@@ -1,9 +1,12 @@
 //! A client implementation that can interact with the network and download data.
 
-use crate::{fetch::DownloadRequest, flattened_response::FlattenedResponse};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use alloy_primitives::B256;
 use futures::{future, future::Either};
-use reth_eth_wire::{EthNetworkPrimitives, NetworkPrimitives};
 use reth_network_api::test_utils::PeersHandle;
 use reth_network_p2p::{
     bodies::client::{BodiesClient, BodiesFut},
@@ -11,18 +14,13 @@ use reth_network_p2p::{
     error::{PeerRequestResult, RequestError},
     headers::client::{HeadersClient, HeadersRequest},
     priority::Priority,
-    BlockClient,
 };
 use reth_network_peers::PeerId;
 use reth_network_types::ReputationChangeKind;
-use std::{
-    ops::RangeInclusive,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use reth_primitives::Header;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
+
+use crate::{fetch::DownloadRequest, flattened_response::FlattenedResponse};
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Front-end API for fetching data from the network.
@@ -32,16 +30,16 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 ///
 /// include_mmd!("docs/mermaid/fetch-client.mmd")
 #[derive(Debug, Clone)]
-pub struct FetchClient<N: NetworkPrimitives = EthNetworkPrimitives> {
+pub struct FetchClient {
     /// Sender half of the request channel.
-    pub(crate) request_tx: UnboundedSender<DownloadRequest<N>>,
+    pub(crate) request_tx: UnboundedSender<DownloadRequest>,
     /// The handle to the peers
     pub(crate) peers_handle: PeersHandle,
     /// Number of active peer sessions the node's currently handling.
     pub(crate) num_active_peers: Arc<AtomicUsize>,
 }
 
-impl<N: NetworkPrimitives> DownloadClient for FetchClient<N> {
+impl DownloadClient for FetchClient {
     fn report_bad_message(&self, peer_id: PeerId) {
         self.peers_handle.reputation_change(peer_id, ReputationChangeKind::BadMessage);
     }
@@ -55,9 +53,8 @@ impl<N: NetworkPrimitives> DownloadClient for FetchClient<N> {
 // or an error.
 type HeadersClientFuture<T> = Either<FlattenedResponse<T>, future::Ready<T>>;
 
-impl<N: NetworkPrimitives> HeadersClient for FetchClient<N> {
-    type Header = N::BlockHeader;
-    type Output = HeadersClientFuture<PeerRequestResult<Vec<N::BlockHeader>>>;
+impl HeadersClient for FetchClient {
+    type Output = HeadersClientFuture<PeerRequestResult<Vec<Header>>>;
 
     /// Sends a `GetBlockHeaders` request to an available peer.
     fn get_headers_with_priority(
@@ -78,21 +75,19 @@ impl<N: NetworkPrimitives> HeadersClient for FetchClient<N> {
     }
 }
 
-impl<N: NetworkPrimitives> BodiesClient for FetchClient<N> {
-    type Body = N::BlockBody;
-    type Output = BodiesFut<N::BlockBody>;
+impl BodiesClient for FetchClient {
+    type Output = BodiesFut;
 
     /// Sends a `GetBlockBodies` request to an available peer.
-    fn get_block_bodies_with_priority_and_range_hint(
+    fn get_block_bodies_with_priority(
         &self,
         request: Vec<B256>,
         priority: Priority,
-        range_hint: Option<RangeInclusive<u64>>,
     ) -> Self::Output {
         let (response, rx) = oneshot::channel();
         if self
             .request_tx
-            .send(DownloadRequest::GetBlockBodies { request, response, priority, range_hint })
+            .send(DownloadRequest::GetBlockBodies { request, response, priority })
             .is_ok()
         {
             Box::pin(FlattenedResponse::from(rx))
@@ -100,8 +95,4 @@ impl<N: NetworkPrimitives> BodiesClient for FetchClient<N> {
             Box::pin(future::err(RequestError::ChannelClosed))
         }
     }
-}
-
-impl<N: NetworkPrimitives> BlockClient for FetchClient<N> {
-    type Block = N::Block;
 }

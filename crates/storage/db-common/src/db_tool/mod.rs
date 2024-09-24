@@ -2,16 +2,18 @@
 
 use boyer_moore_magiclen::BMByte;
 use eyre::Result;
+use reth_chainspec::ChainSpec;
+use reth_db::{RawTable, TableRawRow};
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
     database::Database,
     table::{Decode, Decompress, DupSort, Table, TableRow},
     transaction::{DbTx, DbTxMut},
-    DatabaseError, RawTable, TableRawRow,
+    DatabaseError,
 };
 use reth_fs_util as fs;
 use reth_node_types::NodeTypesWithDB;
-use reth_provider::{providers::ProviderNodeTypes, ChainSpecProvider, DBProvider, ProviderFactory};
+use reth_provider::{ChainSpecProvider, ProviderFactory};
 use std::{path::Path, rc::Rc, sync::Arc};
 use tracing::info;
 
@@ -23,7 +25,7 @@ pub struct DbTool<N: NodeTypesWithDB> {
 }
 
 impl<N: NodeTypesWithDB> DbTool<N> {
-    /// Get an [`Arc`] to the underlying chainspec.
+    /// Get an [`Arc`] to the [`ChainSpec`].
     pub fn chain(&self) -> Arc<N::ChainSpec> {
         self.provider_factory.chain_spec()
     }
@@ -108,7 +110,7 @@ impl<N: NodeTypesWithDB> DbTool<N> {
     }
 }
 
-impl<N: ProviderNodeTypes> DbTool<N> {
+impl<N: NodeTypesWithDB<ChainSpec = ChainSpec>> DbTool<N> {
     /// Takes a DB where the tables have already been created.
     pub fn new(provider_factory: ProviderFactory<N>) -> eyre::Result<Self> {
         // Disable timeout because we are entering a TUI which might read for a long time. We
@@ -130,12 +132,11 @@ impl<N: ProviderNodeTypes> DbTool<N> {
             .map_err(|e| eyre::eyre!(e))
     }
 
-    /// Drops the database, the static files and ExEx WAL at the given paths.
-    pub fn drop<P: AsRef<Path>>(
+    /// Drops the database and the static files at the given path.
+    pub fn drop(
         &self,
-        db_path: P,
-        static_files_path: P,
-        exex_wal_path: P,
+        db_path: impl AsRef<Path>,
+        static_files_path: impl AsRef<Path>,
     ) -> Result<()> {
         let db_path = db_path.as_ref();
         info!(target: "reth::cli", "Dropping database at {:?}", db_path);
@@ -145,12 +146,6 @@ impl<N: ProviderNodeTypes> DbTool<N> {
         info!(target: "reth::cli", "Dropping static files at {:?}", static_files_path);
         fs::remove_dir_all(static_files_path)?;
         fs::create_dir_all(static_files_path)?;
-
-        if exex_wal_path.as_ref().exists() {
-            let exex_wal_path = exex_wal_path.as_ref();
-            info!(target: "reth::cli", "Dropping ExEx WAL at {:?}", exex_wal_path);
-            fs::remove_dir_all(exex_wal_path)?;
-        }
 
         Ok(())
     }
@@ -185,12 +180,12 @@ pub struct ListFilter {
 
 impl ListFilter {
     /// If `search` has a list of bytes, then filter for rows that have this sequence.
-    pub const fn has_search(&self) -> bool {
+    pub fn has_search(&self) -> bool {
         !self.search.is_empty()
     }
 
     /// Updates the page with new `skip` and `len` values.
-    pub const fn update_page(&mut self, skip: usize, len: usize) {
+    pub fn update_page(&mut self, skip: usize, len: usize) {
         self.skip = skip;
         self.len = len;
     }

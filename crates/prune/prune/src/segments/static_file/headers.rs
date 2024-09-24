@@ -1,44 +1,40 @@
+use std::num::NonZeroUsize;
+
 use crate::{
     db_ext::DbTxPruneExt,
     segments::{PruneInput, Segment},
-    PruneLimiter, PrunerError,
+    PrunerError,
 };
 use alloy_primitives::BlockNumber;
 use itertools::Itertools;
-use reth_db_api::{
+use reth_db::{
     cursor::{DbCursorRO, RangeWalker},
-    table::Value,
     tables,
     transaction::DbTxMut,
 };
-use reth_primitives_traits::NodePrimitives;
-use reth_provider::{providers::StaticFileProvider, DBProvider, StaticFileProviderFactory};
+use reth_provider::{providers::StaticFileProvider, DBProvider};
 use reth_prune_types::{
-    PruneMode, PrunePurpose, PruneSegment, SegmentOutput, SegmentOutputCheckpoint,
+    PruneLimiter, PruneMode, PruneProgress, PrunePurpose, PruneSegment, SegmentOutput,
+    SegmentOutputCheckpoint,
 };
 use reth_static_file_types::StaticFileSegment;
-use std::num::NonZeroUsize;
 use tracing::trace;
 
 /// Number of header tables to prune in one step
 const HEADER_TABLES_TO_PRUNE: usize = 3;
 
 #[derive(Debug)]
-pub struct Headers<N> {
-    static_file_provider: StaticFileProvider<N>,
+pub struct Headers {
+    static_file_provider: StaticFileProvider,
 }
 
-impl<N> Headers<N> {
-    pub const fn new(static_file_provider: StaticFileProvider<N>) -> Self {
+impl Headers {
+    pub const fn new(static_file_provider: StaticFileProvider) -> Self {
         Self { static_file_provider }
     }
 }
 
-impl<Provider> Segment<Provider> for Headers<Provider::Primitives>
-where
-    Provider: StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Value>>
-        + DBProvider<Tx: DbTxMut>,
-{
+impl<Provider: DBProvider<Tx: DbTxMut>> Segment<Provider> for Headers {
     fn segment(&self) -> PruneSegment {
         PruneSegment::Headers
     }
@@ -67,12 +63,7 @@ where
 
         let range = last_pruned_block.map_or(0, |block| block + 1)..=block_range_end;
 
-        // let mut headers_cursor = provider.tx_ref().cursor_write::<tables::Headers>()?;
-        let mut headers_cursor = provider
-            .tx_ref()
-            .cursor_write::<tables::Headers<<Provider::Primitives as NodePrimitives>::BlockHeader>>(
-            )?;
-
+        let mut headers_cursor = provider.tx_ref().cursor_write::<tables::Headers>()?;
         let mut header_tds_cursor =
             provider.tx_ref().cursor_write::<tables::HeaderTerminalDifficulties>()?;
         let mut canonical_headers_cursor =
@@ -98,8 +89,8 @@ where
             pruned += entries_pruned;
         }
 
-        let done = last_pruned_block == Some(block_range_end);
-        let progress = limiter.progress(done);
+        let done = last_pruned_block.map_or(false, |block| block == block_range_end);
+        let progress = PruneProgress::new(done, &limiter);
 
         Ok(SegmentOutput {
             progress,
@@ -117,16 +108,11 @@ type Walker<'a, Provider, T> =
 #[allow(missing_debug_implementations)]
 struct HeaderTablesIter<'a, Provider>
 where
-    Provider: StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Value>>
-        + DBProvider<Tx: DbTxMut>,
+    Provider: DBProvider<Tx: DbTxMut>,
 {
     provider: &'a Provider,
     limiter: &'a mut PruneLimiter,
-    headers_walker: Walker<
-        'a,
-        Provider,
-        tables::Headers<<Provider::Primitives as NodePrimitives>::BlockHeader>,
-    >,
+    headers_walker: Walker<'a, Provider, tables::Headers>,
     header_tds_walker: Walker<'a, Provider, tables::HeaderTerminalDifficulties>,
     canonical_headers_walker: Walker<'a, Provider, tables::CanonicalHeaders>,
 }
@@ -138,17 +124,12 @@ struct HeaderTablesIterItem {
 
 impl<'a, Provider> HeaderTablesIter<'a, Provider>
 where
-    Provider: StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Value>>
-        + DBProvider<Tx: DbTxMut>,
+    Provider: DBProvider<Tx: DbTxMut>,
 {
-    const fn new(
+    fn new(
         provider: &'a Provider,
         limiter: &'a mut PruneLimiter,
-        headers_walker: Walker<
-            'a,
-            Provider,
-            tables::Headers<<Provider::Primitives as NodePrimitives>::BlockHeader>,
-        >,
+        headers_walker: Walker<'a, Provider, tables::Headers>,
         header_tds_walker: Walker<'a, Provider, tables::HeaderTerminalDifficulties>,
         canonical_headers_walker: Walker<'a, Provider, tables::CanonicalHeaders>,
     ) -> Self {
@@ -156,10 +137,9 @@ where
     }
 }
 
-impl<Provider> Iterator for HeaderTablesIter<'_, Provider>
+impl<'a, Provider> Iterator for HeaderTablesIter<'a, Provider>
 where
-    Provider: StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Value>>
-        + DBProvider<Tx: DbTxMut>,
+    Provider: DBProvider<Tx: DbTxMut>,
 {
     type Item = Result<HeaderTablesIterItem, PrunerError>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -213,19 +193,19 @@ where
 #[cfg(test)]
 mod tests {
     use crate::segments::{
-        static_file::headers::HEADER_TABLES_TO_PRUNE, PruneInput, PruneLimiter, Segment,
-        SegmentOutput,
+        static_file::headers::HEADER_TABLES_TO_PRUNE, PruneInput, Segment, SegmentOutput,
     };
     use alloy_primitives::{BlockNumber, B256, U256};
     use assert_matches::assert_matches;
-    use reth_db_api::{tables, transaction::DbTx};
+    use reth_db::tables;
+    use reth_db_api::transaction::DbTx;
     use reth_provider::{
         DatabaseProviderFactory, PruneCheckpointReader, PruneCheckpointWriter,
         StaticFileProviderFactory,
     };
     use reth_prune_types::{
-        PruneCheckpoint, PruneInterruptReason, PruneMode, PruneProgress, PruneSegment,
-        SegmentOutputCheckpoint,
+        PruneCheckpoint, PruneInterruptReason, PruneLimiter, PruneMode, PruneProgress,
+        PruneSegment, SegmentOutputCheckpoint,
     };
     use reth_stages::test_utils::TestStageDB;
     use reth_testing_utils::{generators, generators::random_header_range};

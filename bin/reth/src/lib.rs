@@ -15,7 +15,7 @@
 //! - `min-error-logs`: Disables all logs below `error` level.
 //! - `min-warn-logs`: Disables all logs below `warn` level.
 //! - `min-info-logs`: Disables all logs below `info` level. This can speed up the node, since fewer
-//!   calls to the logging component are made.
+//!   calls to the logging component is made.
 //! - `min-debug-logs`: Disables all logs below `debug` level.
 //! - `min-trace-logs`: Disables all logs below `trace` level.
 
@@ -28,6 +28,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 pub mod cli;
+pub mod commands;
 
 /// Re-exported utils.
 pub mod utils {
@@ -40,9 +41,9 @@ pub mod utils {
 
 /// Re-exported payload related types
 pub mod payload {
-    pub use reth_ethereum_payload_builder::EthereumExecutionPayloadValidator;
     pub use reth_payload_builder::*;
     pub use reth_payload_primitives::*;
+    pub use reth_payload_validator::ExecutionPayloadValidator;
 }
 
 /// Re-exported from `reth_node_api`.
@@ -89,7 +90,6 @@ pub mod dirs {
 /// Re-exported from `reth_chainspec`
 pub mod chainspec {
     pub use reth_chainspec::*;
-    pub use reth_ethereum_cli::chainspec::*;
 }
 
 /// Re-exported from `reth_provider`.
@@ -102,9 +102,13 @@ pub mod primitives {
     pub use reth_primitives::*;
 }
 
-/// Re-exported from `reth_ethereum_consensus`.
+/// Re-exported from `reth_beacon_consensus`.
 pub mod beacon_consensus {
-    pub use reth_node_ethereum::consensus::*;
+    pub use reth_beacon_consensus::*;
+}
+/// Re-exported from `reth_blockchain_tree`.
+pub mod blockchain_tree {
+    pub use reth_blockchain_tree::*;
 }
 
 /// Re-exported from `reth_consensus`.
@@ -147,9 +151,9 @@ pub mod rpc {
         pub use reth_rpc_builder::*;
     }
 
-    /// Re-exported from `alloy_rpc_types`.
+    /// Re-exported from `reth_rpc_types`.
     pub mod types {
-        pub use alloy_rpc_types::*;
+        pub use reth_rpc_types::*;
     }
 
     /// Re-exported from `reth_rpc_server_types`.
@@ -175,14 +179,11 @@ pub mod rpc {
         pub use reth_rpc_server_types::result::*;
     }
 
-    /// Re-exported from `reth_rpc_convert`.
+    /// Re-exported from `reth_rpc_types_compat`.
     pub mod compat {
-        pub use reth_rpc_convert::*;
+        pub use reth_rpc_types_compat::*;
     }
 }
-
-/// Ress subprotocol installation.
-pub mod ress;
 
 // re-export for convenience
 #[doc(inline)]
@@ -190,7 +191,3 @@ pub use reth_cli_runner::{tokio_runtime, CliContext, CliRunner};
 
 // for rendering diagrams
 use aquamarine as _;
-
-// used in main
-use clap as _;
-use reth_cli_util as _;

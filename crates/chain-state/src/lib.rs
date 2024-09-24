@@ -11,8 +11,6 @@
 mod in_memory;
 pub use in_memory::*;
 
-mod noop;
-
 mod chain_info;
 pub use chain_info::ChainInfoTracker;
 
@@ -24,11 +22,8 @@ pub use notifications::{
 };
 
 mod memory_overlay;
-pub use memory_overlay::{MemoryOverlayStateProvider, MemoryOverlayStateProviderRef};
+pub use memory_overlay::MemoryOverlayStateProvider;
 
 #[cfg(any(test, feature = "test-utils"))]
 /// Common test helpers
 pub mod test_utils;
-
-// todo: remove when generic data prim integration complete
-pub use reth_ethereum_primitives::EthPrimitives;

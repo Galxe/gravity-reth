@@ -19,12 +19,11 @@ pub mod error;
 pub mod events;
 /// Implementation of network traits for that does nothing.
 pub mod noop;
-
 pub mod test_utils;
-use test_utils::PeersHandleProvider;
 
 pub use alloy_rpc_types_admin::EthProtocolInfo;
-pub use reth_network_p2p::{BlockClient, HeadersClient};
+use reth_network_p2p::sync::NetworkSyncUpdater;
+pub use reth_network_p2p::BlockClient;
 pub use reth_network_types::{PeerKind, Reputation, ReputationChangeKind};
 
 pub use downloaders::BlockDownloaderProvider;
@@ -34,42 +33,35 @@ pub use events::{
     PeerRequestSender,
 };
 
-use reth_eth_wire_types::{
-    capability::Capabilities, Capability, DisconnectReason, EthVersion, NetworkPrimitives,
-    UnifiedStatus,
-};
-use reth_network_p2p::sync::NetworkSyncUpdater;
-use reth_network_peers::NodeRecord;
 use std::{future::Future, net::SocketAddr, sync::Arc, time::Instant};
+
+use reth_eth_wire_types::{capability::Capabilities, DisconnectReason, EthVersion, Status};
+use reth_network_peers::NodeRecord;
 
 /// The `PeerId` type.
 pub type PeerId = alloy_primitives::B512;
 
 /// Helper trait that unifies network API needed to launch node.
 pub trait FullNetwork:
-    BlockDownloaderProvider<
-        Client: BlockClient<Block = <Self::Primitives as NetworkPrimitives>::Block>,
-    > + NetworkSyncUpdater
+    BlockDownloaderProvider
+    + NetworkSyncUpdater
     + NetworkInfo
     + NetworkEventListenerProvider
+    + PeersInfo
     + Peers
-    + PeersHandleProvider
     + Clone
-    + Unpin
     + 'static
 {
 }
 
 impl<T> FullNetwork for T where
-    T: BlockDownloaderProvider<
-            Client: BlockClient<Block = <Self::Primitives as NetworkPrimitives>::Block>,
-        > + NetworkSyncUpdater
+    T: BlockDownloaderProvider
+        + NetworkSyncUpdater
         + NetworkInfo
         + NetworkEventListenerProvider
+        + PeersInfo
         + Peers
-        + PeersHandleProvider
         + Clone
-        + Unpin
         + 'static
 {
 }
@@ -192,7 +184,7 @@ pub trait Peers: PeersInfo {
     /// Disconnect an existing connection to the given peer using the provided reason
     fn disconnect_peer_with_reason(&self, peer: PeerId, reason: DisconnectReason);
 
-    /// Connect to the given peer. NOTE: if the maximum number of outbound sessions is reached,
+    /// Connect to the given peer. NOTE: if the maximum number out outbound sessions is reached,
     /// this won't do anything. See `reth_network::SessionManager::dial_outbound`.
     fn connect_peer(&self, peer: PeerId, tcp_addr: SocketAddr) {
         self.connect_peer_kind(peer, PeerKind::Static, tcp_addr, None)
@@ -239,7 +231,7 @@ pub struct PeerInfo {
     /// The negotiated eth version.
     pub eth_version: EthVersion,
     /// The Status message the peer sent for the `eth` handshake
-    pub status: Arc<UnifiedStatus>,
+    pub status: Arc<Status>,
     /// The timestamp when the session to that peer has been established.
     pub session_established: Instant,
     /// The peer's connection kind
@@ -286,6 +278,4 @@ pub struct NetworkStatus {
     pub protocol_version: u64,
     /// Information about the Ethereum Wire Protocol.
     pub eth_protocol_info: EthProtocolInfo,
-    /// The list of supported capabilities and their versions.
-    pub capabilities: Vec<Capability>,
 }

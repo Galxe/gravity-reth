@@ -1,10 +1,9 @@
 //! Decoding tests for [`PooledTransactions`]
 
-use alloy_consensus::transaction::PooledTransaction;
-use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::hex;
 use alloy_rlp::{Decodable, Encodable};
-use reth_eth_wire::{EthNetworkPrimitives, EthVersion, PooledTransactions, ProtocolMessage};
+use reth_eth_wire::{EthVersion, PooledTransactions, ProtocolMessage};
+use reth_primitives::PooledTransactionsElement;
 use std::{fs, path::PathBuf};
 use test_fuzz::test_fuzz;
 
@@ -12,7 +11,10 @@ use test_fuzz::test_fuzz;
 #[test_fuzz]
 fn roundtrip_pooled_transactions(hex_data: Vec<u8>) -> Result<(), alloy_rlp::Error> {
     let input_rlp = &mut &hex_data[..];
-    let txs: PooledTransactions = PooledTransactions::decode(input_rlp)?;
+    let txs = match PooledTransactions::decode(input_rlp) {
+        Ok(txs) => txs,
+        Err(e) => return Err(e),
+    };
 
     // get the amount of bytes decoded in `decode` by subtracting the length of the original buf,
     // from the length of the remaining bytes
@@ -25,7 +27,7 @@ fn roundtrip_pooled_transactions(hex_data: Vec<u8>) -> Result<(), alloy_rlp::Err
     assert_eq!(expected_encoding, buf);
 
     // now do another decoding, on what we encoded - this should succeed
-    let txs2: PooledTransactions = PooledTransactions::decode(&mut &buf[..]).unwrap();
+    let txs2 = PooledTransactions::decode(&mut &buf[..]).unwrap();
 
     // ensure that the payload length is the same
     assert_eq!(txs.length(), txs2.length());
@@ -51,8 +53,7 @@ fn decode_request_pair_pooled_blob_transactions() {
         .join("testdata/request_pair_pooled_blob_transactions");
     let data = fs::read_to_string(network_data_path).expect("Unable to read file");
     let hex_data = hex::decode(data.trim()).unwrap();
-    let _txs: ProtocolMessage<EthNetworkPrimitives> =
-        ProtocolMessage::decode_message(EthVersion::Eth68, &mut &hex_data[..]).unwrap();
+    let _txs = ProtocolMessage::decode_message(EthVersion::Eth68, &mut &hex_data[..]).unwrap();
 }
 
 #[test]
@@ -61,7 +62,7 @@ fn decode_blob_transaction_data() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/blob_transaction");
     let data = fs::read_to_string(network_data_path).expect("Unable to read file");
     let hex_data = hex::decode(data.trim()).unwrap();
-    let _txs = PooledTransaction::decode(&mut &hex_data[..]).unwrap();
+    let _txs = PooledTransactionsElement::decode(&mut &hex_data[..]).unwrap();
 }
 
 #[test]
@@ -71,5 +72,5 @@ fn decode_blob_rpc_transaction() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/rpc_blob_transaction");
     let data = fs::read_to_string(network_data_path).expect("Unable to read file");
     let hex_data = hex::decode(data.trim()).unwrap();
-    let _txs = PooledTransaction::decode_2718(&mut hex_data.as_ref()).unwrap();
+    let _txs = PooledTransactionsElement::decode_enveloped(&mut hex_data.as_ref()).unwrap();
 }

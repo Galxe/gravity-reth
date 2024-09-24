@@ -2,12 +2,11 @@ use bitflags::bitflags;
 use ffi::*;
 
 /// MDBX sync mode
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub enum SyncMode {
     /// Default robust and durable sync mode.
     /// Metadata is written and flushed to disk after a data is written and flushed, which
     /// guarantees the integrity of the database in the event of a crash at any time.
-    #[default]
     Durable,
 
     /// Don't sync the meta-page after commit.
@@ -57,7 +56,7 @@ pub enum SyncMode {
     /// flag could be used with [`Environment::sync()`](crate::Environment::sync) as alternatively
     /// for batch committing or nested transaction (in some cases).
     ///
-    /// The number and volume of disk IOPs with [`SyncMode::SafeNoSync`] flag will exactly the
+    /// The number and volume of of disk IOPs with [`SyncMode::SafeNoSync`] flag will exactly the
     /// as without any no-sync flags. However, you should expect a larger process's work set
     /// and significantly worse a locality of reference, due to the more intensive allocation
     /// of previously unused pages and increase the size of the database.
@@ -99,6 +98,12 @@ pub enum SyncMode {
     /// be very useful in scenarios where data durability is not required over a system failure
     /// (e.g for short-lived data), or if you can take such risk.
     UtterlyNoSync,
+}
+
+impl Default for SyncMode {
+    fn default() -> Self {
+        Self::Durable
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

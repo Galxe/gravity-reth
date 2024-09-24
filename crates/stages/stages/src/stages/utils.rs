@@ -1,20 +1,17 @@
 //! Utils for `stages`.
-use alloy_primitives::{BlockNumber, TxNumber};
 use reth_config::config::EtlConfig;
+use reth_db::BlockNumberList;
 use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW},
     models::sharded_key::NUM_OF_INDICES_IN_SHARD,
     table::{Decompress, Table},
     transaction::{DbTx, DbTxMut},
-    BlockNumberList, DatabaseError,
+    DatabaseError,
 };
 use reth_etl::Collector;
-use reth_provider::{
-    providers::StaticFileProvider, BlockReader, DBProvider, ProviderError,
-    StaticFileProviderFactory,
-};
+use reth_primitives::BlockNumber;
+use reth_provider::DBProvider;
 use reth_stages_api::StageError;
-use reth_static_file_types::StaticFileSegment;
 use std::{collections::HashMap, hash::Hash, ops::RangeBounds};
 use tracing::info;
 
@@ -54,14 +51,14 @@ where
     let mut changeset_cursor = provider.tx_ref().cursor_read::<CS>()?;
 
     let mut collector = Collector::new(etl_config.file_size, etl_config.dir.clone());
-    let mut cache: HashMap<P, Vec<u64>> = HashMap::default();
+    let mut cache: HashMap<P, Vec<u64>> = HashMap::new();
 
     let mut collect = |cache: &HashMap<P, Vec<u64>>| {
-        for (key, indices) in cache {
-            let last = indices.last().expect("qed");
+        for (key, indice_list) in cache {
+            let last = indice_list.last().expect("qed");
             collector.insert(
                 sharded_key_factory(*key, *last),
-                BlockNumberList::new_pre_sorted(indices.iter().copied()),
+                BlockNumberList::new_pre_sorted(indice_list),
             )?;
         }
         Ok::<(), StageError>(())
@@ -77,7 +74,7 @@ where
         let (block_number, key) = partial_key_factory(entry?);
         cache.entry(key).or_default().push(block_number);
 
-        if idx > 0 && idx.is_multiple_of(interval) && total_changesets > 1000 {
+        if idx > 0 && idx % interval == 0 && total_changesets > 1000 {
             info!(target: "sync::stages::index_history", progress = %format!("{:.4}%", (idx as f64 / total_changesets as f64) * 100.0), "Collecting indices");
         }
 
@@ -124,14 +121,14 @@ where
 
     // observability
     let total_entries = collector.len();
-    let interval = (total_entries / 10).max(1);
+    let interval = (total_entries / 100).max(1);
 
     for (index, element) in collector.iter()?.enumerate() {
         let (k, v) = element?;
         let sharded_key = decode_key(k)?;
         let new_list = BlockNumberList::decompress_owned(v)?;
 
-        if index > 0 && index.is_multiple_of(interval) && total_entries > 10 {
+        if index > 0 && index % interval == 0 && total_entries > 100 {
             info!(target: "sync::stages::index_history", progress = %format!("{:.2}%", (index as f64 / total_entries as f64) * 100.0), "Writing indices");
         }
 
@@ -156,11 +153,12 @@ where
 
             // If it's not the first sync, there might an existing shard already, so we need to
             // merge it with the one coming from the collector
-            if !append_only &&
-                let Some((_, last_database_shard)) =
+            if !append_only {
+                if let Some((_, last_database_shard)) =
                     write_cursor.seek_exact(sharded_key_factory(current_partial, u64::MAX))?
-            {
-                current_list.extend(last_database_shard.iter());
+                {
+                    current_list.extend(last_database_shard.iter());
+                }
             }
         }
 
@@ -222,9 +220,9 @@ where
                 let value = BlockNumberList::new_pre_sorted(chunk);
 
                 if append_only {
-                    cursor.append(key, &value)?;
+                    cursor.append(key, value)?;
                 } else {
-                    cursor.upsert(key, &value)?;
+                    cursor.upsert(key, value)?;
                 }
             }
         }
@@ -245,40 +243,4 @@ impl LoadMode {
     const fn is_flush(&self) -> bool {
         matches!(self, Self::Flush)
     }
-}
-
-/// Called when database is ahead of static files. Attempts to find the first block we are missing
-/// transactions for.
-pub(crate) fn missing_static_data_error<Provider>(
-    last_tx_num: TxNumber,
-    static_file_provider: &StaticFileProvider<Provider::Primitives>,
-    provider: &Provider,
-    segment: StaticFileSegment,
-) -> Result<StageError, ProviderError>
-where
-    Provider: BlockReader + StaticFileProviderFactory,
-{
-    let mut last_block =
-        static_file_provider.get_highest_static_file_block(segment).unwrap_or_default();
-
-    // To be extra safe, we make sure that the last tx num matches the last block from its indices.
-    // If not, get it.
-    loop {
-        if let Some(indices) = provider.block_body_indices(last_block)? &&
-            indices.last_tx_num() <= last_tx_num
-        {
-            break
-        }
-        if last_block == 0 {
-            break
-        }
-        last_block -= 1;
-    }
-
-    let missing_block = Box::new(provider.sealed_header(last_block + 1)?.unwrap_or_default());
-
-    Ok(StageError::MissingStaticFileData {
-        block: Box::new(missing_block.block_with_parent()),
-        segment,
-    })
 }

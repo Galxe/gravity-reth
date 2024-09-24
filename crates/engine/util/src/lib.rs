@@ -1,16 +1,9 @@
 //! Collection of various stream utilities for consensus engine.
 
-#![doc(
-    html_logo_url = "https://raw.githubusercontent.com/paradigmxyz/reth/main/assets/reth-docs.png",
-    html_favicon_url = "https://avatars0.githubusercontent.com/u/97369466?s=256",
-    issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
-)]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![cfg_attr(not(test), warn(unused_crate_dependencies))]
-
-use futures::{Future, Stream};
-use reth_engine_primitives::BeaconEngineMessage;
-use reth_payload_primitives::PayloadTypes;
+use futures::Stream;
+use reth_beacon_consensus::BeaconEngineMessage;
+use reth_engine_primitives::EngineTypes;
+use reth_payload_validator::ExecutionPayloadValidator;
 use std::path::PathBuf;
 use tokio_util::either::Either;
 
@@ -26,12 +19,10 @@ use skip_new_payload::EngineSkipNewPayload;
 pub mod reorg;
 use reorg::EngineReorg;
 
-/// The result type for `maybe_reorg` method.
-type MaybeReorgResult<S, T, Provider, Evm, Validator, E> =
-    Result<Either<EngineReorg<S, T, Provider, Evm, Validator>, S>, E>;
-
 /// The collection of stream extensions for engine API message stream.
-pub trait EngineMessageStreamExt<T: PayloadTypes>: Stream<Item = BeaconEngineMessage<T>> {
+pub trait EngineMessageStreamExt<Engine: EngineTypes>:
+    Stream<Item = BeaconEngineMessage<Engine>>
+{
     /// Skips the specified number of [`BeaconEngineMessage::ForkchoiceUpdated`] messages from the
     /// engine message stream.
     fn skip_fcu(self, count: usize) -> EngineSkipFcu<Self>
@@ -104,14 +95,14 @@ pub trait EngineMessageStreamExt<T: PayloadTypes>: Stream<Item = BeaconEngineMes
     }
 
     /// Creates reorgs with specified frequency.
-    fn reorg<Provider, Evm, Validator>(
+    fn reorg<Provider, Evm, Spec>(
         self,
         provider: Provider,
         evm_config: Evm,
-        payload_validator: Validator,
+        payload_validator: ExecutionPayloadValidator<Spec>,
         frequency: usize,
         depth: Option<usize>,
-    ) -> EngineReorg<Self, T, Provider, Evm, Validator>
+    ) -> EngineReorg<Self, Engine, Provider, Evm, Spec>
     where
         Self: Sized,
     {
@@ -127,45 +118,35 @@ pub trait EngineMessageStreamExt<T: PayloadTypes>: Stream<Item = BeaconEngineMes
 
     /// If frequency is [Some], returns the stream that creates reorgs with
     /// specified frequency. Otherwise, returns `Self`.
-    ///
-    /// The `payload_validator_fn` closure is only called if `frequency` is `Some`,
-    /// allowing for lazy initialization of the validator.
-    fn maybe_reorg<Provider, Evm, Validator, E, F, Fut>(
+    fn maybe_reorg<Provider, Evm, Spec>(
         self,
         provider: Provider,
         evm_config: Evm,
-        payload_validator_fn: F,
+        payload_validator: ExecutionPayloadValidator<Spec>,
         frequency: Option<usize>,
         depth: Option<usize>,
-    ) -> impl Future<Output = MaybeReorgResult<Self, T, Provider, Evm, Validator, E>> + Send
+    ) -> Either<EngineReorg<Self, Engine, Provider, Evm, Spec>, Self>
     where
-        Self: Sized + Send,
-        Provider: Send,
-        Evm: Send,
-        F: FnOnce() -> Fut + Send,
-        Fut: Future<Output = Result<Validator, E>> + Send,
+        Self: Sized,
     {
-        async move {
-            if let Some(frequency) = frequency {
-                let validator = payload_validator_fn().await?;
-                Ok(Either::Left(reorg::EngineReorg::new(
-                    self,
-                    provider,
-                    evm_config,
-                    validator,
-                    frequency,
-                    depth.unwrap_or_default(),
-                )))
-            } else {
-                Ok(Either::Right(self))
-            }
+        if let Some(frequency) = frequency {
+            Either::Left(reorg::EngineReorg::new(
+                self,
+                provider,
+                evm_config,
+                payload_validator,
+                frequency,
+                depth.unwrap_or_default(),
+            ))
+        } else {
+            Either::Right(self)
         }
     }
 }
 
-impl<T, S> EngineMessageStreamExt<T> for S
+impl<Engine, T> EngineMessageStreamExt<Engine> for T
 where
-    T: PayloadTypes,
-    S: Stream<Item = BeaconEngineMessage<T>>,
+    Engine: EngineTypes,
+    T: Stream<Item = BeaconEngineMessage<Engine>>,
 {
 }

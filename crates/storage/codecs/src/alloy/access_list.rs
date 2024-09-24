@@ -1,5 +1,3 @@
-//! Compact implementation for [`AccessList`]
-
 use crate::Compact;
 use alloc::vec::Vec;
 use alloy_eips::eip2930::{AccessList, AccessListItem};

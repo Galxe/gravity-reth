@@ -2,14 +2,14 @@
 
 use crate::{
     segments::{PruneInput, Segment},
-    Metrics, PruneLimiter, PrunerError, PrunerEvent,
+    Metrics, PrunerError, PrunerEvent,
 };
 use alloy_primitives::BlockNumber;
 use reth_exex_types::FinishedExExHeight;
 use reth_provider::{
     DBProvider, DatabaseProviderFactory, PruneCheckpointReader, PruneCheckpointWriter,
 };
-use reth_prune_types::{PruneProgress, PrunedSegmentInfo, PrunerOutput};
+use reth_prune_types::{PruneLimiter, PruneProgress, PruneSegment, PrunerOutput};
 use reth_tokio_util::{EventSender, EventStream};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -20,6 +20,8 @@ pub type PrunerResult = Result<PrunerOutput, PrunerError>;
 
 /// The pruner type itself with the result of [`Pruner::run`]
 pub type PrunerWithResult<S, DB> = (Pruner<S, DB>, PrunerResult);
+
+type PrunerStats = Vec<(PruneSegment, usize, PruneProgress)>;
 
 /// Pruner with preset provider factory.
 pub type PrunerWithFactory<PF> = Pruner<<PF as DatabaseProviderFactory>::ProviderRW, PF>;
@@ -39,7 +41,7 @@ pub struct Pruner<Provider, PF> {
     previous_tip_block_number: Option<BlockNumber>,
     /// Maximum total entries to prune (delete from database) per run.
     delete_limit: usize,
-    /// Maximum time for one pruner run.
+    /// Maximum time for a one pruner run.
     timeout: Option<Duration>,
     /// The finished height of all `ExEx`'s.
     finished_exex_height: watch::Receiver<FinishedExExHeight>,
@@ -172,15 +174,14 @@ where
     /// be pruned according to the highest `static_files`. Segments are parts of the database that
     /// represent one or more tables.
     ///
-    /// Returns a list of stats per pruned segment, total number of entries pruned, and
-    /// [`PruneProgress`].
+    /// Returns [`PrunerStats`], total number of entries pruned, and [`PruneProgress`].
     fn prune_segments(
         &mut self,
         provider: &Provider,
         tip_block_number: BlockNumber,
         limiter: &mut PruneLimiter,
-    ) -> Result<(Vec<PrunedSegmentInfo>, usize, PrunerOutput), PrunerError> {
-        let mut stats = Vec::with_capacity(self.segments.len());
+    ) -> Result<(PrunerStats, usize, PrunerOutput), PrunerError> {
+        let mut stats = PrunerStats::new();
         let mut pruned = 0;
         let mut output = PrunerOutput {
             progress: PruneProgress::Finished,
@@ -248,12 +249,7 @@ where
                 if segment_output.pruned > 0 {
                     limiter.increment_deleted_entries_count_by(segment_output.pruned);
                     pruned += segment_output.pruned;
-                    let info = PrunedSegmentInfo {
-                        segment: segment.segment(),
-                        pruned: segment_output.pruned,
-                        progress: segment_output.progress,
-                    };
-                    stats.push(info);
+                    stats.push((segment.segment(), segment_output.pruned, segment_output.progress));
                 }
             } else {
                 debug!(target: "pruner", segment = ?segment.segment(), purpose = ?segment.purpose(), "Nothing to prune for the segment");
@@ -264,8 +260,7 @@ where
     }
 
     /// Returns `true` if the pruning is needed at the provided tip block number.
-    /// This is determined by the check against minimum pruning interval and last pruned block
-    /// number.
+    /// This determined by the check against minimum pruning interval and last pruned block number.
     pub fn is_pruning_needed(&self, tip_block_number: BlockNumber) -> bool {
         let Some(tip_block_number) =
             self.adjust_tip_block_number_to_finished_exex_height(tip_block_number)

@@ -12,13 +12,10 @@ pub use zstd::{bulk::Decompressor, dict::DecoderDictionary};
 
 type RawDictionary = Vec<u8>;
 
-/// Represents the state of a Zstandard compression operation.
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ZstdState {
-    /// The compressor is pending a dictionary.
     #[default]
     PendingDictionary,
-    /// The compressor is ready to perform compression.
     Ready,
 }
 
@@ -54,7 +51,6 @@ impl Zstd {
         }
     }
 
-    /// Sets the compression level for the Zstd compression instance.
     pub const fn with_level(mut self, level: i32) -> Self {
         self.level = level;
         self
@@ -213,7 +209,7 @@ impl Compression for Zstd {
             return Err(NippyJarError::ColumnLenMismatch(self.columns, columns.len()))
         }
 
-        let mut dictionaries = Vec::with_capacity(columns.len());
+        let mut dictionaries = vec![];
         for column in columns {
             // ZSTD requires all training data to be continuous in memory, alongside the size of
             // each entry
@@ -270,13 +266,13 @@ mod dictionaries_serde {
 #[derive(Serialize, Deserialize, Deref)]
 pub(crate) struct ZstdDictionaries<'a>(Vec<ZstdDictionary<'a>>);
 
-impl std::fmt::Debug for ZstdDictionaries<'_> {
+impl<'a> std::fmt::Debug for ZstdDictionaries<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZstdDictionaries").field("num", &self.len()).finish_non_exhaustive()
     }
 }
 
-impl ZstdDictionaries<'_> {
+impl<'a> ZstdDictionaries<'a> {
     #[cfg(test)]
     /// Creates [`ZstdDictionaries`].
     pub(crate) fn new(raw: Vec<RawDictionary>) -> Self {
@@ -320,12 +316,12 @@ impl ZstdDictionaries<'_> {
 /// A Zstd dictionary. It's created and serialized with [`ZstdDictionary::Raw`], and deserialized as
 /// [`ZstdDictionary::Loaded`].
 pub(crate) enum ZstdDictionary<'a> {
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[allow(dead_code)]
     Raw(RawDictionary),
     Loaded(DecoderDictionary<'a>),
 }
 
-impl ZstdDictionary<'_> {
+impl<'a> ZstdDictionary<'a> {
     /// Returns a reference to the expected `RawDictionary`
     pub(crate) const fn raw(&self) -> Option<&RawDictionary> {
         match self {
@@ -343,7 +339,7 @@ impl ZstdDictionary<'_> {
     }
 }
 
-impl<'de> Deserialize<'de> for ZstdDictionary<'_> {
+impl<'de, 'a> Deserialize<'de> for ZstdDictionary<'a> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -353,7 +349,7 @@ impl<'de> Deserialize<'de> for ZstdDictionary<'_> {
     }
 }
 
-impl Serialize for ZstdDictionary<'_> {
+impl<'a> Serialize for ZstdDictionary<'a> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -366,13 +362,11 @@ impl Serialize for ZstdDictionary<'_> {
 }
 
 #[cfg(test)]
-impl PartialEq for ZstdDictionary<'_> {
+impl<'a> PartialEq for ZstdDictionary<'a> {
     fn eq(&self, other: &Self) -> bool {
         if let (Self::Raw(a), Self::Raw(b)) = (self, &other) {
             return a == b
         }
-        unimplemented!(
-            "`DecoderDictionary` can't be compared. So comparison should be done after decompressing a value."
-        );
+        unimplemented!("`DecoderDictionary` can't be compared. So comparison should be done after decompressing a value.");
     }
 }

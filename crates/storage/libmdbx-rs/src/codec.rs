@@ -17,12 +17,12 @@ pub trait TableObject: Sized {
         _: *const ffi::MDBX_txn,
         data_val: ffi::MDBX_val,
     ) -> Result<Self, Error> {
-        let s = unsafe { slice::from_raw_parts(data_val.iov_base as *const u8, data_val.iov_len) };
+        let s = slice::from_raw_parts(data_val.iov_base as *const u8, data_val.iov_len);
         Self::decode(s)
     }
 }
 
-impl TableObject for Cow<'_, [u8]> {
+impl<'tx> TableObject for Cow<'tx, [u8]> {
     fn decode(_: &[u8]) -> Result<Self, Error> {
         unreachable!()
     }
@@ -32,7 +32,7 @@ impl TableObject for Cow<'_, [u8]> {
         _txn: *const ffi::MDBX_txn,
         data_val: ffi::MDBX_val,
     ) -> Result<Self, Error> {
-        let s = unsafe { slice::from_raw_parts(data_val.iov_base as *const u8, data_val.iov_len) };
+        let s = slice::from_raw_parts(data_val.iov_base as *const u8, data_val.iov_len);
 
         #[cfg(feature = "return-borrowed")]
         {

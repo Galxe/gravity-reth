@@ -22,6 +22,14 @@ impl Default for DurationsRecorder {
 }
 
 impl DurationsRecorder {
+    /// Saves the provided duration for future logging and instantly reports as a metric with
+    /// `action` label.
+    pub(crate) fn record_duration(&mut self, action: Action, duration: Duration) {
+        self.actions.push((action, duration));
+        self.current_metrics.record_duration(action, duration);
+        self.latest = Some(self.start.elapsed());
+    }
+
     /// Records the duration since last record, saves it for future logging and instantly reports as
     /// a metric with `action` label.
     pub(crate) fn record_relative(&mut self, action: Action) {
@@ -36,6 +44,9 @@ impl DurationsRecorder {
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum Action {
+    InsertStorageHashing,
+    InsertAccountHashing,
+    InsertMerkleTree,
     InsertBlock,
     InsertState,
     InsertHashes,
@@ -45,6 +56,12 @@ pub(crate) enum Action {
     InsertHeaders,
     InsertHeaderNumbers,
     InsertHeaderTerminalDifficulties,
+    InsertBlockOmmers,
+    InsertTransactionSenders,
+    InsertTransactions,
+    InsertTransactionHashNumbers,
+    InsertBlockWithdrawals,
+    InsertBlockRequests,
     InsertBlockBodyIndices,
     InsertTransactionBlocks,
     GetNextTxNum,
@@ -55,6 +72,12 @@ pub(crate) enum Action {
 #[derive(Metrics)]
 #[metrics(scope = "storage.providers.database")]
 struct DatabaseProviderMetrics {
+    /// Duration of insert storage hashing
+    insert_storage_hashing: Histogram,
+    /// Duration of insert account hashing
+    insert_account_hashing: Histogram,
+    /// Duration of insert merkle tree
+    insert_merkle_tree: Histogram,
     /// Duration of insert block
     insert_block: Histogram,
     /// Duration of insert state
@@ -73,6 +96,18 @@ struct DatabaseProviderMetrics {
     insert_header_numbers: Histogram,
     /// Duration of insert header TD
     insert_header_td: Histogram,
+    /// Duration of insert block ommers
+    insert_block_ommers: Histogram,
+    /// Duration of insert tx senders
+    insert_tx_senders: Histogram,
+    /// Duration of insert transactions
+    insert_transactions: Histogram,
+    /// Duration of insert transaction hash numbers
+    insert_tx_hash_numbers: Histogram,
+    /// Duration of insert block withdrawals
+    insert_block_withdrawals: Histogram,
+    /// Duration of insert block requests
+    insert_block_requests: Histogram,
     /// Duration of insert block body indices
     insert_block_body_indices: Histogram,
     /// Duration of insert transaction blocks
@@ -87,6 +122,9 @@ impl DatabaseProviderMetrics {
     /// Records the duration for the given action.
     pub(crate) fn record_duration(&self, action: Action, duration: Duration) {
         match action {
+            Action::InsertStorageHashing => self.insert_storage_hashing.record(duration),
+            Action::InsertAccountHashing => self.insert_account_hashing.record(duration),
+            Action::InsertMerkleTree => self.insert_merkle_tree.record(duration),
             Action::InsertBlock => self.insert_block.record(duration),
             Action::InsertState => self.insert_state.record(duration),
             Action::InsertHashes => self.insert_hashes.record(duration),
@@ -96,6 +134,12 @@ impl DatabaseProviderMetrics {
             Action::InsertHeaders => self.insert_headers.record(duration),
             Action::InsertHeaderNumbers => self.insert_header_numbers.record(duration),
             Action::InsertHeaderTerminalDifficulties => self.insert_header_td.record(duration),
+            Action::InsertBlockOmmers => self.insert_block_ommers.record(duration),
+            Action::InsertTransactionSenders => self.insert_tx_senders.record(duration),
+            Action::InsertTransactions => self.insert_transactions.record(duration),
+            Action::InsertTransactionHashNumbers => self.insert_tx_hash_numbers.record(duration),
+            Action::InsertBlockWithdrawals => self.insert_block_withdrawals.record(duration),
+            Action::InsertBlockRequests => self.insert_block_requests.record(duration),
             Action::InsertBlockBodyIndices => self.insert_block_body_indices.record(duration),
             Action::InsertTransactionBlocks => self.insert_tx_blocks.record(duration),
             Action::GetNextTxNum => self.get_next_tx_num.record(duration),

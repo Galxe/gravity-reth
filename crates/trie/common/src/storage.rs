@@ -1,8 +1,9 @@
 use super::{BranchNodeCompact, StoredNibblesSubKey};
+use reth_codecs::Compact;
+use serde::{Deserialize, Serialize};
 
 /// Account storage trie node.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct StorageTrieEntry {
     /// The nibbles of the intermediate node
     pub nibbles: StoredNibblesSubKey,
@@ -13,8 +14,7 @@ pub struct StorageTrieEntry {
 // NOTE: Removing reth_codec and manually encode subkey
 // and compress second part of the value. If we have compression
 // over whole value (Even SubKey) that would mess up fetching of values with seek_by_key_subkey
-#[cfg(any(test, feature = "reth-codec"))]
-impl reth_codecs::Compact for StorageTrieEntry {
+impl Compact for StorageTrieEntry {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -25,8 +25,8 @@ impl reth_codecs::Compact for StorageTrieEntry {
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (nibbles, buf) = StoredNibblesSubKey::from_compact(buf, 65);
-        let (node, buf) = BranchNodeCompact::from_compact(buf, len - 65);
+        let (nibbles, buf) = StoredNibblesSubKey::from_compact(buf, 33);
+        let (node, buf) = BranchNodeCompact::from_compact(buf, len - 33);
         let this = Self { nibbles, node };
         (this, buf)
     }

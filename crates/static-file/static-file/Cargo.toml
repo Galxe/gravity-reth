@@ -13,15 +13,17 @@ workspace = true
 
 [dependencies]
 # reth
-reth-codecs.workspace = true
+reth-chainspec.workspace = true
+reth-db.workspace = true
 reth-db-api.workspace = true
 reth-provider.workspace = true
 reth-storage-errors.workspace = true
+reth-nippy-jar.workspace = true
 reth-tokio-util.workspace = true
 reth-prune-types.workspace = true
-reth-primitives-traits.workspace = true
 reth-static-file-types.workspace = true
 reth-stages-types.workspace = true
+reth-node-types.workspace = true
 
 alloy-primitives.workspace = true
 
@@ -31,6 +33,7 @@ rayon.workspace = true
 parking_lot = { workspace = true, features = ["send_guard", "arc_lock"] }
 
 [dev-dependencies]
+reth-db = { workspace = true, features = ["test-utils"] }
 reth-stages = { workspace = true, features = ["test-utils"] }
 reth-testing-utils.workspace = true
 

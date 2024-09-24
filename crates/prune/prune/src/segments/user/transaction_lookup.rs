@@ -3,12 +3,13 @@ use crate::{
     segments::{PruneInput, Segment, SegmentOutput},
     PrunerError,
 };
-use alloy_eips::eip2718::Encodable2718;
 use rayon::prelude::*;
-use reth_db_api::{tables, transaction::DbTxMut};
-use reth_provider::{BlockReader, DBProvider, PruneCheckpointReader};
-use reth_prune_types::{PruneMode, PrunePurpose, PruneSegment, SegmentOutputCheckpoint};
-use tracing::{debug, instrument, trace};
+use reth_db::{tables, transaction::DbTxMut};
+use reth_provider::{BlockReader, DBProvider, TransactionsProvider};
+use reth_prune_types::{
+    PruneMode, PruneProgress, PrunePurpose, PruneSegment, SegmentOutputCheckpoint,
+};
+use tracing::{instrument, trace};
 
 #[derive(Debug)]
 pub struct TransactionLookup {
@@ -23,8 +24,7 @@ impl TransactionLookup {
 
 impl<Provider> Segment<Provider> for TransactionLookup
 where
-    Provider:
-        DBProvider<Tx: DbTxMut> + BlockReader<Transaction: Encodable2718> + PruneCheckpointReader,
+    Provider: DBProvider<Tx: DbTxMut> + TransactionsProvider + BlockReader,
 {
     fn segment(&self) -> PruneSegment {
         PruneSegment::TransactionLookup
@@ -39,28 +39,7 @@ where
     }
 
     #[instrument(level = "trace", target = "pruner", skip(self, provider), ret)]
-    fn prune(
-        &self,
-        provider: &Provider,
-        mut input: PruneInput,
-    ) -> Result<SegmentOutput, PrunerError> {
-        // It is not possible to prune TransactionLookup data for which we don't have transaction
-        // data. If the TransactionLookup checkpoint is lagging behind (which can happen e.g. when
-        // pre-merge history is dropped and then later tx lookup pruning is enabled) then we can
-        // only prune from the tx checkpoint and onwards.
-        if let Some(txs_checkpoint) = provider.get_prune_checkpoint(PruneSegment::Transactions)? &&
-            input
-                .previous_checkpoint
-                .is_none_or(|checkpoint| checkpoint.block_number < txs_checkpoint.block_number)
-        {
-            input.previous_checkpoint = Some(txs_checkpoint);
-            debug!(
-                target: "pruner",
-                transactions_checkpoint = ?input.previous_checkpoint,
-                "No TransactionLookup checkpoint found, using Transactions checkpoint as fallback"
-            );
-        }
-
+    fn prune(&self, provider: &Provider, input: PruneInput) -> Result<SegmentOutput, PrunerError> {
         let (start, end) = match input.get_next_tx_num_range(provider)? {
             Some(range) => range,
             None => {
@@ -79,7 +58,7 @@ where
         let hashes = provider
             .transactions_by_tx_range(tx_range.clone())?
             .into_par_iter()
-            .map(|transaction| transaction.trie_hash())
+            .map(|transaction| transaction.hash())
             .collect::<Vec<_>>();
 
         // Number of transactions retrieved from the database should match the tx range count
@@ -116,7 +95,7 @@ where
             // run.
             .checked_sub(if done { 0 } else { 1 });
 
-        let progress = limiter.progress(done);
+        let progress = PruneProgress::new(done, &limiter);
 
         Ok(SegmentOutput {
             progress,
@@ -131,17 +110,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::segments::{PruneInput, PruneLimiter, Segment, SegmentOutput, TransactionLookup};
+    use crate::segments::{PruneInput, Segment, SegmentOutput, TransactionLookup};
     use alloy_primitives::{BlockNumber, TxNumber, B256};
     use assert_matches::assert_matches;
     use itertools::{
         FoldWhile::{Continue, Done},
         Itertools,
     };
-    use reth_db_api::tables;
+    use reth_db::tables;
     use reth_provider::{DatabaseProviderFactory, PruneCheckpointReader};
     use reth_prune_types::{
-        PruneCheckpoint, PruneInterruptReason, PruneMode, PruneProgress, PruneSegment,
+        PruneCheckpoint, PruneInterruptReason, PruneLimiter, PruneMode, PruneProgress, PruneSegment,
     };
     use reth_stages::test_utils::{StorageKind, TestStageDB};
     use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
@@ -161,17 +140,15 @@ mod tests {
 
         let mut tx_hash_numbers = Vec::new();
         for block in &blocks {
-            tx_hash_numbers.reserve_exact(block.transaction_count());
-            for transaction in &block.body().transactions {
-                tx_hash_numbers.push((*transaction.tx_hash(), tx_hash_numbers.len() as u64));
+            for transaction in &block.body {
+                tx_hash_numbers.push((transaction.hash, tx_hash_numbers.len() as u64));
             }
         }
-        let tx_hash_numbers_len = tx_hash_numbers.len();
-        db.insert_tx_hash_numbers(tx_hash_numbers).expect("insert tx hash numbers");
+        db.insert_tx_hash_numbers(tx_hash_numbers.clone()).expect("insert tx hash numbers");
 
         assert_eq!(
             db.table::<tables::Transactions>().unwrap().len(),
-            blocks.iter().map(|block| block.transaction_count()).sum::<usize>()
+            blocks.iter().map(|block| block.body.len()).sum::<usize>()
         );
         assert_eq!(
             db.table::<tables::Transactions>().unwrap().len(),
@@ -206,7 +183,7 @@ mod tests {
             let last_pruned_tx_number = blocks
                 .iter()
                 .take(to_block as usize)
-                .map(|block| block.transaction_count())
+                .map(|block| block.body.len())
                 .sum::<usize>()
                 .min(
                     next_tx_number_to_prune as usize +
@@ -217,7 +194,7 @@ mod tests {
             let last_pruned_block_number = blocks
                 .iter()
                 .fold_while((0, 0), |(_, mut tx_count), block| {
-                    tx_count += block.transaction_count();
+                    tx_count += block.body.len();
 
                     if tx_count > last_pruned_tx_number {
                         Done((block.number, tx_count))
@@ -251,7 +228,7 @@ mod tests {
 
             assert_eq!(
                 db.table::<tables::TransactionHashNumbers>().unwrap().len(),
-                tx_hash_numbers_len - (last_pruned_tx_number + 1)
+                tx_hash_numbers.len() - (last_pruned_tx_number + 1)
             );
             assert_eq!(
                 db.factory

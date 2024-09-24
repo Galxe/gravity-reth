@@ -51,7 +51,7 @@ pub struct StageSetBuilder<Provider> {
 
 impl<Provider> Default for StageSetBuilder<Provider> {
     fn default() -> Self {
-        Self { stages: HashMap::default(), order: Vec::new() }
+        Self { stages: HashMap::new(), order: Vec::new() }
     }
 }
 
@@ -73,15 +73,16 @@ impl<Provider> StageSetBuilder<Provider> {
 
     fn upsert_stage_state(&mut self, stage: Box<dyn Stage<Provider>>, added_at_index: usize) {
         let stage_id = stage.id();
-        if self.stages.insert(stage.id(), StageEntry { stage, enabled: true }).is_some() &&
-            let Some(to_remove) = self
+        if self.stages.insert(stage.id(), StageEntry { stage, enabled: true }).is_some() {
+            if let Some(to_remove) = self
                 .order
                 .iter()
                 .enumerate()
                 .find(|(i, id)| *i != added_at_index && **id == stage_id)
                 .map(|(i, _)| i)
-        {
-            self.order.remove(to_remove);
+            {
+                self.order.remove(to_remove);
+            }
         }
     }
 
@@ -96,31 +97,6 @@ impl<Provider> StageSetBuilder<Provider> {
             .get_mut(&stage.id())
             .unwrap_or_else(|| panic!("Stage does not exist in set: {}", stage.id()));
         entry.stage = Box::new(stage);
-        self
-    }
-
-    /// Returns iterator over the stages in this set,
-    /// In the same order they would be executed in the pipeline.
-    pub fn stages(&self) -> impl Iterator<Item = StageId> + '_ {
-        self.order.iter().copied()
-    }
-
-    /// Replaces a stage with the given ID with a new stage.
-    ///
-    /// If the new stage has a different ID,
-    /// it will maintain the original stage's position in the execution order.
-    pub fn replace<S: Stage<Provider> + 'static>(mut self, stage_id: StageId, stage: S) -> Self {
-        self.stages
-            .get(&stage_id)
-            .unwrap_or_else(|| panic!("Stage does not exist in set: {stage_id}"));
-
-        if stage.id() == stage_id {
-            return self.set(stage);
-        }
-        let index = self.index_of(stage_id);
-        self.stages.remove(&stage_id);
-        self.order[index] = stage.id();
-        self.upsert_stage_state(Box::new(stage), index);
         self
     }
 
@@ -263,10 +239,10 @@ impl<Provider> StageSetBuilder<Provider> {
     pub fn build(mut self) -> Vec<Box<dyn Stage<Provider>>> {
         let mut stages = Vec::new();
         for id in &self.order {
-            if let Some(entry) = self.stages.remove(id) &&
-                entry.enabled
-            {
-                stages.push(entry.stage);
+            if let Some(entry) = self.stages.remove(id) {
+                if entry.enabled {
+                    stages.push(entry.stage);
+                }
             }
         }
         stages

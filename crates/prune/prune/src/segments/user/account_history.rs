@@ -4,10 +4,12 @@ use crate::{
     PrunerError,
 };
 use itertools::Itertools;
-use reth_db_api::{models::ShardedKey, tables, transaction::DbTxMut};
+use reth_db::{tables, transaction::DbTxMut};
+use reth_db_api::models::ShardedKey;
 use reth_provider::DBProvider;
 use reth_prune_types::{
-    PruneMode, PrunePurpose, PruneSegment, SegmentOutput, SegmentOutputCheckpoint,
+    PruneInterruptReason, PruneMode, PruneProgress, PrunePurpose, PruneSegment, SegmentOutput,
+    SegmentOutputCheckpoint,
 };
 use rustc_hash::FxHashMap;
 use tracing::{instrument, trace};
@@ -63,7 +65,7 @@ where
         };
         if limiter.is_limit_reached() {
             return Ok(SegmentOutput::not_done(
-                limiter.interrupt_reason(),
+                PruneInterruptReason::new(&limiter),
                 input.previous_checkpoint.map(SegmentOutputCheckpoint::from_prune_checkpoint),
             ))
         }
@@ -111,7 +113,7 @@ where
         )?;
         trace!(target: "pruner", ?outcomes, %done, "Pruned account history (indices)");
 
-        let progress = limiter.progress(done);
+        let progress = PruneProgress::new(done, &limiter);
 
         Ok(SegmentOutput {
             progress,
@@ -128,14 +130,14 @@ where
 mod tests {
     use crate::segments::{
         user::account_history::ACCOUNT_HISTORY_TABLES_TO_PRUNE, AccountHistory, PruneInput,
-        PruneLimiter, Segment, SegmentOutput,
+        Segment, SegmentOutput,
     };
     use alloy_primitives::{BlockNumber, B256};
     use assert_matches::assert_matches;
-    use reth_db_api::{tables, BlockNumberList};
+    use reth_db::{tables, BlockNumberList};
     use reth_provider::{DatabaseProviderFactory, PruneCheckpointReader};
     use reth_prune_types::{
-        PruneCheckpoint, PruneInterruptReason, PruneMode, PruneProgress, PruneSegment,
+        PruneCheckpoint, PruneInterruptReason, PruneLimiter, PruneMode, PruneProgress, PruneSegment,
     };
     use reth_stages::test_utils::{StorageKind, TestStageDB};
     use reth_testing_utils::generators::{
@@ -227,7 +229,7 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
 
-                #[expect(clippy::skip_while_next)]
+                #[allow(clippy::skip_while_next)]
                 let pruned = changesets
                     .iter()
                     .enumerate()
@@ -273,8 +275,10 @@ mod tests {
                     .iter()
                     .filter(|(key, _)| key.highest_block_number > last_pruned_block_number)
                     .map(|(key, blocks)| {
-                        let new_blocks =
-                            blocks.iter().skip_while(|block| *block <= last_pruned_block_number);
+                        let new_blocks = blocks
+                            .iter()
+                            .skip_while(|block| *block <= last_pruned_block_number)
+                            .collect::<Vec<_>>();
                         (key.clone(), BlockNumberList::new_pre_sorted(new_blocks))
                     })
                     .collect::<Vec<_>>();

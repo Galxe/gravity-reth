@@ -17,8 +17,7 @@
 pub mod block;
 pub mod blocking_task;
 pub mod call;
-pub mod config;
-pub mod estimate;
+pub mod error;
 pub mod fee;
 pub mod pending_block;
 pub mod receipt;
@@ -40,18 +39,21 @@ pub use state::{EthState, LoadState};
 pub use trace::Trace;
 pub use transaction::{EthTransactions, LoadTransaction};
 
-use crate::FullEthApiTypes;
+use crate::EthApiTypes;
 
 /// Extension trait that bundles traits needed for tracing transactions.
-pub trait TraceExt: LoadTransaction + LoadBlock + SpawnBlocking + Trace + Call {}
+pub trait TraceExt:
+    LoadTransaction + LoadBlock + LoadPendingBlock + SpawnBlocking + Trace + Call
+{
+}
 
-impl<T> TraceExt for T where T: LoadTransaction + LoadBlock + Trace + Call {}
+impl<T> TraceExt for T where T: LoadTransaction + LoadBlock + LoadPendingBlock + Trace + Call {}
 
 /// Helper trait to unify all `eth` rpc server building block traits, for simplicity.
 ///
 /// This trait is automatically implemented for any type that implements all the `Eth` traits.
 pub trait FullEthApi:
-    FullEthApiTypes
+    EthApiTypes
     + EthApiSpec
     + EthTransactions
     + EthBlocks
@@ -64,7 +66,7 @@ pub trait FullEthApi:
 }
 
 impl<T> FullEthApi for T where
-    T: FullEthApiTypes
+    T: EthApiTypes
         + EthApiSpec
         + EthTransactions
         + EthBlocks

@@ -9,12 +9,13 @@ use interprocess::local_socket::{
     GenericFilePath, ListenerOptions, ToFsName,
 };
 use jsonrpsee::{
-    core::{middleware::layer::RpcLoggerLayer, JsonRawValue, TEN_MB_SIZE_BYTES},
+    core::TEN_MB_SIZE_BYTES,
     server::{
-        middleware::rpc::RpcServiceT, stop_channel, ConnectionGuard, ConnectionPermit, IdProvider,
-        RandomIntegerIdProvider, ServerHandle, StopHandle,
+        middleware::rpc::{RpcLoggerLayer, RpcServiceT},
+        stop_channel, ConnectionGuard, ConnectionPermit, IdProvider, RandomIntegerIdProvider,
+        ServerHandle, StopHandle,
     },
-    BoundedSubscriptions, MethodResponse, MethodSink, Methods,
+    BoundedSubscriptions, MethodSink, Methods,
 };
 use std::{
     future::Future,
@@ -65,13 +66,13 @@ impl<HttpMiddleware, RpcMiddleware> IpcServer<HttpMiddleware, RpcMiddleware> {
 
 impl<HttpMiddleware, RpcMiddleware> IpcServer<HttpMiddleware, RpcMiddleware>
 where
-    RpcMiddleware: for<'a> Layer<RpcService, Service: RpcServiceT> + Clone + Send + 'static,
+    RpcMiddleware: for<'a> Layer<RpcService, Service: RpcServiceT<'a>> + Clone + Send + 'static,
     HttpMiddleware: Layer<
             TowerServiceNoHttp<RpcMiddleware>,
             Service: Service<
                 String,
                 Response = Option<String>,
-                Error = Box<dyn core::error::Error + Send + Sync + 'static>,
+                Error = Box<dyn std::error::Error + Send + Sync + 'static>,
                 Future: Send + Unpin,
             > + Send,
         > + Send
@@ -85,7 +86,7 @@ where
     /// ```
     /// use jsonrpsee::RpcModule;
     /// use reth_ipc::server::Builder;
-    /// async fn run_server() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+    /// async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ///     let server = Builder::default().build("/tmp/my-uds".into());
     ///     let mut module = RpcModule::new(());
     ///     module.register_method("say_hello", |_, _, _| "lo")?;
@@ -139,20 +140,7 @@ where
             .to_fs_name::<GenericFilePath>()
             .and_then(|name| ListenerOptions::new().name(name).create_tokio())
         {
-            Ok(listener) => {
-                #[cfg(unix)]
-                {
-                    // set permissions only on unix
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Some(perms_str) = &self.cfg.ipc_socket_permissions &&
-                        let Ok(mode) = u32::from_str_radix(&perms_str.replace("0o", ""), 8)
-                    {
-                        let perms = std::fs::Permissions::from_mode(mode);
-                        let _ = std::fs::set_permissions(&self.endpoint, perms);
-                    }
-                }
-                listener
-            }
+            Ok(listener) => listener,
             Err(err) => {
                 on_ready
                     .send(Err(IpcServerStartError { endpoint: self.endpoint.clone(), source: err }))
@@ -304,7 +292,7 @@ impl Default for RpcServiceBuilder<Identity> {
 
 impl RpcServiceBuilder<Identity> {
     /// Create a new [`RpcServiceBuilder`].
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self(tower::ServiceBuilder::new())
     }
 }
@@ -369,8 +357,7 @@ pub struct TowerServiceNoHttp<L> {
 impl<RpcMiddleware> Service<String> for TowerServiceNoHttp<RpcMiddleware>
 where
     RpcMiddleware: for<'a> Layer<RpcService>,
-    for<'a> <RpcMiddleware as Layer<RpcService>>::Service:
-        Send + Sync + 'static + RpcServiceT<MethodResponse = MethodResponse>,
+    for<'a> <RpcMiddleware as Layer<RpcService>>::Service: Send + Sync + 'static + RpcServiceT<'a>,
 {
     /// The response of a handled RPC call
     ///
@@ -379,7 +366,7 @@ where
     /// response will be emitted via the `method_sink`.
     type Response = Option<String>;
 
-    type Error = Box<dyn core::error::Error + Send + Sync + 'static>;
+    type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -444,17 +431,17 @@ struct ProcessConnection<'a, HttpMiddleware, RpcMiddleware> {
 
 /// Spawns the IPC connection onto a new task
 #[instrument(name = "connection", skip_all, fields(conn_id = %params.conn_id), level = "INFO")]
-fn process_connection<RpcMiddleware, HttpMiddleware>(
+fn process_connection<'b, RpcMiddleware, HttpMiddleware>(
     params: ProcessConnection<'_, HttpMiddleware, RpcMiddleware>,
 ) where
     RpcMiddleware: Layer<RpcService> + Clone + Send + 'static,
-    for<'a> <RpcMiddleware as Layer<RpcService>>::Service: RpcServiceT,
+    for<'a> <RpcMiddleware as Layer<RpcService>>::Service: RpcServiceT<'a>,
     HttpMiddleware: Layer<TowerServiceNoHttp<RpcMiddleware>> + Send + 'static,
     <HttpMiddleware as Layer<TowerServiceNoHttp<RpcMiddleware>>>::Service: Send
     + Service<
         String,
         Response = Option<String>,
-        Error = Box<dyn core::error::Error + Send + Sync + 'static>,
+        Error = Box<dyn std::error::Error + Send + Sync + 'static>,
     >,
     <<HttpMiddleware as Layer<TowerServiceNoHttp<RpcMiddleware>>>::Service as Service<String>>::Future:
     Send + Unpin,
@@ -477,7 +464,7 @@ fn process_connection<RpcMiddleware, HttpMiddleware>(
         local_socket_stream,
     ));
 
-    let (tx, rx) = mpsc::channel::<Box<JsonRawValue>>(server_cfg.message_buffer_capacity as usize);
+    let (tx, rx) = mpsc::channel::<String>(server_cfg.message_buffer_capacity as usize);
     let method_sink = MethodSink::new_with_limit(tx, server_cfg.max_response_body_size);
     let tower_service = TowerServiceNoHttp {
         inner: ServiceData {
@@ -506,10 +493,10 @@ async fn to_ipc_service<S, T>(
     ipc: IpcConn<JsonRpcStream<T>>,
     service: S,
     stop_handle: StopHandle,
-    rx: mpsc::Receiver<Box<JsonRawValue>>,
+    rx: mpsc::Receiver<String>,
 ) where
     S: Service<String, Response = Option<String>> + Send + 'static,
-    S::Error: Into<Box<dyn core::error::Error + Send + Sync>>,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     S::Future: Send + Unpin,
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -533,7 +520,7 @@ async fn to_ipc_service<S, T>(
             }
             item = rx_item.next() => {
                 if let Some(item) = item {
-                    conn.push_back(item.to_string());
+                    conn.push_back(item);
                 }
             }
             _ = &mut stopped => {
@@ -563,8 +550,6 @@ pub struct Settings {
     message_buffer_capacity: u32,
     /// Custom tokio runtime to run the server on.
     tokio_runtime: Option<tokio::runtime::Handle>,
-    /// The permissions to create the IPC socket with.
-    ipc_socket_permissions: Option<String>,
 }
 
 impl Default for Settings {
@@ -577,7 +562,6 @@ impl Default for Settings {
             max_subscriptions_per_connection: 1024,
             message_buffer_capacity: 1024,
             tokio_runtime: None,
-            ipc_socket_permissions: None,
         }
     }
 }
@@ -628,7 +612,7 @@ impl<HttpMiddleware, RpcMiddleware> Builder<HttpMiddleware, RpcMiddleware> {
         self
     }
 
-    /// Set the maximum number of subscriptions per connection. Default is 1024.
+    /// Set the maximum number of connections allowed. Default is 1024.
     pub const fn max_subscriptions_per_connection(mut self, max: u32) -> Self {
         self.settings.max_subscriptions_per_connection = max;
         self
@@ -636,7 +620,7 @@ impl<HttpMiddleware, RpcMiddleware> Builder<HttpMiddleware, RpcMiddleware> {
 
     /// The server enforces backpressure which means that
     /// `n` messages can be buffered and if the client
-    /// can't keep up with the server.
+    /// can't keep with up the server.
     ///
     /// This `capacity` is applied per connection and
     /// applies globally on the connection which implies
@@ -661,12 +645,6 @@ impl<HttpMiddleware, RpcMiddleware> Builder<HttpMiddleware, RpcMiddleware> {
     /// Default: [`tokio::spawn`]
     pub fn custom_tokio_runtime(mut self, rt: tokio::runtime::Handle) -> Self {
         self.settings.tokio_runtime = Some(rt);
-        self
-    }
-
-    /// Sets the permissions for the IPC socket file.
-    pub fn set_ipc_socket_permissions(mut self, permissions: Option<String>) -> Self {
-        self.settings.ipc_socket_permissions = permissions;
         self
     }
 
@@ -734,6 +712,59 @@ impl<HttpMiddleware, RpcMiddleware> Builder<HttpMiddleware, RpcMiddleware> {
     ///
     /// The builder itself exposes a similar API as the [`tower::ServiceBuilder`]
     /// where it is possible to compose layers to the middleware.
+    ///
+    /// ```
+    /// use std::{
+    ///     net::SocketAddr,
+    ///     sync::{
+    ///         atomic::{AtomicUsize, Ordering},
+    ///         Arc,
+    ///     },
+    ///     time::Instant,
+    /// };
+    ///
+    /// use futures_util::future::BoxFuture;
+    /// use jsonrpsee::{
+    ///     server::{middleware::rpc::RpcServiceT, ServerBuilder},
+    ///     types::Request,
+    ///     MethodResponse,
+    /// };
+    /// use reth_ipc::server::{Builder, RpcServiceBuilder};
+    ///
+    /// #[derive(Clone)]
+    /// struct MyMiddleware<S> {
+    ///     service: S,
+    ///     count: Arc<AtomicUsize>,
+    /// }
+    ///
+    /// impl<'a, S> RpcServiceT<'a> for MyMiddleware<S>
+    /// where
+    ///     S: RpcServiceT<'a> + Send + Sync + Clone + 'static,
+    /// {
+    ///     type Future = BoxFuture<'a, MethodResponse>;
+    ///
+    ///     fn call(&self, req: Request<'a>) -> Self::Future {
+    ///         tracing::info!("MyMiddleware processed call {}", req.method);
+    ///         let count = self.count.clone();
+    ///         let service = self.service.clone();
+    ///
+    ///         Box::pin(async move {
+    ///             let rp = service.call(req).await;
+    ///             // Modify the state.
+    ///             count.fetch_add(1, Ordering::Relaxed);
+    ///             rp
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// // Create a state per connection
+    /// // NOTE: The service type can be omitted once `start` is called on the server.
+    /// let m = RpcServiceBuilder::new().layer_fn(move |service: ()| MyMiddleware {
+    ///     service,
+    ///     count: Arc::new(AtomicUsize::new(0)),
+    /// });
+    /// let builder = Builder::default().set_rpc_middleware(m);
+    /// ```
     pub fn set_rpc_middleware<T>(
         self,
         rpc_middleware: RpcServiceBuilder<T>,
@@ -759,14 +790,13 @@ impl<HttpMiddleware, RpcMiddleware> Builder<HttpMiddleware, RpcMiddleware> {
 }
 
 #[cfg(test)]
-#[expect(missing_docs)]
+#[allow(missing_docs)]
 pub fn dummy_name() -> String {
-    use rand::Rng;
-    let num: u64 = rand::rng().random();
+    let num: u64 = rand::Rng::gen(&mut rand::thread_rng());
     if cfg!(windows) {
-        format!(r"\\.\pipe\my-pipe-{num}")
+        format!(r"\\.\pipe\my-pipe-{}", num)
     } else {
-        format!(r"/tmp/my-uds-{num}")
+        format!(r"/tmp/my-uds-{}", num)
     }
 }
 
@@ -777,8 +807,8 @@ mod tests {
     use futures::future::select;
     use jsonrpsee::{
         core::{
-            client::{self, ClientT, Error, Subscription, SubscriptionClientT},
-            middleware::{Batch, BatchEntry, Notification},
+            client,
+            client::{ClientT, Error, Subscription, SubscriptionClientT},
             params::BatchRequestBuilder,
         },
         rpc_params,
@@ -790,28 +820,10 @@ mod tests {
     use tokio::sync::broadcast;
     use tokio_stream::wrappers::BroadcastStream;
 
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn test_ipc_socket_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let endpoint = &dummy_name();
-        let perms = "0777";
-        let server = Builder::default()
-            .set_ipc_socket_permissions(Some(perms.to_string()))
-            .build(endpoint.clone());
-        let module = RpcModule::new(());
-        let handle = server.start(module).await.unwrap();
-        tokio::spawn(handle.stopped());
-
-        let meta = std::fs::metadata(endpoint).unwrap();
-        let perms = meta.permissions();
-        assert_eq!(perms.mode() & 0o777, 0o777);
-    }
-
     async fn pipe_from_stream_with_bounded_buffer(
         pending: PendingSubscriptionSink,
         stream: BroadcastStream<usize>,
-    ) -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let sink = pending.accept().await.unwrap();
         let closed = sink.closed();
 
@@ -825,8 +837,7 @@ mod tests {
 
                 // received new item from the stream.
                 Either::Right((Some(Ok(item)), c)) => {
-                    let raw_value = serde_json::value::to_raw_value(&item)?;
-                    let notif = SubscriptionMessage::from(raw_value);
+                    let notif = SubscriptionMessage::from_json(&item)?;
 
                     // NOTE: this will block until there a spot in the queue
                     // and you might want to do something smarter if it's
@@ -838,7 +849,7 @@ mod tests {
                     closed = c;
                 }
 
-                // Send back the error.
+                // Send back back the error.
                 Either::Right((Some(Err(e)), _)) => break Err(e.into()),
             }
         }
@@ -1023,18 +1034,13 @@ mod tests {
         #[derive(Clone)]
         struct ModifyRequestIf<S>(S);
 
-        impl<S> RpcServiceT for ModifyRequestIf<S>
+        impl<'a, S> RpcServiceT<'a> for ModifyRequestIf<S>
         where
-            S: Send + Sync + RpcServiceT,
+            S: Send + Sync + RpcServiceT<'a>,
         {
-            type MethodResponse = S::MethodResponse;
-            type NotificationResponse = S::NotificationResponse;
-            type BatchResponse = S::BatchResponse;
+            type Future = S::Future;
 
-            fn call<'a>(
-                &self,
-                mut req: Request<'a>,
-            ) -> impl Future<Output = Self::MethodResponse> + Send + 'a {
+            fn call(&self, mut req: Request<'a>) -> Self::Future {
                 // Re-direct all calls that isn't `say_hello` to `say_goodbye`
                 if req.method == "say_hello" {
                     req.method = "say_goodbye".into();
@@ -1043,46 +1049,6 @@ mod tests {
                 }
 
                 self.0.call(req)
-            }
-
-            fn batch<'a>(
-                &self,
-                mut batch: Batch<'a>,
-            ) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
-                for call in batch.iter_mut() {
-                    match call {
-                        Ok(BatchEntry::Call(req)) => {
-                            if req.method == "say_hello" {
-                                req.method = "say_goodbye".into();
-                            } else if req.method == "say_goodbye" {
-                                req.method = "say_hello".into();
-                            }
-                        }
-                        Ok(BatchEntry::Notification(n)) => {
-                            if n.method == "say_hello" {
-                                n.method = "say_goodbye".into();
-                            } else if n.method == "say_goodbye" {
-                                n.method = "say_hello".into();
-                            }
-                        }
-                        // Invalid request, we don't care about it.
-                        Err(_err) => {}
-                    }
-                }
-
-                self.0.batch(batch)
-            }
-
-            fn notification<'a>(
-                &self,
-                mut n: Notification<'a>,
-            ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
-                if n.method == "say_hello" {
-                    n.method = "say_goodbye".into();
-                } else if n.method == "say_goodbye" {
-                    n.method = "say_hello".into();
-                }
-                self.0.notification(n)
             }
         }
 

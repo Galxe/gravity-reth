@@ -1,16 +1,14 @@
 //! Transaction pool eviction tests.
 
-use alloy_consensus::Transaction;
-use alloy_eips::eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE};
 use alloy_primitives::{Address, B256};
-use rand::distr::Uniform;
+use rand::distributions::Uniform;
+use reth_primitives::constants::{ETHEREUM_BLOCK_GAS_LIMIT, MIN_PROTOCOL_BASE_FEE};
 use reth_transaction_pool::{
     error::PoolErrorKind,
     test_utils::{
         MockFeeRange, MockTransactionDistribution, MockTransactionRatio, TestPool, TestPoolBuilder,
     },
-    AddedTransactionOutcome, BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin,
-    TransactionPool, TransactionPoolExt,
+    BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionPool, TransactionPoolExt,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -29,7 +27,7 @@ async fn only_blobs_eviction() {
 
     let pool: TestPool = TestPoolBuilder::default().with_config(pool_config.clone()).into();
     let block_info = BlockInfo {
-        block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+        block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
         last_seen_block_hash: B256::ZERO,
         last_seen_block_number: 0,
         pending_basefee: 10,
@@ -64,17 +62,14 @@ async fn only_blobs_eviction() {
 
         // start the fees at zero, some transactions will be underpriced
         let fee_range = MockFeeRange {
-            gas_price: Uniform::try_from(0u128..(block_info.pending_basefee as u128 + 1000))
-                .unwrap(),
-            priority_fee: Uniform::try_from(0u128..(block_info.pending_basefee as u128 + 1000))
-                .unwrap(),
+            gas_price: Uniform::from(0u128..(block_info.pending_basefee as u128 + 1000)),
+            priority_fee: Uniform::from(0u128..(block_info.pending_basefee as u128 + 1000)),
             // we need to set the max fee to at least the min protocol base fee, or transactions
             // generated could be rejected
-            max_fee: Uniform::try_from(
+            max_fee: Uniform::from(
                 MIN_PROTOCOL_BASE_FEE as u128..(block_info.pending_basefee as u128 + 2000),
-            )
-            .unwrap(),
-            max_fee_blob: Uniform::try_from(pending_blob_fee..(pending_blob_fee + 1000)).unwrap(),
+            ),
+            max_fee_blob: Uniform::from(pending_blob_fee..(pending_blob_fee + 1000)),
         };
 
         let distribution = MockTransactionDistribution::new(
@@ -87,18 +82,18 @@ async fn only_blobs_eviction() {
         for _ in 0..*sender_amt {
             // use a random sender, create the tx set
             let sender = Address::random();
-            let set = distribution.tx_set(sender, nonce_range.clone(), &mut rand::rng());
+            let set = distribution.tx_set(sender, nonce_range.clone(), &mut rand::thread_rng());
 
             let set = set.into_vec();
 
             // ensure that the first nonce is 0
-            assert_eq!(set[0].nonce(), 0);
+            assert_eq!(set[0].get_nonce(), 0);
 
             // and finally insert it into the pool
             let results = pool.add_transactions(TransactionOrigin::External, set).await;
             for (i, result) in results.iter().enumerate() {
                 match result {
-                    Ok(AddedTransactionOutcome { hash, .. }) => {
+                    Ok(hash) => {
                         println!("✅ Inserted tx into pool with hash: {hash}");
                     }
                     Err(e) => {
@@ -112,12 +107,7 @@ async fn only_blobs_eviction() {
 
                                 // ensure that this is only returned when the sender is over the
                                 // pool limit per account
-                                assert!(
-                                    i + 1 >= pool_config.max_account_slots,
-                                    "Spammer exceeded capacity, but it shouldn't have. Max accounts slots: {}, current txs by sender: {}",
-                                    pool_config.max_account_slots,
-                                    i + 1
-                                );
+                                assert!(i + 1 >= pool_config.max_account_slots, "Spammer exceeded capacity, but it shouldn't have. Max accounts slots: {}, current txs by sender: {}", pool_config.max_account_slots, i + 1);
                                 // at this point we know that the sender has been limited, so we
                                 // keep going
                             }
@@ -150,7 +140,7 @@ async fn mixed_eviction() {
 
     let pool: TestPool = TestPoolBuilder::default().with_config(pool_config.clone()).into();
     let block_info = BlockInfo {
-        block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+        block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
         last_seen_block_hash: B256::ZERO,
         last_seen_block_number: 0,
         pending_basefee: 10,
@@ -182,10 +172,10 @@ async fn mixed_eviction() {
         let min_max_fee = block_info.pending_basefee as u128 + 10;
 
         let fee_range = MockFeeRange {
-            gas_price: Uniform::try_from(min_gas_price..(min_gas_price + 1000)).unwrap(),
-            priority_fee: Uniform::try_from(min_priority_fee..(min_priority_fee + 1000)).unwrap(),
-            max_fee: Uniform::try_from(min_max_fee..(min_max_fee + 2000)).unwrap(),
-            max_fee_blob: Uniform::try_from(pending_blob_fee..(pending_blob_fee + 1000)).unwrap(),
+            gas_price: Uniform::from(min_gas_price..(min_gas_price + 1000)),
+            priority_fee: Uniform::from(min_priority_fee..(min_priority_fee + 1000)),
+            max_fee: Uniform::from(min_max_fee..(min_max_fee + 2000)),
+            max_fee_blob: Uniform::from(pending_blob_fee..(pending_blob_fee + 1000)),
         };
 
         let distribution = MockTransactionDistribution::new(
@@ -200,11 +190,11 @@ async fn mixed_eviction() {
             let set = distribution.tx_set_non_conflicting_types(
                 sender,
                 nonce_range.clone(),
-                &mut rand::rng(),
+                &mut rand::thread_rng(),
             );
 
             let set = set.into_inner().into_vec();
-            assert_eq!(set[0].nonce(), 0);
+            assert_eq!(set[0].get_nonce(), 0);
 
             let results = pool.add_transactions(TransactionOrigin::External, set).await;
             for (i, result) in results.iter().enumerate() {
@@ -224,12 +214,7 @@ async fn mixed_eviction() {
 
                                 // ensure that this is only returned when the sender is over the
                                 // pool limit per account
-                                assert!(
-                                    i + 1 >= pool_config.max_account_slots,
-                                    "Spammer exceeded capacity, but it shouldn't have. Max accounts slots: {}, current txs by sender: {}",
-                                    pool_config.max_account_slots,
-                                    i + 1
-                                );
+                                assert!(i + 1 >= pool_config.max_account_slots, "Spammer exceeded capacity, but it shouldn't have. Max accounts slots: {}, current txs by sender: {}", pool_config.max_account_slots, i + 1);
                             }
                             _ => panic!("Failed to insert tx into pool with unexpected error: {e}"),
                         }
@@ -257,7 +242,7 @@ async fn nonce_gaps_eviction() {
 
     let pool: TestPool = TestPoolBuilder::default().with_config(pool_config.clone()).into();
     let block_info = BlockInfo {
-        block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+        block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
         last_seen_block_hash: B256::ZERO,
         last_seen_block_number: 0,
         pending_basefee: 10,
@@ -289,10 +274,10 @@ async fn nonce_gaps_eviction() {
         let min_max_fee = block_info.pending_basefee as u128 + 10;
 
         let fee_range = MockFeeRange {
-            gas_price: Uniform::try_from(min_gas_price..(min_gas_price + 1000)).unwrap(),
-            priority_fee: Uniform::try_from(min_priority_fee..(min_priority_fee + 1000)).unwrap(),
-            max_fee: Uniform::try_from(min_max_fee..(min_max_fee + 2000)).unwrap(),
-            max_fee_blob: Uniform::try_from(pending_blob_fee..(pending_blob_fee + 1000)).unwrap(),
+            gas_price: Uniform::from(min_gas_price..(min_gas_price + 1000)),
+            priority_fee: Uniform::from(min_priority_fee..(min_priority_fee + 1000)),
+            max_fee: Uniform::from(min_max_fee..(min_max_fee + 2000)),
+            max_fee_blob: Uniform::from(pending_blob_fee..(pending_blob_fee + 1000)),
         };
 
         let distribution = MockTransactionDistribution::new(
@@ -313,10 +298,10 @@ async fn nonce_gaps_eviction() {
             let mut set = distribution.tx_set_non_conflicting_types(
                 sender,
                 nonce_range.clone(),
-                &mut rand::rng(),
+                &mut rand::thread_rng(),
             );
 
-            set.with_nonce_gaps(gap_pct, gap_range.clone(), &mut rand::rng());
+            set.with_nonce_gaps(gap_pct, gap_range.clone(), &mut rand::thread_rng());
             let set = set.into_inner().into_vec();
 
             let results = pool.add_transactions(TransactionOrigin::External, set).await;
@@ -337,12 +322,7 @@ async fn nonce_gaps_eviction() {
 
                                 // ensure that this is only returned when the sender is over the
                                 // pool limit per account
-                                assert!(
-                                    i + 1 >= pool_config.max_account_slots,
-                                    "Spammer exceeded capacity, but it shouldn't have. Max accounts slots: {}, current txs by sender: {}",
-                                    pool_config.max_account_slots,
-                                    i + 1
-                                );
+                                assert!(i + 1 >= pool_config.max_account_slots, "Spammer exceeded capacity, but it shouldn't have. Max accounts slots: {}, current txs by sender: {}", pool_config.max_account_slots, i + 1);
                             }
                             _ => panic!("Failed to insert tx into pool with unexpected error: {e}"),
                         }

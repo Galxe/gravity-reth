@@ -93,13 +93,13 @@ impl<N: ProviderNodeTypes> PipelineSync<N> {
     pub fn new(pipeline: Pipeline<N>, pipeline_task_spawner: Box<dyn TaskSpawner>) -> Self {
         Self {
             pipeline_task_spawner,
-            pipeline_state: PipelineState::Idle(Some(Box::new(pipeline))),
+            pipeline_state: PipelineState::Idle(Some(pipeline)),
             pending_pipeline_target: None,
         }
     }
 
     /// Returns `true` if a pipeline target is queued and will be triggered on the next `poll`.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     const fn is_pipeline_sync_pending(&self) -> bool {
         self.pending_pipeline_target.is_some() && self.pipeline_state.is_idle()
     }
@@ -165,7 +165,7 @@ impl<N: ProviderNodeTypes> PipelineSync<N> {
         };
         let ev = match res {
             Ok((pipeline, result)) => {
-                self.pipeline_state = PipelineState::Idle(Some(Box::new(pipeline)));
+                self.pipeline_state = PipelineState::Idle(Some(pipeline));
                 BackfillEvent::Finished(result)
             }
             Err(why) => {
@@ -214,7 +214,7 @@ impl<N: ProviderNodeTypes> BackfillSync for PipelineSync<N> {
 #[derive(Debug)]
 enum PipelineState<N: ProviderNodeTypes> {
     /// Pipeline is idle.
-    Idle(Option<Box<Pipeline<N>>>),
+    Idle(Option<Pipeline<N>>),
     /// Pipeline is running and waiting for a response
     Running(oneshot::Receiver<PipelineWithResult<N>>),
 }
@@ -230,14 +230,11 @@ impl<N: ProviderNodeTypes> PipelineState<N> {
 mod tests {
     use super::*;
     use crate::test_utils::{insert_headers_into_client, TestPipelineBuilder};
-    use alloy_consensus::Header;
-    use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
-    use alloy_primitives::{BlockNumber, B256};
     use assert_matches::assert_matches;
     use futures::poll;
     use reth_chainspec::{ChainSpecBuilder, MAINNET};
     use reth_network_p2p::test_utils::TestFullBlockClient;
-    use reth_primitives_traits::SealedHeader;
+    use reth_primitives::{BlockNumber, Header, B256};
     use reth_provider::test_utils::MockNodeTypesWithDB;
     use reth_stages::ExecOutput;
     use reth_stages_api::StageCheckpoint;
@@ -265,16 +262,16 @@ mod tests {
                     checkpoint: StageCheckpoint::new(BlockNumber::from(pipeline_done_after)),
                     done: true,
                 })]))
-                .build(chain_spec);
+                .build(chain_spec.clone());
 
             let pipeline_sync = PipelineSync::new(pipeline, Box::<TokioTaskExecutor>::default());
             let client = TestFullBlockClient::default();
             let header = Header {
                 base_fee_per_gas: Some(7),
-                gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                gas_limit: chain_spec.max_gas_limit,
                 ..Default::default()
-            };
-            let header = SealedHeader::seal_slow(header);
+            }
+            .seal_slow();
             insert_headers_into_client(&client, header, 0..total_blocks);
 
             let tip = client.highest_block().expect("there should be blocks here").hash();

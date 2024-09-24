@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use reth_chainspec::EthChainSpec;
+use reth_chainspec::ChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 
 /// Dumps genesis block JSON configuration to stdout
@@ -21,7 +21,7 @@ pub struct DumpGenesisCommand<C: ChainSpecParser> {
     chain: Arc<C::ChainSpec>,
 }
 
-impl<C: ChainSpecParser<ChainSpec: EthChainSpec>> DumpGenesisCommand<C> {
+impl<C: ChainSpecParser<ChainSpec = ChainSpec>> DumpGenesisCommand<C> {
     /// Execute the `dump-genesis` command
     pub async fn execute(self) -> eyre::Result<()> {
         println!("{}", serde_json::to_string_pretty(self.chain.genesis())?);
@@ -29,22 +29,15 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec>> DumpGenesisCommand<C> {
     }
 }
 
-impl<C: ChainSpecParser> DumpGenesisCommand<C> {
-    /// Returns the underlying chain being used to run this command
-    pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
-        Some(&self.chain)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_ethereum_cli::chainspec::{EthereumChainSpecParser, SUPPORTED_CHAINS};
+    use reth_node_core::args::utils::{DefaultChainSpecParser, SUPPORTED_CHAINS};
 
     #[test]
     fn parse_dump_genesis_command_chain_args() {
         for chain in SUPPORTED_CHAINS {
-            let args: DumpGenesisCommand<EthereumChainSpecParser> =
+            let args: DumpGenesisCommand<DefaultChainSpecParser> =
                 DumpGenesisCommand::parse_from(["reth", "--chain", chain]);
             assert_eq!(
                 Ok(args.chain.chain),

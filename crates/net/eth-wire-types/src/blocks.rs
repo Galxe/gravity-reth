@@ -2,11 +2,10 @@
 //! types.
 
 use crate::HeadersDirection;
-use alloc::vec::Vec;
-use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::B256;
 use alloy_rlp::{RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper};
-use reth_codecs_derive::{add_arbitrary_tests, generate_tests};
+use reth_codecs_derive::add_arbitrary_tests;
+use reth_primitives::{BlockBody, BlockHashOrNumber, Header};
 
 /// A request for a peer to return block headers starting at the requested block.
 /// The peer must return at most [`limit`](#structfield.limit) headers.
@@ -41,16 +40,34 @@ pub struct GetBlockHeaders {
 /// The response to [`GetBlockHeaders`], containing headers if any headers were found.
 #[derive(Clone, Debug, PartialEq, Eq, RlpEncodableWrapper, RlpDecodableWrapper, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
-pub struct BlockHeaders<H = alloy_consensus::Header>(
+#[add_arbitrary_tests(rlp, 10)]
+pub struct BlockHeaders(
     /// The requested headers.
-    pub Vec<H>,
+    pub Vec<Header>,
 );
 
-generate_tests!(#[rlp, 10] BlockHeaders<alloy_consensus::Header>, EthBlockHeadersTests);
+#[cfg(any(test, feature = "arbitrary"))]
+impl<'a> arbitrary::Arbitrary<'a> for BlockHeaders {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let headers_count: usize = u.int_in_range(0..=10)?;
+        let mut headers = Vec::with_capacity(headers_count);
 
-impl<H> From<Vec<H>> for BlockHeaders<H> {
-    fn from(headers: Vec<H>) -> Self {
+        for _ in 0..headers_count {
+            headers.push(reth_primitives::generate_valid_header(
+                u.arbitrary()?,
+                u.arbitrary()?,
+                u.arbitrary()?,
+                u.arbitrary()?,
+                u.arbitrary()?,
+            ))
+        }
+
+        Ok(Self(headers))
+    }
+}
+
+impl From<Vec<Header>> for BlockHeaders {
+    fn from(headers: Vec<Header>) -> Self {
         Self(headers)
     }
 }
@@ -76,15 +93,14 @@ impl From<Vec<B256>> for GetBlockBodies {
 #[derive(Clone, Debug, PartialEq, Eq, RlpEncodableWrapper, RlpDecodableWrapper, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
-pub struct BlockBodies<B = reth_ethereum_primitives::BlockBody>(
+#[add_arbitrary_tests(rlp, 16)]
+pub struct BlockBodies(
     /// The requested block bodies, each of which should correspond to a hash in the request.
-    pub Vec<B>,
+    pub Vec<BlockBody>,
 );
 
-generate_tests!(#[rlp, 16] BlockBodies<reth_ethereum_primitives::BlockBody>, EthBlockBodiesTests);
-
-impl<B> From<Vec<B>> for BlockBodies<B> {
-    fn from(bodies: Vec<B>) -> Self {
+impl From<Vec<BlockBody>> for BlockBodies {
+    fn from(bodies: Vec<BlockBody>) -> Self {
         Self(bodies)
     }
 }
@@ -95,12 +111,14 @@ mod tests {
         message::RequestPair, BlockBodies, BlockHeaders, GetBlockBodies, GetBlockHeaders,
         HeadersDirection,
     };
-    use alloy_consensus::{Header, TxLegacy};
-    use alloy_eips::BlockHashOrNumber;
-    use alloy_primitives::{hex, Signature, TxKind, U256};
+    use alloy_primitives::{hex, TxKind, U256};
     use alloy_rlp::{Decodable, Encodable};
-    use reth_ethereum_primitives::{BlockBody, Transaction, TransactionSigned};
+    use reth_primitives::{
+        BlockHashOrNumber, Header, Signature, Transaction, TransactionSigned, TxLegacy,
+    };
     use std::str::FromStr;
+
+    use super::BlockBody;
 
     #[test]
     fn decode_hash() {
@@ -148,10 +166,7 @@ mod tests {
         // 0x89 = 0x80 (start of string) + 0x09 (9, length of string)
         let long_number = hex!("89ffffffffffffffffff");
         let decode_result = BlockHashOrNumber::decode(&mut &long_number[..]);
-        assert!(
-            decode_result.is_err(),
-            "Decoding a number longer than 64 bits (but not exactly 32 bytes) should not decode successfully"
-        );
+        assert!(decode_result.is_err(), "Decoding a number longer than 64 bits (but not exactly 32 bytes) should not decode successfully");
     }
 
     // Test vector from: https://eips.ethereum.org/EIPS/eip-2481
@@ -202,7 +217,7 @@ mod tests {
     fn encode_get_block_header_number() {
         let expected = hex!("ca820457c682270f050580");
         let mut data = vec![];
-        RequestPair {
+        RequestPair::<GetBlockHeaders> {
             request_id: 1111,
             message: GetBlockHeaders {
                 start_block: BlockHashOrNumber::Number(9999),
@@ -219,7 +234,7 @@ mod tests {
     #[test]
     fn decode_get_block_header_number() {
         let data = hex!("ca820457c682270f050580");
-        let expected = RequestPair {
+        let expected = RequestPair::<GetBlockHeaders> {
             request_id: 1111,
             message: GetBlockHeaders {
                 start_block: BlockHashOrNumber::Number(9999),
@@ -236,11 +251,9 @@ mod tests {
     #[test]
     fn encode_block_header() {
         // [ (f90202) 0x0457 = 1111, [ (f901fc) [ (f901f9) header ] ] ]
-        let expected = hex!(
-            "f90202820457f901fcf901f9a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008208ae820d0582115c8215b3821a0a827788a00000000000000000000000000000000000000000000000000000000000000000880000000000000000"
-        );
+        let expected = hex!("f90202820457f901fcf901f9a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008208ae820d0582115c8215b3821a0a827788a00000000000000000000000000000000000000000000000000000000000000000880000000000000000");
         let mut data = vec![];
-        RequestPair {
+        RequestPair::<BlockHeaders> {
             request_id: 1111,
             message: BlockHeaders(vec![
                 Header {
@@ -253,18 +266,18 @@ mod tests {
                     logs_bloom: hex!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000").into(),
                     difficulty: U256::from(0x8aeu64),
                     number: 0xd05u64,
-                    gas_limit: 0x115c,
-                    gas_used: 0x15b3,
+                    gas_limit: 0x115cu64,
+                    gas_used: 0x15b3u64,
                     timestamp: 0x1a0au64,
                     extra_data: hex!("7788")[..].into(),
                     mix_hash: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
-                    nonce: 0x0000000000000000u64.into(),
+                    nonce: 0x0000000000000000u64,
                     base_fee_per_gas: None,
                     withdrawals_root: None,
                     blob_gas_used: None,
                     excess_blob_gas: None,
                     parent_beacon_block_root: None,
-                    requests_hash: None,
+                    requests_root: None
                 },
             ]),
         }.encode(&mut data);
@@ -274,10 +287,8 @@ mod tests {
     // Test vector from: https://eips.ethereum.org/EIPS/eip-2481
     #[test]
     fn decode_block_header() {
-        let data = hex!(
-            "f90202820457f901fcf901f9a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008208ae820d0582115c8215b3821a0a827788a00000000000000000000000000000000000000000000000000000000000000000880000000000000000"
-        );
-        let expected = RequestPair {
+        let data = hex!("f90202820457f901fcf901f9a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008208ae820d0582115c8215b3821a0a827788a00000000000000000000000000000000000000000000000000000000000000000880000000000000000");
+        let expected = RequestPair::<BlockHeaders> {
             request_id: 1111,
             message: BlockHeaders(vec![
                 Header {
@@ -290,18 +301,18 @@ mod tests {
                     logs_bloom: hex!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000").into(),
                     difficulty: U256::from(0x8aeu64),
                     number: 0xd05u64,
-                    gas_limit: 0x115c,
-                    gas_used: 0x15b3,
+                    gas_limit: 0x115cu64,
+                    gas_used: 0x15b3u64,
                     timestamp: 0x1a0au64,
                     extra_data: hex!("7788")[..].into(),
                     mix_hash: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
-                    nonce: 0x0000000000000000u64.into(),
+                    nonce: 0x0000000000000000u64,
                     base_fee_per_gas: None,
                     withdrawals_root: None,
                     blob_gas_used: None,
                     excess_blob_gas: None,
                     parent_beacon_block_root: None,
-                    requests_hash: None,
+                    requests_root: None
                 },
             ]),
         };
@@ -312,11 +323,9 @@ mod tests {
     // Test vector from: https://eips.ethereum.org/EIPS/eip-2481
     #[test]
     fn encode_get_block_bodies() {
-        let expected = hex!(
-            "f847820457f842a000000000000000000000000000000000000000000000000000000000deadc0dea000000000000000000000000000000000000000000000000000000000feedbeef"
-        );
+        let expected = hex!("f847820457f842a000000000000000000000000000000000000000000000000000000000deadc0dea000000000000000000000000000000000000000000000000000000000feedbeef");
         let mut data = vec![];
-        RequestPair {
+        RequestPair::<GetBlockBodies> {
             request_id: 1111,
             message: GetBlockBodies(vec![
                 hex!("00000000000000000000000000000000000000000000000000000000deadc0de").into(),
@@ -330,10 +339,8 @@ mod tests {
     // Test vector from: https://eips.ethereum.org/EIPS/eip-2481
     #[test]
     fn decode_get_block_bodies() {
-        let data = hex!(
-            "f847820457f842a000000000000000000000000000000000000000000000000000000000deadc0dea000000000000000000000000000000000000000000000000000000000feedbeef"
-        );
-        let expected = RequestPair {
+        let data = hex!("f847820457f842a000000000000000000000000000000000000000000000000000000000deadc0dea000000000000000000000000000000000000000000000000000000000feedbeef");
+        let expected = RequestPair::<GetBlockBodies> {
             request_id: 1111,
             message: GetBlockBodies(vec![
                 hex!("00000000000000000000000000000000000000000000000000000000deadc0de").into(),
@@ -347,16 +354,14 @@ mod tests {
     // Test vector from: https://eips.ethereum.org/EIPS/eip-2481
     #[test]
     fn encode_block_bodies() {
-        let expected = hex!(
-            "f902dc820457f902d6f902d3f8d2f867088504a817c8088302e2489435353535353535353535353535353535353535358202008025a064b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12a064b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10f867098504a817c809830334509435353535353535353535353535353535353535358202d98025a052f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afba052f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afbf901fcf901f9a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008208ae820d0582115c8215b3821a0a827788a00000000000000000000000000000000000000000000000000000000000000000880000000000000000"
-        );
+        let expected = hex!("f902dc820457f902d6f902d3f8d2f867088504a817c8088302e2489435353535353535353535353535353535353535358202008025a064b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12a064b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10f867098504a817c809830334509435353535353535353535353535353535353535358202d98025a052f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afba052f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afbf901fcf901f9a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008208ae820d0582115c8215b3821a0a827788a00000000000000000000000000000000000000000000000000000000000000000880000000000000000");
         let mut data = vec![];
-        let request = RequestPair {
+        let request = RequestPair::<BlockBodies> {
             request_id: 1111,
             message: BlockBodies(vec![
                 BlockBody {
                     transactions: vec![
-                        TransactionSigned::new_unhashed(Transaction::Legacy(TxLegacy {
+                        TransactionSigned::from_transaction_and_signature(Transaction::Legacy(TxLegacy {
                             chain_id: Some(1),
                             nonce: 0x8u64,
                             gas_price: 0x4a817c808,
@@ -364,13 +369,14 @@ mod tests {
                             to: TxKind::Call(hex!("3535353535353535353535353535353535353535").into()),
                             value: U256::from(0x200u64),
                             input: Default::default(),
-                        }), Signature::new(
-                                U256::from_str("0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12").unwrap(),
-                                U256::from_str("0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10").unwrap(),
-                                false,
-                            ),
+                        }),
+                        Signature {
+                                odd_y_parity: false,
+                                r: U256::from_str("0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12").unwrap(),
+                                s: U256::from_str("0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10").unwrap(),
+                            }
                         ),
-                        TransactionSigned::new_unhashed(Transaction::Legacy(TxLegacy {
+                        TransactionSigned::from_transaction_and_signature(Transaction::Legacy(TxLegacy {
                             chain_id: Some(1),
                             nonce: 0x9u64,
                             gas_price: 0x4a817c809,
@@ -378,11 +384,11 @@ mod tests {
                             to: TxKind::Call(hex!("3535353535353535353535353535353535353535").into()),
                             value: U256::from(0x2d9u64),
                             input: Default::default(),
-                        }), Signature::new(
-                                U256::from_str("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb").unwrap(),
-                                U256::from_str("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb").unwrap(),
-                                false,
-                            ),
+                        }), Signature {
+                                odd_y_parity: false,
+                                r: U256::from_str("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb").unwrap(),
+                                s: U256::from_str("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb").unwrap(),
+                            },
                         ),
                     ],
                     ommers: vec![
@@ -396,21 +402,22 @@ mod tests {
                             logs_bloom: hex!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000").into(),
                             difficulty: U256::from(0x8aeu64),
                             number: 0xd05u64,
-                            gas_limit: 0x115c,
-                            gas_used: 0x15b3,
+                            gas_limit: 0x115cu64,
+                            gas_used: 0x15b3u64,
                             timestamp: 0x1a0au64,
                             extra_data: hex!("7788")[..].into(),
                             mix_hash: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
-                            nonce: 0x0000000000000000u64.into(),
+                            nonce: 0x0000000000000000u64,
                             base_fee_per_gas: None,
                             withdrawals_root: None,
                             blob_gas_used: None,
                             excess_blob_gas: None,
                             parent_beacon_block_root: None,
-                            requests_hash: None,
+                            requests_root: None
                         },
                     ],
                     withdrawals: None,
+                    requests: None
                 }
             ]),
         };
@@ -421,15 +428,13 @@ mod tests {
     // Test vector from: https://eips.ethereum.org/EIPS/eip-2481
     #[test]
     fn decode_block_bodies() {
-        let data = hex!(
-            "f902dc820457f902d6f902d3f8d2f867088504a817c8088302e2489435353535353535353535353535353535353535358202008025a064b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12a064b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10f867098504a817c809830334509435353535353535353535353535353535353535358202d98025a052f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afba052f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afbf901fcf901f9a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008208ae820d0582115c8215b3821a0a827788a00000000000000000000000000000000000000000000000000000000000000000880000000000000000"
-        );
-        let expected = RequestPair {
+        let data = hex!("f902dc820457f902d6f902d3f8d2f867088504a817c8088302e2489435353535353535353535353535353535353535358202008025a064b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12a064b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10f867098504a817c809830334509435353535353535353535353535353535353535358202d98025a052f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afba052f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afbf901fcf901f9a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008208ae820d0582115c8215b3821a0a827788a00000000000000000000000000000000000000000000000000000000000000000880000000000000000");
+        let expected = RequestPair::<BlockBodies> {
             request_id: 1111,
             message: BlockBodies(vec![
                 BlockBody {
                     transactions: vec![
-                        TransactionSigned::new_unhashed(Transaction::Legacy(
+                        TransactionSigned::from_transaction_and_signature(Transaction::Legacy(
                             TxLegacy {
                                 chain_id: Some(1),
                                 nonce: 0x8u64,
@@ -439,13 +444,13 @@ mod tests {
                                 value: U256::from(0x200u64),
                                 input: Default::default(),
                             }),
-                                                        Signature::new(
-                                U256::from_str("0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12").unwrap(),
-                                U256::from_str("0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10").unwrap(),
-                                false,
-                            ),
+                            Signature {
+                                odd_y_parity: false,
+                                r: U256::from_str("0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12").unwrap(),
+                                s: U256::from_str("0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10").unwrap(),
+                            }
                         ),
-                        TransactionSigned::new_unhashed(
+                        TransactionSigned::from_transaction_and_signature(
                             Transaction::Legacy(TxLegacy {
                                 chain_id: Some(1),
                                 nonce: 0x9u64,
@@ -455,11 +460,11 @@ mod tests {
                                 value: U256::from(0x2d9u64),
                                 input: Default::default(),
                             }),
-                            Signature::new(
-                                U256::from_str("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb").unwrap(),
-                                U256::from_str("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb").unwrap(),
-                                false,
-                            ),
+                            Signature {
+                                odd_y_parity: false,
+                                r: U256::from_str("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb").unwrap(),
+                                s: U256::from_str("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb").unwrap(),
+                            }
                         ),
                     ],
                     ommers: vec![
@@ -473,34 +478,26 @@ mod tests {
                             logs_bloom: hex!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000").into(),
                             difficulty: U256::from(0x8aeu64),
                             number: 0xd05u64,
-                            gas_limit: 0x115c,
-                            gas_used: 0x15b3,
+                            gas_limit: 0x115cu64,
+                            gas_used: 0x15b3u64,
                             timestamp: 0x1a0au64,
                             extra_data: hex!("7788")[..].into(),
                             mix_hash: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
-                            nonce: 0x0000000000000000u64.into(),
+                            nonce: 0x0000000000000000u64,
                             base_fee_per_gas: None,
                             withdrawals_root: None,
                             blob_gas_used: None,
                             excess_blob_gas: None,
                             parent_beacon_block_root: None,
-                            requests_hash: None,
+                            requests_root: None
                         },
                     ],
                     withdrawals: None,
+                    requests: None
                 }
             ]),
         };
         let result = RequestPair::decode(&mut &data[..]).unwrap();
         assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn empty_block_bodies_rlp() {
-        let body = BlockBodies::default();
-        let mut buf = Vec::new();
-        body.encode(&mut buf);
-        let decoded = BlockBodies::<BlockBody>::decode(&mut buf.as_slice()).unwrap();
-        assert_eq!(body, decoded);
     }
 }

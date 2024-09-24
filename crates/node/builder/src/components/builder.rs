@@ -1,5 +1,12 @@
 //! A generic [`NodeComponentsBuilder`]
 
+use std::{future::Future, marker::PhantomData};
+
+use reth_consensus::Consensus;
+use reth_evm::execute::BlockExecutorProvider;
+use reth_primitives::Header;
+use reth_transaction_pool::TransactionPool;
+
 use crate::{
     components::{
         Components, ConsensusBuilder, ExecutorBuilder, NetworkBuilder, NodeComponents,
@@ -7,17 +14,6 @@ use crate::{
     },
     BuilderContext, ConfigureEvm, FullNodeTypes,
 };
-use reth_chainspec::EthChainSpec;
-use reth_consensus::{noop::NoopConsensus, ConsensusError, FullConsensus};
-use reth_network::{types::NetPrimitivesFor, EthNetworkPrimitives, NetworkPrimitives};
-use reth_network_api::{noop::NoopNetwork, FullNetwork};
-use reth_node_api::{BlockTy, BodyTy, HeaderTy, NodeTypes, PrimitivesTy, ReceiptTy, TxTy};
-use reth_payload_builder::PayloadBuilderHandle;
-use reth_transaction_pool::{
-    noop::NoopTransactionPool, EthPoolTransaction, EthPooledTransaction, PoolPooledTx,
-    PoolTransaction, TransactionPool,
-};
-use std::{future::Future, marker::PhantomData};
 
 /// A generic, general purpose and customizable [`NodeComponentsBuilder`] implementation.
 ///
@@ -170,21 +166,6 @@ where
             _marker,
         }
     }
-
-    /// Sets [`NoopTransactionPoolBuilder`].
-    pub fn noop_pool<Tx>(
-        self,
-    ) -> ComponentsBuilder<Node, NoopTransactionPoolBuilder<Tx>, PayloadB, NetworkB, ExecB, ConsB>
-    {
-        ComponentsBuilder {
-            pool_builder: NoopTransactionPoolBuilder::<Tx>::default(),
-            payload_builder: self.payload_builder,
-            network_builder: self.network_builder,
-            executor_builder: self.executor_builder,
-            consensus_builder: self.consensus_builder,
-            _marker: self._marker,
-        }
-    }
 }
 
 impl<Node, PoolB, PayloadB, NetworkB, ExecB, ConsB>
@@ -231,8 +212,7 @@ where
         payload_builder: PB,
     ) -> ComponentsBuilder<Node, PoolB, PB, NetworkB, ExecB, ConsB>
     where
-        ExecB: ExecutorBuilder<Node>,
-        PB: PayloadServiceBuilder<Node, PoolB::Pool, ExecB::EVM>,
+        PB: PayloadServiceBuilder<Node, PoolB::Pool>,
     {
         let Self {
             pool_builder,
@@ -298,7 +278,6 @@ where
             network_builder,
             executor_builder,
             consensus_builder: _,
-
             _marker,
         } = self;
         ComponentsBuilder {
@@ -310,71 +289,19 @@ where
             _marker,
         }
     }
-
-    /// Sets [`NoopNetworkBuilder`].
-    pub fn noop_network<Net>(
-        self,
-    ) -> ComponentsBuilder<Node, PoolB, PayloadB, NoopNetworkBuilder<Net>, ExecB, ConsB> {
-        ComponentsBuilder {
-            pool_builder: self.pool_builder,
-            payload_builder: self.payload_builder,
-            network_builder: NoopNetworkBuilder::<Net>::default(),
-            executor_builder: self.executor_builder,
-            consensus_builder: self.consensus_builder,
-            _marker: self._marker,
-        }
-    }
-
-    /// Sets [`NoopPayloadBuilder`].
-    pub fn noop_payload(
-        self,
-    ) -> ComponentsBuilder<Node, PoolB, NoopPayloadBuilder, NetworkB, ExecB, ConsB> {
-        ComponentsBuilder {
-            pool_builder: self.pool_builder,
-            payload_builder: NoopPayloadBuilder,
-            network_builder: self.network_builder,
-            executor_builder: self.executor_builder,
-            consensus_builder: self.consensus_builder,
-            _marker: self._marker,
-        }
-    }
-
-    /// Sets [`NoopConsensusBuilder`].
-    pub fn noop_consensus(
-        self,
-    ) -> ComponentsBuilder<Node, PoolB, PayloadB, NetworkB, ExecB, NoopConsensusBuilder> {
-        ComponentsBuilder {
-            pool_builder: self.pool_builder,
-            payload_builder: self.payload_builder,
-            network_builder: self.network_builder,
-            executor_builder: self.executor_builder,
-            consensus_builder: NoopConsensusBuilder,
-            _marker: self._marker,
-        }
-    }
 }
 
 impl<Node, PoolB, PayloadB, NetworkB, ExecB, ConsB> NodeComponentsBuilder<Node>
     for ComponentsBuilder<Node, PoolB, PayloadB, NetworkB, ExecB, ConsB>
 where
     Node: FullNodeTypes,
-    PoolB: PoolBuilder<Node, Pool: TransactionPool>,
-    NetworkB: NetworkBuilder<
-        Node,
-        PoolB::Pool,
-        Network: FullNetwork<
-            Primitives: NetPrimitivesFor<
-                PrimitivesTy<Node::Types>,
-                PooledTransaction = PoolPooledTx<PoolB::Pool>,
-            >,
-        >,
-    >,
-    PayloadB: PayloadServiceBuilder<Node, PoolB::Pool, ExecB::EVM>,
+    PoolB: PoolBuilder<Node>,
+    NetworkB: NetworkBuilder<Node, PoolB::Pool>,
+    PayloadB: PayloadServiceBuilder<Node, PoolB::Pool>,
     ExecB: ExecutorBuilder<Node>,
     ConsB: ConsensusBuilder<Node>,
 {
-    type Components =
-        Components<Node, NetworkB::Network, PoolB::Pool, ExecB::EVM, ConsB::Consensus>;
+    type Components = Components<Node, PoolB::Pool, ExecB::EVM, ExecB::Executor, ConsB::Consensus>;
 
     async fn build_components(
         self,
@@ -389,19 +316,18 @@ where
             _marker,
         } = self;
 
-        let evm_config = evm_builder.build_evm(context).await?;
+        let (evm_config, executor) = evm_builder.build_evm(context).await?;
         let pool = pool_builder.build_pool(context).await?;
         let network = network_builder.build_network(context, pool.clone()).await?;
-        let payload_builder_handle = payload_builder
-            .spawn_payload_builder_service(context, pool.clone(), evm_config.clone())
-            .await?;
+        let payload_builder = payload_builder.spawn_payload_service(context, pool.clone()).await?;
         let consensus = consensus_builder.build_consensus(context).await?;
 
         Ok(Components {
             transaction_pool: pool,
             evm_config,
             network,
-            payload_builder_handle,
+            payload_builder,
+            executor,
             consensus,
         })
     }
@@ -440,126 +366,22 @@ pub trait NodeComponentsBuilder<Node: FullNodeTypes>: Send {
     ) -> impl Future<Output = eyre::Result<Self::Components>> + Send;
 }
 
-impl<Node, Net, F, Fut, Pool, EVM, Cons> NodeComponentsBuilder<Node> for F
+impl<Node, F, Fut, Pool, EVM, Executor, Cons> NodeComponentsBuilder<Node> for F
 where
-    Net: FullNetwork<
-        Primitives: NetPrimitivesFor<
-            PrimitivesTy<Node::Types>,
-            PooledTransaction = PoolPooledTx<Pool>,
-        >,
-    >,
     Node: FullNodeTypes,
     F: FnOnce(&BuilderContext<Node>) -> Fut + Send,
-    Fut: Future<Output = eyre::Result<Components<Node, Net, Pool, EVM, Cons>>> + Send,
-    Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Node::Types>>>
-        + Unpin
-        + 'static,
-    EVM: ConfigureEvm<Primitives = PrimitivesTy<Node::Types>> + 'static,
-    Cons:
-        FullConsensus<PrimitivesTy<Node::Types>, Error = ConsensusError> + Clone + Unpin + 'static,
+    Fut: Future<Output = eyre::Result<Components<Node, Pool, EVM, Executor, Cons>>> + Send,
+    Pool: TransactionPool + Unpin + 'static,
+    EVM: ConfigureEvm<Header = Header>,
+    Executor: BlockExecutorProvider,
+    Cons: Consensus + Clone + Unpin + 'static,
 {
-    type Components = Components<Node, Net, Pool, EVM, Cons>;
+    type Components = Components<Node, Pool, EVM, Executor, Cons>;
 
     fn build_components(
         self,
         ctx: &BuilderContext<Node>,
     ) -> impl Future<Output = eyre::Result<Self::Components>> + Send {
         self(ctx)
-    }
-}
-
-/// Builds [`NoopTransactionPool`].
-#[derive(Debug, Clone)]
-pub struct NoopTransactionPoolBuilder<Tx = EthPooledTransaction>(PhantomData<Tx>);
-
-impl<N, Tx> PoolBuilder<N> for NoopTransactionPoolBuilder<Tx>
-where
-    N: FullNodeTypes,
-    Tx: EthPoolTransaction<Consensus = TxTy<N::Types>> + Unpin,
-{
-    type Pool = NoopTransactionPool<Tx>;
-
-    async fn build_pool(self, _ctx: &BuilderContext<N>) -> eyre::Result<Self::Pool> {
-        Ok(NoopTransactionPool::<Tx>::new())
-    }
-}
-
-impl<Tx> Default for NoopTransactionPoolBuilder<Tx> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-/// Builds [`NoopNetwork`].
-#[derive(Debug, Clone)]
-pub struct NoopNetworkBuilder<Net = EthNetworkPrimitives>(PhantomData<Net>);
-
-impl NoopNetworkBuilder {
-    /// Returns the instance with ethereum types.
-    pub fn eth() -> Self {
-        Self::default()
-    }
-}
-
-impl<N, Pool, Net> NetworkBuilder<N, Pool> for NoopNetworkBuilder<Net>
-where
-    N: FullNodeTypes,
-    Pool: TransactionPool,
-    Net: NetworkPrimitives<
-        BlockHeader = HeaderTy<N::Types>,
-        BlockBody = BodyTy<N::Types>,
-        Block = BlockTy<N::Types>,
-        Receipt = ReceiptTy<N::Types>,
-    >,
-{
-    type Network = NoopNetwork<Net>;
-
-    async fn build_network(
-        self,
-        ctx: &BuilderContext<N>,
-        _pool: Pool,
-    ) -> eyre::Result<Self::Network> {
-        Ok(NoopNetwork::new().with_chain_id(ctx.chain_spec().chain_id()))
-    }
-}
-
-impl<Net> Default for NoopNetworkBuilder<Net> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-/// Builds [`NoopConsensus`].
-#[derive(Debug, Clone, Default)]
-pub struct NoopConsensusBuilder;
-
-impl<N> ConsensusBuilder<N> for NoopConsensusBuilder
-where
-    N: FullNodeTypes,
-{
-    type Consensus = NoopConsensus;
-
-    async fn build_consensus(self, _ctx: &BuilderContext<N>) -> eyre::Result<Self::Consensus> {
-        Ok(NoopConsensus::default())
-    }
-}
-
-/// Builds [`PayloadBuilderHandle::noop`].
-#[derive(Debug, Clone, Default)]
-pub struct NoopPayloadBuilder;
-
-impl<N, Pool, EVM> PayloadServiceBuilder<N, Pool, EVM> for NoopPayloadBuilder
-where
-    N: FullNodeTypes,
-    Pool: TransactionPool,
-    EVM: ConfigureEvm<Primitives = PrimitivesTy<N::Types>> + 'static,
-{
-    async fn spawn_payload_builder_service(
-        self,
-        _ctx: &BuilderContext<N>,
-        _pool: Pool,
-        _evm_config: EVM,
-    ) -> eyre::Result<PayloadBuilderHandle<<N::Types as NodeTypes>::Payload>> {
-        Ok(PayloadBuilderHandle::<<N::Types as NodeTypes>::Payload>::noop())
     }
 }

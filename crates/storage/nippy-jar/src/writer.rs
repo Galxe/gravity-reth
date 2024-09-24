@@ -48,7 +48,7 @@ pub struct NippyJarWriter<H: NippyJarHeader = ()> {
 impl<H: NippyJarHeader> NippyJarWriter<H> {
     /// Creates a [`NippyJarWriter`] from [`NippyJar`].
     ///
-    /// If will **always** attempt to heal any inconsistent state when called.
+    /// If will  **always** attempt to heal any inconsistent state when called.
     pub fn new(jar: NippyJar<H>) -> Result<Self, NippyJarError> {
         let (data_file, offsets_file, is_created) =
             Self::create_or_open_files(jar.data_path(), &jar.offsets_path())?;
@@ -98,7 +98,7 @@ impl<H: NippyJarHeader> NippyJarWriter<H> {
     ///
     /// Since there's no way of knowing if `H` has been actually changed, this sets `self.dirty` to
     /// true.
-    pub const fn user_header_mut(&mut self) -> &mut H {
+    pub fn user_header_mut(&mut self) -> &mut H {
         self.dirty = true;
         &mut self.jar.user_header
     }
@@ -106,11 +106,6 @@ impl<H: NippyJarHeader> NippyJarWriter<H> {
     /// Returns whether there are changes that need to be committed.
     pub const fn is_dirty(&self) -> bool {
         self.dirty
-    }
-
-    /// Sets writer as dirty.
-    pub const fn set_dirty(&mut self) {
-        self.dirty = true
     }
 
     /// Gets total writer rows in jar.
@@ -354,10 +349,6 @@ impl<H: NippyJarHeader> NippyJarWriter<H> {
         Ok(())
     }
 
-    /// Commits changes to the data file and offsets without synchronizing all data to disk.
-    ///
-    /// This function flushes the buffered data to the data file and commits the offsets,
-    /// but it does not guarantee that all data is synchronized to persistent storage.
     #[cfg(feature = "test-utils")]
     pub fn commit_without_sync_all(&mut self) -> Result<(), NippyJarError> {
         self.data_file.flush()?;
@@ -404,10 +395,10 @@ impl<H: NippyJarHeader> NippyJarWriter<H> {
 
         // Appends new offsets to disk
         for offset in self.offsets.drain(..) {
-            if let Some(last_offset_ondisk) = last_offset_ondisk.take() &&
-                last_offset_ondisk == offset
-            {
-                continue
+            if let Some(last_offset_ondisk) = last_offset_ondisk.take() {
+                if last_offset_ondisk == offset {
+                    continue
+                }
             }
             self.offsets_file.write_all(&offset.to_le_bytes())?;
         }
@@ -416,49 +407,41 @@ impl<H: NippyJarHeader> NippyJarWriter<H> {
         Ok(())
     }
 
-    /// Returns the maximum row size for the associated [`NippyJar`].
     #[cfg(test)]
     pub const fn max_row_size(&self) -> usize {
         self.jar.max_row_size
     }
 
-    /// Returns the column index of the current checker instance.
     #[cfg(test)]
     pub const fn column(&self) -> usize {
         self.column
     }
 
-    /// Returns a reference to the offsets vector.
     #[cfg(test)]
     pub fn offsets(&self) -> &[u64] {
         &self.offsets
     }
 
-    /// Returns a mutable reference to the offsets vector.
     #[cfg(test)]
-    pub const fn offsets_mut(&mut self) -> &mut Vec<u64> {
+    pub fn offsets_mut(&mut self) -> &mut Vec<u64> {
         &mut self.offsets
     }
 
-    /// Returns the path to the offsets file for the associated [`NippyJar`].
     #[cfg(test)]
     pub fn offsets_path(&self) -> std::path::PathBuf {
         self.jar.offsets_path()
     }
 
-    /// Returns the path to the data file for the associated [`NippyJar`].
     #[cfg(test)]
     pub fn data_path(&self) -> &Path {
         self.jar.data_path()
     }
 
-    /// Returns a mutable reference to the buffered writer for the data file.
     #[cfg(any(test, feature = "test-utils"))]
-    pub const fn data_file(&mut self) -> &mut BufWriter<File> {
+    pub fn data_file(&mut self) -> &mut BufWriter<File> {
         &mut self.data_file
     }
 
-    /// Returns a reference to the associated [`NippyJar`] instance.
     #[cfg(any(test, feature = "test-utils"))]
     pub const fn jar(&self) -> &NippyJar<H> {
         &self.jar

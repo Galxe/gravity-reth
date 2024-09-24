@@ -1,8 +1,7 @@
-use crate::blobstore::{BlobStore, BlobStoreCleanupStat, BlobStoreError, BlobStoreSize};
-use alloy_eips::{
-    eip4844::{BlobAndProofV1, BlobAndProofV2},
-    eip7594::BlobTransactionSidecarVariant,
+use crate::blobstore::{
+    BlobStore, BlobStoreCleanupStat, BlobStoreError, BlobStoreSize, BlobTransactionSidecar,
 };
+use alloy_eips::eip4844::BlobAndProofV1;
 use alloy_primitives::B256;
 use parking_lot::RwLock;
 use std::{collections::HashMap, sync::Arc};
@@ -16,7 +15,7 @@ pub struct InMemoryBlobStore {
 #[derive(Debug, Default)]
 struct InMemoryBlobStoreInner {
     /// Storage for all blob data.
-    store: RwLock<HashMap<B256, Arc<BlobTransactionSidecarVariant>>>,
+    store: RwLock<HashMap<B256, BlobTransactionSidecar>>,
     size_tracker: BlobStoreSize,
 }
 
@@ -27,17 +26,14 @@ impl PartialEq for InMemoryBlobStoreInner {
 }
 
 impl BlobStore for InMemoryBlobStore {
-    fn insert(&self, tx: B256, data: BlobTransactionSidecarVariant) -> Result<(), BlobStoreError> {
+    fn insert(&self, tx: B256, data: BlobTransactionSidecar) -> Result<(), BlobStoreError> {
         let mut store = self.inner.store.write();
         self.inner.size_tracker.add_size(insert_size(&mut store, tx, data));
         self.inner.size_tracker.update_len(store.len());
         Ok(())
     }
 
-    fn insert_all(
-        &self,
-        txs: Vec<(B256, BlobTransactionSidecarVariant)>,
-    ) -> Result<(), BlobStoreError> {
+    fn insert_all(&self, txs: Vec<(B256, BlobTransactionSidecar)>) -> Result<(), BlobStoreError> {
         if txs.is_empty() {
             return Ok(())
         }
@@ -79,41 +75,59 @@ impl BlobStore for InMemoryBlobStore {
     }
 
     // Retrieves the decoded blob data for the given transaction hash.
-    fn get(&self, tx: B256) -> Result<Option<Arc<BlobTransactionSidecarVariant>>, BlobStoreError> {
-        Ok(self.inner.store.read().get(&tx).cloned())
+    fn get(&self, tx: B256) -> Result<Option<BlobTransactionSidecar>, BlobStoreError> {
+        let store = self.inner.store.read();
+        Ok(store.get(&tx).cloned())
     }
 
     fn contains(&self, tx: B256) -> Result<bool, BlobStoreError> {
-        Ok(self.inner.store.read().contains_key(&tx))
+        let store = self.inner.store.read();
+        Ok(store.contains_key(&tx))
     }
 
     fn get_all(
         &self,
         txs: Vec<B256>,
-    ) -> Result<Vec<(B256, Arc<BlobTransactionSidecarVariant>)>, BlobStoreError> {
+    ) -> Result<Vec<(B256, BlobTransactionSidecar)>, BlobStoreError> {
+        let mut items = Vec::with_capacity(txs.len());
         let store = self.inner.store.read();
-        Ok(txs.into_iter().filter_map(|tx| store.get(&tx).map(|item| (tx, item.clone()))).collect())
+        for tx in txs {
+            if let Some(item) = store.get(&tx) {
+                items.push((tx, item.clone()));
+            }
+        }
+
+        Ok(items)
     }
 
-    fn get_exact(
-        &self,
-        txs: Vec<B256>,
-    ) -> Result<Vec<Arc<BlobTransactionSidecarVariant>>, BlobStoreError> {
+    fn get_exact(&self, txs: Vec<B256>) -> Result<Vec<BlobTransactionSidecar>, BlobStoreError> {
+        let mut items = Vec::with_capacity(txs.len());
         let store = self.inner.store.read();
-        Ok(txs.into_iter().filter_map(|tx| store.get(&tx).cloned()).collect())
+        for tx in txs {
+            if let Some(item) = store.get(&tx) {
+                items.push(item.clone());
+            } else {
+                return Err(BlobStoreError::MissingSidecar(tx))
+            }
+        }
+
+        Ok(items)
     }
 
-    fn get_by_versioned_hashes_v1(
+    fn get_by_versioned_hashes(
         &self,
         versioned_hashes: &[B256],
     ) -> Result<Vec<Option<BlobAndProofV1>>, BlobStoreError> {
         let mut result = vec![None; versioned_hashes.len()];
         for (_tx_hash, blob_sidecar) in self.inner.store.read().iter() {
-            if let Some(blob_sidecar) = blob_sidecar.as_eip4844() {
-                for (hash_idx, match_result) in
-                    blob_sidecar.match_versioned_hashes(versioned_hashes)
-                {
-                    result[hash_idx] = Some(match_result);
+            for (i, blob_versioned_hash) in blob_sidecar.versioned_hashes().enumerate() {
+                for (j, target_versioned_hash) in versioned_hashes.iter().enumerate() {
+                    if blob_versioned_hash == *target_versioned_hash {
+                        result[j].get_or_insert_with(|| BlobAndProofV1 {
+                            blob: Box::new(blob_sidecar.blobs[i]),
+                            proof: blob_sidecar.proofs[i],
+                        });
+                    }
                 }
             }
 
@@ -123,31 +137,6 @@ impl BlobStore for InMemoryBlobStore {
             }
         }
         Ok(result)
-    }
-
-    fn get_by_versioned_hashes_v2(
-        &self,
-        versioned_hashes: &[B256],
-    ) -> Result<Option<Vec<BlobAndProofV2>>, BlobStoreError> {
-        let mut result = vec![None; versioned_hashes.len()];
-        for (_tx_hash, blob_sidecar) in self.inner.store.read().iter() {
-            if let Some(blob_sidecar) = blob_sidecar.as_eip7594() {
-                for (hash_idx, match_result) in
-                    blob_sidecar.match_versioned_hashes(versioned_hashes)
-                {
-                    result[hash_idx] = Some(match_result);
-                }
-            }
-
-            if result.iter().all(|blob| blob.is_some()) {
-                break;
-            }
-        }
-        if result.iter().all(|blob| blob.is_some()) {
-            Ok(Some(result.into_iter().map(Option::unwrap).collect()))
-        } else {
-            Ok(None)
-        }
     }
 
     fn data_size_hint(&self) -> Option<usize> {
@@ -161,7 +150,7 @@ impl BlobStore for InMemoryBlobStore {
 
 /// Removes the given blob from the store and returns the size of the blob that was removed.
 #[inline]
-fn remove_size(store: &mut HashMap<B256, Arc<BlobTransactionSidecarVariant>>, tx: &B256) -> usize {
+fn remove_size(store: &mut HashMap<B256, BlobTransactionSidecar>, tx: &B256) -> usize {
     store.remove(tx).map(|rem| rem.size()).unwrap_or_default()
 }
 
@@ -170,11 +159,11 @@ fn remove_size(store: &mut HashMap<B256, Arc<BlobTransactionSidecarVariant>>, tx
 /// We don't need to handle the size updates for replacements because transactions are unique.
 #[inline]
 fn insert_size(
-    store: &mut HashMap<B256, Arc<BlobTransactionSidecarVariant>>,
+    store: &mut HashMap<B256, BlobTransactionSidecar>,
     tx: B256,
-    blob: BlobTransactionSidecarVariant,
+    blob: BlobTransactionSidecar,
 ) -> usize {
     let add = blob.size();
-    store.insert(tx, Arc::new(blob));
+    store.insert(tx, blob);
     add
 }

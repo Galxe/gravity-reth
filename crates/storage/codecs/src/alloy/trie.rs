@@ -1,18 +1,15 @@
-//! Native Compact codec impl for alloy-trie types.
+//! Native Compact codec impl for EIP-7685 requests.
 
 use crate::Compact;
 use alloc::vec::Vec;
 use alloy_primitives::B256;
-use alloy_trie::{
-    hash_builder::{HashBuilderValue, HashBuilderValueRef},
-    BranchNodeCompact, TrieMask,
-};
+use alloy_trie::{hash_builder::HashBuilderValue, BranchNodeCompact, TrieMask};
 use bytes::{Buf, BufMut};
 
-/// Identifier for [`HashBuilderValueRef::Hash`]
+/// Identifier for [`HashBuilderValue::Hash`]
 const HASH_BUILDER_TYPE_HASH: u8 = 0;
 
-/// Identifier for [`HashBuilderValueRef::Bytes`]
+/// Identifier for [`HashBuilderValue::Bytes`]
 const HASH_BUILDER_TYPE_BYTES: u8 = 1;
 
 impl Compact for HashBuilderValue {
@@ -20,34 +17,34 @@ impl Compact for HashBuilderValue {
     where
         B: BufMut + AsMut<[u8]>,
     {
-        match self.as_ref() {
-            HashBuilderValueRef::Hash(hash) => {
+        match self {
+            Self::Hash(hash) => {
                 buf.put_u8(HASH_BUILDER_TYPE_HASH);
                 1 + hash.to_compact(buf)
             }
-            HashBuilderValueRef::Bytes(bytes) => {
+            Self::Bytes(bytes) => {
                 buf.put_u8(HASH_BUILDER_TYPE_BYTES);
                 1 + bytes.to_compact(buf)
             }
         }
     }
 
+    // # Panics
+    //
+    // A panic will be triggered if a HashBuilderValue variant greater than 1 is passed from the
+    // database.
     fn from_compact(mut buf: &[u8], _: usize) -> (Self, &[u8]) {
-        let mut this = Self::default();
-        let buf = match buf.get_u8() {
+        match buf.get_u8() {
             HASH_BUILDER_TYPE_HASH => {
                 let (hash, buf) = B256::from_compact(buf, 32);
-                this.set_from_ref(HashBuilderValueRef::Hash(&hash));
-                buf
+                (Self::Hash(hash), buf)
             }
             HASH_BUILDER_TYPE_BYTES => {
                 let (bytes, buf) = Vec::from_compact(buf, 0);
-                this.set_bytes_owned(bytes);
-                buf
+                (Self::Bytes(bytes), buf)
             }
             _ => unreachable!("Junk data in database: unknown HashBuilderValue variant"),
-        };
-        (this, buf)
+        }
     }
 }
 
@@ -67,7 +64,7 @@ impl Compact for BranchNodeCompact {
             buf.put_slice(root_hash.as_slice());
         }
 
-        for hash in self.hashes.iter() {
+        for hash in &self.hashes {
             buf_size += B256::len_bytes();
             buf.put_slice(hash.as_slice());
         }

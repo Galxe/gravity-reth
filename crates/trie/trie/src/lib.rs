@@ -4,7 +4,6 @@
 //!
 //! ## Feature Flags
 //!
-//! - `rayon`: uses rayon for parallel [`HashedPostState`] creation.
 //! - `test-utils`: Export utilities for testing
 
 #![doc(
@@ -13,6 +12,10 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+
+/// The implementation of a container for storing intermediate changes to a trie.
+/// The container indicates when the trie has been modified.
+pub mod prefix_set;
 
 /// The implementation of forward-only in-memory cursor.
 pub mod forward_cursor;
@@ -29,6 +32,14 @@ pub mod walker;
 /// The iterators for traversing existing intermediate hashes and updated trie leaves.
 pub mod node_iter;
 
+/// In-memory hashed state.
+mod state;
+pub use state::*;
+
+/// Input for trie computation.
+mod input;
+pub use input::TrieInput;
+
 /// Merkle proof generation.
 pub mod proof;
 
@@ -37,14 +48,14 @@ pub mod witness;
 
 /// The implementation of the Merkle Patricia Trie.
 mod trie;
-pub use trie::{StateRoot, StorageRoot, TrieType};
+pub use trie::{StateRoot, StorageRoot};
+
+/// Buffer for trie updates.
+pub mod updates;
 
 /// Utilities for state root checkpoint progress.
 mod progress;
-pub use progress::{
-    IntermediateStateRootState, IntermediateStorageRootState, StateRootProgress,
-    StorageRootProgress,
-};
+pub use progress::{IntermediateStateRootState, StateRootProgress};
 
 /// Trie calculation stats.
 pub mod stats;
@@ -59,10 +70,3 @@ pub mod metrics;
 /// Collection of trie-related test utilities.
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
-
-/// Collection of mock types for testing.
-#[cfg(test)]
-pub mod mock;
-
-/// Verification of existing stored trie nodes against state data.
-pub mod verify;

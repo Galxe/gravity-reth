@@ -1,4 +1,4 @@
-//! An IPC connection.
+//! A IPC connection.
 
 use crate::stream_codec::StreamCodec;
 use futures::{stream::FuturesUnordered, FutureExt, Sink, Stream};
@@ -54,7 +54,7 @@ where
     }
 }
 
-/// Drives an [`IpcConn`] forward.
+/// Drives an [IpcConn] forward.
 ///
 /// This forwards received requests from the connection to the service and sends responses to the
 /// connection.
@@ -82,7 +82,7 @@ impl<T, S, Fut> IpcConnDriver<T, S, Fut> {
 impl<T, S> Future for IpcConnDriver<T, S, S::Future>
 where
     S: Service<String, Response = Option<String>> + Send + 'static,
-    S::Error: Into<Box<dyn core::error::Error + Send + Sync>>,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     S::Future: Send + Unpin,
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {

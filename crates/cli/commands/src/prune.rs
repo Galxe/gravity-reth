@@ -1,11 +1,11 @@
 //! Command that runs pruning without any limits.
-use crate::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
+use crate::common::{AccessRights, Environment, EnvironmentArgs};
 use clap::Parser;
-use reth_chainspec::{EthChainSpec, EthereumHardforks};
+use reth_chainspec::ChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
+use reth_node_builder::NodeTypesWithEngine;
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
-use std::sync::Arc;
 use tracing::info;
 
 /// Prunes according to the configuration without any limits
@@ -15,9 +15,11 @@ pub struct PruneCommand<C: ChainSpecParser> {
     env: EnvironmentArgs<C>,
 }
 
-impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> PruneCommand<C> {
+impl<C: ChainSpecParser<ChainSpec = ChainSpec>> PruneCommand<C> {
     /// Execute the `prune` command
-    pub async fn execute<N: CliNodeTypes<ChainSpec = C::ChainSpec>>(self) -> eyre::Result<()> {
+    pub async fn execute<N: NodeTypesWithEngine<ChainSpec = C::ChainSpec>>(
+        self,
+    ) -> eyre::Result<()> {
         let Environment { config, provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
         let prune_config = config.prune.unwrap_or_default();
 
@@ -25,8 +27,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> PruneComma
         info!(target: "reth::cli", "Copying data from database to static files...");
         let static_file_producer =
             StaticFileProducer::new(provider_factory.clone(), prune_config.segments.clone());
-        let lowest_static_file_height =
-            static_file_producer.lock().copy_to_static_files()?.min_block_num();
+        let lowest_static_file_height = static_file_producer.lock().copy_to_static_files()?.min();
         info!(target: "reth::cli", ?lowest_static_file_height, "Copied data from database to static files");
 
         // Delete data which has been copied to static files.
@@ -42,12 +43,5 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> PruneComma
         }
 
         Ok(())
-    }
-}
-
-impl<C: ChainSpecParser> PruneCommand<C> {
-    /// Returns the underlying chain being used to run this command
-    pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
-        Some(&self.env.chain)
     }
 }

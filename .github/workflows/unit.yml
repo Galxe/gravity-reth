@@ -18,50 +18,30 @@ concurrency:
 
 jobs:
   test:
-    name: test / ${{ matrix.type }} (${{ matrix.partition }}/${{ matrix.total_partitions }})
+    name: test / ${{ matrix.network }} (${{ matrix.partition }}/2)
     runs-on:
       group: Reth
     env:
       RUST_BACKTRACE: 1
     strategy:
       matrix:
-        include:
-          - type: ethereum
-            args: --features "asm-keccak ethereum" --locked
-            partition: 1
-            total_partitions: 2
-          - type: ethereum
-            args: --features "asm-keccak ethereum" --locked
-            partition: 2
-            total_partitions: 2
-          - type: optimism
-            args: --features "asm-keccak" --locked --exclude reth --exclude reth-bench --exclude "example-*" --exclude "reth-ethereum-*" --exclude "*-ethereum"
-            partition: 1
-            total_partitions: 2
-          - type: optimism
-            args: --features "asm-keccak" --locked --exclude reth --exclude reth-bench --exclude "example-*" --exclude "reth-ethereum-*" --exclude "*-ethereum"
-            partition: 2
-            total_partitions: 2
+        partition: [1, 2]
+        network: ["ethereum", "optimism"]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
-      - uses: rui314/setup-mold@v1
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
-      - if: "${{ matrix.type == 'book' }}"
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run tests
         run: |
           cargo nextest run \
-            ${{ matrix.args }} --workspace \
-            --exclude ef-tests --no-tests=warn \
+            --locked --features "asm-keccak ${{ matrix.network }}" \
+            --workspace --exclude ef-tests \
             --partition hash:${{ matrix.partition }}/2 \
-            -E "!kind(test) and not binary(e2e_testsuite)"
+            -E "!kind(test)"
 
   state:
     name: Ethereum state tests
@@ -72,25 +52,15 @@ jobs:
       RUST_BACKTRACE: 1
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - name: Checkout ethereum/tests
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: ethereum/tests
-          ref: 81862e4848585a438d64f911a19b3825f0f4cd95
+          ref: 1c23e3c27ac53b794de0844d2d5e19cd2495b9d8
           path: testing/ef-tests/ethereum-tests
           submodules: recursive
           fetch-depth: 1
-      - name: Download & extract EEST fixtures (public)
-        shell: bash
-        env:
-          EEST_TESTS_TAG: v4.5.0
-        run: |
-          set -euo pipefail
-          mkdir -p testing/ef-tests/execution-spec-tests
-          URL="https://github.com/ethereum/execution-spec-tests/releases/download/${EEST_TESTS_TAG}/fixtures_stable.tar.gz"
-          curl -L "$URL" | tar -xz --strip-components=1 -C testing/ef-tests/execution-spec-tests
-      - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
@@ -99,21 +69,23 @@ jobs:
       - run: cargo nextest run --release -p ef-tests --features "asm-keccak ef-tests"
 
   doc:
-    name: doc tests
+    name: doc tests (${{ matrix.network }})
     runs-on:
       group: Reth
     env:
       RUST_BACKTRACE: 1
     timeout-minutes: 30
+    strategy:
+      matrix:
+        network: ["ethereum", "optimism"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: rui314/setup-mold@v1
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - name: Run doctests
-        run: cargo test --doc --workspace --all-features
+        run: cargo test --doc --workspace --features "${{ matrix.network }}"
 
   unit-success:
     name: unit success

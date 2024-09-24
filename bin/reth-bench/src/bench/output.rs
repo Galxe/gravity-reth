@@ -1,8 +1,7 @@
 //! Contains various benchmark output formats, either for logging or for
 //! serialization to / from files.
 
-use eyre::OptionExt;
-use reth_primitives_traits::constants::GIGAGAS;
+use reth_primitives::constants::gas_units::GIGAGAS;
 use serde::{ser::SerializeStruct, Serialize};
 use std::time::Duration;
 
@@ -53,7 +52,7 @@ impl Serialize for NewPayloadResult {
     {
         // convert the time to microseconds
         let time = self.latency.as_micros();
-        let mut state = serializer.serialize_struct("NewPayloadResult", 2)?;
+        let mut state = serializer.serialize_struct("NewPayloadResult", 3)?;
         state.serialize_field("gas_used", &self.gas_used)?;
         state.serialize_field("latency", &time)?;
         state.end()
@@ -124,6 +123,7 @@ impl Serialize for CombinedResult {
 #[derive(Debug)]
 pub(crate) struct TotalGasRow {
     /// The block number of the block being processed.
+    #[allow(dead_code)]
     pub(crate) block_number: u64,
     /// The total gas used in the block.
     pub(crate) gas_used: u64,
@@ -146,14 +146,15 @@ pub(crate) struct TotalGasOutput {
 
 impl TotalGasOutput {
     /// Create a new [`TotalGasOutput`] from a list of [`TotalGasRow`].
-    pub(crate) fn new(rows: Vec<TotalGasRow>) -> eyre::Result<Self> {
+    pub(crate) fn new(rows: Vec<TotalGasRow>) -> Self {
         // the duration is obtained from the last row
-        let total_duration = rows.last().map(|row| row.time).ok_or_eyre("empty results")?;
+        let total_duration =
+            rows.last().map(|row| row.time).expect("the row has at least one element");
         let blocks_processed = rows.len() as u64;
         let total_gas_used: u64 = rows.into_iter().map(|row| row.gas_used).sum();
         let total_gas_per_second = total_gas_used as f64 / total_duration.as_secs_f64();
 
-        Ok(Self { total_gas_used, total_duration, total_gas_per_second, blocks_processed })
+        Self { total_gas_used, total_duration, total_gas_per_second, blocks_processed }
     }
 
     /// Return the total gigagas per second.

@@ -1,9 +1,4 @@
-use jsonrpsee::{
-    core::middleware::{Batch, Notification},
-    server::middleware::rpc::RpcServiceT,
-    types::Request,
-    MethodResponse, RpcModule,
-};
+use jsonrpsee::{server::middleware::rpc::RpcServiceT, types::Request, MethodResponse, RpcModule};
 use reth_metrics::{
     metrics::{Counter, Histogram},
     Metrics,
@@ -35,12 +30,9 @@ impl RpcRequestMetrics {
         Self {
             inner: Arc::new(RpcServerMetricsInner {
                 connection_metrics: transport.connection_metrics(),
-                call_metrics: module
-                    .method_names()
-                    .map(|method| {
-                        (method, RpcServerCallMetrics::new_with_labels(&[("method", method)]))
-                    })
-                    .collect(),
+                call_metrics: HashMap::from_iter(module.method_names().map(|method| {
+                    (method, RpcServerCallMetrics::new_with_labels(&[("method", method)]))
+                })),
             }),
         }
     }
@@ -63,6 +55,7 @@ impl RpcRequestMetrics {
     }
 
     /// Creates a new instance of the metrics layer for Ws.
+    #[allow(unused)]
     pub(crate) fn ipc(module: &RpcModule<()>) -> Self {
         Self::new(module, RpcTransport::Ipc)
     }
@@ -104,15 +97,13 @@ impl<S> RpcRequestMetricsService<S> {
     }
 }
 
-impl<S> RpcServiceT for RpcRequestMetricsService<S>
+impl<'a, S> RpcServiceT<'a> for RpcRequestMetricsService<S>
 where
-    S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
+    S: RpcServiceT<'a> + Send + Sync + Clone + 'static,
 {
-    type MethodResponse = S::MethodResponse;
-    type NotificationResponse = S::NotificationResponse;
-    type BatchResponse = S::BatchResponse;
+    type Future = MeteredRequestFuture<S::Future>;
 
-    fn call<'a>(&self, req: Request<'a>) -> impl Future<Output = S::MethodResponse> + Send + 'a {
+    fn call(&self, req: Request<'a>) -> Self::Future {
         self.metrics.inner.connection_metrics.requests_started_total.increment(1);
         let call_metrics = self.metrics.inner.call_metrics.get_key_value(req.method.as_ref());
         if let Some((_, call_metrics)) = &call_metrics {
@@ -124,17 +115,6 @@ where
             metrics: self.metrics.clone(),
             method: call_metrics.map(|(method, _)| *method),
         }
-    }
-
-    fn batch<'a>(&self, req: Batch<'a>) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
-        self.inner.batch(req)
-    }
-
-    fn notification<'a>(
-        &self,
-        n: Notification<'a>,
-    ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
-        self.inner.notification(n)
     }
 }
 
@@ -199,6 +179,7 @@ impl<F: Future<Output = MethodResponse>> Future for MeteredRequestFuture<F> {
 pub(crate) enum RpcTransport {
     Http,
     WebSocket,
+    #[allow(unused)]
     Ipc,
 }
 

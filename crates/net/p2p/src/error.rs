@@ -1,14 +1,12 @@
 use std::ops::RangeInclusive;
 
 use super::headers::client::HeadersRequest;
-use alloy_consensus::BlockHeader;
-use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{BlockNumber, B256};
 use derive_more::{Display, Error};
 use reth_consensus::ConsensusError;
 use reth_network_peers::WithPeerId;
 use reth_network_types::ReputationChangeKind;
-use reth_primitives_traits::{GotExpected, GotExpectedBoxed};
+use reth_primitives::{BlockHashOrNumber, GotExpected, GotExpectedBoxed, Header};
 use reth_storage_errors::{db::DatabaseError, provider::ProviderError};
 use tokio::sync::{mpsc, oneshot};
 
@@ -27,7 +25,7 @@ pub trait EthResponseValidator {
     fn reputation_change_err(&self) -> Option<ReputationChangeKind>;
 }
 
-impl<H: BlockHeader> EthResponseValidator for RequestResult<Vec<H>> {
+impl EthResponseValidator for RequestResult<Vec<Header>> {
     fn is_likely_bad_headers_response(&self, request: &HeadersRequest) -> bool {
         match self {
             Ok(headers) => {
@@ -39,7 +37,7 @@ impl<H: BlockHeader> EthResponseValidator for RequestResult<Vec<H>> {
 
                 match request.start {
                     BlockHashOrNumber::Number(block_number) => {
-                        headers.first().is_some_and(|header| block_number != header.number())
+                        headers.first().is_some_and(|header| block_number != header.number)
                     }
                     BlockHashOrNumber::Hash(_) => {
                         // we don't want to hash the header
@@ -80,24 +78,24 @@ impl<H: BlockHeader> EthResponseValidator for RequestResult<Vec<H>> {
 #[derive(Clone, Debug, Eq, PartialEq, Display, Error)]
 pub enum RequestError {
     /// Closed channel to the peer.
-    /// Indicates the channel to the peer is closed.
     #[display("closed channel to the peer")]
+    /// Indicates the channel to the peer is closed.
     ChannelClosed,
     /// Connection to a peer dropped while handling the request.
-    /// Represents a dropped connection while handling the request.
     #[display("connection to a peer dropped while handling the request")]
+    /// Represents a dropped connection while handling the request.
     ConnectionDropped,
     /// Capability message is not supported by the remote peer.
-    /// Indicates an unsupported capability message from the remote peer.
     #[display("capability message is not supported by remote peer")]
+    /// Indicates an unsupported capability message from the remote peer.
     UnsupportedCapability,
     /// Request timed out while awaiting response.
-    /// Represents a timeout while waiting for a response.
     #[display("request timed out while awaiting response")]
+    /// Represents a timeout while waiting for a response.
     Timeout,
     /// Received bad response.
-    /// Indicates a bad response was received.
     #[display("received bad response")]
+    /// Indicates a bad response was received.
     BadResponse,
 }
 
@@ -131,7 +129,7 @@ impl From<oneshot::error::RecvError> for RequestError {
 pub type DownloadResult<T> = Result<T, DownloadError>;
 
 /// The downloader error type
-#[derive(Debug, Clone, Display, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Display, Error)]
 pub enum DownloadError {
     /* ==================== HEADER ERRORS ==================== */
     /// Header validation failed.
@@ -217,8 +215,6 @@ impl From<ProviderError> for DownloadError {
 
 #[cfg(test)]
 mod tests {
-    use alloy_consensus::Header;
-
     use super::*;
 
     #[test]

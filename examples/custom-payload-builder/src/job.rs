@@ -1,10 +1,9 @@
 use futures_util::Future;
-use reth_basic_payload_builder::{HeaderForPayload, PayloadBuilder, PayloadConfig};
-use reth_ethereum::{
-    node::api::{PayloadBuilderAttributes, PayloadKind},
-    tasks::TaskSpawner,
+use reth::{
+    providers::StateProviderFactory, tasks::TaskSpawner, transaction_pool::TransactionPool,
 };
-use reth_payload_builder::{KeepPayloadJobAlive, PayloadBuilderError, PayloadJob};
+use reth_basic_payload_builder::{PayloadBuilder, PayloadConfig};
+use reth_payload_builder::{error::PayloadBuilderError, KeepPayloadJobAlive, PayloadJob};
 
 use std::{
     pin::Pin,
@@ -12,12 +11,16 @@ use std::{
 };
 
 /// A [PayloadJob] that builds empty blocks.
-pub struct EmptyBlockPayloadJob<Tasks, Builder>
+pub struct EmptyBlockPayloadJob<Client, Pool, Tasks, Builder>
 where
-    Builder: PayloadBuilder,
+    Builder: PayloadBuilder<Pool, Client>,
 {
     /// The configuration for how the payload will be created.
-    pub(crate) config: PayloadConfig<Builder::Attributes, HeaderForPayload<Builder::BuiltPayload>>,
+    pub(crate) config: PayloadConfig<Builder::Attributes>,
+    /// The client that can interact with the chain.
+    pub(crate) client: Client,
+    /// The transaction pool.
+    pub(crate) _pool: Pool,
     /// How to spawn building tasks
     pub(crate) _executor: Tasks,
     /// The type responsible for building payloads.
@@ -26,12 +29,14 @@ where
     pub(crate) builder: Builder,
 }
 
-impl<Tasks, Builder> PayloadJob for EmptyBlockPayloadJob<Tasks, Builder>
+impl<Client, Pool, Tasks, Builder> PayloadJob for EmptyBlockPayloadJob<Client, Pool, Tasks, Builder>
 where
+    Client: StateProviderFactory + Clone + Unpin + 'static,
+    Pool: TransactionPool + Unpin + 'static,
     Tasks: TaskSpawner + Clone + 'static,
-    Builder: PayloadBuilder + Unpin + 'static,
-    Builder::Attributes: Unpin + Clone,
-    Builder::BuiltPayload: Unpin + Clone,
+    Builder: PayloadBuilder<Pool, Client> + Unpin + 'static,
+    <Builder as PayloadBuilder<Pool, Client>>::Attributes: Unpin + Clone,
+    <Builder as PayloadBuilder<Pool, Client>>::BuiltPayload: Unpin + Clone,
 {
     type PayloadAttributes = Builder::Attributes;
     type ResolvePayloadFuture =
@@ -39,7 +44,7 @@ where
     type BuiltPayload = Builder::BuiltPayload;
 
     fn best_payload(&self) -> Result<Self::BuiltPayload, PayloadBuilderError> {
-        let payload = self.builder.build_empty_payload(self.config.clone())?;
+        let payload = self.builder.build_empty_payload(&self.client, self.config.clone())?;
         Ok(payload)
     }
 
@@ -47,26 +52,21 @@ where
         Ok(self.config.attributes.clone())
     }
 
-    fn payload_timestamp(&self) -> Result<u64, PayloadBuilderError> {
-        Ok(self.config.attributes.timestamp())
-    }
-
-    fn resolve_kind(
-        &mut self,
-        _kind: PayloadKind,
-    ) -> (Self::ResolvePayloadFuture, KeepPayloadJobAlive) {
+    fn resolve(&mut self) -> (Self::ResolvePayloadFuture, KeepPayloadJobAlive) {
         let payload = self.best_payload();
         (futures_util::future::ready(payload), KeepPayloadJobAlive::No)
     }
 }
 
-/// A [PayloadJob] is a future that's being polled by the `PayloadBuilderService`
-impl<Tasks, Builder> Future for EmptyBlockPayloadJob<Tasks, Builder>
+/// A [PayloadJob] is a a future that's being polled by the `PayloadBuilderService`
+impl<Client, Pool, Tasks, Builder> Future for EmptyBlockPayloadJob<Client, Pool, Tasks, Builder>
 where
+    Client: StateProviderFactory + Clone + Unpin + 'static,
+    Pool: TransactionPool + Unpin + 'static,
     Tasks: TaskSpawner + Clone + 'static,
-    Builder: PayloadBuilder + Unpin + 'static,
-    Builder::Attributes: Unpin + Clone,
-    Builder::BuiltPayload: Unpin + Clone,
+    Builder: PayloadBuilder<Pool, Client> + Unpin + 'static,
+    <Builder as PayloadBuilder<Pool, Client>>::Attributes: Unpin + Clone,
+    <Builder as PayloadBuilder<Pool, Client>>::BuiltPayload: Unpin + Clone,
 {
     type Output = Result<(), PayloadBuilderError>;
 

@@ -1,31 +1,48 @@
 //! Support for building a pending block with transactions from local view of mempool.
 
-use crate::EthApi;
-use reth_rpc_convert::RpcConvert;
-use reth_rpc_eth_api::{
-    helpers::{pending_block::PendingEnvBuilder, LoadPendingBlock},
-    FromEvmError, RpcNodeCore,
-};
-use reth_rpc_eth_types::{builder::config::PendingBlockKind, EthApiError, PendingBlock};
+use reth_chainspec::ChainSpec;
+use reth_evm::ConfigureEvm;
+use reth_primitives::Header;
+use reth_provider::{BlockReaderIdExt, ChainSpecProvider, EvmEnvProvider, StateProviderFactory};
+use reth_rpc_eth_api::helpers::{LoadPendingBlock, SpawnBlocking};
+use reth_rpc_eth_types::PendingBlock;
+use reth_transaction_pool::TransactionPool;
 
-impl<N, Rpc> LoadPendingBlock for EthApi<N, Rpc>
+use crate::EthApi;
+
+impl<Provider, Pool, Network, EvmConfig> LoadPendingBlock
+    for EthApi<Provider, Pool, Network, EvmConfig>
 where
-    N: RpcNodeCore,
-    EthApiError: FromEvmError<N::Evm>,
-    Rpc: RpcConvert<Primitives = N::Primitives>,
+    Self: SpawnBlocking,
+    Provider: BlockReaderIdExt
+        + EvmEnvProvider
+        + ChainSpecProvider<ChainSpec = ChainSpec>
+        + StateProviderFactory,
+    Pool: TransactionPool,
+    EvmConfig: ConfigureEvm<Header = Header>,
 {
     #[inline]
-    fn pending_block(&self) -> &tokio::sync::Mutex<Option<PendingBlock<Self::Primitives>>> {
+    fn provider(
+        &self,
+    ) -> impl BlockReaderIdExt
+           + EvmEnvProvider
+           + ChainSpecProvider<ChainSpec = ChainSpec>
+           + StateProviderFactory {
+        self.inner.provider()
+    }
+
+    #[inline]
+    fn pool(&self) -> impl TransactionPool {
+        self.inner.pool()
+    }
+
+    #[inline]
+    fn pending_block(&self) -> &tokio::sync::Mutex<Option<PendingBlock>> {
         self.inner.pending_block()
     }
 
     #[inline]
-    fn pending_env_builder(&self) -> &dyn PendingEnvBuilder<Self::Evm> {
-        self.inner.pending_env_builder()
-    }
-
-    #[inline]
-    fn pending_block_kind(&self) -> PendingBlockKind {
-        self.inner.pending_block_kind()
+    fn evm_config(&self) -> &impl ConfigureEvm<Header = Header> {
+        self.inner.evm_config()
     }
 }

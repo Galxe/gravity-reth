@@ -7,8 +7,7 @@ use crate::{
         ReverseWalker, Walker,
     },
     database::Database,
-    database_metrics::DatabaseMetrics,
-    table::{DupSort, Encode, Table, TableImporter},
+    table::{DupSort, Table, TableImporter},
     transaction::{DbTx, DbTxMut},
     DatabaseError,
 };
@@ -16,6 +15,7 @@ use core::ops::Bound;
 use std::{collections::BTreeMap, ops::RangeBounds};
 
 /// Mock database used for testing with inner `BTreeMap` structure
+// TODO
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseMock {
     /// Main data. TODO (Make it table aware)
@@ -34,8 +34,6 @@ impl Database for DatabaseMock {
     }
 }
 
-impl DatabaseMetrics for DatabaseMock {}
-
 /// Mock read only tx
 #[derive(Debug, Clone, Default)]
 pub struct TxMock {
@@ -48,13 +46,6 @@ impl DbTx for TxMock {
     type DupCursor<T: DupSort> = CursorMock;
 
     fn get<T: Table>(&self, _key: T::Key) -> Result<Option<T::Value>, DatabaseError> {
-        Ok(None)
-    }
-
-    fn get_by_encoded_key<T: Table>(
-        &self,
-        _key: &<T::Key as Encode>::Encoded,
-    ) -> Result<Option<T::Value>, DatabaseError> {
         Ok(None)
     }
 
@@ -222,7 +213,7 @@ impl<T: Table> DbCursorRW<T> for CursorMock {
     fn upsert(
         &mut self,
         _key: <T as Table>::Key,
-        _value: &<T as Table>::Value,
+        _value: <T as Table>::Value,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -230,7 +221,7 @@ impl<T: Table> DbCursorRW<T> for CursorMock {
     fn insert(
         &mut self,
         _key: <T as Table>::Key,
-        _value: &<T as Table>::Value,
+        _value: <T as Table>::Value,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -238,7 +229,7 @@ impl<T: Table> DbCursorRW<T> for CursorMock {
     fn append(
         &mut self,
         _key: <T as Table>::Key,
-        _value: &<T as Table>::Value,
+        _value: <T as Table>::Value,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }

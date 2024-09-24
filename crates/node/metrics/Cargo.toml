@@ -8,6 +8,8 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+reth-db-api.workspace = true
+reth-provider.workspace = true
 reth-metrics.workspace = true
 reth-tasks.workspace = true
 
@@ -18,7 +20,7 @@ metrics-util.workspace = true
 
 tokio.workspace = true
 
-jsonrpsee-server.workspace = true
+jsonrpsee = { workspace = true, features = ["server"] }
 http.workspace = true
 tower.workspace = true
 
@@ -29,14 +31,19 @@ eyre.workspace = true
 tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-procfs = "0.17.0"
+procfs = "0.16.0"
 
 [dev-dependencies]
 reqwest.workspace = true
-socket2.workspace = true
+reth-chainspec.workspace = true
+socket2 = { version = "0.4", default-features = false }
+reth-provider = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true
 
 [features]
 jemalloc = ["dep:tikv-jemalloc-ctl"]
+
+[build-dependencies]
+vergen = { version = "8.0.0", features = ["build", "cargo", "git", "gitcl"] }

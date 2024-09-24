@@ -2,8 +2,6 @@
 //! files.
 
 pub mod signer;
-pub mod sync_listener;
-pub mod types;
 
 mod block;
 mod call;
@@ -14,5 +12,3 @@ mod spec;
 mod state;
 mod trace;
 mod transaction;
-
-pub use sync_listener::SyncListener;

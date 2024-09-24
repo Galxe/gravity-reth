@@ -1,5 +1,5 @@
 use crate::Tables;
-use metrics::Histogram;
+use metrics::{Gauge, Histogram};
 use reth_metrics::{metrics::Counter, Metrics};
 use rustc_hash::FxHashMap;
 use std::time::{Duration, Instant};
@@ -104,11 +104,10 @@ impl DatabaseEnvMetrics {
         value_size: Option<usize>,
         f: impl FnOnce() -> R,
     ) -> R {
-        if let Some(metrics) = self.operations.get(&(table, operation)) {
-            metrics.record(value_size, f)
-        } else {
-            f()
-        }
+        self.operations
+            .get(&(table, operation))
+            .expect("operation & table metric handle not found")
+            .record(value_size, f)
     }
 
     /// Record metrics for opening a database transaction.
@@ -259,19 +258,17 @@ impl Labels {
 #[derive(Metrics, Clone)]
 #[metrics(scope = "database.transaction")]
 pub(crate) struct TransactionMetrics {
-    /// Total number of opened database transactions (cumulative)
-    opened_total: Counter,
-    /// Total number of closed database transactions (cumulative)
-    closed_total: Counter,
+    /// Total number of currently open database transactions
+    open_total: Gauge,
 }
 
 impl TransactionMetrics {
     pub(crate) fn record_open(&self) {
-        self.opened_total.increment(1);
+        self.open_total.increment(1.0);
     }
 
     pub(crate) fn record_close(&self) {
-        self.closed_total.increment(1);
+        self.open_total.decrement(1.0);
     }
 }
 
@@ -350,7 +347,7 @@ impl OperationMetrics {
 
         // Record duration only for large values to prevent the performance hit of clock syscall
         // on small operations
-        if value_size.is_some_and(|size| size > LARGE_VALUE_THRESHOLD_BYTES) {
+        if value_size.map_or(false, |size| size > LARGE_VALUE_THRESHOLD_BYTES) {
             let start = Instant::now();
             let result = f();
             self.large_value_duration_seconds.record(start.elapsed());

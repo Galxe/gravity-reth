@@ -1,24 +1,21 @@
 //! Commonly used `NodeRecord` type for peers.
 
-use crate::PeerId;
-use alloc::{
-    format,
-    string::{String, ToString},
-};
-use alloy_rlp::{RlpDecodable, RlpEncodable};
-use core::{
+use std::{
     fmt,
     fmt::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::ParseIntError,
     str::FromStr,
 };
+
+use crate::PeerId;
+use alloy_rlp::{RlpDecodable, RlpEncodable};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 #[cfg(feature = "secp256k1")]
 use enr::Enr;
 
-/// Represents an ENR in discovery.
+/// Represents a ENR in discovery.
 ///
 /// Note: this is only an excerpt of the [`NodeRecord`] data structure.
 #[derive(
@@ -63,11 +60,11 @@ impl NodeRecord {
     /// See also [`std::net::Ipv6Addr::to_ipv4_mapped`]
     pub fn convert_ipv4_mapped(&mut self) -> bool {
         // convert IPv4 mapped IPv6 address
-        if let IpAddr::V6(v6) = self.address &&
-            let Some(v4) = v6.to_ipv4_mapped()
-        {
-            self.address = v4.into();
-            return true
+        if let IpAddr::V6(v6) = self.address {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                self.address = v4.into();
+                return true
+            }
         }
         false
     }
@@ -234,23 +231,24 @@ impl TryFrom<&Enr<secp256k1::SecretKey>> for NodeRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloy_rlp::Decodable;
-    use rand::{rng, Rng, RngCore};
+    use rand::{thread_rng, Rng, RngCore};
     use std::net::Ipv6Addr;
+
+    use super::*;
 
     #[test]
     fn test_mapped_ipv6() {
-        let mut rng = rng();
+        let mut rng = thread_rng();
 
         let v4: Ipv4Addr = "0.0.0.0".parse().unwrap();
         let v6 = v4.to_ipv6_mapped();
 
         let record = NodeRecord {
             address: v6.into(),
-            tcp_port: rng.random(),
-            udp_port: rng.random(),
-            id: rng.random(),
+            tcp_port: rng.gen(),
+            udp_port: rng.gen(),
+            id: rng.gen(),
         };
 
         assert!(record.clone().convert_ipv4_mapped());
@@ -259,14 +257,14 @@ mod tests {
 
     #[test]
     fn test_mapped_ipv4() {
-        let mut rng = rng();
+        let mut rng = thread_rng();
         let v4: Ipv4Addr = "0.0.0.0".parse().unwrap();
 
         let record = NodeRecord {
             address: v4.into(),
-            tcp_port: rng.random(),
-            udp_port: rng.random(),
-            id: rng.random(),
+            tcp_port: rng.gen(),
+            udp_port: rng.gen(),
+            id: rng.gen(),
         };
 
         assert!(!record.clone().convert_ipv4_mapped());
@@ -275,15 +273,15 @@ mod tests {
 
     #[test]
     fn test_noderecord_codec_ipv4() {
-        let mut rng = rng();
+        let mut rng = thread_rng();
         for _ in 0..100 {
             let mut ip = [0u8; 4];
             rng.fill_bytes(&mut ip);
             let record = NodeRecord {
                 address: IpAddr::V4(ip.into()),
-                tcp_port: rng.random(),
-                udp_port: rng.random(),
-                id: rng.random(),
+                tcp_port: rng.gen(),
+                udp_port: rng.gen(),
+                id: rng.gen(),
             };
 
             let decoded = NodeRecord::decode(&mut alloy_rlp::encode(record).as_slice()).unwrap();
@@ -293,15 +291,15 @@ mod tests {
 
     #[test]
     fn test_noderecord_codec_ipv6() {
-        let mut rng = rng();
+        let mut rng = thread_rng();
         for _ in 0..100 {
             let mut ip = [0u8; 16];
             rng.fill_bytes(&mut ip);
             let record = NodeRecord {
                 address: IpAddr::V6(ip.into()),
-                tcp_port: rng.random(),
-                udp_port: rng.random(),
-                id: rng.random(),
+                tcp_port: rng.gen(),
+                udp_port: rng.gen(),
+                id: rng.gen(),
             };
 
             let decoded = NodeRecord::decode(&mut alloy_rlp::encode(record).as_slice()).unwrap();

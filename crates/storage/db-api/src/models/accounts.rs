@@ -64,9 +64,11 @@ impl Encode for BlockNumberAddress {
 }
 
 impl Decode for BlockNumberAddress {
-    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+    fn decode<B: AsRef<[u8]>>(value: B) -> Result<Self, DatabaseError> {
+        let value = value.as_ref();
         let num = u64::from_be_bytes(value[..8].try_into().map_err(|_| DatabaseError::Decode)?);
         let hash = Address::from_slice(&value[8..]);
+
         Ok(Self((num, hash)))
     }
 }
@@ -95,9 +97,11 @@ impl Encode for AddressStorageKey {
 }
 
 impl Decode for AddressStorageKey {
-    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+    fn decode<B: AsRef<[u8]>>(value: B) -> Result<Self, DatabaseError> {
+        let value = value.as_ref();
         let address = Address::from_slice(&value[..20]);
         let storage_key = StorageKey::from_slice(&value[20..]);
+
         Ok(Self((address, storage_key)))
     }
 }
@@ -107,13 +111,13 @@ impl_fixed_arbitrary!((BlockNumberAddress, 28), (AddressStorageKey, 52));
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
-    use rand::{rng, Rng};
+    use rand::{thread_rng, Rng};
+    use std::str::FromStr;
 
     #[test]
     fn test_block_number_address() {
         let num = 1u64;
-        let hash = address!("0xba5e000000000000000000000000000000000000");
+        let hash = Address::from_str("ba5e000000000000000000000000000000000000").unwrap();
         let key = BlockNumberAddress((num, hash));
 
         let mut bytes = [0u8; 28];
@@ -123,14 +127,14 @@ mod tests {
         let encoded = Encode::encode(key);
         assert_eq!(encoded, bytes);
 
-        let decoded: BlockNumberAddress = Decode::decode(&encoded).unwrap();
+        let decoded: BlockNumberAddress = Decode::decode(encoded).unwrap();
         assert_eq!(decoded, key);
     }
 
     #[test]
     fn test_block_number_address_rand() {
         let mut bytes = [0u8; 28];
-        rng().fill(bytes.as_mut_slice());
+        thread_rng().fill(bytes.as_mut_slice());
         let key = BlockNumberAddress::arbitrary(&mut Unstructured::new(&bytes)).unwrap();
         assert_eq!(bytes, Encode::encode(key));
     }
@@ -138,7 +142,7 @@ mod tests {
     #[test]
     fn test_address_storage_key() {
         let storage_key = StorageKey::random();
-        let address = address!("0xba5e000000000000000000000000000000000000");
+        let address = Address::from_str("ba5e000000000000000000000000000000000000").unwrap();
         let key = AddressStorageKey((address, storage_key));
 
         let mut bytes = [0u8; 52];
@@ -148,14 +152,14 @@ mod tests {
         let encoded = Encode::encode(key);
         assert_eq!(encoded, bytes);
 
-        let decoded: AddressStorageKey = Decode::decode(&encoded).unwrap();
+        let decoded: AddressStorageKey = Decode::decode(encoded).unwrap();
         assert_eq!(decoded, key);
     }
 
     #[test]
     fn test_address_storage_key_rand() {
         let mut bytes = [0u8; 52];
-        rng().fill(bytes.as_mut_slice());
+        thread_rng().fill(bytes.as_mut_slice());
         let key = AddressStorageKey::arbitrary(&mut Unstructured::new(&bytes)).unwrap();
         assert_eq!(bytes, Encode::encode(key));
     }

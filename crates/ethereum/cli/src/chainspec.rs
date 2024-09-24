@@ -1,34 +1,48 @@
-use reth_chainspec::{ChainSpec, DEV, HOLESKY, HOODI, MAINNET, SEPOLIA};
-use reth_cli::chainspec::{parse_genesis, ChainSpecParser};
-use std::sync::Arc;
-
-/// Chains supported by reth. First value should be used as the default.
-pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "sepolia", "holesky", "hoodi", "dev"];
+use alloy_genesis::Genesis;
+use reth_chainspec::{ChainSpec, DEV, HOLESKY, MAINNET, SEPOLIA};
+use reth_cli::chainspec::ChainSpecParser;
+use std::{fs, path::PathBuf, sync::Arc};
 
 /// Clap value parser for [`ChainSpec`]s.
 ///
 /// The value parser matches either a known chain, the path
 /// to a json file, or a json formatted string in-memory. The json needs to be a Genesis struct.
-pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<ChainSpec>, eyre::Error> {
+fn chain_value_parser(s: &str) -> eyre::Result<Arc<ChainSpec>, eyre::Error> {
     Ok(match s {
         "mainnet" => MAINNET.clone(),
         "sepolia" => SEPOLIA.clone(),
         "holesky" => HOLESKY.clone(),
-        "hoodi" => HOODI.clone(),
         "dev" => DEV.clone(),
-        _ => Arc::new(parse_genesis(s)?.into()),
+        _ => {
+            // try to read json from path first
+            let raw = match fs::read_to_string(PathBuf::from(shellexpand::full(s)?.into_owned())) {
+                Ok(raw) => raw,
+                Err(io_err) => {
+                    // valid json may start with "\n", but must contain "{"
+                    if s.contains('{') {
+                        s.to_string()
+                    } else {
+                        return Err(io_err.into()) // assume invalid path
+                    }
+                }
+            };
+
+            // both serialized Genesis and ChainSpec structs supported
+            let genesis: Genesis = serde_json::from_str(&raw)?;
+
+            Arc::new(genesis.into())
+        }
     })
 }
 
 /// Ethereum chain specification parser.
 #[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct EthereumChainSpecParser;
+pub struct EthChainSpecParser;
 
-impl ChainSpecParser for EthereumChainSpecParser {
+impl ChainSpecParser for EthChainSpecParser {
     type ChainSpec = ChainSpec;
 
-    const SUPPORTED_CHAINS: &'static [&'static str] = SUPPORTED_CHAINS;
+    const SUPPORTED_CHAINS: &'static [&'static str] = &["mainnet", "sepolia", "holesky", "dev"];
 
     fn parse(s: &str) -> eyre::Result<Arc<ChainSpec>> {
         chain_value_parser(s)
@@ -42,8 +56,8 @@ mod tests {
 
     #[test]
     fn parse_known_chain_spec() {
-        for &chain in EthereumChainSpecParser::SUPPORTED_CHAINS {
-            assert!(<EthereumChainSpecParser as ChainSpecParser>::parse(chain).is_ok());
+        for &chain in EthChainSpecParser::SUPPORTED_CHAINS {
+            assert!(<EthChainSpecParser as ChainSpecParser>::parse(chain).is_ok());
         }
     }
 
@@ -90,15 +104,13 @@ mod tests {
     "terminalTotalDifficulty": 0,
     "shanghaiTime": 0,
     "cancunTime": 0,
-    "pragueTime": 0,
-    "osakaTime": 0
+    "pragueTime": 0
   }
 }"#;
 
-        let spec = <EthereumChainSpecParser as ChainSpecParser>::parse(s).unwrap();
+        let spec = <EthChainSpecParser as ChainSpecParser>::parse(s).unwrap();
         assert!(spec.is_shanghai_active_at_timestamp(0));
         assert!(spec.is_cancun_active_at_timestamp(0));
         assert!(spec.is_prague_active_at_timestamp(0));
-        assert!(spec.is_osaka_active_at_timestamp(0));
     }
 }

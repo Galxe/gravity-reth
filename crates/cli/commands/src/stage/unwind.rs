@@ -1,31 +1,32 @@
 //! Unwinding a certain block range
 
-use crate::{
-    common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs},
-    stage::CliNodeComponents,
-};
+use crate::common::{AccessRights, Environment, EnvironmentArgs};
 use alloy_eips::BlockHashOrNumber;
-use alloy_primitives::B256;
+use alloy_primitives::{BlockNumber, B256};
 use clap::{Parser, Subcommand};
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_beacon_consensus::EthBeaconConsensus;
+use reth_chainspec::ChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_config::Config;
-use reth_consensus::noop::NoopConsensus;
+use reth_consensus::Consensus;
 use reth_db::DatabaseEnv;
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
-use reth_evm::ConfigureEvm;
+use reth_evm::noop::NoopBlockExecutorProvider;
 use reth_exex::ExExManagerHandle;
+use reth_node_builder::{NodeTypesWithDB, NodeTypesWithEngine};
+use reth_node_core::args::NetworkArgs;
 use reth_provider::{
-    providers::ProviderNodeTypes, BlockExecutionWriter, BlockNumReader, ChainStateBlockReader,
-    ChainStateBlockWriter, ProviderFactory, StaticFileProviderFactory, StorageLocation,
+    BlockExecutionWriter, BlockNumReader, ChainSpecProvider, FinalizedBlockReader,
+    FinalizedBlockWriter, ProviderFactory, StaticFileProviderFactory,
 };
+use reth_prune::PruneModes;
 use reth_stages::{
     sets::{DefaultStages, OfflineStages},
     stages::ExecutionStage,
     ExecutionStageThresholds, Pipeline, StageSet,
 };
 use reth_static_file::StaticFileProducer;
-use std::sync::Arc;
+use std::{ops::RangeInclusive, sync::Arc};
 use tokio::sync::watch;
 use tracing::info;
 
@@ -34,6 +35,9 @@ use tracing::info;
 pub struct Command<C: ChainSpecParser> {
     #[command(flatten)]
     env: EnvironmentArgs<C>,
+
+    #[command(flatten)]
+    network: NetworkArgs,
 
     #[command(subcommand)]
     command: Subcommands,
@@ -44,27 +48,23 @@ pub struct Command<C: ChainSpecParser> {
     offline: bool,
 }
 
-impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C> {
+impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
     /// Execute `db stage unwind` command
-    pub async fn execute<N: CliNodeTypes<ChainSpec = C::ChainSpec>, F, Comp>(
+    pub async fn execute<N: NodeTypesWithEngine<ChainSpec = C::ChainSpec>>(
         self,
-        components: F,
-    ) -> eyre::Result<()>
-    where
-        Comp: CliNodeComponents<N>,
-        F: FnOnce(Arc<C::ChainSpec>) -> Comp,
-    {
+    ) -> eyre::Result<()> {
         let Environment { provider_factory, config, .. } = self.env.init::<N>(AccessRights::RW)?;
 
-        let target = self.command.unwind_target(provider_factory.clone())?;
-
-        let components = components(provider_factory.chain_spec());
+        let range = self.command.unwind_range(provider_factory.clone())?;
+        if *range.start() == 0 {
+            eyre::bail!("Cannot unwind genesis block")
+        }
 
         let highest_static_file_block = provider_factory
             .static_file_provider()
             .get_highest_static_files()
-            .max_block_num()
-            .filter(|highest_static_file_block| *highest_static_file_block > target);
+            .max()
+            .filter(|highest_static_file_block| highest_static_file_block >= range.start());
 
         // Execute a pipeline unwind if the start of the range overlaps the existing static
         // files. If that's the case, then copy all available data from MDBX to static files, and
@@ -78,80 +78,79 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
             }
 
             if let Some(highest_static_file_block) = highest_static_file_block {
-                info!(target: "reth::cli", ?target, ?highest_static_file_block, "Executing a pipeline unwind.");
+                info!(target: "reth::cli", ?range, ?highest_static_file_block, "Executing a pipeline unwind.");
             } else {
-                info!(target: "reth::cli", ?target, "Executing a pipeline unwind.");
+                info!(target: "reth::cli", ?range, "Executing a pipeline unwind.");
             }
-            info!(target: "reth::cli", prune_config=?config.prune, "Using prune settings");
 
             // This will build an offline-only pipeline if the `offline` flag is enabled
-            let mut pipeline =
-                self.build_pipeline(config, provider_factory, components.evm_config().clone())?;
+            let mut pipeline = self.build_pipeline(config, provider_factory)?;
 
             // Move all applicable data from database to static files.
             pipeline.move_to_static_files()?;
 
-            pipeline.unwind(target, None)?;
+            pipeline.unwind((*range.start()).saturating_sub(1), None)?;
         } else {
-            info!(target: "reth::cli", ?target, "Executing a database unwind.");
+            info!(target: "reth::cli", ?range, "Executing a database unwind.");
             let provider = provider_factory.provider_rw()?;
 
-            provider
-                .remove_block_and_execution_above(target, StorageLocation::Both)
+            let _ = provider
+                .take_block_and_execution_range(range.clone())
                 .map_err(|err| eyre::eyre!("Transaction error on unwind: {err}"))?;
 
             // update finalized block if needed
             let last_saved_finalized_block_number = provider.last_finalized_block_number()?;
-            if last_saved_finalized_block_number.is_none_or(|f| f > target) {
-                provider.save_finalized_block_number(target)?;
+            let range_min =
+                range.clone().min().ok_or(eyre::eyre!("Could not fetch lower range end"))?;
+            if last_saved_finalized_block_number.is_none() ||
+                Some(range_min) < last_saved_finalized_block_number
+            {
+                provider.save_finalized_block_number(BlockNumber::from(range_min))?;
             }
 
             provider.commit()?;
         }
 
-        info!(target: "reth::cli", ?target, "Unwound blocks");
+        info!(target: "reth::cli", range=?range.clone(), count=range.count(), "Unwound blocks");
 
         Ok(())
     }
 
-    fn build_pipeline<N: ProviderNodeTypes<ChainSpec = C::ChainSpec>>(
+    fn build_pipeline<N: NodeTypesWithDB<ChainSpec = C::ChainSpec>>(
         self,
         config: Config,
         provider_factory: ProviderFactory<N>,
-        evm_config: impl ConfigureEvm<Primitives = N::Primitives> + 'static,
     ) -> Result<Pipeline<N>, eyre::Error> {
+        let consensus: Arc<dyn Consensus> =
+            Arc::new(EthBeaconConsensus::new(provider_factory.chain_spec()));
         let stage_conf = &config.stages;
         let prune_modes = config.prune.clone().map(|prune| prune.segments).unwrap_or_default();
 
         let (tip_tx, tip_rx) = watch::channel(B256::ZERO);
 
+        // Unwinding does not require a valid executor
+        let executor = NoopBlockExecutorProvider::default();
+
         let builder = if self.offline {
             Pipeline::<N>::builder().add_stages(
-                OfflineStages::new(
-                    evm_config,
-                    NoopConsensus::arc(),
-                    config.stages,
-                    prune_modes.clone(),
-                )
-                .builder()
-                .disable(reth_stages::StageId::SenderRecovery),
+                OfflineStages::new(executor, config.stages, PruneModes::default())
+                    .builder()
+                    .disable(reth_stages::StageId::SenderRecovery),
             )
         } else {
             Pipeline::<N>::builder().with_tip_sender(tip_tx).add_stages(
                 DefaultStages::new(
                     provider_factory.clone(),
                     tip_rx,
-                    Arc::new(NoopConsensus::default()),
+                    Arc::clone(&consensus),
                     NoopHeaderDownloader::default(),
                     NoopBodiesDownloader::default(),
-                    evm_config.clone(),
+                    executor.clone(),
                     stage_conf.clone(),
                     prune_modes.clone(),
-                    None,
                 )
                 .set(ExecutionStage::new(
-                    evm_config,
-                    Arc::new(NoopConsensus::default()),
+                    executor,
                     ExecutionStageThresholds {
                         max_blocks: None,
                         max_changes: None,
@@ -159,6 +158,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
                         max_duration: None,
                     },
                     stage_conf.execution_external_clean_threshold(),
+                    prune_modes,
                     ExExManagerHandle::empty(),
                 )),
             )
@@ -166,16 +166,9 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
 
         let pipeline = builder.build(
             provider_factory.clone(),
-            StaticFileProducer::new(provider_factory, prune_modes),
+            StaticFileProducer::new(provider_factory, PruneModes::default()),
         );
         Ok(pipeline)
-    }
-}
-
-impl<C: ChainSpecParser> Command<C> {
-    /// Return the underlying chain being used to run this command
-    pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
-        Some(&self.env.chain)
     }
 }
 
@@ -193,11 +186,13 @@ enum Subcommands {
 }
 
 impl Subcommands {
-    /// Returns the block to unwind to. The returned block will stay in database.
-    fn unwind_target<N: ProviderNodeTypes<DB = Arc<DatabaseEnv>>>(
+    /// Returns the block range to unwind.
+    ///
+    /// This returns an inclusive range: [target..=latest]
+    fn unwind_range<N: NodeTypesWithDB<ChainSpec = ChainSpec, DB = Arc<DatabaseEnv>>>(
         &self,
         factory: ProviderFactory<N>,
-    ) -> eyre::Result<u64> {
+    ) -> eyre::Result<RangeInclusive<u64>> {
         let provider = factory.provider()?;
         let last = provider.last_block_number()?;
         let target = match self {
@@ -208,25 +203,23 @@ impl Subcommands {
                 BlockHashOrNumber::Number(num) => *num,
             },
             Self::NumBlocks { amount } => last.saturating_sub(*amount),
-        };
+        } + 1;
         if target > last {
-            eyre::bail!(
-                "Target block number {target} is higher than the latest block number {last}"
-            )
+            eyre::bail!("Target block number is higher than the latest block number")
         }
-        Ok(target)
+        Ok(target..=last)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
+    use reth_node_core::args::utils::DefaultChainSpecParser;
 
     use super::*;
 
     #[test]
     fn parse_unwind() {
-        let cmd = Command::<EthereumChainSpecParser>::parse_from([
+        let cmd = Command::<DefaultChainSpecParser>::parse_from([
             "reth",
             "--datadir",
             "dir",
@@ -235,7 +228,7 @@ mod tests {
         ]);
         assert_eq!(cmd.command, Subcommands::ToBlock { target: BlockHashOrNumber::Number(100) });
 
-        let cmd = Command::<EthereumChainSpecParser>::parse_from([
+        let cmd = Command::<DefaultChainSpecParser>::parse_from([
             "reth",
             "--datadir",
             "dir",

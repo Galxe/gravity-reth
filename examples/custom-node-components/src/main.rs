@@ -1,24 +1,20 @@
 //! This example shows how to configure custom components for a reth node.
 
-#![warn(unused_crate_dependencies)]
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use reth_ethereum::{
+use reth::{
+    api::NodeTypes,
+    builder::{components::PoolBuilder, BuilderContext, FullNodeTypes},
     chainspec::ChainSpec,
-    cli::interface::Cli,
-    node::{
-        api::{FullNodeTypes, NodeTypes},
-        builder::{components::PoolBuilder, BuilderContext},
-        node::EthereumAddOns,
-        EthereumNode,
+    cli::Cli,
+    providers::CanonStateSubscriptions,
+    transaction_pool::{
+        blobstore::InMemoryBlobStore, EthTransactionPool, TransactionValidationTaskExecutor,
     },
-    pool::{
-        blobstore::InMemoryBlobStore, EthTransactionPool, PoolConfig,
-        TransactionValidationTaskExecutor,
-    },
-    provider::CanonStateSubscriptions,
-    EthPrimitives,
 };
+use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_tracing::tracing::{debug, info};
+use reth_transaction_pool::PoolConfig;
 
 fn main() {
     Cli::parse_args()
@@ -29,7 +25,7 @@ fn main() {
                 // Configure the components of the node
                 // use default ethereum components but use our custom pool
                 .with_components(EthereumNode::components().pool(CustomPoolBuilder::default()))
-                .with_add_ons(EthereumAddOns::default())
+                .with_add_ons::<EthereumAddOns>()
                 .launch()
                 .await?;
 
@@ -51,21 +47,25 @@ pub struct CustomPoolBuilder {
 /// This will be used to build the transaction pool and its maintenance tasks during launch.
 impl<Node> PoolBuilder<Node> for CustomPoolBuilder
 where
-    Node: FullNodeTypes<Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>>,
+    Node: FullNodeTypes<Types: NodeTypes<ChainSpec = ChainSpec>>,
 {
     type Pool = EthTransactionPool<Node::Provider, InMemoryBlobStore>;
 
     async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
         let data_dir = ctx.config().datadir();
         let blob_store = InMemoryBlobStore::default();
-        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
+        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.chain_spec())
             .with_head_timestamp(ctx.head().timestamp)
             .kzg_settings(ctx.kzg_settings()?)
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+            .build_with_tasks(
+                ctx.provider().clone(),
+                ctx.task_executor().clone(),
+                blob_store.clone(),
+            );
 
         let transaction_pool =
-            reth_ethereum::pool::Pool::eth_pool(validator, blob_store, self.pool_config);
+            reth_transaction_pool::Pool::eth_pool(validator, blob_store, self.pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
         let transactions_path = data_dir.txpool_transactions();
 
@@ -75,14 +75,12 @@ where
             let chain_events = ctx.provider().canonical_state_stream();
             let client = ctx.provider().clone();
             let transactions_backup_config =
-                reth_ethereum::pool::maintain::LocalTransactionBackupConfig::with_local_txs_backup(
-                    transactions_path,
-                );
+                reth_transaction_pool::maintain::LocalTransactionBackupConfig::with_local_txs_backup(transactions_path);
 
             ctx.task_executor().spawn_critical_with_graceful_shutdown_signal(
                 "local transactions backup task",
                 |shutdown| {
-                    reth_ethereum::pool::maintain::backup_local_transactions_task(
+                    reth_transaction_pool::maintain::backup_local_transactions_task(
                         shutdown,
                         pool.clone(),
                         transactions_backup_config,
@@ -93,15 +91,12 @@ where
             // spawn the maintenance task
             ctx.task_executor().spawn_critical(
                 "txpool maintenance task",
-                reth_ethereum::pool::maintain::maintain_transaction_pool_future(
+                reth_transaction_pool::maintain::maintain_transaction_pool_future(
                     client,
                     pool,
                     chain_events,
                     ctx.task_executor().clone(),
-                    reth_ethereum::pool::maintain::MaintainPoolConfig {
-                        max_tx_lifetime: transaction_pool.config().max_queued_lifetime,
-                        ..Default::default()
-                    },
+                    Default::default(),
                 ),
             );
             debug!(target: "reth::cli", "Spawned txpool maintenance task");

@@ -20,19 +20,20 @@ reth-fs-util.workspace = true
 
 # compression
 zstd = { workspace = true, features = ["experimental", "zdict_builder"] }
-lz4_flex.workspace = true
+lz4_flex = { version = "0.11", default-features = false }
 
-memmap2.workspace = true
-bincode.workspace = true
+memmap2 = "0.9.4"
+bincode = "1.3"
 serde = { workspace = true, features = ["derive"] }
 tracing.workspace = true
-anyhow.workspace = true
+anyhow = "1.0"
 thiserror.workspace = true
 derive_more.workspace = true
 
 [dev-dependencies]
 rand = { workspace = true, features = ["small_rng"] }
 tempfile.workspace = true
+
 
 [features]
 default = []

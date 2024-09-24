@@ -1,15 +1,16 @@
 //! Database debugging tool
-use crate::common::{AccessRights, CliNodeComponents, CliNodeTypes, Environment, EnvironmentArgs};
+use crate::common::{AccessRights, Environment, EnvironmentArgs};
 use clap::Parser;
-use reth_chainspec::{EthChainSpec, EthereumHardforks};
+use reth_chainspec::ChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
-use reth_db::{init_db, mdbx::DatabaseArguments, DatabaseEnv};
+use reth_db::{init_db, mdbx::DatabaseArguments, tables, DatabaseEnv};
 use reth_db_api::{
-    cursor::DbCursorRO, database::Database, models::ClientVersion, table::TableImporter, tables,
+    cursor::DbCursorRO, database::Database, models::ClientVersion, table::TableImporter,
     transaction::DbTx,
 };
 use reth_db_common::DbTool;
-use reth_node_builder::NodeTypesWithDB;
+use reth_evm::execute::BlockExecutorProvider;
+use reth_node_builder::{NodeTypesWithDB, NodeTypesWithEngine};
 use reth_node_core::{
     args::DatadirArgs,
     dirs::{DataDirPath, PlatformPath},
@@ -74,52 +75,39 @@ pub struct StageCommand {
 macro_rules! handle_stage {
     ($stage_fn:ident, $tool:expr, $command:expr) => {{
         let StageCommand { output_datadir, from, to, dry_run, .. } = $command;
-        let output_datadir =
-            output_datadir.with_chain($tool.chain().chain(), DatadirArgs::default());
+        let output_datadir = output_datadir.with_chain($tool.chain().chain, DatadirArgs::default());
         $stage_fn($tool, *from, *to, output_datadir, *dry_run).await?
     }};
 
-    ($stage_fn:ident, $tool:expr, $command:expr, $executor:expr, $consensus:expr) => {{
+    ($stage_fn:ident, $tool:expr, $command:expr, $executor:expr) => {{
         let StageCommand { output_datadir, from, to, dry_run, .. } = $command;
-        let output_datadir =
-            output_datadir.with_chain($tool.chain().chain(), DatadirArgs::default());
-        $stage_fn($tool, *from, *to, output_datadir, *dry_run, $executor, $consensus).await?
+        let output_datadir = output_datadir.with_chain($tool.chain().chain, DatadirArgs::default());
+        $stage_fn($tool, *from, *to, output_datadir, *dry_run, $executor).await?
     }};
 }
 
-impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C> {
+impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
     /// Execute `dump-stage` command
-    pub async fn execute<N, Comp, F>(self, components: F) -> eyre::Result<()>
+    pub async fn execute<N, E, F>(self, executor: F) -> eyre::Result<()>
     where
-        N: CliNodeTypes<ChainSpec = C::ChainSpec>,
-        Comp: CliNodeComponents<N>,
-        F: FnOnce(Arc<C::ChainSpec>) -> Comp,
+        N: NodeTypesWithEngine<ChainSpec = C::ChainSpec>,
+        E: BlockExecutorProvider,
+        F: FnOnce(Arc<ChainSpec>) -> E,
     {
         let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
         let tool = DbTool::new(provider_factory)?;
-        let components = components(tool.chain());
-        let evm_config = components.evm_config().clone();
-        let consensus = components.consensus().clone();
 
         match &self.command {
             Stages::Execution(cmd) => {
-                handle_stage!(dump_execution_stage, &tool, cmd, evm_config, consensus)
+                let executor = executor(tool.chain());
+                handle_stage!(dump_execution_stage, &tool, cmd, executor)
             }
             Stages::StorageHashing(cmd) => handle_stage!(dump_hashing_storage_stage, &tool, cmd),
             Stages::AccountHashing(cmd) => handle_stage!(dump_hashing_account_stage, &tool, cmd),
-            Stages::Merkle(cmd) => {
-                handle_stage!(dump_merkle_stage, &tool, cmd, evm_config, consensus)
-            }
+            Stages::Merkle(cmd) => handle_stage!(dump_merkle_stage, &tool, cmd),
         }
 
         Ok(())
-    }
-}
-
-impl<C: ChainSpecParser> Command<C> {
-    /// Returns the underlying chain being used to run this command
-    pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
-        Some(&self.env.chain)
     }
 }
 
@@ -131,7 +119,7 @@ pub(crate) fn setup<N: NodeTypesWithDB>(
     output_db: &PathBuf,
     db_tool: &DbTool<N>,
 ) -> eyre::Result<(DatabaseEnv, u64)> {
-    assert!(from < to, "FROM block should be lower than TO block.");
+    assert!(from < to, "FROM block should be bigger than TO block.");
 
     info!(target: "reth::cli", ?output_db, "Creating separate db");
 

@@ -1,10 +1,11 @@
 use super::event::ProtocolEvent;
 use crate::subprotocol::connection::handler::CustomRlpxConnectionHandler;
-use reth_ethereum::network::{api::PeerId, protocol::ProtocolHandler};
+use reth_network::protocol::ProtocolHandler;
+use reth_network_api::PeerId;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
-/// Protocol state is a helper struct to store the protocol events.
+/// Protocol state is an helper struct to store the protocol events.
 #[derive(Clone, Debug)]
 pub(crate) struct ProtocolState {
     pub(crate) events: mpsc::UnboundedSender<ProtocolEvent>,

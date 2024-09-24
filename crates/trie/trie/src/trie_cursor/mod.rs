@@ -6,22 +6,14 @@ use reth_storage_errors::db::DatabaseError;
 mod in_memory;
 
 /// Cursor for iterating over a subtrie.
-pub mod subnode;
+mod subnode;
 
 /// Noop trie cursor implementations.
 pub mod noop;
 
-/// Depth-first trie iterator.
-pub mod depth_first;
-
-/// Mock trie cursor implementations.
-#[cfg(test)]
-pub mod mock;
-
-pub use self::{depth_first::DepthFirstTrieIterator, in_memory::*, subnode::CursorSubNode};
+pub use self::{in_memory::*, subnode::CursorSubNode};
 
 /// Factory for creating trie cursors.
-#[auto_impl::auto_impl(&)]
 pub trait TrieCursorFactory {
     /// The account trie cursor type.
     type AccountTrieCursor: TrieCursor;
@@ -38,8 +30,7 @@ pub trait TrieCursorFactory {
     ) -> Result<Self::StorageTrieCursor, DatabaseError>;
 }
 
-/// A cursor for traversing stored trie nodes. The cursor must iterate over keys in
-/// lexicographical order.
+/// A cursor for navigating a trie that works with both Tables and DupSort tables.
 #[auto_impl::auto_impl(&mut, Box)]
 pub trait TrieCursor: Send + Sync {
     /// Move the cursor to the key and return if it is an exact match.

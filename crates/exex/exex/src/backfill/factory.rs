@@ -1,8 +1,8 @@
 use crate::BackfillJob;
-use std::{ops::RangeInclusive, time::Duration};
+use std::ops::RangeInclusive;
 
-use alloy_primitives::BlockNumber;
 use reth_node_api::FullNodeComponents;
+use reth_primitives::BlockNumber;
 use reth_prune_types::PruneModes;
 use reth_stages_api::ExecutionStageThresholds;
 
@@ -11,7 +11,7 @@ use super::stream::DEFAULT_PARALLELISM;
 /// Factory for creating new backfill jobs.
 #[derive(Debug, Clone)]
 pub struct BackfillJobFactory<E, P> {
-    evm_config: E,
+    executor: E,
     provider: P,
     prune_modes: PruneModes,
     thresholds: ExecutionStageThresholds,
@@ -20,20 +20,12 @@ pub struct BackfillJobFactory<E, P> {
 
 impl<E, P> BackfillJobFactory<E, P> {
     /// Creates a new [`BackfillJobFactory`].
-    pub fn new(evm_config: E, provider: P) -> Self {
+    pub fn new(executor: E, provider: P) -> Self {
         Self {
-            evm_config,
+            executor,
             provider,
             prune_modes: PruneModes::none(),
-            thresholds: ExecutionStageThresholds {
-                // Default duration for a database transaction to be considered long-lived is
-                // 60 seconds, so we limit the backfill job to the half of it to be sure we finish
-                // before the warning is logged.
-                //
-                // See `reth_db::implementation::mdbx::tx::LONG_TRANSACTION_DURATION`.
-                max_duration: Some(Duration::from_secs(30)),
-                ..Default::default()
-            },
+            thresholds: ExecutionStageThresholds::default(),
             stream_parallelism: DEFAULT_PARALLELISM,
         }
     }
@@ -64,7 +56,7 @@ impl<E: Clone, P: Clone> BackfillJobFactory<E, P> {
     /// Creates a new backfill job for the given range.
     pub fn backfill(&self, range: RangeInclusive<BlockNumber>) -> BackfillJob<E, P> {
         BackfillJob {
-            evm_config: self.evm_config.clone(),
+            executor: self.executor.clone(),
             provider: self.provider.clone(),
             prune_modes: self.prune_modes.clone(),
             range,
@@ -78,9 +70,9 @@ impl BackfillJobFactory<(), ()> {
     /// Creates a new [`BackfillJobFactory`] from [`FullNodeComponents`].
     pub fn new_from_components<Node: FullNodeComponents>(
         components: Node,
-    ) -> BackfillJobFactory<Node::Evm, Node::Provider> {
+    ) -> BackfillJobFactory<Node::Executor, Node::Provider> {
         BackfillJobFactory::<_, _>::new(
-            components.evm_config().clone(),
+            components.block_executor().clone(),
             components.provider().clone(),
         )
     }

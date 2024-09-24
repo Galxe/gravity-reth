@@ -1,13 +1,10 @@
 use crate::metrics::PersistenceMetrics;
-use alloy_consensus::BlockHeader;
-use alloy_eips::BlockNumHash;
-use reth_chain_state::ExecutedBlockWithTrieUpdates;
+use reth_chain_state::ExecutedBlock;
 use reth_errors::ProviderError;
-use reth_ethereum_primitives::EthPrimitives;
-use reth_primitives_traits::NodePrimitives;
+use reth_primitives::BlockNumHash;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader,
-    ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory,
+    DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory,
 };
 use reth_prune::{PrunerError, PrunerOutput, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender};
@@ -27,14 +24,11 @@ use tracing::{debug, error};
 /// This should be spawned in its own thread with [`std::thread::spawn`], since this performs
 /// blocking I/O operations in an endless loop.
 #[derive(Debug)]
-pub struct PersistenceService<N>
-where
-    N: ProviderNodeTypes,
-{
+pub struct PersistenceService<N: ProviderNodeTypes> {
     /// The provider factory to use
     provider: ProviderFactory<N>,
     /// Incoming requests
-    incoming: Receiver<PersistenceAction<N::Primitives>>,
+    incoming: Receiver<PersistenceAction>,
     /// The pruner
     pruner: PrunerWithFactory<ProviderFactory<N>>,
     /// metrics
@@ -43,14 +37,11 @@ where
     sync_metrics_tx: MetricEventsSender,
 }
 
-impl<N> PersistenceService<N>
-where
-    N: ProviderNodeTypes,
-{
+impl<N: ProviderNodeTypes> PersistenceService<N> {
     /// Create a new persistence service
     pub fn new(
         provider: ProviderFactory<N>,
-        incoming: Receiver<PersistenceAction<N::Primitives>>,
+        incoming: Receiver<PersistenceAction>,
         pruner: PrunerWithFactory<ProviderFactory<N>>,
         sync_metrics_tx: MetricEventsSender,
     ) -> Self {
@@ -69,10 +60,7 @@ where
     }
 }
 
-impl<N> PersistenceService<N>
-where
-    N: ProviderNodeTypes,
-{
+impl<N: ProviderNodeTypes> PersistenceService<N> {
     /// This is the main loop, that will listen to database events and perform the requested
     /// database actions
     pub fn run(mut self) -> Result<(), PersistenceError> {
@@ -89,32 +77,20 @@ where
                 }
                 PersistenceAction::SaveBlocks(blocks, sender) => {
                     let result = self.on_save_blocks(blocks)?;
-                    let result_number = result.map(|r| r.number);
-
-                    // we ignore the error because the caller may or may not care about the result
-                    let _ = sender.send(result);
-
-                    if let Some(block_number) = result_number {
+                    if let Some(ref num_hash) = result {
                         // send new sync metrics based on saved blocks
                         let _ = self
                             .sync_metrics_tx
-                            .send(MetricEvent::SyncHeight { height: block_number });
-
-                        if self.pruner.is_pruning_needed(block_number) {
-                            // We log `PrunerOutput` inside the `Pruner`
-                            let _ = self.prune_before(block_number)?;
-                        }
+                            .send(MetricEvent::SyncHeight { height: num_hash.number });
                     }
+                    // we ignore the error because the caller may or may not care about the result
+                    let _ = sender.send(result);
                 }
-                PersistenceAction::SaveFinalizedBlock(finalized_block) => {
-                    let provider = self.provider.database_provider_rw()?;
-                    provider.save_finalized_block_number(finalized_block)?;
-                    provider.commit()?;
-                }
-                PersistenceAction::SaveSafeBlock(safe_block) => {
-                    let provider = self.provider.database_provider_rw()?;
-                    provider.save_safe_block_number(safe_block)?;
-                    provider.commit()?;
+                PersistenceAction::PruneBefore(block_num, sender) => {
+                    let res = self.prune_before(block_num)?;
+
+                    // we ignore the error because the caller may or may not care about the result
+                    let _ = sender.send(res);
                 }
             }
         }
@@ -132,7 +108,7 @@ where
 
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
         UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(new_tip_num)?;
-        UnifiedStorageWriter::commit_unwind(provider_rw)?;
+        UnifiedStorageWriter::commit_unwind(provider_rw, sf_provider)?;
 
         debug!(target: "engine::persistence", ?new_tip_num, ?new_tip_hash, "Removed blocks from disk");
         self.metrics.remove_blocks_above_duration_seconds.record(start_time.elapsed());
@@ -141,21 +117,20 @@ where
 
     fn on_save_blocks(
         &self,
-        blocks: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
+        blocks: Vec<ExecutedBlock>,
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
-        debug!(target: "engine::persistence", first=?blocks.first().map(|b| b.recovered_block.num_hash()), last=?blocks.last().map(|b| b.recovered_block.num_hash()), "Saving range of blocks");
+        debug!(target: "engine::persistence", first=?blocks.first().map(|b| b.block.num_hash()), last=?blocks.last().map(|b| b.block.num_hash()), "Saving range of blocks");
         let start_time = Instant::now();
-        let last_block_hash_num = blocks.last().map(|block| BlockNumHash {
-            hash: block.recovered_block().hash(),
-            number: block.recovered_block().header().number(),
-        });
+        let last_block_hash_num = blocks
+            .last()
+            .map(|block| BlockNumHash { hash: block.block().hash(), number: block.block().number });
 
         if last_block_hash_num.is_some() {
             let provider_rw = self.provider.database_provider_rw()?;
             let static_file_provider = self.provider.static_file_provider();
 
-            UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(blocks)?;
-            UnifiedStorageWriter::commit(provider_rw)?;
+            UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(&blocks)?;
+            UnifiedStorageWriter::commit(provider_rw, static_file_provider)?;
         }
         self.metrics.save_blocks_duration_seconds.record(start_time.elapsed());
         Ok(last_block_hash_num)
@@ -176,13 +151,13 @@ pub enum PersistenceError {
 
 /// A signal to the persistence service that part of the tree state can be persisted.
 #[derive(Debug)]
-pub enum PersistenceAction<N: NodePrimitives = EthPrimitives> {
+pub enum PersistenceAction {
     /// The section of tree state that should be persisted. These blocks are expected in order of
     /// increasing block number.
     ///
     /// First, header, transaction, and receipt-related data should be written to static files.
     /// Then the execution history-related data will be written to the database.
-    SaveBlocks(Vec<ExecutedBlockWithTrieUpdates<N>>, oneshot::Sender<Option<BlockNumHash>>),
+    SaveBlocks(Vec<ExecutedBlock>, oneshot::Sender<Option<BlockNumHash>>),
 
     /// Removes block data above the given block number from the database.
     ///
@@ -190,40 +165,35 @@ pub enum PersistenceAction<N: NodePrimitives = EthPrimitives> {
     /// static files.
     RemoveBlocksAbove(u64, oneshot::Sender<Option<BlockNumHash>>),
 
-    /// Update the persisted finalized block on disk
-    SaveFinalizedBlock(u64),
-
-    /// Update the persisted safe block on disk
-    SaveSafeBlock(u64),
+    /// Prune associated block data before the given block number, according to already-configured
+    /// prune modes.
+    PruneBefore(u64, oneshot::Sender<PrunerOutput>),
 }
 
 /// A handle to the persistence service
 #[derive(Debug, Clone)]
-pub struct PersistenceHandle<N: NodePrimitives = EthPrimitives> {
+pub struct PersistenceHandle {
     /// The channel used to communicate with the persistence service
-    sender: Sender<PersistenceAction<N>>,
+    sender: Sender<PersistenceAction>,
 }
 
-impl<T: NodePrimitives> PersistenceHandle<T> {
+impl PersistenceHandle {
     /// Create a new [`PersistenceHandle`] from a [`Sender<PersistenceAction>`].
-    pub const fn new(sender: Sender<PersistenceAction<T>>) -> Self {
+    pub const fn new(sender: Sender<PersistenceAction>) -> Self {
         Self { sender }
     }
 
     /// Create a new [`PersistenceHandle`], and spawn the persistence service.
-    pub fn spawn_service<N>(
+    pub fn spawn_service<N: ProviderNodeTypes>(
         provider_factory: ProviderFactory<N>,
         pruner: PrunerWithFactory<ProviderFactory<N>>,
         sync_metrics_tx: MetricEventsSender,
-    ) -> PersistenceHandle<N::Primitives>
-    where
-        N: ProviderNodeTypes,
-    {
+    ) -> Self {
         // create the initial channels
         let (db_service_tx, db_service_rx) = std::sync::mpsc::channel();
 
         // construct persistence handle
-        let persistence_handle = PersistenceHandle::new(db_service_tx);
+        let persistence_handle = Self::new(db_service_tx);
 
         // spawn the persistence service
         let db_service =
@@ -244,8 +214,8 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
     /// for creating any channels for the given action.
     pub fn send_action(
         &self,
-        action: PersistenceAction<T>,
-    ) -> Result<(), SendError<PersistenceAction<T>>> {
+        action: PersistenceAction,
+    ) -> Result<(), SendError<PersistenceAction>> {
         self.sender.send(action)
     }
 
@@ -259,26 +229,10 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
     /// If there are no blocks to persist, then `None` is sent in the sender.
     pub fn save_blocks(
         &self,
-        blocks: Vec<ExecutedBlockWithTrieUpdates<T>>,
+        blocks: Vec<ExecutedBlock>,
         tx: oneshot::Sender<Option<BlockNumHash>>,
-    ) -> Result<(), SendError<PersistenceAction<T>>> {
+    ) -> Result<(), SendError<PersistenceAction>> {
         self.send_action(PersistenceAction::SaveBlocks(blocks, tx))
-    }
-
-    /// Persists the finalized block number on disk.
-    pub fn save_finalized_block_number(
-        &self,
-        finalized_block: u64,
-    ) -> Result<(), SendError<PersistenceAction<T>>> {
-        self.send_action(PersistenceAction::SaveFinalizedBlock(finalized_block))
-    }
-
-    /// Persists the finalized block number on disk.
-    pub fn save_safe_block_number(
-        &self,
-        safe_block: u64,
-    ) -> Result<(), SendError<PersistenceAction<T>>> {
-        self.send_action(PersistenceAction::SaveSafeBlock(safe_block))
     }
 
     /// Tells the persistence service to remove blocks above a certain block number. The removed
@@ -290,22 +244,34 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
         &self,
         block_num: u64,
         tx: oneshot::Sender<Option<BlockNumHash>>,
-    ) -> Result<(), SendError<PersistenceAction<T>>> {
+    ) -> Result<(), SendError<PersistenceAction>> {
         self.send_action(PersistenceAction::RemoveBlocksAbove(block_num, tx))
+    }
+
+    /// Tells the persistence service to remove block data before the given hash, according to the
+    /// configured prune config.
+    ///
+    /// The resulting [`PrunerOutput`] is returned in the receiver end of the sender argument.
+    pub fn prune_before(
+        &self,
+        block_num: u64,
+        tx: oneshot::Sender<PrunerOutput>,
+    ) -> Result<(), SendError<PersistenceAction>> {
+        self.send_action(PersistenceAction::PruneBefore(block_num, tx))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::B256;
     use reth_chain_state::test_utils::TestBlockBuilder;
     use reth_exex_types::FinishedExExHeight;
+    use reth_primitives::B256;
     use reth_provider::test_utils::create_test_provider_factory;
     use reth_prune::Pruner;
     use tokio::sync::mpsc::unbounded_channel;
 
-    fn default_persistence_handle() -> PersistenceHandle<EthPrimitives> {
+    fn default_persistence_handle() -> PersistenceHandle {
         let provider = create_test_provider_factory();
 
         let (_finished_exex_height_tx, finished_exex_height_rx) =
@@ -315,7 +281,7 @@ mod tests {
             Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
 
         let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
+        PersistenceHandle::spawn_service(provider, pruner, sync_metrics_tx)
     }
 
     #[tokio::test]
@@ -337,10 +303,10 @@ mod tests {
         reth_tracing::init_test_tracing();
         let persistence_handle = default_persistence_handle();
         let block_number = 0;
-        let mut test_block_builder = TestBlockBuilder::eth();
+        let mut test_block_builder = TestBlockBuilder::default();
         let executed =
             test_block_builder.get_executed_block_with_number(block_number, B256::random());
-        let block_hash = executed.recovered_block().hash();
+        let block_hash = executed.block().hash();
 
         let blocks = vec![executed];
         let (tx, rx) = oneshot::channel();
@@ -362,9 +328,9 @@ mod tests {
         reth_tracing::init_test_tracing();
         let persistence_handle = default_persistence_handle();
 
-        let mut test_block_builder = TestBlockBuilder::eth();
+        let mut test_block_builder = TestBlockBuilder::default();
         let blocks = test_block_builder.get_executed_blocks(0..5).collect::<Vec<_>>();
-        let last_hash = blocks.last().unwrap().recovered_block().hash();
+        let last_hash = blocks.last().unwrap().block().hash();
         let (tx, rx) = oneshot::channel();
 
         persistence_handle.save_blocks(blocks, tx).unwrap();
@@ -378,10 +344,10 @@ mod tests {
         let persistence_handle = default_persistence_handle();
 
         let ranges = [0..1, 1..2, 2..4, 4..5];
-        let mut test_block_builder = TestBlockBuilder::eth();
+        let mut test_block_builder = TestBlockBuilder::default();
         for range in ranges {
             let blocks = test_block_builder.get_executed_blocks(range).collect::<Vec<_>>();
-            let last_hash = blocks.last().unwrap().recovered_block().hash();
+            let last_hash = blocks.last().unwrap().block().hash();
             let (tx, rx) = oneshot::channel();
 
             persistence_handle.save_blocks(blocks, tx).unwrap();

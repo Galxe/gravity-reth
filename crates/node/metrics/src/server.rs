@@ -11,6 +11,7 @@ use metrics_process::Collector;
 use reth_metrics::metrics::Unit;
 use reth_tasks::TaskExecutor;
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use tracing::info;
 
 /// Configuration for the [`MetricServer`]
 #[derive(Debug)]
@@ -52,6 +53,8 @@ impl MetricServer {
         let MetricServerConfig { listen_addr, hooks, task_executor, version_info, chain_spec_info } =
             &self.config;
 
+        info!(target: "reth::cli", addr = %listen_addr, "Starting metrics endpoint");
+
         let hooks = hooks.clone();
         self.start_endpoint(
             *listen_addr,
@@ -59,7 +62,7 @@ impl MetricServer {
             task_executor.clone(),
         )
         .await
-        .wrap_err_with(|| format!("Could not start Prometheus endpoint at {listen_addr}"))?;
+        .wrap_err("Could not start Prometheus endpoint")?;
 
         // Describe metrics after recorder installation
         describe_db_metrics();
@@ -84,46 +87,43 @@ impl MetricServer {
             .await
             .wrap_err("Could not bind to address")?;
 
-        task_executor.spawn_with_graceful_shutdown_signal(|mut signal| {
-            Box::pin(async move {
-                loop {
-                    let io = tokio::select! {
-                        _ = &mut signal => break,
-                        io = listener.accept() => {
-                            match io {
-                                Ok((stream, _remote_addr)) => stream,
-                                Err(err) => {
-                                    tracing::error!(%err, "failed to accept connection");
-                                    continue;
-                                }
+        task_executor.spawn_with_graceful_shutdown_signal(|mut signal| async move {
+            loop {
+                let io = tokio::select! {
+                    _ = &mut signal => break,
+                    io = listener.accept() => {
+                        match io {
+                            Ok((stream, _remote_addr)) => stream,
+                            Err(err) => {
+                                tracing::error!(%err, "failed to accept connection");
+                                continue;
                             }
                         }
-                    };
+                    }
+                };
 
-                    let handle = install_prometheus_recorder();
-                    let hook = hook.clone();
-                    let service = tower::service_fn(move |_| {
-                        (hook)();
-                        let metrics = handle.handle().render();
-                        let mut response = Response::new(metrics);
-                        response
-                            .headers_mut()
-                            .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-                        async move { Ok::<_, Infallible>(response) }
-                    });
+                let handle = install_prometheus_recorder();
+                let hook = hook.clone();
+                let service = tower::service_fn(move |_| {
+                    (hook)();
+                    let metrics = handle.render();
+                    let mut response = Response::new(metrics);
+                    response
+                        .headers_mut()
+                        .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+                    async move { Ok::<_, Infallible>(response) }
+                });
 
-                    let mut shutdown = signal.clone().ignore_guard();
-                    tokio::task::spawn(async move {
-                        let _ = jsonrpsee_server::serve_with_graceful_shutdown(
-                            io,
-                            service,
-                            &mut shutdown,
-                        )
-                        .await
-                        .inspect_err(|error| tracing::debug!(%error, "failed to serve request"));
-                    });
-                }
-            })
+                let mut shutdown = signal.clone().ignore_guard();
+                tokio::task::spawn(async move {
+                    if let Err(error) =
+                        jsonrpsee::server::serve_with_graceful_shutdown(io, service, &mut shutdown)
+                            .await
+                    {
+                        tracing::debug!(%error, "failed to serve request")
+                    }
+                });
+            }
         });
 
         Ok(())
@@ -209,6 +209,7 @@ const fn describe_io_stats() {}
 mod tests {
     use super::*;
     use reqwest::Client;
+    use reth_provider::{test_utils::create_test_provider_factory, StaticFileProviderFactory};
     use reth_tasks::TaskManager;
     use socket2::{Domain, Socket, Type};
     use std::net::{SocketAddr, TcpListener};
@@ -238,7 +239,8 @@ mod tests {
         let tasks = TaskManager::current();
         let executor = tasks.executor();
 
-        let hooks = Hooks::builder().build();
+        let factory = create_test_provider_factory();
+        let hooks = Hooks::new(factory.db_ref().clone(), factory.static_file_provider());
 
         let listen_addr = get_random_available_addr();
         let config =
@@ -247,13 +249,13 @@ mod tests {
         MetricServer::new(config).serve().await.unwrap();
 
         // Send request to the metrics endpoint
-        let url = format!("http://{listen_addr}");
+        let url = format!("http://{}", listen_addr);
         let response = Client::new().get(&url).send().await.unwrap();
         assert!(response.status().is_success());
 
         // Check the response body
         let body = response.text().await.unwrap();
-        assert!(body.contains("reth_process_cpu_seconds_total"));
-        assert!(body.contains("reth_process_start_time_seconds"));
+        assert!(body.contains("reth_db_table_size"));
+        assert!(body.contains("reth_jemalloc_metadata"));
     }
 }

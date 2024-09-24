@@ -1,19 +1,17 @@
-use crate::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
+use crate::common::{AccessRights, Environment, EnvironmentArgs};
 use clap::{Parser, Subcommand};
-use reth_chainspec::{EthChainSpec, EthereumHardforks};
+use reth_chainspec::ChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_db::version::{get_db_version, DatabaseVersionError, DB_VERSION};
 use reth_db_common::DbTool;
-use std::{
-    io::{self, Write},
-    sync::Arc,
-};
+use reth_node_builder::NodeTypesWithEngine;
+use std::io::{self, Write};
+
 mod checksum;
 mod clear;
 mod diff;
 mod get;
 mod list;
-mod repair_trie;
 mod stats;
 /// DB List TUI
 mod tui;
@@ -49,8 +47,6 @@ pub enum Subcommands {
     },
     /// Deletes all table entries
     Clear(clear::Command),
-    /// Verifies trie consistency and outputs any inconsistencies
-    RepairTrie(repair_trie::Command),
     /// Lists current and local database versions
     Version,
     /// Returns the full database path
@@ -67,13 +63,14 @@ macro_rules! db_ro_exec {
     };
 }
 
-impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C> {
+impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
     /// Execute `db` command
-    pub async fn execute<N: CliNodeTypes<ChainSpec = C::ChainSpec>>(self) -> eyre::Result<()> {
-        let data_dir = self.env.datadir.clone().resolve_datadir(self.env.chain.chain());
+    pub async fn execute<N: NodeTypesWithEngine<ChainSpec = C::ChainSpec>>(
+        self,
+    ) -> eyre::Result<()> {
+        let data_dir = self.env.datadir.clone().resolve_datadir(self.env.chain.chain);
         let db_path = data_dir.db();
         let static_files_path = data_dir.static_files();
-        let exex_wal_path = data_dir.exex_wal();
 
         // ensure the provided datadir exist
         eyre::ensure!(
@@ -115,9 +112,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
             Subcommands::Drop { force } => {
                 if !force {
                     // Ask for confirmation
-                    print!(
-                        "Are you sure you want to drop the database at {data_dir}? This cannot be undone. (y/N): "
-                    );
+                    print!("Are you sure you want to drop the database at {data_dir}? This cannot be undone. (y/N): ");
                     // Flush the buffer to ensure the message is printed immediately
                     io::stdout().flush().unwrap();
 
@@ -132,16 +127,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
 
                 let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
                 let tool = DbTool::new(provider_factory)?;
-                tool.drop(db_path, static_files_path, exex_wal_path)?;
+                tool.drop(db_path, static_files_path)?;
             }
             Subcommands::Clear(command) => {
                 let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
-                command.execute(provider_factory)?;
-            }
-            Subcommands::RepairTrie(command) => {
-                let access_rights =
-                    if command.dry_run { AccessRights::RO } else { AccessRights::RW };
-                let Environment { provider_factory, .. } = self.env.init::<N>(access_rights)?;
                 command.execute(provider_factory)?;
             }
             Subcommands::Version => {
@@ -168,23 +157,16 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
     }
 }
 
-impl<C: ChainSpecParser> Command<C> {
-    /// Returns the underlying chain being used to run this command
-    pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
-        Some(&self.env.chain)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_ethereum_cli::chainspec::{EthereumChainSpecParser, SUPPORTED_CHAINS};
+    use reth_node_core::args::utils::{DefaultChainSpecParser, SUPPORTED_CHAINS};
     use std::path::Path;
 
     #[test]
     fn parse_stats_globals() {
         let path = format!("../{}", SUPPORTED_CHAINS[0]);
-        let cmd = Command::<EthereumChainSpecParser>::try_parse_from([
+        let cmd = Command::<DefaultChainSpecParser>::try_parse_from([
             "reth",
             "--datadir",
             &path,

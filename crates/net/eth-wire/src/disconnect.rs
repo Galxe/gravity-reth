@@ -1,14 +1,12 @@
 //! Disconnect
 
-use std::{future::Future, pin::Pin};
+use std::future::Future;
 
 use futures::{Sink, SinkExt};
 use reth_ecies::stream::ECIESStream;
 use reth_eth_wire_types::DisconnectReason;
 use tokio::io::AsyncWrite;
 use tokio_util::codec::{Encoder, Framed};
-
-type DisconnectResult<E> = Result<(), E>;
 
 /// This trait is meant to allow higher level protocols like `eth` to disconnect from a peer, using
 /// lower-level disconnect functions (such as those that exist in the `p2p` protocol) if the
@@ -20,7 +18,7 @@ pub trait CanDisconnect<T>: Sink<T> + Unpin {
     fn disconnect(
         &mut self,
         reason: DisconnectReason,
-    ) -> Pin<Box<dyn Future<Output = DisconnectResult<Self::Error>> + Send + '_>>;
+    ) -> impl Future<Output = Result<(), <Self as Sink<T>>::Error>> + Send;
 }
 
 // basic impls for things like Framed<TcpStream, etc>
@@ -29,11 +27,11 @@ where
     T: AsyncWrite + Unpin + Send,
     U: Encoder<I> + Send,
 {
-    fn disconnect(
+    async fn disconnect(
         &mut self,
         _reason: DisconnectReason,
-    ) -> Pin<Box<dyn Future<Output = Result<(), <Self as Sink<I>>::Error>> + Send + '_>> {
-        Box::pin(async move { self.close().await })
+    ) -> Result<(), <Self as Sink<I>>::Error> {
+        self.close().await
     }
 }
 
@@ -41,11 +39,8 @@ impl<S> CanDisconnect<bytes::Bytes> for ECIESStream<S>
 where
     S: AsyncWrite + Unpin + Send,
 {
-    fn disconnect(
-        &mut self,
-        _reason: DisconnectReason,
-    ) -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send + '_>> {
-        Box::pin(async move { self.close().await })
+    async fn disconnect(&mut self, _reason: DisconnectReason) -> Result<(), std::io::Error> {
+        self.close().await
     }
 }
 

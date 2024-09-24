@@ -1,19 +1,25 @@
 //! Types for broadcasting new data.
 
-use crate::{EthMessage, EthVersion, NetworkPrimitives};
-use alloc::{sync::Arc, vec::Vec};
-use alloy_primitives::{
-    map::{HashMap, HashSet},
-    Bytes, TxHash, B256, U128,
-};
+use crate::{EthMessage, EthVersion};
 use alloy_rlp::{
     Decodable, Encodable, RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper,
 };
-use core::{fmt::Debug, mem};
+
+use alloy_primitives::{Bytes, TxHash, B256, U128};
 use derive_more::{Constructor, Deref, DerefMut, From, IntoIterator};
-use reth_codecs_derive::{add_arbitrary_tests, generate_tests};
-use reth_ethereum_primitives::TransactionSigned;
-use reth_primitives_traits::{Block, SignedTransaction};
+use reth_codecs_derive::add_arbitrary_tests;
+use reth_primitives::{Block, PooledTransactionsElement, TransactionSigned};
+
+use std::{
+    collections::{HashMap, HashSet},
+    mem,
+    sync::Arc,
+};
+
+#[cfg(feature = "arbitrary")]
+use proptest::{collection::vec, prelude::*};
+#[cfg(feature = "arbitrary")]
+use proptest_arbitrary_interop::arb;
 
 /// This informs peers of new blocks that have appeared on the network.
 #[derive(Clone, Debug, PartialEq, Eq, RlpEncodableWrapper, RlpDecodableWrapper, Default)]
@@ -64,38 +70,18 @@ impl From<NewBlockHashes> for Vec<BlockHashNumber> {
     }
 }
 
-/// A trait for block payloads transmitted through p2p.
-pub trait NewBlockPayload:
-    Encodable + Decodable + Clone + Eq + Debug + Send + Sync + Unpin + 'static
-{
-    /// The block type.
-    type Block: Block;
-
-    /// Returns a reference to the block.
-    fn block(&self) -> &Self::Block;
-}
-
 /// A new block with the current total difficulty, which includes the difficulty of the returned
 /// block.
 #[derive(Clone, Debug, PartialEq, Eq, RlpEncodable, RlpDecodable, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
-pub struct NewBlock<B = reth_ethereum_primitives::Block> {
+#[add_arbitrary_tests(rlp, 25)]
+pub struct NewBlock {
     /// A new block.
-    pub block: B,
+    pub block: Block,
     /// The current total difficulty.
     pub td: U128,
 }
-
-impl<B: Block + 'static> NewBlockPayload for NewBlock<B> {
-    type Block = B;
-
-    fn block(&self) -> &Self::Block {
-        &self.block
-    }
-}
-
-generate_tests!(#[rlp, 25] NewBlock<reth_ethereum_primitives::Block>, EthNewBlockTests);
 
 /// This informs peers of transactions that have appeared on the network and are not yet included
 /// in a block.
@@ -103,26 +89,26 @@ generate_tests!(#[rlp, 25] NewBlock<reth_ethereum_primitives::Block>, EthNewBloc
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
 #[add_arbitrary_tests(rlp, 10)]
-pub struct Transactions<T = TransactionSigned>(
+pub struct Transactions(
     /// New transactions for the peer to include in its mempool.
-    pub Vec<T>,
+    pub Vec<TransactionSigned>,
 );
 
-impl<T: SignedTransaction> Transactions<T> {
+impl Transactions {
     /// Returns `true` if the list of transactions contains any blob transactions.
     pub fn has_eip4844(&self) -> bool {
         self.0.iter().any(|tx| tx.is_eip4844())
     }
 }
 
-impl<T> From<Vec<T>> for Transactions<T> {
-    fn from(txs: Vec<T>) -> Self {
+impl From<Vec<TransactionSigned>> for Transactions {
+    fn from(txs: Vec<TransactionSigned>) -> Self {
         Self(txs)
     }
 }
 
-impl<T> From<Transactions<T>> for Vec<T> {
-    fn from(txs: Transactions<T>) -> Self {
+impl From<Transactions> for Vec<TransactionSigned> {
+    fn from(txs: Transactions) -> Self {
         txs.0
     }
 }
@@ -134,14 +120,13 @@ impl<T> From<Transactions<T>> for Vec<T> {
 #[derive(Clone, Debug, PartialEq, Eq, RlpEncodableWrapper, RlpDecodableWrapper)]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
 #[add_arbitrary_tests(rlp, 20)]
-pub struct SharedTransactions<T = TransactionSigned>(
+pub struct SharedTransactions(
     /// New transactions for the peer to include in its mempool.
-    pub Vec<Arc<T>>,
+    pub Vec<Arc<TransactionSigned>>,
 );
 
 /// A wrapper type for all different new pooled transaction types
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NewPooledTransactionHashes {
     /// A list of transaction hashes valid for [66-68)
     Eth66(NewPooledTransactionHashes66),
@@ -169,7 +154,7 @@ impl NewPooledTransactionHashes {
                 matches!(version, EthVersion::Eth67 | EthVersion::Eth66)
             }
             Self::Eth68(_) => {
-                matches!(version, EthVersion::Eth68 | EthVersion::Eth69)
+                matches!(version, EthVersion::Eth68)
             }
         }
     }
@@ -191,7 +176,7 @@ impl NewPooledTransactionHashes {
     }
 
     /// Returns a mutable reference to transaction hashes.
-    pub const fn hashes_mut(&mut self) -> &mut Vec<B256> {
+    pub fn hashes_mut(&mut self) -> &mut Vec<B256> {
         match self {
             Self::Eth66(msg) => &mut msg.0,
             Self::Eth68(msg) => &mut msg.hashes,
@@ -228,7 +213,7 @@ impl NewPooledTransactionHashes {
     }
 
     /// Returns true if the message is empty
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         match self {
             Self::Eth66(msg) => msg.0.is_empty(),
             Self::Eth68(msg) => msg.hashes.is_empty(),
@@ -236,7 +221,7 @@ impl NewPooledTransactionHashes {
     }
 
     /// Returns the number of hashes in the message
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::Eth66(msg) => msg.0.len(),
             Self::Eth68(msg) => msg.hashes.len(),
@@ -252,7 +237,7 @@ impl NewPooledTransactionHashes {
     }
 
     /// Returns a mutable reference to the inner type if this an eth68 announcement.
-    pub const fn as_eth68_mut(&mut self) -> Option<&mut NewPooledTransactionHashes68> {
+    pub fn as_eth68_mut(&mut self) -> Option<&mut NewPooledTransactionHashes68> {
         match self {
             Self::Eth66(_) => None,
             Self::Eth68(msg) => Some(msg),
@@ -260,7 +245,7 @@ impl NewPooledTransactionHashes {
     }
 
     /// Returns a mutable reference to the inner type if this an eth66 announcement.
-    pub const fn as_eth66_mut(&mut self) -> Option<&mut NewPooledTransactionHashes66> {
+    pub fn as_eth66_mut(&mut self) -> Option<&mut NewPooledTransactionHashes66> {
         match self {
             Self::Eth66(msg) => Some(msg),
             Self::Eth68(_) => None,
@@ -284,7 +269,7 @@ impl NewPooledTransactionHashes {
     }
 }
 
-impl<N: NetworkPrimitives> From<NewPooledTransactionHashes> for EthMessage<N> {
+impl From<NewPooledTransactionHashes> for EthMessage {
     fn from(value: NewPooledTransactionHashes) -> Self {
         match value {
             NewPooledTransactionHashes::Eth66(msg) => Self::NewPooledTransactionHashes66(msg),
@@ -324,7 +309,7 @@ impl From<Vec<B256>> for NewPooledTransactionHashes66 {
     }
 }
 
-/// Same as [`NewPooledTransactionHashes66`] but extends that beside the transaction hashes,
+/// Same as [`NewPooledTransactionHashes66`] but extends that that beside the transaction hashes,
 /// the node sends the transaction types and their sizes (as defined in EIP-2718) as well.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -360,21 +345,17 @@ pub struct NewPooledTransactionHashes68 {
 }
 
 #[cfg(feature = "arbitrary")]
-impl proptest::prelude::Arbitrary for NewPooledTransactionHashes68 {
+impl Arbitrary for NewPooledTransactionHashes68 {
     type Parameters = ();
     fn arbitrary_with(_args: ()) -> Self::Strategy {
-        use proptest::{collection::vec, prelude::*};
         // Generate a single random length for all vectors
         let vec_length = any::<usize>().prop_map(|x| x % 100 + 1); // Lengths between 1 and 100
 
         vec_length
             .prop_flat_map(|len| {
                 // Use the generated length to create vectors of TxType, usize, and B256
-                let types_vec = vec(
-                    proptest_arbitrary_interop::arb::<reth_ethereum_primitives::TxType>()
-                        .prop_map(|ty| ty as u8),
-                    len..=len,
-                );
+                let types_vec =
+                    vec(arb::<reth_primitives::TxType>().prop_map(|ty| ty as u8), len..=len);
 
                 // Map the usize values to the range 0..131072(0x20000)
                 let sizes_vec = vec(proptest::num::usize::ANY.prop_map(|x| x % 131072), len..=len);
@@ -386,42 +367,13 @@ impl proptest::prelude::Arbitrary for NewPooledTransactionHashes68 {
             .boxed()
     }
 
-    type Strategy = proptest::prelude::BoxedStrategy<Self>;
+    type Strategy = BoxedStrategy<Self>;
 }
 
 impl NewPooledTransactionHashes68 {
     /// Returns an iterator over tx hashes zipped with corresponding metadata.
     pub fn metadata_iter(&self) -> impl Iterator<Item = (&B256, (u8, usize))> {
         self.hashes.iter().zip(self.types.iter().copied().zip(self.sizes.iter().copied()))
-    }
-
-    /// Appends a transaction
-    pub fn push<T: SignedTransaction>(&mut self, tx: &T) {
-        self.hashes.push(*tx.tx_hash());
-        self.sizes.push(tx.encode_2718_len());
-        self.types.push(tx.ty());
-    }
-
-    /// Appends the provided transactions
-    pub fn extend<'a, T: SignedTransaction>(&mut self, txs: impl IntoIterator<Item = &'a T>) {
-        for tx in txs {
-            self.push(tx);
-        }
-    }
-
-    /// Consumes and appends a transaction
-    pub fn with_transaction<T: SignedTransaction>(mut self, tx: &T) -> Self {
-        self.push(tx);
-        self
-    }
-
-    /// Consumes and appends the provided transactions
-    pub fn with_transactions<'a, T: SignedTransaction>(
-        mut self,
-        txs: impl IntoIterator<Item = &'a T>,
-    ) -> Self {
-        self.extend(txs);
-        self
     }
 }
 
@@ -544,7 +496,7 @@ impl DedupPayload for NewPooledTransactionHashes68 {
     fn dedup(self) -> PartiallyValidData<Self::Value> {
         let Self { hashes, mut sizes, mut types } = self;
 
-        let mut deduped_data = HashMap::with_capacity_and_hasher(hashes.len(), Default::default());
+        let mut deduped_data = HashMap::with_capacity(hashes.len());
 
         for hash in hashes.into_iter().rev() {
             if let (Some(ty), Some(size)) = (types.pop(), sizes.pop()) {
@@ -570,7 +522,7 @@ impl DedupPayload for NewPooledTransactionHashes66 {
     fn dedup(self) -> PartiallyValidData<Self::Value> {
         let Self(hashes) = self;
 
-        let mut deduped_data = HashMap::with_capacity_and_hasher(hashes.len(), Default::default());
+        let mut deduped_data = HashMap::with_capacity(hashes.len());
 
         let noop_value: Eth68TxMetadata = None;
 
@@ -602,7 +554,7 @@ pub trait HandleVersionedMempoolData {
     fn msg_version(&self) -> EthVersion;
 }
 
-impl<T: SignedTransaction> HandleMempoolData for Vec<T> {
+impl HandleMempoolData for Vec<PooledTransactionsElement> {
     fn is_empty(&self) -> bool {
         self.is_empty()
     }
@@ -612,7 +564,7 @@ impl<T: SignedTransaction> HandleMempoolData for Vec<T> {
     }
 
     fn retain_by_hash(&mut self, mut f: impl FnMut(&TxHash) -> bool) {
-        self.retain(|tx| f(tx.tx_hash()))
+        self.retain(|tx| f(tx.hash()))
     }
 }
 
@@ -666,13 +618,13 @@ impl<V> PartiallyValidData<V> {
     /// Returns a new [`PartiallyValidData`] with empty data from an [`Eth68`](EthVersion::Eth68)
     /// announcement.
     pub fn empty_eth68() -> Self {
-        Self::from_raw_data_eth68(HashMap::default())
+        Self::from_raw_data_eth68(HashMap::new())
     }
 
     /// Returns a new [`PartiallyValidData`] with empty data from an [`Eth66`](EthVersion::Eth66)
     /// announcement.
     pub fn empty_eth66() -> Self {
-        Self::from_raw_data_eth66(HashMap::default())
+        Self::from_raw_data_eth66(HashMap::new())
     }
 
     /// Returns the version of the message this data was received in if different versions of the
@@ -747,12 +699,12 @@ impl RequestTxHashes {
     /// be stored in its entirety like in the future waiting for a
     /// [`GetPooledTransactions`](crate::GetPooledTransactions) request to resolve.
     pub fn with_capacity(capacity: usize) -> Self {
-        Self::new(HashSet::with_capacity_and_hasher(capacity, Default::default()))
+        Self::new(HashSet::with_capacity(capacity))
     }
 
     /// Returns an new empty instance.
     fn empty() -> Self {
-        Self::new(HashSet::default())
+        Self::new(HashSet::new())
     }
 
     /// Retains the given number of elements, returning and iterator over the rest.
@@ -780,36 +732,19 @@ impl RequestTxHashes {
 
 impl FromIterator<(TxHash, Eth68TxMetadata)> for RequestTxHashes {
     fn from_iter<I: IntoIterator<Item = (TxHash, Eth68TxMetadata)>>(iter: I) -> Self {
-        Self::new(iter.into_iter().map(|(hash, _)| hash).collect())
+        Self::new(iter.into_iter().map(|(hash, _)| hash).collect::<HashSet<_>>())
     }
-}
-
-/// The earliest block, the latest block and hash of the latest block which can be provided.
-/// See [BlockRangeUpdate](https://github.com/ethereum/devp2p/blob/master/caps/eth.md#blockrangeupdate-0x11).
-#[derive(Clone, Debug, PartialEq, Eq, Default, RlpEncodable, RlpDecodable)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
-pub struct BlockRangeUpdate {
-    /// The earliest block which is available.
-    pub earliest: u64,
-    /// The latest block which is available.
-    pub latest: u64,
-    /// Latest available block's hash.
-    pub latest_hash: B256,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{transaction::TxHashRef, Typed2718};
-    use alloy_eips::eip2718::Encodable2718;
-    use alloy_primitives::{b256, hex, Signature, U256};
-    use reth_ethereum_primitives::{Transaction, TransactionSigned};
+    use alloy_primitives::{b256, hex};
     use std::str::FromStr;
 
     /// Takes as input a struct / encoded hex message pair, ensuring that we encode to the exact hex
     /// message, and decode to the exact struct.
-    fn test_encoding_vector<T: Encodable + Decodable + PartialEq + core::fmt::Debug>(
+    fn test_encoding_vector<T: Encodable + Decodable + PartialEq + std::fmt::Debug>(
         input: (T, &[u8]),
     ) {
         let (expected_decoded, expected_encoded) = input;
@@ -838,133 +773,115 @@ mod tests {
     fn eth_68_tx_hash_roundtrip() {
         let vectors = vec![
             (
-                NewPooledTransactionHashes68 { types: vec![], sizes: vec![], hashes: vec![] },
-                &hex!("c380c0c0")[..],
+            NewPooledTransactionHashes68 { types: vec![], sizes: vec![], hashes: vec![] },
+            &hex!("c380c0c0")[..],
             ),
             (
-                NewPooledTransactionHashes68 {
-                    types: vec![0x00],
-                    sizes: vec![0x00],
-                    hashes: vec![
-                        B256::from_str(
-                            "0x0000000000000000000000000000000000000000000000000000000000000000",
-                        )
-                        .unwrap(),
-                    ],
-                },
-                &hex!(
-                    "e500c180e1a00000000000000000000000000000000000000000000000000000000000000000"
-                )[..],
+            NewPooledTransactionHashes68 {
+                types: vec![0x00],
+                sizes: vec![0x00],
+                hashes: vec![B256::from_str(
+                    "0x0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .unwrap()],
+            },
+            &hex!("e500c180e1a00000000000000000000000000000000000000000000000000000000000000000")[..],
             ),
             (
-                NewPooledTransactionHashes68 {
-                    types: vec![0x00, 0x00],
-                    sizes: vec![0x00, 0x00],
-                    hashes: vec![
-                        B256::from_str(
-                            "0x0000000000000000000000000000000000000000000000000000000000000000",
-                        )
-                        .unwrap(),
-                        B256::from_str(
-                            "0x0000000000000000000000000000000000000000000000000000000000000000",
-                        )
-                        .unwrap(),
-                    ],
-                },
-                &hex!(
-                    "f84a820000c28080f842a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000"
-                )[..],
+            NewPooledTransactionHashes68 {
+                types: vec![0x00, 0x00],
+                sizes: vec![0x00, 0x00],
+                hashes: vec![
+                    B256::from_str(
+                        "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    )
+                    .unwrap(),
+                    B256::from_str(
+                        "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    )
+                    .unwrap(),
+                ],
+            },
+            &hex!("f84a820000c28080f842a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000")[..],
             ),
             (
-                NewPooledTransactionHashes68 {
-                    types: vec![0x02],
-                    sizes: vec![0xb6],
-                    hashes: vec![
-                        B256::from_str(
-                            "0xfecbed04c7b88d8e7221a0a3f5dc33f220212347fc167459ea5cc9c3eb4c1124",
-                        )
-                        .unwrap(),
-                    ],
-                },
-                &hex!(
-                    "e602c281b6e1a0fecbed04c7b88d8e7221a0a3f5dc33f220212347fc167459ea5cc9c3eb4c1124"
-                )[..],
+            NewPooledTransactionHashes68 {
+                types: vec![0x02],
+                sizes: vec![0xb6],
+                hashes: vec![B256::from_str(
+                    "0xfecbed04c7b88d8e7221a0a3f5dc33f220212347fc167459ea5cc9c3eb4c1124",
+                )
+                .unwrap()],
+            },
+            &hex!("e602c281b6e1a0fecbed04c7b88d8e7221a0a3f5dc33f220212347fc167459ea5cc9c3eb4c1124")[..],
             ),
             (
-                NewPooledTransactionHashes68 {
-                    types: vec![0xff, 0xff],
-                    sizes: vec![0xffffffff, 0xffffffff],
-                    hashes: vec![
-                        B256::from_str(
-                            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                        )
-                        .unwrap(),
-                        B256::from_str(
-                            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                        )
-                        .unwrap(),
-                    ],
-                },
-                &hex!(
-                    "f85282ffffca84ffffffff84fffffffff842a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-                )[..],
+            NewPooledTransactionHashes68 {
+                types: vec![0xff, 0xff],
+                sizes: vec![0xffffffff, 0xffffffff],
+                hashes: vec![
+                    B256::from_str(
+                        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                    )
+                    .unwrap(),
+                    B256::from_str(
+                        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                    )
+                    .unwrap(),
+                ],
+            },
+            &hex!("f85282ffffca84ffffffff84fffffffff842a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")[..],
             ),
             (
-                NewPooledTransactionHashes68 {
-                    types: vec![0xff, 0xff],
-                    sizes: vec![0xffffffff, 0xffffffff],
-                    hashes: vec![
-                        B256::from_str(
-                            "0xbeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafe",
-                        )
-                        .unwrap(),
-                        B256::from_str(
-                            "0xbeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafe",
-                        )
-                        .unwrap(),
-                    ],
-                },
-                &hex!(
-                    "f85282ffffca84ffffffff84fffffffff842a0beefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafea0beefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafe"
-                )[..],
+            NewPooledTransactionHashes68 {
+                types: vec![0xff, 0xff],
+                sizes: vec![0xffffffff, 0xffffffff],
+                hashes: vec![
+                    B256::from_str(
+                        "0xbeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafe",
+                    )
+                    .unwrap(),
+                    B256::from_str(
+                        "0xbeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafe",
+                    )
+                    .unwrap(),
+                ],
+            },
+            &hex!("f85282ffffca84ffffffff84fffffffff842a0beefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafea0beefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafe")[..],
             ),
             (
-                NewPooledTransactionHashes68 {
-                    types: vec![0x10, 0x10],
-                    sizes: vec![0xdeadc0de, 0xdeadc0de],
-                    hashes: vec![
-                        B256::from_str(
-                            "0x3b9aca00f0671c9a2a1b817a0a78d3fe0c0f776cccb2a8c3c1b412a4f4e4d4e2",
-                        )
-                        .unwrap(),
-                        B256::from_str(
-                            "0x3b9aca00f0671c9a2a1b817a0a78d3fe0c0f776cccb2a8c3c1b412a4f4e4d4e2",
-                        )
-                        .unwrap(),
-                    ],
-                },
-                &hex!(
-                    "f852821010ca84deadc0de84deadc0def842a03b9aca00f0671c9a2a1b817a0a78d3fe0c0f776cccb2a8c3c1b412a4f4e4d4e2a03b9aca00f0671c9a2a1b817a0a78d3fe0c0f776cccb2a8c3c1b412a4f4e4d4e2"
-                )[..],
+            NewPooledTransactionHashes68 {
+                types: vec![0x10, 0x10],
+                sizes: vec![0xdeadc0de, 0xdeadc0de],
+                hashes: vec![
+                    B256::from_str(
+                        "0x3b9aca00f0671c9a2a1b817a0a78d3fe0c0f776cccb2a8c3c1b412a4f4e4d4e2",
+                    )
+                    .unwrap(),
+                    B256::from_str(
+                        "0x3b9aca00f0671c9a2a1b817a0a78d3fe0c0f776cccb2a8c3c1b412a4f4e4d4e2",
+                    )
+                    .unwrap(),
+                ],
+            },
+            &hex!("f852821010ca84deadc0de84deadc0def842a03b9aca00f0671c9a2a1b817a0a78d3fe0c0f776cccb2a8c3c1b412a4f4e4d4e2a03b9aca00f0671c9a2a1b817a0a78d3fe0c0f776cccb2a8c3c1b412a4f4e4d4e2")[..],
             ),
             (
-                NewPooledTransactionHashes68 {
-                    types: vec![0x6f, 0x6f],
-                    sizes: vec![0x7fffffff, 0x7fffffff],
-                    hashes: vec![
-                        B256::from_str(
-                            "0x0000000000000000000000000000000000000000000000000000000000000002",
-                        )
-                        .unwrap(),
-                        B256::from_str(
-                            "0x0000000000000000000000000000000000000000000000000000000000000002",
-                        )
-                        .unwrap(),
-                    ],
-                },
-                &hex!(
-                    "f852826f6fca847fffffff847ffffffff842a00000000000000000000000000000000000000000000000000000000000000002a00000000000000000000000000000000000000000000000000000000000000002"
-                )[..],
+            NewPooledTransactionHashes68 {
+                types: vec![0x6f, 0x6f],
+                sizes: vec![0x7fffffff, 0x7fffffff],
+                hashes: vec![
+                    B256::from_str(
+                        "0x0000000000000000000000000000000000000000000000000000000000000002",
+                    )
+                    .unwrap(),
+                    B256::from_str(
+                        "0x0000000000000000000000000000000000000000000000000000000000000002",
+                    )
+                    .unwrap(),
+                ],
+            },
+            &hex!("f852826f6fca847fffffff847ffffffff842a00000000000000000000000000000000000000000000000000000000000000002a00000000000000000000000000000000000000000000000000000000000000002")[..],
             ),
         ];
 
@@ -977,11 +894,11 @@ mod tests {
     fn request_hashes_retain_count_keep_subset() {
         let mut hashes = RequestTxHashes::new(
             [
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000004"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000005"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000001"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000002"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000003"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000004"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000005"),
             ]
             .into_iter()
             .collect::<HashSet<_>>(),
@@ -997,11 +914,11 @@ mod tests {
     fn request_hashes_retain_count_keep_all() {
         let mut hashes = RequestTxHashes::new(
             [
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000004"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000005"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000001"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000002"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000003"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000004"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000005"),
             ]
             .into_iter()
             .collect::<HashSet<_>>(),
@@ -1016,11 +933,11 @@ mod tests {
     fn split_request_hashes_keep_none() {
         let mut hashes = RequestTxHashes::new(
             [
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000004"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000005"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000001"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000002"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000003"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000004"),
+                b256!("0000000000000000000000000000000000000000000000000000000000000005"),
             ]
             .into_iter()
             .collect::<HashSet<_>>(),
@@ -1030,86 +947,5 @@ mod tests {
 
         assert_eq!(0, hashes.len());
         assert_eq!(5, rest.len());
-    }
-
-    fn signed_transaction() -> impl SignedTransaction {
-        TransactionSigned::new_unhashed(
-            Transaction::Legacy(Default::default()),
-            Signature::new(
-                U256::from_str(
-                    "0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c12",
-                )
-                .unwrap(),
-                U256::from_str(
-                    "0x64b1702d9298fee62dfeccc57d322a463ad55ca201256d01f62b45b2e1c21c10",
-                )
-                .unwrap(),
-                false,
-            ),
-        )
-    }
-
-    #[test]
-    fn test_pooled_tx_hashes_68_push() {
-        let tx = signed_transaction();
-        let mut tx_hashes =
-            NewPooledTransactionHashes68 { types: vec![], sizes: vec![], hashes: vec![] };
-        tx_hashes.push(&tx);
-        assert_eq!(tx_hashes.types.len(), 1);
-        assert_eq!(tx_hashes.sizes.len(), 1);
-        assert_eq!(tx_hashes.hashes.len(), 1);
-        assert_eq!(tx_hashes.types[0], tx.ty());
-        assert_eq!(tx_hashes.sizes[0], tx.encode_2718_len());
-        assert_eq!(tx_hashes.hashes[0], *tx.tx_hash());
-    }
-
-    #[test]
-    fn test_pooled_tx_hashes_68_extend() {
-        let tx = signed_transaction();
-        let txs = vec![tx.clone(), tx.clone()];
-        let mut tx_hashes =
-            NewPooledTransactionHashes68 { types: vec![], sizes: vec![], hashes: vec![] };
-        tx_hashes.extend(&txs);
-        assert_eq!(tx_hashes.types.len(), 2);
-        assert_eq!(tx_hashes.sizes.len(), 2);
-        assert_eq!(tx_hashes.hashes.len(), 2);
-        assert_eq!(tx_hashes.types[0], tx.ty());
-        assert_eq!(tx_hashes.sizes[0], tx.encode_2718_len());
-        assert_eq!(tx_hashes.hashes[0], *tx.tx_hash());
-        assert_eq!(tx_hashes.types[1], tx.ty());
-        assert_eq!(tx_hashes.sizes[1], tx.encode_2718_len());
-        assert_eq!(tx_hashes.hashes[1], *tx.tx_hash());
-    }
-
-    #[test]
-    fn test_pooled_tx_hashes_68_with_transaction() {
-        let tx = signed_transaction();
-        let tx_hashes =
-            NewPooledTransactionHashes68 { types: vec![], sizes: vec![], hashes: vec![] }
-                .with_transaction(&tx);
-        assert_eq!(tx_hashes.types.len(), 1);
-        assert_eq!(tx_hashes.sizes.len(), 1);
-        assert_eq!(tx_hashes.hashes.len(), 1);
-        assert_eq!(tx_hashes.types[0], tx.ty());
-        assert_eq!(tx_hashes.sizes[0], tx.encode_2718_len());
-        assert_eq!(tx_hashes.hashes[0], *tx.tx_hash());
-    }
-
-    #[test]
-    fn test_pooled_tx_hashes_68_with_transactions() {
-        let tx = signed_transaction();
-        let txs = vec![tx.clone(), tx.clone()];
-        let tx_hashes =
-            NewPooledTransactionHashes68 { types: vec![], sizes: vec![], hashes: vec![] }
-                .with_transactions(&txs);
-        assert_eq!(tx_hashes.types.len(), 2);
-        assert_eq!(tx_hashes.sizes.len(), 2);
-        assert_eq!(tx_hashes.hashes.len(), 2);
-        assert_eq!(tx_hashes.types[0], tx.ty());
-        assert_eq!(tx_hashes.sizes[0], tx.encode_2718_len());
-        assert_eq!(tx_hashes.hashes[0], *tx.tx_hash());
-        assert_eq!(tx_hashes.types[1], tx.ty());
-        assert_eq!(tx_hashes.sizes[1], tx.encode_2718_len());
-        assert_eq!(tx_hashes.hashes[1], *tx.tx_hash());
     }
 }

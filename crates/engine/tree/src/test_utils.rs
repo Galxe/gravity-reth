@@ -1,8 +1,6 @@
-use alloy_primitives::B256;
 use reth_chainspec::ChainSpec;
-use reth_ethereum_primitives::BlockBody;
 use reth_network_p2p::test_utils::TestFullBlockClient;
-use reth_primitives_traits::SealedHeader;
+use reth_primitives::{BlockBody, SealedHeader, B256};
 use reth_provider::{
     test_utils::{create_test_provider_factory_with_chain_spec, MockNodeTypesWithDB},
     ExecutionOutcome,
@@ -37,6 +35,7 @@ impl TestPipelineBuilder {
     }
 
     /// Set the executor results to use for the test consensus engine.
+    #[allow(dead_code)]
     pub fn with_executor_results(mut self, executor_results: Vec<ExecutionOutcome>) -> Self {
         self.executor_results = executor_results;
         self
@@ -76,7 +75,7 @@ pub fn insert_headers_into_client(
         header.parent_hash = hash;
         header.number += 1;
         header.timestamp += 1;
-        sealed_header = SealedHeader::seal_slow(header);
+        sealed_header = header.seal_slow();
         client.insert(sealed_header.clone(), body.clone());
     }
 }

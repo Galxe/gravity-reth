@@ -13,7 +13,7 @@ pub const BANNED_REPUTATION: i32 = 50 * REPUTATION_UNIT;
 const REMOTE_DISCONNECT_REPUTATION_CHANGE: i32 = 4 * REPUTATION_UNIT;
 
 /// The reputation change to apply to a peer that we failed to connect to.
-pub const FAILED_TO_CONNECT_REPUTATION_CHANGE: i32 = 25 * REPUTATION_UNIT;
+const FAILED_TO_CONNECT_REPUTATION_CHANGE: i32 = 25 * REPUTATION_UNIT;
 
 /// The reputation change to apply to a peer that failed to respond in time.
 const TIMEOUT_REPUTATION_CHANGE: i32 = 4 * REPUTATION_UNIT;
@@ -46,13 +46,6 @@ pub const MAX_TRUSTED_PEER_REPUTATION_CHANGE: Reputation = 2 * REPUTATION_UNIT;
 #[inline]
 pub const fn is_banned_reputation(reputation: i32) -> bool {
     reputation < BANNED_REPUTATION
-}
-
-/// Returns `true` if the given reputation is below the [`FAILED_TO_CONNECT_REPUTATION_CHANGE`]
-/// threshold
-#[inline]
-pub const fn is_connection_failed_reputation(reputation: i32) -> bool {
-    reputation < FAILED_TO_CONNECT_REPUTATION_CHANGE
 }
 
 /// The type that tracks the reputation score.
@@ -136,21 +129,6 @@ pub struct ReputationChangeWeights {
 // === impl ReputationChangeWeights ===
 
 impl ReputationChangeWeights {
-    /// Creates a new instance that doesn't penalize any kind of reputation change.
-    pub const fn zero() -> Self {
-        Self {
-            bad_block: 0,
-            bad_transactions: 0,
-            already_seen_transactions: 0,
-            bad_message: 0,
-            timeout: 0,
-            bad_protocol: 0,
-            failed_to_connect: 0,
-            dropped: 0,
-            bad_announcement: 0,
-        }
-    }
-
     /// Returns the quantifiable [`ReputationChange`] for the given [`ReputationChangeKind`] using
     /// the configured weights
     pub fn change(&self, kind: ReputationChangeKind) -> ReputationChange {

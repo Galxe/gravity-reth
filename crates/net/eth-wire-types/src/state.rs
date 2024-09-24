@@ -1,6 +1,5 @@
 //! Implements the `GetNodeData` and `NodeData` message types.
 
-use alloc::vec::Vec;
 use alloy_primitives::{Bytes, B256};
 use alloy_rlp::{RlpDecodableWrapper, RlpEncodableWrapper};
 use reth_codecs_derive::add_arbitrary_tests;
@@ -35,11 +34,9 @@ mod tests {
     #[test]
     // Test vector from: https://eips.ethereum.org/EIPS/eip-2481
     fn encode_get_node_data() {
-        let expected = hex!(
-            "f847820457f842a000000000000000000000000000000000000000000000000000000000deadc0dea000000000000000000000000000000000000000000000000000000000feedbeef"
-        );
+        let expected = hex!("f847820457f842a000000000000000000000000000000000000000000000000000000000deadc0dea000000000000000000000000000000000000000000000000000000000feedbeef");
         let mut data = vec![];
-        let request = RequestPair {
+        let request = RequestPair::<GetNodeData> {
             request_id: 1111,
             message: GetNodeData(vec![
                 hex!("00000000000000000000000000000000000000000000000000000000deadc0de").into(),
@@ -53,13 +50,11 @@ mod tests {
     #[test]
     // Test vector from: https://eips.ethereum.org/EIPS/eip-2481
     fn decode_get_node_data() {
-        let data = hex!(
-            "f847820457f842a000000000000000000000000000000000000000000000000000000000deadc0dea000000000000000000000000000000000000000000000000000000000feedbeef"
-        );
+        let data = hex!("f847820457f842a000000000000000000000000000000000000000000000000000000000deadc0dea000000000000000000000000000000000000000000000000000000000feedbeef");
         let request = RequestPair::<GetNodeData>::decode(&mut &data[..]).unwrap();
         assert_eq!(
             request,
-            RequestPair {
+            RequestPair::<GetNodeData> {
                 request_id: 1111,
                 message: GetNodeData(vec![
                     hex!("00000000000000000000000000000000000000000000000000000000deadc0de").into(),
@@ -74,7 +69,7 @@ mod tests {
     fn encode_node_data() {
         let expected = hex!("ce820457ca84deadc0de84feedbeef");
         let mut data = vec![];
-        let request = RequestPair {
+        let request = RequestPair::<NodeData> {
             request_id: 1111,
             message: NodeData(vec![
                 hex!("deadc0de").as_slice().into(),
@@ -92,7 +87,7 @@ mod tests {
         let request = RequestPair::<NodeData>::decode(&mut &data[..]).unwrap();
         assert_eq!(
             request,
-            RequestPair {
+            RequestPair::<NodeData> {
                 request_id: 1111,
                 message: NodeData(vec![
                     hex!("deadc0de").as_slice().into(),

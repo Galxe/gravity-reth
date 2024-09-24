@@ -1,6 +1,6 @@
 //! This crate defines abstractions to create and update payloads (blocks):
 //! - [`PayloadJobGenerator`]: a type that knows how to create new jobs for creating payloads based
-//!   on [`PayloadAttributes`](alloy_rpc_types::engine::PayloadAttributes).
+//!   on [`PayloadAttributes`](reth_rpc_types::engine::PayloadAttributes).
 //! - [`PayloadJob`]: a type that yields (better) payloads over time.
 //!
 //! This crate comes with the generic [`PayloadBuilderService`] responsible for managing payload
@@ -26,12 +26,10 @@
 //! ```
 //! use std::future::Future;
 //! use std::pin::Pin;
-//! use std::sync::Arc;
 //! use std::task::{Context, Poll};
-//! use alloy_consensus::{Header, Block};
-//! use alloy_primitives::U256;
-//! use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError, KeepPayloadJobAlive, EthPayloadBuilderAttributes, PayloadJob, PayloadJobGenerator, PayloadKind};
-//! use reth_primitives_traits::SealedBlock;
+//! use reth_payload_builder::{EthBuiltPayload, KeepPayloadJobAlive, EthPayloadBuilderAttributes, PayloadJob, PayloadJobGenerator};
+//! use reth_payload_builder::error::PayloadBuilderError;
+//! use reth_primitives::{Block, Header, U256};
 //!
 //! /// The generator type that creates new jobs that builds empty blocks.
 //! pub struct EmptyBlockPayloadJobGenerator;
@@ -58,7 +56,7 @@
 //!
 //! fn best_payload(&self) -> Result<EthBuiltPayload, PayloadBuilderError> {
 //!     // NOTE: some fields are omitted here for brevity
-//!     let block = Block {
+//!     let payload = Block {
 //!         header: Header {
 //!             parent_hash: self.attributes.parent,
 //!             timestamp: self.attributes.timestamp,
@@ -67,7 +65,7 @@
 //!         },
 //!         ..Default::default()
 //!     };
-//!     let payload = EthBuiltPayload::new(self.attributes.id, Arc::new(SealedBlock::seal_slow(block)), U256::ZERO, None);
+//!     let payload = EthBuiltPayload::new(self.attributes.id, payload.seal_slow(), U256::ZERO, None);
 //!     Ok(payload)
 //! }
 //!
@@ -75,11 +73,7 @@
 //!     Ok(self.attributes.clone())
 //! }
 //!
-//! fn payload_timestamp(&self) -> Result<u64, PayloadBuilderError> {
-//!     Ok(self.attributes.timestamp)
-//! }
-//!
-//! fn resolve_kind(&mut self, _kind: PayloadKind) -> (Self::ResolvePayloadFuture, KeepPayloadJobAlive) {
+//! fn resolve(&mut self) -> (Self::ResolvePayloadFuture, KeepPayloadJobAlive) {
 //!        let payload = self.best_payload();
 //!        (futures_util::future::ready(payload), KeepPayloadJobAlive::No)
 //!     }
@@ -107,6 +101,9 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+pub mod database;
+pub mod error;
+mod events;
 mod metrics;
 mod service;
 mod traits;
@@ -116,9 +113,8 @@ pub mod noop;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
-pub use alloy_rpc_types::engine::PayloadId;
-pub use reth_payload_builder_primitives::PayloadBuilderError;
-pub use reth_payload_primitives::PayloadKind;
+pub use events::{Events, PayloadEvents};
+pub use reth_rpc_types::engine::PayloadId;
 pub use service::{
     PayloadBuilderHandle, PayloadBuilderService, PayloadServiceCommand, PayloadStore,
 };
@@ -126,6 +122,4 @@ pub use traits::{KeepPayloadJobAlive, PayloadJob, PayloadJobGenerator};
 
 // re-export the Ethereum engine primitives for convenience
 #[doc(inline)]
-pub use reth_ethereum_engine_primitives::{
-    BlobSidecars, EthBuiltPayload, EthPayloadBuilderAttributes,
-};
+pub use reth_ethereum_engine_primitives::{EthBuiltPayload, EthPayloadBuilderAttributes};

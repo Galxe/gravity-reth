@@ -1,21 +1,5 @@
 //! Discovery support for the network.
 
-use crate::{
-    cache::LruMap,
-    error::{NetworkError, ServiceKind},
-};
-use enr::Enr;
-use futures::StreamExt;
-use reth_discv4::{DiscoveryUpdate, Discv4, Discv4Config};
-use reth_discv5::{DiscoveredPeer, Discv5};
-use reth_dns_discovery::{
-    DnsDiscoveryConfig, DnsDiscoveryHandle, DnsDiscoveryService, DnsNodeRecordUpdate, DnsResolver,
-};
-use reth_ethereum_forks::{EnrForkIdEntry, ForkId};
-use reth_network_api::{DiscoveredEvent, DiscoveryEvent};
-use reth_network_peers::{NodeRecord, PeerId};
-use reth_network_types::PeerAddr;
-use secp256k1::SecretKey;
 use std::{
     collections::VecDeque,
     net::{IpAddr, SocketAddr},
@@ -23,9 +7,27 @@ use std::{
     sync::Arc,
     task::{ready, Context, Poll},
 };
+
+use enr::Enr;
+use futures::StreamExt;
+use reth_discv4::{DiscoveryUpdate, Discv4, Discv4Config};
+use reth_discv5::{DiscoveredPeer, Discv5};
+use reth_dns_discovery::{
+    DnsDiscoveryConfig, DnsDiscoveryHandle, DnsDiscoveryService, DnsNodeRecordUpdate, DnsResolver,
+};
+use reth_network_api::{DiscoveredEvent, DiscoveryEvent};
+use reth_network_peers::{NodeRecord, PeerId};
+use reth_network_types::PeerAddr;
+use reth_primitives::{EnrForkIdEntry, ForkId};
+use secp256k1::SecretKey;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tracing::trace;
+
+use crate::{
+    cache::LruMap,
+    error::{NetworkError, ServiceKind},
+};
 
 /// Default max capacity for cache of discovered peers.
 ///
@@ -200,7 +202,6 @@ impl Discovery {
     }
 
     /// Add a node to the discv4 table.
-    #[expect(clippy::result_large_err)]
     pub(crate) fn add_discv5_node(&self, enr: Enr<SecretKey>) -> Result<(), NetworkError> {
         if let Some(discv5) = &self.discv5 {
             discv5.add_node(enr).map_err(NetworkError::Discv5Error)?;
@@ -213,10 +214,6 @@ impl Discovery {
     fn on_node_record_update(&mut self, record: NodeRecord, fork_id: Option<ForkId>) {
         let peer_id = record.id;
         let tcp_addr = record.tcp_addr();
-        if tcp_addr.port() == 0 {
-            // useless peer for p2p
-            return
-        }
         let udp_addr = record.udp_addr();
         let addr = PeerAddr::new(tcp_addr, Some(udp_addr));
         _ =
@@ -267,11 +264,12 @@ impl Discovery {
             while let Some(Poll::Ready(Some(update))) =
                 self.discv5_updates.as_mut().map(|updates| updates.poll_next_unpin(cx))
             {
-                if let Some(discv5) = self.discv5.as_mut() &&
-                    let Some(DiscoveredPeer { node_record, fork_id }) =
+                if let Some(discv5) = self.discv5.as_mut() {
+                    if let Some(DiscoveredPeer { node_record, fork_id }) =
                         discv5.on_discv5_update(update)
-                {
-                    self.on_node_record_update(node_record, fork_id);
+                    {
+                        self.on_node_record_update(node_record, fork_id);
+                    }
                 }
             }
 
@@ -338,12 +336,14 @@ impl Discovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::thread_rng;
     use secp256k1::SECP256K1;
     use std::net::{Ipv4Addr, SocketAddrV4};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_discovery_setup() {
-        let (secret_key, _) = SECP256K1.generate_keypair(&mut rand_08::thread_rng());
+        let mut rng = thread_rng();
+        let (secret_key, _) = SECP256K1.generate_keypair(&mut rng);
         let discovery_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
         let _discovery = Discovery::new(
             discovery_addr,
@@ -362,7 +362,7 @@ mod tests {
     use tracing::trace;
 
     async fn start_discovery_node(udp_port_discv4: u16, udp_port_discv5: u16) -> Discovery {
-        let secret_key = SecretKey::new(&mut rand_08::thread_rng());
+        let secret_key = SecretKey::new(&mut thread_rng());
 
         let discv4_addr = format!("127.0.0.1:{udp_port_discv4}").parse().unwrap();
         let discv5_addr: SocketAddr = format!("127.0.0.1:{udp_port_discv5}").parse().unwrap();

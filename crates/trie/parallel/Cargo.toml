@@ -13,14 +13,13 @@ workspace = true
 
 [dependencies]
 # reth
+reth-primitives.workspace = true
+reth-db.workspace = true
 reth-db-api.workspace = true
+reth-trie.workspace = true
+reth-trie-db.workspace = true
 reth-execution-errors.workspace = true
 reth-provider.workspace = true
-reth-storage-errors.workspace = true
-reth-trie-common.workspace = true
-reth-trie-db.workspace = true
-reth-trie-sparse = { workspace = true, features = ["std"] }
-reth-trie.workspace = true
 
 # alloy
 alloy-rlp.workspace = true
@@ -32,9 +31,14 @@ tracing.workspace = true
 # misc
 thiserror.workspace = true
 derive_more.workspace = true
-rayon.workspace = true
-itertools.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+# `async` feature
+reth-tasks = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, default-features = false }
+itertools = { workspace = true, optional = true }
+
+# `parallel` feature
+rayon = { workspace = true, optional = true }
 
 # `metrics` feature
 reth-metrics = { workspace = true, optional = true }
@@ -42,30 +46,25 @@ metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
 # reth
-reth-primitives-traits.workspace = true
+reth-primitives = { workspace = true, features = ["test-utils", "arbitrary"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-trie = { workspace = true, features = ["test-utils"] }
 
 # misc
 rand.workspace = true
-criterion.workspace = true
+tokio = { workspace = true, default-features = false, features = ["sync", "rt", "macros"] }
+rayon.workspace = true
+criterion = { workspace = true, features = ["async_tokio"] }
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
-default = ["metrics"]
-metrics = ["reth-metrics", "dep:metrics", "reth-trie/metrics", "reth-trie-sparse/metrics"]
-test-utils = [
-    "reth-db-api/test-utils",
-    "reth-primitives-traits/test-utils",
-    "reth-provider/test-utils",
-    "reth-trie-common/test-utils",
-    "reth-trie-db/test-utils",
-    "reth-trie-sparse/test-utils",
-    "reth-trie/test-utils",
-]
+default = ["metrics", "async", "parallel"]
+metrics = ["reth-metrics", "dep:metrics", "reth-trie/metrics"]
+async = ["reth-tasks/rayon", "tokio/sync", "itertools"]
+parallel = ["rayon"]
 
 [[bench]]
 name = "root"
+required-features = ["async", "parallel"]
 harness = false

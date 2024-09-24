@@ -1,18 +1,11 @@
-use crate::{
-    common::CliNodeTypes,
-    db::get::{maybe_json_value_parser, table_key},
-};
-use alloy_primitives::map::foldhash::fast::FixedState;
+use crate::db::get::{maybe_json_value_parser, table_key};
+use ahash::RandomState;
 use clap::Parser;
-use reth_chainspec::EthereumHardforks;
-use reth_db::DatabaseEnv;
-use reth_db_api::{
-    cursor::DbCursorRO, table::Table, transaction::DbTx, RawKey, RawTable, RawValue, TableViewer,
-    Tables,
-};
+use reth_chainspec::ChainSpec;
+use reth_db::{DatabaseEnv, RawKey, RawTable, RawValue, TableViewer, Tables};
+use reth_db_api::{cursor::DbCursorRO, table::Table, transaction::DbTx};
 use reth_db_common::DbTool;
-use reth_node_builder::{NodeTypesWithDB, NodeTypesWithDBAdapter};
-use reth_provider::{providers::ProviderNodeTypes, DBProvider};
+use reth_node_builder::{NodeTypesWithDB, NodeTypesWithDBAdapter, NodeTypesWithEngine};
 use std::{
     hash::{BuildHasher, Hasher},
     sync::Arc,
@@ -42,7 +35,7 @@ pub struct Command {
 
 impl Command {
     /// Execute `db checksum` command
-    pub fn execute<N: CliNodeTypes<ChainSpec: EthereumHardforks>>(
+    pub fn execute<N: NodeTypesWithEngine<ChainSpec = ChainSpec>>(
         self,
         tool: &DbTool<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>,
     ) -> eyre::Result<()> {
@@ -70,7 +63,9 @@ impl<N: NodeTypesWithDB> ChecksumViewer<'_, N> {
     }
 }
 
-impl<N: ProviderNodeTypes> TableViewer<(u64, Duration)> for ChecksumViewer<'_, N> {
+impl<N: NodeTypesWithDB<ChainSpec = ChainSpec>> TableViewer<(u64, Duration)>
+    for ChecksumViewer<'_, N>
+{
     type Error = eyre::Report;
 
     fn view<T: Table>(&self) -> Result<(u64, Duration), Self::Error> {
@@ -85,24 +80,24 @@ impl<N: ProviderNodeTypes> TableViewer<(u64, Duration)> for ChecksumViewer<'_, N
         let mut cursor = tx.cursor_read::<RawTable<T>>()?;
         let walker = match (self.start_key.as_deref(), self.end_key.as_deref()) {
             (Some(start), Some(end)) => {
-                let start_key = table_key::<T>(start).map(RawKey::new)?;
-                let end_key = table_key::<T>(end).map(RawKey::new)?;
+                let start_key = table_key::<T>(start).map(RawKey::<T::Key>::new)?;
+                let end_key = table_key::<T>(end).map(RawKey::<T::Key>::new)?;
                 cursor.walk_range(start_key..=end_key)?
             }
             (None, Some(end)) => {
-                let end_key = table_key::<T>(end).map(RawKey::new)?;
+                let end_key = table_key::<T>(end).map(RawKey::<T::Key>::new)?;
 
                 cursor.walk_range(..=end_key)?
             }
             (Some(start), None) => {
-                let start_key = table_key::<T>(start).map(RawKey::new)?;
+                let start_key = table_key::<T>(start).map(RawKey::<T::Key>::new)?;
                 cursor.walk_range(start_key..)?
             }
             (None, None) => cursor.walk_range(..)?,
         };
 
         let start_time = Instant::now();
-        let mut hasher = FixedState::with_seed(u64::from_be_bytes(*b"RETHRETH")).build_hasher();
+        let mut hasher = RandomState::with_seeds(1, 2, 3, 4).build_hasher();
         let mut total = 0;
 
         let limit = self.limit.unwrap_or(usize::MAX);
@@ -111,7 +106,7 @@ impl<N: ProviderNodeTypes> TableViewer<(u64, Duration)> for ChecksumViewer<'_, N
         for (index, entry) in walker.enumerate() {
             let (k, v): (RawKey<T::Key>, RawValue<T::Value>) = entry?;
 
-            if index.is_multiple_of(100_000) {
+            if index % 100_000 == 0 {
                 info!("Hashed {index} entries.");
             }
 

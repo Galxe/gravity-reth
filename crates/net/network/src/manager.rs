@@ -15,44 +15,6 @@
 //! (IP+port) of our node is published via discovery, remote peers can initiate inbound connections
 //! to the local node. Once a (tcp) connection is established, both peers start to authenticate a [RLPx session](https://github.com/ethereum/devp2p/blob/master/rlpx.md) via a handshake. If the handshake was successful, both peers announce their capabilities and are now ready to exchange sub-protocol messages via the `RLPx` session.
 
-use crate::{
-    budget::{DEFAULT_BUDGET_TRY_DRAIN_NETWORK_HANDLE_CHANNEL, DEFAULT_BUDGET_TRY_DRAIN_SWARM},
-    config::NetworkConfig,
-    discovery::Discovery,
-    error::{NetworkError, ServiceKind},
-    eth_requests::IncomingEthRequest,
-    import::{BlockImport, BlockImportEvent, BlockImportOutcome, BlockValidation, NewBlockEvent},
-    listener::ConnectionListener,
-    message::{NewBlockMessage, PeerMessage},
-    metrics::{DisconnectMetrics, NetworkMetrics, NETWORK_POOL_TRANSACTIONS_SCOPE},
-    network::{NetworkHandle, NetworkHandleMessage},
-    peers::PeersManager,
-    poll_nested_stream_with_budget,
-    protocol::IntoRlpxSubProtocol,
-    required_block_filter::RequiredBlockFilter,
-    session::SessionManager,
-    state::NetworkState,
-    swarm::{Swarm, SwarmEvent},
-    transactions::NetworkTransactionEvent,
-    FetchClient, NetworkBuilder,
-};
-use futures::{Future, StreamExt};
-use parking_lot::Mutex;
-use reth_chainspec::EnrForkIdEntry;
-use reth_eth_wire::{DisconnectReason, EthNetworkPrimitives, NetworkPrimitives};
-use reth_fs_util::{self as fs, FsPathError};
-use reth_metrics::common::mpsc::UnboundedMeteredSender;
-use reth_network_api::{
-    events::{PeerEvent, SessionInfo},
-    test_utils::PeersHandle,
-    EthProtocolInfo, NetworkEvent, NetworkStatus, PeerInfo, PeerRequest,
-};
-use reth_network_peers::{NodeRecord, PeerId};
-use reth_network_types::ReputationChangeKind;
-use reth_storage_api::BlockNumReader;
-use reth_tasks::shutdown::GracefulShutdown;
-use reth_tokio_util::EventSender;
-use secp256k1::SecretKey;
 use std::{
     net::SocketAddr,
     path::Path,
@@ -64,58 +26,70 @@ use std::{
     task::{Context, Poll},
     time::{Duration, Instant},
 };
+
+use futures::{Future, StreamExt};
+use parking_lot::Mutex;
+use reth_eth_wire::{capability::CapabilityMessage, Capabilities, DisconnectReason};
+use reth_fs_util::{self as fs, FsPathError};
+use reth_metrics::common::mpsc::UnboundedMeteredSender;
+use reth_network_api::{
+    test_utils::PeersHandle, EthProtocolInfo, NetworkEvent, NetworkStatus, PeerInfo, PeerRequest,
+};
+use reth_network_peers::{NodeRecord, PeerId};
+use reth_network_types::ReputationChangeKind;
+use reth_storage_api::BlockNumReader;
+use reth_tasks::shutdown::GracefulShutdown;
+use reth_tokio_util::EventSender;
+use secp256k1::SecretKey;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, trace, warn};
 
+use crate::{
+    budget::{DEFAULT_BUDGET_TRY_DRAIN_NETWORK_HANDLE_CHANNEL, DEFAULT_BUDGET_TRY_DRAIN_SWARM},
+    config::NetworkConfig,
+    discovery::Discovery,
+    error::{NetworkError, ServiceKind},
+    eth_requests::IncomingEthRequest,
+    import::{BlockImport, BlockImportOutcome, BlockValidation},
+    listener::ConnectionListener,
+    message::{NewBlockMessage, PeerMessage},
+    metrics::{DisconnectMetrics, NetworkMetrics, NETWORK_POOL_TRANSACTIONS_SCOPE},
+    network::{NetworkHandle, NetworkHandleMessage},
+    peers::PeersManager,
+    poll_nested_stream_with_budget,
+    protocol::IntoRlpxSubProtocol,
+    session::SessionManager,
+    state::NetworkState,
+    swarm::{Swarm, SwarmEvent},
+    transactions::NetworkTransactionEvent,
+    FetchClient, NetworkBuilder,
+};
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
-// TODO: Inlined diagram due to a bug in aquamarine library, should become an include when it's
-// fixed. See https://github.com/mersinvald/aquamarine/issues/50
-// include_mmd!("docs/mermaid/network-manager.mmd")
 /// Manages the _entire_ state of the network.
 ///
 /// This is an endless [`Future`] that consistently drives the state of the entire network forward.
 ///
 /// The [`NetworkManager`] is the container type for all parts involved with advancing the network.
 ///
-/// ```mermaid
-/// graph TB
-///   handle(NetworkHandle)
-///   events(NetworkEvents)
-///   transactions(Transactions Task)
-///   ethrequest(ETH Request Task)
-///   discovery(Discovery Task)
-///   subgraph NetworkManager
-///     direction LR
-///     subgraph Swarm
-///         direction TB
-///         B1[(Session Manager)]
-///         B2[(Connection Listener)]
-///         B3[(Network State)]
-///     end
-///  end
-///  handle <--> |request response channel| NetworkManager
-///  NetworkManager --> |Network events| events
-///  transactions <--> |transactions| NetworkManager
-///  ethrequest <--> |ETH request handing| NetworkManager
-///  discovery --> |Discovered peers| NetworkManager
-/// ```
+/// include_mmd!("docs/mermaid/network-manager.mmd")
 #[derive(Debug)]
 #[must_use = "The NetworkManager does nothing unless polled"]
-pub struct NetworkManager<N: NetworkPrimitives = EthNetworkPrimitives> {
+pub struct NetworkManager {
     /// The type that manages the actual network part, which includes connections.
-    swarm: Swarm<N>,
+    swarm: Swarm,
     /// Underlying network handle that can be shared.
-    handle: NetworkHandle<N>,
+    handle: NetworkHandle,
     /// Receiver half of the command channel set up between this type and the [`NetworkHandle`]
-    from_handle_rx: UnboundedReceiverStream<NetworkHandleMessage<N>>,
+    from_handle_rx: UnboundedReceiverStream<NetworkHandleMessage>,
     /// Handles block imports according to the `eth` protocol.
-    block_import: Box<dyn BlockImport<N::NewBlockPayload>>,
+    block_import: Box<dyn BlockImport>,
     /// Sender for high level network events.
-    event_sender: EventSender<NetworkEvent<PeerRequest<N>>>,
+    event_sender: EventSender<NetworkEvent>,
     /// Sender half to send events to the
     /// [`TransactionsManager`](crate::transactions::TransactionsManager) task, if configured.
-    to_transactions_manager: Option<UnboundedMeteredSender<NetworkTransactionEvent<N>>>,
+    to_transactions_manager: Option<UnboundedMeteredSender<NetworkTransactionEvent>>,
     /// Sender half to send events to the
     /// [`EthRequestHandler`](crate::eth_requests::EthRequestHandler) task, if configured.
     ///
@@ -129,7 +103,7 @@ pub struct NetworkManager<N: NetworkPrimitives = EthNetworkPrimitives> {
     /// Thus, we use a bounded channel here to avoid unbounded build up if the node is flooded with
     /// requests. This channel size is set at
     /// [`ETH_REQUEST_CHANNEL_CAPACITY`](crate::builder::ETH_REQUEST_CHANNEL_CAPACITY)
-    to_eth_request_handler: Option<mpsc::Sender<IncomingEthRequest<N>>>,
+    to_eth_request_handler: Option<mpsc::Sender<IncomingEthRequest>>,
     /// Tracks the number of active session (connected peers).
     ///
     /// This is updated via internal events and shared via `Arc` with the [`NetworkHandle`]
@@ -141,53 +115,18 @@ pub struct NetworkManager<N: NetworkPrimitives = EthNetworkPrimitives> {
     disconnect_metrics: DisconnectMetrics,
 }
 
+// === impl NetworkManager ===
 impl NetworkManager {
-    /// Creates the manager of a new network with [`EthNetworkPrimitives`] types.
-    ///
-    /// ```no_run
-    /// # async fn f() {
-    /// use reth_chainspec::MAINNET;
-    /// use reth_network::{NetworkConfig, NetworkManager};
-    /// let config =
-    ///     NetworkConfig::builder_with_rng_secret_key().build_with_noop_provider(MAINNET.clone());
-    /// let manager = NetworkManager::eth(config).await;
-    /// # }
-    /// ```
-    pub async fn eth<C: BlockNumReader + 'static>(
-        config: NetworkConfig<C, EthNetworkPrimitives>,
-    ) -> Result<Self, NetworkError> {
-        Self::new(config).await
-    }
-}
-
-impl<N: NetworkPrimitives> NetworkManager<N> {
-    /// Sets the dedicated channel for events intended for the
+    /// Sets the dedicated channel for events indented for the
     /// [`TransactionsManager`](crate::transactions::TransactionsManager).
-    pub fn with_transactions(
-        mut self,
-        tx: mpsc::UnboundedSender<NetworkTransactionEvent<N>>,
-    ) -> Self {
-        self.set_transactions(tx);
-        self
-    }
-
-    /// Sets the dedicated channel for events intended for the
-    /// [`TransactionsManager`](crate::transactions::TransactionsManager).
-    pub fn set_transactions(&mut self, tx: mpsc::UnboundedSender<NetworkTransactionEvent<N>>) {
+    pub fn set_transactions(&mut self, tx: mpsc::UnboundedSender<NetworkTransactionEvent>) {
         self.to_transactions_manager =
             Some(UnboundedMeteredSender::new(tx, NETWORK_POOL_TRANSACTIONS_SCOPE));
     }
 
-    /// Sets the dedicated channel for events intended for the
+    /// Sets the dedicated channel for events indented for the
     /// [`EthRequestHandler`](crate::eth_requests::EthRequestHandler).
-    pub fn with_eth_request_handler(mut self, tx: mpsc::Sender<IncomingEthRequest<N>>) -> Self {
-        self.set_eth_request_handler(tx);
-        self
-    }
-
-    /// Sets the dedicated channel for events intended for the
-    /// [`EthRequestHandler`](crate::eth_requests::EthRequestHandler).
-    pub fn set_eth_request_handler(&mut self, tx: mpsc::Sender<IncomingEthRequest<N>>) {
+    pub fn set_eth_request_handler(&mut self, tx: mpsc::Sender<IncomingEthRequest>) {
         self.to_eth_request_handler = Some(tx);
     }
 
@@ -199,7 +138,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     /// Returns the [`NetworkHandle`] that can be cloned and shared.
     ///
     /// The [`NetworkHandle`] can be used to interact with this [`NetworkManager`]
-    pub const fn handle(&self) -> &NetworkHandle<N> {
+    pub const fn handle(&self) -> &NetworkHandle {
         &self.handle
     }
 
@@ -220,13 +159,15 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
         metrics.acc_duration_poll_network_handle.set(acc_network_handle.as_secs_f64());
         metrics.acc_duration_poll_swarm.set(acc_swarm.as_secs_f64());
     }
+}
 
+impl NetworkManager {
     /// Creates the manager of a new network.
     ///
     /// The [`NetworkManager`] is an endless future that needs to be polled in order to advance the
     /// state of the entire network.
     pub async fn new<C: BlockNumReader + 'static>(
-        config: NetworkConfig<C, N>,
+        config: NetworkConfig<C>,
     ) -> Result<Self, NetworkError> {
         let NetworkConfig {
             client,
@@ -237,7 +178,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
             listener_addr,
             peers_config,
             sessions_config,
-            chain_id,
+            chain_spec,
             block_import,
             network_mode,
             boot_nodes,
@@ -249,9 +190,6 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
             extra_protocols,
             tx_gossip_disabled,
             transactions_manager_config: _,
-            nat,
-            handshake,
-            required_block_hashes,
         } = config;
 
         let peers_manager = PeersManager::new(peers_config);
@@ -271,9 +209,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
         if let Some(disc_config) = discovery_v4_config.as_mut() {
             // merge configured boot nodes
             disc_config.bootstrap_nodes.extend(resolved_boot_nodes.clone());
-            // add the forkid entry for EIP-868, but wrap it in an `EnrForkIdEntry` for proper
-            // encoding
-            disc_config.add_eip868_pair("eth", EnrForkIdEntry::from(status.forkid));
+            disc_config.add_eip868_pair("eth", status.forkid);
         }
 
         if let Some(discv5) = discovery_v5_config.as_mut() {
@@ -305,7 +241,6 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
             hello_message,
             fork_filter,
             extra_protocols,
-            handshake,
         );
 
         let state = NetworkState::new(
@@ -319,7 +254,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
 
         let (to_manager_tx, from_handle_rx) = mpsc::unbounded_channel();
 
-        let event_sender: EventSender<NetworkEvent<PeerRequest<N>>> = Default::default();
+        let event_sender: EventSender<NetworkEvent> = Default::default();
 
         let handle = NetworkHandle::new(
             Arc::clone(&num_active_peers),
@@ -329,19 +264,12 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
             local_peer_id,
             peers_handle,
             network_mode,
-            Arc::new(AtomicU64::new(chain_id)),
+            Arc::new(AtomicU64::new(chain_spec.chain.id())),
             tx_gossip_disabled,
             discv4,
             discv5,
             event_sender.clone(),
-            nat,
         );
-
-        // Spawn required block peer filter if configured
-        if !required_block_hashes.is_empty() {
-            let filter = RequiredBlockFilter::new(handle.clone(), required_block_hashes);
-            filter.spawn();
-        }
 
         Ok(Self {
             swarm,
@@ -361,11 +289,9 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     /// components of the network
     ///
     /// ```
-    /// use reth_network::{
-    ///     config::rng_secret_key, EthNetworkPrimitives, NetworkConfig, NetworkManager,
-    /// };
+    /// use reth_network::{config::rng_secret_key, NetworkConfig, NetworkManager};
     /// use reth_network_peers::mainnet_nodes;
-    /// use reth_storage_api::noop::NoopProvider;
+    /// use reth_provider::test_utils::NoopProvider;
     /// use reth_transaction_pool::TransactionPool;
     /// async fn launch<Pool: TransactionPool>(pool: Pool) {
     ///     // This block provider implementation is used for testing purposes.
@@ -374,9 +300,8 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     ///     // The key that's used for encrypting sessions and to identify our node.
     ///     let local_key = rng_secret_key();
     ///
-    ///     let config = NetworkConfig::<_, EthNetworkPrimitives>::builder(local_key)
-    ///         .boot_nodes(mainnet_nodes())
-    ///         .build(client.clone());
+    ///     let config =
+    ///         NetworkConfig::builder(local_key).boot_nodes(mainnet_nodes()).build(client.clone());
     ///     let transactions_manager_config = config.transactions_manager_config.clone();
     ///
     ///     // create the network instance
@@ -389,14 +314,14 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     /// }
     /// ```
     pub async fn builder<C: BlockNumReader + 'static>(
-        config: NetworkConfig<C, N>,
-    ) -> Result<NetworkBuilder<(), (), N>, NetworkError> {
+        config: NetworkConfig<C>,
+    ) -> Result<NetworkBuilder<(), ()>, NetworkError> {
         let network = Self::new(config).await?;
         Ok(network.into_builder())
     }
 
     /// Create a [`NetworkBuilder`] to configure all components of the network
-    pub const fn into_builder(self) -> NetworkBuilder<(), (), N> {
+    pub const fn into_builder(self) -> NetworkBuilder<(), ()> {
         NetworkBuilder { network: self, transactions: (), request_handler: () }
     }
 
@@ -444,7 +369,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     /// Returns a new [`FetchClient`] that can be cloned and shared.
     ///
     /// The [`FetchClient`] is the entrypoint for sending requests to the network.
-    pub fn fetch_client(&self) -> FetchClient<N> {
+    pub fn fetch_client(&self) -> FetchClient {
         self.swarm.state().fetch_client()
     }
 
@@ -454,28 +379,36 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
         let status = sessions.status();
         let hello_message = sessions.hello_message();
 
-        #[expect(deprecated)]
         NetworkStatus {
             client_version: hello_message.client_version,
             protocol_version: hello_message.protocol_version as u64,
             eth_protocol_info: EthProtocolInfo {
-                difficulty: None,
+                difficulty: status.total_difficulty,
                 head: status.blockhash,
                 network: status.chain.id(),
                 genesis: status.genesis,
                 config: Default::default(),
             },
-            capabilities: hello_message
-                .protocols
-                .into_iter()
-                .map(|protocol| protocol.cap)
-                .collect(),
         }
+    }
+
+    /// Event hook for an unexpected message from the peer.
+    fn on_invalid_message(
+        &mut self,
+        peer_id: PeerId,
+        _capabilities: Arc<Capabilities>,
+        _message: CapabilityMessage,
+    ) {
+        trace!(target: "net", ?peer_id, "received unexpected message");
+        self.swarm
+            .state_mut()
+            .peers_mut()
+            .apply_reputation_change(&peer_id, ReputationChangeKind::BadProtocol);
     }
 
     /// Sends an event to the [`TransactionsManager`](crate::transactions::TransactionsManager) if
     /// configured.
-    fn notify_tx_manager(&self, event: NetworkTransactionEvent<N>) {
+    fn notify_tx_manager(&self, event: NetworkTransactionEvent) {
         if let Some(ref tx) = self.to_transactions_manager {
             let _ = tx.send(event);
         }
@@ -483,7 +416,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
 
     /// Sends an event to the [`EthRequestManager`](crate::eth_requests::EthRequestHandler) if
     /// configured.
-    fn delegate_eth_request(&self, event: IncomingEthRequest<N>) {
+    fn delegate_eth_request(&self, event: IncomingEthRequest) {
         if let Some(ref reqs) = self.to_eth_request_handler {
             let _ = reqs.try_send(event).map_err(|e| {
                 if let TrySendError::Full(_) = e {
@@ -495,7 +428,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     }
 
     /// Handle an incoming request from the peer
-    fn on_eth_request(&self, peer_id: PeerId, req: PeerRequest<N>) {
+    fn on_eth_request(&self, peer_id: PeerId, req: PeerRequest) {
         match req {
             PeerRequest::GetBlockHeaders { request, response } => {
                 self.delegate_eth_request(IncomingEthRequest::GetBlockHeaders {
@@ -525,13 +458,6 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                     response,
                 })
             }
-            PeerRequest::GetReceipts69 { request, response } => {
-                self.delegate_eth_request(IncomingEthRequest::GetReceipts69 {
-                    peer_id,
-                    request,
-                    response,
-                })
-            }
             PeerRequest::GetPooledTransactions { request, response } => {
                 self.notify_tx_manager(NetworkTransactionEvent::GetPooledTransactions {
                     peer_id,
@@ -543,39 +469,23 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     }
 
     /// Invoked after a `NewBlock` message from the peer was validated
-    fn on_block_import_result(&mut self, event: BlockImportEvent<N::NewBlockPayload>) {
-        match event {
-            BlockImportEvent::Announcement(validation) => match validation {
+    fn on_block_import_result(&mut self, outcome: BlockImportOutcome) {
+        let BlockImportOutcome { peer, result } = outcome;
+        match result {
+            Ok(validated_block) => match validated_block {
                 BlockValidation::ValidHeader { block } => {
+                    self.swarm.state_mut().update_peer_block(&peer, block.hash, block.number());
                     self.swarm.state_mut().announce_new_block(block);
                 }
                 BlockValidation::ValidBlock { block } => {
                     self.swarm.state_mut().announce_new_block_hash(block);
                 }
             },
-            BlockImportEvent::Outcome(outcome) => {
-                let BlockImportOutcome { peer, result } = outcome;
-                match result {
-                    Ok(validated_block) => match validated_block {
-                        BlockValidation::ValidHeader { block } => {
-                            self.swarm.state_mut().update_peer_block(
-                                &peer,
-                                block.hash,
-                                block.number(),
-                            );
-                            self.swarm.state_mut().announce_new_block(block);
-                        }
-                        BlockValidation::ValidBlock { block } => {
-                            self.swarm.state_mut().announce_new_block_hash(block);
-                        }
-                    },
-                    Err(_err) => {
-                        self.swarm
-                            .state_mut()
-                            .peers_mut()
-                            .apply_reputation_change(&peer, ReputationChangeKind::BadBlock);
-                    }
-                }
+            Err(_err) => {
+                self.swarm
+                    .state_mut()
+                    .peers_mut()
+                    .apply_reputation_change(&peer, ReputationChangeKind::BadBlock);
             }
         }
     }
@@ -601,21 +511,19 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     }
 
     /// Handles a received Message from the peer's session.
-    fn on_peer_message(&mut self, peer_id: PeerId, msg: PeerMessage<N>) {
+    fn on_peer_message(&mut self, peer_id: PeerId, msg: PeerMessage) {
         match msg {
             PeerMessage::NewBlockHashes(hashes) => {
                 self.within_pow_or_disconnect(peer_id, |this| {
                     // update peer's state, to track what blocks this peer has seen
-                    this.swarm.state_mut().on_new_block_hashes(peer_id, hashes.0.clone());
-                    // start block import process for the hashes
-                    this.block_import.on_new_block(peer_id, NewBlockEvent::Hashes(hashes));
+                    this.swarm.state_mut().on_new_block_hashes(peer_id, hashes.0)
                 })
             }
             PeerMessage::NewBlock(block) => {
                 self.within_pow_or_disconnect(peer_id, move |this| {
                     this.swarm.state_mut().on_new_block(peer_id, block.hash);
                     // start block import process
-                    this.block_import.on_new_block(peer_id, NewBlockEvent::Block(block));
+                    this.block_import.on_new_block(peer_id, block);
                 });
             }
             PeerMessage::PooledTransactions(msg) => {
@@ -636,7 +544,6 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
             PeerMessage::SendTransactions(_) => {
                 unreachable!("Not emitted by session")
             }
-            PeerMessage::BlockRangeUpdated(_) => {}
             PeerMessage::Other(other) => {
                 debug!(target: "net", message_id=%other.id, "Ignoring unsupported message");
             }
@@ -644,7 +551,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
     }
 
     /// Handler for received messages from a handle
-    fn on_handle_message(&mut self, msg: NetworkHandleMessage<N>) {
+    fn on_handle_message(&mut self, msg: NetworkHandleMessage) {
         match msg {
             NetworkHandleMessage::DiscoveryListener(tx) => {
                 self.swarm.state_mut().discovery_mut().add_listener(tx);
@@ -695,7 +602,14 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
             }
 
             NetworkHandleMessage::Shutdown(tx) => {
-                self.perform_network_shutdown();
+                // Set connection status to `Shutdown`. Stops node to accept
+                // new incoming connections as well as sending connection requests to newly
+                // discovered nodes.
+                self.swarm.on_shutdown_requested();
+                // Disconnect all active connections
+                self.swarm.sessions_mut().disconnect_all(Some(DisconnectReason::ClientQuitting));
+                // drop pending connections
+                self.swarm.sessions_mut().disconnect_all_pending();
                 let _ = tx.send(());
             }
             NetworkHandleMessage::ReputationChange(peer_id, kind) => {
@@ -736,19 +650,17 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                     let _ = tx.send(None);
                 }
             }
-            NetworkHandleMessage::InternalBlockRangeUpdate(block_range_update) => {
-                self.swarm.sessions_mut().update_advertised_block_range(block_range_update);
-            }
-            NetworkHandleMessage::EthMessage { peer_id, message } => {
-                self.swarm.sessions_mut().send_message(&peer_id, message)
-            }
         }
     }
 
-    fn on_swarm_event(&mut self, event: SwarmEvent<N>) {
+    fn on_swarm_event(&mut self, event: SwarmEvent) {
         // handle event
         match event {
             SwarmEvent::ValidMessage { peer_id, message } => self.on_peer_message(peer_id, message),
+            SwarmEvent::InvalidCapabilityMessage { peer_id, capabilities, message } => {
+                self.on_invalid_message(peer_id, capabilities, message);
+                self.metrics.invalid_messages_received.increment(1);
+            }
             SwarmEvent::TcpListenerClosed { remote_addr } => {
                 trace!(target: "net", ?remote_addr, "TCP listener closed.");
             }
@@ -803,34 +715,24 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
 
                 self.update_active_connection_metrics();
 
-                let peer_kind = self
-                    .swarm
-                    .state()
-                    .peers()
-                    .peer_by_id(peer_id)
-                    .map(|(_, kind)| kind)
-                    .unwrap_or_default();
-                let session_info = SessionInfo {
+                self.event_sender.notify(NetworkEvent::SessionEstablished {
                     peer_id,
                     remote_addr,
                     client_version,
                     capabilities,
-                    status,
                     version,
-                    peer_kind,
-                };
-
-                self.event_sender
-                    .notify(NetworkEvent::ActivePeerSession { info: session_info, messages });
+                    status,
+                    messages,
+                });
             }
             SwarmEvent::PeerAdded(peer_id) => {
                 trace!(target: "net", ?peer_id, "Peer added");
-                self.event_sender.notify(NetworkEvent::Peer(PeerEvent::PeerAdded(peer_id)));
+                self.event_sender.notify(NetworkEvent::PeerAdded(peer_id));
                 self.metrics.tracked_peers.set(self.swarm.state().peers().num_known_peers() as f64);
             }
             SwarmEvent::PeerRemoved(peer_id) => {
                 trace!(target: "net", ?peer_id, "Peer dropped");
-                self.event_sender.notify(NetworkEvent::Peer(PeerEvent::PeerRemoved(peer_id)));
+                self.event_sender.notify(NetworkEvent::PeerRemoved(peer_id));
                 self.metrics.tracked_peers.set(self.swarm.state().peers().num_known_peers() as f64);
             }
             SwarmEvent::SessionClosed { peer_id, remote_addr, error } => {
@@ -845,7 +747,8 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                     "Session disconnected"
                 );
 
-                let reason = if let Some(ref err) = error {
+                let mut reason = None;
+                if let Some(ref err) = error {
                     // If the connection was closed due to an error, we report
                     // the peer
                     self.swarm.state_mut().peers_mut().on_active_session_dropped(
@@ -853,12 +756,11 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                         &peer_id,
                         err,
                     );
-                    err.as_disconnected()
+                    reason = err.as_disconnected();
                 } else {
                     // Gracefully disconnected
                     self.swarm.state_mut().peers_mut().on_active_session_gracefully_closed(peer_id);
-                    None
-                };
+                }
                 self.metrics.closed_sessions.increment(1);
                 self.update_active_connection_metrics();
 
@@ -873,8 +775,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                             .saturating_sub(1)
                             as f64,
                     );
-                self.event_sender
-                    .notify(NetworkEvent::Peer(PeerEvent::SessionClosed { peer_id, reason }));
+                self.event_sender.notify(NetworkEvent::SessionClosed { peer_id, reason });
             }
             SwarmEvent::IncomingPendingSessionClosed { remote_addr, error } => {
                 trace!(
@@ -1047,7 +948,9 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
             .total_pending_connections
             .set(self.swarm.sessions().num_pending_connections() as f64);
     }
+}
 
+impl NetworkManager {
     /// Drives the [`NetworkManager`] future until a [`GracefulShutdown`] signal is received.
     ///
     /// This invokes the given function `shutdown_hook` while holding the graceful shutdown guard.
@@ -1067,27 +970,13 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
             },
         }
 
-        self.perform_network_shutdown();
         let res = shutdown_hook(self);
         drop(graceful_guard);
         res
     }
-
-    /// Performs a graceful network shutdown by stopping new connections from being accepted while
-    /// draining current and pending connections.
-    fn perform_network_shutdown(&mut self) {
-        // Set connection status to `Shutdown`. Stops node from accepting
-        // new incoming connections as well as sending connection requests to newly
-        // discovered nodes.
-        self.swarm.on_shutdown_requested();
-        // Disconnect all active connections
-        self.swarm.sessions_mut().disconnect_all(Some(DisconnectReason::ClientQuitting));
-        // drop pending connections
-        self.swarm.sessions_mut().disconnect_all_pending();
-    }
 }
 
-impl<N: NetworkPrimitives> Future for NetworkManager<N> {
+impl Future for NetworkManager {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

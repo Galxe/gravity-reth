@@ -1,14 +1,15 @@
 //! Possible errors when interacting with the network.
 
-use crate::session::PendingSessionHandshakeError;
+use std::{fmt, io, io::ErrorKind, net::SocketAddr};
+
 use reth_dns_discovery::resolver::ResolveError;
-use reth_ecies::ECIESErrorImpl;
 use reth_eth_wire::{
     errors::{EthHandshakeError, EthStreamError, P2PHandshakeError, P2PStreamError},
     DisconnectReason,
 };
 use reth_network_types::BackoffKind;
-use std::{fmt, io, io::ErrorKind, net::SocketAddr};
+
+use crate::session::PendingSessionHandshakeError;
 
 /// Service kind.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -53,8 +54,8 @@ pub enum NetworkError {
         error: io::Error,
     },
     /// IO error when creating the discovery service
-    #[error("failed to launch discovery service on {0}: {1}")]
-    Discovery(SocketAddr, io::Error),
+    #[error("failed to launch discovery service: {0}")]
+    Discovery(io::Error),
     /// An error occurred with discovery v5 node.
     #[error("discv5 error, {0}")]
     Discv5Error(#[from] reth_discv5::Error),
@@ -71,8 +72,8 @@ impl NetworkError {
         match err.kind() {
             ErrorKind::AddrInUse => Self::AddressAlreadyInUse { kind, error: err },
             _ => {
-                if let ServiceKind::Discovery(address) = kind {
-                    return Self::Discovery(address, err)
+                if let ServiceKind::Discovery(_) = kind {
+                    return Self::Discovery(err)
                 }
                 Self::Io(err)
             }
@@ -205,37 +206,16 @@ impl SessionError for PendingSessionHandshakeError {
     fn merits_discovery_ban(&self) -> bool {
         match self {
             Self::Eth(eth) => eth.merits_discovery_ban(),
-            Self::Ecies(err) => matches!(
-                err.inner(),
-                ECIESErrorImpl::TagCheckDecryptFailed |
-                    ECIESErrorImpl::TagCheckHeaderFailed |
-                    ECIESErrorImpl::TagCheckBodyFailed |
-                    ECIESErrorImpl::InvalidAuthData |
-                    ECIESErrorImpl::InvalidAckData |
-                    ECIESErrorImpl::InvalidHeader |
-                    ECIESErrorImpl::Secp256k1(_) |
-                    ECIESErrorImpl::InvalidHandshake { .. }
-            ),
-            Self::Timeout | Self::UnsupportedExtraCapability => false,
+            Self::Ecies(_) => true,
+            Self::Timeout => false,
         }
     }
 
     fn is_fatal_protocol_error(&self) -> bool {
         match self {
             Self::Eth(eth) => eth.is_fatal_protocol_error(),
-            Self::Ecies(err) => matches!(
-                err.inner(),
-                ECIESErrorImpl::TagCheckDecryptFailed |
-                    ECIESErrorImpl::TagCheckHeaderFailed |
-                    ECIESErrorImpl::TagCheckBodyFailed |
-                    ECIESErrorImpl::InvalidAuthData |
-                    ECIESErrorImpl::InvalidAckData |
-                    ECIESErrorImpl::InvalidHeader |
-                    ECIESErrorImpl::Secp256k1(_) |
-                    ECIESErrorImpl::InvalidHandshake { .. }
-            ),
+            Self::Ecies(_) => true,
             Self::Timeout => false,
-            Self::UnsupportedExtraCapability => true,
         }
     }
 
@@ -244,7 +224,6 @@ impl SessionError for PendingSessionHandshakeError {
             Self::Eth(eth) => eth.should_backoff(),
             Self::Ecies(_) => Some(BackoffKind::Low),
             Self::Timeout => Some(BackoffKind::Medium),
-            Self::UnsupportedExtraCapability => Some(BackoffKind::High),
         }
     }
 }

@@ -10,10 +10,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
-use reth_db_api::{
-    table::{Table, TableRow},
-    RawValue,
-};
+use reth_db::RawValue;
+use reth_db_api::table::{Table, TableRow};
 use std::{
     io,
     time::{Duration, Instant},
@@ -29,6 +27,12 @@ static CMDS: [(&str, &str); 6] = [
     ("→", "Next page"),
     ("G", "Go to a specific page"),
 ];
+
+/// Modified version of the [`ListState`] struct that exposes the `offset` field.
+/// Used to make the [`DbListTUI`] keys clickable.
+struct ExpListState {
+    pub(crate) offset: usize,
+}
 
 #[derive(Default, Eq, PartialEq)]
 pub(crate) enum ViewMode {
@@ -315,7 +319,14 @@ where
             MouseEventKind::ScrollUp => app.previous(),
             // TODO: This click event can be triggered outside of the list widget.
             MouseEventKind::Down(_) => {
-                let new_idx = (e.row as usize + app.list_state.offset()).saturating_sub(1);
+                // SAFETY: The pointer to the app's state will always be valid for
+                // reads here, and the source is larger than the destination.
+                //
+                // This is technically unsafe, but because the alignment requirements
+                // in both the source and destination are the same and we can ensure
+                // that the pointer to `app.state` is valid for reads, this is safe.
+                let state: ExpListState = unsafe { std::mem::transmute_copy(&app.list_state) };
+                let new_idx = (e.row as usize + state.offset).saturating_sub(1);
                 if new_idx < app.entries.len() {
                     app.list_state.select(Some(new_idx));
                 }
@@ -336,7 +347,7 @@ where
     let outer_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(95), Constraint::Percentage(5)].as_ref())
-        .split(f.area());
+        .split(f.size());
 
     // Columns
     {
@@ -354,7 +365,7 @@ where
             .map(|(i, k)| {
                 ListItem::new(format!("[{:0>width$}]: {k:?}", i + app.skip, width = key_length))
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<ListItem<'_>>>();
 
         let key_list = List::new(formatted_keys)
             .block(Block::default().borders(Borders::ALL).title(format!(

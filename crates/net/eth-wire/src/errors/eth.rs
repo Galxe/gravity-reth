@@ -3,11 +3,9 @@
 use crate::{
     errors::P2PStreamError, message::MessageError, version::ParseVersionError, DisconnectReason,
 };
-use alloy_chains::Chain;
 use alloy_primitives::B256;
-use reth_eth_wire_types::EthVersion;
-use reth_ethereum_forks::ValidationError;
-use reth_primitives_traits::{GotExpected, GotExpectedBoxed};
+use reth_chainspec::Chain;
+use reth_primitives::{GotExpected, GotExpectedBoxed, ValidationError};
 use std::io;
 
 /// Errors when sending/receiving messages
@@ -22,15 +20,13 @@ pub enum EthStreamError {
     #[error(transparent)]
     /// Failed Ethereum handshake.
     EthHandshakeError(#[from] EthHandshakeError),
-    /// Thrown when decoding a message failed.
+    /// Thrown when decoding a message message failed.
     #[error(transparent)]
     InvalidMessage(#[from] MessageError),
     #[error("message size ({0}) exceeds max length (10MB)")]
     /// Received a message whose size exceeds the standard limit.
     MessageTooBig(usize),
-    #[error(
-        "TransactionHashes invalid len of fields: hashes_len={hashes_len} types_len={types_len} sizes_len={sizes_len}"
-    )]
+    #[error("TransactionHashes invalid len of fields: hashes_len={hashes_len} types_len={types_len} sizes_len={sizes_len}")]
     /// Received malformed transaction hashes message with discrepancies in field lengths.
     TransactionHashesInvalidLenOfFields {
         /// The number of transaction hashes.
@@ -43,12 +39,6 @@ pub enum EthStreamError {
     /// Error when data is not received from peer for a prolonged period.
     #[error("never received data from remote peer")]
     StreamTimeout,
-    /// Error triggered when an unknown or unsupported Ethereum message ID is received.
-    #[error("Received unknown ETH message ID: 0x{message_id:X}")]
-    UnsupportedMessage {
-        /// The identifier of the unknown Ethereum message.
-        message_id: u8,
-    },
 }
 
 // === impl EthStreamError ===
@@ -98,7 +88,7 @@ pub enum EthHandshakeError {
     MismatchedGenesis(GotExpectedBoxed<B256>),
     #[error("mismatched protocol version in status message: {0}")]
     /// Mismatched protocol versions in status messages.
-    MismatchedProtocolVersion(GotExpected<EthVersion>),
+    MismatchedProtocolVersion(GotExpected<u8>),
     #[error("mismatched chain in status message: {0}")]
     /// Mismatch in chain details in status messages.
     MismatchedChain(GotExpected<Chain>),

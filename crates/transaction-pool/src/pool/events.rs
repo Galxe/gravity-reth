@@ -1,4 +1,4 @@
-use crate::{traits::PropagateKind, PoolTransaction, SubPool, ValidPoolTransaction};
+use crate::{traits::PropagateKind, PoolTransaction, ValidPoolTransaction};
 use alloy_primitives::{TxHash, B256};
 use std::sync::Arc;
 
@@ -81,27 +81,5 @@ impl TransactionEvent {
     /// hash.
     pub const fn is_final(&self) -> bool {
         matches!(self, Self::Replaced(_) | Self::Mined(_) | Self::Discarded)
-    }
-}
-
-/// Represents a new transaction
-#[derive(Debug)]
-pub struct NewTransactionEvent<T: PoolTransaction> {
-    /// The pool which the transaction was moved to.
-    pub subpool: SubPool,
-    /// Actual transaction
-    pub transaction: Arc<ValidPoolTransaction<T>>,
-}
-
-impl<T: PoolTransaction> NewTransactionEvent<T> {
-    /// Creates a new event for a pending transaction.
-    pub const fn pending(transaction: Arc<ValidPoolTransaction<T>>) -> Self {
-        Self { subpool: SubPool::Pending, transaction }
-    }
-}
-
-impl<T: PoolTransaction> Clone for NewTransactionEvent<T> {
-    fn clone(&self) -> Self {
-        Self { subpool: self.subpool, transaction: self.transaction.clone() }
     }
 }

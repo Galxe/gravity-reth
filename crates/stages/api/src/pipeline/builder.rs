@@ -14,7 +14,6 @@ pub struct PipelineBuilder<Provider> {
     /// A receiver for the current chain tip to sync to.
     tip_tx: Option<watch::Sender<B256>>,
     metrics_tx: Option<MetricEventsSender>,
-    fail_on_unwind: bool,
 }
 
 impl<Provider> PipelineBuilder<Provider> {
@@ -35,9 +34,7 @@ impl<Provider> PipelineBuilder<Provider> {
     /// [`builder`][StageSet::builder] on the set which will convert it to a
     /// [`StageSetBuilder`][crate::StageSetBuilder].
     pub fn add_stages<Set: StageSet<Provider>>(mut self, set: Set) -> Self {
-        let states = set.builder().build();
-        self.stages.reserve_exact(states.len());
-        for stage in states {
+        for stage in set.builder().build() {
             self.stages.push(stage);
         }
         self
@@ -63,12 +60,6 @@ impl<Provider> PipelineBuilder<Provider> {
         self
     }
 
-    /// Set whether pipeline should fail on unwind.
-    pub const fn with_fail_on_unwind(mut self, yes: bool) -> Self {
-        self.fail_on_unwind = yes;
-        self
-    }
-
     /// Builds the final [`Pipeline`] using the given database.
     pub fn build<N>(
         self,
@@ -79,7 +70,7 @@ impl<Provider> PipelineBuilder<Provider> {
         N: ProviderNodeTypes,
         ProviderFactory<N>: DatabaseProviderFactory<ProviderRW = Provider>,
     {
-        let Self { stages, max_block, tip_tx, metrics_tx, fail_on_unwind } = self;
+        let Self { stages, max_block, tip_tx, metrics_tx } = self;
         Pipeline {
             provider_factory,
             stages,
@@ -89,22 +80,13 @@ impl<Provider> PipelineBuilder<Provider> {
             event_sender: Default::default(),
             progress: Default::default(),
             metrics_tx,
-            fail_on_unwind,
-            last_detached_head_unwind_target: None,
-            detached_head_attempts: 0,
         }
     }
 }
 
 impl<Provider> Default for PipelineBuilder<Provider> {
     fn default() -> Self {
-        Self {
-            stages: Vec::new(),
-            max_block: None,
-            tip_tx: None,
-            metrics_tx: None,
-            fail_on_unwind: false,
-        }
+        Self { stages: Vec::new(), max_block: None, tip_tx: None, metrics_tx: None }
     }
 }
 
@@ -113,7 +95,6 @@ impl<Provider> std::fmt::Debug for PipelineBuilder<Provider> {
         f.debug_struct("PipelineBuilder")
             .field("stages", &self.stages.iter().map(|stage| stage.id()).collect::<Vec<StageId>>())
             .field("max_block", &self.max_block)
-            .field("fail_on_unwind", &self.fail_on_unwind)
             .finish()
     }
 }

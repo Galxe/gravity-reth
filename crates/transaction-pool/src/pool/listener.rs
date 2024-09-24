@@ -1,8 +1,8 @@
 //! Listeners for the transaction-pool
 
 use crate::{
-    pool::events::{FullTransactionEvent, NewTransactionEvent, TransactionEvent},
-    traits::{NewBlobSidecar, PropagateKind},
+    pool::events::{FullTransactionEvent, TransactionEvent},
+    traits::PropagateKind,
     PoolTransaction, ValidPoolTransaction,
 };
 use alloy_primitives::{TxHash, B256};
@@ -14,9 +14,9 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::sync::mpsc::{
-    self as mpsc, error::TrySendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+    error::TrySendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tracing::debug;
+
 /// The size of the event channel used to propagate transaction events.
 const TX_POOL_EVENT_CHANNEL_SIZE: usize = 1024;
 
@@ -110,12 +110,6 @@ impl<T: PoolTransaction> PoolEventBroadcast<T> {
         self.all_events_broadcaster.broadcast(pool_event);
     }
 
-    /// Returns true if no listeners are installed
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.all_events_broadcaster.is_empty() && self.broadcasters_by_hash.is_empty()
-    }
-
     /// Create a new subscription for the given transaction hash.
     pub(crate) fn subscribe(&mut self, tx_hash: TxHash) -> TransactionEvents {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -173,25 +167,9 @@ impl<T: PoolTransaction> PoolEventBroadcast<T> {
         );
     }
 
-    /// Notify listeners about all discarded transactions.
-    #[inline]
-    pub(crate) fn discarded_many(&mut self, discarded: &[Arc<ValidPoolTransaction<T>>]) {
-        if self.is_empty() {
-            return
-        }
-        for tx in discarded {
-            self.discarded(tx.hash());
-        }
-    }
-
     /// Notify listeners about a transaction that was discarded.
     pub(crate) fn discarded(&mut self, tx: &TxHash) {
         self.broadcast_event(tx, TransactionEvent::Discarded, FullTransactionEvent::Discarded(*tx));
-    }
-
-    /// Notify listeners about a transaction that was invalid.
-    pub(crate) fn invalid(&mut self, tx: &TxHash) {
-        self.broadcast_event(tx, TransactionEvent::Invalid, FullTransactionEvent::Invalid(*tx));
     }
 
     /// Notify listeners that the transaction was mined
@@ -227,12 +205,6 @@ impl<T: PoolTransaction> AllPoolEventsBroadcaster<T> {
             Err(TrySendError::Closed(_)) => false,
         })
     }
-
-    /// Returns true if there are no listeners installed.
-    #[inline]
-    const fn is_empty(&self) -> bool {
-        self.senders.is_empty()
-    }
 }
 
 /// All Sender half(s) of the event channels for a specific transaction.
@@ -246,117 +218,12 @@ struct PoolEventBroadcaster {
 
 impl PoolEventBroadcaster {
     /// Returns `true` if there are no more listeners remaining.
-    const fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.senders.is_empty()
     }
 
     // Broadcast an event to all listeners. Dropped listeners are silently evicted.
     fn broadcast(&mut self, event: TransactionEvent) {
         self.senders.retain(|sender| sender.send(event.clone()).is_ok())
-    }
-}
-
-/// An active listener for new pending transactions.
-#[derive(Debug)]
-pub(crate) struct PendingTransactionHashListener {
-    pub(crate) sender: mpsc::Sender<TxHash>,
-    /// Whether to include transactions that should not be propagated over the network.
-    pub(crate) kind: TransactionListenerKind,
-}
-
-impl PendingTransactionHashListener {
-    /// Attempts to send all hashes to the listener.
-    ///
-    /// Returns false if the channel is closed (receiver dropped)
-    pub(crate) fn send_all(&self, hashes: impl IntoIterator<Item = TxHash>) -> bool {
-        for tx_hash in hashes {
-            match self.sender.try_send(tx_hash) {
-                Ok(()) => {}
-                Err(err) => {
-                    return if matches!(err, mpsc::error::TrySendError::Full(_)) {
-                        debug!(
-                            target: "txpool",
-                            "[{:?}] failed to send pending tx; channel full",
-                            tx_hash,
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                }
-            }
-        }
-        true
-    }
-}
-
-/// An active listener for new pending transactions.
-#[derive(Debug)]
-pub(crate) struct TransactionListener<T: PoolTransaction> {
-    pub(crate) sender: mpsc::Sender<NewTransactionEvent<T>>,
-    /// Whether to include transactions that should not be propagated over the network.
-    pub(crate) kind: TransactionListenerKind,
-}
-
-impl<T: PoolTransaction> TransactionListener<T> {
-    /// Attempts to send the event to the listener.
-    ///
-    /// Returns false if the channel is closed (receiver dropped)
-    pub(crate) fn send(&self, event: NewTransactionEvent<T>) -> bool {
-        self.send_all(std::iter::once(event))
-    }
-
-    /// Attempts to send all events to the listener.
-    ///
-    /// Returns false if the channel is closed (receiver dropped)
-    pub(crate) fn send_all(
-        &self,
-        events: impl IntoIterator<Item = NewTransactionEvent<T>>,
-    ) -> bool {
-        for event in events {
-            match self.sender.try_send(event) {
-                Ok(()) => {}
-                Err(err) => {
-                    return if let mpsc::error::TrySendError::Full(event) = err {
-                        debug!(
-                            target: "txpool",
-                            "[{:?}] failed to send pending tx; channel full",
-                            event.transaction.hash(),
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                }
-            }
-        }
-        true
-    }
-}
-
-/// An active listener for new blobs
-#[derive(Debug)]
-pub(crate) struct BlobTransactionSidecarListener {
-    pub(crate) sender: mpsc::Sender<NewBlobSidecar>,
-}
-
-/// Determines what kind of new transactions should be emitted by a stream of transactions.
-///
-/// This gives control whether to include transactions that are allowed to be propagated.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum TransactionListenerKind {
-    /// Any new pending transactions
-    All,
-    /// Only transactions that are allowed to be propagated.
-    ///
-    /// See also [`ValidPoolTransaction`]
-    PropagateOnly,
-}
-
-impl TransactionListenerKind {
-    /// Returns true if we're only interested in transactions that are allowed to be propagated.
-    #[inline]
-    pub const fn is_propagate_only(&self) -> bool {
-        matches!(self, Self::PropagateOnly)
     }
 }

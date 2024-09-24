@@ -1,72 +1,111 @@
 //! Contains RPC handler implementations specific to state.
 
-use crate::EthApi;
-use reth_rpc_convert::RpcConvert;
-use reth_rpc_eth_api::{
-    helpers::{EthState, LoadPendingBlock, LoadState},
-    RpcNodeCore,
-};
+use reth_chainspec::ChainSpec;
+use reth_provider::{ChainSpecProvider, StateProviderFactory};
+use reth_transaction_pool::TransactionPool;
 
-impl<N, Rpc> EthState for EthApi<N, Rpc>
+use reth_rpc_eth_api::helpers::{EthState, LoadState, SpawnBlocking};
+use reth_rpc_eth_types::EthStateCache;
+
+use crate::EthApi;
+
+impl<Provider, Pool, Network, EvmConfig> EthState for EthApi<Provider, Pool, Network, EvmConfig>
 where
-    N: RpcNodeCore,
-    Rpc: RpcConvert<Primitives = N::Primitives>,
-    Self: LoadPendingBlock,
+    Self: LoadState + SpawnBlocking,
 {
     fn max_proof_window(&self) -> u64 {
         self.inner.eth_proof_window()
     }
 }
 
-impl<N, Rpc> LoadState for EthApi<N, Rpc>
+impl<Provider, Pool, Network, EvmConfig> LoadState for EthApi<Provider, Pool, Network, EvmConfig>
 where
-    N: RpcNodeCore,
-    Rpc: RpcConvert<Primitives = N::Primitives>,
-    Self: LoadPendingBlock,
+    Self: Send + Sync,
+    Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = ChainSpec>,
+    Pool: TransactionPool,
 {
+    #[inline]
+    fn provider(&self) -> impl StateProviderFactory + ChainSpecProvider<ChainSpec = ChainSpec> {
+        self.inner.provider()
+    }
+
+    #[inline]
+    fn cache(&self) -> &EthStateCache {
+        self.inner.cache()
+    }
+
+    #[inline]
+    fn pool(&self) -> impl TransactionPool {
+        self.inner.pool()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::eth::helpers::types::EthRpcConverter;
-
     use super::*;
     use alloy_primitives::{Address, StorageKey, StorageValue, U256};
-    use reth_chainspec::ChainSpec;
+    use reth_chainspec::MAINNET;
     use reth_evm_ethereum::EthEvmConfig;
-    use reth_network_api::noop::NoopNetwork;
-    use reth_provider::{
-        test_utils::{ExtendedAccount, MockEthProvider, NoopProvider},
-        ChainSpecProvider,
+    use reth_primitives::{constants::ETHEREUM_BLOCK_GAS_LIMIT, KECCAK_EMPTY};
+    use reth_provider::test_utils::{ExtendedAccount, MockEthProvider, NoopProvider};
+    use reth_rpc_eth_api::helpers::EthState;
+    use reth_rpc_eth_types::{
+        EthStateCache, FeeHistoryCache, FeeHistoryCacheConfig, GasPriceOracle,
     };
-    use reth_rpc_eth_api::{helpers::EthState, node::RpcNodeCoreAdapter};
+    use reth_rpc_server_types::constants::{
+        DEFAULT_ETH_PROOF_WINDOW, DEFAULT_MAX_SIMULATE_BLOCKS, DEFAULT_PROOF_PERMITS,
+    };
+    use reth_tasks::pool::BlockingTaskPool;
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
     use std::collections::HashMap;
 
-    fn noop_eth_api() -> EthApi<
-        RpcNodeCoreAdapter<NoopProvider, TestPool, NoopNetwork, EthEvmConfig>,
-        EthRpcConverter<ChainSpec>,
-    > {
-        let provider = NoopProvider::default();
+    fn noop_eth_api() -> EthApi<NoopProvider, TestPool, (), EthEvmConfig> {
         let pool = testing_pool();
-        let evm_config = EthEvmConfig::mainnet();
+        let evm_config = EthEvmConfig::new(MAINNET.clone());
 
-        EthApi::builder(provider, pool, NoopNetwork::default(), evm_config).build()
+        let cache =
+            EthStateCache::spawn(NoopProvider::default(), Default::default(), evm_config.clone());
+        EthApi::new(
+            NoopProvider::default(),
+            pool,
+            (),
+            cache.clone(),
+            GasPriceOracle::new(NoopProvider::default(), Default::default(), cache.clone()),
+            ETHEREUM_BLOCK_GAS_LIMIT,
+            DEFAULT_MAX_SIMULATE_BLOCKS,
+            DEFAULT_ETH_PROOF_WINDOW,
+            BlockingTaskPool::build().expect("failed to build tracing pool"),
+            FeeHistoryCache::new(cache, FeeHistoryCacheConfig::default()),
+            evm_config,
+            DEFAULT_PROOF_PERMITS,
+        )
     }
 
     fn mock_eth_api(
         accounts: HashMap<Address, ExtendedAccount>,
-    ) -> EthApi<
-        RpcNodeCoreAdapter<MockEthProvider, TestPool, NoopNetwork, EthEvmConfig>,
-        EthRpcConverter<ChainSpec>,
-    > {
+    ) -> EthApi<MockEthProvider, TestPool, (), EthEvmConfig> {
         let pool = testing_pool();
         let mock_provider = MockEthProvider::default();
 
         let evm_config = EthEvmConfig::new(mock_provider.chain_spec());
         mock_provider.extend_accounts(accounts);
 
-        EthApi::builder(mock_provider, pool, NoopNetwork::default(), evm_config).build()
+        let cache =
+            EthStateCache::spawn(mock_provider.clone(), Default::default(), evm_config.clone());
+        EthApi::new(
+            mock_provider.clone(),
+            pool,
+            (),
+            cache.clone(),
+            GasPriceOracle::new(mock_provider, Default::default(), cache.clone()),
+            ETHEREUM_BLOCK_GAS_LIMIT,
+            DEFAULT_MAX_SIMULATE_BLOCKS,
+            DEFAULT_ETH_PROOF_WINDOW,
+            BlockingTaskPool::build().expect("failed to build tracing pool"),
+            FeeHistoryCache::new(cache, FeeHistoryCacheConfig::default()),
+            evm_config,
+            DEFAULT_PROOF_PERMITS,
+        )
     }
 
     #[tokio::test]
@@ -97,5 +136,17 @@ mod tests {
         let address = Address::random();
         let account = eth_api.get_account(address, Default::default()).await.unwrap();
         assert!(account.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_account_empty() {
+        let address = Address::random();
+        let accounts = HashMap::from([(address, ExtendedAccount::new(0, U256::ZERO))]);
+        let eth_api = mock_eth_api(accounts);
+
+        let account = eth_api.get_account(address, Default::default()).await.unwrap();
+        let expected_account =
+            reth_rpc_types::Account { code_hash: KECCAK_EMPTY, ..Default::default() };
+        assert_eq!(Some(expected_account), account);
     }
 }

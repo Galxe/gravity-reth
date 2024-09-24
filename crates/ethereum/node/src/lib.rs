@@ -1,7 +1,4 @@
 //! Standalone crate for ethereum-specific Reth configuration and builder types.
-//!
-//! # features
-//! - `js-tracer`: Enable the `JavaScript` tracer for the `debug_trace` endpoints
 
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/paradigmxyz/reth/main/assets/reth-docs.png",
@@ -11,22 +8,10 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-use reth_revm as _;
-use revm as _;
-
 pub use reth_ethereum_engine_primitives::EthEngineTypes;
 
 pub mod evm;
-pub use evm::EthEvmConfig;
+pub use evm::{EthEvmConfig, EthExecutorProvider};
 
-#[allow(deprecated)]
-pub use evm::EthExecutorProvider;
-
-pub use reth_ethereum_consensus as consensus;
 pub mod node;
-pub use node::*;
-
-pub mod payload;
-
-pub mod engine;
-pub use engine::EthereumEngineValidator;
+pub use node::EthereumNode;

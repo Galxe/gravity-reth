@@ -1,7 +1,8 @@
 use super::{collect_history_indices, load_history_indices};
-use alloy_primitives::Address;
 use reth_config::config::{EtlConfig, IndexHistoryConfig};
-use reth_db_api::{models::ShardedKey, table::Decode, tables, transaction::DbTxMut};
+use reth_db::tables;
+use reth_db_api::{models::ShardedKey, table::Decode, transaction::DbTxMut};
+use reth_primitives::Address;
 use reth_provider::{DBProvider, HistoryWriter, PruneCheckpointReader, PruneCheckpointWriter};
 use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment};
 use reth_stages_api::{
@@ -67,22 +68,23 @@ where
                 )
             })
             .transpose()?
-            .flatten() &&
-            target_prunable_block > input.checkpoint().block_number
+            .flatten()
         {
-            input.checkpoint = Some(StageCheckpoint::new(target_prunable_block));
+            if target_prunable_block > input.checkpoint().block_number {
+                input.checkpoint = Some(StageCheckpoint::new(target_prunable_block));
 
-            // Save prune checkpoint only if we don't have one already.
-            // Otherwise, pruner may skip the unpruned range of blocks.
-            if provider.get_prune_checkpoint(PruneSegment::AccountHistory)?.is_none() {
-                provider.save_prune_checkpoint(
-                    PruneSegment::AccountHistory,
-                    PruneCheckpoint {
-                        block_number: Some(target_prunable_block),
-                        tx_number: None,
-                        prune_mode,
-                    },
-                )?;
+                // Save prune checkpoint only if we don't have one already.
+                // Otherwise, pruner may skip the unpruned range of blocks.
+                if provider.get_prune_checkpoint(PruneSegment::AccountHistory)?.is_none() {
+                    provider.save_prune_checkpoint(
+                        PruneSegment::AccountHistory,
+                        PruneCheckpoint {
+                            block_number: Some(target_prunable_block),
+                            tx_number: None,
+                            prune_mode,
+                        },
+                    )?;
+                }
             }
         }
 
@@ -116,7 +118,7 @@ where
             collector,
             first_sync,
             ShardedKey::new,
-            ShardedKey::<Address>::decode_owned,
+            ShardedKey::<Address>::decode,
             |key| key.key,
         )?;
 
@@ -132,7 +134,7 @@ where
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
-        provider.unwind_account_history_indices_range(range)?;
+        provider.unwind_account_history_indices(range)?;
 
         // from HistoryIndex higher than that number.
         Ok(UnwindOutput { checkpoint: StageCheckpoint::new(unwind_progress) })
@@ -146,8 +148,8 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, TestRunnerError,
         TestStageDB, UnwindStageTestRunner,
     };
-    use alloy_primitives::{address, BlockNumber, B256};
     use itertools::Itertools;
+    use reth_db::BlockNumberList;
     use reth_db_api::{
         cursor::DbCursorRO,
         models::{
@@ -155,8 +157,8 @@ mod tests {
             StoredBlockBodyIndices,
         },
         transaction::DbTx,
-        BlockNumberList,
     };
+    use reth_primitives::{address, BlockNumber, B256};
     use reth_provider::{providers::StaticFileWriter, DatabaseProviderFactory};
     use reth_testing_utils::generators::{
         self, random_block_range, random_changeset_range, random_contract_account_range,
@@ -164,7 +166,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    const ADDRESS: Address = address!("0x0000000000000000000000000000000000000001");
+    const ADDRESS: Address = address!("0000000000000000000000000000000000000001");
 
     const LAST_BLOCK_IN_FULL_SHARD: BlockNumber = NUM_OF_INDICES_IN_SHARD as BlockNumber;
     const MAX_BLOCK: BlockNumber = NUM_OF_INDICES_IN_SHARD as BlockNumber + 2;
@@ -179,7 +181,7 @@ mod tests {
     }
 
     fn list(list: &[u64]) -> BlockNumberList {
-        BlockNumberList::new(list.iter().copied()).unwrap()
+        BlockNumberList::new(list).unwrap()
     }
 
     fn cast(

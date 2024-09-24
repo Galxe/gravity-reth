@@ -27,7 +27,7 @@ use std::{
     pin::{pin, Pin},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
+        Arc,
     },
     task::{ready, Context, Poll},
 };
@@ -44,9 +44,6 @@ pub mod shutdown;
 
 #[cfg(feature = "rayon")]
 pub mod pool;
-
-/// Global [`TaskExecutor`] instance that can be accessed from anywhere.
-static GLOBAL_EXECUTOR: OnceLock<TaskExecutor> = OnceLock::new();
 
 /// A type that can spawn tasks.
 ///
@@ -114,13 +111,6 @@ dyn_clone::clone_trait_object!(TaskSpawner);
 #[non_exhaustive]
 pub struct TokioTaskExecutor;
 
-impl TokioTaskExecutor {
-    /// Converts the instance to a boxed [`TaskSpawner`].
-    pub fn boxed(self) -> Box<dyn TaskSpawner + 'static> {
-        Box::new(self)
-    }
-}
-
 impl TaskSpawner for TokioTaskExecutor {
     fn spawn(&self, fut: BoxFuture<'static, ()>) -> JoinHandle<()> {
         tokio::task::spawn(fut)
@@ -162,10 +152,10 @@ pub struct TaskManager {
     ///
     /// See [`Handle`] docs.
     handle: Handle,
-    /// Sender half for sending task events to this type
-    task_events_tx: UnboundedSender<TaskEvent>,
-    /// Receiver for task events
-    task_events_rx: UnboundedReceiver<TaskEvent>,
+    /// Sender half for sending panic signals to this type
+    panicked_tasks_tx: UnboundedSender<PanickedTaskError>,
+    /// Listens for panicked tasks
+    panicked_tasks_rx: UnboundedReceiver<PanickedTaskError>,
     /// The [Signal] to fire when all tasks should be shutdown.
     ///
     /// This is fired when dropped.
@@ -179,11 +169,7 @@ pub struct TaskManager {
 // === impl TaskManager ===
 
 impl TaskManager {
-    /// Returns a __new__ [`TaskManager`] over the currently running Runtime.
-    ///
-    /// This must be polled for the duration of the program.
-    ///
-    /// To obtain the current [`TaskExecutor`] see [`TaskExecutor::current`].
+    /// Returns a a [`TaskManager`] over the currently running Runtime.
     ///
     /// # Panics
     ///
@@ -194,25 +180,17 @@ impl TaskManager {
     }
 
     /// Create a new instance connected to the given handle's tokio runtime.
-    ///
-    /// This also sets the global [`TaskExecutor`].
     pub fn new(handle: Handle) -> Self {
-        let (task_events_tx, task_events_rx) = unbounded_channel();
+        let (panicked_tasks_tx, panicked_tasks_rx) = unbounded_channel();
         let (signal, on_shutdown) = signal();
-        let manager = Self {
+        Self {
             handle,
-            task_events_tx,
-            task_events_rx,
+            panicked_tasks_tx,
+            panicked_tasks_rx,
             signal: Some(signal),
             on_shutdown,
             graceful_tasks: Arc::new(AtomicUsize::new(0)),
-        };
-
-        let _ = GLOBAL_EXECUTOR
-            .set(manager.executor())
-            .inspect_err(|_| error!("Global executor already set"));
-
-        manager
+        }
     }
 
     /// Returns a new [`TaskExecutor`] that can spawn new tasks onto the tokio runtime this type is
@@ -221,7 +199,7 @@ impl TaskManager {
         TaskExecutor {
             handle: self.handle.clone(),
             on_shutdown: self.on_shutdown.clone(),
-            task_events_tx: self.task_events_tx.clone(),
+            panicked_tasks_tx: self.panicked_tasks_tx.clone(),
             metrics: Default::default(),
             graceful_tasks: Arc::clone(&self.graceful_tasks),
         }
@@ -259,23 +237,16 @@ impl TaskManager {
 ///
 /// See [`TaskExecutor::spawn_critical`]
 impl Future for TaskManager {
-    type Output = Result<(), PanickedTaskError>;
+    type Output = PanickedTaskError;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match ready!(self.as_mut().get_mut().task_events_rx.poll_recv(cx)) {
-            Some(TaskEvent::Panic(err)) => Poll::Ready(Err(err)),
-            Some(TaskEvent::GracefulShutdown) | None => {
-                if let Some(signal) = self.get_mut().signal.take() {
-                    signal.fire();
-                }
-                Poll::Ready(Ok(()))
-            }
-        }
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let err = ready!(self.get_mut().panicked_tasks_rx.poll_recv(cx));
+        Poll::Ready(err.expect("stream can not end"))
     }
 }
 
 /// Error with the name of the task that panicked and an error downcasted to string, if possible.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub struct PanickedTaskError {
     task_name: &'static str,
     error: Option<String>,
@@ -306,15 +277,6 @@ impl PanickedTaskError {
     }
 }
 
-/// Represents the events that the `TaskManager`'s main future can receive.
-#[derive(Debug)]
-enum TaskEvent {
-    /// Indicates that a critical task has panicked.
-    Panic(PanickedTaskError),
-    /// A signal requesting a graceful shutdown of the `TaskManager`.
-    GracefulShutdown,
-}
-
 /// A type that can spawn new tokio tasks
 #[derive(Debug, Clone)]
 pub struct TaskExecutor {
@@ -324,9 +286,9 @@ pub struct TaskExecutor {
     handle: Handle,
     /// Receiver of the shutdown signal.
     on_shutdown: Shutdown,
-    /// Sender half for sending task events to this type
-    task_events_tx: UnboundedSender<TaskEvent>,
-    /// Task Executor Metrics
+    /// Sender half for sending panic signals to this type
+    panicked_tasks_tx: UnboundedSender<PanickedTaskError>,
+    // Task Executor Metrics
     metrics: TaskExecutorMetrics,
     /// How many [`GracefulShutdown`] tasks are currently active
     graceful_tasks: Arc<AtomicUsize>,
@@ -335,23 +297,6 @@ pub struct TaskExecutor {
 // === impl TaskExecutor ===
 
 impl TaskExecutor {
-    /// Attempts to get the current `TaskExecutor` if one has been initialized.
-    ///
-    /// Returns an error if no [`TaskExecutor`] has been initialized via [`TaskManager`].
-    pub fn try_current() -> Result<Self, NoCurrentTaskExecutorError> {
-        GLOBAL_EXECUTOR.get().cloned().ok_or_else(NoCurrentTaskExecutorError::default)
-    }
-
-    /// Returns the current `TaskExecutor`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no global executor has been initialized. Use [`try_current`](Self::try_current)
-    /// for a non-panicking version.
-    pub fn current() -> Self {
-        Self::try_current().unwrap()
-    }
-
     /// Returns the [Handle] to the tokio runtime.
     pub const fn handle(&self) -> &Handle {
         &self.handle
@@ -449,7 +394,7 @@ impl TaskExecutor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let panicked_tasks_tx = self.task_events_tx.clone();
+        let panicked_tasks_tx = self.panicked_tasks_tx.clone();
         let on_shutdown = self.on_shutdown.clone();
 
         // wrap the task in catch unwind
@@ -458,7 +403,7 @@ impl TaskExecutor {
             .map_err(move |error| {
                 let task_error = PanickedTaskError::new(name, error);
                 error!("{task_error}");
-                let _ = panicked_tasks_tx.send(TaskEvent::Panic(task_error));
+                let _ = panicked_tasks_tx.send(task_error);
             })
             .in_current_span();
 
@@ -508,7 +453,7 @@ impl TaskExecutor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let panicked_tasks_tx = self.task_events_tx.clone();
+        let panicked_tasks_tx = self.panicked_tasks_tx.clone();
         let on_shutdown = self.on_shutdown.clone();
         let fut = f(on_shutdown);
 
@@ -518,7 +463,7 @@ impl TaskExecutor {
             .map_err(move |error| {
                 let task_error = PanickedTaskError::new(name, error);
                 error!("{task_error}");
-                let _ = panicked_tasks_tx.send(TaskEvent::Panic(task_error));
+                let _ = panicked_tasks_tx.send(task_error);
             })
             .map(drop)
             .in_current_span();
@@ -554,7 +499,7 @@ impl TaskExecutor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let panicked_tasks_tx = self.task_events_tx.clone();
+        let panicked_tasks_tx = self.panicked_tasks_tx.clone();
         let on_shutdown = GracefulShutdown::new(
             self.on_shutdown.clone(),
             GracefulShutdownGuard::new(Arc::clone(&self.graceful_tasks)),
@@ -567,7 +512,7 @@ impl TaskExecutor {
             .map_err(move |error| {
                 let task_error = PanickedTaskError::new(name, error);
                 error!("{task_error}");
-                let _ = panicked_tasks_tx.send(TaskEvent::Panic(task_error));
+                let _ = panicked_tasks_tx.send(task_error);
             })
             .map(drop)
             .in_current_span();
@@ -609,25 +554,6 @@ impl TaskExecutor {
 
         self.handle.spawn(fut)
     }
-
-    /// Sends a request to the `TaskManager` to initiate a graceful shutdown.
-    ///
-    /// Caution: This will terminate the entire program.
-    ///
-    /// The [`TaskManager`] upon receiving this event, will terminate and initiate the shutdown that
-    /// can be handled via the returned [`GracefulShutdown`].
-    pub fn initiate_graceful_shutdown(
-        &self,
-    ) -> Result<GracefulShutdown, tokio::sync::mpsc::error::SendError<()>> {
-        self.task_events_tx
-            .send(TaskEvent::GracefulShutdown)
-            .map_err(|_send_error_with_task_event| tokio::sync::mpsc::error::SendError(()))?;
-
-        Ok(GracefulShutdown::new(
-            self.on_shutdown.clone(),
-            GracefulShutdownGuard::new(Arc::clone(&self.graceful_tasks)),
-        ))
-    }
 }
 
 impl TaskSpawner for TaskExecutor {
@@ -642,7 +568,6 @@ impl TaskSpawner for TaskExecutor {
     }
 
     fn spawn_blocking(&self, fut: BoxFuture<'static, ()>) -> JoinHandle<()> {
-        self.metrics.inc_regular_tasks();
         self.spawn_blocking(fut)
     }
 
@@ -651,7 +576,6 @@ impl TaskSpawner for TaskExecutor {
         name: &'static str,
         fut: BoxFuture<'static, ()>,
     ) -> JoinHandle<()> {
-        self.metrics.inc_critical_tasks();
         Self::spawn_critical_blocking(self, name, fut)
     }
 }
@@ -713,12 +637,6 @@ enum TaskKind {
     Blocking,
 }
 
-/// Error returned by `try_current` when no task executor has been configured.
-#[derive(Debug, Default, thiserror::Error)]
-#[error("No current task executor available.")]
-#[non_exhaustive]
-pub struct NoCurrentTaskExecutorError;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,12 +666,9 @@ mod tests {
         executor.spawn_critical("this is a critical task", async { panic!("intentionally panic") });
 
         runtime.block_on(async move {
-            let err_result = manager.await;
-            assert!(err_result.is_err(), "Expected TaskManager to return an error due to panic");
-            let panicked_err = err_result.unwrap_err();
-
-            assert_eq!(panicked_err.task_name, "this is a critical task");
-            assert_eq!(panicked_err.error, Some("intentionally panic".to_string()));
+            let err = manager.await;
+            assert_eq!(err.task_name, "this is a critical task");
+            assert_eq!(err.error, Some("intentionally panic".to_string()));
         })
     }
 
@@ -860,50 +775,5 @@ mod tests {
 
         manager.graceful_shutdown_with_timeout(timeout);
         assert!(!val.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn can_access_global() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let handle = runtime.handle().clone();
-        let _manager = TaskManager::new(handle);
-        let _executor = TaskExecutor::try_current().unwrap();
-    }
-
-    #[test]
-    fn test_graceful_shutdown_triggered_by_executor() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let task_manager = TaskManager::new(runtime.handle().clone());
-        let executor = task_manager.executor();
-
-        let task_did_shutdown_flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = task_did_shutdown_flag.clone();
-
-        let spawned_task_handle = executor.spawn_with_signal(|shutdown_signal| async move {
-            shutdown_signal.await;
-            flag_clone.store(true, Ordering::SeqCst);
-        });
-
-        let manager_future_handle = runtime.spawn(task_manager);
-
-        let send_result = executor.initiate_graceful_shutdown();
-        assert!(send_result.is_ok(), "Sending the graceful shutdown signal should succeed and return a GracefulShutdown future");
-
-        let manager_final_result = runtime.block_on(manager_future_handle);
-
-        assert!(manager_final_result.is_ok(), "TaskManager task should not panic");
-        assert_eq!(
-            manager_final_result.unwrap(),
-            Ok(()),
-            "TaskManager should resolve cleanly with Ok(()) after graceful shutdown request"
-        );
-
-        let task_join_result = runtime.block_on(spawned_task_handle);
-        assert!(task_join_result.is_ok(), "Spawned task should complete without panic");
-
-        assert!(
-            task_did_shutdown_flag.load(Ordering::Relaxed),
-            "Task should have received the shutdown signal and set the flag"
-        );
     }
 }

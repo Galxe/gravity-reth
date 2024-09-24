@@ -1,45 +1,41 @@
 use std::sync::Arc;
 
 use alloy_genesis::ChainConfig;
-use alloy_rpc_types_admin::{
-    EthInfo, EthPeerInfo, EthProtocolInfo, NodeInfo, PeerInfo, PeerNetworkInfo, PeerProtocolInfo,
-    Ports, ProtocolInfo,
-};
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition};
+use reth_chainspec::ChainSpec;
 use reth_network_api::{NetworkInfo, Peers};
 use reth_network_peers::{id2pk, AnyNode, NodeRecord};
 use reth_network_types::PeerKind;
+use reth_primitives::EthereumHardfork;
 use reth_rpc_api::AdminApiServer;
 use reth_rpc_server_types::ToRpcResult;
-use reth_transaction_pool::TransactionPool;
+use reth_rpc_types::admin::{
+    EthInfo, EthPeerInfo, EthProtocolInfo, NodeInfo, PeerInfo, PeerNetworkInfo, PeerProtocolInfo,
+    Ports, ProtocolInfo,
+};
 
 /// `admin` API implementation.
 ///
 /// This type provides the functionality for handling `admin` related requests.
-pub struct AdminApi<N, ChainSpec, Pool> {
+pub struct AdminApi<N> {
     /// An interface to interact with the network
     network: N,
     /// The specification of the blockchain's configuration.
     chain_spec: Arc<ChainSpec>,
-    /// The transaction pool
-    pool: Pool,
 }
 
-impl<N, ChainSpec, Pool> AdminApi<N, ChainSpec, Pool> {
+impl<N> AdminApi<N> {
     /// Creates a new instance of `AdminApi`.
-    pub const fn new(network: N, chain_spec: Arc<ChainSpec>, pool: Pool) -> Self {
-        Self { network, chain_spec, pool }
+    pub const fn new(network: N, chain_spec: Arc<ChainSpec>) -> Self {
+        Self { network, chain_spec }
     }
 }
 
 #[async_trait]
-impl<N, ChainSpec, Pool> AdminApiServer for AdminApi<N, ChainSpec, Pool>
+impl<N> AdminApiServer for AdminApi<N>
 where
     N: NetworkInfo + Peers + 'static,
-    ChainSpec: EthChainSpec + EthereumHardforks + Send + Sync + 'static,
-    Pool: TransactionPool + 'static,
 {
     /// Handler for `admin_addPeer`
     fn add_peer(&self, record: NodeRecord) -> RpcResult<bool> {
@@ -112,16 +108,16 @@ where
         let enode = self.network.local_node_record();
         let status = self.network.network_status().await.to_rpc_result()?;
         let mut config = ChainConfig {
-            chain_id: self.chain_spec.chain().id(),
+            chain_id: self.chain_spec.chain.id(),
             terminal_total_difficulty_passed: self
                 .chain_spec
-                .final_paris_total_difficulty()
+                .get_final_paris_total_difficulty()
                 .is_some(),
             terminal_total_difficulty: self
                 .chain_spec
-                .ethereum_fork_activation(EthereumHardfork::Paris)
+                .hardforks
+                .fork(EthereumHardfork::Paris)
                 .ttd(),
-            deposit_contract_address: self.chain_spec.deposit_contract().map(|dc| dc.address),
             ..self.chain_spec.genesis().config.clone()
         };
 
@@ -131,12 +127,7 @@ where
                 $(
                     // don't overwrite if already set
                     if $config.$field.is_none() {
-                        $config.$field = match self.chain_spec.ethereum_fork_activation(EthereumHardfork::$fork) {
-                            ForkCondition::Block(block) => Some(block),
-                            ForkCondition::TTD { fork_block, .. } => fork_block,
-                            ForkCondition::Timestamp(ts) => Some(ts),
-                            ForkCondition::Never => None,
-                        };
+                        $config.$field = self.chain_spec.hardforks.fork_block(EthereumHardfork::$fork);
                     }
                 )*
             };
@@ -172,14 +163,13 @@ where
             ip: enode.address,
             ports: Ports { discovery: enode.udp_port, listener: enode.tcp_port },
             listen_addr: enode.tcp_addr(),
-            #[expect(deprecated)]
             protocols: ProtocolInfo {
                 eth: Some(EthProtocolInfo {
                     network: status.eth_protocol_info.network,
+                    difficulty: status.eth_protocol_info.difficulty,
                     genesis: status.eth_protocol_info.genesis,
                     config,
                     head: status.eth_protocol_info.head,
-                    difficulty: None,
                 }),
                 snap: None,
             },
@@ -193,17 +183,9 @@ where
     ) -> jsonrpsee::core::SubscriptionResult {
         Err("admin_peerEvents is not implemented yet".into())
     }
-
-    /// Handler for `admin_clearTxpool`
-    async fn clear_txpool(&self) -> RpcResult<u64> {
-        let all_hashes = self.pool.all_transaction_hashes();
-        let count = all_hashes.len() as u64;
-        let _ = self.pool.remove_transactions(all_hashes);
-        Ok(count)
-    }
 }
 
-impl<N, ChainSpec, Pool> std::fmt::Debug for AdminApi<N, ChainSpec, Pool> {
+impl<N> std::fmt::Debug for AdminApi<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AdminApi").finish_non_exhaustive()
     }

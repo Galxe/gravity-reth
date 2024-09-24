@@ -6,7 +6,7 @@ on:
   pull_request:
   merge_group:
   push:
-    branches: [main]
+    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,8 +29,7 @@ jobs:
       RUST_BACKTRACE: 1
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
-      - uses: rui314/setup-mold@v1
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

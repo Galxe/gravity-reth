@@ -1,19 +1,15 @@
 //! JSON-RPC service middleware.
-use futures::{
-    future::Either,
-    stream::{FuturesOrdered, StreamExt},
-};
+use futures_util::future::BoxFuture;
 use jsonrpsee::{
-    core::middleware::{Batch, BatchEntry},
     server::{
         middleware::rpc::{ResponseFuture, RpcServiceT},
         IdProvider,
     },
-    types::{error::reject_too_many_subscriptions, ErrorCode, ErrorObject, Id, Request},
-    BatchResponse, BatchResponseBuilder, BoundedSubscriptions, ConnectionId, MethodCallback,
-    MethodResponse, MethodSink, Methods, SubscriptionState,
+    types::{error::reject_too_many_subscriptions, ErrorCode, ErrorObject, Request},
+    BoundedSubscriptions, ConnectionId, Extensions, MethodCallback, MethodResponse, MethodSink,
+    Methods, SubscriptionState,
 };
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 /// JSON-RPC service middleware.
 #[derive(Clone, Debug)]
@@ -50,19 +46,19 @@ impl RpcService {
     }
 }
 
-impl RpcServiceT for RpcService {
-    type MethodResponse = MethodResponse;
-    type NotificationResponse = Option<MethodResponse>;
-    type BatchResponse = BatchResponse;
+impl<'a> RpcServiceT<'a> for RpcService {
+    // The rpc module is already boxing the futures and
+    // it's used to under the hood by the RpcService.
+    type Future = ResponseFuture<BoxFuture<'a, MethodResponse>>;
 
-    fn call<'a>(&self, req: Request<'a>) -> impl Future<Output = Self::MethodResponse> + Send + 'a {
+    fn call(&self, req: Request<'a>) -> Self::Future {
         let conn_id = self.conn_id;
         let max_response_body_size = self.max_response_body_size;
 
         let params = req.params();
         let name = req.method_name();
         let id = req.id().clone();
-        let extensions = req.extensions.clone();
+        let extensions = Extensions::new();
 
         match self.methods.method_with_name(name) {
             None => {
@@ -86,9 +82,9 @@ impl RpcServiceT for RpcService {
                         bounded_subscriptions,
                         sink,
                         id_provider,
-                    } = &self.cfg
+                    } = self.cfg.clone()
                     else {
-                        tracing::warn!(id = ?id, method = %name, "Attempted subscription on a service not configured for subscriptions.");
+                        tracing::warn!("Subscriptions not supported");
                         let rp =
                             MethodResponse::error(id, ErrorObject::from(ErrorCode::InternalError));
                         return ResponseFuture::ready(rp);
@@ -97,12 +93,11 @@ impl RpcServiceT for RpcService {
                     if let Some(p) = bounded_subscriptions.acquire() {
                         let conn_state = SubscriptionState {
                             conn_id,
-                            id_provider: &**id_provider,
+                            id_provider: &*id_provider.clone(),
                             subscription_permit: p,
                         };
 
-                        let fut =
-                            callback(id.clone(), params, sink.clone(), conn_state, extensions);
+                        let fut = callback(id.clone(), params, sink, conn_state, extensions);
                         ResponseFuture::future(fut)
                     } else {
                         let max = bounded_subscriptions.max();
@@ -115,7 +110,7 @@ impl RpcServiceT for RpcService {
                     // happen!
 
                     let RpcServiceCfg::CallsAndSubscriptions { .. } = self.cfg else {
-                        tracing::warn!(id = ?id, method = %name, "Attempted unsubscription on a service not configured for subscriptions.");
+                        tracing::warn!("Subscriptions not supported");
                         let rp =
                             MethodResponse::error(id, ErrorObject::from(ErrorCode::InternalError));
                         return ResponseFuture::ready(rp);
@@ -126,45 +121,5 @@ impl RpcServiceT for RpcService {
                 }
             },
         }
-    }
-
-    fn batch<'a>(&self, req: Batch<'a>) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
-        let entries: Vec<_> = req.into_iter().collect();
-
-        let mut got_notif = false;
-        let mut batch_response = BatchResponseBuilder::new_with_limit(self.max_response_body_size);
-
-        let mut pending_calls: FuturesOrdered<_> = entries
-            .into_iter()
-            .filter_map(|v| match v {
-                Ok(BatchEntry::Call(call)) => Some(Either::Right(self.call(call))),
-                Ok(BatchEntry::Notification(_n)) => {
-                    got_notif = true;
-                    None
-                }
-                Err(_err) => Some(Either::Left(async {
-                    MethodResponse::error(Id::Null, ErrorObject::from(ErrorCode::InvalidRequest))
-                })),
-            })
-            .collect();
-        async move {
-            while let Some(response) = pending_calls.next().await {
-                if let Err(too_large) = batch_response.append(response) {
-                    let mut error_batch = BatchResponseBuilder::new_with_limit(1);
-                    let _ = error_batch.append(too_large);
-                    return error_batch.finish();
-                }
-            }
-
-            batch_response.finish()
-        }
-    }
-
-    #[allow(clippy::manual_async_fn)]
-    fn notification<'a>(
-        &self,
-        _n: jsonrpsee::core::middleware::Notification<'a>,
-    ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
-        async move { None }
     }
 }

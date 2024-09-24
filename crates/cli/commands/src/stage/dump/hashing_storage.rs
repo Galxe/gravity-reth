@@ -1,18 +1,18 @@
+use std::sync::Arc;
+
 use super::setup;
 use eyre::Result;
-use reth_db::DatabaseEnv;
-use reth_db_api::{database::Database, table::TableImporter, tables};
+use reth_chainspec::ChainSpec;
+use reth_db::{tables, DatabaseEnv};
+use reth_db_api::{database::Database, table::TableImporter};
 use reth_db_common::DbTool;
+use reth_node_builder::{NodeTypesWithDB, NodeTypesWithDBAdapter};
 use reth_node_core::dirs::{ChainPath, DataDirPath};
-use reth_provider::{
-    providers::{ProviderNodeTypes, StaticFileProvider},
-    DatabaseProviderFactory, ProviderFactory,
-};
+use reth_provider::{providers::StaticFileProvider, DatabaseProviderFactory, ProviderFactory};
 use reth_stages::{stages::StorageHashingStage, Stage, StageCheckpoint, UnwindInput};
-use std::sync::Arc;
 use tracing::info;
 
-pub(crate) async fn dump_hashing_storage_stage<N: ProviderNodeTypes<DB = Arc<DatabaseEnv>>>(
+pub(crate) async fn dump_hashing_storage_stage<N: NodeTypesWithDB<ChainSpec = ChainSpec>>(
     db_tool: &DbTool<N>,
     from: u64,
     to: u64,
@@ -25,7 +25,7 @@ pub(crate) async fn dump_hashing_storage_stage<N: ProviderNodeTypes<DB = Arc<Dat
 
     if should_run {
         dry_run(
-            ProviderFactory::<N>::new(
+            ProviderFactory::<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>::new(
                 Arc::new(output_db),
                 db_tool.chain(),
                 StaticFileProvider::read_write(output_datadir.static_files())?,
@@ -39,7 +39,7 @@ pub(crate) async fn dump_hashing_storage_stage<N: ProviderNodeTypes<DB = Arc<Dat
 }
 
 /// Dry-run an unwind to FROM block and copy the necessary table data to the new database.
-fn unwind_and_copy<N: ProviderNodeTypes>(
+fn unwind_and_copy<N: NodeTypesWithDB<ChainSpec = ChainSpec>>(
     db_tool: &DbTool<N>,
     from: u64,
     tip_block_number: u64,
@@ -69,7 +69,7 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
 }
 
 /// Try to re-execute the stage straight away
-fn dry_run<N: ProviderNodeTypes>(
+fn dry_run<N: NodeTypesWithDB<ChainSpec = ChainSpec>>(
     output_provider_factory: ProviderFactory<N>,
     to: u64,
     from: u64,

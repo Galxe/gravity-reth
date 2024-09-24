@@ -21,6 +21,7 @@ pub trait DbCursorRO<T: Table> {
     fn seek(&mut self, key: T::Key) -> PairResult<T>;
 
     /// Position the cursor at the next KV pair, returning it.
+    #[allow(clippy::should_implement_trait)]
     fn next(&mut self) -> PairResult<T>;
 
     /// Position the cursor at the previous KV pair, returning it.
@@ -103,17 +104,17 @@ pub trait DbDupCursorRO<T: DupSort> {
 pub trait DbCursorRW<T: Table> {
     /// Database operation that will update an existing row if a specified value already
     /// exists in a table, and insert a new row if the specified value doesn't already exist
-    fn upsert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError>;
+    fn upsert(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError>;
 
     /// Database operation that will insert a row at a given key. If the key is already
     /// present, the operation will result in an error.
-    fn insert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError>;
+    fn insert(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError>;
 
     /// Append value to next cursor item.
     ///
     /// This is efficient for pre-sorted data. If the data is not pre-sorted, use
     /// [`DbCursorRW::insert`].
-    fn append(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError>;
+    fn append(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError>;
 
     /// Delete current value that cursor points to
     fn delete_current(&mut self) -> Result<(), DatabaseError>;
@@ -148,16 +149,21 @@ where
     }
 }
 
-impl<T: Table, CURSOR: DbCursorRO<T>> Iterator for Walker<'_, T, CURSOR> {
+impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> Iterator for Walker<'cursor, T, CURSOR> {
     type Item = Result<TableRow<T>, DatabaseError>;
     fn next(&mut self) -> Option<Self::Item> {
-        self.start.take().or_else(|| self.cursor.next().transpose())
+        let start = self.start.take();
+        if start.is_some() {
+            return start
+        }
+
+        self.cursor.next().transpose()
     }
 }
 
 impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> Walker<'cursor, T, CURSOR> {
     /// construct Walker
-    pub const fn new(cursor: &'cursor mut CURSOR, start: IterPairResult<T>) -> Self {
+    pub fn new(cursor: &'cursor mut CURSOR, start: IterPairResult<T>) -> Self {
         Self { cursor, start }
     }
 
@@ -168,7 +174,7 @@ impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> Walker<'cursor, T, CURSOR> {
     }
 }
 
-impl<T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> Walker<'_, T, CURSOR> {
+impl<'cursor, T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> Walker<'cursor, T, CURSOR> {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
         self.start.take();
@@ -200,7 +206,7 @@ where
 
 impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> ReverseWalker<'cursor, T, CURSOR> {
     /// construct `ReverseWalker`
-    pub const fn new(cursor: &'cursor mut CURSOR, start: IterPairResult<T>) -> Self {
+    pub fn new(cursor: &'cursor mut CURSOR, start: IterPairResult<T>) -> Self {
         Self { cursor, start }
     }
 
@@ -211,7 +217,7 @@ impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> ReverseWalker<'cursor, T, CURSOR>
     }
 }
 
-impl<T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> ReverseWalker<'_, T, CURSOR> {
+impl<'cursor, T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> ReverseWalker<'cursor, T, CURSOR> {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
         self.start.take();
@@ -219,7 +225,7 @@ impl<T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> ReverseWalker<'_, T, CURSO
     }
 }
 
-impl<T: Table, CURSOR: DbCursorRO<T>> Iterator for ReverseWalker<'_, T, CURSOR> {
+impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> Iterator for ReverseWalker<'cursor, T, CURSOR> {
     type Item = Result<TableRow<T>, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -260,7 +266,7 @@ where
     }
 }
 
-impl<T: Table, CURSOR: DbCursorRO<T>> Iterator for RangeWalker<'_, T, CURSOR> {
+impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> Iterator for RangeWalker<'cursor, T, CURSOR> {
     type Item = Result<TableRow<T>, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -310,7 +316,7 @@ impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> RangeWalker<'cursor, T, CURSOR> {
     }
 }
 
-impl<T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> RangeWalker<'_, T, CURSOR> {
+impl<'cursor, T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> RangeWalker<'cursor, T, CURSOR> {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
         self.start.take();
@@ -343,7 +349,7 @@ where
     }
 }
 
-impl<T: DupSort, CURSOR: DbCursorRW<T> + DbDupCursorRO<T>> DupWalker<'_, T, CURSOR> {
+impl<'cursor, T: DupSort, CURSOR: DbCursorRW<T> + DbDupCursorRO<T>> DupWalker<'cursor, T, CURSOR> {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
         self.start.take();
@@ -351,7 +357,7 @@ impl<T: DupSort, CURSOR: DbCursorRW<T> + DbDupCursorRO<T>> DupWalker<'_, T, CURS
     }
 }
 
-impl<T: DupSort, CURSOR: DbDupCursorRO<T>> Iterator for DupWalker<'_, T, CURSOR> {
+impl<'cursor, T: DupSort, CURSOR: DbDupCursorRO<T>> Iterator for DupWalker<'cursor, T, CURSOR> {
     type Item = Result<TableRow<T>, DatabaseError>;
     fn next(&mut self) -> Option<Self::Item> {
         let start = self.start.take();

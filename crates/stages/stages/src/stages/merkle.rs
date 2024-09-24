@@ -1,19 +1,15 @@
-use alloy_consensus::{constants::KECCAK_EMPTY, BlockHeader};
-use alloy_primitives::{BlockNumber, Sealable, B256};
 use reth_codecs::Compact;
 use reth_consensus::ConsensusError;
-use reth_db_api::{
-    tables,
-    transaction::{DbTx, DbTxMut},
-};
-use reth_primitives_traits::{GotExpected, SealedHeader};
+use reth_db::tables;
+use reth_db_api::transaction::{DbTx, DbTxMut};
+use reth_primitives::{BlockNumber, GotExpected, SealedHeader, B256};
 use reth_provider::{
     DBProvider, HeaderProvider, ProviderError, StageCheckpointReader, StageCheckpointWriter,
     StatsReader, TrieWriter,
 };
 use reth_stages_api::{
     BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
-    StageCheckpoint, StageError, StageId, StorageRootMerkleCheckpoint, UnwindInput, UnwindOutput,
+    StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_trie::{IntermediateStateRootState, StateRoot, StateRootProgress, StoredSubNode};
 use reth_trie_db::DatabaseStateRoot;
@@ -40,17 +36,11 @@ Once you have this information, please submit a github issue at https://github.c
 
 /// The default threshold (in number of blocks) for switching from incremental trie building
 /// of changes to whole rebuild.
-pub const MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD: u64 = 100_000;
-
-/// The default threshold (in number of blocks) to run the stage in incremental mode. The
-/// incremental mode will calculate the state root for a large range of blocks by calculating the
-/// new state root for this many blocks, in batches, repeating until we reach the desired block
-/// number.
-pub const MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD: u64 = 7_000;
+pub const MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD: u64 = 5_000;
 
 /// The merkle hashing stage uses input from
 /// [`AccountHashingStage`][crate::stages::AccountHashingStage] and
-/// [`StorageHashingStage`][crate::stages::StorageHashingStage] to calculate intermediate hashes
+/// [`StorageHashingStage`][crate::stages::AccountHashingStage] to calculate intermediate hashes
 /// and state roots.
 ///
 /// This stage should be run with the above two stages, otherwise it is a no-op.
@@ -73,15 +63,9 @@ pub const MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD: u64 = 7_000;
 pub enum MerkleStage {
     /// The execution portion of the merkle stage.
     Execution {
-        // TODO: make struct for holding incremental settings, for code reuse between `Execution`
-        // variant and `Both`
         /// The threshold (in number of blocks) for switching from incremental trie building
         /// of changes to whole rebuild.
-        rebuild_threshold: u64,
-        /// The threshold (in number of blocks) to run the stage in incremental mode. The
-        /// incremental mode will calculate the state root by calculating the new state root for
-        /// some number of blocks, repeating until we reach the desired block number.
-        incremental_threshold: u64,
+        clean_threshold: u64,
     },
     /// The unwind portion of the merkle stage.
     Unwind,
@@ -90,21 +74,14 @@ pub enum MerkleStage {
     Both {
         /// The threshold (in number of blocks) for switching from incremental trie building
         /// of changes to whole rebuild.
-        rebuild_threshold: u64,
-        /// The threshold (in number of blocks) to run the stage in incremental mode. The
-        /// incremental mode will calculate the state root by calculating the new state root for
-        /// some number of blocks, repeating until we reach the desired block number.
-        incremental_threshold: u64,
+        clean_threshold: u64,
     },
 }
 
 impl MerkleStage {
     /// Stage default for the [`MerkleStage::Execution`].
     pub const fn default_execution() -> Self {
-        Self::Execution {
-            rebuild_threshold: MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD,
-            incremental_threshold: MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD,
-        }
+        Self::Execution { clean_threshold: MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD }
     }
 
     /// Stage default for the [`MerkleStage::Unwind`].
@@ -113,8 +90,8 @@ impl MerkleStage {
     }
 
     /// Create new instance of [`MerkleStage::Execution`].
-    pub const fn new_execution(rebuild_threshold: u64, incremental_threshold: u64) -> Self {
-        Self::Execution { rebuild_threshold, incremental_threshold }
+    pub const fn new_execution(clean_threshold: u64) -> Self {
+        Self::Execution { clean_threshold }
     }
 
     /// Gets the hashing progress
@@ -173,18 +150,14 @@ where
 
     /// Execute the stage.
     fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
-        let (threshold, incremental_threshold) = match self {
+        let threshold = match self {
             Self::Unwind => {
                 info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
                 return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
             }
-            Self::Execution { rebuild_threshold, incremental_threshold } => {
-                (*rebuild_threshold, *incremental_threshold)
-            }
+            Self::Execution { clean_threshold } => *clean_threshold,
             #[cfg(any(test, feature = "test-utils"))]
-            Self::Both { rebuild_threshold, incremental_threshold } => {
-                (*rebuild_threshold, *incremental_threshold)
-            }
+            Self::Both { clean_threshold } => *clean_threshold,
         };
 
         let range = input.next_block_range();
@@ -194,13 +167,12 @@ where
         let target_block = provider
             .header_by_number(to_block)?
             .ok_or_else(|| ProviderError::HeaderNotFound(to_block.into()))?;
-        let target_block_root = target_block.state_root();
+        let target_block_root = target_block.state_root;
 
+        let mut checkpoint = self.get_execution_checkpoint(provider)?;
         let (trie_root, entities_checkpoint) = if range.is_empty() {
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
         } else if to_block - from_block > threshold || from_block == 1 {
-            let mut checkpoint = self.get_execution_checkpoint(provider)?;
-
             // if there are more blocks than threshold it is faster to rebuild the trie
             let mut entities_checkpoint = if let Some(checkpoint) =
                 checkpoint.as_ref().filter(|c| c.target_block == to_block)
@@ -249,35 +221,12 @@ where
                 StateRootProgress::Progress(state, hashed_entries_walked, updates) => {
                     provider.write_trie_updates(&updates)?;
 
-                    let mut checkpoint = MerkleCheckpoint::new(
+                    let checkpoint = MerkleCheckpoint::new(
                         to_block,
-                        state.account_root_state.last_hashed_key,
-                        state
-                            .account_root_state
-                            .walker_stack
-                            .into_iter()
-                            .map(StoredSubNode::from)
-                            .collect(),
-                        state.account_root_state.hash_builder.into(),
+                        state.last_account_key,
+                        state.walker_stack.into_iter().map(StoredSubNode::from).collect(),
+                        state.hash_builder.into(),
                     );
-
-                    // Save storage root state if present
-                    if let Some(storage_state) = state.storage_root_state {
-                        checkpoint.storage_root_checkpoint =
-                            Some(StorageRootMerkleCheckpoint::new(
-                                storage_state.state.last_hashed_key,
-                                storage_state
-                                    .state
-                                    .walker_stack
-                                    .into_iter()
-                                    .map(StoredSubNode::from)
-                                    .collect(),
-                                storage_state.state.hash_builder.into(),
-                                storage_state.account.nonce,
-                                storage_state.account.balance,
-                                storage_state.account.bytecode_hash.unwrap_or(KECCAK_EMPTY),
-                            ));
-                    }
                     self.save_execution_checkpoint(provider, Some(checkpoint))?;
 
                     entities_checkpoint.processed += hashed_entries_walked as u64;
@@ -298,33 +247,15 @@ where
                 }
             }
         } else {
-            debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
-            let mut final_root = None;
-            for start_block in range.step_by(incremental_threshold as usize) {
-                let chunk_to = std::cmp::min(start_block + incremental_threshold, to_block);
-                let chunk_range = start_block..=chunk_to;
-                debug!(
-                    target: "sync::stages::merkle::exec",
-                    current = ?current_block_number,
-                    target = ?to_block,
-                    incremental_threshold,
-                    chunk_range = ?chunk_range,
-                    "Processing chunk"
-                );
-                let (root, updates) =
-                StateRoot::incremental_root_with_updates(provider.tx_ref(), chunk_range)
+            debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie");
+            let (root, updates) =
+                StateRoot::incremental_root_with_updates(provider.tx_ref(), range)
                     .map_err(|e| {
                         error!(target: "sync::stages::merkle", %e, ?current_block_number, ?to_block, "Incremental state root failed! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
                         StageError::Fatal(Box::new(e))
                     })?;
-                provider.write_trie_updates(&updates)?;
-                final_root = Some(root);
-            }
 
-            // if we had no final root, we must have not looped above, which should not be possible
-            let final_root = final_root.ok_or(StageError::Fatal(
-                "Incremental merkle hashing did not produce a final root".into(),
-            ))?;
+            provider.write_trie_updates(&updates)?;
 
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
                 provider.count_entries::<tables::HashedStorages>()?)
@@ -337,14 +268,14 @@ where
                 processed: total_hashed_entries,
                 total: total_hashed_entries,
             };
-            // Save the checkpoint
-            (final_root, entities_checkpoint)
+
+            (root, entities_checkpoint)
         };
 
         // Reset the checkpoint
         self.save_execution_checkpoint(provider, None)?;
 
-        validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
+        validate_state_root(trie_root, target_block.seal_slow(), to_block)?;
 
         Ok(ExecOutput {
             checkpoint: StageCheckpoint::new(to_block)
@@ -396,44 +327,34 @@ where
             let target = provider
                 .header_by_number(input.unwind_to)?
                 .ok_or_else(|| ProviderError::HeaderNotFound(input.unwind_to.into()))?;
-
-            validate_state_root(block_root, SealedHeader::seal_slow(target), input.unwind_to)?;
+            validate_state_root(block_root, target.seal_slow(), input.unwind_to)?;
 
             // Validation passed, apply unwind changes to the database.
             provider.write_trie_updates(&updates)?;
 
-            // Update entities checkpoint to reflect the unwind operation
-            // Since we're unwinding, we need to recalculate the total entities at the target block
-            let accounts = tx.entries::<tables::HashedAccounts>()?;
-            let storages = tx.entries::<tables::HashedStorages>()?;
-            let total = (accounts + storages) as u64;
-            entities_checkpoint.total = total;
-            entities_checkpoint.processed = total;
+            // TODO(alexey): update entities checkpoint
         }
 
-        Ok(UnwindOutput {
-            checkpoint: StageCheckpoint::new(input.unwind_to)
-                .with_entities_stage_checkpoint(entities_checkpoint),
-        })
+        Ok(UnwindOutput { checkpoint: StageCheckpoint::new(input.unwind_to) })
     }
 }
 
 /// Check that the computed state root matches the root in the expected header.
 #[inline]
-fn validate_state_root<H: BlockHeader + Sealable + Debug>(
+fn validate_state_root(
     got: B256,
-    expected: SealedHeader<H>,
+    expected: SealedHeader,
     target_block: BlockNumber,
 ) -> Result<(), StageError> {
-    if got == expected.state_root() {
+    if got == expected.state_root {
         Ok(())
     } else {
         error!(target: "sync::stages::merkle", ?target_block, ?got, ?expected, "Failed to verify block state root! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
         Err(StageError::Block {
             error: BlockErrorKind::Validation(ConsensusError::BodyStateRootDiff(
-                GotExpected { got, expected: expected.state_root() }.into(),
+                GotExpected { got, expected: expected.state_root }.into(),
             )),
-            block: Box::new(expected.block_with_parent()),
+            block: Box::new(expected),
         })
     }
 }
@@ -445,13 +366,11 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, StorageKind,
         TestRunnerError, TestStageDB, UnwindStageTestRunner,
     };
-    use alloy_primitives::{keccak256, U256};
     use assert_matches::assert_matches;
     use reth_db_api::cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO};
-    use reth_primitives_traits::{SealedBlock, StorageEntry};
+    use reth_primitives::{keccak256, SealedBlock, StaticFileSegment, StorageEntry, U256};
     use reth_provider::{providers::StaticFileWriter, StaticFileProviderFactory};
     use reth_stages_api::StageUnitCheckpoint;
-    use reth_static_file_types::StaticFileSegment;
     use reth_testing_utils::generators::{
         self, random_block, random_block_range, random_changeset_range,
         random_contract_account_range, BlockParams, BlockRangeParams,
@@ -542,79 +461,14 @@ mod tests {
         assert!(runner.validate_execution(input, result.ok()).is_ok(), "execution validation");
     }
 
-    #[tokio::test]
-    async fn execute_chunked_merkle() {
-        let (previous_stage, stage_progress) = (200, 100);
-        let clean_threshold = 100;
-        let incremental_threshold = 10;
-
-        // Set up the runner
-        let mut runner =
-            MerkleTestRunner { db: TestStageDB::default(), clean_threshold, incremental_threshold };
-
-        let input = ExecInput {
-            target: Some(previous_stage),
-            checkpoint: Some(StageCheckpoint::new(stage_progress)),
-        };
-
-        runner.seed_execution(input).expect("failed to seed execution");
-        let rx = runner.execute(input);
-
-        // Assert the successful result
-        let result = rx.await.unwrap();
-        assert_matches!(
-            result,
-            Ok(ExecOutput {
-                checkpoint: StageCheckpoint {
-                    block_number,
-                    stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
-                        processed,
-                        total
-                    }))
-                },
-                done: true
-            }) if block_number == previous_stage && processed == total &&
-                total == (
-                    runner.db.table::<tables::HashedAccounts>().unwrap().len() +
-                    runner.db.table::<tables::HashedStorages>().unwrap().len()
-                ) as u64
-        );
-
-        // Validate the stage execution
-        let provider = runner.db.factory.provider().unwrap();
-        let header = provider.header_by_number(previous_stage).unwrap().unwrap();
-        let expected_root = header.state_root;
-
-        let actual_root = runner
-            .db
-            .query(|tx| {
-                Ok(StateRoot::incremental_root_with_updates(
-                    tx,
-                    stage_progress + 1..=previous_stage,
-                ))
-            })
-            .unwrap();
-
-        assert_eq!(
-            actual_root.unwrap().0,
-            expected_root,
-            "State root mismatch after chunked processing"
-        );
-    }
-
     struct MerkleTestRunner {
         db: TestStageDB,
         clean_threshold: u64,
-        incremental_threshold: u64,
     }
 
     impl Default for MerkleTestRunner {
         fn default() -> Self {
-            Self {
-                db: TestStageDB::default(),
-                clean_threshold: 10000,
-                incremental_threshold: 10000,
-            }
+            Self { db: TestStageDB::default(), clean_threshold: 10000 }
         }
     }
 
@@ -626,15 +480,12 @@ mod tests {
         }
 
         fn stage(&self) -> Self::S {
-            Self::S::Both {
-                rebuild_threshold: self.clean_threshold,
-                incremental_threshold: self.incremental_threshold,
-            }
+            Self::S::Both { clean_threshold: self.clean_threshold }
         }
     }
 
     impl ExecuteStageTestRunner for MerkleTestRunner {
-        type Seed = Vec<SealedBlock<reth_ethereum_primitives::Block>>;
+        type Seed = Vec<SealedBlock>;
 
         fn seed_execution(&mut self, input: ExecInput) -> Result<Self::Seed, TestRunnerError> {
             let stage_progress = input.checkpoint().block_number;
@@ -665,12 +516,11 @@ mod tests {
                 accounts.iter().map(|(addr, acc)| (*addr, (*acc, std::iter::empty()))),
             )?;
 
-            let (header, body) = random_block(
+            let SealedBlock { header, body, ommers, withdrawals, requests } = random_block(
                 &mut rng,
                 stage_progress,
                 BlockParams { parent: preblocks.last().map(|b| b.hash()), ..Default::default() },
-            )
-            .split_sealed_header_body();
+            );
             let mut header = header.unseal();
 
             header.state_root = state_root(
@@ -679,10 +529,8 @@ mod tests {
                     .into_iter()
                     .map(|(address, account)| (address, (account, std::iter::empty()))),
             );
-            let sealed_head = SealedBlock::<reth_ethereum_primitives::Block>::from_sealed_parts(
-                SealedHeader::seal_slow(header),
-                body,
-            );
+            let sealed_head =
+                SealedBlock { header: header.seal_slow(), body, ommers, withdrawals, requests };
 
             let head_hash = sealed_head.hash();
             let mut blocks = vec![sealed_head];
@@ -732,8 +580,8 @@ mod tests {
             let static_file_provider = self.db.factory.static_file_provider();
             let mut writer =
                 static_file_provider.latest_writer(StaticFileSegment::Headers).unwrap();
-            let mut last_header = last_block.clone_sealed_header();
-            last_header.set_state_root(root);
+            let mut last_header = last_block.header().clone();
+            last_header.state_root = root;
 
             let hash = last_header.hash_slow();
             writer.prune_headers(1).unwrap();
@@ -796,7 +644,7 @@ mod tests {
 
                             if !value.is_zero() {
                                 let storage_entry = StorageEntry { key: hashed_slot, value };
-                                storage_cursor.upsert(hashed_address, &storage_entry).unwrap();
+                                storage_cursor.upsert(hashed_address, storage_entry).unwrap();
                             }
                         }
                     }

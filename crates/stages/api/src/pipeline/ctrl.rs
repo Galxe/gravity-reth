@@ -1,5 +1,5 @@
-use alloy_eips::eip1898::BlockWithParent;
 use alloy_primitives::BlockNumber;
+use reth_primitives_traits::SealedHeader;
 
 /// Determines the control flow during pipeline execution.
 ///
@@ -9,12 +9,9 @@ pub enum ControlFlow {
     /// An unwind was requested and must be performed before continuing.
     Unwind {
         /// The block to unwind to.
-        ///
-        /// This marks the highest block to which the stage should unwind to.
-        /// For example, unwinding to block 10, should remove all data for blocks above 10 (>=11).
         target: BlockNumber,
         /// The block that caused the unwind.
-        bad_block: Box<BlockWithParent>,
+        bad_block: Box<SealedHeader>,
     },
     /// The pipeline made progress.
     Continue {

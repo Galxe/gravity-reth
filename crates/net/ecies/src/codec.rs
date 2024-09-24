@@ -1,14 +1,11 @@
 //! This contains the main codec for `RLPx` ECIES messages
 
-use crate::{algorithm::ECIES, ECIESError, ECIESErrorImpl, EgressECIESValue, IngressECIESValue};
+use crate::{algorithm::ECIES, ECIESError, EgressECIESValue, IngressECIESValue};
 use alloy_primitives::{bytes::BytesMut, B512 as PeerId};
 use secp256k1::SecretKey;
 use std::{fmt::Debug, io};
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{instrument, trace};
-
-/// The max size that the initial handshake packet can be. Currently 2KiB.
-const MAX_INITIAL_HANDSHAKE_SIZE: usize = 2048;
 
 /// Tokio codec for ECIES
 #[derive(Debug)]
@@ -28,11 +25,6 @@ pub enum ECIESState {
     /// The second stage of the ECIES handshake, where each side of the connection sends an ack
     /// message containing the nonce and other metadata.
     Ack,
-
-    /// This is the same as the [`ECIESState::Header`] stage, but occurs only after the first
-    /// [`ECIESState::Ack`] message. This is so that the initial handshake message can be properly
-    /// validated.
-    InitialHeader,
 
     /// The third stage of the ECIES handshake, where header is parsed, message integrity checks
     /// performed, and message is decrypted.
@@ -78,7 +70,7 @@ impl Decoder for ECIESCodec {
 
                     self.ecies.read_auth(&mut buf.split_to(total_size))?;
 
-                    self.state = ECIESState::InitialHeader;
+                    self.state = ECIESState::Header;
                     return Ok(Some(IngressECIESValue::AuthReceive(self.ecies.remote_id())))
                 }
                 ECIESState::Ack => {
@@ -97,28 +89,8 @@ impl Decoder for ECIESCodec {
 
                     self.ecies.read_ack(&mut buf.split_to(total_size))?;
 
-                    self.state = ECIESState::InitialHeader;
+                    self.state = ECIESState::Header;
                     return Ok(Some(IngressECIESValue::Ack))
-                }
-                ECIESState::InitialHeader => {
-                    if buf.len() < ECIES::header_len() {
-                        trace!("current len {}, need {}", buf.len(), ECIES::header_len());
-                        return Ok(None)
-                    }
-
-                    let body_size =
-                        self.ecies.read_header(&mut buf.split_to(ECIES::header_len()))?;
-
-                    if body_size > MAX_INITIAL_HANDSHAKE_SIZE {
-                        trace!(?body_size, max=?MAX_INITIAL_HANDSHAKE_SIZE, "Header exceeds max initial handshake size");
-                        return Err(ECIESErrorImpl::InitialHeaderBodyTooLarge {
-                            body_size,
-                            max_body_size: MAX_INITIAL_HANDSHAKE_SIZE,
-                        }
-                        .into())
-                    }
-
-                    self.state = ECIESState::Body;
                 }
                 ECIESState::Header => {
                     if buf.len() < ECIES::header_len() {
@@ -159,7 +131,7 @@ impl Encoder<EgressECIESValue> for ECIESCodec {
                 Ok(())
             }
             EgressECIESValue::Ack => {
-                self.state = ECIESState::InitialHeader;
+                self.state = ECIESState::Header;
                 self.ecies.write_ack(buf);
                 Ok(())
             }

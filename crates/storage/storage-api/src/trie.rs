@@ -1,11 +1,9 @@
-use alloc::vec::Vec;
 use alloy_primitives::{Address, Bytes, B256};
 use reth_storage_errors::provider::ProviderResult;
-use reth_trie_common::{
-    updates::{StorageTrieUpdates, TrieUpdates},
-    AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
-    StorageProof, TrieInput,
+use reth_trie::{
+    updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof, TrieInput,
 };
+use std::collections::{HashMap, HashSet};
 
 /// A type that can compute the state root of a given post state.
 #[auto_impl::auto_impl(&, Box, Arc)]
@@ -19,7 +17,7 @@ pub trait StateRootProvider: Send + Sync {
     /// computation.
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256>;
 
-    /// Returns the state root of the `HashedPostState` on top of the current state but reuses the
+    /// Returns the state root of the `HashedPostState` on top of the current state but re-uses the
     /// intermediate nodes to speed up the computation. It's up to the caller to construct the
     /// prefix sets and inform the provider of the trie paths that have changes.
     fn state_root_from_nodes(&self, input: TrieInput) -> ProviderResult<B256>;
@@ -46,23 +44,6 @@ pub trait StorageRootProvider: Send + Sync {
     /// state.
     fn storage_root(&self, address: Address, hashed_storage: HashedStorage)
         -> ProviderResult<B256>;
-
-    /// Returns the storage proof of the `HashedStorage` for target slot on top of the current
-    /// state.
-    fn storage_proof(
-        &self,
-        address: Address,
-        slot: B256,
-        hashed_storage: HashedStorage,
-    ) -> ProviderResult<StorageProof>;
-
-    /// Returns the storage multiproof for target slots.
-    fn storage_multiproof(
-        &self,
-        address: Address,
-        slots: &[B256],
-        hashed_storage: HashedStorage,
-    ) -> ProviderResult<StorageMultiProof>;
 }
 
 /// A type that can generate state proof on top of a given post state.
@@ -82,32 +63,13 @@ pub trait StateProofProvider: Send + Sync {
     fn multiproof(
         &self,
         input: TrieInput,
-        targets: MultiProofTargets,
+        targets: HashMap<B256, HashSet<B256>>,
     ) -> ProviderResult<MultiProof>;
 
     /// Get trie witness for provided state.
-    fn witness(&self, input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>>;
-}
-
-/// Trie Writer
-#[auto_impl::auto_impl(&, Arc, Box)]
-pub trait TrieWriter: Send + Sync {
-    /// Writes trie updates to the database.
-    ///
-    /// Returns the number of entries modified.
-    fn write_trie_updates(&self, trie_updates: &TrieUpdates) -> ProviderResult<usize>;
-}
-
-/// Storage Trie Writer
-#[auto_impl::auto_impl(&, Arc, Box)]
-pub trait StorageTrieWriter: Send + Sync {
-    /// Writes storage trie updates from the given storage trie map.
-    ///
-    /// First sorts the storage trie updates by the hashed address key, writing in sorted order.
-    ///
-    /// Returns the number of entries modified.
-    fn write_storage_trie_updates<'a>(
+    fn witness(
         &self,
-        storage_tries: impl Iterator<Item = (&'a B256, &'a StorageTrieUpdates)>,
-    ) -> ProviderResult<usize>;
+        input: TrieInput,
+        target: HashedPostState,
+    ) -> ProviderResult<HashMap<B256, Bytes>>;
 }

@@ -14,7 +14,7 @@ use discv5::{
 };
 use reth_ethereum_forks::{EnrForkIdEntry, ForkId};
 use reth_network_peers::NodeRecord;
-use tracing::debug;
+use tracing::warn;
 
 use crate::{enr::discv4_id_to_multiaddr_id, filter::MustNotIncludeKeys, NetworkStackId};
 
@@ -30,25 +30,19 @@ pub const DEFAULT_DISCOVERY_V5_ADDR_IPV6: Ipv6Addr = Ipv6Addr::UNSPECIFIED;
 
 /// The default port for discv5 via UDP.
 ///
-/// Default is port 9200.
-pub const DEFAULT_DISCOVERY_V5_PORT: u16 = 9200;
-
-/// The default [`discv5::ListenConfig`].
-///
-/// This is different from the upstream default.
-pub const DEFAULT_DISCOVERY_V5_LISTEN_CONFIG: ListenConfig =
-    ListenConfig::Ipv4 { ip: DEFAULT_DISCOVERY_V5_ADDR, port: DEFAULT_DISCOVERY_V5_PORT };
+/// Default is port 9000. See [`discv5::ListenConfig`] default.
+pub const DEFAULT_DISCOVERY_V5_PORT: u16 = 9000;
 
 /// Default interval in seconds at which to run a lookup up query.
 ///
-/// Default is 20 seconds.
-pub const DEFAULT_SECONDS_LOOKUP_INTERVAL: u64 = 20;
+/// Default is 60 seconds.
+pub const DEFAULT_SECONDS_LOOKUP_INTERVAL: u64 = 60;
 
 /// Default number of times to do pulse lookup queries, at bootstrap (pulse intervals, defaulting
 /// to 5 seconds).
 ///
-/// Default is 200 counts.
-pub const DEFAULT_COUNT_BOOTSTRAP_LOOKUPS: u64 = 200;
+/// Default is 100 counts.
+pub const DEFAULT_COUNT_BOOTSTRAP_LOOKUPS: u64 = 100;
 
 /// Default duration of the pulse lookup interval at bootstrap.
 ///
@@ -152,10 +146,10 @@ impl ConfigBuilder {
     /// Adds a comma-separated list of enodes, serialized unsigned node records, to boot nodes.
     pub fn add_serialized_unsigned_boot_nodes(mut self, enodes: &[&str]) -> Self {
         for node in enodes {
-            if let Ok(node) = node.parse() &&
-                let Ok(node) = BootNode::from_unsigned(node)
-            {
-                self.bootstrap_nodes.insert(node);
+            if let Ok(node) = node.parse() {
+                if let Ok(node) = BootNode::from_unsigned(node) {
+                    self.bootstrap_nodes.insert(node);
+                }
             }
         }
 
@@ -228,9 +222,8 @@ impl ConfigBuilder {
             discovered_peer_filter,
         } = self;
 
-        let mut discv5_config = discv5_config.unwrap_or_else(|| {
-            discv5::ConfigBuilder::new(DEFAULT_DISCOVERY_V5_LISTEN_CONFIG).build()
-        });
+        let mut discv5_config = discv5_config
+            .unwrap_or_else(|| discv5::ConfigBuilder::new(ListenConfig::default()).build());
 
         discv5_config.listen_config =
             amend_listen_config_wrt_rlpx(&discv5_config.listen_config, tcp_socket.ip());
@@ -297,7 +290,7 @@ impl Config {
     pub fn builder(rlpx_tcp_socket: SocketAddr) -> ConfigBuilder {
         ConfigBuilder {
             discv5_config: None,
-            bootstrap_nodes: HashSet::default(),
+            bootstrap_nodes: HashSet::new(),
             fork: None,
             tcp_socket: rlpx_tcp_socket,
             other_enr_kv_pairs: Vec::new(),
@@ -411,10 +404,8 @@ pub fn discv5_sockets_wrt_rlpx_addr(
             let discv5_socket_ipv6 =
                 discv5_addr_ipv6.map(|ip| SocketAddrV6::new(ip, discv5_port_ipv6, 0, 0));
 
-            if let Some(discv5_addr) = discv5_addr_ipv4 &&
-                discv5_addr != rlpx_addr
-            {
-                debug!(target: "net::discv5",
+            if let Some(discv5_addr) = discv5_addr_ipv4 {
+                warn!(target: "discv5",
                     %discv5_addr,
                     %rlpx_addr,
                     "Overwriting discv5 IPv4 address with RLPx IPv4 address, limited to one advertised IP address per IP version"
@@ -430,10 +421,8 @@ pub fn discv5_sockets_wrt_rlpx_addr(
             let discv5_socket_ipv4 =
                 discv5_addr_ipv4.map(|ip| SocketAddrV4::new(ip, discv5_port_ipv4));
 
-            if let Some(discv5_addr) = discv5_addr_ipv6 &&
-                discv5_addr != rlpx_addr
-            {
-                debug!(target: "net::discv5",
+            if let Some(discv5_addr) = discv5_addr_ipv6 {
+                warn!(target: "discv5",
                     %discv5_addr,
                     %rlpx_addr,
                     "Overwriting discv5 IPv6 address with RLPx IPv6 address, limited to one advertised IP address per IP version"
@@ -481,9 +470,11 @@ impl BootNode {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use alloy_primitives::hex;
     use std::net::SocketAddrV4;
+
+    use alloy_primitives::hex;
+
+    use super::*;
 
     const MULTI_ADDRESSES: &str = "/ip4/184.72.129.189/udp/30301/p2p/16Uiu2HAmSG2hdLwyQHQmG4bcJBgD64xnW63WMTLcrNq6KoZREfGb,/ip4/3.231.11.52/udp/30301/p2p/16Uiu2HAmMy4V8bi3XP7KDfSLQcLACSvTLroRRwEsTyFUKo8NCkkp,/ip4/54.198.153.150/udp/30301/p2p/16Uiu2HAmSVsb7MbRf1jg3Dvd6a3n5YNqKQwn1fqHCFgnbqCsFZKe,/ip4/3.220.145.177/udp/30301/p2p/16Uiu2HAm74pBDGdQ84XCZK27GRQbGFFwQ7RsSqsPwcGmCR3Cwn3B,/ip4/3.231.138.188/udp/30301/p2p/16Uiu2HAmMnTiJwgFtSVGV14ZNpwAvS1LUoF4pWWeNtURuV6C3zYB";
     const BOOT_NODES_OP_MAINNET_AND_BASE_MAINNET: &[&str] = &[
@@ -494,12 +485,12 @@ mod test {
         "enode://ca21ea8f176adb2e229ce2d700830c844af0ea941a1d8152a9513b966fe525e809c3a6c73a2c18a12b74ed6ec4380edf91662778fe0b79f6a591236e49e176f9@184.72.129.189:30301",
         "enode://acf4507a211ba7c1e52cdf4eef62cdc3c32e7c9c47998954f7ba024026f9a6b2150cd3f0b734d9c78e507ab70d59ba61dfe5c45e1078c7ad0775fb251d7735a2@3.220.145.177:30301",
         "enode://8a5a5006159bf079d06a04e5eceab2a1ce6e0f721875b2a9c96905336219dbe14203d38f70f3754686a6324f786c2f9852d8c0dd3adac2d080f4db35efc678c5@3.231.11.52:30301",
-        "enode://cdadbe835308ad3557f9a1de8db411da1a260a98f8421d62da90e71da66e55e98aaa8e90aa7ce01b408a54e4bd2253d701218081ded3dbe5efbbc7b41d7cef79@54.198.153.150:30301",
+        "enode://cdadbe835308ad3557f9a1de8db411da1a260a98f8421d62da90e71da66e55e98aaa8e90aa7ce01b408a54e4bd2253d701218081ded3dbe5efbbc7b41d7cef79@54.198.153.150:30301"
     ];
 
     #[test]
     fn parse_boot_nodes() {
-        const OP_SEPOLIA_CL_BOOTNODES: &str = "enr:-J64QBwRIWAco7lv6jImSOjPU_W266lHXzpAS5YOh7WmgTyBZkgLgOwo_mxKJq3wz2XRbsoBItbv1dCyjIoNq67mFguGAYrTxM42gmlkgnY0gmlwhBLSsHKHb3BzdGFja4S0lAUAiXNlY3AyNTZrMaEDmoWSi8hcsRpQf2eJsNUx-sqv6fH4btmo2HsAzZFAKnKDdGNwgiQGg3VkcIIkBg,enr:-J64QFa3qMsONLGphfjEkeYyF6Jkil_jCuJmm7_a42ckZeUQGLVzrzstZNb1dgBp1GGx9bzImq5VxJLP-BaptZThGiWGAYrTytOvgmlkgnY0gmlwhGsV-zeHb3BzdGFja4S0lAUAiXNlY3AyNTZrMaEDahfSECTIS_cXyZ8IyNf4leANlZnrsMEWTkEYxf4GMCmDdGNwgiQGg3VkcIIkBg";
+        const OP_SEPOLIA_CL_BOOTNODES: &str ="enr:-J64QBwRIWAco7lv6jImSOjPU_W266lHXzpAS5YOh7WmgTyBZkgLgOwo_mxKJq3wz2XRbsoBItbv1dCyjIoNq67mFguGAYrTxM42gmlkgnY0gmlwhBLSsHKHb3BzdGFja4S0lAUAiXNlY3AyNTZrMaEDmoWSi8hcsRpQf2eJsNUx-sqv6fH4btmo2HsAzZFAKnKDdGNwgiQGg3VkcIIkBg,enr:-J64QFa3qMsONLGphfjEkeYyF6Jkil_jCuJmm7_a42ckZeUQGLVzrzstZNb1dgBp1GGx9bzImq5VxJLP-BaptZThGiWGAYrTytOvgmlkgnY0gmlwhGsV-zeHb3BzdGFja4S0lAUAiXNlY3AyNTZrMaEDahfSECTIS_cXyZ8IyNf4leANlZnrsMEWTkEYxf4GMCmDdGNwgiQGg3VkcIIkBg";
 
         let config = Config::builder((Ipv4Addr::UNSPECIFIED, 30303).into())
             .add_cl_serialized_signed_boot_nodes(OP_SEPOLIA_CL_BOOTNODES)
@@ -537,7 +528,7 @@ mod test {
     fn overwrite_ipv4_addr() {
         let rlpx_addr: Ipv4Addr = "192.168.0.1".parse().unwrap();
 
-        let listen_config = DEFAULT_DISCOVERY_V5_LISTEN_CONFIG;
+        let listen_config = ListenConfig::default();
 
         let amended_config = amend_listen_config_wrt_rlpx(&listen_config, rlpx_addr.into());
 
@@ -552,7 +543,7 @@ mod test {
     fn overwrite_ipv6_addr() {
         let rlpx_addr: Ipv6Addr = "fe80::1".parse().unwrap();
 
-        let listen_config = DEFAULT_DISCOVERY_V5_LISTEN_CONFIG;
+        let listen_config = ListenConfig::default();
 
         let amended_config = amend_listen_config_wrt_rlpx(&listen_config, rlpx_addr.into());
 

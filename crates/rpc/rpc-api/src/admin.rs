@@ -1,6 +1,6 @@
-use alloy_rpc_types_admin::{NodeInfo, PeerInfo};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_network_peers::{AnyNode, NodeRecord};
+use reth_rpc_types::admin::{NodeInfo, PeerInfo};
 
 /// Admin namespace rpc interface that gives access to several non-standard RPC methods.
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "admin"))]
@@ -45,9 +45,4 @@ pub trait AdminApi {
     /// Returns the ENR of the node.
     #[method(name = "nodeInfo")]
     async fn node_info(&self) -> RpcResult<NodeInfo>;
-
-    /// Clears all transactions from the transaction pool.
-    /// Returns the number of transactions that were removed from the pool.
-    #[method(name = "clearTxpool")]
-    async fn clear_txpool(&self) -> RpcResult<u64>;
 }

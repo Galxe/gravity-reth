@@ -1,20 +1,15 @@
-use alloy_consensus::Header;
-use alloy_primitives::{hex, BlockHash};
+use alloy_primitives::BlockHash;
 use clap::Parser;
+use reth_chainspec::ChainSpec;
 use reth_db::{
-    static_file::{
-        ColumnSelectorOne, ColumnSelectorTwo, HeaderWithHashMask, ReceiptMask, TransactionMask,
-    },
-    RawDupSort,
-};
-use reth_db_api::{
-    table::{Decompress, DupSort, Table},
+    static_file::{ColumnSelectorOne, ColumnSelectorTwo, HeaderMask, ReceiptMask, TransactionMask},
     tables, RawKey, RawTable, Receipts, TableViewer, Transactions,
 };
+use reth_db_api::table::{Decompress, DupSort, Table};
 use reth_db_common::DbTool;
-use reth_node_api::{ReceiptTy, TxTy};
 use reth_node_builder::NodeTypesWithDB;
-use reth_provider::{providers::ProviderNodeTypes, StaticFileProviderFactory};
+use reth_primitives::Header;
+use reth_provider::StaticFileProviderFactory;
 use reth_static_file_types::StaticFileSegment;
 use tracing::error;
 
@@ -59,7 +54,10 @@ enum Subcommand {
 
 impl Command {
     /// Execute `db get` command
-    pub fn execute<N: ProviderNodeTypes>(self, tool: &DbTool<N>) -> eyre::Result<()> {
+    pub fn execute<N: NodeTypesWithDB<ChainSpec = ChainSpec>>(
+        self,
+        tool: &DbTool<N>,
+    ) -> eyre::Result<()> {
         match self.subcommand {
             Subcommand::Mdbx { table, key, subkey, raw } => {
                 table.view(&GetValueViewer { tool, key, subkey, raw })?
@@ -67,14 +65,16 @@ impl Command {
             Subcommand::StaticFile { segment, key, raw } => {
                 let (key, mask): (u64, _) = match segment {
                     StaticFileSegment::Headers => {
-                        (table_key::<tables::Headers>(&key)?, <HeaderWithHashMask<Header>>::MASK)
+                        (table_key::<tables::Headers>(&key)?, <HeaderMask<Header, BlockHash>>::MASK)
                     }
-                    StaticFileSegment::Transactions => {
-                        (table_key::<tables::Transactions>(&key)?, <TransactionMask<TxTy<N>>>::MASK)
-                    }
-                    StaticFileSegment::Receipts => {
-                        (table_key::<tables::Receipts>(&key)?, <ReceiptMask<ReceiptTy<N>>>::MASK)
-                    }
+                    StaticFileSegment::Transactions => (
+                        table_key::<tables::Transactions>(&key)?,
+                        <TransactionMask<<Transactions as Table>::Value>>::MASK,
+                    ),
+                    StaticFileSegment::Receipts => (
+                        table_key::<tables::Receipts>(&key)?,
+                        <ReceiptMask<<Receipts as Table>::Value>>::MASK,
+                    ),
                 };
 
                 let content = tool.provider_factory.static_file_provider().find_static_file(
@@ -92,14 +92,14 @@ impl Command {
                 match content {
                     Some(content) => {
                         if raw {
-                            println!("{}", hex::encode_prefixed(&content[0]));
+                            println!("{content:?}");
                         } else {
                             match segment {
                                 StaticFileSegment::Headers => {
                                     let header = Header::decompress(content[0].as_slice())?;
                                     let block_hash = BlockHash::decompress(content[1].as_slice())?;
                                     println!(
-                                        "Header\n{}\n\nBlockHash\n{}",
+                                        "{}\n{}",
                                         serde_json::to_string_pretty(&header)?,
                                         serde_json::to_string_pretty(&block_hash)?
                                     );
@@ -132,12 +132,13 @@ impl Command {
 
 /// Get an instance of key for given table
 pub(crate) fn table_key<T: Table>(key: &str) -> Result<T::Key, eyre::Error> {
-    serde_json::from_str(key).map_err(|e| eyre::eyre!(e))
+    serde_json::from_str::<T::Key>(key).map_err(|e| eyre::eyre!(e))
 }
 
 /// Get an instance of subkey for given dupsort table
-fn table_subkey<T: DupSort>(subkey: Option<&str>) -> Result<T::SubKey, eyre::Error> {
-    serde_json::from_str(subkey.unwrap_or_default()).map_err(|e| eyre::eyre!(e))
+fn table_subkey<T: DupSort>(subkey: &Option<String>) -> Result<T::SubKey, eyre::Error> {
+    serde_json::from_str::<T::SubKey>(&subkey.clone().unwrap_or_default())
+        .map_err(|e| eyre::eyre!(e))
 }
 
 struct GetValueViewer<'a, N: NodeTypesWithDB> {
@@ -147,7 +148,7 @@ struct GetValueViewer<'a, N: NodeTypesWithDB> {
     raw: bool,
 }
 
-impl<N: ProviderNodeTypes> TableViewer<()> for GetValueViewer<'_, N> {
+impl<N: NodeTypesWithDB<ChainSpec = ChainSpec>> TableViewer<()> for GetValueViewer<'_, N> {
     type Error = eyre::Report;
 
     fn view<T: Table>(&self) -> Result<(), Self::Error> {
@@ -156,7 +157,7 @@ impl<N: ProviderNodeTypes> TableViewer<()> for GetValueViewer<'_, N> {
         let content = if self.raw {
             self.tool
                 .get::<RawTable<T>>(RawKey::from(key))?
-                .map(|content| hex::encode_prefixed(content.raw_value()))
+                .map(|content| format!("{:?}", content.raw_value()))
         } else {
             self.tool.get::<T>(key)?.as_ref().map(serde_json::to_string_pretty).transpose()?
         };
@@ -178,23 +179,11 @@ impl<N: ProviderNodeTypes> TableViewer<()> for GetValueViewer<'_, N> {
         let key = table_key::<T>(&self.key)?;
 
         // process dupsort table
-        let subkey = table_subkey::<T>(self.subkey.as_deref())?;
+        let subkey = table_subkey::<T>(&self.subkey)?;
 
-        let content = if self.raw {
-            self.tool
-                .get_dup::<RawDupSort<T>>(RawKey::from(key), RawKey::from(subkey))?
-                .map(|content| hex::encode_prefixed(content.raw_value()))
-        } else {
-            self.tool
-                .get_dup::<T>(key, subkey)?
-                .as_ref()
-                .map(serde_json::to_string_pretty)
-                .transpose()?
-        };
-
-        match content {
+        match self.tool.get_dup::<T>(key, subkey)? {
             Some(content) => {
-                println!("{content}");
+                println!("{}", serde_json::to_string_pretty(&content)?);
             }
             None => {
                 error!(target: "reth::cli", "No content for the given table subkey.");
@@ -216,12 +205,10 @@ pub(crate) fn maybe_json_value_parser(value: &str) -> Result<String, eyre::Error
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, B256};
+    use alloy_primitives::{Address, B256};
     use clap::{Args, Parser};
-    use reth_db_api::{
-        models::{storage_sharded_key::StorageShardedKey, ShardedKey},
-        AccountsHistory, HashedAccounts, Headers, StageCheckpoints, StoragesHistory,
-    };
+    use reth_db::{AccountsHistory, HashedAccounts, Headers, StageCheckpoints, StoragesHistory};
+    use reth_db_api::models::{storage_sharded_key::StorageShardedKey, ShardedKey};
     use std::str::FromStr;
 
     /// A helper type to parse Args more easily
@@ -257,7 +244,7 @@ mod tests {
         assert_eq!(
             table_key::<StoragesHistory>(r#"{ "address": "0x01957911244e546ce519fbac6f798958fafadb41", "sharded_key": { "key": "0x0000000000000000000000000000000000000000000000000000000000000003", "highest_block_number": 18446744073709551615 } }"#).unwrap(),
             StorageShardedKey::new(
-                address!("0x01957911244e546ce519fbac6f798958fafadb41"),
+                Address::from_str("0x01957911244e546ce519fbac6f798958fafadb41").unwrap(),
                 B256::from_str(
                     "0x0000000000000000000000000000000000000000000000000000000000000003"
                 )
@@ -272,7 +259,7 @@ mod tests {
         assert_eq!(
             table_key::<AccountsHistory>(r#"{ "key": "0x4448e1273fd5a8bfdb9ed111e96889c960eee145", "highest_block_number": 18446744073709551615 }"#).unwrap(),
             ShardedKey::new(
-                address!("0x4448e1273fd5a8bfdb9ed111e96889c960eee145"),
+                Address::from_str("0x4448e1273fd5a8bfdb9ed111e96889c960eee145").unwrap(),
                 18446744073709551615
             )
         );

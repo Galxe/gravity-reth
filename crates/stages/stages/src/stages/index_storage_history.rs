@@ -1,10 +1,10 @@
 use super::{collect_history_indices, load_history_indices};
 use crate::{StageCheckpoint, StageId};
 use reth_config::config::{EtlConfig, IndexHistoryConfig};
+use reth_db::tables;
 use reth_db_api::{
     models::{storage_sharded_key::StorageShardedKey, AddressStorageKey, BlockNumberAddress},
     table::Decode,
-    tables,
     transaction::DbTxMut,
 };
 use reth_provider::{DBProvider, HistoryWriter, PruneCheckpointReader, PruneCheckpointWriter};
@@ -70,22 +70,23 @@ where
                 )
             })
             .transpose()?
-            .flatten() &&
-            target_prunable_block > input.checkpoint().block_number
+            .flatten()
         {
-            input.checkpoint = Some(StageCheckpoint::new(target_prunable_block));
+            if target_prunable_block > input.checkpoint().block_number {
+                input.checkpoint = Some(StageCheckpoint::new(target_prunable_block));
 
-            // Save prune checkpoint only if we don't have one already.
-            // Otherwise, pruner may skip the unpruned range of blocks.
-            if provider.get_prune_checkpoint(PruneSegment::StorageHistory)?.is_none() {
-                provider.save_prune_checkpoint(
-                    PruneSegment::StorageHistory,
-                    PruneCheckpoint {
-                        block_number: Some(target_prunable_block),
-                        tx_number: None,
-                        prune_mode,
-                    },
-                )?;
+                // Save prune checkpoint only if we don't have one already.
+                // Otherwise, pruner may skip the unpruned range of blocks.
+                if provider.get_prune_checkpoint(PruneSegment::StorageHistory)?.is_none() {
+                    provider.save_prune_checkpoint(
+                        PruneSegment::StorageHistory,
+                        PruneCheckpoint {
+                            block_number: Some(target_prunable_block),
+                            tx_number: None,
+                            prune_mode,
+                        },
+                    )?;
+                }
             }
         }
 
@@ -123,7 +124,7 @@ where
             |AddressStorageKey((address, storage_key)), highest_block_number| {
                 StorageShardedKey::new(address, storage_key, highest_block_number)
             },
-            StorageShardedKey::decode_owned,
+            StorageShardedKey::decode,
             |key| AddressStorageKey((key.address, key.sharded_key.key)),
         )?;
 
@@ -139,7 +140,7 @@ where
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
-        provider.unwind_storage_history_indices_range(BlockNumberAddress::range(range))?;
+        provider.unwind_storage_history_indices(BlockNumberAddress::range(range))?;
 
         Ok(UnwindOutput { checkpoint: StageCheckpoint::new(unwind_progress) })
     }
@@ -152,8 +153,8 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, TestRunnerError,
         TestStageDB, UnwindStageTestRunner,
     };
-    use alloy_primitives::{address, b256, Address, BlockNumber, B256, U256};
     use itertools::Itertools;
+    use reth_db::BlockNumberList;
     use reth_db_api::{
         cursor::DbCursorRO,
         models::{
@@ -161,9 +162,8 @@ mod tests {
             StoredBlockBodyIndices,
         },
         transaction::DbTx,
-        BlockNumberList,
     };
-    use reth_primitives_traits::StorageEntry;
+    use reth_primitives::{address, b256, Address, BlockNumber, StorageEntry, B256, U256};
     use reth_provider::{providers::StaticFileWriter, DatabaseProviderFactory};
     use reth_testing_utils::generators::{
         self, random_block_range, random_changeset_range, random_contract_account_range,
@@ -171,9 +171,9 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    const ADDRESS: Address = address!("0x0000000000000000000000000000000000000001");
+    const ADDRESS: Address = address!("0000000000000000000000000000000000000001");
     const STORAGE_KEY: B256 =
-        b256!("0x0000000000000000000000000000000000000000000000000000000000000001");
+        b256!("0000000000000000000000000000000000000000000000000000000000000001");
 
     const LAST_BLOCK_IN_FULL_SHARD: BlockNumber = NUM_OF_INDICES_IN_SHARD as BlockNumber;
     const MAX_BLOCK: BlockNumber = NUM_OF_INDICES_IN_SHARD as BlockNumber + 2;
@@ -196,7 +196,7 @@ mod tests {
     }
 
     fn list(list: &[u64]) -> BlockNumberList {
-        BlockNumberList::new(list.iter().copied()).unwrap()
+        BlockNumberList::new(list).unwrap()
     }
 
     fn cast(

@@ -19,7 +19,7 @@ reth-tokio-util = { workspace = true, features = ["time"] }
 
 # ethereum
 alloy-primitives.workspace = true
-secp256k1 = { workspace = true, features = ["global-context", "std", "recovery", "serde"] }
+secp256k1 = { workspace = true, features = ["global-context", "rand-std", "recovery", "serde"] }
 enr.workspace = true
 
 # async/futures
@@ -27,10 +27,10 @@ tokio = { workspace = true, features = ["io-util", "net", "time"] }
 tokio-stream.workspace = true
 
 # trust-dns
-hickory-resolver = { workspace = true, features = ["tokio"] }
+trust-dns-resolver = "0.23"
 
 # misc
-data-encoding.workspace = true
+data-encoding = "2"
 linked_hash_set.workspace = true
 schnellru.workspace = true
 thiserror.workspace = true
@@ -43,22 +43,9 @@ serde_with = { workspace = true, optional = true }
 reth-chainspec.workspace = true
 alloy-rlp.workspace = true
 alloy-chains.workspace = true
-secp256k1 = { workspace = true, features = ["rand"] }
 tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread"] }
 reth-tracing.workspace = true
 rand.workspace = true
 
 [features]
-serde = [
-    "dep:serde",
-    "dep:serde_with",
-    "alloy-chains/serde",
-    "alloy-primitives/serde",
-    "enr/serde",
-    "linked_hash_set/serde",
-    "parking_lot/serde",
-    "rand/serde",
-    "secp256k1/serde",
-    "hickory-resolver/serde",
-    "reth-ethereum-forks/serde",
-]
+serde = ["dep:serde", "dep:serde_with"]

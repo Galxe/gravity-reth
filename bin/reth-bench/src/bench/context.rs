@@ -3,11 +3,12 @@
 
 use crate::{authenticated_transport::AuthenticatedTransportConnect, bench_mode::BenchMode};
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::address;
-use alloy_provider::{network::AnyNetwork, Provider, RootProvider};
+use alloy_provider::{network::AnyNetwork, Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_client::ClientBuilder;
 use alloy_rpc_types_engine::JwtSecret;
-use reqwest::Url;
+use alloy_transport::BoxTransport;
+use alloy_transport_http::Http;
+use reqwest::{Client, Url};
 use reth_node_core::args::BenchmarkArgs;
 use tracing::info;
 
@@ -17,17 +18,15 @@ use tracing::info;
 /// queries, a [`BenchMode`] to determine whether the benchmark should run for a closed or open
 /// range of blocks, and the next block to fetch.
 pub(crate) struct BenchContext {
-    /// The auth provider is used for engine API queries.
-    pub(crate) auth_provider: RootProvider<AnyNetwork>,
-    /// The block provider is used for block queries.
-    pub(crate) block_provider: RootProvider<AnyNetwork>,
+    /// The auth provider used for engine API queries.
+    pub(crate) auth_provider: RootProvider<BoxTransport, AnyNetwork>,
+    /// The block provider used for block queries.
+    pub(crate) block_provider: RootProvider<Http<Client>, AnyNetwork>,
     /// The benchmark mode, which defines whether the benchmark should run for a closed or open
     /// range of blocks.
     pub(crate) benchmark_mode: BenchMode,
     /// The next block to fetch.
     pub(crate) next_block: u64,
-    /// Whether the chain is an OP rollup.
-    pub(crate) is_optimism: bool,
 }
 
 impl BenchContext {
@@ -36,33 +35,25 @@ impl BenchContext {
     pub(crate) async fn new(bench_args: &BenchmarkArgs, rpc_url: String) -> eyre::Result<Self> {
         info!("Running benchmark using data from RPC URL: {}", rpc_url);
 
-        // Ensure that output directory exists and is a directory
+        // Ensure that output directory is a directory
         if let Some(output) = &bench_args.output {
             if output.is_file() {
                 return Err(eyre::eyre!("Output path must be a directory"));
             }
-            // Create the directory if it doesn't exist
-            if !output.exists() {
-                std::fs::create_dir_all(output)?;
-                info!("Created output directory: {:?}", output);
-            }
         }
 
         // set up alloy client for blocks
-        let client = ClientBuilder::default().http(rpc_url.parse()?);
-        let block_provider = RootProvider::<AnyNetwork>::new(client);
+        let block_provider =
+            ProviderBuilder::new().network::<AnyNetwork>().on_http(rpc_url.parse()?);
 
-        // Check if this is an OP chain by checking code at a predeploy address.
-        let is_optimism = !block_provider
-            .get_code_at(address!("0x420000000000000000000000000000000000000F"))
-            .await?
-            .is_empty();
+        // If neither `--from` nor `--to` are provided, we will run the benchmark continuously,
+        // starting at the latest block.
+        let mut benchmark_mode = BenchMode::new(bench_args.from, bench_args.to)?;
 
         // construct the authenticated provider
-        let auth_jwt = bench_args
-            .auth_jwtsecret
-            .clone()
-            .ok_or_else(|| eyre::eyre!("--jwt-secret must be provided for authenticated RPC"))?;
+        let auth_jwt = bench_args.auth_jwtsecret.clone().ok_or_else(|| {
+            eyre::eyre!("--auth-jwtsecret must be provided for authenticated RPC")
+        })?;
 
         // fetch jwt from file
         //
@@ -76,46 +67,20 @@ impl BenchContext {
         // construct the authed transport
         info!("Connecting to Engine RPC at {} for replay", auth_url);
         let auth_transport = AuthenticatedTransportConnect::new(auth_url, jwt);
-        let client = ClientBuilder::default().connect_with(auth_transport).await?;
-        let auth_provider = RootProvider::<AnyNetwork>::new(client);
-
-        // Computes the block range for the benchmark.
-        //
-        // - If `--advance` is provided, fetches the latest block and sets:
-        //     - `from = head + 1`
-        //     - `to = head + advance`
-        // - Otherwise, uses the values from `--from` and `--to`.
-        let (from, to) = if let Some(advance) = bench_args.advance {
-            if advance == 0 {
-                return Err(eyre::eyre!("--advance must be greater than 0"));
-            }
-
-            let head_block = auth_provider
-                .get_block_by_number(BlockNumberOrTag::Latest)
-                .await?
-                .ok_or_else(|| eyre::eyre!("Failed to fetch latest block for --advance"))?;
-            let head_number = head_block.header.number;
-            (Some(head_number), Some(head_number + advance))
-        } else {
-            (bench_args.from, bench_args.to)
-        };
-
-        // If neither `--from` nor `--to` are provided, we will run the benchmark continuously,
-        // starting at the latest block.
-        let mut benchmark_mode = BenchMode::new(from, to)?;
+        let client = ClientBuilder::default().connect_boxed(auth_transport).await?;
+        let auth_provider = RootProvider::<_, AnyNetwork>::new(client);
 
         let first_block = match benchmark_mode {
             BenchMode::Continuous => {
                 // fetch Latest block
-                block_provider.get_block_by_number(BlockNumberOrTag::Latest).full().await?.unwrap()
+                block_provider.get_block_by_number(BlockNumberOrTag::Latest, true).await?.unwrap()
             }
             BenchMode::Range(ref mut range) => {
                 match range.next() {
                     Some(block_number) => {
                         // fetch first block in range
                         block_provider
-                            .get_block_by_number(block_number.into())
-                            .full()
+                            .get_block_by_number(block_number.into(), true)
                             .await?
                             .unwrap()
                     }
@@ -129,6 +94,6 @@ impl BenchContext {
         };
 
         let next_block = first_block.header.number + 1;
-        Ok(Self { auth_provider, block_provider, benchmark_mode, next_block, is_optimism })
+        Ok(Self { auth_provider, block_provider, benchmark_mode, next_block })
     }
 }

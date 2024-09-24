@@ -1,22 +1,26 @@
-use alloy_eips::BlockId;
-use alloy_primitives::{map::HashSet, Bytes, B256};
-use alloy_rpc_types_eth::{state::StateOverride, BlockOverrides, Index};
-use alloy_rpc_types_trace::{
-    filter::TraceFilter,
-    opcode::{BlockOpcodeGas, TransactionOpcodeGas},
-    parity::*,
-};
+use alloy_primitives::{Bytes, B256};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+use reth_primitives::BlockId;
+use reth_rpc_types::{
+    state::StateOverride,
+    trace::{
+        filter::TraceFilter,
+        opcode::{BlockOpcodeGas, TransactionOpcodeGas},
+        parity::*,
+    },
+    BlockOverrides, Index, TransactionRequest,
+};
+use std::collections::HashSet;
 
 /// Ethereum trace API
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "trace"))]
 #[cfg_attr(feature = "client", rpc(server, client, namespace = "trace"))]
-pub trait TraceApi<TxReq> {
+pub trait TraceApi {
     /// Executes the given call and returns a number of possible traces for it.
     #[method(name = "call")]
     async fn trace_call(
         &self,
-        call: TxReq,
+        call: TransactionRequest,
         trace_types: HashSet<TraceType>,
         block_id: Option<BlockId>,
         state_overrides: Option<StateOverride>,
@@ -29,7 +33,7 @@ pub trait TraceApi<TxReq> {
     #[method(name = "callMany")]
     async fn trace_call_many(
         &self,
-        calls: Vec<(TxReq, HashSet<TraceType>)>,
+        calls: Vec<(TransactionRequest, HashSet<TraceType>)>,
         block_id: Option<BlockId>,
     ) -> RpcResult<Vec<TraceResults>>;
 
@@ -78,7 +82,7 @@ pub trait TraceApi<TxReq> {
     /// `indices` represent the index positions of the traces.
     ///
     /// Note: This expects a list of indices but only one is supported since this function returns a
-    /// single [`LocalizedTransactionTrace`].
+    /// single [LocalizedTransactionTrace].
     #[method(name = "get")]
     async fn trace_get(
         &self,

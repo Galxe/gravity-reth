@@ -1,8 +1,7 @@
 //! Events related to Consensus Layer health.
 
-use alloy_consensus::Header;
 use futures::Stream;
-use reth_storage_api::CanonChainTracker;
+use reth_provider::CanonChainTracker;
 use std::{
     fmt,
     pin::Pin,
@@ -13,33 +12,35 @@ use tokio::time::{Instant, Interval};
 
 /// Interval of checking Consensus Layer client health.
 const CHECK_INTERVAL: Duration = Duration::from_secs(300);
-
+/// Period of not exchanging transition configurations with Consensus Layer client,
+/// after which the warning is issued.
+const NO_TRANSITION_CONFIG_EXCHANGED_PERIOD: Duration = Duration::from_secs(120);
 /// Period of not receiving fork choice updates from Consensus Layer client,
 /// after which the warning is issued.
 const NO_FORKCHOICE_UPDATE_RECEIVED_PERIOD: Duration = Duration::from_secs(120);
 
 /// A Stream of [`ConsensusLayerHealthEvent`].
-pub struct ConsensusLayerHealthEvents<H = Header> {
+pub struct ConsensusLayerHealthEvents {
     interval: Interval,
-    canon_chain: Box<dyn CanonChainTracker<Header = H>>,
+    canon_chain: Box<dyn CanonChainTracker>,
 }
 
-impl<H> fmt::Debug for ConsensusLayerHealthEvents<H> {
+impl fmt::Debug for ConsensusLayerHealthEvents {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConsensusLayerHealthEvents").field("interval", &self.interval).finish()
     }
 }
 
-impl<H> ConsensusLayerHealthEvents<H> {
+impl ConsensusLayerHealthEvents {
     /// Creates a new [`ConsensusLayerHealthEvents`] with the given canonical chain tracker.
-    pub fn new(canon_chain: Box<dyn CanonChainTracker<Header = H>>) -> Self {
+    pub fn new(canon_chain: Box<dyn CanonChainTracker>) -> Self {
         // Skip the first tick to prevent the false `ConsensusLayerHealthEvent::NeverSeen` event.
         let interval = tokio::time::interval_at(Instant::now() + CHECK_INTERVAL, CHECK_INTERVAL);
         Self { interval, canon_chain }
     }
 }
 
-impl<H: Send + Sync> Stream for ConsensusLayerHealthEvents<H> {
+impl Stream for ConsensusLayerHealthEvents {
     type Item = ConsensusLayerHealthEvent;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -59,6 +60,20 @@ impl<H: Send + Sync> Stream for ConsensusLayerHealthEvents<H> {
                         fork_choice.elapsed(),
                     ),
                 ))
+            }
+
+            if let Some(transition_config) =
+                this.canon_chain.last_exchanged_transition_configuration_timestamp()
+            {
+                return if transition_config.elapsed() <= NO_TRANSITION_CONFIG_EXCHANGED_PERIOD {
+                    // We never had an FCU, but had a transition config exchange, and it's recent.
+                    Poll::Ready(Some(ConsensusLayerHealthEvent::NeverReceivedUpdates))
+                } else {
+                    // We never had an FCU, but had a transition config exchange, but it's too old.
+                    Poll::Ready(Some(ConsensusLayerHealthEvent::HasNotBeenSeenForAWhile(
+                        transition_config.elapsed(),
+                    )))
+                }
             }
 
             // We never had both FCU and transition config exchange.

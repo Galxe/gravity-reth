@@ -7,9 +7,6 @@
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![cfg_attr(not(feature = "std"), no_std)]
-
-extern crate alloc;
 
 mod id;
 use alloy_primitives::{BlockHash, BlockNumber};
@@ -19,7 +16,7 @@ mod checkpoints;
 pub use checkpoints::{
     AccountHashingCheckpoint, CheckpointBlockRange, EntitiesCheckpoint, ExecutionCheckpoint,
     HeadersCheckpoint, IndexHistoryCheckpoint, MerkleCheckpoint, StageCheckpoint,
-    StageUnitCheckpoint, StorageHashingCheckpoint, StorageRootMerkleCheckpoint,
+    StageUnitCheckpoint, StorageHashingCheckpoint,
 };
 
 mod execution;
@@ -68,8 +65,8 @@ impl From<BlockHash> for PipelineTarget {
     }
 }
 
-impl core::fmt::Display for PipelineTarget {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl std::fmt::Display for PipelineTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sync(block) => {
                 write!(f, "Sync({block})")

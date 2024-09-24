@@ -12,7 +12,8 @@ description = "Commonly used fs utils in reth."
 workspace = true
 
 [dependencies]
+
 # misc
-serde_json = { workspace = true, features = ["std"] }
+serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true

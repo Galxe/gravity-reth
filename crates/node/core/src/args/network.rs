@@ -1,15 +1,14 @@
 //! clap [Args](clap::Args) for network related arguments.
 
-use alloy_primitives::B256;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     ops::Not,
     path::PathBuf,
+    sync::Arc,
 };
 
-use crate::version::version_metadata;
 use clap::Args;
-use reth_chainspec::EthChainSpec;
+use reth_chainspec::ChainSpec;
 use reth_config::Config;
 use reth_discv4::{NodeRecord, DEFAULT_DISCOVERY_ADDR, DEFAULT_DISCOVERY_PORT};
 use reth_discv5::{
@@ -19,7 +18,6 @@ use reth_discv5::{
 use reth_net_nat::{NatResolver, DEFAULT_NET_IF_NAME};
 use reth_network::{
     transactions::{
-        config::TransactionPropagationKind,
         constants::{
             tx_fetcher::{
                 DEFAULT_MAX_CAPACITY_CACHE_PENDING_FETCH, DEFAULT_MAX_COUNT_CONCURRENT_REQUESTS,
@@ -29,15 +27,17 @@ use reth_network::{
                 DEFAULT_MAX_COUNT_PENDING_POOL_IMPORTS, DEFAULT_MAX_COUNT_TRANSACTIONS_SEEN_BY_PEER,
             },
         },
-        TransactionFetcherConfig, TransactionPropagationMode, TransactionsManagerConfig,
+        TransactionFetcherConfig, TransactionsManagerConfig,
         DEFAULT_SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESP_ON_PACK_GET_POOLED_TRANSACTIONS_REQ,
         SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESPONSE,
     },
-    HelloMessageWithProtocols, NetworkConfigBuilder, NetworkPrimitives, SessionsConfig,
+    HelloMessageWithProtocols, NetworkConfigBuilder, SessionsConfig,
 };
 use reth_network_peers::{mainnet_nodes, TrustedPeer};
 use secp256k1::SecretKey;
 use tracing::error;
+
+use crate::version::P2P_CLIENT_VERSION;
 
 /// Parameters for configuring the network more granularity via CLI
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -47,7 +47,7 @@ pub struct NetworkArgs {
     #[command(flatten)]
     pub discovery: DiscoveryArgs,
 
-    #[expect(clippy::doc_markdown)]
+    #[allow(clippy::doc_markdown)]
     /// Comma separated enode URLs of trusted peers for P2P connections.
     ///
     /// --trusted-peers enode://abcd@192.168.0.1:30303
@@ -74,7 +74,7 @@ pub struct NetworkArgs {
     pub peers_file: Option<PathBuf>,
 
     /// Custom node identity
-    #[arg(long, value_name = "IDENTITY", default_value = version_metadata().p2p_client_version.as_ref())]
+    #[arg(long, value_name = "IDENTITY", default_value = P2P_CLIENT_VERSION)]
     pub identity: String,
 
     /// Secret key to use for this node.
@@ -155,35 +155,6 @@ pub struct NetworkArgs {
     /// If flag is set, but no value is passed, the default interface for docker `eth0` is tried.
     #[arg(long = "net-if.experimental", conflicts_with = "addr", value_name = "IF_NAME")]
     pub net_if: Option<String>,
-
-    /// Transaction Propagation Policy
-    ///
-    /// The policy determines which peers transactions are gossiped to.
-    #[arg(long = "tx-propagation-policy", default_value_t = TransactionPropagationKind::All)]
-    pub tx_propagation_policy: TransactionPropagationKind,
-
-    /// Disable transaction pool gossip
-    ///
-    /// Disables gossiping of transactions in the mempool to peers. This can be omitted for
-    /// personal nodes, though providers should always opt to enable this flag.
-    #[arg(long = "disable-tx-gossip")]
-    pub disable_tx_gossip: bool,
-
-    /// Sets the transaction propagation mode by determining how new pending transactions are
-    /// propagated to other peers in full.
-    ///
-    /// Examples: sqrt, all, max:10
-    #[arg(
-        long = "tx-propagation-mode",
-        default_value = "sqrt",
-        help = "Transaction propagation mode (sqrt, all, max:<number>)"
-    )]
-    pub propagation_mode: TransactionPropagationMode,
-
-    /// Comma separated list of required block hashes.
-    /// Peers that don't have these blocks will be filtered out.
-    #[arg(long = "required-block-hashes", value_delimiter = ',')]
-    pub required_block_hashes: Vec<B256>,
 }
 
 impl NetworkArgs {
@@ -202,7 +173,7 @@ impl NetworkArgs {
 
                     DEFAULT_DISCOVERY_ADDR
                 }
-            };
+            }
         }
 
         self.addr
@@ -214,23 +185,9 @@ impl NetworkArgs {
             bootnodes.into_iter().filter_map(|node| node.resolve_blocking().ok()).collect()
         })
     }
-    /// Configures and returns a `TransactionsManagerConfig` based on the current settings.
-    pub const fn transactions_manager_config(&self) -> TransactionsManagerConfig {
-        TransactionsManagerConfig {
-            transaction_fetcher_config: TransactionFetcherConfig::new(
-                self.max_concurrent_tx_requests,
-                self.max_concurrent_tx_requests_per_peer,
-                self.soft_limit_byte_size_pooled_transactions_response,
-                self.soft_limit_byte_size_pooled_transactions_response_on_pack_request,
-                self.max_capacity_cache_txns_pending_fetch,
-            ),
-            max_transactions_seen_by_peer_history: self.max_seen_tx_history,
-            propagation_mode: self.propagation_mode,
-        }
-    }
 
-    /// Build a [`NetworkConfigBuilder`] from a [`Config`] and a [`EthChainSpec`], in addition to
-    /// the values in this option struct.
+    /// Build a [`NetworkConfigBuilder`] from a [`Config`] and a [`ChainSpec`], in addition to the
+    /// values in this option struct.
     ///
     /// The `default_peers_file` will be used as the default location to store the persistent peers
     /// file if `no_persist_peers` is false, and there is no provided `peers_file`.
@@ -240,13 +197,13 @@ impl NetworkArgs {
     /// 1. --bootnodes flag
     /// 2. Network preset flags (e.g. --holesky)
     /// 3. default to mainnet nodes
-    pub fn network_config<N: NetworkPrimitives>(
+    pub fn network_config(
         &self,
         config: &Config,
-        chain_spec: impl EthChainSpec,
+        chain_spec: Arc<ChainSpec>,
         secret_key: SecretKey,
         default_peers_file: PathBuf,
-    ) -> NetworkConfigBuilder<N> {
+    ) -> NetworkConfigBuilder {
         let addr = self.resolved_addr();
         let chain_bootnodes = self
             .resolved_bootnodes()
@@ -260,8 +217,20 @@ impl NetworkArgs {
             .with_max_inbound_opt(self.max_inbound_peers)
             .with_max_outbound_opt(self.max_outbound_peers);
 
+        // Configure transactions manager
+        let transactions_manager_config = TransactionsManagerConfig {
+            transaction_fetcher_config: TransactionFetcherConfig::new(
+                self.max_concurrent_tx_requests,
+                self.max_concurrent_tx_requests_per_peer,
+                self.soft_limit_byte_size_pooled_transactions_response,
+                self.soft_limit_byte_size_pooled_transactions_response_on_pack_request,
+                self.max_capacity_cache_txns_pending_fetch,
+            ),
+            max_transactions_seen_by_peer_history: self.max_seen_tx_history,
+        };
+
         // Configure basic network stack
-        NetworkConfigBuilder::<N>::new(secret_key)
+        NetworkConfigBuilder::new(secret_key)
             .peer_config(config.peers_config_with_basic_nodes_from_file(
                 self.persistent_peers_file(peers_file).as_deref(),
             ))
@@ -271,7 +240,8 @@ impl NetworkArgs {
             )
             .peer_config(peers_config)
             .boot_nodes(chain_bootnodes.clone())
-            .transactions_manager_config(self.transactions_manager_config())
+            .chain_spec(chain_spec)
+            .transactions_manager_config(transactions_manager_config)
             // Configure node identity
             .apply(|builder| {
                 let peer_id = builder.get_peer_id();
@@ -295,8 +265,6 @@ impl NetworkArgs {
                 // set discovery port based on instance number
                 self.discovery.port,
             ))
-            .disable_tx_gossip(self.disable_tx_gossip)
-            .required_block_hashes(self.required_block_hashes.clone())
     }
 
     /// If `no_persist_peers` is false then this returns the path to the persistent peers file path.
@@ -319,17 +287,15 @@ impl NetworkArgs {
         self
     }
 
-    /// Change networking port numbers based on the instance number, if provided.
+    /// Change networking port numbers based on the instance number.
     /// Ports are updated to `previous_value + instance - 1`
     ///
     /// # Panics
     /// Warning: if `instance` is zero in debug mode, this will panic.
-    pub fn adjust_instance_ports(&mut self, instance: Option<u16>) {
-        if let Some(instance) = instance {
-            debug_assert_ne!(instance, 0, "instance must be non-zero");
-            self.port += instance - 1;
-            self.discovery.adjust_instance_ports(instance);
-        }
+    pub fn adjust_instance_ports(&mut self, instance: u16) {
+        debug_assert_ne!(instance, 0, "instance must be non-zero");
+        self.port += instance - 1;
+        self.discovery.adjust_instance_ports(instance);
     }
 
     /// Resolve all trusted peers at once
@@ -350,7 +316,7 @@ impl Default for NetworkArgs {
             bootnodes: None,
             dns_retries: 0,
             peers_file: None,
-            identity: version_metadata().p2p_client_version.to_string(),
+            identity: P2P_CLIENT_VERSION.to_string(),
             p2p_secret_key: None,
             no_persist_peers: false,
             nat: NatResolver::Any,
@@ -367,10 +333,6 @@ impl Default for NetworkArgs {
             max_seen_tx_history: DEFAULT_MAX_COUNT_TRANSACTIONS_SEEN_BY_PEER,
             max_capacity_cache_txns_pending_fetch: DEFAULT_MAX_CAPACITY_CACHE_PENDING_FETCH,
             net_if: None,
-            tx_propagation_policy: TransactionPropagationKind::default(),
-            disable_tx_gossip: false,
-            propagation_mode: TransactionPropagationMode::Sqrt,
-            required_block_hashes: vec![],
         }
     }
 }
@@ -393,10 +355,6 @@ pub struct DiscoveryArgs {
     /// Enable Discv5 discovery.
     #[arg(long, conflicts_with = "disable_discovery")]
     pub enable_discv5_discovery: bool,
-
-    /// Disable Nat discovery.
-    #[arg(long, conflicts_with = "disable_discovery")]
-    pub disable_nat: bool,
 
     /// The UDP address to use for devp2p peer discovery version 4.
     #[arg(id = "discovery.addr", long = "discovery.addr", value_name = "DISCOVERY_ADDR", default_value_t = DEFAULT_DISCOVERY_ADDR)]
@@ -447,15 +405,12 @@ pub struct DiscoveryArgs {
 
 impl DiscoveryArgs {
     /// Apply the discovery settings to the given [`NetworkConfigBuilder`]
-    pub fn apply_to_builder<N>(
+    pub fn apply_to_builder(
         &self,
-        mut network_config_builder: NetworkConfigBuilder<N>,
+        mut network_config_builder: NetworkConfigBuilder,
         rlpx_tcp_socket: SocketAddr,
         boot_nodes: impl IntoIterator<Item = NodeRecord>,
-    ) -> NetworkConfigBuilder<N>
-    where
-        N: NetworkPrimitives,
-    {
+    ) -> NetworkConfigBuilder {
         if self.disable_discovery || self.disable_dns_discovery {
             network_config_builder = network_config_builder.disable_dns_discovery();
         }
@@ -464,12 +419,7 @@ impl DiscoveryArgs {
             network_config_builder = network_config_builder.disable_discv4_discovery();
         }
 
-        if self.disable_nat {
-            // we only check for `disable-nat` here and not for disable discovery because nat:extip can be used without discovery: <https://github.com/paradigmxyz/reth/issues/14878>
-            network_config_builder = network_config_builder.disable_nat();
-        }
-
-        if self.should_enable_discv5() {
+        if !self.disable_discovery && self.enable_discv5_discovery {
             network_config_builder = network_config_builder
                 .discovery_v5(self.discovery_v5_builder(rlpx_tcp_socket, boot_nodes));
         }
@@ -518,17 +468,6 @@ impl DiscoveryArgs {
             .bootstrap_lookup_countdown(*discv5_bootstrap_lookup_countdown)
     }
 
-    /// Returns true if discv5 discovery should be configured
-    const fn should_enable_discv5(&self) -> bool {
-        if self.disable_discovery {
-            return false;
-        }
-
-        self.enable_discv5_discovery ||
-            self.discv5_addr.is_some() ||
-            self.discv5_addr_ipv6.is_some()
-    }
-
     /// Set the discovery port to zero, to allow the OS to assign a random unused port when
     /// discovery binds to the socket.
     pub const fn with_unused_discovery_port(mut self) -> Self {
@@ -556,7 +495,6 @@ impl Default for DiscoveryArgs {
             disable_dns_discovery: false,
             disable_discv4_discovery: false,
             enable_discv5_discovery: false,
-            disable_nat: false,
             addr: DEFAULT_DISCOVERY_ADDR,
             port: DEFAULT_DISCOVERY_PORT,
             discv5_addr: None,
@@ -645,43 +583,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_disable_tx_gossip_args() {
-        let args = CommandParser::<NetworkArgs>::parse_from(["reth", "--disable-tx-gossip"]).args;
-        assert!(args.disable_tx_gossip);
-    }
-
+    #[cfg(not(feature = "optimism"))]
     #[test]
     fn network_args_default_sanity_test() {
         let default_args = NetworkArgs::default();
         let args = CommandParser::<NetworkArgs>::parse_from(["reth"]).args;
 
         assert_eq!(args, default_args);
-    }
-
-    #[test]
-    fn parse_required_block_hashes() {
-        let args = CommandParser::<NetworkArgs>::parse_from([
-            "reth",
-            "--required-block-hashes",
-            "0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222",
-        ])
-        .args;
-
-        assert_eq!(args.required_block_hashes.len(), 2);
-        assert_eq!(
-            args.required_block_hashes[0].to_string(),
-            "0x1111111111111111111111111111111111111111111111111111111111111111"
-        );
-        assert_eq!(
-            args.required_block_hashes[1].to_string(),
-            "0x2222222222222222222222222222222222222222222222222222222222222222"
-        );
-    }
-
-    #[test]
-    fn parse_empty_required_block_hashes() {
-        let args = CommandParser::<NetworkArgs>::parse_from(["reth"]).args;
-        assert!(args.required_block_hashes.is_empty());
     }
 }

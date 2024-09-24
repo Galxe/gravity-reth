@@ -2,33 +2,28 @@ use crate::{
     segments::{PruneInput, Segment},
     PrunerError,
 };
-use reth_db_api::{table::Value, transaction::DbTxMut};
-use reth_primitives_traits::NodePrimitives;
+use reth_db::transaction::DbTxMut;
 use reth_provider::{
     errors::provider::ProviderResult, providers::StaticFileProvider, BlockReader, DBProvider,
-    PruneCheckpointWriter, StaticFileProviderFactory, TransactionsProvider,
+    PruneCheckpointWriter, TransactionsProvider,
 };
 use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, SegmentOutput};
 use reth_static_file_types::StaticFileSegment;
 
 #[derive(Debug)]
-pub struct Receipts<N> {
-    static_file_provider: StaticFileProvider<N>,
+pub struct Receipts {
+    static_file_provider: StaticFileProvider,
 }
 
-impl<N> Receipts<N> {
-    pub const fn new(static_file_provider: StaticFileProvider<N>) -> Self {
+impl Receipts {
+    pub const fn new(static_file_provider: StaticFileProvider) -> Self {
         Self { static_file_provider }
     }
 }
 
-impl<Provider> Segment<Provider> for Receipts<Provider::Primitives>
+impl<Provider> Segment<Provider> for Receipts
 where
-    Provider: StaticFileProviderFactory<Primitives: NodePrimitives<Receipt: Value>>
-        + DBProvider<Tx: DbTxMut>
-        + PruneCheckpointWriter
-        + TransactionsProvider
-        + BlockReader,
+    Provider: DBProvider<Tx: DbTxMut> + PruneCheckpointWriter + TransactionsProvider + BlockReader,
 {
     fn segment(&self) -> PruneSegment {
         PruneSegment::Receipts

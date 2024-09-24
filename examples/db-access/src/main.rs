@@ -1,17 +1,13 @@
-#![warn(unused_crate_dependencies)]
-
-use alloy_primitives::{Address, B256};
-use reth_ethereum::{
-    chainspec::ChainSpecBuilder,
-    node::EthereumNode,
-    primitives::{AlloyBlockHeader, SealedBlock, SealedHeader},
-    provider::{
-        providers::ReadOnlyConfig, AccountReader, BlockReader, BlockSource, HeaderProvider,
-        ReceiptProvider, StateProvider, TransactionVariant, TransactionsProvider,
-    },
-    rpc::eth::primitives::Filter,
-    TransactionSigned,
+use reth_chainspec::ChainSpecBuilder;
+use reth_node_ethereum::EthereumNode;
+use reth_node_types::NodeTypesWithDBAdapter;
+use reth_primitives::{Address, B256};
+use reth_provider::{
+    providers::StaticFileProvider, AccountReader, BlockReader, BlockSource, HeaderProvider,
+    ProviderFactory, ReceiptProvider, StateProvider, TransactionsProvider,
 };
+use reth_rpc_types::{Filter, FilteredParams};
+use std::path::Path;
 
 // Providers are zero cost abstractions on top of an opened MDBX Transaction
 // exposing a familiar API to query the chain's information without requiring knowledge
@@ -20,13 +16,20 @@ use reth_ethereum::{
 // These abstractions do not include any caching and the user is responsible for doing that.
 // Other parts of the code which include caching are parts of the `EthApi` abstraction.
 fn main() -> eyre::Result<()> {
-    // The path to data directory, e.g. "~/.local/reth/share/mainnet"
-    let datadir = std::env::var("RETH_DATADIR")?;
+    // Opens a RO handle to the database file.
+    let db_path = std::env::var("RETH_DB_PATH")?;
+    let db_path = Path::new(&db_path);
 
-    // Instantiate a provider factory for Ethereum mainnet using the provided datadir path.
+    // Instantiate a provider factory for Ethereum mainnet using the provided DB.
+    // TODO: Should the DB version include the spec so that you do not need to specify it here?
     let spec = ChainSpecBuilder::mainnet().build();
-    let factory = EthereumNode::provider_factory_builder()
-        .open_read_only(spec.into(), ReadOnlyConfig::from_datadir(datadir))?;
+    let factory =
+        ProviderFactory::<NodeTypesWithDBAdapter<EthereumNode, _>>::new_with_database_path(
+            db_path,
+            spec.into(),
+            Default::default(),
+            StaticFileProvider::read_only(db_path.join("static_files"), false)?,
+        )?;
 
     // This call opens a RO transaction on the database. To write to the DB you'd need to call
     // the `provider_rw` function and look for the `Writer` variants of the traits.
@@ -57,9 +60,9 @@ fn header_provider_example<T: HeaderProvider>(provider: T, number: u64) -> eyre:
     // Can query the header by number
     let header = provider.header_by_number(number)?.ok_or(eyre::eyre!("header not found"))?;
 
-    // We can convert a header to a sealed header which contains the hash w/o needing to recompute
+    // We can convert a header to a sealed header which contains the hash w/o needing to re-compute
     // it every time.
-    let sealed_header = SealedHeader::seal_slow(header);
+    let sealed_header = header.seal_slow();
 
     // Can also query the header by hash!
     let header_by_hash =
@@ -79,9 +82,7 @@ fn header_provider_example<T: HeaderProvider>(provider: T, number: u64) -> eyre:
 }
 
 /// The `TransactionsProvider` allows querying transaction-related information
-fn txs_provider_example<T: TransactionsProvider<Transaction = TransactionSigned>>(
-    provider: T,
-) -> eyre::Result<()> {
+fn txs_provider_example<T: TransactionsProvider>(provider: T) -> eyre::Result<()> {
     // Try the 5th tx
     let txid = 5;
 
@@ -90,17 +91,16 @@ fn txs_provider_example<T: TransactionsProvider<Transaction = TransactionSigned>
 
     // Can query the tx by hash
     let tx_by_hash =
-        provider.transaction_by_hash(*tx.tx_hash())?.ok_or(eyre::eyre!("txhash not found"))?;
+        provider.transaction_by_hash(tx.hash)?.ok_or(eyre::eyre!("txhash not found"))?;
     assert_eq!(tx, tx_by_hash);
 
     // Can query the tx by hash with info about the block it was included in
-    let (tx, meta) = provider
-        .transaction_by_hash_with_meta(*tx.tx_hash())?
-        .ok_or(eyre::eyre!("txhash not found"))?;
-    assert_eq!(*tx.tx_hash(), meta.tx_hash);
+    let (tx, meta) =
+        provider.transaction_by_hash_with_meta(tx.hash)?.ok_or(eyre::eyre!("txhash not found"))?;
+    assert_eq!(tx.hash, meta.tx_hash);
 
     // Can reverse lookup the key too
-    let id = provider.transaction_id(*tx.tx_hash())?.ok_or(eyre::eyre!("txhash not found"))?;
+    let id = provider.transaction_id(tx.hash)?.ok_or(eyre::eyre!("txhash not found"))?;
     assert_eq!(id, txid);
 
     // Can find the block of a transaction given its key
@@ -115,23 +115,18 @@ fn txs_provider_example<T: TransactionsProvider<Transaction = TransactionSigned>
 }
 
 /// The `BlockReader` allows querying the headers-related tables.
-fn block_provider_example<T: BlockReader<Block = reth_ethereum::Block>>(
-    provider: T,
-    number: u64,
-) -> eyre::Result<()> {
+fn block_provider_example<T: BlockReader>(provider: T, number: u64) -> eyre::Result<()> {
     // Can query a block by number
     let block = provider.block(number.into())?.ok_or(eyre::eyre!("block num not found"))?;
     assert_eq!(block.number, number);
 
-    // Can query a block with its senders, this is useful when you want to execute a block and do
+    // Can query a block with its senders, this is useful when you'd want to execute a block and do
     // not want to manually recover the senders for each transaction (as each transaction is
     // stored on disk with its v,r,s but not its `from` field.).
-    let _recovered_block = provider
-        .sealed_block_with_senders(number.into(), TransactionVariant::WithHash)?
-        .ok_or(eyre::eyre!("block num not found"))?;
+    let block = provider.block(number.into())?.ok_or(eyre::eyre!("block num not found"))?;
 
     // Can seal the block to cache the hash, like the Header above.
-    let sealed_block = SealedBlock::seal_slow(block.clone());
+    let sealed_block = block.clone().seal_slow();
 
     // Can also query the block by hash directly
     let block_by_hash = provider
@@ -145,21 +140,25 @@ fn block_provider_example<T: BlockReader<Block = reth_ethereum::Block>>(
         .ok_or(eyre::eyre!("block by hash not found"))?;
     assert_eq!(block, block_by_hash2);
 
-    // Or you can also specify the datasource. For this provider this always returns `None`, but
+    // Or you can also specify the datasource. For this provider this always return `None`, but
     // the blockchain tree is also able to access pending state not available in the db yet.
     let block_by_hash3 = provider
         .find_block_by_hash(sealed_block.hash(), BlockSource::Any)?
         .ok_or(eyre::eyre!("block hash not found"))?;
     assert_eq!(block, block_by_hash3);
+
+    // Can query the block's ommers/uncles
+    let _ommers = provider.ommers(number.into())?;
+
+    // Can query the block's withdrawals (via the `WithdrawalsProvider`)
+    let _withdrawals =
+        provider.withdrawals_by_block(sealed_block.hash().into(), sealed_block.timestamp)?;
+
     Ok(())
 }
 
 /// The `ReceiptProvider` allows querying the receipts tables.
-fn receipts_provider_example<
-    T: ReceiptProvider<Receipt = reth_ethereum::Receipt>
-        + TransactionsProvider<Transaction = TransactionSigned>
-        + HeaderProvider,
->(
+fn receipts_provider_example<T: ReceiptProvider + TransactionsProvider + HeaderProvider>(
     provider: T,
 ) -> eyre::Result<()> {
     let txid = 5;
@@ -170,9 +169,8 @@ fn receipts_provider_example<
 
     // Can query receipt by txhash too
     let tx = provider.transaction_by_id(txid)?.unwrap();
-    let receipt_by_hash = provider
-        .receipt_by_hash(*tx.tx_hash())?
-        .ok_or(eyre::eyre!("tx receipt by hash not found"))?;
+    let receipt_by_hash =
+        provider.receipt_by_hash(tx.hash)?.ok_or(eyre::eyre!("tx receipt by hash not found"))?;
     assert_eq!(receipt, receipt_by_hash);
 
     // Can query all the receipts in a block
@@ -180,11 +178,11 @@ fn receipts_provider_example<
         .receipts_by_block(100.into())?
         .ok_or(eyre::eyre!("no receipts found for block"))?;
 
-    // Can check if an address/topic filter is present in a header, if it is we query the block and
+    // Can check if a address/topic filter is present in a header, if it is we query the block and
     // receipts and do something with the data
     // 1. get the bloom from the header
     let header = provider.header_by_number(header_num)?.unwrap();
-    let bloom = header.logs_bloom();
+    let bloom = header.logs_bloom;
 
     // 2. Construct the address/topics filters
     // For a hypothetical address, we'll want to filter down for a specific indexed topic (e.g.
@@ -195,14 +193,21 @@ fn receipts_provider_example<
     // TODO: Make it clearer how to choose between event_signature(topic0) (event name) and the
     // other 3 indexed topics. This API is a bit clunky and not obvious to use at the moment.
     let filter = Filter::new().address(addr).event_signature(topic);
+    let filter_params = FilteredParams::new(Some(filter));
+    let address_filter = FilteredParams::address_filter(&addr.into());
+    let topics_filter = FilteredParams::topics_filter(&[topic.into()]);
 
     // 3. If the address & topics filters match do something. We use the outer check against the
     // bloom filter stored in the header to avoid having to query the receipts table when there
     // is no instance of any event that matches the filter in the header.
-    if filter.matches_bloom(bloom) {
+    if FilteredParams::matches_address(bloom, &address_filter) &&
+        FilteredParams::matches_topics(bloom, &topics_filter)
+    {
         let receipts = provider.receipt(header_num)?.ok_or(eyre::eyre!("receipt not found"))?;
         for log in &receipts.logs {
-            if filter.matches(log) {
+            if filter_params.filter_address(&log.address) &&
+                filter_params.filter_topics(log.topics())
+            {
                 // Do something with the log e.g. decode it.
                 println!("Matching log found! {log:?}")
             }
@@ -217,8 +222,8 @@ fn state_provider_example<T: StateProvider + AccountReader>(provider: T) -> eyre
     let storage_key = B256::random();
 
     // Can get account / storage state with simple point queries
-    let _account = provider.basic_account(&address)?;
-    let _code = provider.account_code(&address)?;
+    let _account = provider.basic_account(address)?;
+    let _code = provider.account_code(address)?;
     let _storage = provider.storage(address, storage_key)?;
     // TODO: unimplemented.
     // let _proof = provider.proof(address, &[])?;

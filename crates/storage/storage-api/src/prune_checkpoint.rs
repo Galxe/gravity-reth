@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_storage_errors::provider::ProviderResult;
 

@@ -1,15 +1,17 @@
 use crate::utils::{test_address, test_rpc_builder};
-use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
 use jsonrpsee::{
-    core::middleware::{Batch, Notification},
-    server::middleware::rpc::RpcServiceT,
+    server::{middleware::rpc::RpcServiceT, RpcServiceBuilder},
     types::Request,
+    MethodResponse,
 };
+use reth_rpc::EthApi;
 use reth_rpc_builder::{RpcServerConfig, TransportRpcModuleConfig};
 use reth_rpc_eth_api::EthApiClient;
 use reth_rpc_server_types::RpcModuleSelection;
+use reth_rpc_types::{Block, Receipt, Transaction};
 use std::{
     future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -36,15 +38,13 @@ struct MyMiddlewareService<S> {
     count: Arc<AtomicUsize>,
 }
 
-impl<S> RpcServiceT for MyMiddlewareService<S>
+impl<'a, S> RpcServiceT<'a> for MyMiddlewareService<S>
 where
-    S: RpcServiceT + Send + Sync + Clone + 'static,
+    S: RpcServiceT<'a> + Send + Sync + Clone + 'static,
 {
-    type MethodResponse = S::MethodResponse;
-    type NotificationResponse = S::NotificationResponse;
-    type BatchResponse = S::BatchResponse;
+    type Future = Pin<Box<dyn Future<Output = MethodResponse> + Send + 'a>>;
 
-    fn call<'a>(&self, req: Request<'a>) -> impl Future<Output = Self::MethodResponse> + Send + 'a {
+    fn call(&self, req: Request<'a>) -> Self::Future {
         tracing::info!("MyMiddleware processed call {}", req.method);
         let count = self.count.clone();
         let service = self.service.clone();
@@ -55,41 +55,27 @@ where
             rp
         })
     }
-
-    fn batch<'a>(&self, req: Batch<'a>) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
-        self.service.batch(req)
-    }
-
-    fn notification<'a>(
-        &self,
-        n: Notification<'a>,
-    ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
-        self.service.notification(n)
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rpc_middleware() {
     let builder = test_rpc_builder();
-    let eth_api = builder.bootstrap_eth_api();
-    let modules =
-        builder.build(TransportRpcModuleConfig::set_http(RpcModuleSelection::All), eth_api);
+    let modules = builder.build(
+        TransportRpcModuleConfig::set_http(RpcModuleSelection::All),
+        Box::new(EthApi::with_spawner),
+    );
 
     let mylayer = MyMiddlewareLayer::default();
 
     let handle = RpcServerConfig::http(Default::default())
         .with_http_address(test_address())
-        .set_rpc_middleware(mylayer.clone())
+        .set_rpc_middleware(RpcServiceBuilder::new().layer(mylayer.clone()))
         .start(&modules)
         .await
         .unwrap();
 
     let client = handle.http_client().unwrap();
-    EthApiClient::<TransactionRequest, Transaction, Block, Receipt, Header>::protocol_version(
-        &client,
-    )
-    .await
-    .unwrap();
+    EthApiClient::<Transaction, Block, Receipt>::protocol_version(&client).await.unwrap();
     let count = mylayer.count.load(Ordering::Relaxed);
     assert_eq!(count, 1);
 }

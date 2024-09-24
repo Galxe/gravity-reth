@@ -1,24 +1,22 @@
 //! Helper types for `reth_rpc_eth_api::EthApiServer` implementation.
 //!
 //! Transaction wrapper that labels transaction with its origin.
-
 use alloy_primitives::B256;
-use alloy_rpc_types_eth::TransactionInfo;
-use reth_ethereum_primitives::TransactionSigned;
-use reth_primitives_traits::{NodePrimitives, Recovered, SignedTransaction};
-use reth_rpc_convert::{RpcConvert, RpcTransaction};
+use reth_primitives::TransactionSignedEcRecovered;
+use reth_rpc_types::{Transaction, TransactionInfo, WithOtherFields};
+use reth_rpc_types_compat::transaction::from_recovered_with_block_context;
 
 /// Represents from where a transaction was fetched.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum TransactionSource<T = TransactionSigned> {
+pub enum TransactionSource {
     /// Transaction exists in the pool (Pending)
-    Pool(Recovered<T>),
+    Pool(TransactionSignedEcRecovered),
     /// Transaction already included in a block
     ///
     /// This can be a historical block or a pending block (received from the CL)
     Block {
         /// Transaction fetched via provider
-        transaction: Recovered<T>,
+        transaction: TransactionSignedEcRecovered,
         /// Index of the transaction in the block
         index: u64,
         /// Hash of the block.
@@ -32,45 +30,21 @@ pub enum TransactionSource<T = TransactionSigned> {
 
 // === impl TransactionSource ===
 
-impl<T: SignedTransaction> TransactionSource<T> {
+impl TransactionSource {
     /// Consumes the type and returns the wrapped transaction.
-    pub fn into_recovered(self) -> Recovered<T> {
+    pub fn into_recovered(self) -> TransactionSignedEcRecovered {
         self.into()
     }
 
-    /// Conversion into network specific transaction type.
-    pub fn into_transaction<Builder>(
-        self,
-        resp_builder: &Builder,
-    ) -> Result<RpcTransaction<Builder::Network>, Builder::Error>
-    where
-        Builder: RpcConvert<Primitives: NodePrimitives<SignedTx = T>>,
-    {
-        match self {
-            Self::Pool(tx) => resp_builder.fill_pending(tx),
-            Self::Block { transaction, index, block_hash, block_number, base_fee } => {
-                let tx_info = TransactionInfo {
-                    hash: Some(transaction.trie_hash()),
-                    index: Some(index),
-                    block_hash: Some(block_hash),
-                    block_number: Some(block_number),
-                    base_fee,
-                };
-
-                resp_builder.fill(transaction, tx_info)
-            }
-        }
-    }
-
     /// Returns the transaction and block related info, if not pending
-    pub fn split(self) -> (Recovered<T>, TransactionInfo) {
+    pub fn split(self) -> (TransactionSignedEcRecovered, TransactionInfo) {
         match self {
             Self::Pool(tx) => {
-                let hash = tx.trie_hash();
+                let hash = tx.hash();
                 (tx, TransactionInfo { hash: Some(hash), ..Default::default() })
             }
             Self::Block { transaction, index, block_hash, block_number, base_fee } => {
-                let hash = transaction.trie_hash();
+                let hash = transaction.hash();
                 (
                     transaction,
                     TransactionInfo {
@@ -78,7 +52,7 @@ impl<T: SignedTransaction> TransactionSource<T> {
                         index: Some(index),
                         block_hash: Some(block_hash),
                         block_number: Some(block_number),
-                        base_fee,
+                        base_fee: base_fee.map(u128::from),
                     },
                 )
             }
@@ -86,11 +60,29 @@ impl<T: SignedTransaction> TransactionSource<T> {
     }
 }
 
-impl<T> From<TransactionSource<T>> for Recovered<T> {
-    fn from(value: TransactionSource<T>) -> Self {
+impl From<TransactionSource> for TransactionSignedEcRecovered {
+    fn from(value: TransactionSource) -> Self {
         match value {
             TransactionSource::Pool(tx) => tx,
             TransactionSource::Block { transaction, .. } => transaction,
+        }
+    }
+}
+
+impl From<TransactionSource> for WithOtherFields<Transaction> {
+    fn from(value: TransactionSource) -> Self {
+        match value {
+            TransactionSource::Pool(tx) => reth_rpc_types_compat::transaction::from_recovered(tx),
+            TransactionSource::Block { transaction, index, block_hash, block_number, base_fee } => {
+                let tx_info = TransactionInfo {
+                    hash: Some(transaction.hash()),
+                    block_hash: Some(block_hash),
+                    block_number: Some(block_number),
+                    base_fee: base_fee.map(u128::from),
+                    index: Some(index),
+                };
+                from_recovered_with_block_context(transaction, tx_info)
+            }
         }
     }
 }

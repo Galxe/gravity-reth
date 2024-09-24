@@ -1,10 +1,13 @@
 //! Stores engine API messages to disk for later inspection and replay.
 
-use alloy_rpc_types_engine::ForkchoiceState;
 use futures::{Stream, StreamExt};
-use reth_engine_primitives::{BeaconEngineMessage, ExecutionPayload};
+use reth_beacon_consensus::BeaconEngineMessage;
+use reth_engine_primitives::EngineTypes;
 use reth_fs_util as fs;
-use reth_payload_primitives::PayloadTypes;
+use reth_rpc_types::{
+    engine::{CancunPayloadFields, ForkchoiceState},
+    ExecutionPayload,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -18,19 +21,20 @@ use tracing::*;
 /// A message from the engine API that has been stored to disk.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum StoredEngineApiMessage<T: PayloadTypes> {
+pub enum StoredEngineApiMessage<Attributes> {
     /// The on-disk representation of an `engine_forkchoiceUpdated` method call.
     ForkchoiceUpdated {
         /// The [`ForkchoiceState`] sent in the persisted call.
         state: ForkchoiceState,
         /// The payload attributes sent in the persisted call, if any.
-        payload_attrs: Option<T::PayloadAttributes>,
+        payload_attrs: Option<Attributes>,
     },
     /// The on-disk representation of an `engine_newPayload` method call.
     NewPayload {
-        /// The [`PayloadTypes::ExecutionData`] sent in the persisted call.
-        #[serde(flatten)]
-        payload: T::ExecutionData,
+        /// The [`ExecutionPayload`] sent in the persisted call.
+        payload: ExecutionPayload,
+        /// The Cancun-specific fields sent in the persisted call, if any.
+        cancun_fields: Option<CancunPayloadFields>,
     },
 }
 
@@ -51,41 +55,41 @@ impl EngineMessageStore {
 
     /// Stores the received [`BeaconEngineMessage`] to disk, appending the `received_at` time to the
     /// path.
-    pub fn on_message<T>(
+    pub fn on_message<Engine>(
         &self,
-        msg: &BeaconEngineMessage<T>,
+        msg: &BeaconEngineMessage<Engine>,
         received_at: SystemTime,
     ) -> eyre::Result<()>
     where
-        T: PayloadTypes,
+        Engine: EngineTypes,
     {
         fs::create_dir_all(&self.path)?; // ensure that store path had been created
         let timestamp = received_at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
         match msg {
-            BeaconEngineMessage::ForkchoiceUpdated {
-                state,
-                payload_attrs,
-                tx: _tx,
-                version: _version,
-            } => {
+            BeaconEngineMessage::ForkchoiceUpdated { state, payload_attrs, tx: _tx } => {
                 let filename = format!("{}-fcu-{}.json", timestamp, state.head_block_hash);
                 fs::write(
                     self.path.join(filename),
-                    serde_json::to_vec(&StoredEngineApiMessage::<T>::ForkchoiceUpdated {
+                    serde_json::to_vec(&StoredEngineApiMessage::ForkchoiceUpdated {
                         state: *state,
                         payload_attrs: payload_attrs.clone(),
                     })?,
                 )?;
             }
-            BeaconEngineMessage::NewPayload { payload, tx: _tx } => {
+            BeaconEngineMessage::NewPayload { payload, cancun_fields, tx: _tx } => {
                 let filename = format!("{}-new_payload-{}.json", timestamp, payload.block_hash());
                 fs::write(
                     self.path.join(filename),
-                    serde_json::to_vec(&StoredEngineApiMessage::<T>::NewPayload {
-                        payload: payload.clone(),
-                    })?,
+                    serde_json::to_vec(
+                        &StoredEngineApiMessage::<Engine::PayloadAttributes>::NewPayload {
+                            payload: payload.clone(),
+                            cancun_fields: cancun_fields.clone(),
+                        },
+                    )?,
                 )?;
             }
+            // noop
+            BeaconEngineMessage::TransitionConfigurationExchanged => (),
         };
         Ok(())
     }
@@ -130,20 +134,20 @@ impl<S> EngineStoreStream<S> {
     }
 }
 
-impl<S, T> Stream for EngineStoreStream<S>
+impl<S, Engine> Stream for EngineStoreStream<S>
 where
-    S: Stream<Item = BeaconEngineMessage<T>>,
-    T: PayloadTypes,
+    S: Stream<Item = BeaconEngineMessage<Engine>>,
+    Engine: EngineTypes,
 {
     type Item = S::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         let next = ready!(this.stream.poll_next_unpin(cx));
-        if let Some(msg) = &next &&
-            let Err(error) = this.store.on_message(msg, SystemTime::now())
-        {
-            error!(target: "engine::stream::store", ?msg, %error, "Error handling Engine API message");
+        if let Some(msg) = &next {
+            if let Err(error) = this.store.on_message(msg, SystemTime::now()) {
+                error!(target: "engine::stream::store", ?msg, %error, "Error handling Engine API message");
+            }
         }
         Poll::Ready(next)
     }

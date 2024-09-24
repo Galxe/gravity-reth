@@ -190,14 +190,14 @@ pub struct EtlIter<'a> {
     files: &'a mut Vec<EtlFile>,
 }
 
-impl EtlIter<'_> {
+impl<'a> EtlIter<'a> {
     /// Peeks into the next element
     pub fn peek(&self) -> Option<&(Vec<u8>, Vec<u8>)> {
         self.heap.peek().map(|(Reverse(entry), _)| entry)
     }
 }
 
-impl Iterator for EtlIter<'_> {
+impl<'a> Iterator for EtlIter<'a> {
     type Item = std::io::Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -281,8 +281,9 @@ impl EtlFile {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloy_primitives::{TxHash, TxNumber};
+
+    use super::*;
 
     #[test]
     fn etl_hashes() {

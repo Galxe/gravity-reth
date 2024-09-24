@@ -1,4 +1,4 @@
-use std::{cmp::max, time::Duration};
+use std::cmp::max;
 
 /// The default port for the http server
 pub const DEFAULT_HTTP_RPC_PORT: u16 = 8545;
@@ -14,9 +14,6 @@ pub const DEFAULT_MAX_BLOCKS_PER_FILTER: u64 = 100_000;
 
 /// The default maximum of logs in a single response.
 pub const DEFAULT_MAX_LOGS_PER_RESPONSE: usize = 20_000;
-
-/// The default maximum number of blocks for `trace_filter` requests.
-pub const DEFAULT_MAX_TRACE_FILTER_BLOCKS: u64 = 100;
 
 /// The default maximum number tracing requests we're allowing concurrently.
 /// Tracing is mostly CPU bound so we're limiting the number of concurrent requests to something
@@ -54,15 +51,9 @@ pub const DEFAULT_MAX_SIMULATE_BLOCKS: u64 = 256;
 /// The default eth historical proof window.
 pub const DEFAULT_ETH_PROOF_WINDOW: u64 = 0;
 
-/// The default eth tx fee cap is 1 ETH
-pub const DEFAULT_TX_FEE_CAP_WEI: u128 = 1_000_000_000_000_000_000u128;
-
-/// Maximum eth historical proof window. Equivalent to roughly 6 months of data on a 12
-/// second block time, and a month on a 2 second block time.
-pub const MAX_ETH_PROOF_WINDOW: u64 = 28 * 24 * 60 * 60 / 2;
-
-/// Default timeout for send raw transaction sync in seconds.
-pub const RPC_DEFAULT_SEND_RAW_TX_SYNC_TIMEOUT_SECS: Duration = Duration::from_secs(30);
+/// Maximum eth historical proof window. Equivalent to roughly one and a half months of data on a 12
+/// second block time, and a week on a 2 second block time.
+pub const MAX_ETH_PROOF_WINDOW: u64 = 7 * 24 * 60 * 60 / 2;
 
 /// GPO specific constants
 pub mod gas_oracle {
@@ -73,9 +64,6 @@ pub mod gas_oracle {
 
     /// The default maximum number of blocks to use for the gas price oracle.
     pub const MAX_HEADER_HISTORY: u64 = 1024;
-
-    /// The default maximum number of allowed reward percentiles
-    pub const MAX_REWARD_PERCENTILE_COUNT: u64 = 100;
 
     /// Number of recent blocks to check for gas price
     pub const DEFAULT_GAS_PRICE_BLOCKS: u32 = 20;
@@ -93,7 +81,8 @@ pub mod gas_oracle {
     /// The default gas limit for `eth_call` and adjacent calls.
     ///
     /// This is different from the default to regular 30M block gas limit
-    /// `ETHEREUM_BLOCK_GAS_LIMIT_30M` to allow for more complex calls.
+    /// [`ETHEREUM_BLOCK_GAS_LIMIT`](reth_primitives::constants::ETHEREUM_BLOCK_GAS_LIMIT) to allow
+    /// for more complex calls.
     pub const RPC_DEFAULT_GAS_CAP: u64 = 50_000_000;
 
     /// Allowed error ratio for gas estimation
@@ -107,14 +96,26 @@ pub mod gas_oracle {
 
 /// Cache specific constants
 pub mod cache {
+    // TODO: memory based limiter is currently disabled pending <https://github.com/paradigmxyz/reth/issues/3503>
+    /// Default cache size for the block cache: 500MB
+    ///
+    /// With an average block size of ~100kb this should be able to cache ~5000 blocks.
+    pub const DEFAULT_BLOCK_CACHE_SIZE_BYTES_MB: usize = 500;
+
+    /// Default cache size for the receipts cache: 500MB
+    pub const DEFAULT_RECEIPT_CACHE_SIZE_BYTES_MB: usize = 500;
+
+    /// Default cache size for the env cache: 1MB
+    pub const DEFAULT_ENV_CACHE_SIZE_BYTES_MB: usize = 1;
+
     /// Default cache size for the block cache: 5000 blocks.
     pub const DEFAULT_BLOCK_CACHE_MAX_LEN: u32 = 5000;
 
     /// Default cache size for the receipts cache: 2000 receipts.
     pub const DEFAULT_RECEIPT_CACHE_MAX_LEN: u32 = 2000;
 
-    /// Default cache size for the header cache: 1000 headers.
-    pub const DEFAULT_HEADER_CACHE_MAX_LEN: u32 = 1000;
+    /// Default cache size for the env cache: 1000 envs.
+    pub const DEFAULT_ENV_CACHE_MAX_LEN: u32 = 1000;
 
     /// Default number of concurrent database requests.
     pub const DEFAULT_CONCURRENT_DB_REQUESTS: usize = 512;

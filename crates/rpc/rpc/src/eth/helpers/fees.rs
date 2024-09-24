@@ -1,36 +1,42 @@
 //! Contains RPC handler implementations for fee history.
 
-use reth_rpc_convert::RpcConvert;
-use reth_rpc_eth_api::{
-    helpers::{EthFees, LoadFee},
-    FromEvmError, RpcNodeCore,
-};
-use reth_rpc_eth_types::{EthApiError, FeeHistoryCache, GasPriceOracle};
-use reth_storage_api::ProviderHeader;
+use reth_chainspec::ChainSpec;
+use reth_provider::{BlockIdReader, BlockReaderIdExt, ChainSpecProvider, HeaderProvider};
+
+use reth_rpc_eth_api::helpers::{EthFees, LoadBlock, LoadFee};
+use reth_rpc_eth_types::{EthStateCache, FeeHistoryCache, GasPriceOracle};
 
 use crate::EthApi;
 
-impl<N, Rpc> EthFees for EthApi<N, Rpc>
-where
-    N: RpcNodeCore,
-    EthApiError: FromEvmError<N::Evm>,
-    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError>,
+impl<Provider, Pool, Network, EvmConfig> EthFees for EthApi<Provider, Pool, Network, EvmConfig> where
+    Self: LoadFee
 {
 }
 
-impl<N, Rpc> LoadFee for EthApi<N, Rpc>
+impl<Provider, Pool, Network, EvmConfig> LoadFee for EthApi<Provider, Pool, Network, EvmConfig>
 where
-    N: RpcNodeCore,
-    EthApiError: FromEvmError<N::Evm>,
-    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError>,
+    Self: LoadBlock,
+    Provider: BlockReaderIdExt + HeaderProvider + ChainSpecProvider<ChainSpec = ChainSpec>,
 {
     #[inline]
-    fn gas_oracle(&self) -> &GasPriceOracle<Self::Provider> {
+    fn provider(
+        &self,
+    ) -> impl BlockIdReader + HeaderProvider + ChainSpecProvider<ChainSpec = ChainSpec> {
+        self.inner.provider()
+    }
+
+    #[inline]
+    fn cache(&self) -> &EthStateCache {
+        self.inner.cache()
+    }
+
+    #[inline]
+    fn gas_oracle(&self) -> &GasPriceOracle<impl BlockReaderIdExt> {
         self.inner.gas_oracle()
     }
 
     #[inline]
-    fn fee_history_cache(&self) -> &FeeHistoryCache<ProviderHeader<N::Provider>> {
+    fn fee_history_cache(&self) -> &FeeHistoryCache {
         self.inner.fee_history_cache()
     }
 }

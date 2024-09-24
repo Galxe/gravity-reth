@@ -12,27 +12,16 @@ workspace = true
 
 [dependencies]
 # reth
-reth-execution-types.workspace = true
-reth-primitives-traits.workspace = true
+reth-primitives.workspace = true
 
 # ethereum
 alloy-primitives.workspace = true
-alloy-consensus.workspace = true
 
 # misc
 auto_impl.workspace = true
-thiserror.workspace = true
+derive_more.workspace = true
 
 [features]
 default = ["std"]
-std = [
-    "reth-primitives-traits/std",
-    "alloy-primitives/std",
-    "alloy-consensus/std",
-    "reth-primitives-traits/std",
-    "reth-execution-types/std",
-    "thiserror/std",
-]
-test-utils = [
-    "reth-primitives-traits/test-utils",
-]
+std = []
+test-utils = []

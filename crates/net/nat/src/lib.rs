@@ -25,9 +25,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tracing::{debug, error};
 
-use crate::net_if::resolve_net_if_ip;
 #[cfg(feature = "serde")]
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 
@@ -35,7 +33,7 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 ///
 /// Taken from: <https://stackoverflow.com/questions/3253701/get-public-external-ip-address>
 const EXTERNAL_IP_APIS: &[&str] =
-    &["https://ipinfo.io/ip", "https://icanhazip.com", "https://ifconfig.me"];
+    &["http://ipinfo.io/ip", "http://icanhazip.com", "http://ifconfig.me"];
 
 /// All builtin resolvers.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Hash)]
@@ -50,8 +48,6 @@ pub enum NatResolver {
     PublicIp,
     /// Use the given [`IpAddr`]
     ExternalIp(IpAddr),
-    /// Resolve external IP via the network interface.
-    NetIf,
     /// Resolve nothing
     None,
 }
@@ -60,14 +56,6 @@ impl NatResolver {
     /// Attempts to produce an IP address (best effort).
     pub async fn external_addr(self) -> Option<IpAddr> {
         external_addr_with(self).await
-    }
-
-    /// Returns the external ip, if it is [`NatResolver::ExternalIp`]
-    pub const fn as_external_ip(self) -> Option<IpAddr> {
-        match self {
-            Self::ExternalIp(ip) => Some(ip),
-            _ => None,
-        }
     }
 }
 
@@ -78,7 +66,6 @@ impl fmt::Display for NatResolver {
             Self::Upnp => f.write_str("upnp"),
             Self::PublicIp => f.write_str("publicip"),
             Self::ExternalIp(ip) => write!(f, "extip:{ip}"),
-            Self::NetIf => f.write_str("netif"),
             Self::None => f.write_str("none"),
         }
     }
@@ -104,14 +91,13 @@ impl FromStr for NatResolver {
             "upnp" => Self::Upnp,
             "none" => Self::None,
             "publicip" | "public-ip" => Self::PublicIp,
-            "netif" => Self::NetIf,
             s => {
                 let Some(ip) = s.strip_prefix("extip:") else {
                     return Err(ParseNatResolverError::UnknownVariant(format!(
                         "Unknown Nat Resolver: {s}"
                     )))
                 };
-                Self::ExternalIp(ip.parse()?)
+                Self::ExternalIp(ip.parse::<IpAddr>()?)
             }
         };
         Ok(r)
@@ -161,11 +147,6 @@ impl ResolveNatInterval {
         Self::with_interval(resolver, interval)
     }
 
-    /// Returns the resolver used by this interval
-    pub const fn resolver(&self) -> &NatResolver {
-        &self.resolver
-    }
-
     /// Completes when the next [`IpAddr`] in the interval has been reached.
     pub async fn tick(&mut self) -> Option<IpAddr> {
         poll_fn(|cx| self.poll_tick(cx)).await
@@ -204,30 +185,13 @@ pub async fn external_addr_with(resolver: NatResolver) -> Option<IpAddr> {
     match resolver {
         NatResolver::Any | NatResolver::Upnp | NatResolver::PublicIp => resolve_external_ip().await,
         NatResolver::ExternalIp(ip) => Some(ip),
-        NatResolver::NetIf => resolve_net_if_ip(DEFAULT_NET_IF_NAME)
-            .inspect_err(|err| {
-                debug!(target: "net::nat",
-                     %err,
-                    "Failed to resolve network interface IP"
-                );
-            })
-            .ok(),
         NatResolver::None => None,
     }
 }
 
 async fn resolve_external_ip() -> Option<IpAddr> {
     let futures = EXTERNAL_IP_APIS.iter().copied().map(resolve_external_ip_url_res).map(Box::pin);
-    futures_util::future::select_ok(futures)
-        .await
-        .inspect_err(|err| {
-            debug!(target: "net::nat",
-            ?err,
-                external_ip_apis=?EXTERNAL_IP_APIS,
-                "Failed to resolve external IP from any API");
-        })
-        .ok()
-        .map(|(ip, _)| ip)
+    futures_util::future::select_ok(futures).await.ok().map(|(res, _)| res)
 }
 
 async fn resolve_external_ip_url_res(url: &str) -> Result<IpAddr, ()> {
@@ -235,8 +199,7 @@ async fn resolve_external_ip_url_res(url: &str) -> Result<IpAddr, ()> {
 }
 
 async fn resolve_external_ip_url(url: &str) -> Option<IpAddr> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().ok()?;
-    let response = client.get(url).send().await.ok()?;
+    let response = reqwest::get(url).await.ok()?;
     let response = response.error_for_status().ok()?;
     let text = response.text().await.ok()?;
     text.trim().parse().ok()

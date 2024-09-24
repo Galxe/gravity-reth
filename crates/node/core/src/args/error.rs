@@ -2,7 +2,7 @@ use std::num::ParseIntError;
 
 /// Error while parsing a `ReceiptsLogPruneConfig`
 #[derive(thiserror::Error, Debug)]
-#[expect(clippy::enum_variant_names)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum ReceiptsLogError {
     /// The format of the filter is invalid.
     #[error("invalid filter format: {0}")]

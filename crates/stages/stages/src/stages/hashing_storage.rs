@@ -1,15 +1,14 @@
-use alloy_primitives::{bytes::BufMut, keccak256, B256};
 use itertools::Itertools;
 use reth_config::config::{EtlConfig, HashingConfig};
+use reth_db::tables;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRW},
     models::{BlockNumberAddress, CompactU256},
     table::Decompress,
-    tables,
     transaction::{DbTx, DbTxMut},
 };
 use reth_etl::Collector;
-use reth_primitives_traits::StorageEntry;
+use reth_primitives::{keccak256, BufMut, StorageEntry, B256};
 use reth_provider::{DBProvider, HashingWriter, StatsReader, StorageReader};
 use reth_stages_api::{
     EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
@@ -110,7 +109,7 @@ where
                 });
 
                 // Flush to ETL when channels length reaches MAXIMUM_CHANNELS
-                if !channels.is_empty() && channels.len().is_multiple_of(MAXIMUM_CHANNELS) {
+                if !channels.is_empty() && channels.len() % MAXIMUM_CHANNELS == 0 {
                     collect(&mut channels, &mut collector)?;
                 }
             }
@@ -121,7 +120,7 @@ where
             let interval = (total_hashes / 10).max(1);
             let mut cursor = tx.cursor_dup_write::<tables::HashedStorages>()?;
             for (index, item) in collector.iter()?.enumerate() {
-                if index > 0 && index.is_multiple_of(interval) {
+                if index > 0 && index % interval == 0 {
                     info!(
                         target: "sync::stages::hashing_storage",
                         progress = %format!("{:.2}%", (index as f64 / total_hashes as f64) * 100.0),
@@ -134,7 +133,7 @@ where
                     B256::from_slice(&addr_key[..32]),
                     StorageEntry {
                         key: B256::from_slice(&addr_key[32..]),
-                        value: CompactU256::decompress_owned(value)?.into(),
+                        value: CompactU256::decompress(value)?.into(),
                     },
                 )?;
             }
@@ -169,7 +168,7 @@ where
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
-        provider.unwind_storage_hashing_range(BlockNumberAddress::range(range))?;
+        provider.unwind_storage_hashing(BlockNumberAddress::range(range))?;
 
         let mut stage_checkpoint =
             input.checkpoint.storage_hashing_stage_checkpoint().unwrap_or_default();
@@ -212,15 +211,13 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, TestRunnerError,
         TestStageDB, UnwindStageTestRunner,
     };
-    use alloy_primitives::{Address, U256};
     use assert_matches::assert_matches;
     use rand::Rng;
     use reth_db_api::{
         cursor::{DbCursorRW, DbDupCursorRO},
         models::StoredBlockBodyIndices,
     };
-    use reth_ethereum_primitives::Block;
-    use reth_primitives_traits::SealedBlock;
+    use reth_primitives::{Address, SealedBlock, U256};
     use reth_provider::providers::StaticFileWriter;
     use reth_testing_utils::generators::{
         self, random_block_range, random_contract_account_range, BlockRangeParams,
@@ -329,7 +326,7 @@ mod tests {
     }
 
     impl ExecuteStageTestRunner for StorageHashingTestRunner {
-        type Seed = Vec<SealedBlock<Block>>;
+        type Seed = Vec<SealedBlock>;
 
         fn seed_execution(&mut self, input: ExecInput) -> Result<Self::Seed, TestRunnerError> {
             let stage_progress = input.next_block();
@@ -345,7 +342,7 @@ mod tests {
                 BlockRangeParams { parent: Some(B256::ZERO), tx_count: 0..3, ..Default::default() },
             );
 
-            self.db.insert_headers(blocks.iter().map(|block| block.sealed_header()))?;
+            self.db.insert_headers(blocks.iter().map(|block| &block.header))?;
 
             let iter = blocks.iter();
             let mut next_tx_num = 0;
@@ -354,28 +351,30 @@ mod tests {
                 // Insert last progress data
                 let block_number = progress.number;
                 self.db.commit(|tx| {
-                    progress.body().transactions.iter().try_for_each(
+                    progress.body.iter().try_for_each(
                         |transaction| -> Result<(), reth_db::DatabaseError> {
                             tx.put::<tables::TransactionHashNumbers>(
-                                *transaction.tx_hash(),
+                                transaction.hash(),
                                 next_tx_num,
                             )?;
-                            tx.put::<tables::Transactions>(next_tx_num, transaction.clone())?;
+                            tx.put::<tables::Transactions>(
+                                next_tx_num,
+                                transaction.clone().into(),
+                            )?;
 
-                            let (addr, _) = accounts
-                                .get_mut((rng.random::<u64>() % n_accounts) as usize)
-                                .unwrap();
+                            let (addr, _) =
+                                accounts.get_mut(rng.gen::<usize>() % n_accounts as usize).unwrap();
 
                             for _ in 0..2 {
                                 let new_entry = StorageEntry {
-                                    key: keccak256([rng.random::<u8>()]),
-                                    value: U256::from(rng.random::<u8>() % 30 + 1),
+                                    key: keccak256([rng.gen::<u8>()]),
+                                    value: U256::from(rng.gen::<u8>() % 30 + 1),
                                 };
                                 self.insert_storage_entry(
                                     tx,
                                     (block_number, *addr).into(),
                                     new_entry,
-                                    progress.number == stage_progress,
+                                    progress.header.number == stage_progress,
                                 )?;
                             }
 
@@ -385,22 +384,22 @@ mod tests {
                     )?;
 
                     // Randomize rewards
-                    let has_reward: bool = rng.random();
+                    let has_reward: bool = rng.gen();
                     if has_reward {
                         self.insert_storage_entry(
                             tx,
                             (block_number, Address::random()).into(),
                             StorageEntry {
                                 key: keccak256("mining"),
-                                value: U256::from(rng.random::<u32>()),
+                                value: U256::from(rng.gen::<u32>()),
                             },
-                            progress.number == stage_progress,
+                            progress.header.number == stage_progress,
                         )?;
                     }
 
                     let body = StoredBlockBodyIndices {
                         first_tx_num,
-                        tx_count: progress.transaction_count() as u64,
+                        tx_count: progress.body.len() as u64,
                     };
 
                     first_tx_num = next_tx_num;
@@ -535,7 +534,7 @@ mod tests {
                     }
 
                     if !entry.value.is_zero() {
-                        storage_cursor.upsert(bn_address.address(), &entry)?;
+                        storage_cursor.upsert(bn_address.address(), entry)?;
                     }
                 }
                 Ok(())

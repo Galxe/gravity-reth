@@ -2,11 +2,10 @@ use crate::{
     segments::{PruneInput, Segment},
     PrunerError,
 };
-use reth_db_api::{table::Value, transaction::DbTxMut};
-use reth_primitives_traits::NodePrimitives;
+use reth_db::transaction::DbTxMut;
 use reth_provider::{
-    errors::provider::ProviderResult, BlockReader, DBProvider, NodePrimitivesProvider,
-    PruneCheckpointWriter, TransactionsProvider,
+    errors::provider::ProviderResult, BlockReader, DBProvider, PruneCheckpointWriter,
+    TransactionsProvider,
 };
 use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, SegmentOutput};
 use tracing::instrument;
@@ -24,11 +23,7 @@ impl Receipts {
 
 impl<Provider> Segment<Provider> for Receipts
 where
-    Provider: DBProvider<Tx: DbTxMut>
-        + PruneCheckpointWriter
-        + TransactionsProvider
-        + BlockReader
-        + NodePrimitivesProvider<Primitives: NodePrimitives<Receipt: Value>>,
+    Provider: DBProvider<Tx: DbTxMut> + PruneCheckpointWriter + TransactionsProvider + BlockReader,
 {
     fn segment(&self) -> PruneSegment {
         PruneSegment::Receipts

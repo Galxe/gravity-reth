@@ -1,13 +1,12 @@
-use alloy_primitives::{Signature, B256};
+use alloy_primitives::B256;
 use reth_eth_wire::{GetPooledTransactions, PooledTransactions};
-use reth_ethereum_primitives::TransactionSigned;
 use reth_network::{
     test_utils::{NetworkEventStream, Testnet},
     NetworkEventListenerProvider, PeerRequest,
 };
 use reth_network_api::{NetworkInfo, Peers};
 use reth_network_p2p::sync::{NetworkSyncUpdater, SyncState};
-use reth_primitives_traits::SignedTransaction;
+use reth_primitives::{Signature, TransactionSigned};
 use reth_provider::test_utils::MockEthProvider;
 use reth_transaction_pool::{
     test_utils::{testing_pool, MockTransaction},
@@ -27,13 +26,16 @@ async fn test_large_tx_req() {
             // replace rng txhash with real txhash
             let mut tx = MockTransaction::eip1559();
 
-            let ts =
-                TransactionSigned::new_unhashed(tx.clone().into(), Signature::test_signature());
+            let ts = TransactionSigned {
+                hash: Default::default(),
+                signature: Signature::default(),
+                transaction: tx.clone().into(),
+            };
             tx.set_hash(ts.recalculate_hash());
             tx
         })
         .collect();
-    let txs_hashes: Vec<B256> = txs.iter().map(|tx| *tx.get_hash()).collect();
+    let txs_hashes: Vec<B256> = txs.iter().map(|tx| tx.get_hash()).collect();
 
     // setup testnet
     let mut net = Testnet::create_with(2, MockEthProvider::default()).await;
@@ -78,9 +80,7 @@ async fn test_large_tx_req() {
     // check all txs have been received
     match receive.await.unwrap() {
         Ok(PooledTransactions(txs)) => {
-            for tx in txs {
-                assert!(txs_hashes.contains(tx.hash()));
-            }
+            txs.into_iter().for_each(|tx| assert!(txs_hashes.contains(tx.hash())));
         }
         Err(e) => {
             panic!("error: {e:?}");

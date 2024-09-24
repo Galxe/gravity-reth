@@ -1,18 +1,12 @@
-//! Compact implementation for [`AlloyTxLegacy`]
-
 use crate::Compact;
 use alloy_consensus::TxLegacy as AlloyTxLegacy;
 use alloy_primitives::{Bytes, ChainId, TxKind, U256};
+use serde::{Deserialize, Serialize};
 
 /// Legacy transaction.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Compact)]
-#[reth_codecs(crate = "crate")]
-#[cfg_attr(
-    any(test, feature = "test-utils"),
-    derive(arbitrary::Arbitrary, serde::Serialize, serde::Deserialize),
-    crate::add_arbitrary_tests(crate, compact)
-)]
-#[cfg_attr(feature = "test-utils", allow(unreachable_pub), visibility::make(pub))]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Compact, Serialize, Deserialize)]
+#[cfg_attr(test, derive(arbitrary::Arbitrary))]
+#[cfg_attr(test, crate::add_arbitrary_tests(compact))]
 pub(crate) struct TxLegacy {
     /// Added as EIP-155: Simple replay attack protection
     chain_id: Option<ChainId>,
@@ -42,7 +36,7 @@ pub(crate) struct TxLegacy {
     value: U256,
     /// Input has two uses depending if transaction is Create or Call (if `to` field is None or
     /// Some). pub init: An unlimited size byte array specifying the
-    /// EVM-code for the account initialization procedure CREATE,
+    /// EVM-code for the account initialisation procedure CREATE,
     /// data: An unlimited size byte array specifying the
     /// input data of the message call, formally Td.
     input: Bytes,
@@ -57,7 +51,7 @@ impl Compact for AlloyTxLegacy {
             chain_id: self.chain_id,
             nonce: self.nonce,
             gas_price: self.gas_price,
-            gas_limit: self.gas_limit,
+            gas_limit: self.gas_limit as u64,
             to: self.to,
             value: self.value,
             input: self.input.clone(),
@@ -73,7 +67,7 @@ impl Compact for AlloyTxLegacy {
             chain_id: tx.chain_id,
             nonce: tx.nonce,
             gas_price: tx.gas_price,
-            gas_limit: tx.gas_limit,
+            gas_limit: tx.gas_limit.into(),
             to: tx.to,
             value: tx.value,
             input: tx.input,

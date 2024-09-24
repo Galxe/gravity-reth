@@ -1,8 +1,9 @@
 //! Transaction wrapper for libmdbx-sys.
 
-use super::{cursor::Cursor, utils::*};
+use super::cursor::Cursor;
 use crate::{
     metrics::{DatabaseEnvMetrics, Operation, TransactionMode, TransactionOutcome},
+    tables::utils::decode_one,
     DatabaseError,
 };
 use reth_db_api::{
@@ -14,7 +15,6 @@ use reth_storage_errors::db::{DatabaseWriteError, DatabaseWriteOperation};
 use reth_tracing::tracing::{debug, trace, warn};
 use std::{
     backtrace::Backtrace,
-    collections::HashMap,
     marker::PhantomData,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -32,9 +32,6 @@ pub struct Tx<K: TransactionKind> {
     /// Libmdbx-sys transaction.
     pub inner: Transaction<K>,
 
-    /// Cached MDBX DBIs for reuse.
-    dbis: Arc<HashMap<&'static str, MDBX_dbi>>,
-
     /// Handler for metrics with its own [Drop] implementation for cases when the transaction isn't
     /// closed by [`Tx::commit`] or [`Tx::abort`], but we still need to report it in the metrics.
     ///
@@ -43,12 +40,17 @@ pub struct Tx<K: TransactionKind> {
 }
 
 impl<K: TransactionKind> Tx<K> {
+    /// Creates new `Tx` object with a `RO` or `RW` transaction.
+    #[inline]
+    pub const fn new(inner: Transaction<K>) -> Self {
+        Self::new_inner(inner, None)
+    }
+
     /// Creates new `Tx` object with a `RO` or `RW` transaction and optionally enables metrics.
     #[inline]
     #[track_caller]
-    pub(crate) fn new(
+    pub(crate) fn new_with_metrics(
         inner: Transaction<K>,
-        dbis: Arc<HashMap<&'static str, MDBX_dbi>>,
         env_metrics: Option<Arc<DatabaseEnvMetrics>>,
     ) -> reth_libmdbx::Result<Self> {
         let metrics_handler = env_metrics
@@ -59,7 +61,12 @@ impl<K: TransactionKind> Tx<K> {
                 Ok(handler)
             })
             .transpose()?;
-        Ok(Self { inner, dbis, metrics_handler })
+        Ok(Self::new_inner(inner, metrics_handler))
+    }
+
+    #[inline]
+    const fn new_inner(inner: Transaction<K>, metrics_handler: Option<MetricsHandler<K>>) -> Self {
+        Self { inner, metrics_handler }
     }
 
     /// Gets this transaction ID.
@@ -69,14 +76,10 @@ impl<K: TransactionKind> Tx<K> {
 
     /// Gets a table database handle if it exists, otherwise creates it.
     pub fn get_dbi<T: Table>(&self) -> Result<MDBX_dbi, DatabaseError> {
-        if let Some(dbi) = self.dbis.get(T::NAME) {
-            Ok(*dbi)
-        } else {
-            self.inner
-                .open_db(Some(T::NAME))
-                .map(|db| db.dbi())
-                .map_err(|e| DatabaseError::Open(e.into()))
-        }
+        self.inner
+            .open_db(Some(T::NAME))
+            .map(|db| db.dbi())
+            .map_err(|e| DatabaseError::Open(e.into()))
     }
 
     /// Create db Cursor
@@ -177,12 +180,7 @@ struct MetricsHandler<K: TransactionKind> {
     /// If `true`, the backtrace of transaction has already been recorded and logged.
     /// See [`MetricsHandler::log_backtrace_on_long_read_transaction`].
     backtrace_recorded: AtomicBool,
-    /// Shared database environment metrics.
     env_metrics: Arc<DatabaseEnvMetrics>,
-    /// Backtrace of the location where the transaction has been opened. Reported only with debug
-    /// assertions, because capturing the backtrace on every transaction opening is expensive.
-    #[cfg(debug_assertions)]
-    open_backtrace: Backtrace,
     _marker: PhantomData<K>,
 }
 
@@ -195,8 +193,6 @@ impl<K: TransactionKind> MetricsHandler<K> {
             close_recorded: false,
             record_backtrace: true,
             backtrace_recorded: AtomicBool::new(false),
-            #[cfg(debug_assertions)]
-            open_backtrace: Backtrace::force_capture(),
             env_metrics,
             _marker: PhantomData,
         }
@@ -236,22 +232,11 @@ impl<K: TransactionKind> MetricsHandler<K> {
             let open_duration = self.start.elapsed();
             if open_duration >= self.long_transaction_duration {
                 self.backtrace_recorded.store(true, Ordering::Relaxed);
-                #[cfg(debug_assertions)]
-                let message = format!(
-                    "The database read transaction has been open for too long. Open backtrace:\n{}\n\nCurrent backtrace:\n{}",
-                    self.open_backtrace,
-                    Backtrace::force_capture()
-                );
-                #[cfg(not(debug_assertions))]
-                let message = format!(
-                    "The database read transaction has been open for too long. Backtrace:\n{}",
-                    Backtrace::force_capture()
-                );
                 warn!(
                     target: "storage::db::mdbx",
                     ?open_duration,
                     %self.txn_id,
-                    "{message}"
+                    "The database read transaction has been open for too long. Backtrace:\n{}", Backtrace::force_capture()
                 );
             }
         }
@@ -280,15 +265,8 @@ impl<K: TransactionKind> DbTx for Tx<K> {
     type DupCursor<T: DupSort> = Cursor<K, T>;
 
     fn get<T: Table>(&self, key: T::Key) -> Result<Option<<T as Table>::Value>, DatabaseError> {
-        self.get_by_encoded_key::<T>(&key.encode())
-    }
-
-    fn get_by_encoded_key<T: Table>(
-        &self,
-        key: &<T::Key as Encode>::Encoded,
-    ) -> Result<Option<T::Value>, DatabaseError> {
         self.execute_with_operation_metric::<T, _>(Operation::Get, None, |tx| {
-            tx.get(self.get_dbi::<T>()?, key.as_ref())
+            tx.get(self.get_dbi::<T>()?, key.encode().as_ref())
                 .map_err(|e| DatabaseError::Read(e.into()))?
                 .map(decode_one::<T>)
                 .transpose()

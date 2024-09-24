@@ -1,16 +1,14 @@
 use clap::Parser;
-use reth_db::{open_db_read_only, tables_to_generic, DatabaseEnv};
-use reth_db_api::{
-    cursor::DbCursorRO, database::Database, table::Table, transaction::DbTx, Tables,
-};
+use reth_db::{open_db_read_only, tables_to_generic, DatabaseEnv, Tables};
+use reth_db_api::{cursor::DbCursorRO, database::Database, table::Table, transaction::DbTx};
 use reth_db_common::DbTool;
-use reth_node_builder::{NodeTypes, NodeTypesWithDBAdapter};
+use reth_node_builder::{NodeTypesWithDBAdapter, NodeTypesWithEngine};
 use reth_node_core::{
     args::DatabaseArgs,
     dirs::{DataDirPath, PlatformPath},
 };
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     fmt::Debug,
     fs::{self, File},
     hash::Hash,
@@ -54,7 +52,7 @@ impl Command {
     ///
     /// The discrepancies and extra elements, along with a brief summary of the diff results are
     /// then written to a file in the output directory.
-    pub fn execute<T: NodeTypes>(
+    pub fn execute<T: NodeTypesWithEngine>(
         self,
         tool: &DbTool<NodeTypesWithDBAdapter<T, Arc<DatabaseEnv>>>,
     ) -> eyre::Result<()> {
@@ -109,19 +107,14 @@ where
     info!("");
     info!("Diff results for {table}:");
 
-    // analyze the result and print some stats
-    let discrepancies = result.discrepancies.len();
-    let extra_elements = result.extra_elements.len();
-
-    if discrepancies == 0 && extra_elements == 0 {
-        info!("No discrepancies or extra elements found in table {table}");
-        return Ok(());
-    }
-
     // create directory and open file
     fs::create_dir_all(output_dir.as_ref())?;
     let file_name = format!("{table}.txt");
     let mut file = File::create(output_dir.as_ref().join(file_name.clone()))?;
+
+    // analyze the result and print some stats
+    let discrepancies = result.discrepancies.len();
+    let extra_elements = result.extra_elements.len();
 
     // Make a pretty summary header for the table
     writeln!(file, "Diff results for {table}")?;
@@ -160,7 +153,7 @@ where
     }
 
     for discrepancy in result.discrepancies.values() {
-        writeln!(file, "{discrepancy:#?}")?;
+        writeln!(file, "{discrepancy:?}")?;
     }
 
     if extra_elements > 0 {
@@ -168,7 +161,7 @@ where
     }
 
     for extra_element in result.extra_elements.values() {
-        writeln!(file, "{extra_element:#?}")?;
+        writeln!(file, "{extra_element:?}")?;
     }
 
     let full_file_name = output_dir.as_ref().join(file_name);
@@ -247,11 +240,11 @@ struct TableDiffElement<T: Table> {
     key: T::Key,
 
     /// The element from the first table
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     first: T::Value,
 
     /// The element from the second table
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     second: T::Value,
 }
 
@@ -262,10 +255,10 @@ where
     T::Key: Hash,
 {
     /// All elements of the database that are different
-    discrepancies: BTreeMap<T::Key, TableDiffElement<T>>,
+    discrepancies: HashMap<T::Key, TableDiffElement<T>>,
 
     /// Any extra elements, and the table they are in
-    extra_elements: BTreeMap<T::Key, ExtraTableElement<T>>,
+    extra_elements: HashMap<T::Key, ExtraTableElement<T>>,
 }
 
 impl<T> Default for TableDiffResult<T>
@@ -274,7 +267,7 @@ where
     T::Key: Hash,
 {
     fn default() -> Self {
-        Self { discrepancies: BTreeMap::default(), extra_elements: BTreeMap::default() }
+        Self { discrepancies: HashMap::new(), extra_elements: HashMap::new() }
     }
 }
 
@@ -338,11 +331,11 @@ where
 #[derive(Debug)]
 enum ExtraTableElement<T: Table> {
     /// The extra element that is in the first table
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     First { key: T::Key, value: T::Value },
 
     /// The extra element that is in the second table
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     Second { key: T::Key, value: T::Value },
 }
 

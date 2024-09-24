@@ -1,24 +1,22 @@
 use crate::TrieMask;
-use alloc::vec::Vec;
-use alloy_trie::{hash_builder::HashBuilderValue, nodes::RlpNode, HashBuilder};
+use alloy_trie::{hash_builder::HashBuilderValue, HashBuilder};
+use bytes::Buf;
 use nybbles::Nibbles;
+use reth_codecs::{add_arbitrary_tests, Compact};
+use serde::{Deserialize, Serialize};
 
 /// The hash builder state for storing in the database.
 /// Check the `reth-trie` crate for more info on hash builder.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(
-    feature = "arbitrary",
-    derive(arbitrary::Arbitrary),
-    reth_codecs::add_arbitrary_tests(compact)
-)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+#[add_arbitrary_tests(compact)]
 pub struct HashBuilderState {
     /// The current key.
     pub key: Vec<u8>,
+    /// The builder stack.
+    pub stack: Vec<Vec<u8>>,
     /// The current node value.
     pub value: HashBuilderValue,
-    /// The builder stack.
-    pub stack: Vec<RlpNode>,
 
     /// Group masks.
     pub groups: Vec<TrieMask>,
@@ -37,7 +35,7 @@ impl From<HashBuilderState> for HashBuilder {
             key: Nibbles::from_nibbles_unchecked(state.key),
             stack: state.stack,
             value: state.value,
-            state_masks: state.groups,
+            groups: state.groups,
             tree_masks: state.tree_masks,
             hash_masks: state.hash_masks,
             stored_in_database: state.stored_in_database,
@@ -51,10 +49,10 @@ impl From<HashBuilderState> for HashBuilder {
 impl From<HashBuilder> for HashBuilderState {
     fn from(state: HashBuilder) -> Self {
         Self {
-            key: state.key.to_vec(),
+            key: state.key.into(),
             stack: state.stack,
             value: state.value,
-            groups: state.state_masks,
+            groups: state.groups,
             tree_masks: state.tree_masks,
             hash_masks: state.hash_masks,
             stored_in_database: state.stored_in_database,
@@ -62,8 +60,7 @@ impl From<HashBuilder> for HashBuilderState {
     }
 }
 
-#[cfg(any(test, feature = "reth-codec"))]
-impl reth_codecs::Compact for HashBuilderState {
+impl Compact for HashBuilderState {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -106,15 +103,13 @@ impl reth_codecs::Compact for HashBuilderState {
     }
 
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        use bytes::Buf;
-
         let (key, mut buf) = Vec::from_compact(buf, 0);
 
         let stack_len = buf.get_u16() as usize;
         let mut stack = Vec::with_capacity(stack_len);
         for _ in 0..stack_len {
             let item_len = buf.get_u16() as usize;
-            stack.push(RlpNode::from_raw(&buf[..item_len]).unwrap());
+            stack.push(Vec::from(&buf[..item_len]));
             buf.advance(item_len);
         }
 
@@ -152,22 +147,22 @@ impl reth_codecs::Compact for HashBuilderState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_codecs::Compact;
+    use proptest::prelude::*;
+    use proptest_arbitrary_interop::arb;
 
     #[test]
     fn hash_builder_state_regression() {
         let mut state = HashBuilderState::default();
-        state.stack.push(Default::default());
+        state.stack.push(vec![]);
         let mut buf = vec![];
         let len = state.clone().to_compact(&mut buf);
         let (decoded, _) = HashBuilderState::from_compact(&buf, len);
         assert_eq!(state, decoded);
     }
 
-    #[cfg(feature = "arbitrary")]
-    proptest::proptest! {
+    proptest! {
         #[test]
-        fn hash_builder_state_roundtrip(state in proptest_arbitrary_interop::arb::<HashBuilderState>()) {
+        fn hash_builder_state_roundtrip(state in arb::<HashBuilderState>()) {
             let mut buf = vec![];
             let len = state.to_compact(&mut buf);
             let (decoded, _) = HashBuilderState::from_compact(&buf, len);

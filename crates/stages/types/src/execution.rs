@@ -1,4 +1,4 @@
-use core::time::Duration;
+use std::time::Duration;
 
 /// The thresholds at which the execution stage writes state changes to the database.
 ///

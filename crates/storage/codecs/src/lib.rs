@@ -17,35 +17,16 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-extern crate alloc;
-
 pub use reth_codecs_derive::*;
-use serde as _;
 
 use alloy_primitives::{Address, Bloom, Bytes, FixedBytes, U256};
 use bytes::{Buf, BufMut};
 
-use alloc::{
-    borrow::{Cow, ToOwned},
-    vec::Vec,
-};
+extern crate alloc;
+use alloc::vec::Vec;
 
-#[cfg(feature = "test-utils")]
-pub mod alloy;
-
-#[cfg(not(feature = "test-utils"))]
 #[cfg(any(test, feature = "alloy"))]
-pub mod alloy;
-
-pub mod txtype;
-
-#[cfg(any(test, feature = "test-utils"))]
-pub mod test_utils;
-
-// Used by generated code and doc tests. Not public API.
-#[doc(hidden)]
-#[path = "private.rs"]
-pub mod __private;
+mod alloy;
 
 /// Trait that implements the `Compact` codec.
 ///
@@ -64,12 +45,6 @@ pub mod __private;
 /// Regarding the `specialized_to/from_compact` methods: Mainly used as a workaround for not being
 /// able to specialize an impl over certain types like `Vec<T>`/`Option<T>` where `T` is a fixed
 /// size array like `Vec<B256>`.
-///
-/// ## Caution
-///
-/// Due to the bitfields, every type change on the rust type (e.g. `U256` to `u64`) is a breaking
-/// change and will lead to a new, incompatible [`Compact`] implementation. Implementers must take
-/// special care when changing or rearranging fields.
 pub trait Compact: Sized {
     /// Takes a buffer which can be written to. *Ideally*, it returns the length written to.
     fn to_compact<B>(&self, buf: &mut B) -> usize
@@ -97,21 +72,6 @@ pub trait Compact: Sized {
     #[inline]
     fn specialized_from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
         Self::from_compact(buf, len)
-    }
-}
-
-impl Compact for alloc::string::String {
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        self.as_bytes().to_compact(buf)
-    }
-
-    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (vec, buf) = Vec::<u8>::from_compact(buf, len);
-        let string = Self::from_utf8(vec).unwrap(); // Safe conversion
-        (string, buf)
     }
 }
 
@@ -187,7 +147,21 @@ where
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
-        self.as_slice().to_compact(buf)
+        encode_varuint(self.len(), buf);
+
+        let mut tmp: Vec<u8> = Vec::with_capacity(64);
+
+        for element in self {
+            tmp.clear();
+
+            // We don't know the length until we compact it
+            let length = element.to_compact(&mut tmp);
+            encode_varuint(length, buf);
+
+            buf.put_slice(&tmp);
+        }
+
+        0
     }
 
     #[inline]
@@ -213,7 +187,11 @@ where
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
-        self.as_slice().specialized_to_compact(buf)
+        encode_varuint(self.len(), buf);
+        for element in self {
+            element.to_compact(buf);
+        }
+        0
     }
 
     /// To be used by fixed sized types like `Vec<B256>`.
@@ -343,32 +321,6 @@ where
 
         let (element, buf) = T::from_compact(buf, len);
         (Some(element), buf)
-    }
-}
-
-impl<T: Compact + ToOwned<Owned = T>> Compact for Cow<'_, T> {
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        self.as_ref().to_compact(buf)
-    }
-
-    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (element, buf) = T::from_compact(buf, len);
-        (Cow::Owned(element), buf)
-    }
-
-    fn specialized_to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        self.as_ref().specialized_to_compact(buf)
-    }
-
-    fn specialized_from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (element, buf) = T::specialized_from_compact(buf, len);
-        (Cow::Owned(element), buf)
     }
 }
 
@@ -547,7 +499,7 @@ mod tests {
 
     #[test]
     fn compact_address() {
-        let mut buf = Vec::with_capacity(21);
+        let mut buf = vec![];
         assert_eq!(Address::ZERO.to_compact(&mut buf), 20);
         assert_eq!(buf, vec![0; 20]);
 
@@ -699,8 +651,7 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Compact, arbitrary::Arbitrary)]
-    #[add_arbitrary_tests(crate, compact)]
-    #[reth_codecs(crate = "crate")]
+    #[add_arbitrary_tests(compact)]
     struct TestStruct {
         f_u64: u64,
         f_u256: U256,
@@ -752,8 +703,7 @@ mod tests {
     #[derive(
         Debug, PartialEq, Clone, Default, Serialize, Deserialize, Compact, arbitrary::Arbitrary,
     )]
-    #[add_arbitrary_tests(crate, compact)]
-    #[reth_codecs(crate = "crate")]
+    #[add_arbitrary_tests(compact)]
     enum TestEnum {
         #[default]
         Var0,
@@ -762,6 +712,7 @@ mod tests {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     #[test_fuzz::test_fuzz]
     fn compact_test_enum_all_variants(var0: TestEnum, var1: TestEnum, var2: TestEnum) {
         let mut buf = vec![];

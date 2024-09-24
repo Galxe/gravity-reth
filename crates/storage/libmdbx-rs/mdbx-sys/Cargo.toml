@@ -9,5 +9,5 @@ homepage.workspace = true
 repository.workspace = true
 
 [build-dependencies]
-cc.workspace = true
-bindgen = { workspace = true, features = ["runtime"] }
+cc = "1.0"
+bindgen = { version = "0.69", default-features = false, features = ["runtime"] }

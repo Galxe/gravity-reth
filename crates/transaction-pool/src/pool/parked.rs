@@ -16,6 +16,9 @@ use std::{
 /// basefee, ancestor transactions, balance) that eventually move the transaction into the pending
 /// pool.
 ///
+/// This pool is a bijection: at all times each set (`best`, `by_id`) contains the same
+/// transactions.
+///
 /// Note: This type is generic over [`ParkedPool`] which enforces that the underlying transaction
 /// type is [`ValidPoolTransaction`] wrapped in an [Arc].
 #[derive(Debug, Clone)]
@@ -26,17 +29,21 @@ pub struct ParkedPool<T: ParkedOrd> {
     submission_id: u64,
     /// _All_ Transactions that are currently inside the pool grouped by their identifier.
     by_id: BTreeMap<TransactionId, ParkedPoolTransaction<T>>,
+    /// All transactions sorted by their order function.
+    ///
+    /// The higher, the better.
+    best: BTreeSet<ParkedPoolTransaction<T>>,
     /// Keeps track of last submission id for each sender.
     ///
-    /// This are sorted in reverse order, so the last (highest) submission id is first, and the
-    /// lowest (oldest) is the last.
+    /// This are sorted in Reverse order, so the last (highest) submission id is first, and the
+    /// lowest(oldest) is the last.
     last_sender_submission: BTreeSet<SubmissionSenderId>,
     /// Keeps track of the number of transactions in the pool by the sender and the last submission
     /// id.
     sender_transaction_count: FxHashMap<SenderId, SenderTransactionCount>,
     /// Keeps track of the size of this pool.
     ///
-    /// See also [`reth_primitives_traits::InMemorySize::size`].
+    /// See also [`PoolTransaction::size`].
     size_of: SizeTracker,
 }
 
@@ -44,9 +51,13 @@ pub struct ParkedPool<T: ParkedOrd> {
 
 impl<T: ParkedOrd> ParkedPool<T> {
     /// Adds a new transactions to the pending queue.
+    ///
+    /// # Panics
+    ///
+    /// If the transaction is already included.
     pub fn add_transaction(&mut self, tx: Arc<ValidPoolTransaction<T::Transaction>>) {
         let id = *tx.id();
-        debug_assert!(
+        assert!(
             !self.contains(&id),
             "transaction already included {:?}",
             self.get(&id).unwrap().transaction.transaction
@@ -60,7 +71,8 @@ impl<T: ParkedOrd> ParkedPool<T> {
         self.add_sender_count(tx.sender_id(), submission_id);
         let transaction = ParkedPoolTransaction { submission_id, transaction: tx.into() };
 
-        self.by_id.insert(id, transaction);
+        self.by_id.insert(id, transaction.clone());
+        self.best.insert(transaction);
     }
 
     /// Increments the count of transactions for the given sender and updates the tracked submission
@@ -119,7 +131,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
     /// Returns an iterator over all transactions in the pool
     pub(crate) fn all(
         &self,
-    ) -> impl ExactSizeIterator<Item = Arc<ValidPoolTransaction<T::Transaction>>> + '_ {
+    ) -> impl Iterator<Item = Arc<ValidPoolTransaction<T::Transaction>>> + '_ {
         self.by_id.values().map(|tx| tx.transaction.clone().into())
     }
 
@@ -130,6 +142,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
     ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
         // remove from queues
         let tx = self.by_id.remove(id)?;
+        self.best.remove(&tx);
         self.remove_sender_count(tx.transaction.sender_id());
 
         // keep track of size
@@ -182,10 +195,10 @@ impl<T: ParkedOrd> ParkedPool<T> {
 
         let mut removed = Vec::new();
 
-        while !self.last_sender_submission.is_empty() && limit.is_exceeded(self.len(), self.size())
+        while limit.is_exceeded(self.len(), self.size()) && !self.last_sender_submission.is_empty()
         {
             // NOTE: This will not panic due to `!last_sender_transaction.is_empty()`
-            let sender_id = self.last_sender_submission.last().unwrap().sender_id;
+            let sender_id = self.last_sender_submission.last().expect("not empty").sender_id;
             let list = self.get_txs_by_sender(sender_id);
 
             // Drop transactions from this sender until the pool is under limits
@@ -203,7 +216,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
         removed
     }
 
-    const fn next_id(&mut self) -> u64 {
+    fn next_id(&mut self) -> u64 {
         let id = self.submission_id;
         self.submission_id = self.submission_id.wrapping_add(1);
         id
@@ -227,6 +240,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
 
     /// Returns whether the pool is empty
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }
@@ -241,9 +255,11 @@ impl<T: ParkedOrd> ParkedPool<T> {
         self.by_id.get(id)
     }
 
-    /// Asserts that all subpool invariants
+    /// Asserts that the bijection between `by_id` and `best` is valid.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn assert_invariants(&self) {
+        assert_eq!(self.by_id.len(), self.best.len(), "by_id.len() != best.len()");
+
         assert_eq!(
             self.last_sender_submission.len(),
             self.sender_transaction_count.len(),
@@ -256,11 +272,12 @@ impl<T: PoolTransaction> ParkedPool<BasefeeOrd<T>> {
     /// Returns all transactions that satisfy the given basefee.
     ///
     /// Note: this does _not_ remove the transactions
+    #[allow(dead_code)]
     pub(crate) fn satisfy_base_fee_transactions(
         &self,
         basefee: u64,
     ) -> Vec<Arc<ValidPoolTransaction<T>>> {
-        let ids = self.satisfy_base_fee_ids(basefee as u128);
+        let ids = self.satisfy_base_fee_ids(basefee);
         let mut txs = Vec::with_capacity(ids.len());
         for id in ids {
             txs.push(self.get(&id).expect("transaction exists").transaction.clone().into());
@@ -269,13 +286,13 @@ impl<T: PoolTransaction> ParkedPool<BasefeeOrd<T>> {
     }
 
     /// Returns all transactions that satisfy the given basefee.
-    fn satisfy_base_fee_ids(&self, basefee: u128) -> Vec<TransactionId> {
+    fn satisfy_base_fee_ids(&self, basefee: u64) -> Vec<TransactionId> {
         let mut transactions = Vec::new();
         {
             let mut iter = self.by_id.iter().peekable();
 
             while let Some((id, tx)) = iter.next() {
-                if tx.transaction.transaction.max_fee_per_gas() < basefee {
+                if tx.transaction.transaction.max_fee_per_gas() < basefee as u128 {
                     // still parked -> skip descendant transactions
                     'this: while let Some((peek, _)) = iter.peek() {
                         if peek.sender != id.sender {
@@ -291,43 +308,18 @@ impl<T: PoolTransaction> ParkedPool<BasefeeOrd<T>> {
         transactions
     }
 
-    /// Removes all transactions from this subpool that can afford the given basefee,
-    /// invoking the provided handler for each transaction as it is removed.
-    ///
-    /// This method enforces the basefee constraint by identifying transactions that now
-    /// satisfy the basefee requirement (typically after a basefee decrease) and processing
-    /// them via the provided transaction handler closure.
-    ///
-    /// Respects per-sender nonce ordering: if the lowest-nonce transaction for a sender
-    /// still cannot afford the basefee, higher-nonce transactions from that sender are skipped.
-    ///
-    /// Note: the transactions are not returned in a particular order.
-    pub(crate) fn enforce_basefee_with<F>(&mut self, basefee: u64, mut tx_handler: F)
-    where
-        F: FnMut(Arc<ValidPoolTransaction<T>>),
-    {
-        let to_remove = self.satisfy_base_fee_ids(basefee as u128);
-
-        for id in to_remove {
-            if let Some(tx) = self.remove_transaction(&id) {
-                tx_handler(tx);
-            }
-        }
-    }
-
     /// Removes all transactions and their dependent transaction from the subpool that no longer
     /// satisfy the given basefee.
     ///
-    /// Legacy method maintained for compatibility with read-only queries.
-    /// For basefee enforcement, prefer `enforce_basefee_with` for better performance.
-    ///
     /// Note: the transactions are not returned in a particular order.
-    #[cfg(test)]
     pub(crate) fn enforce_basefee(&mut self, basefee: u64) -> Vec<Arc<ValidPoolTransaction<T>>> {
-        let mut removed = Vec::new();
-        self.enforce_basefee_with(basefee, |tx| {
-            removed.push(tx);
-        });
+        let to_remove = self.satisfy_base_fee_ids(basefee);
+
+        let mut removed = Vec::with_capacity(to_remove.len());
+        for id in to_remove {
+            removed.push(self.remove_transaction(&id).expect("transaction exists"));
+        }
+
         removed
     }
 }
@@ -337,6 +329,7 @@ impl<T: ParkedOrd> Default for ParkedPool<T> {
         Self {
             submission_id: 0,
             by_id: Default::default(),
+            best: Default::default(),
             last_sender_submission: Default::default(),
             sender_transaction_count: Default::default(),
             size_of: Default::default(),
@@ -513,10 +506,11 @@ pub struct QueuedOrd<T: PoolTransaction>(Arc<ValidPoolTransaction<T>>);
 
 impl_ord_wrapper!(QueuedOrd);
 
+// TODO: temporary solution for ordering the queued pool.
 impl<T: PoolTransaction> Ord for QueuedOrd<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Higher fee is better
-        self.max_fee_per_gas().cmp(&other.max_fee_per_gas()).then_with(||
+        // Higher price is better
+        self.max_fee_per_gas().cmp(&self.max_fee_per_gas()).then_with(||
             // Lower timestamp is better
             other.timestamp.cmp(&self.timestamp))
     }
@@ -526,8 +520,8 @@ impl<T: PoolTransaction> Ord for QueuedOrd<T> {
 mod tests {
     use super::*;
     use crate::test_utils::{MockTransaction, MockTransactionFactory, MockTransactionSet};
-    use alloy_consensus::{Transaction, TxType};
     use alloy_primitives::address;
+    use reth_primitives::TxType;
     use std::collections::HashSet;
 
     #[test]
@@ -591,10 +585,10 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
 
-        let a_sender = address!("0x000000000000000000000000000000000000000a");
-        let b_sender = address!("0x000000000000000000000000000000000000000b");
-        let c_sender = address!("0x000000000000000000000000000000000000000c");
-        let d_sender = address!("0x000000000000000000000000000000000000000d");
+        let a_sender = address!("000000000000000000000000000000000000000a");
+        let b_sender = address!("000000000000000000000000000000000000000b");
+        let c_sender = address!("000000000000000000000000000000000000000c");
+        let d_sender = address!("000000000000000000000000000000000000000d");
 
         // create a chain of transactions by sender A, B, C
         let mut tx_set = MockTransactionSet::dependent(a_sender, 0, 4, TxType::Eip1559);
@@ -668,7 +662,7 @@ mod tests {
 
         // create a chain of transactions by sender A
         // make sure they are all one over half the limit
-        let a_sender = address!("0x000000000000000000000000000000000000000a");
+        let a_sender = address!("000000000000000000000000000000000000000a");
 
         // 2 txs, that should put the pool over the size limit but not max txs
         let a_txs = MockTransactionSet::dependent(a_sender, 0, 2, TxType::Eip1559)
@@ -695,23 +689,27 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
 
-        let a_sender = address!("0x000000000000000000000000000000000000000a");
-        let b_sender = address!("0x000000000000000000000000000000000000000b");
-        let c_sender = address!("0x000000000000000000000000000000000000000c");
-        let d_sender = address!("0x000000000000000000000000000000000000000d");
+        let a_sender = address!("000000000000000000000000000000000000000a");
+        let b_sender = address!("000000000000000000000000000000000000000b");
+        let c_sender = address!("000000000000000000000000000000000000000c");
+        let d_sender = address!("000000000000000000000000000000000000000d");
 
         // create a chain of transactions by sender A, B, C
-        let mut tx_set = MockTransactionSet::dependent(a_sender, 0, 4, TxType::Eip1559);
+        let mut tx_set =
+            MockTransactionSet::dependent(a_sender, 0, 4, reth_primitives::TxType::Eip1559);
         let a = tx_set.clone().into_vec();
 
-        let b = MockTransactionSet::dependent(b_sender, 0, 3, TxType::Eip1559).into_vec();
+        let b = MockTransactionSet::dependent(b_sender, 0, 3, reth_primitives::TxType::Eip1559)
+            .into_vec();
         tx_set.extend(b.clone());
 
         // C has the same number of txs as B
-        let c = MockTransactionSet::dependent(c_sender, 0, 3, TxType::Eip1559).into_vec();
+        let c = MockTransactionSet::dependent(c_sender, 0, 3, reth_primitives::TxType::Eip1559)
+            .into_vec();
         tx_set.extend(c.clone());
 
-        let d = MockTransactionSet::dependent(d_sender, 0, 1, TxType::Eip1559).into_vec();
+        let d = MockTransactionSet::dependent(d_sender, 0, 1, reth_primitives::TxType::Eip1559)
+            .into_vec();
         tx_set.extend(d.clone());
 
         let all_txs = tx_set.into_vec();
@@ -857,271 +855,5 @@ mod tests {
             pool.last_sender_submission.iter().find(|info| info.sender_id == sender2).unwrap();
         assert_eq!(submission_info2.sender_id, sender2);
         assert_eq!(submission_info2.submission_id, 2);
-    }
-
-    #[test]
-    fn test_remove_sender_count() {
-        // Initialize a mock transaction factory
-        let mut f = MockTransactionFactory::default();
-        // Create an empty transaction pool
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-        // Generate two validated transactions and add them to the pool
-        let tx1 = f.validated_arc(MockTransaction::eip1559().inc_price());
-        let tx2 = f.validated_arc(MockTransaction::eip1559().inc_price());
-        pool.add_transaction(tx1);
-        pool.add_transaction(tx2);
-
-        // Define two different sender IDs and their corresponding submission IDs
-        let sender1: SenderId = 11.into();
-        let sender2: SenderId = 22.into();
-
-        // Add the sender counts to the pool
-        pool.add_sender_count(sender1, 1);
-
-        // We add sender 2 multiple times to test the removal of sender counts
-        pool.add_sender_count(sender2, 2);
-        pool.add_sender_count(sender2, 3);
-
-        // Before removing the sender count we should have 4 sender transaction counts
-        assert_eq!(pool.sender_transaction_count.len(), 4);
-        assert!(pool.sender_transaction_count.contains_key(&sender1));
-
-        // We should have 1 sender transaction count for sender 1 before removing the sender count
-        assert_eq!(pool.sender_transaction_count.get(&sender1).unwrap().count, 1);
-
-        // Remove the sender count for sender 1
-        pool.remove_sender_count(sender1);
-
-        // After removing the sender count we should have 3 sender transaction counts remaining
-        assert_eq!(pool.sender_transaction_count.len(), 3);
-        assert!(!pool.sender_transaction_count.contains_key(&sender1));
-
-        // Check the sender transaction count for sender 2 before removing the sender count
-        assert_eq!(
-            *pool.sender_transaction_count.get(&sender2).unwrap(),
-            SenderTransactionCount { count: 2, last_submission_id: 3 }
-        );
-
-        // Remove the sender count for sender 2
-        pool.remove_sender_count(sender2);
-
-        // After removing the sender count for sender 2, we still have 3 sender transaction counts
-        // remaining.
-        //
-        // This is because we added sender 2 multiple times and we only removed the last submission.
-        assert_eq!(pool.sender_transaction_count.len(), 3);
-        assert!(pool.sender_transaction_count.contains_key(&sender2));
-
-        // Sender transaction count for sender 2 should be updated correctly
-        assert_eq!(
-            *pool.sender_transaction_count.get(&sender2).unwrap(),
-            SenderTransactionCount { count: 1, last_submission_id: 3 }
-        );
-    }
-
-    #[test]
-    fn test_pool_size() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Create a transaction with a specific size and add it to the pool
-        let tx = f.validated_arc(MockTransaction::eip1559().set_size(1024).clone());
-        pool.add_transaction(tx);
-
-        // Assert that the reported size of the pool is correct
-        assert_eq!(pool.size(), 1024);
-    }
-
-    #[test]
-    fn test_pool_len() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Initially, the pool should have zero transactions
-        assert_eq!(pool.len(), 0);
-
-        // Add a transaction to the pool and check the length
-        let tx = f.validated_arc(MockTransaction::eip1559());
-        pool.add_transaction(tx);
-        assert_eq!(pool.len(), 1);
-    }
-
-    #[test]
-    fn test_pool_contains() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Create a transaction and get its ID
-        let tx = f.validated_arc(MockTransaction::eip1559());
-        let tx_id = *tx.id();
-
-        // Before adding, the transaction should not be in the pool
-        assert!(!pool.contains(&tx_id));
-
-        // After adding, the transaction should be present in the pool
-        pool.add_transaction(tx);
-        assert!(pool.contains(&tx_id));
-    }
-
-    #[test]
-    fn test_get_transaction() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Add a transaction to the pool and get its ID
-        let tx = f.validated_arc(MockTransaction::eip1559());
-        let tx_id = *tx.id();
-        pool.add_transaction(tx.clone());
-
-        // Retrieve the transaction using `get()` and assert it matches the added transaction
-        let retrieved = pool.get(&tx_id).expect("Transaction should exist in the pool");
-        assert_eq!(retrieved.transaction.id(), tx.id());
-    }
-
-    #[test]
-    fn test_all_transactions() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Add two transactions to the pool
-        let tx1 = f.validated_arc(MockTransaction::eip1559());
-        let tx2 = f.validated_arc(MockTransaction::eip1559());
-        pool.add_transaction(tx1.clone());
-        pool.add_transaction(tx2.clone());
-
-        // Collect all transaction IDs from the pool
-        let all_txs: Vec<_> = pool.all().map(|tx| *tx.id()).collect();
-        assert_eq!(all_txs.len(), 2);
-
-        // Check that the IDs of both transactions are present
-        assert!(all_txs.contains(tx1.id()));
-        assert!(all_txs.contains(tx2.id()));
-    }
-
-    #[test]
-    fn test_truncate_pool_edge_case() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Add two transactions to the pool
-        let tx1 = f.validated_arc(MockTransaction::eip1559());
-        let tx2 = f.validated_arc(MockTransaction::eip1559());
-        pool.add_transaction(tx1);
-        pool.add_transaction(tx2);
-
-        // Set a limit that matches the current number of transactions
-        let limit = SubPoolLimit { max_txs: 2, max_size: usize::MAX };
-        let removed = pool.truncate_pool(limit);
-
-        // No transactions should be removed
-        assert!(removed.is_empty());
-
-        // Set a stricter limit that requires truncating one transaction
-        let limit = SubPoolLimit { max_txs: 1, max_size: usize::MAX };
-        let removed = pool.truncate_pool(limit);
-
-        // One transaction should be removed, and the pool should have one left
-        assert_eq!(removed.len(), 1);
-        assert_eq!(pool.len(), 1);
-    }
-
-    #[test]
-    fn test_satisfy_base_fee_transactions() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Add two transactions with different max fees
-        let tx1 = f.validated_arc(MockTransaction::eip1559().set_max_fee(100).clone());
-        let tx2 = f.validated_arc(MockTransaction::eip1559().set_max_fee(200).clone());
-        pool.add_transaction(tx1);
-        pool.add_transaction(tx2.clone());
-
-        // Check that only the second transaction satisfies the base fee requirement
-        let satisfied = pool.satisfy_base_fee_transactions(150);
-        assert_eq!(satisfied.len(), 1);
-        assert_eq!(satisfied[0].id(), tx2.id())
-    }
-
-    #[test]
-    fn test_remove_transaction() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Add a transaction to the pool and get its ID
-        let tx = f.validated_arc(MockTransaction::eip1559());
-        let tx_id = *tx.id();
-        pool.add_transaction(tx);
-
-        // Ensure the transaction is in the pool before removal
-        assert!(pool.contains(&tx_id));
-
-        // Remove the transaction and check that it is no longer in the pool
-        let removed = pool.remove_transaction(&tx_id);
-        assert!(removed.is_some());
-        assert!(!pool.contains(&tx_id));
-    }
-
-    #[test]
-    fn test_enforce_basefee_with_handler_zero_allocation() {
-        let mut f = MockTransactionFactory::default();
-        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
-
-        // Add multiple transactions across different fee ranges
-        let sender_a = address!("0x000000000000000000000000000000000000000a");
-        let sender_b = address!("0x000000000000000000000000000000000000000b");
-
-        // Add transactions where nonce ordering allows proper processing:
-        // Sender A: both transactions can afford basefee (500 >= 400, 600 >= 400)
-        // Sender B: transaction cannot afford basefee (300 < 400)
-        let txs = vec![
-            f.validated_arc(
-                MockTransaction::eip1559()
-                    .set_sender(sender_a)
-                    .set_nonce(0)
-                    .set_max_fee(500)
-                    .clone(),
-            ),
-            f.validated_arc(
-                MockTransaction::eip1559()
-                    .set_sender(sender_a)
-                    .set_nonce(1)
-                    .set_max_fee(600)
-                    .clone(),
-            ),
-            f.validated_arc(
-                MockTransaction::eip1559()
-                    .set_sender(sender_b)
-                    .set_nonce(0)
-                    .set_max_fee(300)
-                    .clone(),
-            ),
-        ];
-
-        let expected_affordable = vec![txs[0].clone(), txs[1].clone()]; // Both sender A txs
-        for tx in txs {
-            pool.add_transaction(tx);
-        }
-
-        // Test the handler approach with zero allocations
-        let mut processed_txs = Vec::new();
-        let mut handler_call_count = 0;
-
-        pool.enforce_basefee_with(400, |tx| {
-            processed_txs.push(tx);
-            handler_call_count += 1;
-        });
-
-        // Verify correct number of transactions processed
-        assert_eq!(handler_call_count, 2);
-        assert_eq!(processed_txs.len(), 2);
-
-        // Verify the correct transactions were processed (those with fee >= 400)
-        let processed_ids: Vec<_> = processed_txs.iter().map(|tx| *tx.id()).collect();
-        for expected_tx in expected_affordable {
-            assert!(processed_ids.contains(expected_tx.id()));
-        }
-
-        // Verify transactions were removed from pool
-        assert_eq!(pool.len(), 1); // Only the 300 fee tx should remain
     }
 }

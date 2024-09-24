@@ -1,26 +1,36 @@
 use alloy_primitives::U256;
-use reth_rpc_convert::RpcConvert;
-use reth_rpc_eth_api::{
-    helpers::{spec::SignersForApi, EthApiSpec},
-    RpcNodeCore,
-};
-use reth_storage_api::ProviderTx;
+use reth_chainspec::ChainSpec;
+use reth_network_api::NetworkInfo;
+use reth_provider::{BlockNumReader, ChainSpecProvider, StageCheckpointReader};
+use reth_rpc_eth_api::helpers::EthApiSpec;
+use reth_transaction_pool::TransactionPool;
 
 use crate::EthApi;
 
-impl<N, Rpc> EthApiSpec for EthApi<N, Rpc>
+impl<Provider, Pool, Network, EvmConfig> EthApiSpec for EthApi<Provider, Pool, Network, EvmConfig>
 where
-    N: RpcNodeCore,
-    Rpc: RpcConvert<Primitives = N::Primitives>,
+    Pool: TransactionPool + 'static,
+    Provider:
+        ChainSpecProvider<ChainSpec = ChainSpec> + BlockNumReader + StageCheckpointReader + 'static,
+    Network: NetworkInfo + 'static,
+    EvmConfig: Send + Sync,
 {
-    type Transaction = ProviderTx<N::Provider>;
-    type Rpc = Rpc::Network;
+    fn provider(
+        &self,
+    ) -> impl ChainSpecProvider<ChainSpec = ChainSpec> + BlockNumReader + StageCheckpointReader
+    {
+        self.inner.provider()
+    }
+
+    fn network(&self) -> impl NetworkInfo {
+        self.inner.network()
+    }
 
     fn starting_block(&self) -> U256 {
         self.inner.starting_block()
     }
 
-    fn signers(&self) -> &SignersForApi<Self> {
+    fn signers(&self) -> &parking_lot::RwLock<Vec<Box<dyn reth_rpc_eth_api::helpers::EthSigner>>> {
         self.inner.signers()
     }
 }

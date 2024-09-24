@@ -1,12 +1,10 @@
 #![allow(missing_docs, unreachable_pub)]
-use alloy_consensus::ReceiptWithBloom;
 use alloy_primitives::B256;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use proptest::{prelude::*, strategy::ValueTree, test_runner::TestRunner};
 use proptest_arbitrary_interop::arb;
-use reth_ethereum_primitives::Receipt;
+use reth_primitives::ReceiptWithBloom;
 use reth_trie::triehash::KeccakHasher;
-use std::hint::black_box;
 
 /// Benchmarks different implementations of the root calculation.
 pub fn trie_root_benchmark(c: &mut Criterion) {
@@ -29,9 +27,9 @@ pub fn trie_root_benchmark(c: &mut Criterion) {
     }
 }
 
-fn generate_test_data(size: usize) -> Vec<ReceiptWithBloom<Receipt>> {
-    prop::collection::vec(arb::<ReceiptWithBloom<Receipt>>(), size)
-        .new_tree(&mut TestRunner::deterministic())
+fn generate_test_data(size: usize) -> Vec<ReceiptWithBloom> {
+    prop::collection::vec(arb::<ReceiptWithBloom>(), size)
+        .new_tree(&mut TestRunner::new(ProptestConfig::default()))
         .unwrap()
         .current()
 }
@@ -45,18 +43,18 @@ criterion_main!(benches);
 
 mod implementations {
     use super::*;
-    use alloy_eips::eip2718::Encodable2718;
     use alloy_rlp::Encodable;
-    use alloy_trie::root::adjust_index_for_rlp;
-    use reth_trie_common::{HashBuilder, Nibbles};
+    use reth_trie_common::{root::adjust_index_for_rlp, HashBuilder, Nibbles};
 
-    pub fn trie_hash_ordered_trie_root(receipts: &[ReceiptWithBloom<Receipt>]) -> B256 {
-        triehash::ordered_trie_root::<KeccakHasher, _>(
-            receipts.iter().map(|receipt_with_bloom| receipt_with_bloom.encoded_2718()),
-        )
+    pub fn trie_hash_ordered_trie_root(receipts: &[ReceiptWithBloom]) -> B256 {
+        triehash::ordered_trie_root::<KeccakHasher, _>(receipts.iter().map(|receipt| {
+            let mut receipt_rlp = Vec::new();
+            receipt.encode_inner(&mut receipt_rlp, false);
+            receipt_rlp
+        }))
     }
 
-    pub fn hash_builder_root(receipts: &[ReceiptWithBloom<Receipt>]) -> B256 {
+    pub fn hash_builder_root(receipts: &[ReceiptWithBloom]) -> B256 {
         let mut index_buffer = Vec::new();
         let mut value_buffer = Vec::new();
 
@@ -69,7 +67,7 @@ mod implementations {
             index.encode(&mut index_buffer);
 
             value_buffer.clear();
-            receipts[index].encode_2718(&mut value_buffer);
+            receipts[index].encode_inner(&mut value_buffer, false);
 
             hb.add_leaf(Nibbles::unpack(&index_buffer), &value_buffer);
         }

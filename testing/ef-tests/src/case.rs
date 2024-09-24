@@ -1,7 +1,6 @@
 //! Test case definitions
 
 use crate::result::{CaseResult, Error};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
     fmt::Debug,
     path::{Path, PathBuf},
@@ -35,9 +34,6 @@ pub struct Cases<T> {
 impl<T: Case> Cases<T> {
     /// Run the contained test cases.
     pub fn run(&self) -> Vec<CaseResult> {
-        self.test_cases
-            .par_iter()
-            .map(|(path, case)| CaseResult::new(path, case, case.run()))
-            .collect()
+        self.test_cases.iter().map(|(path, case)| CaseResult::new(path, case, case.run())).collect()
     }
 }

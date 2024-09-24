@@ -7,7 +7,7 @@ use std::{
     fmt, mem, ptr,
 };
 
-unsafe extern "C" {
+extern "C" {
     fn backtrace_symbols_fd(buffer: *const *mut libc::c_void, size: libc::c_int, fd: libc::c_int);
 }
 
@@ -44,14 +44,16 @@ macro_rules! raw_errln {
 /// Signal handler installed for SIGSEGV
 extern "C" fn print_stack_trace(_: libc::c_int) {
     const MAX_FRAMES: usize = 256;
-    let mut stack_trace: [*mut libc::c_void; MAX_FRAMES] = [ptr::null_mut(); MAX_FRAMES];
+    // Reserve data segment so we don't have to malloc in a signal handler, which might fail
+    // in incredibly undesirable and unexpected ways due to e.g. the allocator deadlocking
+    static mut STACK_TRACE: [*mut libc::c_void; MAX_FRAMES] = [ptr::null_mut(); MAX_FRAMES];
     let stack = unsafe {
         // Collect return addresses
-        let depth = libc::backtrace(stack_trace.as_mut_ptr(), MAX_FRAMES as i32);
+        let depth = libc::backtrace(STACK_TRACE.as_mut_ptr(), MAX_FRAMES as i32);
         if depth == 0 {
             return
         }
-        &stack_trace[0..depth as usize]
+        &STACK_TRACE.as_slice()[0..(depth as _)]
     };
 
     // Just a stack trace is cryptic. Explain what we're doing.
@@ -123,13 +125,13 @@ pub fn install() {
         let mut alt_stack: libc::stack_t = mem::zeroed();
         alt_stack.ss_sp = alloc(Layout::from_size_align(alt_stack_size, 1).unwrap()).cast();
         alt_stack.ss_size = alt_stack_size;
-        libc::sigaltstack(&raw const alt_stack, ptr::null_mut());
+        libc::sigaltstack(&alt_stack, ptr::null_mut());
 
         let mut sa: libc::sigaction = mem::zeroed();
         sa.sa_sigaction = print_stack_trace as libc::sighandler_t;
         sa.sa_flags = libc::SA_NODEFER | libc::SA_RESETHAND | libc::SA_ONSTACK;
-        libc::sigemptyset(&raw mut sa.sa_mask);
-        libc::sigaction(libc::SIGSEGV, &raw const sa, ptr::null_mut());
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGSEGV, &sa, ptr::null_mut());
     }
 }
 

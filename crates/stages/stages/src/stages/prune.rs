@@ -1,5 +1,4 @@
-use reth_db_api::{table::Value, transaction::DbTxMut};
-use reth_primitives_traits::NodePrimitives;
+use reth_db::transaction::DbTxMut;
 use reth_provider::{
     BlockReader, DBProvider, PruneCheckpointReader, PruneCheckpointWriter,
     StaticFileProviderFactory,
@@ -42,9 +41,7 @@ where
         + PruneCheckpointReader
         + PruneCheckpointWriter
         + BlockReader
-        + StaticFileProviderFactory<
-            Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-        >,
+        + StaticFileProviderFactory,
 {
     fn id(&self) -> StageId {
         StageId::Prune
@@ -133,9 +130,7 @@ where
         + PruneCheckpointReader
         + PruneCheckpointWriter
         + BlockReader
-        + StaticFileProviderFactory<
-            Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-        >,
+        + StaticFileProviderFactory,
 {
     fn id(&self) -> StageId {
         StageId::PruneSenderRecovery
@@ -174,9 +169,7 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, StorageKind,
         TestRunnerError, TestStageDB, UnwindStageTestRunner,
     };
-    use alloy_primitives::B256;
-    use reth_ethereum_primitives::Block;
-    use reth_primitives_traits::{SealedBlock, SignerRecoverable};
+    use reth_primitives::{SealedBlock, B256};
     use reth_provider::{
         providers::StaticFileWriter, TransactionsProvider, TransactionsProviderExt,
     };
@@ -209,7 +202,7 @@ mod tests {
     }
 
     impl ExecuteStageTestRunner for PruneTestRunner {
-        type Seed = Vec<SealedBlock<Block>>;
+        type Seed = Vec<SealedBlock>;
 
         fn seed_execution(&mut self, input: ExecInput) -> Result<Self::Seed, TestRunnerError> {
             let mut rng = generators::rng();
@@ -220,9 +213,9 @@ mod tests {
             );
             self.db.insert_blocks(blocks.iter(), StorageKind::Static)?;
             self.db.insert_transaction_senders(
-                blocks.iter().flat_map(|block| block.body().transactions.iter()).enumerate().map(
-                    |(i, tx)| (i as u64, tx.recover_signer().expect("failed to recover signer")),
-                ),
+                blocks.iter().flat_map(|block| block.body.iter()).enumerate().map(|(i, tx)| {
+                    (i as u64, tx.recover_signer().expect("failed to recover signer"))
+                }),
             )?;
             Ok(blocks)
         }

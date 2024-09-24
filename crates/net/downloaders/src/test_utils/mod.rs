@@ -5,7 +5,7 @@
 use crate::{bodies::test_utils::create_raw_bodies, file_codec::BlockFileCodec};
 use alloy_primitives::B256;
 use futures::SinkExt;
-use reth_ethereum_primitives::BlockBody;
+use reth_primitives::{BlockBody, SealedHeader};
 use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
 use std::{collections::HashMap, io::SeekFrom, ops::RangeInclusive};
 use tokio::{fs::File, io::AsyncSeekExt};
@@ -13,7 +13,6 @@ use tokio_util::codec::FramedWrite;
 
 mod bodies_client;
 pub use bodies_client::TestBodiesClient;
-use reth_primitives_traits::SealedHeader;
 
 /// Metrics scope used for testing.
 pub(crate) const TEST_SCOPE: &str = "downloaders.test";
@@ -29,8 +28,21 @@ pub(crate) fn generate_bodies(
         BlockRangeParams { parent: Some(B256::ZERO), tx_count: 0..2, ..Default::default() },
     );
 
-    let headers = blocks.iter().map(|block| block.clone_sealed_header()).collect();
-    let bodies = blocks.into_iter().map(|block| (block.hash(), block.into_body())).collect();
+    let headers = blocks.iter().map(|block| block.header.clone()).collect();
+    let bodies = blocks
+        .into_iter()
+        .map(|block| {
+            (
+                block.hash(),
+                BlockBody {
+                    transactions: block.body,
+                    ommers: block.ommers,
+                    withdrawals: block.withdrawals,
+                    requests: block.requests,
+                },
+            )
+        })
+        .collect();
 
     (headers, bodies)
 }
@@ -44,7 +56,7 @@ pub(crate) async fn generate_bodies_file(
     let raw_block_bodies = create_raw_bodies(headers.iter().cloned(), &mut bodies.clone());
 
     let file: File = tempfile::tempfile().unwrap().into();
-    let mut writer = FramedWrite::new(file, BlockFileCodec::default());
+    let mut writer = FramedWrite::new(file, BlockFileCodec);
 
     // rlp encode one after the other
     for block in raw_block_bodies {

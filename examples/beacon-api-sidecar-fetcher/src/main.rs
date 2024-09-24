@@ -1,7 +1,7 @@
 //! Run with
 //!
-//! ```sh
-//! cargo run -p example-beacon-api-sidecar-fetcher -- node --full
+//! ```not_rust
+//! cargo run -p beacon-api-beacon-sidecar-fetcher --node -- full
 //! ```
 //!
 //! This launches a regular reth instance and subscribes to payload attributes event stream.
@@ -11,33 +11,32 @@
 //!
 //! See beacon Node API: <https://ethereum.github.io/beacon-APIs/>
 
-#![warn(unused_crate_dependencies)]
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 use std::{
     collections::VecDeque,
     net::{IpAddr, Ipv4Addr},
 };
 
-use alloy_primitives::B256;
 use clap::Parser;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use mined_sidecar::MinedSidecarStream;
-use reth_ethereum::{
-    cli::{chainspec::EthereumChainSpecParser, interface::Cli},
-    node::{builder::NodeHandle, EthereumNode},
-    provider::CanonStateSubscriptions,
+use reth::{
+    args::utils::DefaultChainSpecParser, builder::NodeHandle, cli::Cli, primitives::B256,
+    providers::CanonStateSubscriptions,
 };
+use reth_node_ethereum::EthereumNode;
 
 pub mod mined_sidecar;
 
 fn main() {
-    Cli::<EthereumChainSpecParser, BeaconSidecarConfig>::parse()
+    Cli::<DefaultChainSpecParser, BeaconSidecarConfig>::parse()
         .run(|builder, beacon_config| async move {
             // launch the node
             let NodeHandle { node, node_exit_future } =
                 builder.node(EthereumNode::default()).launch().await?;
 
-            let notifications: reth_ethereum::provider::CanonStateNotificationStream =
+            let notifications: reth::providers::CanonStateNotificationStream =
                 node.provider.canonical_state_stream();
 
             let pool = node.pool.clone();
@@ -56,11 +55,11 @@ fn main() {
                     match result {
                         Ok(blob_transaction) => {
                             // Handle successful transaction
-                            println!("Processed BlobTransaction: {blob_transaction:?}");
+                            println!("Processed BlobTransaction: {:?}", blob_transaction);
                         }
                         Err(e) => {
                             // Handle errors specifically
-                            eprintln!("Failed to process transaction: {e:?}");
+                            eprintln!("Failed to process transaction: {:?}", e);
                         }
                     }
                 }

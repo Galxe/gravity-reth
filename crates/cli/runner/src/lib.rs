@@ -11,40 +11,15 @@
 //! Entrypoint for running commands.
 
 use reth_tasks::{TaskExecutor, TaskManager};
-use std::{
-    future::Future,
-    pin::pin,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    },
-    time::Duration,
-};
+use std::{future::Future, pin::pin, sync::mpsc, time::Duration};
 use tracing::{debug, error, trace};
 
 /// Executes CLI commands.
 ///
 /// Provides utilities for running a cli command to completion.
-#[derive(Debug)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct CliRunner {
-    tokio_runtime: tokio::runtime::Runtime,
-}
-
-impl CliRunner {
-    /// Attempts to create a new [`CliRunner`] using the default tokio
-    /// [`Runtime`](tokio::runtime::Runtime).
-    ///
-    /// The default tokio runtime is multi-threaded, with both I/O and time drivers enabled.
-    pub fn try_default_runtime() -> Result<Self, std::io::Error> {
-        Ok(Self { tokio_runtime: tokio_runtime()? })
-    }
-
-    /// Create a new [`CliRunner`] from a provided tokio [`Runtime`](tokio::runtime::Runtime).
-    pub const fn from_runtime(tokio_runtime: tokio::runtime::Runtime) -> Self {
-        Self { tokio_runtime }
-    }
-}
+pub struct CliRunner;
 
 // === impl CliRunner ===
 
@@ -62,8 +37,7 @@ impl CliRunner {
         F: Future<Output = Result<(), E>>,
         E: Send + Sync + From<std::io::Error> + From<reth_tasks::PanickedTaskError> + 'static,
     {
-        let AsyncCliRunner { context, mut task_manager, tokio_runtime } =
-            AsyncCliRunner::new(self.tokio_runtime);
+        let AsyncCliRunner { context, mut task_manager, tokio_runtime } = AsyncCliRunner::new()?;
 
         // Executes the command until it finished or ctrl-c was fired
         let command_res = tokio_runtime.block_on(run_to_completion_or_panic(
@@ -107,7 +81,8 @@ impl CliRunner {
         F: Future<Output = Result<(), E>>,
         E: Send + Sync + From<std::io::Error> + 'static,
     {
-        self.tokio_runtime.block_on(run_until_ctrl_c(fut))?;
+        let tokio_runtime = tokio_runtime()?;
+        tokio_runtime.block_on(run_until_ctrl_c(fut))?;
         Ok(())
     }
 
@@ -120,7 +95,7 @@ impl CliRunner {
         F: Future<Output = Result<(), E>> + Send + 'static,
         E: Send + Sync + From<std::io::Error> + 'static,
     {
-        let tokio_runtime = self.tokio_runtime;
+        let tokio_runtime = tokio_runtime()?;
         let handle = tokio_runtime.handle().clone();
         let fut = tokio_runtime.handle().spawn_blocking(move || handle.block_on(fut));
         tokio_runtime
@@ -148,12 +123,13 @@ struct AsyncCliRunner {
 // === impl AsyncCliRunner ===
 
 impl AsyncCliRunner {
-    /// Given a tokio [`Runtime`](tokio::runtime::Runtime), creates additional context required to
-    /// execute commands asynchronously.
-    fn new(tokio_runtime: tokio::runtime::Runtime) -> Self {
+    /// Attempts to create a tokio Runtime and additional context required to execute commands
+    /// asynchronously.
+    fn new() -> Result<Self, std::io::Error> {
+        let tokio_runtime = tokio_runtime()?;
         let task_manager = TaskManager::new(tokio_runtime.handle().clone());
         let task_executor = task_manager.executor();
-        Self { context: CliContext { task_executor }, task_manager, tokio_runtime }
+        Ok(Self { context: CliContext { task_executor }, task_manager, tokio_runtime })
     }
 }
 
@@ -167,14 +143,7 @@ pub struct CliContext {
 /// Creates a new default tokio multi-thread [Runtime](tokio::runtime::Runtime) with all features
 /// enabled
 pub fn tokio_runtime() -> Result<tokio::runtime::Runtime, std::io::Error> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name_fn(|| {
-            static IDX: AtomicUsize = AtomicUsize::new(0);
-            let id = IDX.fetch_add(1, Ordering::Relaxed);
-            format!("tokio-{id}")
-        })
-        .build()
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()
 }
 
 /// Runs the given future to completion or until a critical task panicked.
@@ -188,10 +157,8 @@ where
     {
         let fut = pin!(fut);
         tokio::select! {
-            task_manager_result = tasks => {
-                if let Err(panicked_error) = task_manager_result {
-                    return Err(panicked_error.into());
-                }
+            err = tasks => {
+                return Err(err.into())
             },
             res = fut => res?,
         }
