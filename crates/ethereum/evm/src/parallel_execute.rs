@@ -168,7 +168,10 @@ where
                 let output =
                     executor.parallel_execute().map_err(|e| BlockExecutionError::msg(e))?;
                 let seq_state = seq_executor.take_state();
-                if seq_state.transition_state != executor.database.state.transition_state {
+                if !crate::debug_ext::compare_transition_state(
+                    seq_state.transition_state.as_ref().unwrap(),
+                    executor.database.state.transition_state.as_ref().unwrap(),
+                ) {
                     crate::debug_ext::dump_transitions(
                         block.number,
                         seq_state.transition_state.as_ref().unwrap(),

@@ -130,3 +130,27 @@ pub(crate) fn dump_transitions(
 
     Ok(())
 }
+
+/// Compare two transition states, return true if they are equal
+pub(crate) fn compare_transition_state(left: &TransitionState, right: &TransitionState) -> bool {
+    if left.transitions.len() != right.transitions.len() {
+        return false;
+    }
+
+    for (addr, left_account) in left.transitions.iter() {
+        if let Some(right_account) = right.transitions.get(addr) {
+            // Bundle state ignore previous status, so skip comparing it
+            if left_account.info != right_account.info ||
+                left_account.previous_info != right_account.previous_info ||
+                left_account.storage != right_account.storage ||
+                left_account.status != right_account.status
+            {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    return true;
+}
