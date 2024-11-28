@@ -39,6 +39,7 @@ use revm_primitives::{
     BlockEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, ResultAndState, TxEnv,
 };
 use std::collections::hash_map::Entry;
+use tracing::*;
 
 /// Provides executors to execute regular ethereum blocks
 #[derive(Debug, Clone)]
@@ -292,6 +293,7 @@ where
         block: &BlockWithSenders,
         total_difficulty: U256,
     ) -> Result<EthExecuteOutput, BlockExecutionError> {
+        debug!(target: "EthBlockExecutor", "Executing block {}", block.number);
         // 1. prepare state on new block
         self.on_new_block(&block.header);
 

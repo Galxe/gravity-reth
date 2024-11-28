@@ -33,6 +33,7 @@ use reth_revm::{
 
 use reth_primitives::{BlockNumber, BlockWithSenders, Header, Receipt};
 use revm_primitives::{BlockEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, TxEnv, U256};
+use tracing::*;
 
 /// Provides grevm executors to execute regular ethereum blocks
 #[derive(Debug)]
@@ -131,6 +132,7 @@ where
         block: &BlockWithSenders,
         total_difficulty: U256,
     ) -> Result<EthExecuteOutput, BlockExecutionError> {
+        debug!(target: "GrevmBlockExecutor", "Executing block {}", block.number);
         // Prepare state on new block
         self.on_new_block(&block.header);
 
