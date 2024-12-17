@@ -16,6 +16,7 @@ use reth_evm::{
         BlockExecutorProvider, BlockValidationError, Executor, ProviderError,
     },
     system_calls::{
+        apply_beacon_root_contract_call, apply_blockhashes_contract_call,
         apply_consolidation_requests_contract_call, apply_withdrawal_requests_contract_call,
     },
     ConfigureEvm,
@@ -159,6 +160,24 @@ where
         DB: Database,
         DB::Error: Into<ProviderError> + Display,
     {
+        // apply pre execution changes
+        apply_beacon_root_contract_call(
+            &self.evm_config,
+            &self.chain_spec,
+            block.timestamp,
+            block.number,
+            block.parent_beacon_block_root,
+            &mut evm,
+        )?;
+        apply_blockhashes_contract_call(
+            &self.evm_config,
+            &self.chain_spec,
+            block.timestamp,
+            block.number,
+            block.parent_hash,
+            &mut evm,
+        )?;
+
         // execute transactions
         let mut cumulative_gas_used = 0;
         let mut receipts = Vec::with_capacity(block.body.len());
@@ -238,7 +257,7 @@ pub struct EthBlockExecutor<EvmConfig, DB> {
     /// Chain specific evm config that's used to execute a block.
     executor: EthEvmExecutor<EvmConfig>,
     /// The state to use for execution
-    state: State<DB>,
+    pub(super) state: State<DB>,
 }
 
 impl<EvmConfig, DB> EthBlockExecutor<EvmConfig, DB> {
@@ -288,7 +307,7 @@ where
     /// EIP-7685 [requests](Request).
     ///
     /// Returns an error if execution fails.
-    fn execute_without_verification(
+    pub(super) fn execute_without_verification(
         &mut self,
         block: &BlockWithSenders,
         total_difficulty: U256,
