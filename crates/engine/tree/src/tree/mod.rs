@@ -55,9 +55,8 @@ use std::{
     time::Instant,
 };
 use tokio::sync::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    oneshot,
-    oneshot::error::TryRecvError,
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    oneshot::{self, error::TryRecvError},
 };
 use tracing::*;
 
@@ -69,6 +68,9 @@ pub use config::TreeConfig;
 pub use invalid_block_hook::{InvalidBlockHooks, NoopInvalidBlockHook};
 pub use reth_engine_primitives::InvalidBlockHook;
 use reth_pipe_exec_layer_ext::PIPE_EXEC_LAYER_EXT;
+use reth_pipe_exec_layer_ext_v2::{
+    PipeExecLayerEvent, PIPE_EXEC_LAYER_EXT as PIPE_EXEC_LAYER_EXT_V2,
+};
 
 /// Keeps track of the state of the tree.
 ///
@@ -624,6 +626,58 @@ where
         (incoming, outgoing)
     }
 
+    fn try_recv_pipe_exec_event(&self) -> Result<Option<PipeExecLayerEvent>, RecvError> {
+        if let Some(ext) = PIPE_EXEC_LAYER_EXT_V2.get() {
+            if self.persistence_state.in_progress() {
+                let mut waited_time_ms = 0;
+                loop {
+                    match ext.event_rx.blocking_lock().try_recv() {
+                        Ok(event) => return Ok(Some(event)),
+                        Err(mpsc::error::TryRecvError::Empty) => {
+                            if waited_time_ms > 500 {
+                                // timeout
+                                return Ok(None);
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            waited_time_ms += 10;
+                        }
+                        Err(mpsc::error::TryRecvError::Disconnected) => return Err(RecvError),
+                    }
+                }
+            } else {
+                let event = ext.event_rx.blocking_lock().blocking_recv();
+                if event.is_some() {
+                    Ok(event)
+                } else {
+                    Err(RecvError)
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent) {
+        match event {
+            PipeExecLayerEvent::InsertExecutedBlock(block, tx) => {
+                debug!(target: "on_pipe_exec_event", block_number = %block.block().number, block_hash = %block.block().hash(), "Received insert executed block event");
+                self.state.tree_state.insert_executed(block);
+                tx.send(()).unwrap();
+            }
+            PipeExecLayerEvent::MakeCanonical(payload, tx) => {
+                let block_number = payload.block_number();
+                let block_hash = payload.block_hash();
+                debug!(target: "on_pipe_exec_event", block_number = %block_number, block_hash = %block_hash, "Received make canonical event");
+                self.on_new_payload(payload, None).unwrap_or_else(|err| {
+                    panic!(
+                        "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
+                    )
+                });
+                tx.send(()).unwrap();
+            }
+        }
+    }
+
     /// Returns a new [`Sender`] to send messages to this type.
     pub fn sender(&self) -> Sender<FromEngine<EngineApiRequest<T>>> {
         self.incoming_tx.clone()
@@ -634,6 +688,15 @@ where
     /// This will block the current thread and process incoming messages.
     pub fn run(mut self) {
         loop {
+            match self.try_recv_pipe_exec_event() {
+                Ok(Some(event)) => self.on_pipe_exec_event(event),
+                Ok(None) => {}
+                Err(RecvError) => {
+                    error!(target: "engine::tree", "Pipe exec layer channel disconnected");
+                    return
+                }
+            }
+
             match self.try_recv_engine_message() {
                 Ok(Some(msg)) => {
                     debug!(target: "engine::tree", %msg, "received new engine message");

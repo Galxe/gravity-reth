@@ -84,6 +84,7 @@ members = [
     "crates/payload/primitives/",
     "crates/payload/validator/",
     "crates/pipe-exec-layer-ext/",
+    "crates/pipe-exec-layer-ext-v2/",
     "crates/primitives-traits/",
     "crates/primitives/",
     "crates/prune/prune",
@@ -372,6 +373,7 @@ reth-payload-builder = { path = "crates/payload/builder" }
 reth-payload-primitives = { path = "crates/payload/primitives" }
 reth-payload-validator = { path = "crates/payload/validator" }
 reth-pipe-exec-layer-ext = { path = "crates/pipe-exec-layer-ext" }
+reth-pipe-exec-layer-ext-v2 = { path = "crates/pipe-exec-layer-ext-v2" }
 reth-primitives = { path = "crates/primitives", default-features = false, features = [
     "std",
 ] }

@@ -1,6 +1,8 @@
+//! Pipeline execution layer extension
+
 use alloy_primitives::B256;
 use once_cell::sync::OnceCell;
-use reth_primitives::{Address, BlockWithSenders, TransactionSigned};
+use reth_primitives::{Address, TransactionSigned};
 use reth_rpc_types::engine::PayloadId;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
