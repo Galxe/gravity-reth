@@ -47,6 +47,7 @@ members = [
     "crates/exex/exex/",
     "crates/exex/test-utils/",
     "crates/exex/types/",
+    "crates/gravity-storage/",
     "crates/metrics/",
     "crates/metrics/metrics-derive/",
     "crates/net/banlist/",
