@@ -14,11 +14,9 @@ use reth_primitives::{
     proofs, Address, Block, BlockWithSenders, Header, TransactionSigned, Withdrawals, B64,
     EMPTY_OMMER_ROOT_HASH, U256,
 };
-use reth_revm::database::StateProviderDatabase;
 use reth_rpc_types::ExecutionPayload;
-use reth_storage_api::StateProvider;
-use reth_trie::{updates::TrieUpdates, HashedPostState};
-use revm::{db::BundleState, State};
+use reth_trie::HashedPostState;
+use revm::State;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -26,6 +24,7 @@ use std::sync::{
 
 use once_cell::sync::OnceCell;
 
+use gravity_storage::GravityStorage;
 use reth_rpc_types_compat::engine::payload::block_to_payload_v3;
 use tokio::sync::{
     mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
@@ -69,55 +68,29 @@ pub enum PipeExecLayerEvent {
 
 /// Owned by EL
 #[derive(Debug)]
-struct PipeExecService {
+struct PipeExecService<Storage: GravityStorage> {
     /// Immutable part of the state
-    core: Arc<Core>,
+    core: Arc<Core<Storage>>,
     /// Receive ordered block from Coordinator
     ordered_block_rx: UnboundedReceiver<OrderedBlock>,
     latest_block_header_rx: Receiver<(B256 /* block id */, Header)>,
 }
 
 #[derive(Debug)]
-struct Core {
+struct Core<Storage: GravityStorage> {
     /// Send executed block hash to Coordinator
     executed_block_hash_tx: UnboundedSender<ExecutedBlockMeta>,
     /// Receive verified block hash from Coordinator
     verified_block_hash_rx: Mutex<UnboundedReceiver<ExecutedBlockMeta>>,
     latest_block_header_tx: Sender<(B256 /* block id */, Header)>,
-    storage: GravityStorage,
+    storage: Storage,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
     latest_canonical_block_number: AtomicU64,
     event_tx: UnboundedSender<PipeExecLayerEvent>,
 }
 
-#[derive(Debug)]
-
-struct GravityStorage {}
-
-impl GravityStorage {
-    async fn state_by_block_number(&self, block_number: u64) -> Box<dyn StateProvider> {
-        todo!()
-    }
-
-    fn commit_state(&self, state: BundleState) {
-        todo!()
-    }
-
-    async fn merklization(&self, block_number: u64) -> (B256 /* state root */, TrieUpdates) {
-        todo!()
-    }
-
-    async fn block_hash_by_number(&self, block_number: u64) -> B256 {
-        todo!()
-    }
-
-    fn insert_block_hash(&self, block_number: u64, block_hash: B256) {
-        todo!()
-    }
-}
-
-impl PipeExecService {
+impl<Storage: GravityStorage> PipeExecService<Storage> {
     async fn run(mut self) {
         // TODO: get latest block header from storage at startup
         let mut latest_block_id = B256::default();
@@ -197,7 +170,7 @@ impl PipeExecService {
     }
 }
 
-impl Core {
+impl<Storage: GravityStorage> Core<Storage> {
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
     /// Returns `None` if the channel has been closed.
     async fn verify_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
@@ -275,14 +248,14 @@ impl Core {
             block.header.blob_gas_used = Some(blob_gas_used);
         }
 
-        let state = self.storage.state_by_block_number(block.number - 1).await;
-        let state = StateProviderDatabase::new(state);
-        let mut db = State::builder().with_database_ref(state).with_bundle_update().build();
+        let (block_id, state) = self.storage.get_state_view(block.number - 1).await;
+        assert_eq!(block_id, ordered_block.id);
+        let db = State::builder().with_database_ref(state).with_bundle_update().build();
 
         let executor_provider =
             EthExecutorProvider::new(self.chain_spec.clone(), self.evm_config.clone());
         let executor_outcome = executor_provider
-            .executor(&mut db)
+            .executor(db)
             .execute(BlockExecutionInput { block: &block, total_difficulty: block_env.difficulty })
             .unwrap_or_else(|err| {
                 panic!("failed to execute block {:?}: {:?}", ordered_block.id, err)
@@ -301,7 +274,9 @@ impl Core {
         // block before execution.
         self.latest_block_header_tx.send((ordered_block.id, block.header.clone())).await.unwrap();
 
-        self.storage.commit_state(executor_outcome.state.clone());
+        self.storage
+            .commit_state(ordered_block.id, ordered_block.number, &executor_outcome.state)
+            .await;
 
         if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
             block.requests = Some(executor_outcome.requests.clone().into());
@@ -322,7 +297,8 @@ impl Core {
             execution_outcome.block_logs_bloom(block.number).expect("Number is in range");
 
         // calculate the state root
-        let (state_root, trie_output) = self.storage.merklization(block.number).await;
+        let (state_root, trie_output) =
+            self.storage.state_root_with_updates(block.number, &execution_outcome.state()).await;
 
         let transactions_root = proofs::calculate_transaction_root(&block.body);
 
@@ -358,7 +334,7 @@ impl Core {
             "block hash verfication successful"
         );
 
-        self.storage.insert_block_hash(sealed_block.number, sealed_block.hash());
+        self.storage.insert_block_hash(sealed_block.number, sealed_block.hash()).await;
 
         // create the executed block data
         let hashed_state = HashedPostState::from_bundle_state(&execution_outcome.state().state);
@@ -413,7 +389,10 @@ pub struct PipeExecLayerExt {
 pub static PIPE_EXEC_LAYER_EXT: OnceCell<PipeExecLayerExt> = OnceCell::new();
 
 /// Create a new `PipeExecLayerApi` instance and launch a `PipeExecService`.
-pub fn new_pipe_exec_layer_api(chain_spec: Arc<ChainSpec>) -> PipeExecLayerApi {
+pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
+    chain_spec: Arc<ChainSpec>,
+    storage: Storage,
+) -> PipeExecLayerApi {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (executed_block_hash_tx, executed_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
     let (verified_block_hash_tx, verified_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -425,7 +404,7 @@ pub fn new_pipe_exec_layer_api(chain_spec: Arc<ChainSpec>) -> PipeExecLayerApi {
             executed_block_hash_tx,
             verified_block_hash_rx: Mutex::new(verified_block_hash_rx),
             latest_block_header_tx,
-            storage: GravityStorage {},
+            storage,
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
             latest_canonical_block_number: AtomicU64::new(0),

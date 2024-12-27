@@ -410,6 +410,7 @@ reth-trie = { path = "crates/trie/trie" }
 reth-trie-common = { path = "crates/trie/common" }
 reth-trie-db = { path = "crates/trie/db" }
 reth-trie-parallel = { path = "crates/trie/parallel" }
+gravity-storage = { path = "crates/gravity-storage" }
 
 # revm
 revm = { package = "revm", git = "https://github.com/galxe/revm", rev = "a32cd92", features = [
