@@ -12,7 +12,7 @@ use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{
     constants::{BEACON_NONCE, EMPTY_WITHDRAWALS},
     proofs, Address, Block, BlockWithSenders, Header, Receipt, SealedBlockWithSenders,
-    TransactionSigned, Withdrawals, B64, EMPTY_OMMER_ROOT_HASH, U256,
+    TransactionSigned, Withdrawals, EMPTY_OMMER_ROOT_HASH, U256,
 };
 use reth_rpc_types::ExecutionPayload;
 use reth_trie::{updates::TrieUpdates, HashedPostState};
@@ -221,8 +221,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         block.header.parent_hash = parent_hash;
 
         // Merkling the state trie
-        let (state_root, trie_output) =
-            self.storage.state_root_with_updates(block_number, &execution_outcome.state()).await;
+        let (state_root, trie_output) = self
+            .storage
+            .state_root_with_updates(block_number, &execution_outcome.state())
+            .await
+            .unwrap();
         block.header.state_root = state_root;
 
         // Seal the block
@@ -231,6 +234,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Commit the executed block hash to Coordinator
         self.verify_executed_block_hash(ExecutedBlockMeta { block_id, block_hash }).await.unwrap();
+        self.storage.insert_block_hash(block_number, block_hash).await;
 
         // Make the block canonical
         self.make_canonical(block, execution_outcome, trie_output).await;

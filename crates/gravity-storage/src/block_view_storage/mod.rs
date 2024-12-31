@@ -6,13 +6,9 @@ use reth_storage_api::{errors::provider::ProviderError, StateProviderBox, StateP
 use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::{db::BundleState, primitives::AccountInfo, DatabaseRef};
 use std::{collections::BTreeMap, sync::Arc};
-use tokio::{
-    sync::Mutex,
-    time::{sleep, Duration},
-};
+use tokio::sync::Mutex;
 
 use crate::{GravityStorage, GravityStorageError};
-use tracing::debug;
 
 pub struct BlockViewStorage<Client> {
     client: Client,
@@ -63,18 +59,20 @@ impl BlockViewStorageInner {
 
 #[async_trait]
 impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage<Client> {
+    type StateView = BlockViewProvider;
+
     async fn get_state_view(
         &self,
         target_block_number: u64,
-    ) -> Result<(B256, Arc<dyn DatabaseRef<Error = ProviderError>>), GravityStorageError> {
+    ) -> Result<(B256, Self::StateView), GravityStorageError> {
         let storage = self.inner.lock().await;
         if target_block_number == storage.state_provider_info.1 {
             return Ok((
                 B256::ZERO,
-                Arc::new(BlockViewProvider::new(
+                BlockViewProvider::new(
                     vec![],
                     get_state_provider(&self.client, storage.state_provider_info.0)?,
-                )),
+                ),
             ));
         }
         if storage.block_number_to_view.get(&target_block_number).is_none() {
@@ -91,10 +89,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         let block_hash = storage.state_provider_info.0;
         Ok((
             block_id,
-            Arc::new(BlockViewProvider::new(
-                block_views,
-                get_state_provider(&self.client, block_hash)?,
-            )),
+            BlockViewProvider::new(block_views, get_state_provider(&self.client, block_hash)?),
         ))
     }
 
@@ -111,7 +106,9 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         }
         let mut storage = self.inner.lock().await;
         storage.block_number_to_view.insert(block_number, Arc::new(cached));
-        storage.block_number_to_state.insert(block_number, HashedPostState::from_bundle_state(&bundle_state.state));
+        storage
+            .block_number_to_state
+            .insert(block_number, HashedPostState::from_bundle_state(&bundle_state.state));
         storage.block_number_to_id.insert(block_number, block_id);
     }
 

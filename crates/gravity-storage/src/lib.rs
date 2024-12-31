@@ -26,7 +26,11 @@ impl std::fmt::Display for GravityStorageError {
                 write!(f, "The block number {} is too new", new)
             }
             GravityStorageError::StateProviderError((block_hash, error)) => {
-                write!(f, "Failed to get state provider. block_hash={}, error={}", block_hash, error)
+                write!(
+                    f,
+                    "Failed to get state provider. block_hash={}, error={}",
+                    block_hash, error
+                )
             }
         }
     }
@@ -34,10 +38,12 @@ impl std::fmt::Display for GravityStorageError {
 
 #[async_trait]
 pub trait GravityStorage: Send + Sync + 'static {
+    type StateView: DatabaseRef<Error = ProviderError>;
+
     async fn get_state_view(
         &self,
         block_number: u64,
-    ) -> Result<(B256, Arc<dyn DatabaseRef<Error = ProviderError>>), GravityStorageError>;
+    ) -> Result<(B256, Self::StateView), GravityStorageError>;
 
     async fn commit_state(&self, block_id: B256, block_number: u64, bundle_state: &BundleState);
 
