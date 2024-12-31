@@ -248,7 +248,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.header.blob_gas_used = Some(blob_gas_used);
         }
 
-        let (block_id, state) = self.storage.get_state_view(block.number - 1).await;
+        let (block_id, state) = self.storage.get_state_view(block.number - 1).await.unwrap();
         assert_eq!(block_id, ordered_block.id);
         let db = State::builder().with_database_ref(state).with_bundle_update().build();
 
@@ -298,7 +298,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // calculate the state root
         let (state_root, trie_output) =
-            self.storage.state_root_with_updates(block.number, &execution_outcome.state()).await;
+            self.storage.state_root_with_updates(block.number, &execution_outcome.state()).await.unwrap();
 
         let transactions_root = proofs::calculate_transaction_root(&block.body);
 
@@ -308,7 +308,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         block.header.receipts_root = receipts_root;
         block.header.logs_bloom = logs_bloom;
 
-        block.header.parent_hash = self.storage.block_hash_by_number(block.number - 1).await;
+        block.header.parent_hash = self.storage.block_hash_by_number(block.number - 1).await.unwrap();
 
         let sealed_block = block.seal_slow();
 

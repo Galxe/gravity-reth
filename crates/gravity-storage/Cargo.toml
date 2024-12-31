@@ -22,3 +22,4 @@ reth-trie.workspace = true
 
 tracing.workspace = true
 tokio.workspace = true
+thiserror.workspace = true
