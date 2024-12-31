@@ -8,26 +8,23 @@ use reth_evm::{
     ConfigureEvmEnv, NextBlockEnvAttributes,
 };
 use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
-use reth_execution_types::ExecutionOutcome;
+use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{
     constants::{BEACON_NONCE, EMPTY_WITHDRAWALS},
-    proofs, Address, Block, BlockWithSenders, Header, TransactionSigned, Withdrawals, B64,
-    EMPTY_OMMER_ROOT_HASH, U256,
+    proofs, Address, Block, BlockWithSenders, Header, Receipt, SealedBlockWithSenders,
+    TransactionSigned, Withdrawals, B64, EMPTY_OMMER_ROOT_HASH, U256,
 };
 use reth_rpc_types::ExecutionPayload;
-use reth_trie::HashedPostState;
+use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::State;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use once_cell::sync::OnceCell;
 
 use gravity_storage::GravityStorage;
 use reth_rpc_types_compat::engine::payload::block_to_payload_v3;
 use tokio::sync::{
-    mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
+    mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot, Mutex,
 };
 
@@ -73,7 +70,6 @@ struct PipeExecService<Storage: GravityStorage> {
     core: Arc<Core<Storage>>,
     /// Receive ordered block from Coordinator
     ordered_block_rx: UnboundedReceiver<OrderedBlock>,
-    latest_block_header_rx: Receiver<(B256 /* block id */, Header)>,
 }
 
 #[derive(Debug)]
@@ -82,95 +78,165 @@ struct Core<Storage: GravityStorage> {
     executed_block_hash_tx: UnboundedSender<ExecutedBlockMeta>,
     /// Receive verified block hash from Coordinator
     verified_block_hash_rx: Mutex<UnboundedReceiver<ExecutedBlockMeta>>,
-    latest_block_header_tx: Sender<(B256 /* block id */, Header)>,
     storage: Storage,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
-    latest_canonical_block_number: AtomicU64,
     event_tx: UnboundedSender<PipeExecLayerEvent>,
+    execute_block_barrier: PipeBarrier<Header>,
+    make_canonical_barrier: PipeBarrier<B256 /* block hash */>,
+}
+
+#[derive(Debug)]
+struct PipeBarrier<Result> {
+    inner: Mutex<PipeBarrierInner<Result>>,
+}
+
+impl<Result> Default for PipeBarrier<Result> {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(PipeBarrierInner {
+                block_number: 0,
+                result: None,
+                waiters: Vec::new(),
+                closed: false,
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PipeBarrierInner<Result> {
+    block_number: u64,
+    result: Option<Result>,
+    waiters: Vec<oneshot::Sender<()>>,
+    closed: bool,
+}
+
+impl<Result> PipeBarrier<Result> {
+    /// Wait until the block number is reached and return the result.
+    /// Returns `None` if the barrier has been closed.
+    async fn wait(&self, block_number: u64) -> Option<Result> {
+        loop {
+            let mut inner = self.inner.lock().await;
+            if inner.closed {
+                return None;
+            }
+
+            assert!(inner.block_number <= block_number, "{} {}", inner.block_number, block_number);
+            if inner.block_number == block_number {
+                return Some(inner.result.take().expect("double wait"));
+            }
+
+            let (tx, rx) = oneshot::channel();
+            inner.waiters.push(tx);
+            drop(inner);
+            rx.await.unwrap();
+        }
+    }
+
+    /// Notify the block number with the result.
+    /// Returns `None` if the barrier has been closed.
+    async fn notify(&self, block_number: u64, result: Result) -> Option<()> {
+        let mut inner = self.inner.lock().await;
+        if inner.closed {
+            return None;
+        }
+
+        assert!(inner.block_number < block_number, "{} {}", inner.block_number, block_number);
+        inner.block_number = block_number;
+        inner.result = Some(result);
+        let waiters = std::mem::take(&mut inner.waiters);
+        drop(inner);
+
+        for tx in waiters {
+            let _ = tx.send(());
+        }
+        Some(())
+    }
+
+    async fn close(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.closed = true;
+        let waiters = std::mem::take(&mut inner.waiters);
+        drop(inner);
+
+        for tx in waiters {
+            let _ = tx.send(());
+        }
+    }
 }
 
 impl<Storage: GravityStorage> PipeExecService<Storage> {
-    async fn run(mut self) {
-        // TODO: get latest block header from storage at startup
-        let mut latest_block_id = B256::default();
-        let latest_block_header = Header::default();
+    async fn run(mut self, latest_block_header: Header, latest_block_hash: B256) {
         let mut latest_block_number = latest_block_header.number;
         self.core
-            .latest_block_header_tx
-            .send((latest_block_id, latest_block_header))
+            .execute_block_barrier
+            .notify(latest_block_number, latest_block_header)
             .await
             .unwrap();
-        self.core.latest_canonical_block_number.store(latest_block_number, Ordering::Release);
+        self.core
+            .make_canonical_barrier
+            .notify(latest_block_number, latest_block_hash)
+            .await
+            .unwrap();
 
         loop {
-            // get ordered block from queue
             let ordered_block = match self.ordered_block_rx.recv().await {
                 Some(ordered_block) => ordered_block,
-                None => break,
+                None => {
+                    self.core.execute_block_barrier.close().await;
+                    self.core.make_canonical_barrier.close().await;
+                    return;
+                }
             };
-            assert_eq!(ordered_block.parent_id, latest_block_id);
+            // TODO: read latest block id from storage
+            // assert_eq!(ordered_block.parent_id, latest_block_id);
+            // latest_block_id = ordered_block.id;
             assert_eq!(ordered_block.number, latest_block_number + 1);
-            latest_block_id = ordered_block.id;
             latest_block_number = ordered_block.number;
 
-            // Retrieve the parent block header to generate the necessary configs for executing the
-            // current block
-            let (parent_id, parent_block_header) =
-                self.latest_block_header_rx.recv().await.unwrap();
-            assert_eq!(ordered_block.parent_id, parent_id);
-            assert_eq!(ordered_block.number, parent_block_header.number + 1);
-
-            tokio::spawn({
-                let core = self.core.clone();
-                async move {
-                    let block_number = ordered_block.number;
-                    let executed_block = core
-                        .execute_and_verify_ordered_block(ordered_block, parent_block_header)
-                        .await;
-
-                    let payload: reth_rpc_types::ExecutionPayloadV3 =
-                        block_to_payload_v3(executed_block.block.as_ref().clone());
-
-                    // Ensure that blocks are inserted and made canonical in block number order
-                    while core.latest_canonical_block_number.load(Ordering::Acquire) + 1 <
-                        block_number
-                    {
-                        tokio::task::yield_now().await;
-                    }
-                    assert_eq!(
-                        core.latest_canonical_block_number.load(Ordering::Relaxed) + 1,
-                        block_number
-                    );
-
-                    // Insert executed block to state tree
-                    let (tx, rx) = oneshot::channel();
-                    core.event_tx
-                        .send(PipeExecLayerEvent::InsertExecutedBlock(executed_block, tx))
-                        .unwrap();
-                    rx.await.unwrap();
-
-                    debug!(target: "PipeExecService", block_number=?block_number, "block inserted");
-
-                    // Make executed block canonical
-                    let (tx, rx) = oneshot::channel();
-                    core.event_tx
-                        .send(PipeExecLayerEvent::MakeCanonical(
-                            ExecutionPayload::from(payload),
-                            tx,
-                        ))
-                        .unwrap();
-                    rx.await.unwrap();
-                    core.latest_canonical_block_number.store(block_number, Ordering::Release);
-
-                    debug!(target: "PipeExecService", block_number=?block_number, "block made canonical");
-                }
+            let core = self.core.clone();
+            tokio::spawn(async move {
+                core.process(ordered_block).await;
             });
         }
     }
 }
 
 impl<Storage: GravityStorage> Core<Storage> {
+    async fn process(&self, ordered_block: OrderedBlock) {
+        let block_number = ordered_block.number;
+        let block_id = ordered_block.id;
+
+        // Retrieve the parent block header to generate the necessary configs for
+        // executing the current block
+        let parent_block_header = self.execute_block_barrier.wait(block_number - 1).await.unwrap();
+        let (mut block, outcome) =
+            self.execute_ordered_block(ordered_block, &parent_block_header).await;
+        self.execute_block_barrier.notify(block_number, block.header.clone()).await.unwrap();
+
+        let execution_outcome = self.calculate_roots(&mut block, outcome);
+
+        let parent_hash = self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
+        block.header.parent_hash = parent_hash;
+
+        // Merkling the state trie
+        let (state_root, trie_output) =
+            self.storage.state_root_with_updates(block_number, &execution_outcome.state()).await;
+        block.header.state_root = state_root;
+
+        // Seal the block
+        let block = block.seal_slow();
+        let block_hash = block.hash();
+
+        // Commit the executed block hash to Coordinator
+        self.verify_executed_block_hash(ExecutedBlockMeta { block_id, block_hash }).await.unwrap();
+
+        // Make the block canonical
+        self.make_canonical(block, execution_outcome, trie_output).await;
+        self.make_canonical_barrier.notify(block_number, block_hash).await;
+    }
+
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
     /// Returns `None` if the channel has been closed.
     async fn verify_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
@@ -181,12 +247,12 @@ impl<Storage: GravityStorage> Core<Storage> {
         Some(())
     }
 
-    async fn execute_and_verify_ordered_block(
+    async fn execute_ordered_block(
         &self,
         ordered_block: OrderedBlock,
-        parent_header: Header,
-    ) -> ExecutedBlock {
-        debug!(target: "execute_and_verify_ordered_block",
+        parent_header: &Header,
+    ) -> (BlockWithSenders, BlockExecutionOutput<Receipt>) {
+        debug!(target: "execute_ordered_block",
             id=?ordered_block.id,
             parent_id=?ordered_block.parent_id,
             number=?ordered_block.number,
@@ -194,7 +260,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
 
         let (_, block_env) = self.evm_config.next_cfg_and_block_env(
-            &parent_header,
+            parent_header,
             NextBlockEnvAttributes {
                 timestamp: ordered_block.timestamp,
                 suggested_fee_recipient: ordered_block.coinbase,
@@ -254,41 +320,44 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let executor_provider =
             EthExecutorProvider::new(self.chain_spec.clone(), self.evm_config.clone());
-        let executor_outcome = executor_provider
+        let outcome = executor_provider
             .executor(db)
             .execute(BlockExecutionInput { block: &block, total_difficulty: block_env.difficulty })
             .unwrap_or_else(|err| {
                 panic!("failed to execute block {:?}: {:?}", ordered_block.id, err)
             });
 
-        debug!(target: "execute_and_verify_ordered_block",
+        debug!(target: "execute_ordered_block",
             id=?ordered_block.id,
             parent_id=?ordered_block.parent_id,
             number=?ordered_block.number,
             "block executed"
         );
 
-        block.header.gas_used = executor_outcome.gas_used;
+        block.header.gas_used = outcome.gas_used;
+        (block, outcome)
+    }
 
-        // All fields needed for next block execution are filled, ready to be consumed by the next
-        // block before execution.
-        self.latest_block_header_tx.send((ordered_block.id, block.header.clone())).await.unwrap();
-
-        self.storage
-            .commit_state(ordered_block.id, ordered_block.number, &executor_outcome.state)
-            .await;
-
+    /// Calculate the receipts root, logs bloom, and transactions root, etc. and fill them into the
+    /// block header.
+    fn calculate_roots(
+        &self,
+        block: &mut BlockWithSenders,
+        execution_outcome: BlockExecutionOutput<Receipt>,
+    ) -> ExecutionOutcome {
+        // only determine cancun fields when active
         if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
-            block.requests = Some(executor_outcome.requests.clone().into());
+            block.requests = Some(execution_outcome.requests.clone().into());
             block.header.requests_root =
-                Some(proofs::calculate_requests_root(&executor_outcome.requests));
+                Some(proofs::calculate_requests_root(&execution_outcome.requests));
         }
 
         let execution_outcome = ExecutionOutcome::new(
-            executor_outcome.state,
-            vec![executor_outcome.receipts.into_iter().map(|r| Some(r)).collect::<Vec<_>>()].into(),
+            execution_outcome.state,
+            vec![execution_outcome.receipts.into_iter().map(|r| Some(r)).collect::<Vec<_>>()]
+                .into(),
             block.number,
-            vec![executor_outcome.requests.into()],
+            vec![execution_outcome.requests.into()],
         );
 
         let receipts_root =
@@ -296,55 +365,53 @@ impl<Storage: GravityStorage> Core<Storage> {
         let logs_bloom =
             execution_outcome.block_logs_bloom(block.number).expect("Number is in range");
 
-        // calculate the state root
-        let (state_root, trie_output) =
-            self.storage.state_root_with_updates(block.number, &execution_outcome.state()).await.unwrap();
-
         let transactions_root = proofs::calculate_transaction_root(&block.body);
 
         // Fill the block header with the calculated values
-        block.header.state_root = state_root;
         block.header.transactions_root = transactions_root;
         block.header.receipts_root = receipts_root;
         block.header.logs_bloom = logs_bloom;
 
-        block.header.parent_hash = self.storage.block_hash_by_number(block.number - 1).await.unwrap();
+        execution_outcome
+    }
 
-        let sealed_block = block.seal_slow();
-
-        debug!(target: "execute_and_verify_ordered_block", id=?ordered_block.id,
-            parent_id=?ordered_block.parent_id,
-            number=?ordered_block.number,
-            hash=?sealed_block.hash(),
-            "block sealed"
-        );
-
-        self.verify_executed_block_hash(ExecutedBlockMeta {
-            block_id: ordered_block.id,
-            block_hash: sealed_block.hash(),
-        })
-        .await
-        .unwrap();
-
-        debug!(target: "execute_and_verify_ordered_block",
-            id=?ordered_block.id,
-            parent_id=?ordered_block.parent_id,
-            number=?ordered_block.number,
-            hash=?sealed_block.hash(),
-            "block hash verfication successful"
-        );
-
-        self.storage.insert_block_hash(sealed_block.number, sealed_block.hash()).await;
-
+    async fn make_canonical(
+        &self,
+        sealed_block: SealedBlockWithSenders,
+        execution_outcome: ExecutionOutcome,
+        trie_output: TrieUpdates,
+    ) {
         // create the executed block data
         let hashed_state = HashedPostState::from_bundle_state(&execution_outcome.state().state);
-        ExecutedBlock {
+        let executed_block = ExecutedBlock {
             block: Arc::new(sealed_block.block),
             senders: Arc::new(sealed_block.senders),
             execution_output: Arc::new(execution_outcome),
             hashed_state: Arc::new(hashed_state),
             trie: Arc::new(trie_output),
-        }
+        };
+
+        let block_number = executed_block.block.number;
+        let payload: reth_rpc_types::ExecutionPayloadV3 =
+            block_to_payload_v3(executed_block.block.as_ref().clone());
+
+        // Insert executed block to state tree
+        let (tx, rx) = oneshot::channel();
+        self.event_tx.send(PipeExecLayerEvent::InsertExecutedBlock(executed_block, tx)).unwrap();
+        rx.await.unwrap();
+
+        debug!(target: "make_canonical", block_number=?block_number, "block inserted");
+
+        // Make executed block canonical
+        let (tx, rx) = oneshot::channel();
+        self.event_tx
+            .send(PipeExecLayerEvent::MakeCanonical(ExecutionPayload::from(payload), tx))
+            .unwrap();
+        rx.await.unwrap();
+
+        debug!(target: "make_canonical", block_number=?block_number, "block made canonical");
+
+        self.storage.update_canonical(block_number).await;
     }
 }
 
@@ -392,28 +459,28 @@ pub static PIPE_EXEC_LAYER_EXT: OnceCell<PipeExecLayerExt> = OnceCell::new();
 pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     chain_spec: Arc<ChainSpec>,
     storage: Storage,
+    latest_block_header: Header,
+    latest_block_hash: B256,
 ) -> PipeExecLayerApi {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (executed_block_hash_tx, executed_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
     let (verified_block_hash_tx, verified_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (latest_block_header_tx, latest_block_header_rx) = tokio::sync::mpsc::channel(1);
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let service = PipeExecService {
         core: Arc::new(Core {
             executed_block_hash_tx,
             verified_block_hash_rx: Mutex::new(verified_block_hash_rx),
-            latest_block_header_tx,
             storage,
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
-            latest_canonical_block_number: AtomicU64::new(0),
             event_tx,
+            execute_block_barrier: PipeBarrier::default(),
+            make_canonical_barrier: PipeBarrier::default(),
         }),
         ordered_block_rx,
-        latest_block_header_rx,
     };
-    tokio::spawn(service.run());
+    tokio::spawn(service.run(latest_block_header, latest_block_hash));
 
     PIPE_EXEC_LAYER_EXT.get_or_init(|| PipeExecLayerExt { event_rx: Mutex::new(event_rx) });
 
