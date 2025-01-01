@@ -37,7 +37,7 @@ fn get_state_provider<Client: StateProviderFactory + 'static>(
 }
 
 impl<Client: StateProviderFactory + 'static> BlockViewStorage<Client> {
-    fn new(client: Client, block_number: u64, block_hash: B256) -> Self {
+    pub fn new(client: Client, block_number: u64, block_hash: B256) -> Self {
         Self { client, inner: Mutex::new(BlockViewStorageInner::new(block_number, block_hash)) }
     }
 }
