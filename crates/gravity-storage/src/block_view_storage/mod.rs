@@ -1,12 +1,10 @@
-use async_trait::async_trait;
 use reth_payload_builder::database::CachedReads;
 use reth_primitives::{revm_primitives::Bytecode, Address, B256, U256};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{errors::provider::ProviderError, StateProviderBox, StateProviderFactory};
 use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::{db::BundleState, primitives::AccountInfo, DatabaseRef};
-use std::{collections::BTreeMap, sync::Arc};
-use tokio::sync::Mutex;
+use std::{clone, collections::BTreeMap, sync::{Arc, Mutex}};
 
 use crate::{GravityStorage, GravityStorageError};
 
@@ -18,9 +16,8 @@ pub struct BlockViewStorage<Client> {
 struct BlockViewStorageInner {
     state_provider_info: (B256, u64), // (block_hash, block_number),
     block_number_to_view: BTreeMap<u64, Arc<CachedReads>>,
-    block_number_to_state: BTreeMap<u64, HashedPostState>,
-    block_number_to_trip_updates: BTreeMap<u64, TrieUpdates>,
-    block_number_to_hash: BTreeMap<u64, B256>,
+    block_number_to_state: BTreeMap<u64, Arc<HashedPostState>>,
+    block_number_to_trip_updates: BTreeMap<u64, Arc<TrieUpdates>>,
     block_number_to_id: BTreeMap<u64, B256>,
 }
 
@@ -37,40 +34,37 @@ fn get_state_provider<Client: StateProviderFactory + 'static>(
 }
 
 impl<Client: StateProviderFactory + 'static> BlockViewStorage<Client> {
-    pub fn new(client: Client, block_number: u64, block_hash: B256) -> Self {
-        Self { client, inner: Mutex::new(BlockViewStorageInner::new(block_number, block_hash)) }
+    pub fn new(client: Client, latest_block_number: u64, latest_block_hash: B256, block_number_to_id: BTreeMap<u64, B256>) -> Self {
+        Self { client, inner: Mutex::new(BlockViewStorageInner::new(latest_block_number, latest_block_hash, block_number_to_id)) }
     }
 }
 
 impl BlockViewStorageInner {
-    fn new(block_number: u64, block_hash: B256) -> Self {
-        let mut res = Self {
+    fn new(block_number: u64, block_hash: B256, block_number_to_id: BTreeMap<u64, B256>) -> Self {
+        Self {
             state_provider_info: (block_hash, block_number),
             block_number_to_view: BTreeMap::new(),
             block_number_to_state: BTreeMap::new(),
             block_number_to_trip_updates: BTreeMap::new(),
-            block_number_to_hash: BTreeMap::new(),
-            block_number_to_id: BTreeMap::new(),
-        };
-        res.block_number_to_hash.insert(block_number, block_hash);
-        res
+            block_number_to_id: block_number_to_id,
+        }
     }
 }
 
-#[async_trait]
 impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage<Client> {
     type StateView = BlockViewProvider;
 
-    async fn get_state_view(
+    fn get_state_view(
         &self,
         target_block_number: u64,
     ) -> Result<(B256, Self::StateView), GravityStorageError> {
-        let storage = self.inner.lock().await;
+        let storage = self.inner.lock().unwrap();
         if target_block_number == storage.state_provider_info.1 {
             return Ok((
-                B256::ZERO,
+                *storage.block_number_to_id.get(&target_block_number).unwrap(),
                 BlockViewProvider::new(
                     vec![],
+                    storage.block_number_to_id.clone(),
                     get_state_provider(&self.client, storage.state_provider_info.0)?,
                 ),
             ));
@@ -89,11 +83,11 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         let block_hash = storage.state_provider_info.0;
         Ok((
             block_id,
-            BlockViewProvider::new(block_views, get_state_provider(&self.client, block_hash)?),
+            BlockViewProvider::new(block_views, storage.block_number_to_id.clone(), get_state_provider(&self.client, block_hash)?),
         ))
     }
 
-    async fn commit_state(&self, block_id: B256, block_number: u64, bundle_state: &BundleState) {
+    fn insert_bundle_state(&self, block_id: B256, block_number: u64, bundle_state: &BundleState) {
         let mut cached = CachedReads::default();
         for (addr, acc) in bundle_state.state().iter().map(|(a, acc)| (*a, acc)) {
             if let Some(info) = acc.info.clone() {
@@ -104,58 +98,53 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
                 cached.insert_account(addr, info, storage);
             }
         }
-        let mut storage = self.inner.lock().await;
+        let mut storage = self.inner.lock().unwrap();
         storage.block_number_to_view.insert(block_number, Arc::new(cached));
         storage
             .block_number_to_state
-            .insert(block_number, HashedPostState::from_bundle_state(&bundle_state.state));
+            .insert(block_number, Arc::new(HashedPostState::from_bundle_state(&bundle_state.state)));
         storage.block_number_to_id.insert(block_number, block_id);
     }
 
-    async fn insert_block_hash(&self, block_number: u64, block_hash: B256) {
-        let mut storage = self.inner.lock().await;
-        storage.block_number_to_hash.insert(block_number, block_hash);
-    }
-
-    async fn block_hash_by_number(&self, block_number: u64) -> Result<B256, GravityStorageError> {
-        let storage = self.inner.lock().await;
-        match storage.block_number_to_hash.get(&block_number) {
-            Some(block_hash) => Ok(*block_hash),
-            None => Err(GravityStorageError::TooNew(block_number)),
-        }
-    }
-
-    async fn update_canonical(&self, block_number: u64) {
-        let mut storage = self.inner.lock().await;
+    fn update_canonical(&self, block_number: u64, block_hash: B256) {
+        let mut storage = self.inner.lock().unwrap();
         assert!(block_number > storage.state_provider_info.1);
         let gc_block_number = storage.state_provider_info.1;
-        let block_hash = *storage.block_number_to_hash.get(&block_number).unwrap();
         storage.state_provider_info = (block_hash, block_number);
         storage.block_number_to_view.remove(&gc_block_number);
-        storage.block_number_to_hash.remove(&gc_block_number);
-        storage.block_number_to_id.remove(&gc_block_number);
+        storage.block_number_to_state.remove(&gc_block_number);
+        storage.block_number_to_trip_updates.remove(&gc_block_number);
     }
 
-    async fn state_root_with_updates(
+    fn state_root_with_updates(
         &self,
         block_number: u64,
-        bundle_state: &BundleState,
-    ) -> Result<(B256, TrieUpdates), GravityStorageError> {
-        let block_hash = self.block_hash_by_number(block_number - 1).await?;
-        let state_provider = get_state_provider(&self.client, block_hash)?;
-        let hashed_state = HashedPostState::from_bundle_state(&bundle_state.state);
-        Ok(state_provider.state_root_with_updates(hashed_state).unwrap())
+    ) -> Result<(B256, Arc<HashedPostState>, Arc<TrieUpdates>), GravityStorageError> {
+        let mut storage = self.inner.lock().unwrap();
+        let state_provider = get_state_provider(&self.client, storage.state_provider_info.0)?;
+        let mut hashed_state_vec = vec![];
+        let mut trie_updates_vec = vec![];
+        for number in storage.state_provider_info.1..block_number {
+            hashed_state_vec.push(storage.block_number_to_state.get(&number).unwrap().clone());
+            trie_updates_vec.push(storage.block_number_to_trip_updates.get(&number).unwrap().clone());
+        }
+        let hashed_state = storage.block_number_to_state.get(&block_number).unwrap().clone();
+        let (state_root, trie_updates) = state_provider.state_root_with_updates_v2(hashed_state.as_ref().clone(), hashed_state_vec, trie_updates_vec).unwrap();
+        let trie_updates = Arc::new(trie_updates);
+        storage.block_number_to_trip_updates.insert(block_number, trie_updates.clone());
+        Ok((state_root, hashed_state, trie_updates))
     }
 }
 
 pub struct BlockViewProvider {
     block_views: Vec<Arc<CachedReads>>,
+    block_number_to_id: BTreeMap<u64, B256>,
     db: StateProviderDatabase<StateProviderBox>,
 }
 
 impl BlockViewProvider {
-    fn new(block_views: Vec<Arc<CachedReads>>, state_provider: StateProviderBox) -> Self {
-        Self { block_views, db: StateProviderDatabase::new(state_provider) }
+    fn new(block_views: Vec<Arc<CachedReads>>, block_number_to_id: BTreeMap<u64, B256>, state_provider: StateProviderBox) -> Self {
+        Self { block_views, block_number_to_id, db: StateProviderDatabase::new(state_provider) }
     }
 }
 
@@ -192,11 +181,6 @@ impl DatabaseRef for BlockViewProvider {
     }
 
     fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
-        for block_view in &self.block_views {
-            if let Some(hash) = block_view.block_hashes.get(&number) {
-                return Ok(*hash);
-            }
-        }
-        Ok(self.db.block_hash_ref(number)?)
+       Ok(*self.block_number_to_id.get(&number).unwrap())
     }
 }

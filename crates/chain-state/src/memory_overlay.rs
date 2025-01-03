@@ -11,7 +11,7 @@ use reth_trie::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 /// A state provider that stores references to in-memory blocks along with their state as well as
@@ -117,6 +117,25 @@ impl StateRootProvider for MemoryOverlayStateProvider {
         state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
         self.state_root_from_nodes_with_updates(TrieInput::from_state(state))
+    }
+
+    fn state_root_with_updates_v2(
+        &self,
+        state: HashedPostState,
+        hashed_state_vec: Vec<Arc<HashedPostState>>,
+        trie_updates_vec: Vec<Arc<TrieUpdates>>,
+    ) -> ProviderResult<(B256, TrieUpdates)> {
+        let mut input = TrieInput::from_state(state);
+        let mut trie_state = MemoryOverlayTrieState::default();
+        hashed_state_vec.iter().for_each(|hashed_state| {
+            trie_state.state.extend_ref(hashed_state.as_ref());
+        });
+        trie_updates_vec.iter().for_each(|trie_updates| {
+            trie_state.nodes.extend_ref(trie_updates.as_ref());
+        });
+        let MemoryOverlayTrieState { nodes, state } = trie_state;
+        input.prepend_cached(nodes, state);
+        self.state_root_from_nodes_with_updates(input)
     }
 
     fn state_root_from_nodes_with_updates(

@@ -932,6 +932,14 @@ mod tests {
         ) -> ProviderResult<(B256, TrieUpdates)> {
             Ok((B256::random(), TrieUpdates::default()))
         }
+        
+        fn state_root_with_updates_v2(&self,
+            state:HashedPostState,
+            hashed_state_vec: Vec<Arc<HashedPostState>>,
+            trie_updates_vec: Vec<Arc<TrieUpdates>>,
+        ) -> ProviderResult<(B256,TrieUpdates)>  {
+            Ok((B256::random(), TrieUpdates::default()))
+        }
     }
 
     impl StorageRootProvider for MockStateProvider {

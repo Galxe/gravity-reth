@@ -199,20 +199,20 @@ impl<Storage: GravityStorage> Core<Storage> {
         let parent_block_header = self.execute_block_barrier.wait(block_number - 1).await.unwrap();
         let (mut block, outcome) =
             self.execute_ordered_block(ordered_block, &parent_block_header).await;
+        self.storage.insert_bundle_state(block_id, block_number, &outcome.state);
         self.execute_block_barrier.notify(block_number, block.header.clone()).await.unwrap();
 
         let execution_outcome = self.calculate_roots(&mut block, outcome);
 
-        let parent_hash = self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
-        block.header.parent_hash = parent_hash;
-
         // Merkling the state trie
-        let (state_root, trie_output) = self
+        let (state_root, hashed_state, trie_output) = self
             .storage
-            .state_root_with_updates(block_number, &execution_outcome.state())
-            .await
+            .state_root_with_updates(block_number)
             .unwrap();
         block.header.state_root = state_root;
+
+        let parent_hash = self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
+        block.header.parent_hash = parent_hash;
 
         // Seal the block
         let block = block.seal_slow();
@@ -220,10 +220,10 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Commit the executed block hash to Coordinator
         self.verify_executed_block_hash(ExecutedBlockMeta { block_id, block_hash }).await.unwrap();
-        self.storage.insert_block_hash(block_number, block_hash).await;
 
         // Make the block canonical
-        self.make_canonical(block, execution_outcome, trie_output).await;
+        self.make_canonical(block, execution_outcome, hashed_state, trie_output).await;
+        self.storage.update_canonical(block_number, block_hash);
         self.make_canonical_barrier.notify(block_number, block_hash).await;
     }
 
@@ -304,7 +304,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.header.blob_gas_used = Some(blob_gas_used);
         }
 
-        let (block_id, state) = self.storage.get_state_view(block.number - 1).await.unwrap();
+        let (block_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
         assert_eq!(block_id, ordered_block.id);
         let db = State::builder().with_database_ref(state).with_bundle_update().build();
 
@@ -369,16 +369,16 @@ impl<Storage: GravityStorage> Core<Storage> {
         &self,
         sealed_block: SealedBlockWithSenders,
         execution_outcome: ExecutionOutcome,
-        trie_output: TrieUpdates,
+        hashed_state: Arc<HashedPostState>,
+        trie_output: Arc<TrieUpdates>,
     ) {
         // create the executed block data
-        let hashed_state = HashedPostState::from_bundle_state(&execution_outcome.state().state);
         let executed_block = ExecutedBlock {
             block: Arc::new(sealed_block.block),
             senders: Arc::new(sealed_block.senders),
             execution_output: Arc::new(execution_outcome),
-            hashed_state: Arc::new(hashed_state),
-            trie: Arc::new(trie_output),
+            hashed_state: hashed_state,
+            trie: trie_output,
         };
 
         let block_number = executed_block.block.number;
@@ -400,8 +400,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         rx.await.unwrap();
 
         debug!(target: "make_canonical", block_number=?block_number, "block made canonical");
-
-        self.storage.update_canonical(block_number).await;
     }
 }
 

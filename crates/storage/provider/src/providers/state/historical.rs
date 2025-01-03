@@ -23,7 +23,7 @@ use reth_trie_db::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Debug,
+    fmt::Debug, sync::Arc,
 };
 
 /// State provider for a given block number which takes a tx reference.
@@ -316,6 +316,15 @@ impl<'b, TX: DbTx> StateRootProvider for HistoricalStateProviderRef<'b, TX> {
         input.prepend(self.revert_state()?);
         StateRoot::overlay_root_from_nodes_with_updates(self.tx, input)
             .map_err(|err| ProviderError::Database(err.into()))
+    }
+
+    fn state_root_with_updates_v2(
+        &self,
+        state: HashedPostState,
+        hashed_state_vec: Vec<Arc<HashedPostState>>,
+        trie_updates_vec:Vec<Arc<TrieUpdates>>,
+    ) -> ProviderResult<(B256,TrieUpdates)>  {
+        todo!()
     }
 }
 

@@ -2,11 +2,10 @@ pub mod block_view_storage;
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use reth_primitives::B256;
 use reth_revm::DatabaseRef;
 use reth_storage_api::errors::provider::ProviderError;
-use reth_trie::updates::TrieUpdates;
+use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::db::BundleState;
 
 use thiserror::Error;
@@ -36,26 +35,20 @@ impl std::fmt::Display for GravityStorageError {
     }
 }
 
-#[async_trait]
 pub trait GravityStorage: Send + Sync + 'static {
     type StateView: DatabaseRef<Error = ProviderError>;
 
-    async fn get_state_view(
+    fn get_state_view(
         &self,
         block_number: u64,
     ) -> Result<(B256, Self::StateView), GravityStorageError>;
 
-    async fn commit_state(&self, block_id: B256, block_number: u64, bundle_state: &BundleState);
+    fn insert_bundle_state(&self, block_id: B256, block_number: u64, bundle_state: &BundleState);
 
-    async fn insert_block_hash(&self, block_number: u64, block_hash: B256);
+    fn update_canonical(&self, block_number: u64, block_hash: B256); // gc
 
-    async fn block_hash_by_number(&self, block_number: u64) -> Result<B256, GravityStorageError>;
-
-    async fn update_canonical(&self, block_number: u64); // gc
-
-    async fn state_root_with_updates(
+    fn state_root_with_updates(
         &self,
         block_number: u64,
-        bundle_state: &BundleState,
-    ) -> Result<(B256, TrieUpdates), GravityStorageError>;
+    ) -> Result<(B256, Arc<HashedPostState>, Arc<TrieUpdates>), GravityStorageError>;
 }

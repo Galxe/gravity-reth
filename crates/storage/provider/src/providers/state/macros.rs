@@ -4,6 +4,9 @@
 /// A macro that delegates trait implementations to the `as_ref` function of the type.
 ///
 /// Used to implement provider traits.
+
+use std::sync::Arc;
+
 macro_rules! delegate_impls_to_as_ref {
     (for $target:ty => $($trait:ident $(where [$($generics:tt)*])? {  $(fn $func:ident$(<$($generic_arg:ident: $generic_arg_ty:path),*>)?(&self, $($arg:ident: $argty:ty),*) -> $ret:path;)* })* ) => {
 
@@ -46,6 +49,7 @@ macro_rules! delegate_provider_impls {
                 fn state_root_from_nodes(&self, input: reth_trie::TrieInput) -> reth_storage_errors::provider::ProviderResult<alloy_primitives::B256>;
                 fn state_root_with_updates(&self, state: reth_trie::HashedPostState) -> reth_storage_errors::provider::ProviderResult<(alloy_primitives::B256, reth_trie::updates::TrieUpdates)>;
                 fn state_root_from_nodes_with_updates(&self, input: reth_trie::TrieInput) -> reth_storage_errors::provider::ProviderResult<(alloy_primitives::B256, reth_trie::updates::TrieUpdates)>;
+                fn state_root_with_updates_v2(&self, state: HashedPostState, hashed_state_vec: Vec<Arc<HashedPostState>>, trie_updates_vec:Vec<Arc<TrieUpdates>>) -> ProviderResult<(B256,TrieUpdates)>;
             }
             StorageRootProvider $(where [$($generics)*])? {
                 fn storage_root(&self, address: alloy_primitives::Address, storage: reth_trie::HashedStorage) ->  reth_storage_errors::provider::ProviderResult<alloy_primitives::B256>;

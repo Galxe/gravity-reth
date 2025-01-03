@@ -8,7 +8,7 @@ use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof, TrieInput,
 };
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 /// A state provider that resolves to data from either a wrapped [`crate::ExecutionOutcome`]
 /// or an underlying state provider.
@@ -96,6 +96,15 @@ impl<SP: StateProvider, EDP: ExecutionDataProvider> StateRootProvider
         let bundle_state = self.block_execution_data_provider.execution_outcome().state();
         input.prepend(HashedPostState::from_bundle_state(&bundle_state.state));
         self.state_provider.state_root_from_nodes_with_updates(input)
+    }
+    
+    fn state_root_with_updates_v2(
+        &self,
+        state: HashedPostState,
+        hashed_state_vec: Vec<Arc<HashedPostState>>,
+        trie_updates_vec:Vec<Arc<TrieUpdates>>,
+    ) -> ProviderResult<(B256,TrieUpdates)>  {
+        todo!()
     }
 }
 

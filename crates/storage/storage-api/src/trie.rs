@@ -3,7 +3,7 @@ use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof, TrieInput,
 };
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 /// A type that can compute the state root of a given post state.
 #[auto_impl::auto_impl(&, Box, Arc)]
@@ -34,6 +34,13 @@ pub trait StateRootProvider: Send + Sync {
     fn state_root_from_nodes_with_updates(
         &self,
         input: TrieInput,
+    ) -> ProviderResult<(B256, TrieUpdates)>;
+
+    fn state_root_with_updates_v2(
+        &self,
+        state: HashedPostState,
+        hashed_state_vec: Vec<Arc<HashedPostState>>,
+        trie_updates_vec: Vec<Arc<TrieUpdates>>,
     ) -> ProviderResult<(B256, TrieUpdates)>;
 }
 
