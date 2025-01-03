@@ -193,12 +193,12 @@ impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, ordered_block: OrderedBlock) {
         let block_number = ordered_block.number;
         let block_id = ordered_block.id;
-
+        self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
         let parent_block_header = self.execute_block_barrier.wait(block_number - 1).await.unwrap();
         let (mut block, outcome) = self.execute_ordered_block(ordered_block, &parent_block_header);
-        self.storage.insert_bundle_state(block_id, block_number, &outcome.state);
+        self.storage.insert_bundle_state(block_number, &outcome.state);
         self.execute_block_barrier.notify(block_number, block.header.clone()).await.unwrap();
 
         let execution_outcome = self.calculate_roots(&mut block, outcome);

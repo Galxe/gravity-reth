@@ -43,7 +43,9 @@ pub trait GravityStorage: Send + Sync + 'static {
         block_number: u64,
     ) -> Result<(B256, Self::StateView), GravityStorageError>;
 
-    fn insert_bundle_state(&self, block_id: B256, block_number: u64, bundle_state: &BundleState);
+    fn insert_block_id(&self, block_number: u64, block_id: B256);
+
+    fn insert_bundle_state(&self, block_number: u64, bundle_state: &BundleState);
 
     fn update_canonical(&self, block_number: u64, block_hash: B256); // gc
 

@@ -87,7 +87,12 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         ))
     }
 
-    fn insert_bundle_state(&self, block_id: B256, block_number: u64, bundle_state: &BundleState) {
+    fn insert_block_id(&self, block_number: u64, block_id: B256) {
+         let mut storage = self.inner.lock().unwrap();
+        storage.block_number_to_id.insert(block_number, block_id);
+    }
+
+    fn insert_bundle_state(&self, block_number: u64, bundle_state: &BundleState) {
         let mut cached = CachedReads::default();
         for (addr, acc) in bundle_state.state().iter().map(|(a, acc)| (*a, acc)) {
             if let Some(info) = acc.info.clone() {
@@ -103,7 +108,6 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         storage
             .block_number_to_state
             .insert(block_number, Arc::new(HashedPostState::from_bundle_state(&bundle_state.state)));
-        storage.block_number_to_id.insert(block_number, block_id);
     }
 
     fn update_canonical(&self, block_number: u64, block_hash: B256) {
