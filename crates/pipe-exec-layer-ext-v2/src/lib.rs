@@ -197,18 +197,15 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
         let parent_block_header = self.execute_block_barrier.wait(block_number - 1).await.unwrap();
-        let (mut block, outcome) =
-            self.execute_ordered_block(ordered_block, &parent_block_header).await;
+        let (mut block, outcome) = self.execute_ordered_block(ordered_block, &parent_block_header);
         self.storage.insert_bundle_state(block_id, block_number, &outcome.state);
         self.execute_block_barrier.notify(block_number, block.header.clone()).await.unwrap();
 
         let execution_outcome = self.calculate_roots(&mut block, outcome);
 
         // Merkling the state trie
-        let (state_root, hashed_state, trie_output) = self
-            .storage
-            .state_root_with_updates(block_number)
-            .unwrap();
+        let (state_root, hashed_state, trie_output) =
+            self.storage.state_root_with_updates(block_number).unwrap();
         block.header.state_root = state_root;
 
         let parent_hash = self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
@@ -222,7 +219,14 @@ impl<Storage: GravityStorage> Core<Storage> {
         self.verify_executed_block_hash(ExecutedBlockMeta { block_id, block_hash }).await.unwrap();
 
         // Make the block canonical
-        self.make_canonical(block, execution_outcome, hashed_state, trie_output).await;
+        self.make_canonical(ExecutedBlock {
+            block: Arc::new(block.block),
+            senders: Arc::new(block.senders),
+            execution_output: Arc::new(execution_outcome),
+            hashed_state,
+            trie: trie_output,
+        })
+        .await;
         self.storage.update_canonical(block_number, block_hash);
         self.make_canonical_barrier.notify(block_number, block_hash).await;
     }
@@ -237,7 +241,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         Some(())
     }
 
-    async fn execute_ordered_block(
+    fn execute_ordered_block(
         &self,
         ordered_block: OrderedBlock,
         parent_header: &Header,
@@ -365,22 +369,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         execution_outcome
     }
 
-    async fn make_canonical(
-        &self,
-        sealed_block: SealedBlockWithSenders,
-        execution_outcome: ExecutionOutcome,
-        hashed_state: Arc<HashedPostState>,
-        trie_output: Arc<TrieUpdates>,
-    ) {
-        // create the executed block data
-        let executed_block = ExecutedBlock {
-            block: Arc::new(sealed_block.block),
-            senders: Arc::new(sealed_block.senders),
-            execution_output: Arc::new(execution_outcome),
-            hashed_state: hashed_state,
-            trie: trie_output,
-        };
-
+    async fn make_canonical(&self, executed_block: ExecutedBlock) {
         let block_number = executed_block.block.number;
         let payload: reth_rpc_types::ExecutionPayloadV3 =
             block_to_payload_v3(executed_block.block.as_ref().clone());
