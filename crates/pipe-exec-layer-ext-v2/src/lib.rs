@@ -278,6 +278,9 @@ impl<Storage: GravityStorage> Core<Storage> {
                         .unwrap_or(self.chain_spec.max_gas_limit),
                     difficulty: U256::ZERO,
                     excess_blob_gas: block_env.blob_excess_gas_and_price.map(|v| v.excess_blob_gas),
+                    // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root`
+                    // before execution?
+                    parent_beacon_block_root: Some(ordered_block.parent_id),
                     ..Default::default()
                 },
                 body: ordered_block.transactions,
