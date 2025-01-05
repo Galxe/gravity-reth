@@ -206,6 +206,12 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Merkling the state trie
         let (state_root, hashed_state, trie_output) =
             self.storage.state_root_with_updates(block_number).unwrap();
+        debug!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            state_root=?state_root,
+            "state trie merklized"
+        );
         block.header.state_root = state_root;
 
         let parent_hash = self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
@@ -214,9 +220,21 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Seal the block
         let block = block.seal_slow();
         let block_hash = block.hash();
+        debug!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            block_hash=?block_hash,
+            "block sealed"
+        );
 
         // Commit the executed block hash to Coordinator
         self.verify_executed_block_hash(ExecutedBlockMeta { block_id, block_hash }).await.unwrap();
+        debug!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            block_hash=?block_hash,
+            "block verified"
+        );
 
         // Make the block canonical
         self.make_canonical(ExecutedBlock {
