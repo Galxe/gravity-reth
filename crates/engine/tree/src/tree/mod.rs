@@ -664,11 +664,11 @@ where
                 self.state.tree_state.insert_executed(block);
                 tx.send(()).unwrap();
             }
-            PipeExecLayerEvent::MakeCanonical(payload, tx) => {
+            PipeExecLayerEvent::MakeCanonical(payload, cancun_fields, tx) => {
                 let block_number = payload.block_number();
                 let block_hash = payload.block_hash();
                 debug!(target: "on_pipe_exec_event", block_number = %block_number, block_hash = %block_hash, "Received make canonical event");
-                self.on_new_payload(payload, None).unwrap_or_else(|err| {
+                self.on_new_payload(payload, cancun_fields).unwrap_or_else(|err| {
                     panic!(
                         "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
                     )

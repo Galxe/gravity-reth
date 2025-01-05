@@ -11,11 +11,10 @@ use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{
     constants::{BEACON_NONCE, EMPTY_WITHDRAWALS},
-    proofs, Address, Block, BlockWithSenders, Header, Receipt, SealedBlockWithSenders,
-    TransactionSigned, Withdrawals, EMPTY_OMMER_ROOT_HASH, U256,
+    proofs, Address, Block, BlockWithSenders, Header, Receipt, TransactionSigned, Withdrawals,
+    EMPTY_OMMER_ROOT_HASH, U256,
 };
-use reth_rpc_types::ExecutionPayload;
-use reth_trie::{updates::TrieUpdates, HashedPostState};
+use reth_rpc_types::{engine::CancunPayloadFields, ExecutionPayload};
 use revm::State;
 use std::sync::Arc;
 
@@ -60,7 +59,7 @@ pub enum PipeExecLayerEvent {
     /// Insert executed block to state tree
     InsertExecutedBlock(ExecutedBlock, oneshot::Sender<()>),
     /// Make executed block canonical
-    MakeCanonical(ExecutionPayload, oneshot::Sender<()>),
+    MakeCanonical(ExecutionPayload, Option<CancunPayloadFields>, oneshot::Sender<()>),
 }
 
 /// Owned by EL
@@ -296,9 +295,6 @@ impl<Storage: GravityStorage> Core<Storage> {
                         .unwrap_or(self.chain_spec.max_gas_limit),
                     difficulty: U256::ZERO,
                     excess_blob_gas: block_env.blob_excess_gas_and_price.map(|v| v.excess_blob_gas),
-                    // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root`
-                    // before execution?
-                    parent_beacon_block_root: Some(ordered_block.parent_id),
                     ..Default::default()
                 },
                 body: ordered_block.transactions,
@@ -320,6 +316,9 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // only determine cancun fields when active
         if self.chain_spec.is_cancun_active_at_timestamp(block.timestamp) {
+            // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
+            // execution?
+            block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
             let mut blob_gas_used: u64 = 0;
             for tx in &block.body {
                 if let Some(blob_tx) = tx.transaction.as_eip4844() {
@@ -394,6 +393,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         let block_number = executed_block.block.number;
         let payload: reth_rpc_types::ExecutionPayloadV3 =
             block_to_payload_v3(executed_block.block.as_ref().clone());
+        let cancun_fields =
+            executed_block.block.header.parent_beacon_block_root.map(|parent_beacon_block_root| {
+                CancunPayloadFields { parent_beacon_block_root, versioned_hashes: vec![] }
+            });
 
         // Insert executed block to state tree
         let (tx, rx) = oneshot::channel();
@@ -405,7 +408,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Make executed block canonical
         let (tx, rx) = oneshot::channel();
         self.event_tx
-            .send(PipeExecLayerEvent::MakeCanonical(ExecutionPayload::from(payload), tx))
+            .send(PipeExecLayerEvent::MakeCanonical(
+                ExecutionPayload::from(payload),
+                cancun_fields,
+                tx,
+            ))
             .unwrap();
         rx.await.unwrap();
 
