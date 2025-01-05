@@ -309,7 +309,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         }
 
         let (block_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
-        assert_eq!(block_id, ordered_block.id);
+        assert_eq!(block_id, ordered_block.parent_id);
         let db = State::builder().with_database_ref(state).with_bundle_update().build();
 
         let executor_provider =
