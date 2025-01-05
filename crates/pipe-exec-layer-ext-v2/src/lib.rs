@@ -308,8 +308,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.header.blob_gas_used = Some(blob_gas_used);
         }
 
-        let (block_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
-        assert_eq!(block_id, ordered_block.parent_id);
+        let (parent_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
+        assert_eq!(parent_id, ordered_block.parent_id);
         let db = State::builder().with_database_ref(state).with_bundle_update().build();
 
         let executor_provider =
