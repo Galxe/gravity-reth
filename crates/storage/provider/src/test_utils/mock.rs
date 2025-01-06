@@ -612,6 +612,16 @@ impl StateRootProvider for MockEthProvider {
         let state_root = self.state_roots.lock().pop().unwrap_or_default();
         Ok((state_root, Default::default()))
     }
+
+    fn state_root_with_updates_v2(
+        &self,
+        _state: HashedPostState,
+        _hashed_state_vec: Vec<Arc<HashedPostState>>,
+        _trie_updates_vec: Vec<Arc<TrieUpdates>>,
+    ) -> ProviderResult<(B256, TrieUpdates)> {
+        let state_root = self.state_roots.lock().pop().unwrap_or_default();
+        Ok((state_root, Default::default()))
+    }
 }
 
 impl StorageRootProvider for MockEthProvider {

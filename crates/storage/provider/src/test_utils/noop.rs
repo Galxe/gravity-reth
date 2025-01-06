@@ -346,6 +346,15 @@ impl StateRootProvider for NoopProvider {
     ) -> ProviderResult<(B256, TrieUpdates)> {
         Ok((B256::default(), TrieUpdates::default()))
     }
+
+    fn state_root_with_updates_v2(
+        &self,
+        _state: HashedPostState,
+        _hashed_states: Vec<Arc<HashedPostState>>,
+        _trie_updates: Vec<Arc<TrieUpdates>>,
+    ) -> ProviderResult<(B256, TrieUpdates)> {
+        Ok((B256::default(), TrieUpdates::default()))
+    }
 }
 
 impl StorageRootProvider for NoopProvider {
