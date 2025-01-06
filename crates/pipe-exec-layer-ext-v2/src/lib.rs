@@ -11,11 +11,10 @@ use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{
     constants::{BEACON_NONCE, EMPTY_WITHDRAWALS},
-    proofs, Address, Block, BlockWithSenders, Header, Receipt, SealedBlockWithSenders,
-    TransactionSigned, Withdrawals, EMPTY_OMMER_ROOT_HASH, U256,
+    proofs, Address, Block, BlockWithSenders, Header, Receipt, TransactionSigned, Withdrawals,
+    EMPTY_OMMER_ROOT_HASH, U256,
 };
-use reth_rpc_types::ExecutionPayload;
-use reth_trie::{updates::TrieUpdates, HashedPostState};
+use reth_rpc_types::{engine::CancunPayloadFields, ExecutionPayload};
 use revm::State;
 use std::sync::Arc;
 
@@ -60,7 +59,7 @@ pub enum PipeExecLayerEvent {
     /// Insert executed block to state tree
     InsertExecutedBlock(ExecutedBlock, oneshot::Sender<()>),
     /// Make executed block canonical
-    MakeCanonical(ExecutionPayload, oneshot::Sender<()>),
+    MakeCanonical(ExecutionPayload, Option<CancunPayloadFields>, oneshot::Sender<()>),
 }
 
 /// Owned by EL
@@ -206,6 +205,12 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Merkling the state trie
         let (state_root, hashed_state, trie_output) =
             self.storage.state_root_with_updates(block_number).unwrap();
+        debug!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            state_root=?state_root,
+            "state trie merklized"
+        );
         block.header.state_root = state_root;
 
         let parent_hash = self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
@@ -214,9 +219,21 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Seal the block
         let block = block.seal_slow();
         let block_hash = block.hash();
+        debug!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            block_hash=?block_hash,
+            "block sealed"
+        );
 
         // Commit the executed block hash to Coordinator
         self.verify_executed_block_hash(ExecutedBlockMeta { block_id, block_hash }).await.unwrap();
+        debug!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            block_hash=?block_hash,
+            "block verified"
+        );
 
         // Make the block canonical
         self.make_canonical(ExecutedBlock {
@@ -299,6 +316,9 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // only determine cancun fields when active
         if self.chain_spec.is_cancun_active_at_timestamp(block.timestamp) {
+            // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
+            // execution?
+            block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
             let mut blob_gas_used: u64 = 0;
             for tx in &block.body {
                 if let Some(blob_tx) = tx.transaction.as_eip4844() {
@@ -308,8 +328,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.header.blob_gas_used = Some(blob_gas_used);
         }
 
-        let (block_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
-        assert_eq!(block_id, ordered_block.parent_id);
+        let (parent_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
+        assert_eq!(parent_id, ordered_block.parent_id);
         let db = State::builder().with_database_ref(state).with_bundle_update().build();
 
         let executor_provider =
@@ -373,6 +393,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         let block_number = executed_block.block.number;
         let payload: reth_rpc_types::ExecutionPayloadV3 =
             block_to_payload_v3(executed_block.block.as_ref().clone());
+        let cancun_fields =
+            executed_block.block.header.parent_beacon_block_root.map(|parent_beacon_block_root| {
+                CancunPayloadFields { parent_beacon_block_root, versioned_hashes: vec![] }
+            });
 
         // Insert executed block to state tree
         let (tx, rx) = oneshot::channel();
@@ -384,7 +408,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Make executed block canonical
         let (tx, rx) = oneshot::channel();
         self.event_tx
-            .send(PipeExecLayerEvent::MakeCanonical(ExecutionPayload::from(payload), tx))
+            .send(PipeExecLayerEvent::MakeCanonical(
+                ExecutionPayload::from(payload),
+                cancun_fields,
+                tx,
+            ))
             .unwrap();
         rx.await.unwrap();
 
