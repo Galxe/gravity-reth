@@ -14,14 +14,12 @@ use reth_primitives::{
     proofs, Address, Block, BlockWithSenders, Header, Receipt, TransactionSigned, Withdrawals,
     EMPTY_OMMER_ROOT_HASH, U256,
 };
-use reth_rpc_types::{engine::CancunPayloadFields, ExecutionPayload};
 use revm::State;
 use std::sync::Arc;
 
 use once_cell::sync::OnceCell;
 
 use gravity_storage::GravityStorage;
-use reth_rpc_types_compat::engine::payload::block_to_payload_v3;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot, Mutex,
@@ -78,7 +76,7 @@ struct Core<Storage: GravityStorage> {
     storage: Storage,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
-    event_tx: UnboundedSender<PipeExecLayerEvent>,
+    event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent>,
     execute_block_barrier: PipeBarrier<Header>,
     make_canonical_barrier: PipeBarrier<B256 /* block hash */>,
 }
@@ -440,7 +438,7 @@ impl PipeExecLayerApi {
 #[derive(Debug)]
 pub struct PipeExecLayerExt {
     /// Receive events from PipeExecService
-    pub event_rx: Mutex<UnboundedReceiver<PipeExecLayerEvent>>,
+    pub event_rx: std::sync::Mutex<std::sync::mpsc::Receiver<PipeExecLayerEvent>>,
 }
 
 /// A static instance of `PipeExecLayerExt` used for dispatching events.
@@ -456,7 +454,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (executed_block_hash_tx, executed_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
     let (verified_block_hash_tx, verified_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
 
     let latest_block_number = latest_block_header.number;
     let service = PipeExecService {
@@ -474,7 +472,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     };
     tokio::spawn(service.run(latest_block_number));
 
-    PIPE_EXEC_LAYER_EXT.get_or_init(|| PipeExecLayerExt { event_rx: Mutex::new(event_rx) });
+    PIPE_EXEC_LAYER_EXT.get_or_init(|| PipeExecLayerExt { event_rx: event_rx.into() });
 
     PipeExecLayerApi {
         ordered_block_tx,

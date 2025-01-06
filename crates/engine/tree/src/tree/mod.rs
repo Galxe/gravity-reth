@@ -632,28 +632,20 @@ where
         pipe_exec_layer_ext: &PipeExecLayerExtV2,
     ) -> Result<Option<PipeExecLayerEvent>, RecvError> {
         if self.persistence_state.in_progress() {
-            let mut waited_time_ms = 0;
-            loop {
-                match pipe_exec_layer_ext.event_rx.blocking_lock().try_recv() {
-                    Ok(event) => return Ok(Some(event)),
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        if waited_time_ms > 500 {
-                            // timeout
-                            return Ok(None);
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        waited_time_ms += 10;
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => return Err(RecvError),
-                }
+            match pipe_exec_layer_ext
+                .event_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_millis(500))
+            {
+                Ok(event) => return Ok(Some(event)),
+                Err(err) => match err {
+                    RecvTimeoutError::Timeout => Ok(None),
+                    RecvTimeoutError::Disconnected => Err(RecvError),
+                },
             }
         } else {
-            let event = pipe_exec_layer_ext.event_rx.blocking_lock().blocking_recv();
-            if event.is_some() {
-                Ok(event)
-            } else {
-                Err(RecvError)
-            }
+            pipe_exec_layer_ext.event_rx.lock().unwrap().recv().map(Some)
         }
     }
 
