@@ -659,23 +659,44 @@ where
 
     fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent) {
         match event {
-            PipeExecLayerEvent::InsertExecutedBlock(block, tx) => {
-                debug!(target: "on_pipe_exec_event", block_number = %block.block().number, block_hash = %block.block().hash(), "Received insert executed block event");
-                self.state.tree_state.insert_executed(block);
-                tx.send(()).unwrap();
-            }
-            PipeExecLayerEvent::MakeCanonical(payload, cancun_fields, tx) => {
-                let block_number = payload.block_number();
-                let block_hash = payload.block_hash();
-                debug!(target: "on_pipe_exec_event", block_number = %block_number, block_hash = %block_hash, "Received make canonical event");
-                self.on_new_payload(payload, cancun_fields).unwrap_or_else(|err| {
-                    panic!(
-                        "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
-                    )
-                });
+            PipeExecLayerEvent::MakeCanonical(block, tx) => {
+                debug!(target: "on_pipe_exec_event", block_number=%block.block.number, block_hash=%block.block.hash(), "Received make canonical event");
+                self.make_executed_block_canonical(block);
                 tx.send(()).unwrap();
             }
         }
+    }
+
+    fn make_executed_block_canonical(&mut self, block: ExecutedBlock) {
+        let block_number = block.block.number;
+        let block_hash = block.block.hash();
+
+        {
+            let block: SealedBlock = block.block.as_ref().clone();
+            let block = block.seal_with_senders().unwrap_or_else(|| {
+                panic!(
+                    "Failed to recover transaction senders, block_number={block_number} block_hash={block_hash:?}",
+                )
+            });
+            self.validate_block(&block).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to validate block, block_number={block_number} block_hash={block_hash:?}: {err}",
+                )
+            });
+        }
+
+        self.state.tree_state.insert_executed(block);
+
+        assert!(
+            self.is_sync_target_head(block_hash),
+            "block_number={block_number} block_hash={block_hash:?}"
+        );
+
+        self.make_canonical(block_hash, Some(block_hash)).unwrap_or_else(|err| {
+            panic!(
+                "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
+            )
+        });
     }
 
     /// Returns a new [`Sender`] to send messages to this type.

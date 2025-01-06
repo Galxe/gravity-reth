@@ -56,10 +56,8 @@ pub struct OrderedBlock {
 
 #[derive(Debug)]
 pub enum PipeExecLayerEvent {
-    /// Insert executed block to state tree
-    InsertExecutedBlock(ExecutedBlock, oneshot::Sender<()>),
     /// Make executed block canonical
-    MakeCanonical(ExecutionPayload, Option<CancunPayloadFields>, oneshot::Sender<()>),
+    MakeCanonical(ExecutedBlock, oneshot::Sender<()>),
 }
 
 /// Owned by EL
@@ -398,29 +396,10 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     async fn make_canonical(&self, executed_block: ExecutedBlock) {
         let block_number = executed_block.block.number;
-        let payload: reth_rpc_types::ExecutionPayloadV3 =
-            block_to_payload_v3(executed_block.block.as_ref().clone());
-        let cancun_fields =
-            executed_block.block.header.parent_beacon_block_root.map(|parent_beacon_block_root| {
-                CancunPayloadFields { parent_beacon_block_root, versioned_hashes: vec![] }
-            });
-
-        // Insert executed block to state tree
-        let (tx, rx) = oneshot::channel();
-        self.event_tx.send(PipeExecLayerEvent::InsertExecutedBlock(executed_block, tx)).unwrap();
-        rx.await.unwrap();
-
-        debug!(target: "make_canonical", block_number=?block_number, "block inserted");
 
         // Make executed block canonical
         let (tx, rx) = oneshot::channel();
-        self.event_tx
-            .send(PipeExecLayerEvent::MakeCanonical(
-                ExecutionPayload::from(payload),
-                cancun_fields,
-                tx,
-            ))
-            .unwrap();
+        self.event_tx.send(PipeExecLayerEvent::MakeCanonical(executed_block, tx)).unwrap();
         rx.await.unwrap();
 
         debug!(target: "make_canonical", block_number=?block_number, "block made canonical");
