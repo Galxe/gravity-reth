@@ -192,6 +192,13 @@ impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, ordered_block: OrderedBlock) {
         let block_number = ordered_block.number;
         let block_id = ordered_block.id;
+        debug!(target: "PipeExecService.process",
+            id=?block_id,
+            parent_id=?ordered_block.parent_id,
+            number=?block_number,
+            "new ordered block"
+        );
+
         self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
@@ -267,7 +274,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             id=?ordered_block.id,
             parent_id=?ordered_block.parent_id,
             number=?ordered_block.number,
-            "new ordered block"
+            "ready to execute block"
         );
 
         let (_, block_env) = self.evm_config.next_cfg_and_block_env(
