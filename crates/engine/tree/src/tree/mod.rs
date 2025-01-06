@@ -5,8 +5,8 @@ use crate::{
     persistence::PersistenceHandle,
 };
 use reth_beacon_consensus::{
-    BeaconConsensusEngineEvent, BeaconEngineMessage, ForkchoiceStateTracker, InvalidHeaderCache,
-    OnForkChoiceUpdated, MIN_BLOCKS_FOR_PIPELINE_RUN,
+    BeaconConsensusEngineEvent, BeaconEngineMessage, ForkchoiceStateTracker, ForkchoiceStatus,
+    InvalidHeaderCache, OnForkChoiceUpdated, MIN_BLOCKS_FOR_PIPELINE_RUN,
 };
 use reth_blockchain_tree::{
     error::{InsertBlockErrorKindTwo, InsertBlockErrorTwo, InsertBlockFatalError},
@@ -687,9 +687,13 @@ where
 
         self.state.tree_state.insert_executed(block);
 
-        assert!(
-            self.is_sync_target_head(block_hash),
-            "block_number={block_number} block_hash={block_hash:?}"
+        self.state.forkchoice_state_tracker.set_latest(
+            ForkchoiceState {
+                head_block_hash: block_hash,
+                safe_block_hash: block_hash,
+                finalized_block_hash: block_hash,
+            },
+            ForkchoiceStatus::Valid,
         );
 
         self.make_canonical(block_hash, Some(block_hash)).unwrap_or_else(|err| {
