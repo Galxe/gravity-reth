@@ -14,14 +14,12 @@ use reth_primitives::{
     proofs, Address, Block, BlockWithSenders, Header, Receipt, TransactionSigned, Withdrawals,
     EMPTY_OMMER_ROOT_HASH, U256,
 };
-use reth_rpc_types::{engine::CancunPayloadFields, ExecutionPayload};
 use revm::State;
 use std::sync::Arc;
 
 use once_cell::sync::OnceCell;
 
 use gravity_storage::GravityStorage;
-use reth_rpc_types_compat::engine::payload::block_to_payload_v3;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot, Mutex,
@@ -56,10 +54,8 @@ pub struct OrderedBlock {
 
 #[derive(Debug)]
 pub enum PipeExecLayerEvent {
-    /// Insert executed block to state tree
-    InsertExecutedBlock(ExecutedBlock, oneshot::Sender<()>),
     /// Make executed block canonical
-    MakeCanonical(ExecutionPayload, Option<CancunPayloadFields>, oneshot::Sender<()>),
+    MakeCanonical(ExecutedBlock, oneshot::Sender<()>),
 }
 
 /// Owned by EL
@@ -80,7 +76,7 @@ struct Core<Storage: GravityStorage> {
     storage: Storage,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
-    event_tx: UnboundedSender<PipeExecLayerEvent>,
+    event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent>,
     execute_block_barrier: PipeBarrier<Header>,
     make_canonical_barrier: PipeBarrier<B256 /* block hash */>,
 }
@@ -192,6 +188,13 @@ impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, ordered_block: OrderedBlock) {
         let block_number = ordered_block.number;
         let block_id = ordered_block.id;
+        debug!(target: "PipeExecService.process",
+            id=?block_id,
+            parent_id=?ordered_block.parent_id,
+            number=?block_number,
+            "new ordered block"
+        );
+
         self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
@@ -267,7 +270,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             id=?ordered_block.id,
             parent_id=?ordered_block.parent_id,
             number=?ordered_block.number,
-            "new ordered block"
+            "ready to execute block"
         );
 
         let (_, block_env) = self.evm_config.next_cfg_and_block_env(
@@ -391,29 +394,10 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     async fn make_canonical(&self, executed_block: ExecutedBlock) {
         let block_number = executed_block.block.number;
-        let payload: reth_rpc_types::ExecutionPayloadV3 =
-            block_to_payload_v3(executed_block.block.as_ref().clone());
-        let cancun_fields =
-            executed_block.block.header.parent_beacon_block_root.map(|parent_beacon_block_root| {
-                CancunPayloadFields { parent_beacon_block_root, versioned_hashes: vec![] }
-            });
-
-        // Insert executed block to state tree
-        let (tx, rx) = oneshot::channel();
-        self.event_tx.send(PipeExecLayerEvent::InsertExecutedBlock(executed_block, tx)).unwrap();
-        rx.await.unwrap();
-
-        debug!(target: "make_canonical", block_number=?block_number, "block inserted");
 
         // Make executed block canonical
         let (tx, rx) = oneshot::channel();
-        self.event_tx
-            .send(PipeExecLayerEvent::MakeCanonical(
-                ExecutionPayload::from(payload),
-                cancun_fields,
-                tx,
-            ))
-            .unwrap();
+        self.event_tx.send(PipeExecLayerEvent::MakeCanonical(executed_block, tx)).unwrap();
         rx.await.unwrap();
 
         debug!(target: "make_canonical", block_number=?block_number, "block made canonical");
@@ -454,7 +438,7 @@ impl PipeExecLayerApi {
 #[derive(Debug)]
 pub struct PipeExecLayerExt {
     /// Receive events from PipeExecService
-    pub event_rx: Mutex<UnboundedReceiver<PipeExecLayerEvent>>,
+    pub event_rx: std::sync::Mutex<std::sync::mpsc::Receiver<PipeExecLayerEvent>>,
 }
 
 /// A static instance of `PipeExecLayerExt` used for dispatching events.
@@ -470,7 +454,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (executed_block_hash_tx, executed_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
     let (verified_block_hash_tx, verified_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
 
     let latest_block_number = latest_block_header.number;
     let service = PipeExecService {
@@ -488,7 +472,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     };
     tokio::spawn(service.run(latest_block_number));
 
-    PIPE_EXEC_LAYER_EXT.get_or_init(|| PipeExecLayerExt { event_rx: Mutex::new(event_rx) });
+    PIPE_EXEC_LAYER_EXT.get_or_init(|| PipeExecLayerExt { event_rx: event_rx.into() });
 
     PipeExecLayerApi {
         ordered_block_tx,

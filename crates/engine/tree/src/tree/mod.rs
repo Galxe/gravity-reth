@@ -5,8 +5,8 @@ use crate::{
     persistence::PersistenceHandle,
 };
 use reth_beacon_consensus::{
-    BeaconConsensusEngineEvent, BeaconEngineMessage, ForkchoiceStateTracker, InvalidHeaderCache,
-    OnForkChoiceUpdated, MIN_BLOCKS_FOR_PIPELINE_RUN,
+    BeaconConsensusEngineEvent, BeaconEngineMessage, ForkchoiceStateTracker, ForkchoiceStatus,
+    InvalidHeaderCache, OnForkChoiceUpdated, MIN_BLOCKS_FOR_PIPELINE_RUN,
 };
 use reth_blockchain_tree::{
     error::{InsertBlockErrorKindTwo, InsertBlockErrorTwo, InsertBlockFatalError},
@@ -632,50 +632,67 @@ where
         pipe_exec_layer_ext: &PipeExecLayerExtV2,
     ) -> Result<Option<PipeExecLayerEvent>, RecvError> {
         if self.persistence_state.in_progress() {
-            let mut waited_time_ms = 0;
-            loop {
-                match pipe_exec_layer_ext.event_rx.blocking_lock().try_recv() {
-                    Ok(event) => return Ok(Some(event)),
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        if waited_time_ms > 500 {
-                            // timeout
-                            return Ok(None);
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        waited_time_ms += 10;
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => return Err(RecvError),
-                }
+            match pipe_exec_layer_ext
+                .event_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_millis(500))
+            {
+                Ok(event) => return Ok(Some(event)),
+                Err(err) => match err {
+                    RecvTimeoutError::Timeout => Ok(None),
+                    RecvTimeoutError::Disconnected => Err(RecvError),
+                },
             }
         } else {
-            let event = pipe_exec_layer_ext.event_rx.blocking_lock().blocking_recv();
-            if event.is_some() {
-                Ok(event)
-            } else {
-                Err(RecvError)
-            }
+            pipe_exec_layer_ext.event_rx.lock().unwrap().recv().map(Some)
         }
     }
 
     fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent) {
         match event {
-            PipeExecLayerEvent::InsertExecutedBlock(block, tx) => {
-                debug!(target: "on_pipe_exec_event", block_number = %block.block().number, block_hash = %block.block().hash(), "Received insert executed block event");
-                self.state.tree_state.insert_executed(block);
-                tx.send(()).unwrap();
-            }
-            PipeExecLayerEvent::MakeCanonical(payload, cancun_fields, tx) => {
-                let block_number = payload.block_number();
-                let block_hash = payload.block_hash();
-                debug!(target: "on_pipe_exec_event", block_number = %block_number, block_hash = %block_hash, "Received make canonical event");
-                self.on_new_payload(payload, cancun_fields).unwrap_or_else(|err| {
-                    panic!(
-                        "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
-                    )
-                });
+            PipeExecLayerEvent::MakeCanonical(block, tx) => {
+                debug!(target: "on_pipe_exec_event", block_number=%block.block.number, block_hash=%block.block.hash(), "Received make canonical event");
+                self.make_executed_block_canonical(block);
                 tx.send(()).unwrap();
             }
         }
+    }
+
+    fn make_executed_block_canonical(&mut self, block: ExecutedBlock) {
+        let block_number = block.block.number;
+        let block_hash = block.block.hash();
+
+        {
+            let block: SealedBlock = block.block.as_ref().clone();
+            let block = block.seal_with_senders().unwrap_or_else(|| {
+                panic!(
+                    "Failed to recover transaction senders, block_number={block_number} block_hash={block_hash:?}",
+                )
+            });
+            self.validate_block(&block).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to validate block, block_number={block_number} block_hash={block_hash:?}: {err}",
+                )
+            });
+        }
+
+        self.state.tree_state.insert_executed(block);
+
+        self.state.forkchoice_state_tracker.set_latest(
+            ForkchoiceState {
+                head_block_hash: block_hash,
+                safe_block_hash: block_hash,
+                finalized_block_hash: block_hash,
+            },
+            ForkchoiceStatus::Valid,
+        );
+
+        self.make_canonical(block_hash, Some(block_hash)).unwrap_or_else(|err| {
+            panic!(
+                "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
+            )
+        });
     }
 
     /// Returns a new [`Sender`] to send messages to this type.

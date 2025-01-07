@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::precompile::HashMap;
 use alloc::vec::Vec;
@@ -91,6 +91,15 @@ impl StateRootProvider for StateProviderTest {
         _input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
         unimplemented!("state root computation is not supported")
+    }
+
+    fn state_root_with_updates_v2(
+        &self,
+        _state: HashedPostState,
+        _hashed_state_vec: Vec<Arc<HashedPostState>>,
+        _trie_updates_vec: Vec<Arc<TrieUpdates>>,
+    ) -> ProviderResult<(B256, TrieUpdates)> {
+        todo!()
     }
 }
 
