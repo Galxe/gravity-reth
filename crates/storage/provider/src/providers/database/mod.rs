@@ -37,6 +37,8 @@ use tracing::trace;
 mod provider;
 pub use provider::{DatabaseProvider, DatabaseProviderRO, DatabaseProviderRW};
 
+mod parallel_provider;
+
 use super::ProviderNodeTypes;
 
 mod metrics;
