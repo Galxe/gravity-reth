@@ -23,7 +23,7 @@ use reth_primitives::{
 };
 use reth_prune_types::{PruneCheckpoint, PruneModes, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
-use reth_storage_api::TryIntoHistoricalStateProvider;
+use reth_storage_api::{StateProviderOptions, TryIntoHistoricalStateProvider};
 use reth_storage_errors::provider::ProviderResult;
 use revm::primitives::{BlockEnv, CfgEnvWithHandlerCfg};
 use std::{
@@ -38,6 +38,7 @@ mod provider;
 pub use provider::{DatabaseProvider, DatabaseProviderRO, DatabaseProviderRW};
 
 mod parallel_provider;
+use parallel_provider::ParallelStateProvider;
 
 use super::ProviderNodeTypes;
 
@@ -166,21 +167,30 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     pub fn history_by_block_number(
         &self,
         block_number: BlockNumber,
+        opts: StateProviderOptions,
     ) -> ProviderResult<StateProviderBox> {
-        let state_provider = self.provider()?.try_into_history_at_block(block_number)?;
+        let state_provider = if opts.parallel.get() > 1 {
+            Box::new(ParallelStateProvider::try_new(&self, block_number, opts.parallel.get())?)
+        } else {
+            self.provider()?.try_into_history_at_block(block_number)?
+        };
         trace!(target: "providers::db", ?block_number, "Returning historical state provider for block number");
         Ok(state_provider)
     }
 
     /// Storage provider for state at that given block hash
-    pub fn history_by_block_hash(&self, block_hash: BlockHash) -> ProviderResult<StateProviderBox> {
+    pub fn history_by_block_hash(
+        &self,
+        block_hash: BlockHash,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         let provider = self.provider()?;
 
         let block_number = provider
             .block_number(block_hash)?
             .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
 
-        let state_provider = self.provider()?.try_into_history_at_block(block_number)?;
+        let state_provider = self.history_by_block_number(block_number, opts)?;
         trace!(target: "providers::db", ?block_number, %block_hash, "Returning historical state provider for block hash");
         Ok(state_provider)
     }

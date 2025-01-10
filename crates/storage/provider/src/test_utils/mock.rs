@@ -24,7 +24,8 @@ use reth_primitives::{
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
-    DatabaseProviderFactory, StageCheckpointReader, StateProofProvider, StorageRootProvider,
+    DatabaseProviderFactory, StageCheckpointReader, StateProofProvider, StateProviderOptions,
+    StorageRootProvider,
 };
 use reth_storage_errors::provider::{ConsistentViewError, ProviderError, ProviderResult};
 use reth_trie::{
@@ -745,11 +746,19 @@ impl StateProviderFactory for MockEthProvider {
         Ok(Box::new(self.clone()))
     }
 
-    fn history_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
-    fn state_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -783,7 +792,11 @@ impl StateProviderFactory for MockEthProvider {
         Ok(Box::new(self.clone()))
     }
 
-    fn pending_state_by_hash(&self, _block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+    fn pending_state_by_hash_with_opts(
+        &self,
+        _block_hash: B256,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<Option<StateProviderBox>> {
         Ok(Some(Box::new(self.clone())))
     }
 }

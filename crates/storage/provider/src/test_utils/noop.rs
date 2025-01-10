@@ -24,7 +24,7 @@ use reth_primitives::{
 };
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
-use reth_storage_api::{StateProofProvider, StorageRootProvider};
+use reth_storage_api::{StateProofProvider, StateProviderOptions, StorageRootProvider};
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof, TrieInput,
@@ -469,11 +469,19 @@ impl StateProviderFactory for NoopProvider {
         Ok(Box::new(*self))
     }
 
-    fn history_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(*self))
     }
 
-    fn state_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(*self))
     }
 
@@ -507,7 +515,11 @@ impl StateProviderFactory for NoopProvider {
         }
     }
 
-    fn pending_state_by_hash(&self, _block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+    fn pending_state_by_hash_with_opts(
+        &self,
+        _block_hash: B256,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<Option<StateProviderBox>> {
         Ok(Some(Box::new(*self)))
     }
 }

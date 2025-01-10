@@ -4,8 +4,9 @@ use crate::{
     CanonStateSubscriptions, ChainSpecProvider, ChangeSetReader, DatabaseProviderFactory,
     DatabaseProviderRO, EvmEnvProvider, FinalizedBlockReader, HeaderProvider, ProviderError,
     ProviderFactory, PruneCheckpointReader, ReceiptProvider, ReceiptProviderIdExt,
-    RequestsProvider, StageCheckpointReader, StateProviderBox, StateProviderFactory, StateReader,
-    StaticFileProviderFactory, TransactionVariant, TransactionsProvider, WithdrawalsProvider,
+    RequestsProvider, StageCheckpointReader, StateProviderBox, StateProviderFactory,
+    StateProviderOptions, StateReader, StaticFileProviderFactory, TransactionVariant,
+    TransactionsProvider, WithdrawalsProvider,
 };
 use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumHash, BlockNumberOrTag};
 use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256};
@@ -173,10 +174,11 @@ impl<N: ProviderNodeTypes> BlockchainProvider2<N> {
     fn block_state_provider(
         &self,
         state: impl AsRef<BlockState>,
+        opts: StateProviderOptions,
     ) -> ProviderResult<MemoryOverlayStateProvider> {
         let state = state.as_ref();
         let anchor_hash = state.anchor().hash;
-        let latest_historical = self.database.history_by_block_hash(anchor_hash)?;
+        let latest_historical = self.database.history_by_block_hash(anchor_hash, opts)?;
         Ok(self.canonical_in_memory_state.state_provider(state.hash(), latest_historical))
     }
 
@@ -1083,7 +1085,7 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider2<N> {
         // use latest state provider if the head state exists
         if let Some(state) = self.canonical_in_memory_state.head_state() {
             trace!(target: "providers::blockchain", "Using head state for latest state provider");
-            Ok(self.block_state_provider(state)?.boxed())
+            Ok(self.block_state_provider(state, Default::default())?.boxed())
         } else {
             trace!(target: "providers::blockchain", "Using database state for latest state provider");
             self.database.latest()
@@ -1102,14 +1104,18 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider2<N> {
         self.history_by_block_hash(hash)
     }
 
-    fn history_by_block_hash(&self, block_hash: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash_with_opts(
+        &self,
+        block_hash: BlockHash,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?block_hash, "Getting history by block hash");
-        if let Ok(state) = self.database.history_by_block_hash(block_hash) {
+        if let Ok(state) = self.database.history_by_block_hash(block_hash, opts.clone()) {
             // This could be tracked by a block in the database block
             Ok(state)
         } else if let Some(state) = self.canonical_in_memory_state.state_by_hash(block_hash) {
             // ... or this could be tracked by the in memory state
-            let state_provider = self.block_state_provider(state)?;
+            let state_provider = self.block_state_provider(state, opts)?;
             Ok(Box::new(state_provider))
         } else {
             // if we couldn't find it anywhere, then we should return an error
@@ -1117,12 +1123,16 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider2<N> {
         }
     }
 
-    fn state_by_block_hash(&self, hash: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash_with_opts(
+        &self,
+        hash: BlockHash,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?hash, "Getting state by block hash");
-        if let Ok(state) = self.history_by_block_hash(hash) {
+        if let Ok(state) = self.history_by_block_hash_with_opts(hash, opts.clone()) {
             // This could be tracked by a historical block
             Ok(state)
-        } else if let Ok(Some(pending)) = self.pending_state_by_hash(hash) {
+        } else if let Ok(Some(pending)) = self.pending_state_by_hash_with_opts(hash, opts) {
             // .. or this could be the pending state
             Ok(pending)
         } else {
@@ -1139,7 +1149,7 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider2<N> {
         trace!(target: "providers::blockchain", "Getting provider for pending state");
 
         if let Some(block) = self.canonical_in_memory_state.pending_block_num_hash() {
-            let historical = self.database.history_by_block_hash(block.hash)?;
+            let historical = self.database.history_by_block_hash(block.hash, Default::default())?;
             let pending_provider =
                 self.canonical_in_memory_state.state_provider(block.hash, historical);
 
@@ -1150,8 +1160,12 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider2<N> {
         self.latest()
     }
 
-    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
-        let historical = self.database.history_by_block_hash(block_hash)?;
+    fn pending_state_by_hash_with_opts(
+        &self,
+        block_hash: B256,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<Option<StateProviderBox>> {
+        let historical = self.database.history_by_block_hash(block_hash, opts)?;
         if let Some(block) = self.canonical_in_memory_state.pending_block_num_hash() {
             if block.hash == block_hash {
                 let pending_provider =

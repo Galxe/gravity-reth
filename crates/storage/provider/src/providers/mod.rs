@@ -26,6 +26,7 @@ use reth_primitives::{
 };
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
+use reth_storage_api::StateProviderOptions;
 use reth_storage_errors::provider::ProviderResult;
 use revm::primitives::{BlockEnv, CfgEnvWithHandlerCfg};
 use std::{
@@ -160,11 +161,12 @@ where
     fn pending_with_provider(
         &self,
         bundle_state_data: Box<dyn FullExecutionDataProvider>,
+        opts: StateProviderOptions,
     ) -> ProviderResult<StateProviderBox> {
         let canonical_fork = bundle_state_data.canonical_fork();
         trace!(target: "providers::blockchain", ?canonical_fork, "Returning post state provider");
 
-        let state_provider = self.history_by_block_hash(canonical_fork.hash)?;
+        let state_provider = self.history_by_block_hash_with_opts(canonical_fork.hash, opts)?;
         let bundle_state_provider = BundleStateProvider::new(state_provider, bundle_state_data);
         Ok(Box::new(bundle_state_provider))
     }
@@ -601,21 +603,29 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?block_number, "Getting history by block number");
         self.ensure_canonical_block(block_number)?;
-        self.database.history_by_block_number(block_number)
+        self.database.history_by_block_number(block_number, Default::default())
     }
 
-    fn history_by_block_hash(&self, block_hash: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash_with_opts(
+        &self,
+        block_hash: BlockHash,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?block_hash, "Getting history by block hash");
-        self.database.history_by_block_hash(block_hash)
+        self.database.history_by_block_hash(block_hash, opts)
     }
 
-    fn state_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash_with_opts(
+        &self,
+        block: BlockHash,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?block, "Getting state by block hash");
-        let mut state = self.history_by_block_hash(block);
+        let mut state = self.history_by_block_hash_with_opts(block, opts.clone());
 
         // we failed to get the state by hash, from disk, hash block be the pending block
         if state.is_err() {
-            if let Ok(Some(pending)) = self.pending_state_by_hash(block) {
+            if let Ok(Some(pending)) = self.pending_state_by_hash_with_opts(block, opts) {
                 // we found pending block by hash
                 state = Ok(pending)
             }
@@ -665,7 +675,7 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
 
         if let Some(block) = self.tree.pending_block_num_hash() {
             if let Ok(pending) = self.tree.pending_state_provider(block.hash) {
-                return self.pending_with_provider(pending)
+                return self.pending_with_provider(pending, Default::default())
             }
         }
 
@@ -673,9 +683,13 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
         self.latest()
     }
 
-    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+    fn pending_state_by_hash_with_opts(
+        &self,
+        block_hash: B256,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<Option<StateProviderBox>> {
         if let Some(state) = self.tree.find_pending_state_provider(block_hash) {
-            return Ok(Some(self.pending_with_provider(state)?))
+            return Ok(Some(self.pending_with_provider(state, opts)?))
         }
         Ok(None)
     }
