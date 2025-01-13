@@ -1,6 +1,6 @@
 use crate::{error::StageError, StageCheckpoint, StageId};
 use alloy_primitives::{BlockNumber, TxNumber};
-use reth_provider::{BlockReader, ProviderError};
+use reth_provider::{BlockReader, ProviderError, ProviderResult, StateProviderBox};
 use std::{
     cmp::{max, min},
     future::{poll_fn, Future},
@@ -178,6 +178,12 @@ pub struct UnwindOutput {
     pub checkpoint: StageCheckpoint,
 }
 
+/// A factory for creating latest block state provider.
+pub trait LatestStateProviderFactory {
+    /// Create state provider for latest block
+    fn latest(&self) -> ProviderResult<StateProviderBox>;
+}
+
 /// A stage is a segmented part of the syncing process of the node.
 ///
 /// Each stage takes care of a well-defined task, such as downloading headers or executing
@@ -232,6 +238,16 @@ pub trait Stage<Provider>: Send + Sync {
     /// It is expected that the stage will write all necessary data to the database
     /// upon invoking this method.
     fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError>;
+
+    /// Execute the stage.
+    fn execute_v2(
+        &mut self,
+        provider: &Provider,
+        _factory: &dyn LatestStateProviderFactory,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
+        self.execute(provider, input)
+    }
 
     /// Post execution commit hook.
     ///

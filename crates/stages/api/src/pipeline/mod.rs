@@ -1,15 +1,15 @@
 mod ctrl;
 mod event;
 pub use crate::pipeline::ctrl::ControlFlow;
-use crate::{PipelineTarget, StageCheckpoint, StageId};
+use crate::{LatestStateProviderFactory, PipelineTarget, StageCheckpoint, StageId};
 use alloy_primitives::{BlockNumber, B256};
 pub use event::*;
 use futures_util::Future;
 use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, DatabaseProviderFactory,
-    FinalizedBlockReader, FinalizedBlockWriter, ProviderFactory, StageCheckpointReader,
-    StageCheckpointWriter, StaticFileProviderFactory,
+    FinalizedBlockReader, FinalizedBlockWriter, ProviderFactory, ProviderResult,
+    StageCheckpointReader, StageCheckpointWriter, StateProviderBox, StaticFileProviderFactory,
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
@@ -104,6 +104,12 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// Listen for events on the pipeline.
     pub fn events(&self) -> EventStream<PipelineEvent> {
         self.event_sender.new_listener()
+    }
+}
+
+impl<N: ProviderNodeTypes> LatestStateProviderFactory for ProviderFactory<N> {
+    fn latest(&self) -> ProviderResult<StateProviderBox> {
+        self.latest()
     }
 }
 
@@ -435,7 +441,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 target,
             });
 
-            match stage.execute(&provider_rw, exec_input) {
+            match stage.execute_v2(&provider_rw, &self.provider_factory, exec_input) {
                 Ok(out @ ExecOutput { checkpoint, done }) => {
                     made_progress |=
                         checkpoint.block_number != prev_checkpoint.unwrap_or_default().block_number;
