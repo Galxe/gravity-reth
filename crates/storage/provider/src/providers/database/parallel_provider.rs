@@ -115,13 +115,13 @@ impl StateProvider for ParallelStateProvider {
     fn storage(&self, address: Address, key: StorageKey) -> ProviderResult<Option<StorageValue>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.task_tx.send(StateProviderTask::Storage(address, key, tx));
-        rx.blocking_recv().unwrap()
+        tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
     }
 
     fn bytecode_by_hash(&self, code_hash: B256) -> ProviderResult<Option<Bytecode>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.task_tx.send(StateProviderTask::BytecodeByHash(code_hash, tx));
-        rx.blocking_recv().unwrap()
+        tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
     }
 }
 
@@ -130,7 +130,7 @@ impl BlockHashReader for ParallelStateProvider {
     fn block_hash(&self, block_number: u64) -> ProviderResult<Option<B256>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.task_tx.send(StateProviderTask::BlockHash(block_number, tx));
-        rx.blocking_recv().unwrap()
+        tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
     }
 
     fn canonical_hashes_range(
@@ -146,7 +146,7 @@ impl AccountReader for ParallelStateProvider {
     fn basic_account(&self, address: Address) -> ProviderResult<Option<Account>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.task_tx.send(StateProviderTask::BasicAccount(address, tx));
-        rx.blocking_recv().unwrap()
+        tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
     }
 }
 
