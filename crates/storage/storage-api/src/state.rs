@@ -1,3 +1,5 @@
+use std::num::NonZero;
+
 use super::{
     AccountReader, BlockHashReader, BlockIdReader, StateProofProvider, StateRootProvider,
     StorageRootProvider,
@@ -90,6 +92,17 @@ pub trait TryIntoHistoricalStateProvider {
     ) -> ProviderResult<StateProviderBox>;
 }
 
+#[derive(Debug, Clone)]
+pub struct StateProviderOptions {
+    pub parallel: NonZero<usize>,
+}
+
+impl Default for StateProviderOptions {
+    fn default() -> Self {
+        Self { parallel: NonZero::new(1).unwrap() }
+    }
+}
+
 /// Light wrapper that returns `StateProvider` implementations that correspond to the given
 /// `BlockNumber`, the latest state, or the pending state.
 ///
@@ -146,12 +159,30 @@ pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Returns a historical [StateProvider] indexed by the given block hash.
     ///
     /// Note: this only looks at historical blocks, not pending blocks.
-    fn history_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox>;
+    fn history_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox> {
+        self.history_by_block_hash_with_opts(block, StateProviderOptions::default())
+    }
+
+    /// See `history_by_block_hash`
+    fn history_by_block_hash_with_opts(
+        &self,
+        block: BlockHash,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox>;
 
     /// Returns _any_ [StateProvider] with matching block hash.
     ///
     /// This will return a [StateProvider] for either a historical or pending block.
-    fn state_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox>;
+    fn state_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox> {
+        self.state_by_block_hash_with_opts(block, StateProviderOptions::default())
+    }
+
+    /// See `state_by_block_hash`
+    fn state_by_block_hash_with_opts(
+        &self,
+        block: BlockHash,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox>;
 
     /// Storage provider for pending state.
     ///
@@ -164,7 +195,16 @@ pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Represents the state at the block that extends the canonical chain.
     ///
     /// If the block couldn't be found, returns `None`.
-    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>>;
+    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+        self.pending_state_by_hash_with_opts(block_hash, StateProviderOptions::default())
+    }
+
+    /// See `pending_state_by_hash`
+    fn pending_state_by_hash_with_opts(
+        &self,
+        block_hash: B256,
+        opts: StateProviderOptions,
+    ) -> ProviderResult<Option<StateProviderBox>>;
 }
 
 /// Blockchain trait provider that gives access to the blockchain state that is not yet committed

@@ -65,6 +65,9 @@ reth-ethereum-engine-primitives = { workspace = true, optional = true }
 # parallel utils
 rayon.workspace = true
 
+# parallel provider
+flume = "0.11.1"
+
 [dev-dependencies]
 reth-db = { workspace = true, features = ["test-utils"] }
 reth-primitives = { workspace = true, features = ["arbitrary", "test-utils"] }
