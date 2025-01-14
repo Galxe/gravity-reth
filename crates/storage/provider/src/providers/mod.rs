@@ -592,9 +592,9 @@ impl<N: ProviderNodeTypes> ChainSpecProvider for BlockchainProvider<N> {
 
 impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     /// Storage provider for latest block
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
+    fn latest_with_opts(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting latest block state provider");
-        self.database.latest()
+        self.database.latest(opts)
     }
 
     fn history_by_block_number(

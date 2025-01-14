@@ -1,6 +1,8 @@
 use crate::{error::StageError, StageCheckpoint, StageId};
 use alloy_primitives::{BlockNumber, TxNumber};
-use reth_provider::{BlockReader, ProviderError, ProviderResult, StateProviderBox};
+use reth_provider::{
+    BlockReader, ProviderError, ProviderResult, StateProviderBox, StateProviderOptions,
+};
 use std::{
     cmp::{max, min},
     future::{poll_fn, Future},
@@ -181,7 +183,7 @@ pub struct UnwindOutput {
 /// A factory for creating latest block state provider.
 pub trait LatestStateProviderFactory {
     /// Create state provider for latest block
-    fn latest(&self) -> ProviderResult<StateProviderBox>;
+    fn latest(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox>;
 }
 
 /// A stage is a segmented part of the syncing process of the node.

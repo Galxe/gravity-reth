@@ -9,7 +9,8 @@ use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, DatabaseProviderFactory,
     FinalizedBlockReader, FinalizedBlockWriter, ProviderFactory, ProviderResult,
-    StageCheckpointReader, StageCheckpointWriter, StateProviderBox, StaticFileProviderFactory,
+    StageCheckpointReader, StageCheckpointWriter, StateProviderBox, StateProviderOptions,
+    StaticFileProviderFactory,
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
@@ -108,8 +109,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 }
 
 impl<N: ProviderNodeTypes> LatestStateProviderFactory for ProviderFactory<N> {
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
-        self.latest()
+    fn latest(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
+        self.latest(opts)
     }
 }
 

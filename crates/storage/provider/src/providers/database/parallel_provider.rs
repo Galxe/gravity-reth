@@ -4,6 +4,7 @@ use std::{
 };
 
 use alloy_primitives::{Address, BlockNumber, Bytes, B256};
+use reth_db::Database;
 use reth_primitives::{Account, Bytecode, StorageKey, StorageValue};
 use reth_storage_api::{
     AccountReader, BlockHashReader, StateProofProvider, StateProvider, StateRootProvider,
@@ -14,7 +15,7 @@ use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof, TrieInput,
 };
 
-use crate::providers::ProviderNodeTypes;
+use crate::{providers::ProviderNodeTypes, LatestStateProvider, StaticFileProviderFactory};
 
 use super::ProviderFactory;
 use flume as mpmc;
@@ -71,6 +72,32 @@ impl ParallelStateProvider {
 
         for _ in 0..parallel {
             let state_provider = db.provider()?.try_into_history_at_block(block_number)?;
+            let task_rx = task_rx.clone();
+            // TODO: use individual tokio runtime
+            tokio::spawn(async move {
+                while let Ok(task) = task_rx.recv_async().await {
+                    task.process(state_provider.as_ref());
+                }
+            });
+        }
+
+        Ok(Self { task_tx })
+    }
+
+    pub(super) fn try_new_latest<N>(
+        db: &ProviderFactory<N>,
+        parallel: usize,
+    ) -> ProviderResult<Self>
+    where
+        N: ProviderNodeTypes,
+    {
+        assert!(parallel > 1, "parallel must be greater than 1");
+
+        let (task_tx, task_rx) = mpmc::unbounded::<StateProviderTask>();
+
+        for _ in 0..parallel {
+            let state_provider =
+                Box::new(LatestStateProvider::new(db.db_ref().tx()?, db.static_file_provider()));
             let task_rx = task_rx.clone();
             // TODO: use individual tokio runtime
             tokio::spawn(async move {

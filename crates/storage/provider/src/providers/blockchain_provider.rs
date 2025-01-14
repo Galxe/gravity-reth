@@ -1080,15 +1080,15 @@ impl<N: NodeTypesWithDB> ChainSpecProvider for BlockchainProvider2<N> {
 
 impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider2<N> {
     /// Storage provider for latest block
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
+    fn latest_with_opts(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting latest block state provider");
         // use latest state provider if the head state exists
         if let Some(state) = self.canonical_in_memory_state.head_state() {
             trace!(target: "providers::blockchain", "Using head state for latest state provider");
-            Ok(self.block_state_provider(state, Default::default())?.boxed())
+            Ok(self.block_state_provider(state, opts)?.boxed())
         } else {
             trace!(target: "providers::blockchain", "Using database state for latest state provider");
-            self.database.latest()
+            self.database.latest(opts)
         }
     }
 

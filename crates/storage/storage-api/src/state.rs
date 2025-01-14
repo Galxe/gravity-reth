@@ -129,7 +129,12 @@ impl Default for StateProviderOptions {
 #[auto_impl(&, Arc, Box)]
 pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Storage provider for latest block.
-    fn latest(&self) -> ProviderResult<StateProviderBox>;
+    fn latest(&self) -> ProviderResult<StateProviderBox> {
+        self.latest_with_opts(StateProviderOptions::default())
+    }
+
+    /// See `latest`
+    fn latest_with_opts(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox>;
 
     /// Returns a [`StateProvider`] indexed by the given [`BlockId`].
     ///
