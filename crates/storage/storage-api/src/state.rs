@@ -7,6 +7,7 @@ use super::{
 use alloy_eips::{BlockId, BlockNumHash, BlockNumberOrTag};
 use alloy_primitives::{Address, BlockHash, BlockNumber, StorageKey, StorageValue, B256, U256};
 use auto_impl::auto_impl;
+use once_cell::sync::Lazy;
 use reth_execution_types::ExecutionOutcome;
 use reth_primitives::{Bytecode, KECCAK_EMPTY};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
@@ -96,6 +97,17 @@ pub trait TryIntoHistoricalStateProvider {
 pub struct StateProviderOptions {
     pub parallel: NonZero<usize>,
 }
+
+/// General options for state providers.
+pub static STATE_PROVIDER_OPTS: Lazy<StateProviderOptions> = Lazy::new(|| StateProviderOptions {
+    parallel: NonZero::new(
+        std::env::var("STATE_PROVIDER_OPTS_PARALLEL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8),
+    )
+    .unwrap(),
+});
 
 impl Default for StateProviderOptions {
     fn default() -> Self {
