@@ -160,10 +160,16 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     #[track_caller]
     pub fn latest(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::db", "Returning latest state provider");
+
+        let factory = || {
+            Ok(Box::new(LatestStateProvider::new(self.db.tx()?, self.static_file_provider()))
+                as StateProviderBox)
+        };
+
         if opts.parallel.get() > 1 {
-            Ok(Box::new(ParallelStateProvider::try_new_latest(self, opts.parallel.get())?))
+            Ok(Box::new(ParallelStateProvider::try_new(factory, opts.parallel.get())?))
         } else {
-            Ok(Box::new(LatestStateProvider::new(self.db.tx()?, self.static_file_provider())))
+            factory()
         }
     }
 
@@ -173,13 +179,15 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         block_number: BlockNumber,
         opts: StateProviderOptions,
     ) -> ProviderResult<StateProviderBox> {
-        let state_provider = if opts.parallel.get() > 1 {
-            Box::new(ParallelStateProvider::try_new(&self, block_number, opts.parallel.get())?)
-        } else {
-            self.provider()?.try_into_history_at_block(block_number)?
-        };
         trace!(target: "providers::db", ?block_number, "Returning historical state provider for block number");
-        Ok(state_provider)
+
+        let factory = || Ok(self.provider()?.try_into_history_at_block(block_number)?);
+
+        if opts.parallel.get() > 1 {
+            Ok(Box::new(ParallelStateProvider::try_new(factory, opts.parallel.get())?))
+        } else {
+            factory()
+        }
     }
 
     /// Storage provider for state at that given block hash

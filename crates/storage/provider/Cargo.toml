@@ -57,6 +57,7 @@ notify = { workspace = true, default-features = false, features = ["macos_fseven
 parking_lot.workspace = true
 dashmap = { workspace = true, features = ["inline"] }
 strum.workspace = true
+paste.workspace = true
 
 # test-utils
 once_cell = { workspace = true, optional = true }
