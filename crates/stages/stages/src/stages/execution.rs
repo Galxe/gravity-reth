@@ -15,8 +15,8 @@ use reth_provider::{
     providers::{StaticFileProvider, StaticFileProviderRWRefMut, StaticFileWriter},
     writer::UnifiedStorageWriter,
     BlockReader, DBProvider, HeaderProvider, LatestStateProviderRef, OriginalValuesKnown,
-    ProviderError, StateChangeWriter, StateProvider, StateProviderOptions, StateWriter,
-    StaticFileProviderFactory, StatsReader, TransactionVariant, STATE_PROVIDER_OPTS,
+    ProviderError, StateChangeWriter, StateProvider, StateWriter, StaticFileProviderFactory,
+    StatsReader, TransactionVariant, STATE_PROVIDER_OPTS,
 };
 use reth_prune_types::PruneModes;
 use reth_revm::database::StateProviderDatabase;
@@ -27,7 +27,6 @@ use reth_stages_api::{
 };
 use std::{
     cmp::Ordering,
-    num::NonZero,
     ops::RangeInclusive,
     sync::Arc,
     task::{ready, Context, Poll},
