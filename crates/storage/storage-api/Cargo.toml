@@ -28,3 +28,4 @@ alloy-eips.workspace = true
 alloy-primitives.workspace = true
 
 auto_impl.workspace = true
+once_cell.workspace = true

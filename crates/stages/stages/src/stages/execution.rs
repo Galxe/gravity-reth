@@ -16,7 +16,7 @@ use reth_provider::{
     writer::UnifiedStorageWriter,
     BlockReader, DBProvider, HeaderProvider, LatestStateProviderRef, OriginalValuesKnown,
     ProviderError, StateChangeWriter, StateProvider, StateProviderOptions, StateWriter,
-    StaticFileProviderFactory, StatsReader, TransactionVariant,
+    StaticFileProviderFactory, StatsReader, TransactionVariant, STATE_PROVIDER_OPTS,
 };
 use reth_prune_types::PruneModes;
 use reth_revm::database::StateProviderDatabase;
@@ -346,29 +346,26 @@ where
             None
         };
 
-        let mut executor = if let Some(parallel_provider) =
-            self.executor_provider.try_into_parallel_provider()
-        {
-            let db: Arc<dyn StateProvider> = if let Some(factory) = factory {
-                Arc::new(
-                    factory.latest(StateProviderOptions { parallel: NonZero::new(8).unwrap() })?,
+        let mut executor =
+            if let Some(parallel_provider) = self.executor_provider.try_into_parallel_provider() {
+                let db: Arc<dyn StateProvider> = if let Some(factory) = factory {
+                    Arc::new(factory.latest(STATE_PROVIDER_OPTS.clone())?)
+                } else {
+                    Arc::new(LatestStateProviderRef::new(
+                        provider.tx_ref(),
+                        provider.static_file_provider(),
+                    ))
+                };
+                EitherBatchExecutor::Parallel(
+                    parallel_provider.batch_executor(StateProviderDatabase(db)),
                 )
             } else {
-                Arc::new(LatestStateProviderRef::new(
+                let db = StateProviderDatabase(LatestStateProviderRef::new(
                     provider.tx_ref(),
                     provider.static_file_provider(),
-                ))
+                ));
+                EitherBatchExecutor::Sequential(self.executor_provider.batch_executor(db))
             };
-            EitherBatchExecutor::Parallel(
-                parallel_provider.batch_executor(StateProviderDatabase(db)),
-            )
-        } else {
-            let db = StateProviderDatabase(LatestStateProviderRef::new(
-                provider.tx_ref(),
-                provider.static_file_provider(),
-            ));
-            EitherBatchExecutor::Sequential(self.executor_provider.batch_executor(db))
-        };
         executor.set_tip(max_block);
         executor.set_prune_modes(prune_modes);
 
