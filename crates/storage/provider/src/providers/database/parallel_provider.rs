@@ -4,6 +4,7 @@ use std::{
 };
 
 use alloy_primitives::{Address, BlockNumber, Bytes, B256};
+use reth_db::Database;
 use reth_primitives::{Account, Bytecode, StorageKey, StorageValue};
 use reth_storage_api::{
     AccountReader, BlockHashReader, StateProofProvider, StateProvider, StateRootProvider,
@@ -14,7 +15,7 @@ use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof, TrieInput,
 };
 
-use crate::providers::ProviderNodeTypes;
+use crate::{providers::ProviderNodeTypes, LatestStateProvider, StaticFileProviderFactory};
 
 use super::ProviderFactory;
 use flume as mpmc;
@@ -24,34 +25,40 @@ enum StateProviderTask {
     Storage(Address, StorageKey, oneshot::Sender<ProviderResult<Option<StorageValue>>>),
     BytecodeByHash(B256, oneshot::Sender<ProviderResult<Option<Bytecode>>>),
     BasicAccount(Address, oneshot::Sender<ProviderResult<Option<Account>>>),
+    BlockHash(u64, oneshot::Sender<ProviderResult<Option<B256>>>),
 }
 
 impl StateProviderTask {
     fn process(self, state_provider: &dyn StateProvider) {
         match self {
-            StateProviderTask::Storage(address, key, tx) => {
+            Self::Storage(address, key, tx) => {
                 let result = tokio::task::block_in_place(|| state_provider.storage(address, key));
                 let _ = tx.send(result);
             }
-            StateProviderTask::BytecodeByHash(code_hash, tx) => {
+            Self::BytecodeByHash(code_hash, tx) => {
                 let result =
                     tokio::task::block_in_place(|| state_provider.bytecode_by_hash(code_hash));
                 let _ = tx.send(result);
             }
-            StateProviderTask::BasicAccount(address, tx) => {
+            Self::BasicAccount(address, tx) => {
                 let result = tokio::task::block_in_place(|| state_provider.basic_account(address));
+                let _ = tx.send(result);
+            }
+            Self::BlockHash(block_number, tx) => {
+                let result =
+                    tokio::task::block_in_place(|| state_provider.block_hash(block_number));
                 let _ = tx.send(result);
             }
         }
     }
 }
 
-pub struct ParallelStateProvider {
+pub(super) struct ParallelStateProvider {
     task_tx: mpmc::Sender<StateProviderTask>,
 }
 
 impl ParallelStateProvider {
-    pub fn try_new<N>(
+    pub(super) fn try_new<N>(
         db: &ProviderFactory<N>,
         block_number: u64,
         parallel: usize,
@@ -66,6 +73,33 @@ impl ParallelStateProvider {
         for _ in 0..parallel {
             let state_provider = db.provider()?.try_into_history_at_block(block_number)?;
             let task_rx = task_rx.clone();
+            // TODO: use individual tokio runtime
+            tokio::spawn(async move {
+                while let Ok(task) = task_rx.recv_async().await {
+                    task.process(state_provider.as_ref());
+                }
+            });
+        }
+
+        Ok(Self { task_tx })
+    }
+
+    pub(super) fn try_new_latest<N>(
+        db: &ProviderFactory<N>,
+        parallel: usize,
+    ) -> ProviderResult<Self>
+    where
+        N: ProviderNodeTypes,
+    {
+        assert!(parallel > 1, "parallel must be greater than 1");
+
+        let (task_tx, task_rx) = mpmc::unbounded::<StateProviderTask>();
+
+        for _ in 0..parallel {
+            let state_provider =
+                Box::new(LatestStateProvider::new(db.db_ref().tx()?, db.static_file_provider()));
+            let task_rx = task_rx.clone();
+            // TODO: use individual tokio runtime
             tokio::spawn(async move {
                 while let Ok(task) = task_rx.recv_async().await {
                     task.process(state_provider.as_ref());
@@ -81,20 +115,22 @@ impl StateProvider for ParallelStateProvider {
     fn storage(&self, address: Address, key: StorageKey) -> ProviderResult<Option<StorageValue>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.task_tx.send(StateProviderTask::Storage(address, key, tx));
-        rx.blocking_recv().unwrap()
+        tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
     }
 
     fn bytecode_by_hash(&self, code_hash: B256) -> ProviderResult<Option<Bytecode>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.task_tx.send(StateProviderTask::BytecodeByHash(code_hash, tx));
-        rx.blocking_recv().unwrap()
+        tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
     }
 }
 
 #[allow(unused)]
 impl BlockHashReader for ParallelStateProvider {
     fn block_hash(&self, block_number: u64) -> ProviderResult<Option<B256>> {
-        todo!()
+        let (tx, rx) = oneshot::channel();
+        let _ = self.task_tx.send(StateProviderTask::BlockHash(block_number, tx));
+        tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
     }
 
     fn canonical_hashes_range(
@@ -110,7 +146,7 @@ impl AccountReader for ParallelStateProvider {
     fn basic_account(&self, address: Address) -> ProviderResult<Option<Account>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.task_tx.send(StateProviderTask::BasicAccount(address, tx));
-        rx.blocking_recv().unwrap()
+        tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
     }
 }
 

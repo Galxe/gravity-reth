@@ -158,9 +158,13 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
 
     /// State provider for latest block
     #[track_caller]
-    pub fn latest(&self) -> ProviderResult<StateProviderBox> {
+    pub fn latest(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::db", "Returning latest state provider");
-        Ok(Box::new(LatestStateProvider::new(self.db.tx()?, self.static_file_provider())))
+        if opts.parallel.get() > 1 {
+            Ok(Box::new(ParallelStateProvider::try_new_latest(self, opts.parallel.get())?))
+        } else {
+            Ok(Box::new(LatestStateProvider::new(self.db.tx()?, self.static_file_provider())))
+        }
     }
 
     /// Storage provider for state at that given block
@@ -665,7 +669,7 @@ mod tests {
     #[test]
     fn common_history_provider() {
         let factory = create_test_provider_factory();
-        let _ = factory.latest();
+        let _ = factory.latest(Default::default());
     }
 
     #[test]
