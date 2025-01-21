@@ -29,3 +29,6 @@ revm.workspace = true
 
 # misc
 tracing.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
