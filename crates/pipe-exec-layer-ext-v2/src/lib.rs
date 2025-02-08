@@ -1,5 +1,9 @@
 //! Pipeline execution layer extension
 
+mod channel;
+
+use channel::Channel;
+
 use alloy_primitives::B256;
 use reth_chain_state::ExecutedBlock;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
@@ -70,106 +74,16 @@ struct PipeExecService<Storage: GravityStorage> {
 #[derive(Debug)]
 struct Core<Storage: GravityStorage> {
     /// Send executed block hash to Coordinator
-    executed_block_hash_tx: Arc<PipeBarrier<B256 /* block id */, B256 /* block hash */>>,
+    executed_block_hash_tx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
     /// Receive verified block hash from Coordinator
     verified_block_hash_rx: Mutex<UnboundedReceiver<ExecutedBlockMeta>>,
     storage: Storage,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent>,
-    execute_block_barrier: PipeBarrier<u64 /* block number */, Header>,
-    merklize_barrier: PipeBarrier<u64 /* block number */, ()>,
-    make_canonical_barrier: PipeBarrier<u64 /* block number */, B256 /* block hash */>,
-}
-
-#[derive(Debug)]
-struct PipeBarrier<K, V> {
-    inner: Mutex<PipeBarrierInner<K, V>>,
-}
-
-impl<K, V> Default for PipeBarrier<K, V> {
-    fn default() -> Self {
-        Self {
-            inner: Mutex::new(PipeBarrierInner {
-                buffer: None,
-                waiters: Vec::new(),
-                closed: false,
-            }),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct PipeBarrierInner<K, V> {
-    buffer: Option<(K, V)>,
-    waiters: Vec<(K, oneshot::Sender<()>)>,
-    closed: bool,
-}
-
-impl<K: Eq + Clone, V> PipeBarrier<K, V> {
-    fn new(key: K, val: V) -> Self {
-        Self {
-            inner: Mutex::new(PipeBarrierInner {
-                buffer: Some((key, val)),
-                waiters: Vec::new(),
-                closed: false,
-            }),
-        }
-    }
-
-    /// Wait until the key is notified.
-    /// Returns `None` if the barrier has been closed.
-    async fn wait(&self, key: K) -> Option<V> {
-        loop {
-            let mut inner = self.inner.lock().await;
-            if inner.closed {
-                return None;
-            }
-
-            if let Some((k, _)) = inner.buffer.as_ref() {
-                if *k == key {
-                    return Some(inner.buffer.take().unwrap().1);
-                }
-            }
-
-            let (tx, rx) = oneshot::channel();
-            inner.waiters.push((key.clone(), tx));
-            drop(inner);
-            rx.await.unwrap();
-        }
-    }
-
-    /// Notify the key with the value.
-    /// Returns `None` if the barrier has been closed.
-    async fn notify(&self, key: K, val: V) -> Option<()> {
-        let mut inner = self.inner.lock().await;
-        if inner.closed {
-            return None;
-        }
-
-        assert!(inner.buffer.is_none());
-        let waiter_to_notify = inner
-            .waiters
-            .iter()
-            .position(|(k, _)| *k == key)
-            .map(|i| inner.waiters.swap_remove(i).1);
-        inner.buffer = Some((key, val));
-        drop(inner);
-
-        let _ = waiter_to_notify.map(|tx| tx.send(()));
-        Some(())
-    }
-
-    async fn close(&self) {
-        let mut inner = self.inner.lock().await;
-        inner.closed = true;
-        let waiters = std::mem::take(&mut inner.waiters);
-        drop(inner);
-
-        for (_, tx) in waiters {
-            let _ = tx.send(());
-        }
-    }
+    execute_block_barrier: Channel<u64 /* block number */, Header>,
+    merklize_barrier: Channel<u64 /* block number */, ()>,
+    make_canonical_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
 }
 
 impl<Storage: GravityStorage> PipeExecService<Storage> {
@@ -178,6 +92,7 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
             let ordered_block = match self.ordered_block_rx.recv().await {
                 Some(ordered_block) => ordered_block,
                 None => {
+                    self.core.executed_block_hash_tx.close().await;
                     self.core.execute_block_barrier.close().await;
                     self.core.merklize_barrier.close().await;
                     self.core.make_canonical_barrier.close().await;
@@ -424,7 +339,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 #[derive(Debug)]
 pub struct PipeExecLayerApi {
     ordered_block_tx: UnboundedSender<OrderedBlock>,
-    executed_block_hash_rx: Arc<PipeBarrier<B256 /* block id */, B256 /* block hash */>>,
+    executed_block_hash_rx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
     verified_block_hash_tx: UnboundedSender<ExecutedBlockMeta>,
 }
 
@@ -466,7 +381,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     latest_block_hash: B256,
 ) -> PipeExecLayerApi {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
-    let executed_block_hash_ch = Arc::new(PipeBarrier::default());
+    let executed_block_hash_ch = Arc::new(Channel::new());
     let (verified_block_hash_tx, verified_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
 
@@ -479,9 +394,15 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
             event_tx,
-            execute_block_barrier: PipeBarrier::new(latest_block_number, latest_block_header),
-            merklize_barrier: PipeBarrier::new(latest_block_number, ()),
-            make_canonical_barrier: PipeBarrier::new(latest_block_number, latest_block_hash),
+            execute_block_barrier: Channel::new_with_states([(
+                latest_block_number,
+                latest_block_header,
+            )]),
+            merklize_barrier: Channel::new_with_states([(latest_block_number, ())]),
+            make_canonical_barrier: Channel::new_with_states([(
+                latest_block_number,
+                latest_block_hash,
+            )]),
         }),
         ordered_block_rx,
     };
@@ -493,31 +414,5 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
         ordered_block_tx,
         executed_block_hash_rx: executed_block_hash_ch,
         verified_block_hash_tx,
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use rand::{thread_rng, Rng};
-    use std::sync::Arc;
-    use tokio::task::JoinSet;
-
-    #[tokio::test]
-    async fn test_pipe_barrier() {
-        let barrier = Arc::new(super::PipeBarrier::new(0, 0));
-
-        let mut tasks = JoinSet::new();
-        for i in 1..10 {
-            let barrier = barrier.clone();
-            let sleep_ms = thread_rng().gen_range(100..1000);
-            tasks.spawn(async move {
-                let v = barrier.wait(i - 1).await;
-                assert_eq!(v.unwrap(), i - 1);
-                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-                let _ = barrier.notify(i, i).await;
-            });
-        }
-
-        tasks.join_all().await;
     }
 }
