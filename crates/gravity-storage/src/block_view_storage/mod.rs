@@ -4,7 +4,11 @@ use reth_primitives::{revm_primitives::Bytecode, Address, B256, U256};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{errors::provider::ProviderError, StateProviderBox, StateProviderFactory};
 use reth_trie::{updates::TrieUpdates, HashedPostState};
-use revm::{db::BundleState, primitives::AccountInfo, DatabaseRef};
+use revm::{
+    db::BundleState,
+    primitives::{AccountInfo, BLOCK_HASH_HISTORY},
+    DatabaseRef,
+};
 use std::{
     clone,
     collections::BTreeMap,
@@ -110,6 +114,9 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
     fn insert_block_id(&self, block_number: u64, block_id: B256) {
         let mut storage = self.inner.lock().unwrap();
         storage.block_number_to_id.insert(block_number, block_id);
+        while storage.block_number_to_id.len() > BLOCK_HASH_HISTORY {
+            storage.block_number_to_id.pop_first();
+        }
     }
 
     fn insert_bundle_state(&self, block_number: u64, bundle_state: &BundleState) {
