@@ -114,7 +114,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
     fn insert_block_id(&self, block_number: u64, block_id: B256) {
         let mut storage = self.inner.lock().unwrap();
         storage.block_number_to_id.insert(block_number, block_id);
-        while storage.block_number_to_id.len() > BLOCK_HASH_HISTORY {
+        while storage.block_number_to_id.len() > BLOCK_HASH_HISTORY as usize {
             storage.block_number_to_id.pop_first();
         }
     }
