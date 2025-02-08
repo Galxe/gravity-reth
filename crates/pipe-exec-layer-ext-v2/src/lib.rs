@@ -26,7 +26,7 @@ use once_cell::sync::OnceCell;
 use gravity_storage::GravityStorage;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
-    oneshot, Mutex,
+    oneshot,
 };
 
 use tracing::*;
@@ -76,14 +76,15 @@ struct Core<Storage: GravityStorage> {
     /// Send executed block hash to Coordinator
     executed_block_hash_tx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
     /// Receive verified block hash from Coordinator
-    verified_block_hash_rx: Mutex<UnboundedReceiver<ExecutedBlockMeta>>,
+    verified_block_hash_rx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
     storage: Storage,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent>,
     execute_block_barrier: Channel<u64 /* block number */, Header>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
-    make_canonical_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
+    seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
+    make_canonical_barrier: Channel<u64 /* block number */, ()>,
 }
 
 impl<Storage: GravityStorage> PipeExecService<Storage> {
@@ -147,12 +148,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         block.header.state_root = state_root;
 
-        let parent_hash = self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
+        let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
         block.header.parent_hash = parent_hash;
 
         // Seal the block
         let block = block.seal_slow();
         let block_hash = block.hash();
+        self.seal_barrier.notify(block_number, block_hash).await.unwrap();
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
@@ -170,6 +172,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
 
         // Make the block canonical
+        self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
         self.make_canonical(ExecutedBlock {
             block: Arc::new(block.block),
             senders: Arc::new(block.senders),
@@ -179,16 +182,15 @@ impl<Storage: GravityStorage> Core<Storage> {
         })
         .await;
         self.storage.update_canonical(block_number, block_hash);
-        self.make_canonical_barrier.notify(block_number, block_hash).await;
+        self.make_canonical_barrier.notify(block_number, ()).await.unwrap();
     }
 
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
     /// Returns `None` if the channel has been closed.
     async fn verify_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
         self.executed_block_hash_tx.notify(block_meta.block_id, block_meta.block_hash).await?;
-        let meta = self.verified_block_hash_rx.lock().await.recv().await?;
-        assert_eq!(block_meta.block_id, meta.block_id);
-        assert_eq!(block_meta.block_hash, meta.block_hash);
+        let block_hash = self.verified_block_hash_rx.wait(block_meta.block_id).await?;
+        assert_eq!(block_meta.block_hash, block_hash);
         Some(())
     }
 
@@ -340,7 +342,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 pub struct PipeExecLayerApi {
     ordered_block_tx: UnboundedSender<OrderedBlock>,
     executed_block_hash_rx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
-    verified_block_hash_tx: UnboundedSender<ExecutedBlockMeta>,
+    verified_block_hash_tx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
 }
 
 impl PipeExecLayerApi {
@@ -358,8 +360,8 @@ impl PipeExecLayerApi {
 
     /// Push verified block hash to EL for commit.
     /// Returns `None` if the channel has been closed.
-    pub fn commit_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
-        self.verified_block_hash_tx.send(block_meta).ok()
+    pub async fn commit_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
+        self.verified_block_hash_tx.notify(block_meta.block_id, block_meta.block_hash).await
     }
 }
 
@@ -382,14 +384,14 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
 ) -> PipeExecLayerApi {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let executed_block_hash_ch = Arc::new(Channel::new());
-    let (verified_block_hash_tx, verified_block_hash_rx) = tokio::sync::mpsc::unbounded_channel();
+    let verified_block_hash_ch = Arc::new(Channel::new());
     let (event_tx, event_rx) = std::sync::mpsc::channel();
 
     let latest_block_number = latest_block_header.number;
     let service = PipeExecService {
         core: Arc::new(Core {
             executed_block_hash_tx: executed_block_hash_ch.clone(),
-            verified_block_hash_rx: Mutex::new(verified_block_hash_rx),
+            verified_block_hash_rx: verified_block_hash_ch.clone(),
             storage,
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
@@ -399,10 +401,8 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
                 latest_block_header,
             )]),
             merklize_barrier: Channel::new_with_states([(latest_block_number, ())]),
-            make_canonical_barrier: Channel::new_with_states([(
-                latest_block_number,
-                latest_block_hash,
-            )]),
+            seal_barrier: Channel::new_with_states([(latest_block_number, latest_block_hash)]),
+            make_canonical_barrier: Channel::new_with_states([(latest_block_number, ())]),
         }),
         ordered_block_rx,
     };
@@ -413,6 +413,6 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     PipeExecLayerApi {
         ordered_block_tx,
         executed_block_hash_rx: executed_block_hash_ch,
-        verified_block_hash_tx,
+        verified_block_hash_tx: verified_block_hash_ch,
     }
 }
