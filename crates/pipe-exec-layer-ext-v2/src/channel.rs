@@ -1,6 +1,11 @@
-use std::{collections::HashMap, fmt::Debug, hash::Hash};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    hash::Hash,
+    sync::{Mutex, MutexGuard},
+};
 
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 
 #[derive(Debug)]
 pub(crate) struct Channel<K, V> {
@@ -35,12 +40,17 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
     /// Wait until the key is notified.
     /// Returns `None` if the barrier has been closed.
     pub(crate) async fn wait(&self, key: K) -> Option<V> {
-        let mut inner = self.inner.lock().await;
-        if inner.closed {
+        // ATTN: We can guarantee that `.await` will not occur within the critical zone, which means
+        // `MutexGuard` will not be sent across threads.
+        struct SendMutexGuard<'a, T>(MutexGuard<'a, T>);
+        unsafe impl<'a, T> Send for SendMutexGuard<'a, T> {}
+
+        let mut inner = SendMutexGuard(self.inner.lock().unwrap());
+        if inner.0.closed {
             return None;
         }
 
-        let state = inner.states.remove(&key);
+        let state = inner.0.states.remove(&key);
         match state {
             Some(State::Notified(v)) => Some(v),
             Some(State::Waiting(_)) => {
@@ -48,7 +58,7 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
             }
             None => {
                 let (tx, rx) = oneshot::channel();
-                inner.states.insert(key, State::Waiting(tx));
+                inner.0.states.insert(key, State::Waiting(tx));
                 drop(inner);
 
                 rx.await.ok()
@@ -58,8 +68,8 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
 
     /// Notify the key with the value.
     /// Returns `None` if the barrier has been closed.
-    pub(crate) async fn notify(&self, key: K, val: V) -> Option<()> {
-        let mut inner = self.inner.lock().await;
+    pub(crate) fn notify(&self, key: K, val: V) -> Option<()> {
+        let mut inner = self.inner.lock().unwrap();
         if inner.closed {
             return None;
         }
@@ -79,8 +89,8 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
         Some(())
     }
 
-    pub(crate) async fn close(&self) {
-        let mut inner = self.inner.lock().await;
+    pub(crate) fn close(&self) {
+        let mut inner = self.inner.lock().unwrap();
         inner.closed = true;
         inner.states.clear();
     }
@@ -104,7 +114,7 @@ mod test {
                 let v = barrier.wait(i - 1).await.unwrap();
                 assert_eq!(v, i - 1);
                 tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-                let _ = barrier.notify(i, i).await;
+                barrier.notify(i, i).unwrap();
             });
         }
 

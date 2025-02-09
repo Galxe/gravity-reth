@@ -93,10 +93,10 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
             let ordered_block = match self.ordered_block_rx.recv().await {
                 Some(ordered_block) => ordered_block,
                 None => {
-                    self.core.executed_block_hash_tx.close().await;
-                    self.core.execute_block_barrier.close().await;
-                    self.core.merklize_barrier.close().await;
-                    self.core.make_canonical_barrier.close().await;
+                    self.core.executed_block_hash_tx.close();
+                    self.core.execute_block_barrier.close();
+                    self.core.merklize_barrier.close();
+                    self.core.make_canonical_barrier.close();
                     return;
                 }
             };
@@ -131,7 +131,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let parent_block_header = self.execute_block_barrier.wait(block_number - 1).await.unwrap();
         let (mut block, outcome) = self.execute_ordered_block(ordered_block, &parent_block_header);
         self.storage.insert_bundle_state(block_number, &outcome.state);
-        self.execute_block_barrier.notify(block_number, block.header.clone()).await.unwrap();
+        self.execute_block_barrier.notify(block_number, block.header.clone()).unwrap();
 
         let execution_outcome = self.calculate_roots(&mut block, outcome);
 
@@ -139,7 +139,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
         let (state_root, hashed_state, trie_output) =
             self.storage.state_root_with_updates(block_number).unwrap();
-        self.merklize_barrier.notify(block_number, ()).await.unwrap();
+        self.merklize_barrier.notify(block_number, ()).unwrap();
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
@@ -154,7 +154,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Seal the block
         let block = block.seal_slow();
         let block_hash = block.hash();
-        self.seal_barrier.notify(block_number, block_hash).await.unwrap();
+        self.seal_barrier.notify(block_number, block_hash).unwrap();
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
@@ -182,13 +182,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         })
         .await;
         self.storage.update_canonical(block_number, block_hash);
-        self.make_canonical_barrier.notify(block_number, ()).await.unwrap();
+        self.make_canonical_barrier.notify(block_number, ()).unwrap();
     }
 
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
     /// Returns `None` if the channel has been closed.
     async fn verify_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
-        self.executed_block_hash_tx.notify(block_meta.block_id, block_meta.block_hash).await?;
+        self.executed_block_hash_tx.notify(block_meta.block_id, block_meta.block_hash)?;
         let block_hash = self.verified_block_hash_rx.wait(block_meta.block_id).await?;
         assert_eq!(block_meta.block_hash, block_hash);
         Some(())
@@ -360,8 +360,14 @@ impl PipeExecLayerApi {
 
     /// Push verified block hash to EL for commit.
     /// Returns `None` if the channel has been closed.
-    pub async fn commit_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
-        self.verified_block_hash_tx.notify(block_meta.block_id, block_meta.block_hash).await
+    pub fn commit_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
+        self.verified_block_hash_tx.notify(block_meta.block_id, block_meta.block_hash)
+    }
+}
+
+impl Drop for PipeExecLayerApi {
+    fn drop(&mut self) {
+        self.verified_block_hash_tx.close();
     }
 }
 
