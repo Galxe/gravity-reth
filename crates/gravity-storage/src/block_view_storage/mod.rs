@@ -1,17 +1,17 @@
-use core::hash;
-use reth_payload_builder::database::CachedReads;
 use reth_primitives::{revm_primitives::Bytecode, Address, B256, U256};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{errors::provider::ProviderError, StateProviderBox, StateProviderFactory};
 use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::{
-    db::BundleState,
+    db::{
+        states::{CacheAccount, PlainAccount},
+        BundleState,
+    },
     primitives::{AccountInfo, BLOCK_HASH_HISTORY},
     DatabaseRef,
 };
 use std::{
-    clone,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
 };
 
@@ -24,8 +24,7 @@ pub struct BlockViewStorage<Client> {
 
 struct BlockViewStorageInner {
     state_provider_info: (B256, u64), // (block_hash, block_number),
-    block_number_to_view: BTreeMap<u64, Arc<CachedReads>>,
-    block_number_to_state: BTreeMap<u64, Arc<HashedPostState>>,
+    block_number_to_view: BTreeMap<u64, (Arc<BlockView>, Arc<HashedPostState>)>,
     block_number_to_trie_updates: BTreeMap<u64, Arc<TrieUpdates>>,
     block_number_to_id: BTreeMap<u64, B256>,
 }
@@ -65,7 +64,6 @@ impl BlockViewStorageInner {
         Self {
             state_provider_info: (block_hash, block_number),
             block_number_to_view: BTreeMap::new(),
-            block_number_to_state: BTreeMap::new(),
             block_number_to_trie_updates: BTreeMap::new(),
             block_number_to_id,
         }
@@ -94,7 +92,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
             .block_number_to_view
             .range(base_block_number + 1..target_block_number + 1)
             .rev()
-            .map(|(_, view)| view.clone())
+            .map(|(_, view)| view.0.clone())
             .collect();
         drop(storage);
 
@@ -120,20 +118,22 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
     }
 
     fn insert_bundle_state(&self, block_number: u64, bundle_state: &BundleState) {
-        let mut cached = CachedReads::default();
-        for (addr, acc) in bundle_state.state().iter().map(|(a, acc)| (*a, acc)) {
-            if let Some(info) = acc.info.clone() {
-                // we want pre cache existing accounts and their storage
-                // this only includes changed accounts and storage but is better than nothing
-                let storage =
-                    acc.storage.iter().map(|(key, slot)| (*key, slot.present_value)).collect();
-                cached.insert_account(addr, info, storage);
-            }
-        }
+        let block_view = BlockView {
+            accounts: bundle_state
+                .state()
+                .iter()
+                .map(|(addr, acc)| {
+                    let storage = acc.storage.iter().map(|(k, v)| (*k, v.present_value)).collect();
+                    let plain_account =
+                        acc.account_info().map(|info| PlainAccount { info, storage });
+                    (*addr, CacheAccount { account: plain_account, status: acc.status })
+                })
+                .collect(),
+            contracts: bundle_state.contracts.clone(),
+        };
         let hashed_state = Arc::new(HashedPostState::from_bundle_state(&bundle_state.state));
         let mut storage = self.inner.lock().unwrap();
-        storage.block_number_to_view.insert(block_number, Arc::new(cached));
-        storage.block_number_to_state.insert(block_number, hashed_state);
+        storage.block_number_to_view.insert(block_number, (Arc::new(block_view), hashed_state));
     }
 
     fn update_canonical(&self, block_number: u64, block_hash: B256) {
@@ -142,7 +142,6 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         let gc_block_number = storage.state_provider_info.1;
         storage.state_provider_info = (block_hash, block_number);
         storage.block_number_to_view.remove(&gc_block_number);
-        storage.block_number_to_state.remove(&gc_block_number);
         storage.block_number_to_trie_updates.remove(&gc_block_number);
     }
 
@@ -153,16 +152,16 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         let storage = self.inner.lock().unwrap();
         let (base_block_hash, base_block_number) = storage.state_provider_info;
         let hashed_state_vec: Vec<_> = storage
-            .block_number_to_state
+            .block_number_to_view
             .range(base_block_number + 1..block_number)
-            .map(|(_, hashed_state)| hashed_state.clone())
+            .map(|(_, view)| view.1.clone())
             .collect();
         let trie_updates_vec: Vec<_> = storage
             .block_number_to_trie_updates
             .range(base_block_number + 1..block_number)
             .map(|(_, trie_updates)| trie_updates.clone())
             .collect();
-        let hashed_state = storage.block_number_to_state.get(&block_number).unwrap().clone();
+        let hashed_state = storage.block_number_to_view.get(&block_number).unwrap().1.clone();
         drop(storage);
 
         // Block number should be continuous
@@ -188,15 +187,22 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
     }
 }
 
+struct BlockView {
+    /// Block state account with account state.
+    accounts: HashMap<Address, CacheAccount>,
+    /// Created contracts.
+    contracts: HashMap<B256, Bytecode>,
+}
+
 pub struct BlockViewProvider {
-    block_views: Vec<Arc<CachedReads>>,
+    block_views: Vec<Arc<BlockView>>,
     block_number_to_id: BTreeMap<u64, B256>,
     db: StateProviderDatabase<StateProviderBox>,
 }
 
 impl BlockViewProvider {
     fn new(
-        block_views: Vec<Arc<CachedReads>>,
+        block_views: Vec<Arc<BlockView>>,
         block_number_to_id: BTreeMap<u64, B256>,
         state_provider: StateProviderBox,
     ) -> Self {
@@ -210,10 +216,10 @@ impl DatabaseRef for BlockViewProvider {
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         for block_view in &self.block_views {
             if let Some(account) = block_view.accounts.get(&address) {
-                return Ok(account.info.clone());
+                return Ok(account.account_info());
             }
         }
-        Ok(self.db.basic_ref(address)?)
+        self.db.basic_ref(address)
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
@@ -222,18 +228,31 @@ impl DatabaseRef for BlockViewProvider {
                 return Ok(bytecode.clone());
             }
         }
-        Ok(self.db.code_by_hash_ref(code_hash)?)
+        self.db.code_by_hash_ref(code_hash)
     }
 
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
         for block_view in &self.block_views {
-            if let Some(acc_entry) = block_view.accounts.get(&address) {
-                if let Some(value) = acc_entry.storage.get(&index) {
-                    return Ok(*value);
+            if let Some(entry) = block_view.accounts.get(&address) {
+                // if account was destroyed or account is newly built
+                // we return zero and don't ask database.
+                match &entry.account {
+                    Some(account) => {
+                        if let Some(value) = account.storage.get(&index) {
+                            return Ok(*value);
+                        } else if entry.status.is_storage_known() {
+                            return Ok(U256::ZERO);
+                        } else {
+                            continue;
+                        }
+                    }
+                    None => {
+                        return Ok(U256::ZERO);
+                    }
                 }
             }
         }
-        Ok(self.db.storage_ref(address, index)?)
+        self.db.storage_ref(address, index)
     }
 
     fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
