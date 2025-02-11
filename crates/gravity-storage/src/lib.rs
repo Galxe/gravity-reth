@@ -2,6 +2,7 @@ pub mod block_view_storage;
 
 use std::sync::Arc;
 
+use reth_evm::execute::ParallelDatabase;
 use reth_primitives::B256;
 use reth_revm::DatabaseRef;
 use reth_storage_api::errors::provider::ProviderError;
@@ -36,7 +37,7 @@ impl std::fmt::Display for GravityStorageError {
 }
 
 pub trait GravityStorage: Send + Sync + 'static {
-    type StateView: DatabaseRef<Error = ProviderError>;
+    type StateView: ParallelDatabase;
 
     // get state view for execute
     fn get_state_view(

@@ -8,7 +8,7 @@ use alloy_primitives::B256;
 use reth_chain_state::ExecutedBlock;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_evm::{
-    execute::{BlockExecutionInput, BlockExecutorProvider, Executor},
+    execute::{BlockExecutionInput, BlockExecutorProvider, Executor, ParallelExecutorProvider},
     ConfigureEvmEnv, NextBlockEnvAttributes,
 };
 use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
@@ -18,7 +18,7 @@ use reth_primitives::{
     proofs, Address, Block, BlockWithSenders, Header, Receipt, TransactionSigned, Withdrawals,
     EMPTY_OMMER_ROOT_HASH, U256,
 };
-use revm::State;
+use revm::db::WrapDatabaseRef;
 use std::sync::Arc;
 
 use once_cell::sync::OnceCell;
@@ -266,16 +266,23 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let (parent_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
         assert_eq!(parent_id, ordered_block.parent_id);
-        let db = State::builder().with_database_ref(state).with_bundle_update().build();
 
         let executor_provider =
             EthExecutorProvider::new(self.chain_spec.clone(), self.evm_config.clone());
-        let outcome = executor_provider
-            .executor(db)
-            .execute(BlockExecutionInput { block: &block, total_difficulty: block_env.difficulty })
-            .unwrap_or_else(|err| {
-                panic!("failed to execute block {:?}: {:?}", ordered_block.id, err)
-            });
+        let outcome = if let Some(executor_provider) =
+            executor_provider.try_into_parallel_provider()
+        {
+            executor_provider.executor(state).execute(BlockExecutionInput {
+                block: &block,
+                total_difficulty: block_env.difficulty,
+            })
+        } else {
+            executor_provider.executor(WrapDatabaseRef(state)).execute(BlockExecutionInput {
+                block: &block,
+                total_difficulty: block_env.difficulty,
+            })
+        }
+        .unwrap_or_else(|err| panic!("failed to execute block {:?}: {:?}", ordered_block.id, err));
 
         debug!(target: "execute_ordered_block",
             id=?ordered_block.id,

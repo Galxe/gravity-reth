@@ -370,19 +370,18 @@ impl StorageInner {
 
         trace!(target: "consensus::auto", transactions=?&block.body, "executing transactions");
 
-        let db = Arc::new(StateProviderDatabase::new(
+        let db = StateProviderDatabase::new(
             provider.latest().map_err(InternalBlockExecutionError::LatestBlock)?,
-        ));
+        );
 
         // execute the block
-        let block_execution_output =
-            if let Some(parallel_provider) = executor.try_into_parallel_provider() {
-                parallel_provider.executor(db.clone()).execute((&block, U256::ZERO).into())?
-            } else {
-                executor
-                    .executor(WrapDatabaseRef::from(db.clone()))
-                    .execute((&block, U256::ZERO).into())?
-            };
+        let block_execution_output = if let Some(parallel_provider) =
+            executor.try_into_parallel_provider()
+        {
+            parallel_provider.executor(&db).execute((&block, U256::ZERO).into())?
+        } else {
+            executor.executor(WrapDatabaseRef::from(&db)).execute((&block, U256::ZERO).into())?
+        };
 
         let gas_used = block_execution_output.gas_used;
         let execution_outcome = ExecutionOutcome::from((block_execution_output, block.number));
