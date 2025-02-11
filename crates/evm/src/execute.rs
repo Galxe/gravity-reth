@@ -145,18 +145,14 @@ pub trait BlockExecutorProvider: Send + Sync + Clone + Unpin + 'static {
 }
 
 pub trait ParallelDatabase:
-    DatabaseRef<Error: Send + Sync + 'static + Display + Clone + Into<ProviderError>>
-    + Send
-    + Sync
-    + Clone
+    DatabaseRef<Error: Send + Sync + 'static + Display + Clone + Into<ProviderError>> + Send + Sync
 {
 }
 
 impl<
         T: DatabaseRef<Error: Send + Sync + 'static + Display + Clone + Into<ProviderError>>
             + Send
-            + Sync
-            + Clone,
+            + Sync,
     > ParallelDatabase for T
 {
 }

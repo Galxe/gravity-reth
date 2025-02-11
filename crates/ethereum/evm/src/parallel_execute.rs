@@ -147,7 +147,7 @@ where
 
         let revm_transition_state = if DEBUG_EXT.compare_with_revm_executor {
             let mut state = State::builder()
-                .with_database(self.state.database.clone())
+                .with_database(&mut self.state.database)
                 .with_bundle_update()
                 .without_state_clear()
                 .build();
@@ -184,7 +184,7 @@ where
         let mut executor = new_grevm_scheduler(
             env.spec_id(),
             env.env.as_ref().clone(),
-            self.state.database.0.clone(),
+            &self.state.database.0,
             txs.clone(),
             Some(Box::new(reth_grevm::storage::State {
                 cache: std::mem::take(&mut self.state.cache),
@@ -200,7 +200,7 @@ where
                 let mut seq_executor = new_grevm_scheduler(
                     env.spec_id(),
                     env.env.as_ref().clone(),
-                    self.state.database.0.clone(),
+                    &self.state.database.0,
                     txs.clone(),
                     Some(executor.database.state.clone()),
                 );
