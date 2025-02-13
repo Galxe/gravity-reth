@@ -461,7 +461,7 @@ impl EvmEnvProvider for NoopProvider {
 }
 
 impl StateProviderFactory for NoopProvider {
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
+    fn latest_with_opts(&self, _opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(*self))
     }
 

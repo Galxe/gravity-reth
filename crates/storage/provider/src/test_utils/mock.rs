@@ -738,7 +738,7 @@ impl EvmEnvProvider for MockEthProvider {
 }
 
 impl StateProviderFactory for MockEthProvider {
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
+    fn latest_with_opts(&self,opts:StateProviderOptions) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
