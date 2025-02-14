@@ -63,7 +63,7 @@ pub enum PipeExecLayerEvent {
 }
 
 #[derive(Debug)]
-pub struct StorageConfig {
+pub struct ExecutionArgs {
     block_number_to_block_id: BTreeMap<u64, B256>,
 }
 /// Owned by EL
@@ -73,8 +73,8 @@ struct PipeExecService<Storage: GravityStorage> {
     core: Arc<Core<Storage>>,
     /// Receive ordered block from Coordinator
     ordered_block_rx: UnboundedReceiver<OrderedBlock>,
-    /// Receive the storage config from GravitySDK
-    storage_config_rx: oneshot::Receiver<StorageConfig>,
+    /// Receive the execution init args from GravitySDK
+    execution_args_rx: oneshot::Receiver<ExecutionArgs>,
 }
 
 #[derive(Debug)]
@@ -95,7 +95,7 @@ struct Core<Storage: GravityStorage> {
 
 impl<Storage: GravityStorage> PipeExecService<Storage> {
     async fn run(mut self, mut latest_block_number: u64) {
-        self.core.init_storage(self.storage_config_rx.await.unwrap().block_number_to_block_id);
+        self.core.init_storage(self.execution_args_rx.await.unwrap());
         loop {
             let ordered_block = match self.ordered_block_rx.recv().await {
                 Some(ordered_block) => ordered_block,
@@ -350,8 +350,8 @@ impl<Storage: GravityStorage> Core<Storage> {
         debug!(target: "make_canonical", block_number=?block_number, "block made canonical");
     }
 
-    fn init_storage(&self, block_number_to_block_id: BTreeMap<u64, B256>) {
-        block_number_to_block_id.into_iter().for_each(|(block_number, block_id)| {
+    fn init_storage(&self, execution_args: ExecutionArgs) {
+        execution_args.block_number_to_block_id.into_iter().for_each(|(block_number, block_id)| {
             self.storage.insert_block_id(block_number, block_id);
         });
     }
@@ -407,7 +407,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     storage: Storage,
     latest_block_header: Header,
     latest_block_hash: B256,
-    storage_config_rx: oneshot::Receiver<StorageConfig>,
+    execution_args_rx: oneshot::Receiver<ExecutionArgs>,
 ) -> PipeExecLayerApi {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let executed_block_hash_ch = Arc::new(Channel::new());
@@ -432,7 +432,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
             make_canonical_barrier: Channel::new_with_states([(latest_block_number, ())]),
         }),
         ordered_block_rx,
-        storage_config_rx,
+        execution_args_rx,
     };
     tokio::spawn(service.run(latest_block_number));
 
