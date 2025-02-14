@@ -62,6 +62,10 @@ pub enum PipeExecLayerEvent {
     MakeCanonical(ExecutedBlock, oneshot::Sender<()>),
 }
 
+#[derive(Debug)]
+pub struct StorageConfig {
+    block_number_to_block_id: BTreeMap<u64, B256>,
+}
 /// Owned by EL
 #[derive(Debug)]
 struct PipeExecService<Storage: GravityStorage> {
@@ -70,7 +74,7 @@ struct PipeExecService<Storage: GravityStorage> {
     /// Receive ordered block from Coordinator
     ordered_block_rx: UnboundedReceiver<OrderedBlock>,
     /// Receive the storage config from GravitySDK
-    storage_config_rx: oneshot::Receiver<BTreeMap<u64, B256>>,
+    storage_config_rx: oneshot::Receiver<StorageConfig>,
 }
 
 #[derive(Debug)]
@@ -91,7 +95,7 @@ struct Core<Storage: GravityStorage> {
 
 impl<Storage: GravityStorage> PipeExecService<Storage> {
     async fn run(mut self, mut latest_block_number: u64) {
-        self.core.init_storage(self.storage_config_rx.await.unwrap());
+        self.core.init_storage(self.storage_config_rx.await.unwrap().block_number_to_block_id);
         loop {
             let ordered_block = match self.ordered_block_rx.recv().await {
                 Some(ordered_block) => ordered_block,
@@ -403,7 +407,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     storage: Storage,
     latest_block_header: Header,
     latest_block_hash: B256,
-    storage_config_rx: oneshot::Receiver<BTreeMap<u64, B256>>,
+    storage_config_rx: oneshot::Receiver<StorageConfig>,
 ) -> PipeExecLayerApi {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let executed_block_hash_ch = Arc::new(Channel::new());
