@@ -64,7 +64,7 @@ pub enum PipeExecLayerEvent {
 
 #[derive(Debug)]
 pub struct ExecutionArgs {
-    block_number_to_block_id: BTreeMap<u64, B256>,
+    pub block_number_to_block_id: BTreeMap<u64, B256>,
 }
 /// Owned by EL
 #[derive(Debug)]
