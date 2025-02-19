@@ -1,8 +1,10 @@
 //! Pipeline execution layer extension
 
 mod channel;
+mod metrics;
 
 use channel::Channel;
+use metrics::PipeExecLayerMetrics;
 
 use alloy_primitives::B256;
 use reth_chain_state::ExecutedBlock;
@@ -19,7 +21,7 @@ use reth_primitives::{
     EMPTY_OMMER_ROOT_HASH, U256,
 };
 use revm::db::WrapDatabaseRef;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use once_cell::sync::OnceCell;
 
@@ -91,6 +93,7 @@ struct Core<Storage: GravityStorage> {
     merklize_barrier: Channel<u64 /* block number */, ()>,
     seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
     make_canonical_barrier: Channel<u64 /* block number */, ()>,
+    metrics: PipeExecLayerMetrics,
 }
 
 impl<Storage: GravityStorage> PipeExecService<Storage> {
@@ -136,16 +139,20 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
         let parent_block_header = self.execute_block_barrier.wait(block_number - 1).await.unwrap();
+        let start_time = Instant::now();
         let (mut block, outcome) = self.execute_ordered_block(ordered_block, &parent_block_header);
         self.storage.insert_bundle_state(block_number, &outcome.state);
+        self.metrics.execute_duration.record(start_time.elapsed());
         self.execute_block_barrier.notify(block_number, block.header.clone()).unwrap();
 
         let execution_outcome = self.calculate_roots(&mut block, outcome);
 
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
+        let start_time = Instant::now();
         let (state_root, hashed_state, trie_output) =
             self.storage.state_root_with_updates(block_number).unwrap();
+        self.metrics.merklize_duration.record(start_time.elapsed());
         self.merklize_barrier.notify(block_number, ()).unwrap();
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
@@ -156,11 +163,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         block.header.state_root = state_root;
 
         let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
+        let start_time = Instant::now();
         block.header.parent_hash = parent_hash;
 
         // Seal the block
         let block = block.seal_slow();
         let block_hash = block.hash();
+        self.metrics.seal_duration.record(start_time.elapsed());
         self.seal_barrier.notify(block_number, block_hash).unwrap();
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
@@ -170,7 +179,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
 
         // Commit the executed block hash to Coordinator
+        let start_time = Instant::now();
         self.verify_executed_block_hash(ExecutedBlockMeta { block_id, block_hash }).await.unwrap();
+        self.metrics.verify_duration.record(start_time.elapsed());
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
@@ -178,8 +189,11 @@ impl<Storage: GravityStorage> Core<Storage> {
             "block verified"
         );
 
+        let gas_used = block.gas_used;
+
         // Make the block canonical
         self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
+        let start_time = Instant::now();
         self.make_canonical(ExecutedBlock {
             block: Arc::new(block.block),
             senders: Arc::new(block.senders),
@@ -189,7 +203,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         })
         .await;
         self.storage.update_canonical(block_number, block_hash);
+        self.metrics.make_canonical_duration.record(start_time.elapsed());
         self.make_canonical_barrier.notify(block_number, ()).unwrap();
+
+        self.metrics.total_gas_used.increment(gas_used);
     }
 
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
@@ -430,6 +447,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
             merklize_barrier: Channel::new_with_states([(latest_block_number, ())]),
             seal_barrier: Channel::new_with_states([(latest_block_number, latest_block_hash)]),
             make_canonical_barrier: Channel::new_with_states([(latest_block_number, ())]),
+            metrics: PipeExecLayerMetrics::default(),
         }),
         ordered_block_rx,
         execution_args_rx,
