@@ -1,6 +1,8 @@
 use reth_primitives::{revm_primitives::Bytecode, Address, B256, U256};
 use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::{errors::provider::ProviderError, StateProviderBox, StateProviderFactory};
+use reth_storage_api::{
+    errors::provider::ProviderError, StateProviderBox, StateProviderFactory, STATE_PROVIDER_OPTS,
+};
 use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::{
     db::{
@@ -32,8 +34,13 @@ struct BlockViewStorageInner {
 fn get_state_provider<Client: StateProviderFactory + 'static>(
     client: &Client,
     block_hash: B256,
+    parallel: bool,
 ) -> Result<StateProviderBox, GravityStorageError> {
-    let state_provider = client.state_by_block_hash(block_hash);
+    let state_provider = if parallel {
+        client.state_by_block_hash_with_opts(block_hash, STATE_PROVIDER_OPTS.clone())
+    } else {
+        client.state_by_block_hash(block_hash)
+    };
 
     match state_provider {
         Ok(state_provider) => Ok(state_provider),
@@ -104,7 +111,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
             BlockViewProvider::new(
                 block_views,
                 block_number_to_id,
-                get_state_provider(&self.client, base_block_hash)?,
+                get_state_provider(&self.client, base_block_hash, true)?,
             ),
         ))
     }
@@ -168,7 +175,8 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         assert_eq!(hashed_state_vec.len() as u64, block_number - base_block_number - 1);
         assert_eq!(trie_updates_vec.len() as u64, block_number - base_block_number - 1);
 
-        let state_provider = get_state_provider(&self.client, base_block_hash)?;
+        // TODO: implement parallel state root calculation
+        let state_provider = get_state_provider(&self.client, base_block_hash, false)?;
         let (state_root, trie_updates) = state_provider
             .state_root_with_updates_v2(
                 hashed_state.as_ref().clone(),
