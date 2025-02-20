@@ -19,4 +19,10 @@ pub(crate) struct PipeExecLayerMetrics {
     pub(crate) make_canonical_duration: Histogram,
     /// Total gas used
     pub(crate) total_gas_used: Counter,
+    /// Time difference between two adjacent ordered blocks received
+    pub(crate) recv_block_time_diff: Histogram,
+    /// Time difference between two adjacent blocks starting execute
+    pub(crate) start_execute_time_diff: Histogram,
+    /// Time difference between two adjacent blocks completing commit
+    pub(crate) finish_commit_time_diff: Histogram,
 }
