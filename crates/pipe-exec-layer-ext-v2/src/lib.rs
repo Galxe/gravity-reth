@@ -23,7 +23,7 @@ use reth_primitives::{
 use revm::db::WrapDatabaseRef;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 
 use gravity_storage::GravityStorage;
 use tokio::sync::{
@@ -426,6 +426,10 @@ pub struct PipeExecLayerExt {
 
 /// A static instance of `PipeExecLayerExt` used for dispatching events.
 pub static PIPE_EXEC_LAYER_EXT: OnceCell<PipeExecLayerExt> = OnceCell::new();
+
+/// Whether to validate the block before inserting it into `TreeState`.
+pub static PIPE_VALIDATE_BLOCK_BEFORE_INSERT: Lazy<bool> =
+    Lazy::new(|| std::env::var("PIPE_VALIDATE_BLOCK_BEFORE_INSERT").is_ok());
 
 /// Create a new `PipeExecLayerApi` instance and launch a `PipeExecService`.
 pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(

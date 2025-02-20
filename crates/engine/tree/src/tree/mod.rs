@@ -663,7 +663,7 @@ where
         let block_number = block.block.number;
         let block_hash = block.block.hash();
 
-        {
+        if *reth_pipe_exec_layer_ext_v2::PIPE_VALIDATE_BLOCK_BEFORE_INSERT {
             let block: SealedBlock = block.block.as_ref().clone();
             let block = block.seal_with_senders().unwrap_or_else(|| {
                 panic!(
