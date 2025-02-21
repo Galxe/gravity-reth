@@ -42,6 +42,7 @@ reth-pipe-exec-layer-ext-v2.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
 gravity-storage.workspace = true
+reth-metrics.workspace = true
 
 [workspace.package]
 version = "1.0.7"
