@@ -31,3 +31,4 @@ pub use reth_rpc_types;
 pub use reth_tasks;
 pub use reth_tracing;
 pub use reth_transaction_pool;
+pub use reth_metrics;
