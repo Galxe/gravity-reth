@@ -26,10 +26,7 @@ use reth_primitives::{BlockNumber, BlockWithSenders, Header, Receipt};
 use reth_prune_types::PruneModes;
 use reth_revm::{
     batch::BlockBatchRecord,
-    db::{
-        states::{bundle_state::BundleRetention},
-        State,
-    },
+    db::{states::bundle_state::BundleRetention, State},
     state_change::post_block_balance_increments,
     DatabaseCommit, EvmBuilder, TransitionState,
 };
@@ -97,7 +94,7 @@ where
 {
     /// Create a new instance of the executor
     pub fn new(chain_spec: Arc<ChainSpec>, evm_config: EvmConfig, database: DB) -> Self {
-        let state = ParallelState::new(database, true);
+        let state = ParallelState::new(database, true, DEBUG_EXT.update_db_metrics);
         Self { chain_spec, evm_config, state: Some(state), state_clear_flag: true }
     }
 }
@@ -160,12 +157,15 @@ where
 
         let (results, mut state) = if DEBUG_EXT.compare_with_seq_exec {
             let seq_state = {
-                let mut seq_state =
-                    State::builder().with_database_ref(&state.database).with_bundle_update().build();
-                seq_state.set_state_clear_flag(self.state_clear_flag);
-                seq_state.cache.accounts.extend(state.cache.accounts.clone());
-                seq_state.cache.contracts.extend(state.cache.contracts.clone());
+                let mut seq_state = State::builder()
+                    .with_database_ref(&state.database)
+                    .with_bundle_update()
+                    .build();
+                let as_state = state.cache.as_cache_state();
+                seq_state.cache.accounts.extend(as_state.accounts);
+                seq_state.cache.contracts.extend(as_state.contracts);
                 seq_state.block_hashes.extend(state.block_hashes.clone());
+                seq_state.set_state_clear_flag(self.state_clear_flag);
                 {
                     let mut evm = EvmBuilder::default()
                         .with_db(&mut seq_state)
@@ -192,10 +192,17 @@ where
             let parallel_output = executor.parallel_execute(None);
             let (parallel_results, parallel_state) = executor.take_result_and_state();
 
-            if parallel_output.is_err() || !crate::debug_ext::compare_transition_state(
-                seq_state.0.as_ref().unwrap(),
-                parallel_state.transition_state.as_ref().unwrap(),
-            ) {
+            let dump_block_number: Option<u64> =
+                std::env::var("DUMP_BLOCK_NUMBER").map(|s| s.parse().unwrap()).ok();
+            let should_dump =
+                dump_block_number.map(|number| number == block.number).unwrap_or(false);
+            let parallel_error = parallel_output.is_err() ||
+                !crate::debug_ext::compare_transition_state(
+                    seq_state.0.as_ref().unwrap(),
+                    parallel_state.transition_state.as_ref().unwrap(),
+                );
+
+            if should_dump || parallel_error {
                 crate::debug_ext::dump_transitions(
                     block.number,
                     seq_state.0.as_ref().unwrap(),
@@ -216,7 +223,11 @@ where
                     &seq_state.2,
                 )
                 .unwrap();
-                panic!("Transition state mismatch, block number: {}", block.number);
+                if parallel_error {
+                    panic!("Transition state mismatch, block number: {}", block.number);
+                } else {
+                    println!("Dump block number: {}", block.number);
+                }
             }
             parallel_output.map_err(|e| BlockExecutionError::msg(e))?;
             (parallel_results, parallel_state)
