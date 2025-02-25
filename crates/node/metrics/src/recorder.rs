@@ -1,7 +1,7 @@
 //! Prometheus recorder
 
 use eyre::WrapErr;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use metrics_util::layers::{PrefixLayer, Stack};
 use std::sync::LazyLock;
 
@@ -22,7 +22,24 @@ pub struct PrometheusRecorder;
 impl PrometheusRecorder {
     /// Installs Prometheus as the metrics recorder.
     pub fn install() -> eyre::Result<PrometheusHandle> {
-        let recorder = PrometheusBuilder::new().build_recorder();
+        let recorder = PrometheusBuilder::new()
+            .set_buckets_for_metric(
+                Matcher::Full("grevm.db_latency_us".to_owned()),
+                &[
+                    5000.0, 10000.0, 20000.0, 40000.0, 80000.0, 100000.0, 200000.0, 400000.0,
+                    600000.0, 800000.0, 1000000.0, 2000000.0, 4000000.0,
+                ],
+            )
+            .unwrap()
+            .set_buckets_for_metric(
+                Matcher::Prefix("grevm.".to_owned()),
+                &[
+                    0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 80.0, 96.0, 112.0, 128.0,
+                    256.0, 512.0, 1024.0, 2048.0,
+                ],
+            )
+            .unwrap()
+            .build_recorder();
         let handle = recorder.handle();
 
         // Build metrics stack
