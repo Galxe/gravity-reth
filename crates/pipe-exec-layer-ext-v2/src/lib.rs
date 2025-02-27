@@ -181,6 +181,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number=?block_number,
             block_id=?block_id,
             block_hash=?block_hash,
+            transactions_root=?block.block.header().transactions_root,
+            receipts_root=?block.block.header().receipts_root,
             "block sealed"
         );
 
