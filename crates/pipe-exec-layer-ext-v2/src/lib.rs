@@ -302,20 +302,21 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let executor_provider =
             EthExecutorProvider::new(self.chain_spec.clone(), self.evm_config.clone());
-        let outcome = if let Some(executor_provider) =
-            executor_provider.try_into_parallel_provider()
-        {
-            executor_provider.executor(state).execute(BlockExecutionInput {
-                block: &block,
-                total_difficulty: block_env.difficulty,
-            })
-        } else {
-            executor_provider.executor(WrapDatabaseRef(state)).execute(BlockExecutionInput {
-                block: &block,
-                total_difficulty: block_env.difficulty,
-            })
-        }
-        .unwrap_or_else(|err| panic!("failed to execute block {:?}: {:?}", ordered_block.id, err));
+        let outcome =
+            if let Some(executor_provider) = executor_provider.try_into_parallel_provider() {
+                executor_provider.executor(state).execute(BlockExecutionInput {
+                    block: &block,
+                    total_difficulty: block_env.difficulty,
+                })
+            } else {
+                executor_provider.executor(WrapDatabaseRef(state)).execute(BlockExecutionInput {
+                    block: &block,
+                    total_difficulty: block_env.difficulty,
+                })
+            }
+            .unwrap_or_else(|err| {
+                panic!("failed to execute block {:?}: {:?}\n{:?}", ordered_block.id, err, block)
+            });
 
         debug!(target: "execute_ordered_block",
             id=?ordered_block.id,
