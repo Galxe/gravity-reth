@@ -1,24 +1,28 @@
 use crate::stages::MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD;
+use alloy_consensus::{BlockHeader, Header, Sealable};
+use alloy_eips::{eip1898::BlockWithParent, NumHash};
+use alloy_primitives::BlockNumber;
 use num_traits::Zero;
 use reth_config::config::ExecutionConfig;
+use reth_consensus::{ConsensusError, FullConsensus, PostExecutionInput};
 use reth_db::{static_file::HeaderMask, tables};
-use reth_db_api::{cursor::DbCursorRO, transaction::DbTx};
 use reth_evm::{
-    execute::{BlockExecutorProvider, EitherBatchExecutor, ParallelExecutorProvider},
+    database::*,
+    execute::{BlockExecutorProvider, Executor},
     metrics::ExecutorMetrics,
+    parallel_database,
 };
-use reth_execution_types::{Chain, ExecutionOutcome};
-use reth_exex::{ExExManagerHandle, ExExNotification};
-use reth_primitives::{BlockNumber, Header, StaticFileSegment};
-use reth_primitives_traits::format_gas_throughput;
+use reth_execution_types::Chain;
+use reth_exex::{ExExManagerHandle, ExExNotification, ExExNotificationSource};
+use reth_primitives::StaticFileSegment;
+use reth_primitives_traits::{format_gas_throughput, Block, BlockBody, NodePrimitives};
 use reth_provider::{
-    providers::{StaticFileProvider, StaticFileProviderRWRefMut, StaticFileWriter},
-    writer::UnifiedStorageWriter,
-    BlockReader, DBProvider, HeaderProvider, LatestStateProviderRef, OriginalValuesKnown,
-    ProviderError, StateChangeWriter, StateProvider, StateWriter, StaticFileProviderFactory,
-    StatsReader, TransactionVariant, STATE_PROVIDER_OPTS,
+    providers::{StaticFileProvider, StaticFileWriter},
+    BlockHashReader, BlockReader, DBProvider, ExecutionOutcome, HeaderProvider,
+    LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateCommitmentProvider,
+    StateProvider, StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation,
+    TransactionVariant, STATE_PROVIDER_OPTS,
 };
-use reth_prune_types::PruneModes;
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
     BlockErrorKind, CheckpointBlockRange, EntitiesCheckpoint, ExecInput, ExecOutput,
@@ -33,6 +37,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::*;
+
+use super::missing_static_data_error;
 
 /// The execution stage executes all transactions and
 /// update history indexes.
@@ -63,10 +69,16 @@ use tracing::*;
 /// - [`tables::PlainAccountState`] [`tables::StoragesHistory`] to remove change set and apply old
 ///   values to [`tables::PlainStorageState`]
 // false positive, we cannot derive it if !DB: Debug.
-#[allow(missing_debug_implementations)]
-pub struct ExecutionStage<E> {
+#[derive(Debug)]
+pub struct ExecutionStage<E>
+where
+    E: BlockExecutorProvider,
+{
     /// The stage's internal block executor
     executor_provider: E,
+    /// The consensus instance for validating blocks.
+    consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
+    /// The consensu
     /// The commit thresholds of the execution stage.
     thresholds: ExecutionStageThresholds,
     /// The highest threshold (in number of blocks) for switching between incremental
@@ -74,36 +86,37 @@ pub struct ExecutionStage<E> {
     /// [`super::StorageHashingStage`]. This is required to figure out if can prune or not
     /// changesets on subsequent pipeline runs.
     external_clean_threshold: u64,
-    /// Pruning configuration.
-    prune_modes: PruneModes,
     /// Input for the post execute commit hook.
     /// Set after every [`ExecutionStage::execute`] and cleared after
     /// [`ExecutionStage::post_execute_commit`].
-    post_execute_commit_input: Option<Chain>,
+    post_execute_commit_input: Option<Chain<E::Primitives>>,
     /// Input for the post unwind commit hook.
     /// Set after every [`ExecutionStage::unwind`] and cleared after
     /// [`ExecutionStage::post_unwind_commit`].
-    post_unwind_commit_input: Option<Chain>,
+    post_unwind_commit_input: Option<Chain<E::Primitives>>,
     /// Handle to communicate with `ExEx` manager.
-    exex_manager_handle: ExExManagerHandle,
+    exex_manager_handle: ExExManagerHandle<E::Primitives>,
     /// Executor metrics.
     metrics: ExecutorMetrics,
 }
 
-impl<E> ExecutionStage<E> {
+impl<E> ExecutionStage<E>
+where
+    E: BlockExecutorProvider,
+{
     /// Create new execution stage with specified config.
     pub fn new(
         executor_provider: E,
+        consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
         thresholds: ExecutionStageThresholds,
         external_clean_threshold: u64,
-        prune_modes: PruneModes,
-        exex_manager_handle: ExExManagerHandle,
+        exex_manager_handle: ExExManagerHandle<E::Primitives>,
     ) -> Self {
         Self {
             external_clean_threshold,
             executor_provider,
+            consensus,
             thresholds,
-            prune_modes,
             post_execute_commit_input: None,
             post_unwind_commit_input: None,
             exex_manager_handle,
@@ -114,12 +127,15 @@ impl<E> ExecutionStage<E> {
     /// Create an execution stage with the provided executor.
     ///
     /// The commit threshold will be set to [`MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD`].
-    pub fn new_with_executor(executor_provider: E) -> Self {
+    pub fn new_with_executor(
+        executor_provider: E,
+        consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
+    ) -> Self {
         Self::new(
             executor_provider,
+            consensus,
             ExecutionStageThresholds::default(),
             MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD,
-            PruneModes::none(),
             ExExManagerHandle::empty(),
         )
     }
@@ -127,20 +143,21 @@ impl<E> ExecutionStage<E> {
     /// Create new instance of [`ExecutionStage`] from configuration.
     pub fn from_config(
         executor_provider: E,
+        consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
         config: ExecutionConfig,
         external_clean_threshold: u64,
-        prune_modes: PruneModes,
     ) -> Self {
         Self::new(
             executor_provider,
+            consensus,
             config.into(),
             external_clean_threshold,
-            prune_modes,
             ExExManagerHandle::empty(),
         )
     }
 
-    /// Adjusts the prune modes related to changesets.
+    /// Returns whether we can perform pruning of [`tables::AccountChangeSets`] and
+    /// [`tables::StorageChangeSets`].
     ///
     /// This function verifies whether the [`super::MerkleStage`] or Hashing stages will run from
     /// scratch. If at least one stage isn't starting anew, it implies that pruning of
@@ -150,32 +167,108 @@ impl<E> ExecutionStage<E> {
     /// Given that `start_block` changes with each checkpoint, it's necessary to inspect
     /// [`tables::AccountsTrie`] to ensure that [`super::MerkleStage`] hasn't
     /// been previously executed.
-    fn adjust_prune_modes(
+    fn can_prune_changesets(
         &self,
         provider: impl StatsReader,
         start_block: u64,
         max_block: u64,
-    ) -> Result<PruneModes, StageError> {
-        let mut prune_modes = self.prune_modes.clone();
-
-        // If we're not executing MerkleStage from scratch (by threshold or first-sync), then erase
-        // changeset related pruning configurations
-        if !(max_block - start_block > self.external_clean_threshold ||
+    ) -> Result<bool, StageError> {
+        // We can only prune changesets if we're not executing MerkleStage from scratch (by
+        // threshold or first-sync)
+        Ok(max_block - start_block > self.external_clean_threshold ||
             provider.count_entries::<tables::AccountsTrie>()?.is_zero())
-        {
-            prune_modes.account_history = None;
-            prune_modes.storage_history = None;
+    }
+
+    /// Performs consistency check on static files.
+    ///
+    /// This function compares the highest receipt number recorded in the database with that in the
+    /// static file to detect any discrepancies due to unexpected shutdowns or database rollbacks.
+    /// **If the height in the static file is higher**, it rolls back (unwinds) the static file.
+    /// **Conversely, if the height in the database is lower**, it triggers a rollback in the
+    /// database (by returning [`StageError`]) until the heights in both the database and static
+    /// file match.
+    fn ensure_consistency<Provider>(
+        &self,
+        provider: &Provider,
+        checkpoint: u64,
+        unwind_to: Option<u64>,
+    ) -> Result<(), StageError>
+    where
+        Provider: StaticFileProviderFactory + DBProvider + BlockReader + HeaderProvider,
+    {
+        // If there's any receipts pruning configured, receipts are written directly to database and
+        // inconsistencies are expected.
+        if provider.prune_modes_ref().has_receipts_pruning() {
+            return Ok(())
         }
-        Ok(prune_modes)
+
+        // Get next expected receipt number
+        let next_receipt_num =
+            provider.block_body_indices(checkpoint)?.map(|b| b.next_tx_num()).unwrap_or(0);
+
+        let static_file_provider = provider.static_file_provider();
+
+        // Get next expected receipt number in static files
+        let next_static_file_receipt_num = static_file_provider
+            .get_highest_static_file_tx(StaticFileSegment::Receipts)
+            .map(|num| num + 1)
+            .unwrap_or(0);
+
+        // Check if we had any unexpected shutdown after committing to static files, but
+        // NOT committing to database.
+        match next_static_file_receipt_num.cmp(&next_receipt_num) {
+            // It can be equal when it's a chain of empty blocks, but we still need to update the
+            // last block in the range.
+            Ordering::Greater | Ordering::Equal => {
+                let mut static_file_producer =
+                    static_file_provider.latest_writer(StaticFileSegment::Receipts)?;
+                static_file_producer
+                    .prune_receipts(next_static_file_receipt_num - next_receipt_num, checkpoint)?;
+                // Since this is a database <-> static file inconsistency, we commit the change
+                // straight away.
+                static_file_producer.commit()?;
+            }
+            Ordering::Less => {
+                // If we are already in the process of unwind, this might be fine because we will
+                // fix the inconsistency right away.
+                if let Some(unwind_to) = unwind_to {
+                    let next_receipt_num_after_unwind = provider
+                        .block_body_indices(unwind_to)?
+                        .map(|b| b.next_tx_num())
+                        .ok_or(ProviderError::BlockBodyIndicesNotFound(unwind_to))?;
+
+                    if next_receipt_num_after_unwind > next_static_file_receipt_num {
+                        // This means we need a deeper unwind.
+                    } else {
+                        return Ok(())
+                    }
+                }
+
+                return Err(missing_static_data_error(
+                    next_static_file_receipt_num.saturating_sub(1),
+                    &static_file_provider,
+                    provider,
+                    StaticFileSegment::Receipts,
+                )?)
+            }
+        }
+
+        Ok(())
     }
 }
 
 impl<E, Provider> Stage<Provider> for ExecutionStage<E>
 where
     E: BlockExecutorProvider,
-    Provider:
-        DBProvider + BlockReader + StaticFileProviderFactory + StatsReader + StateChangeWriter,
-    for<'a> UnifiedStorageWriter<'a, Provider, StaticFileProviderRWRefMut<'a>>: StateWriter,
+    Provider: DBProvider
+        + BlockReader<
+            Block = <E::Primitives as NodePrimitives>::Block,
+            Header = <E::Primitives as NodePrimitives>::BlockHeader,
+        > + StaticFileProviderFactory
+        + StatsReader
+        + BlockHashReader
+        + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
+        + StateCommitmentProvider,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -211,9 +304,10 @@ where
 
         // NOTE: We can ignore the error here, since an error means that the channel is closed,
         // which means the manager has died, which then in turn means the node is shutting down.
-        let _ = self
-            .exex_manager_handle
-            .send(ExExNotification::ChainCommitted { new: Arc::new(chain) });
+        let _ = self.exex_manager_handle.send(
+            ExExNotificationSource::Pipeline,
+            ExExNotification::ChainCommitted { new: Arc::new(chain) },
+        );
 
         Ok(())
     }
@@ -232,10 +326,13 @@ where
             })
         }
 
+        self.ensure_consistency(provider, input.checkpoint.block_number, Some(unwind_to))?;
+
         // Unwind account and storage changesets, as well as receipts.
         //
         // This also updates `PlainStorageState` and `PlainAccountState`.
-        let bundle_state_with_receipts = provider.take_state(range.clone())?;
+        let bundle_state_with_receipts =
+            provider.take_state_above(unwind_to, StorageLocation::Both)?;
 
         // Prepare the input for post unwind commit hook, where an `ExExNotification` will be sent.
         if self.exex_manager_handle.has_exexs() {
@@ -256,25 +353,6 @@ where
             }
         }
 
-        let static_file_provider = provider.static_file_provider();
-
-        // Unwind all receipts for transactions in the block range
-        if self.prune_modes.receipts.is_none() && self.prune_modes.receipts_log_filter.is_empty() {
-            // We only use static files for Receipts, if there is no receipt pruning of any kind.
-
-            // prepare_static_file_producer does a consistency check that will unwind static files
-            // if the expected highest receipt in the files is higher than the database.
-            // Which is essentially what happens here when we unwind this stage.
-            let _static_file_producer =
-                prepare_static_file_producer(provider, &static_file_provider, *range.start())?;
-        } else {
-            // If there is any kind of receipt pruning/filtering we use the database, since static
-            // files do not support filters.
-            //
-            // If we hit this case, the receipts have already been unwound by the call to
-            // `take_state`.
-        }
-
         // Update the checkpoint.
         let mut stage_checkpoint = input.checkpoint.execution_stage_checkpoint();
         if let Some(stage_checkpoint) = stage_checkpoint.as_mut() {
@@ -282,7 +360,8 @@ where
                 stage_checkpoint.progress.processed -= provider
                     .block_by_number(block_number)?
                     .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?
-                    .gas_used;
+                    .header()
+                    .gas_used();
             }
         }
         let checkpoint = if let Some(stage_checkpoint) = stage_checkpoint {
@@ -299,8 +378,10 @@ where
 
         // NOTE: We can ignore the error here, since an error means that the channel is closed,
         // which means the manager has died, which then in turn means the node is shutting down.
-        let _ =
-            self.exex_manager_handle.send(ExExNotification::ChainReverted { old: Arc::new(chain) });
+        let _ = self.exex_manager_handle.send(
+            ExExNotificationSource::Pipeline,
+            ExExNotification::ChainReverted { old: Arc::new(chain) },
+        );
 
         Ok(())
     }
@@ -317,9 +398,15 @@ where
         input: ExecInput,
     ) -> Result<ExecOutput, StageError>
     where
-        Provider:
-            DBProvider + BlockReader + StaticFileProviderFactory + StatsReader + StateChangeWriter,
-        for<'a> UnifiedStorageWriter<'a, Provider, StaticFileProviderRWRefMut<'a>>: StateWriter,
+        Provider: DBProvider
+            + BlockReader<
+                Block = <E::Primitives as NodePrimitives>::Block,
+                Header = <E::Primitives as NodePrimitives>::BlockHeader,
+            > + StaticFileProviderFactory
+            + StatsReader
+            + BlockHashReader
+            + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
+            + StateCommitmentProvider,
     {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
@@ -327,46 +414,17 @@ where
 
         let start_block = input.next_block();
         let max_block = input.target();
-        let prune_modes = self.adjust_prune_modes(provider, start_block, max_block)?;
         let static_file_provider = provider.static_file_provider();
 
-        // We only use static files for Receipts, if there is no receipt pruning of any kind.
-        let static_file_producer = if self.prune_modes.receipts.is_none() &&
-            self.prune_modes.receipts_log_filter.is_empty()
-        {
-            debug!(target: "sync::stages::execution", start = start_block, "Preparing static file producer");
-            let mut producer =
-                prepare_static_file_producer(provider, &static_file_provider, start_block)?;
-            // Since there might be a database <-> static file inconsistency (read
-            // `prepare_static_file_producer` for context), we commit the change straight away.
-            producer.commit()?;
-            Some(producer)
-        } else {
-            None
-        };
+        self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
+        let db: Box<dyn StateProvider> = if let Some(factory) = factory {
+            Box::new(factory.latest(STATE_PROVIDER_OPTS.clone())?)
+        } else {
+            Box::new(LatestStateProviderRef::new(provider))
+        };
         let mut executor =
-            if let Some(parallel_provider) = self.executor_provider.try_into_parallel_provider() {
-                let db: Arc<dyn StateProvider> = if let Some(factory) = factory {
-                    Arc::new(factory.latest(STATE_PROVIDER_OPTS.clone())?)
-                } else {
-                    Arc::new(LatestStateProviderRef::new(
-                        provider.tx_ref(),
-                        provider.static_file_provider(),
-                    ))
-                };
-                EitherBatchExecutor::Parallel(
-                    parallel_provider.batch_executor(StateProviderDatabase(db)),
-                )
-            } else {
-                let db = StateProviderDatabase(LatestStateProviderRef::new(
-                    provider.tx_ref(),
-                    provider.static_file_provider(),
-                ));
-                EitherBatchExecutor::Sequential(self.executor_provider.batch_executor(db))
-            };
-        executor.set_tip(max_block);
-        executor.set_prune_modes(prune_modes);
+            self.executor_provider.executor(parallel_database! { StateProviderDatabase(db) });
 
         // Progress tracking
         let mut stage_progress = start_block;
@@ -393,13 +451,10 @@ where
         let batch_start = Instant::now();
 
         let mut blocks = Vec::new();
+        let mut results = Vec::new();
         for block_number in start_block..=max_block {
             // Fetch the block
             let fetch_block_start = Instant::now();
-
-            let td = provider
-                .header_td_by_number(block_number)?
-                .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?;
 
             // we need the block's transactions but we don't need the transaction hashes
             let block = provider
@@ -408,20 +463,40 @@ where
 
             fetch_block_duration += fetch_block_start.elapsed();
 
-            cumulative_gas += block.gas_used;
+            cumulative_gas += block.header().gas_used();
 
             // Configure the executor to use the current state.
-            trace!(target: "sync::stages::execution", number = block_number, txs = block.body.len(), "Executing block");
+            trace!(target: "sync::stages::execution", number = block_number, txs = block.body().transactions().len(), "Executing block");
 
             // Execute the block
             let execute_start = Instant::now();
 
-            self.metrics.metered((&block, td).into(), |input| {
-                executor.execute_and_verify_one(input).map_err(|error| StageError::Block {
-                    block: Box::new(block.header.clone().seal_slow()),
-                    error: BlockErrorKind::Execution(error),
+            let result = self.metrics.metered_one(&block, |input| {
+                executor.execute_one(input).map_err(|error| {
+                    let header = block.header();
+                    StageError::Block {
+                        block: Box::new(BlockWithParent::new(
+                            header.parent_hash(),
+                            NumHash::new(header.number(), header.hash_slow()),
+                        )),
+                        error: BlockErrorKind::Execution(error),
+                    }
                 })
             })?;
+
+            if let Err(err) = self.consensus.validate_block_post_execution(
+                &block,
+                PostExecutionInput::new(&result.receipts, &result.requests),
+            ) {
+                return Err(StageError::Block {
+                    block: Box::new(BlockWithParent::new(
+                        block.header().parent_hash(),
+                        NumHash::new(block.header().number(), block.hash_slow()),
+                    )),
+                    error: BlockErrorKind::Validation(err),
+                })
+            }
+            results.push(result);
 
             execution_duration += execute_start.elapsed();
 
@@ -442,7 +517,7 @@ where
             }
 
             stage_progress = block_number;
-            stage_checkpoint.progress.processed += block.gas_used;
+            stage_checkpoint.progress.processed += block.header().gas_used();
 
             // If we have ExExes we need to save the block in memory for later
             if self.exex_manager_handle.has_exexs() {
@@ -450,10 +525,9 @@ where
             }
 
             // Check if we should commit now
-            let bundle_size_hint = executor.size_hint().unwrap_or_default() as u64;
             if self.thresholds.is_end_of_batch(
                 block_number - start_block,
-                bundle_size_hint,
+                executor.size_hint() as u64,
                 cumulative_gas,
                 batch_start.elapsed(),
             ) {
@@ -463,8 +537,11 @@ where
 
         // prepare execution output for writing
         let time = Instant::now();
-        let ExecutionOutcome { bundle, receipts, requests, first_block } = executor.finalize();
-        let state = ExecutionOutcome::new(bundle, receipts, first_block, requests);
+        let mut state = ExecutionOutcome::from_blocks(
+            start_block,
+            executor.into_state().take_bundle(),
+            results,
+        );
         let write_preparation_duration = time.elapsed();
 
         // log the gas per second for the range we just executed
@@ -481,27 +558,47 @@ where
         // Note: Since we only write to `blocks` if there are any ExExes, we don't need to perform
         // the `has_exexs` check here as well
         if !blocks.is_empty() {
-            let blocks = blocks.into_iter().map(|block| {
-                let hash = block.header.hash_slow();
-                block.seal(hash)
-            });
-
             let previous_input =
                 self.post_execute_commit_input.replace(Chain::new(blocks, state.clone(), None));
-            debug_assert!(
-                previous_input.is_none(),
-                "Previous post execute commit input wasn't processed"
-            );
-            if let Some(previous_input) = previous_input {
-                tracing::debug!(target: "sync::stages::execution", ?previous_input, "Previous post execute commit input wasn't processed");
+
+            if previous_input.is_some() {
+                // Not processing the previous post execute commit input is a critical error, as it
+                // means that we didn't send the notification to ExExes
+                return Err(StageError::PostExecuteCommit(
+                    "Previous post execute commit input wasn't processed",
+                ))
             }
         }
 
         let time = Instant::now();
 
+        if self.can_prune_changesets(provider, start_block, max_block)? {
+            let prune_modes = provider.prune_modes_ref();
+
+            // Iterate over all reverts and clear them if pruning is configured.
+            for block_number in start_block..=max_block {
+                let Some(reverts) =
+                    state.bundle.reverts.get_mut((block_number - start_block) as usize)
+                else {
+                    break
+                };
+
+                // If both account history and storage history pruning is configured, clear reverts
+                // for this block.
+                if prune_modes
+                    .account_history
+                    .is_some_and(|m| m.should_prune(block_number, max_block)) &&
+                    prune_modes
+                        .storage_history
+                        .is_some_and(|m| m.should_prune(block_number, max_block))
+                {
+                    reverts.clear();
+                }
+            }
+        }
+
         // write output
-        let mut writer = UnifiedStorageWriter::new(provider, static_file_producer);
-        writer.write_to_storage(state, OriginalValuesKnown::Yes)?;
+        provider.write_state(&state, OriginalValuesKnown::Yes, StorageLocation::StaticFiles)?;
 
         let db_write_duration = time.elapsed();
         debug!(
@@ -522,8 +619,8 @@ where
     }
 }
 
-fn execution_checkpoint(
-    provider: &StaticFileProvider,
+fn execution_checkpoint<N: NodePrimitives>(
+    provider: &StaticFileProvider<N>,
     start_block: BlockNumber,
     max_block: BlockNumber,
     checkpoint: StageCheckpoint,
@@ -589,8 +686,8 @@ fn execution_checkpoint(
     })
 }
 
-fn calculate_gas_used_from_headers(
-    provider: &StaticFileProvider,
+fn calculate_gas_used_from_headers<N: NodePrimitives>(
+    provider: &StaticFileProvider<N>,
     range: RangeInclusive<BlockNumber>,
 ) -> Result<u64, ProviderError> {
     debug!(target: "sync::stages::execution", ?range, "Calculating gas used from headers");
@@ -614,113 +711,40 @@ fn calculate_gas_used_from_headers(
     Ok(gas_total)
 }
 
-/// Returns a `StaticFileProviderRWRefMut` static file producer after performing a consistency
-/// check.
-///
-/// This function compares the highest receipt number recorded in the database with that in the
-/// static file to detect any discrepancies due to unexpected shutdowns or database rollbacks. **If
-/// the height in the static file is higher**, it rolls back (unwinds) the static file.
-/// **Conversely, if the height in the database is lower**, it triggers a rollback in the database
-/// (by returning [`StageError`]) until the heights in both the database and static file match.
-fn prepare_static_file_producer<'a, 'b, Provider>(
-    provider: &'b Provider,
-    static_file_provider: &'a StaticFileProvider,
-    start_block: u64,
-) -> Result<StaticFileProviderRWRefMut<'a>, StageError>
-where
-    Provider: DBProvider + BlockReader + HeaderProvider,
-    'b: 'a,
-{
-    // Get next expected receipt number
-    let tx = provider.tx_ref();
-    let next_receipt_num = tx
-        .cursor_read::<tables::BlockBodyIndices>()?
-        .seek_exact(start_block)?
-        .map(|(_, value)| value.first_tx_num)
-        .unwrap_or(0);
-
-    // Get next expected receipt number in static files
-    let next_static_file_receipt_num = static_file_provider
-        .get_highest_static_file_tx(StaticFileSegment::Receipts)
-        .map(|num| num + 1)
-        .unwrap_or(0);
-
-    let mut static_file_producer =
-        static_file_provider.get_writer(start_block, StaticFileSegment::Receipts)?;
-
-    // Check if we had any unexpected shutdown after committing to static files, but
-    // NOT committing to database.
-    match next_static_file_receipt_num.cmp(&next_receipt_num) {
-        // It can be equal when it's a chain of empty blocks, but we still need to update the last
-        // block in the range.
-        Ordering::Greater | Ordering::Equal => static_file_producer.prune_receipts(
-            next_static_file_receipt_num - next_receipt_num,
-            start_block.saturating_sub(1),
-        )?,
-        Ordering::Less => {
-            let mut last_block = static_file_provider
-                .get_highest_static_file_block(StaticFileSegment::Receipts)
-                .unwrap_or(0);
-
-            let last_receipt_num = static_file_provider
-                .get_highest_static_file_tx(StaticFileSegment::Receipts)
-                .unwrap_or(0);
-
-            // To be extra safe, we make sure that the last receipt num matches the last block from
-            // its indices. If not, get it.
-            loop {
-                if let Some(indices) = provider.block_body_indices(last_block)? {
-                    if indices.last_tx_num() <= last_receipt_num {
-                        break
-                    }
-                }
-                if last_block == 0 {
-                    break
-                }
-                last_block -= 1;
-            }
-
-            let missing_block =
-                Box::new(provider.sealed_header(last_block + 1)?.unwrap_or_default());
-
-            return Err(StageError::MissingStaticFileData {
-                block: missing_block,
-                segment: StaticFileSegment::Receipts,
-            })
-        }
-    }
-
-    Ok(static_file_producer)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::TestStageDB;
+    use alloy_primitives::{address, hex_literal::hex, keccak256, Address, B256, U256};
     use alloy_rlp::Decodable;
     use assert_matches::assert_matches;
     use reth_chainspec::ChainSpecBuilder;
+    use reth_db::transaction::DbTx;
     use reth_db_api::{models::AccountBeforeTx, transaction::DbTxMut};
-    use reth_evm_ethereum::execute::EthExecutorProvider;
-    use reth_execution_errors::BlockValidationError;
-    use reth_primitives::{
-        address, hex_literal::hex, keccak256, Account, Address, Bytecode, SealedBlock,
-        StorageEntry, B256, U256,
-    };
+    use reth_ethereum_consensus::EthBeaconConsensus;
+    use reth_evm::execute::BasicBlockExecutorProvider;
+    use reth_evm_ethereum::execute::EthExecutionStrategyFactory;
+    use reth_primitives::{Account, Bytecode, SealedBlock, StorageEntry};
     use reth_provider::{
         test_utils::create_test_provider_factory, AccountReader, DatabaseProviderFactory,
         ReceiptProvider, StaticFileProviderFactory,
     };
+    use reth_prune::PruneModes;
     use reth_prune_types::{PruneMode, ReceiptsLogPruneConfig};
     use reth_stages_api::StageUnitCheckpoint;
     use std::collections::BTreeMap;
 
-    fn stage() -> ExecutionStage<EthExecutorProvider> {
-        let executor_provider = EthExecutorProvider::ethereum(Arc::new(
+    fn stage() -> ExecutionStage<BasicBlockExecutorProvider<EthExecutionStrategyFactory>> {
+        let strategy_factory = EthExecutionStrategyFactory::ethereum(Arc::new(
             ChainSpecBuilder::mainnet().berlin_activated().build(),
         ));
+        let executor_provider = BasicBlockExecutorProvider::new(strategy_factory);
+        let consensus = Arc::new(EthBeaconConsensus::new(Arc::new(
+            ChainSpecBuilder::mainnet().berlin_activated().build(),
+        )));
         ExecutionStage::new(
             executor_provider,
+            consensus,
             ExecutionStageThresholds {
                 max_blocks: Some(100),
                 max_changes: None,
@@ -728,7 +752,6 @@ mod tests {
                 max_duration: None,
             },
             MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD,
-            PruneModes::none(),
             ExExManagerHandle::empty(),
         )
     }
@@ -753,7 +776,9 @@ mod tests {
             previous_checkpoint,
         );
 
-        assert_eq!(stage_checkpoint, Ok(previous_stage_checkpoint));
+        assert!(
+            matches!(stage_checkpoint, Ok(checkpoint) if checkpoint == previous_stage_checkpoint)
+        );
     }
 
     #[test]
@@ -762,18 +787,11 @@ mod tests {
         let provider = factory.provider_rw().unwrap();
 
         let mut genesis_rlp = hex!("f901faf901f5a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa045571b40ae66ca7480791bbb2887286e4e4c4b1b298b191c889d6959023a32eda056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000808502540be400808000a00000000000000000000000000000000000000000000000000000000000000000880000000000000000c0c0").as_slice();
-        let genesis = SealedBlock::decode(&mut genesis_rlp).unwrap();
+        let genesis = SealedBlock::<reth_primitives::Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
-        let block = SealedBlock::decode(&mut block_rlp).unwrap();
-        provider
-            .insert_historical_block(
-                genesis
-                    .try_seal_with_senders()
-                    .map_err(|_| BlockValidationError::SenderRecoveryError)
-                    .unwrap(),
-            )
-            .unwrap();
-        provider.insert_historical_block(block.clone().try_seal_with_senders().unwrap()).unwrap();
+        let block = SealedBlock::<reth_primitives::Block>::decode(&mut block_rlp).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -810,11 +828,11 @@ mod tests {
         let provider = factory.provider_rw().unwrap();
 
         let mut genesis_rlp = hex!("f901faf901f5a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa045571b40ae66ca7480791bbb2887286e4e4c4b1b298b191c889d6959023a32eda056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000808502540be400808000a00000000000000000000000000000000000000000000000000000000000000000880000000000000000c0c0").as_slice();
-        let genesis = SealedBlock::decode(&mut genesis_rlp).unwrap();
+        let genesis = SealedBlock::<reth_primitives::Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
-        let block = SealedBlock::decode(&mut block_rlp).unwrap();
-        provider.insert_historical_block(genesis.try_seal_with_senders().unwrap()).unwrap();
-        provider.insert_historical_block(block.clone().try_seal_with_senders().unwrap()).unwrap();
+        let block = SealedBlock::<reth_primitives::Block>::decode(&mut block_rlp).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -842,7 +860,7 @@ mod tests {
                 total
             }
         }) if processed == previous_stage_checkpoint.progress.processed &&
-            total == previous_stage_checkpoint.progress.total + block.gas_used);
+            total == previous_stage_checkpoint.progress.total + block.gas_used());
     }
 
     #[test]
@@ -851,11 +869,11 @@ mod tests {
         let provider = factory.provider_rw().unwrap();
 
         let mut genesis_rlp = hex!("f901faf901f5a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa045571b40ae66ca7480791bbb2887286e4e4c4b1b298b191c889d6959023a32eda056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000808502540be400808000a00000000000000000000000000000000000000000000000000000000000000000880000000000000000c0c0").as_slice();
-        let genesis = SealedBlock::decode(&mut genesis_rlp).unwrap();
+        let genesis = SealedBlock::<reth_primitives::Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
-        let block = SealedBlock::decode(&mut block_rlp).unwrap();
-        provider.insert_historical_block(genesis.try_seal_with_senders().unwrap()).unwrap();
-        provider.insert_historical_block(block.clone().try_seal_with_senders().unwrap()).unwrap();
+        let block = SealedBlock::<reth_primitives::Block>::decode(&mut block_rlp).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -884,11 +902,11 @@ mod tests {
         let provider = factory.provider_rw().unwrap();
         let input = ExecInput { target: Some(1), checkpoint: None };
         let mut genesis_rlp = hex!("f901faf901f5a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa045571b40ae66ca7480791bbb2887286e4e4c4b1b298b191c889d6959023a32eda056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000808502540be400808000a00000000000000000000000000000000000000000000000000000000000000000880000000000000000c0c0").as_slice();
-        let genesis = SealedBlock::decode(&mut genesis_rlp).unwrap();
+        let genesis = SealedBlock::<reth_primitives::Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
-        let block = SealedBlock::decode(&mut block_rlp).unwrap();
-        provider.insert_historical_block(genesis.try_seal_with_senders().unwrap()).unwrap();
-        provider.insert_historical_block(block.clone().try_seal_with_senders().unwrap()).unwrap();
+        let block = SealedBlock::<reth_primitives::Block>::decode(&mut block_rlp).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -933,12 +951,14 @@ mod tests {
         // If there is a pruning configuration, then it's forced to use the database.
         // This way we test both cases.
         let modes = [None, Some(PruneModes::none())];
-        let random_filter =
-            ReceiptsLogPruneConfig(BTreeMap::from([(Address::random(), PruneMode::Full)]));
+        let random_filter = ReceiptsLogPruneConfig(BTreeMap::from([(
+            Address::random(),
+            PruneMode::Distance(100000),
+        )]));
 
         // Tests node with database and node with static files
         for mut mode in modes {
-            let provider = factory.database_provider_rw().unwrap();
+            let mut provider = factory.database_provider_rw().unwrap();
 
             if let Some(mode) = &mut mode {
                 // Simulating a full node where we write receipts to database
@@ -946,7 +966,7 @@ mod tests {
             }
 
             let mut execution_stage = stage();
-            execution_stage.prune_modes = mode.clone().unwrap_or_default();
+            provider.set_prune_modes(mode.clone().unwrap_or_default());
 
             let output = execution_stage.execute(&provider, input).unwrap();
             provider.commit().unwrap();
@@ -988,32 +1008,25 @@ mod tests {
             };
 
             // assert accounts
-            assert_eq!(
-                provider.basic_account(account1),
-                Ok(Some(account1_info)),
-                "Post changed of a account"
+            assert!(
+                matches!(provider.basic_account(&account1), Ok(Some(acc)) if acc == account1_info)
             );
-            assert_eq!(
-                provider.basic_account(account2),
-                Ok(Some(account2_info)),
-                "Post changed of a account"
+            assert!(
+                matches!(provider.basic_account(&account2), Ok(Some(acc)) if acc == account2_info)
             );
-            assert_eq!(
-                provider.basic_account(account3),
-                Ok(Some(account3_info)),
-                "Post changed of a account"
+            assert!(
+                matches!(provider.basic_account(&account3), Ok(Some(acc)) if acc == account3_info)
             );
             // assert storage
             // Get on dupsort would return only first value. This is good enough for this test.
-            assert_eq!(
+            assert!(matches!(
                 provider.tx_ref().get::<tables::PlainStorageState>(account1),
-                Ok(Some(StorageEntry { key: B256::with_last_byte(1), value: U256::from(2) })),
-                "Post changed of a account"
-            );
+                Ok(Some(entry)) if entry.key == B256::with_last_byte(1) && entry.value == U256::from(2)
+            ));
 
-            let provider = factory.database_provider_rw().unwrap();
+            let mut provider = factory.database_provider_rw().unwrap();
             let mut stage = stage();
-            stage.prune_modes = mode.unwrap_or_default();
+            provider.set_prune_modes(mode.unwrap_or_default());
 
             let _result = stage
                 .unwind(
@@ -1031,11 +1044,11 @@ mod tests {
         let provider = factory.provider_rw().unwrap();
         let input = ExecInput { target: Some(1), checkpoint: None };
         let mut genesis_rlp = hex!("f901faf901f5a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa045571b40ae66ca7480791bbb2887286e4e4c4b1b298b191c889d6959023a32eda056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000808502540be400808000a00000000000000000000000000000000000000000000000000000000000000000880000000000000000c0c0").as_slice();
-        let genesis = SealedBlock::decode(&mut genesis_rlp).unwrap();
+        let genesis = SealedBlock::<reth_primitives::Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
-        let block = SealedBlock::decode(&mut block_rlp).unwrap();
-        provider.insert_historical_block(genesis.try_seal_with_senders().unwrap()).unwrap();
-        provider.insert_historical_block(block.clone().try_seal_with_senders().unwrap()).unwrap();
+        let block = SealedBlock::<reth_primitives::Block>::decode(&mut block_rlp).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -1075,8 +1088,10 @@ mod tests {
         // If there is a pruning configuration, then it's forced to use the database.
         // This way we test both cases.
         let modes = [None, Some(PruneModes::none())];
-        let random_filter =
-            ReceiptsLogPruneConfig(BTreeMap::from([(Address::random(), PruneMode::Full)]));
+        let random_filter = ReceiptsLogPruneConfig(BTreeMap::from([(
+            Address::random(),
+            PruneMode::Before(100000),
+        )]));
 
         // Tests node with database and node with static files
         for mut mode in modes {
@@ -1087,7 +1102,7 @@ mod tests {
 
             // Test Execution
             let mut execution_stage = stage();
-            execution_stage.prune_modes = mode.clone().unwrap_or_default();
+            provider.set_prune_modes(mode.clone().unwrap_or_default());
 
             let result = execution_stage.execute(&provider, input).unwrap();
             provider.commit().unwrap();
@@ -1095,7 +1110,7 @@ mod tests {
             // Test Unwind
             provider = factory.database_provider_rw().unwrap();
             let mut stage = stage();
-            stage.prune_modes = mode.unwrap_or_default();
+            provider.set_prune_modes(mode.clone().unwrap_or_default());
 
             let result = stage
                 .unwind(
@@ -1121,25 +1136,13 @@ mod tests {
             } if total == block.gas_used);
 
             // assert unwind stage
-            assert_eq!(
-                provider.basic_account(acc1),
-                Ok(Some(acc1_info)),
-                "Pre changed of a account"
-            );
-            assert_eq!(
-                provider.basic_account(acc2),
-                Ok(Some(acc2_info)),
-                "Post changed of a account"
-            );
+            assert!(matches!(provider.basic_account(&acc1), Ok(Some(acc)) if acc == acc1_info));
+            assert!(matches!(provider.basic_account(&acc2), Ok(Some(acc)) if acc == acc2_info));
 
             let miner_acc = address!("2adc25665018aa1fe0e6bc666dac8fc2697ff9ba");
-            assert_eq!(
-                provider.basic_account(miner_acc),
-                Ok(None),
-                "Third account should be unwound"
-            );
+            assert!(matches!(provider.basic_account(&miner_acc), Ok(None)));
 
-            assert_eq!(provider.receipt(0), Ok(None), "First receipt should be unwound");
+            assert!(matches!(provider.receipt(0), Ok(None)));
         }
     }
 
@@ -1149,11 +1152,11 @@ mod tests {
         let provider = test_db.factory.database_provider_rw().unwrap();
         let input = ExecInput { target: Some(1), checkpoint: None };
         let mut genesis_rlp = hex!("f901f8f901f3a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa0c9ceb8372c88cb461724d8d3d87e8b933f6fc5f679d4841800e662f4428ffd0da056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008302000080830f4240808000a00000000000000000000000000000000000000000000000000000000000000000880000000000000000c0c0").as_slice();
-        let genesis = SealedBlock::decode(&mut genesis_rlp).unwrap();
+        let genesis = SealedBlock::<reth_primitives::Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f9025ff901f7a0c86e8cc0310ae7c531c758678ddbfd16fc51c8cef8cec650b032de9869e8b94fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa050554882fbbda2c2fd93fdc466db9946ea262a67f7a76cc169e714f105ab583da00967f09ef1dfed20c0eacfaa94d5cd4002eda3242ac47eae68972d07b106d192a0e3c8b47fbfc94667ef4cceb17e5cc21e3b1eebd442cebb27f07562b33836290db90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008302000001830f42408238108203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f862f860800a83061a8094095e7baea6a6c7c4c2dfeb977efac326af552d8780801ba072ed817487b84ba367d15d2f039b5fc5f087d0a8882fbdf73e8cb49357e1ce30a0403d800545b8fc544f92ce8124e2255f8c3c6af93f28243a120585d4c4c6a2a3c0").as_slice();
-        let block = SealedBlock::decode(&mut block_rlp).unwrap();
-        provider.insert_historical_block(genesis.try_seal_with_senders().unwrap()).unwrap();
-        provider.insert_historical_block(block.clone().try_seal_with_senders().unwrap()).unwrap();
+        let block = SealedBlock::<reth_primitives::Block>::decode(&mut block_rlp).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -1220,13 +1223,12 @@ mod tests {
 
         // assert unwind stage
         let provider = test_db.factory.database_provider_rw().unwrap();
-        assert_eq!(provider.basic_account(destroyed_address), Ok(None), "Account was destroyed");
+        assert!(matches!(provider.basic_account(&destroyed_address), Ok(None)));
 
-        assert_eq!(
+        assert!(matches!(
             provider.tx_ref().get::<tables::PlainStorageState>(destroyed_address),
-            Ok(None),
-            "There is storage for destroyed account"
-        );
+            Ok(None)
+        ));
         // drops tx so that it returns write privilege to test_tx
         drop(provider);
         let plain_accounts = test_db.table::<tables::PlainAccountState>().unwrap();

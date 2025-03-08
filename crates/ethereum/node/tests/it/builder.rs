@@ -9,7 +9,7 @@ use reth_db::{
 use reth_node_api::NodeTypesWithDBAdapter;
 use reth_node_builder::{EngineNodeLauncher, FullNodeComponents, NodeBuilder, NodeConfig};
 use reth_node_ethereum::node::{EthereumAddOns, EthereumNode};
-use reth_provider::providers::BlockchainProvider2;
+use reth_provider::providers::BlockchainProvider;
 use reth_tasks::TaskManager;
 
 #[test]
@@ -22,7 +22,7 @@ fn test_basic_setup() {
         .with_database(db)
         .with_types::<EthereumNode>()
         .with_components(EthereumNode::components())
-        .with_add_ons::<EthereumAddOns>()
+        .with_add_ons(EthereumAddOns::default())
         .on_component_initialized(move |ctx| {
             let _provider = ctx.provider();
             println!("{msg}");
@@ -50,11 +50,11 @@ async fn test_eth_launcher() {
     let _builder =
         NodeBuilder::new(config)
             .with_database(db)
-            .with_types_and_provider::<EthereumNode, BlockchainProvider2<
+            .with_types_and_provider::<EthereumNode, BlockchainProvider<
                 NodeTypesWithDBAdapter<EthereumNode, Arc<TempDatabase<DatabaseEnv>>>,
             >>()
             .with_components(EthereumNode::components())
-            .with_add_ons::<EthereumAddOns>()
+            .with_add_ons(EthereumAddOns::default())
             .launch_with_fn(|builder| {
                 let launcher = EngineNodeLauncher::new(
                     tasks.executor(),

@@ -7,10 +7,9 @@ pub use event::*;
 use futures_util::Future;
 use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
-    providers::ProviderNodeTypes, writer::UnifiedStorageWriter, DatabaseProviderFactory,
-    FinalizedBlockReader, FinalizedBlockWriter, ProviderFactory, ProviderResult,
+    providers::ProviderNodeTypes, writer::UnifiedStorageWriter, ChainStateBlockReader,
+    ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, ProviderResult,
     StageCheckpointReader, StageCheckpointWriter, StateProviderBox, StateProviderOptions,
-    StaticFileProviderFactory,
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
@@ -79,6 +78,9 @@ pub struct Pipeline<N: ProviderNodeTypes> {
     /// A receiver for the current chain tip to sync to.
     tip_tx: Option<watch::Sender<B256>>,
     metrics_tx: Option<MetricEventsSender>,
+    /// Whether an unwind should fail the syncing process. Should only be set when downloading
+    /// blocks from trusted sources and expecting them to be valid.
+    fail_on_unwind: bool,
 }
 
 impl<N: ProviderNodeTypes> Pipeline<N> {
@@ -135,9 +137,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// pipeline and its result as a future.
     #[track_caller]
     pub fn run_as_fut(mut self, target: Option<PipelineTarget>) -> PipelineFut<N> {
-        // TODO: fix this in a follow up PR. ideally, consensus engine would be responsible for
-        // updating metrics.
-        let _ = self.register_metrics(); // ignore error
+        let _ = self.register_metrics();
         Box::pin(async move {
             // NOTE: the tip should only be None if we are in continuous sync mode.
             if let Some(target) = target {
@@ -171,13 +171,17 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         loop {
             let next_action = self.run_loop().await?;
 
+            if next_action.is_unwind() && self.fail_on_unwind {
+                return Err(PipelineError::UnexpectedUnwind)
+            }
+
             // Terminate the loop early if it's reached the maximum user
             // configured block.
             if next_action.should_continue() &&
                 self.progress
                     .minimum_block_number
                     .zip(self.max_block)
-                    .map_or(false, |(progress, target)| progress >= target)
+                    .is_some_and(|(progress, target)| progress >= target)
             {
                 trace!(
                     target: "sync::pipeline",
@@ -223,7 +227,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 }
                 ControlFlow::Continue { block_number } => self.progress.update(block_number),
                 ControlFlow::Unwind { target, bad_block } => {
-                    self.unwind(target, Some(bad_block.number))?;
+                    self.unwind(target, Some(bad_block.block.number))?;
                     return Ok(ControlFlow::Unwind { target, bad_block })
                 }
             }
@@ -256,7 +260,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     pub fn move_to_static_files(&self) -> RethResult<()> {
         // Copies data from database to static files
         let lowest_static_file_height =
-            self.static_file_producer.lock().copy_to_static_files()?.min();
+            self.static_file_producer.lock().copy_to_static_files()?.min_block_num();
 
         // Deletes data which has been copied to static files.
         if let Some(prune_tip) = lowest_static_file_height {
@@ -282,6 +286,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     ) -> Result<(), PipelineError> {
         // Unwind stages in reverse order of execution
         let unwind_pipeline = self.stages.iter_mut().rev();
+
+        // Legacy Engine: This prevents a race condition in which the `StaticFileProducer` could
+        // attempt to proceed with a finalized block which has been unwinded
+        let _locked_sf_producer = self.static_file_producer.lock();
 
         let mut provider_rw = self.provider_factory.database_provider_rw()?;
 
@@ -354,10 +362,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                             ))?;
                         }
 
-                        UnifiedStorageWriter::commit_unwind(
-                            provider_rw,
-                            self.provider_factory.static_file_provider(),
-                        )?;
+                        UnifiedStorageWriter::commit_unwind(provider_rw)?;
 
                         stage.post_unwind_commit()?;
 
@@ -392,7 +397,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
             let stage_reached_max_block = prev_checkpoint
                 .zip(self.max_block)
-                .map_or(false, |(prev_progress, target)| prev_progress.block_number >= target);
+                .is_some_and(|(prev_progress, target)| prev_progress.block_number >= target);
             if stage_reached_max_block {
                 warn!(
                     target: "sync::pipeline",
@@ -465,10 +470,9 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                         result: out.clone(),
                     });
 
-                    UnifiedStorageWriter::commit(
-                        provider_rw,
-                        self.provider_factory.static_file_provider(),
-                    )?;
+                    UnifiedStorageWriter::commit(provider_rw)?;
+
+                    stage.post_execute_commit()?;
 
                     if done {
                         let block_number = checkpoint.block_number;
@@ -505,7 +509,7 @@ fn on_stage_error<N: ProviderNodeTypes>(
 
         // We unwind because of a detached head.
         let unwind_to =
-            local_head.number.saturating_sub(BEACON_CONSENSUS_REORG_UNWIND_DEPTH).max(1);
+            local_head.block.number.saturating_sub(BEACON_CONSENSUS_REORG_UNWIND_DEPTH).max(1);
         Ok(Some(ControlFlow::Unwind { target: unwind_to, bad_block: local_head }))
     } else if let StageError::Block { block, error } = err {
         match error {
@@ -513,7 +517,7 @@ fn on_stage_error<N: ProviderNodeTypes>(
                 error!(
                     target: "sync::pipeline",
                     stage = %stage_id,
-                    bad_block = %block.number,
+                    bad_block = %block.block.number,
                     "Stage encountered a validation error: {validation_error}"
                 );
 
@@ -527,7 +531,7 @@ fn on_stage_error<N: ProviderNodeTypes>(
                     prev_checkpoint.unwrap_or_default(),
                 )?;
 
-                UnifiedStorageWriter::commit(provider_rw, factory.static_file_provider())?;
+                UnifiedStorageWriter::commit(provider_rw)?;
 
                 // We unwind because of a validation error. If the unwind itself
                 // fails, we bail entirely,
@@ -542,7 +546,7 @@ fn on_stage_error<N: ProviderNodeTypes>(
                 error!(
                     target: "sync::pipeline",
                     stage = %stage_id,
-                    bad_block = %block.number,
+                    bad_block = %block.block.number,
                     "Stage encountered an execution error: {execution_error}"
                 );
 
@@ -560,12 +564,12 @@ fn on_stage_error<N: ProviderNodeTypes>(
         error!(
             target: "sync::pipeline",
             stage = %stage_id,
-            bad_block = %block.number,
+            bad_block = %block.block.number,
             segment = %segment,
             "Stage is missing static file data."
         );
 
-        Ok(Some(ControlFlow::Unwind { target: block.number - 1, bad_block: block }))
+        Ok(Some(ControlFlow::Unwind { target: block.block.number - 1, bad_block: block }))
     } else if err.is_fatal() {
         error!(target: "sync::pipeline", stage = %stage_id, "Stage encountered a fatal error: {err}");
         Err(err.into())
@@ -587,12 +591,15 @@ impl<N: ProviderNodeTypes> std::fmt::Debug for Pipeline<N> {
             .field("stages", &self.stages.iter().map(|stage| stage.id()).collect::<Vec<StageId>>())
             .field("max_block", &self.max_block)
             .field("event_sender", &self.event_sender)
+            .field("fail_on_unwind", &self.fail_on_unwind)
             .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use super::*;
     use crate::{test_utils::TestStage, UnwindOutput};
     use assert_matches::assert_matches;
@@ -600,7 +607,7 @@ mod tests {
     use reth_errors::ProviderError;
     use reth_provider::test_utils::{create_test_provider_factory, MockNodeTypesWithDB};
     use reth_prune::PruneModes;
-    use reth_testing_utils::{generators, generators::random_header};
+    use reth_testing_utils::generators::{self, random_block_with_parent};
     use tokio_stream::StreamExt;
 
     #[test]
@@ -635,15 +642,19 @@ mod tests {
     async fn run_pipeline() {
         let provider_factory = create_test_provider_factory();
 
+        let stage_a = TestStage::new(StageId::Other("A"))
+            .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(20), done: true }));
+        let (stage_a, post_execute_commit_counter_a) = stage_a.with_post_execute_commit_counter();
+        let (stage_a, post_unwind_commit_counter_a) = stage_a.with_post_unwind_commit_counter();
+
+        let stage_b = TestStage::new(StageId::Other("B"))
+            .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(10), done: true }));
+        let (stage_b, post_execute_commit_counter_b) = stage_b.with_post_execute_commit_counter();
+        let (stage_b, post_unwind_commit_counter_b) = stage_b.with_post_unwind_commit_counter();
+
         let mut pipeline = Pipeline::<MockNodeTypesWithDB>::builder()
-            .add_stage(
-                TestStage::new(StageId::Other("A"))
-                    .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(20), done: true })),
-            )
-            .add_stage(
-                TestStage::new(StageId::Other("B"))
-                    .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(10), done: true })),
-            )
+            .add_stage(stage_a)
+            .add_stage(stage_b)
             .with_max_block(10)
             .build(
                 provider_factory.clone(),
@@ -696,6 +707,12 @@ mod tests {
                 },
             ]
         );
+
+        assert_eq!(post_execute_commit_counter_a.load(Ordering::Relaxed), 1);
+        assert_eq!(post_unwind_commit_counter_a.load(Ordering::Relaxed), 0);
+
+        assert_eq!(post_execute_commit_counter_b.load(Ordering::Relaxed), 1);
+        assert_eq!(post_unwind_commit_counter_b.load(Ordering::Relaxed), 0);
     }
 
     /// Unwinds a simple pipeline.
@@ -703,22 +720,28 @@ mod tests {
     async fn unwind_pipeline() {
         let provider_factory = create_test_provider_factory();
 
+        let stage_a = TestStage::new(StageId::Other("A"))
+            .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(100), done: true }))
+            .add_unwind(Ok(UnwindOutput { checkpoint: StageCheckpoint::new(1) }));
+        let (stage_a, post_execute_commit_counter_a) = stage_a.with_post_execute_commit_counter();
+        let (stage_a, post_unwind_commit_counter_a) = stage_a.with_post_unwind_commit_counter();
+
+        let stage_b = TestStage::new(StageId::Other("B"))
+            .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(10), done: true }))
+            .add_unwind(Ok(UnwindOutput { checkpoint: StageCheckpoint::new(1) }));
+        let (stage_b, post_execute_commit_counter_b) = stage_b.with_post_execute_commit_counter();
+        let (stage_b, post_unwind_commit_counter_b) = stage_b.with_post_unwind_commit_counter();
+
+        let stage_c = TestStage::new(StageId::Other("C"))
+            .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(20), done: true }))
+            .add_unwind(Ok(UnwindOutput { checkpoint: StageCheckpoint::new(1) }));
+        let (stage_c, post_execute_commit_counter_c) = stage_c.with_post_execute_commit_counter();
+        let (stage_c, post_unwind_commit_counter_c) = stage_c.with_post_unwind_commit_counter();
+
         let mut pipeline = Pipeline::<MockNodeTypesWithDB>::builder()
-            .add_stage(
-                TestStage::new(StageId::Other("A"))
-                    .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(100), done: true }))
-                    .add_unwind(Ok(UnwindOutput { checkpoint: StageCheckpoint::new(1) })),
-            )
-            .add_stage(
-                TestStage::new(StageId::Other("B"))
-                    .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(10), done: true }))
-                    .add_unwind(Ok(UnwindOutput { checkpoint: StageCheckpoint::new(1) })),
-            )
-            .add_stage(
-                TestStage::new(StageId::Other("C"))
-                    .add_exec(Ok(ExecOutput { checkpoint: StageCheckpoint::new(20), done: true }))
-                    .add_unwind(Ok(UnwindOutput { checkpoint: StageCheckpoint::new(1) })),
-            )
+            .add_stage(stage_a)
+            .add_stage(stage_b)
+            .add_stage(stage_c)
             .with_max_block(10)
             .build(
                 provider_factory.clone(),
@@ -830,6 +853,15 @@ mod tests {
                 },
             ]
         );
+
+        assert_eq!(post_execute_commit_counter_a.load(Ordering::Relaxed), 1);
+        assert_eq!(post_unwind_commit_counter_a.load(Ordering::Relaxed), 1);
+
+        assert_eq!(post_execute_commit_counter_b.load(Ordering::Relaxed), 1);
+        assert_eq!(post_unwind_commit_counter_b.load(Ordering::Relaxed), 1);
+
+        assert_eq!(post_execute_commit_counter_c.load(Ordering::Relaxed), 1);
+        assert_eq!(post_unwind_commit_counter_c.load(Ordering::Relaxed), 1);
     }
 
     /// Unwinds a pipeline with intermediate progress.
@@ -947,7 +979,7 @@ mod tests {
             .add_stage(
                 TestStage::new(StageId::Other("B"))
                     .add_exec(Err(StageError::Block {
-                        block: Box::new(random_header(
+                        block: Box::new(random_block_with_parent(
                             &mut generators::rng(),
                             5,
                             Default::default(),

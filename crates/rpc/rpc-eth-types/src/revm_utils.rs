@@ -1,14 +1,15 @@
 //! utilities for working with revm
 
 use alloy_primitives::{Address, B256, U256};
-use reth_rpc_types::{
+use alloy_rpc_types_eth::{
     state::{AccountOverride, StateOverride},
     BlockOverrides,
 };
+use reth_evm::TransactionEnv;
 use revm::{
     db::CacheDB,
     precompile::{PrecompileSpecId, Precompiles},
-    primitives::{db::DatabaseRef, Bytecode, SpecId, TxEnv},
+    primitives::{db::DatabaseRef, Bytecode, SpecId},
     Database,
 };
 use revm_primitives::BlockEnv;
@@ -20,20 +21,7 @@ use super::{EthApiError, EthResult, RpcInvalidTransactionError};
 #[inline]
 pub fn get_precompiles(spec_id: SpecId) -> impl IntoIterator<Item = Address> {
     let spec = PrecompileSpecId::from_spec_id(spec_id);
-    Precompiles::new(spec).addresses().copied().map(Address::from)
-}
-
-/// Caps the configured [`TxEnv`] `gas_limit` with the allowance of the caller.
-pub fn cap_tx_gas_limit_with_caller_allowance<DB>(db: &mut DB, env: &mut TxEnv) -> EthResult<()>
-where
-    DB: Database,
-    EthApiError: From<<DB as Database>::Error>,
-{
-    if let Ok(gas_limit) = caller_gas_allowance(db, env)?.try_into() {
-        env.gas_limit = gas_limit;
-    }
-
-    Ok(())
+    Precompiles::new(spec).addresses().copied()
 }
 
 /// Calculates the caller gas allowance.
@@ -42,31 +30,34 @@ where
 ///
 /// Returns an error if the caller has insufficient funds.
 /// Caution: This assumes non-zero `env.gas_price`. Otherwise, zero allowance will be returned.
-pub fn caller_gas_allowance<DB>(db: &mut DB, env: &TxEnv) -> EthResult<U256>
+///
+/// Note: this takes the mut [Database] trait because the loaded sender can be reused for the
+/// following operation like `eth_call`.
+pub fn caller_gas_allowance<DB>(db: &mut DB, env: &impl TransactionEnv) -> EthResult<U256>
 where
     DB: Database,
     EthApiError: From<<DB as Database>::Error>,
 {
     // Get the caller account.
-    let caller = db.basic(env.caller)?;
+    let caller = db.basic(env.caller())?;
     // Get the caller balance.
     let balance = caller.map(|acc| acc.balance).unwrap_or_default();
     // Get transaction value.
-    let value = env.value;
+    let value = env.value();
     // Subtract transferred value from the caller balance. Return error if the caller has
     // insufficient funds.
     let balance = balance
-        .checked_sub(env.value)
+        .checked_sub(env.value())
         .ok_or_else(|| RpcInvalidTransactionError::InsufficientFunds { cost: value, balance })?;
 
     Ok(balance
         // Calculate the amount of gas the caller can afford with the specified gas price.
-        .checked_div(env.gas_price)
+        .checked_div(env.gas_price())
         // This will be 0 if gas price is 0. It is fine, because we check it before.
         .unwrap_or_default())
 }
 
-/// Helper type for representing the fees of a [`reth_rpc_types::TransactionRequest`]
+/// Helper type for representing the fees of a `TransactionRequest`
 #[derive(Debug)]
 pub struct CallFees {
     /// EIP-1559 priority fee
@@ -85,7 +76,7 @@ pub struct CallFees {
 // === impl CallFees ===
 
 impl CallFees {
-    /// Ensures the fields of a [`reth_rpc_types::TransactionRequest`] are not conflicting.
+    /// Ensures the fields of a `TransactionRequest` are not conflicting.
     ///
     /// # EIP-4844 transactions
     ///
@@ -275,13 +266,16 @@ where
 {
     // we need to fetch the account via the `DatabaseRef` to not update the state of the account,
     // which is modified via `Database::basic_ref`
-    let mut account_info = DatabaseRef::basic_ref(db, account)?.unwrap_or_default();
+    let mut account_info = db.basic_ref(account)?.unwrap_or_default();
 
     if let Some(nonce) = account_override.nonce {
         account_info.nonce = nonce;
     }
     if let Some(code) = account_override.code {
-        account_info.code = Some(Bytecode::new_raw(code));
+        account_info.code = Some(
+            Bytecode::new_raw_checked(code)
+                .map_err(|err| EthApiError::InvalidBytecode(err.to_string()))?,
+        );
     }
     if let Some(balance) = account_override.balance {
         account_info.balance = balance;
@@ -325,7 +319,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_primitives::constants::GWEI_TO_WEI;
+    use alloy_consensus::constants::GWEI_TO_WEI;
 
     #[test]
     fn test_ensure_0_fallback() {

@@ -15,9 +15,11 @@ use reth_cli_commands::{
 };
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
+use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
+use reth_network::EthNetworkPrimitives;
 use reth_node_builder::{NodeBuilder, WithLaunchContext};
-use reth_node_core::args::utils::DefaultChainSpecParser;
-use reth_node_ethereum::{EthExecutorProvider, EthereumNode};
+use reth_node_ethereum::{consensus::EthBeaconConsensus, EthExecutorProvider, EthereumNode};
+use reth_node_metrics::recorder::install_prometheus_recorder;
 use reth_tracing::FileWorkerGuard;
 use std::{ffi::OsString, fmt, future::Future, sync::Arc};
 use tracing::info;
@@ -34,10 +36,11 @@ pub use crate::core::cli::*;
 /// This is the entrypoint to the executable.
 #[derive(Debug, Parser)]
 #[command(author, version = SHORT_VERSION, long_version = LONG_VERSION, about = "Reth", long_about = None)]
-pub struct Cli<C: ChainSpecParser = DefaultChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs> {
+pub struct Cli<C: ChainSpecParser = EthereumChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs>
+{
     /// The command to run
     #[command(subcommand)]
-    command: Commands<C, Ext>,
+    pub command: Commands<C, Ext>,
 
     /// The chain this node is running.
     ///
@@ -50,7 +53,7 @@ pub struct Cli<C: ChainSpecParser = DefaultChainSpecParser, Ext: clap::Args + fm
         value_parser = C::parser(),
         global = true,
     )]
-    chain: Arc<C::ChainSpec>,
+    pub chain: Arc<C::ChainSpec>,
 
     /// Add a new instance of a node.
     ///
@@ -66,10 +69,11 @@ pub struct Cli<C: ChainSpecParser = DefaultChainSpecParser, Ext: clap::Args + fm
     /// - `HTTP_RPC_PORT`: default - `instance` + 1
     /// - `WS_RPC_PORT`: default + `instance` * 2 - 2
     #[arg(long, value_name = "INSTANCE", global = true, default_value_t = 1, value_parser = value_parser!(u16).range(..=200))]
-    instance: u16,
+    pub instance: u16,
 
+    /// The logging configuration for the CLI.
     #[command(flatten)]
-    logs: LogArgs,
+    pub logs: LogArgs,
 }
 
 impl Cli {
@@ -116,14 +120,15 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>, Ext: clap::Args + fmt::Debug> Cl
     ///
     /// ```no_run
     /// use clap::Parser;
-    /// use reth::{args::utils::DefaultChainSpecParser, cli::Cli};
+    /// use reth::cli::Cli;
+    /// use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
     ///
     /// #[derive(Debug, Parser)]
     /// pub struct MyArgs {
     ///     pub enable: bool,
     /// }
     ///
-    /// Cli::<DefaultChainSpecParser, MyArgs>::parse()
+    /// Cli::<EthereumChainSpecParser, MyArgs>::parse()
     ///     .run(|builder, my_args: MyArgs| async move {
     ///         // launch the node
     ///
@@ -143,7 +148,13 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>, Ext: clap::Args + fmt::Debug> Cl
         let _guard = self.init_tracing()?;
         info!(target: "reth::cli", "Initialized tracing, debug log directory: {}", self.logs.log_file_directory);
 
+        // Install the prometheus recorder to be sure to record all metrics
+        let _ = install_prometheus_recorder();
+
         let runner = CliRunner::default();
+        let components = |spec: Arc<C::ChainSpec>| {
+            (EthExecutorProvider::ethereum(spec.clone()), EthBeaconConsensus::new(spec))
+        };
         match self.command {
             Commands::Node(command) => {
                 runner.run_command_until_exit(|ctx| command.execute(ctx, launcher))
@@ -154,17 +165,19 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>, Ext: clap::Args + fmt::Debug> Cl
             Commands::InitState(command) => {
                 runner.run_blocking_until_ctrl_c(command.execute::<EthereumNode>())
             }
-            Commands::Import(command) => runner.run_blocking_until_ctrl_c(
-                command.execute::<EthereumNode, _, _>(EthExecutorProvider::ethereum),
-            ),
+            Commands::Import(command) => {
+                runner.run_blocking_until_ctrl_c(command.execute::<EthereumNode, _, _>(components))
+            }
             Commands::DumpGenesis(command) => runner.run_blocking_until_ctrl_c(command.execute()),
             Commands::Db(command) => {
                 runner.run_blocking_until_ctrl_c(command.execute::<EthereumNode>())
             }
             Commands::Stage(command) => runner.run_command_until_exit(|ctx| {
-                command.execute::<EthereumNode, _, _>(ctx, EthExecutorProvider::ethereum)
+                command.execute::<EthereumNode, _, _, EthNetworkPrimitives>(ctx, components)
             }),
-            Commands::P2P(command) => runner.run_until_ctrl_c(command.execute()),
+            Commands::P2P(command) => {
+                runner.run_until_ctrl_c(command.execute::<EthNetworkPrimitives>())
+            }
             #[cfg(feature = "dev")]
             Commands::TestVectors(command) => runner.run_until_ctrl_c(command.execute()),
             Commands::Config(command) => runner.run_until_ctrl_c(command.execute()),
@@ -223,7 +236,7 @@ pub enum Commands<C: ChainSpecParser, Ext: clap::Args + fmt::Debug> {
     Config(config_cmd::Command),
     /// Various debug routines
     #[command(name = "debug")]
-    Debug(debug_cmd::Command<C>),
+    Debug(Box<debug_cmd::Command<C>>),
     /// Scripts for node recovery
     #[command(name = "recover")]
     Recover(recover::Command<C>),
@@ -237,7 +250,7 @@ mod tests {
     use super::*;
     use crate::args::ColorMode;
     use clap::CommandFactory;
-    use reth_node_core::args::utils::SUPPORTED_CHAINS;
+    use reth_ethereum_cli::chainspec::SUPPORTED_CHAINS;
 
     #[test]
     fn parse_color_mode() {
@@ -250,7 +263,7 @@ mod tests {
     /// runtime
     #[test]
     fn test_parse_help_all_subcommands() {
-        let reth = Cli::<DefaultChainSpecParser, NoArgs>::command();
+        let reth = Cli::<EthereumChainSpecParser, NoArgs>::command();
         for sub_command in reth.get_subcommands() {
             let err = Cli::try_parse_args_from(["reth", sub_command.get_name(), "--help"])
                 .err()

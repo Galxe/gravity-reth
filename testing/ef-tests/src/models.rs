@@ -1,17 +1,16 @@
 //! Shared models for <https://github.com/ethereum/tests>
 
 use crate::{assert::assert_equal, Error};
-use alloy_primitives::{Address, Bloom, Bytes, B256, B64, U256};
+use alloy_consensus::Header as RethHeader;
+use alloy_eips::eip4895::Withdrawals;
+use alloy_primitives::{keccak256, Address, Bloom, Bytes, B256, B64, U256};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
 use reth_db::tables;
 use reth_db_api::{
     cursor::DbDupCursorRO,
     transaction::{DbTx, DbTxMut},
 };
-use reth_primitives::{
-    keccak256, Account as RethAccount, Bytecode, Header as RethHeader, SealedHeader, StorageEntry,
-    Withdrawals,
-};
+use reth_primitives::{Account as RethAccount, Bytecode, SealedHeader, StorageEntry};
 use serde::Deserialize;
 use std::{collections::BTreeMap, ops::Deref};
 
@@ -88,7 +87,9 @@ pub struct Header {
     /// Parent beacon block root.
     pub parent_beacon_block_root: Option<B256>,
     /// Requests root.
-    pub requests_root: Option<B256>,
+    pub requests_hash: Option<B256>,
+    /// Target blobs per block.
+    pub target_blobs_per_block: Option<U256>,
 }
 
 impl From<Header> for SealedHeader {
@@ -101,7 +102,7 @@ impl From<Header> for SealedHeader {
             gas_limit: value.gas_limit.to::<u64>(),
             gas_used: value.gas_used.to::<u64>(),
             mix_hash: value.mix_hash,
-            nonce: u64::from_be_bytes(value.nonce.0),
+            nonce: u64::from_be_bytes(value.nonce.0).into(),
             number: value.number.to::<u64>(),
             timestamp: value.timestamp.to::<u64>(),
             transactions_root: value.transactions_trie,
@@ -114,9 +115,9 @@ impl From<Header> for SealedHeader {
             blob_gas_used: value.blob_gas_used.map(|v| v.to::<u64>()),
             excess_blob_gas: value.excess_blob_gas.map(|v| v.to::<u64>()),
             parent_beacon_block_root: value.parent_beacon_block_root,
-            requests_root: value.requests_root,
+            requests_hash: value.requests_hash,
         };
-        header.seal(value.hash)
+        Self::new(header, value.hash)
     }
 }
 
@@ -166,10 +167,15 @@ impl State {
             };
             tx.put::<tables::PlainAccountState>(address, reth_account)?;
             tx.put::<tables::HashedAccounts>(hashed_address, reth_account)?;
+
             if let Some(code_hash) = code_hash {
                 tx.put::<tables::Bytecodes>(code_hash, Bytecode::new_raw(account.code.clone()))?;
             }
-            account.storage.iter().filter(|(_, v)| !v.is_zero()).try_for_each(|(k, v)| {
+
+            for (k, v) in &account.storage {
+                if v.is_zero() {
+                    continue
+                }
                 let storage_key = B256::from_slice(&k.to_be_bytes::<32>());
                 tx.put::<tables::PlainStorageState>(
                     address,
@@ -178,10 +184,9 @@ impl State {
                 tx.put::<tables::HashedStorages>(
                     hashed_address,
                     StorageEntry { key: keccak256(storage_key), value: *v },
-                )
-            })?;
+                )?;
+            }
         }
-
         Ok(())
     }
 }
@@ -213,9 +218,12 @@ impl Account {
     ///
     /// In case of a mismatch, `Err(Error::Assertion)` is returned.
     pub fn assert_db(&self, address: Address, tx: &impl DbTx) -> Result<(), Error> {
-        let account = tx.get::<tables::PlainAccountState>(address)?.ok_or_else(|| {
-            Error::Assertion(format!("Expected account ({address}) is missing from DB: {self:?}"))
-        })?;
+        let account =
+            tx.get_by_encoded_key::<tables::PlainAccountState>(&address)?.ok_or_else(|| {
+                Error::Assertion(format!(
+                    "Expected account ({address}) is missing from DB: {self:?}"
+                ))
+            })?;
 
         assert_equal(self.balance, account.balance, "Balance does not match")?;
         assert_equal(self.nonce.to(), account.nonce, "Nonce does not match")?;
@@ -258,7 +266,7 @@ impl Account {
 }
 
 /// Fork specification.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy, Deserialize)]
 pub enum ForkSpec {
     /// Frontier
     Frontier,

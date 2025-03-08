@@ -1,7 +1,10 @@
 //! Generators for different data structures like block headers, block bodies and ranges of those.
 
+use alloy_consensus::{Block, Header, SignableTransaction, Transaction as _, TxLegacy};
 use alloy_eips::{
-    eip6110::DepositRequest, eip7002::WithdrawalRequest, eip7251::ConsolidationRequest,
+    eip1898::BlockWithParent,
+    eip4895::{Withdrawal, Withdrawals},
+    NumHash,
 };
 use alloy_primitives::{Address, BlockNumber, Bytes, TxKind, B256, U256};
 pub use rand::Rng;
@@ -9,14 +12,15 @@ use rand::{
     distributions::uniform::SampleRange, rngs::StdRng, seq::SliceRandom, thread_rng, SeedableRng,
 };
 use reth_primitives::{
-    proofs, sign_message, Account, Header, Log, Receipt, Request, Requests, SealedBlock,
-    SealedHeader, StorageEntry, Transaction, TransactionSigned, TxLegacy, Withdrawal, Withdrawals,
+    Account, BlockBody, Log, Receipt, SealedBlock, SealedHeader, StorageEntry, Transaction,
+    TransactionSigned,
 };
+
+use reth_primitives_traits::{crypto::secp256k1::sign_message, proofs, Block as _};
 use secp256k1::{Keypair, Secp256k1};
 use std::{
     cmp::{max, min},
-    collections::{hash_map::DefaultHasher, BTreeMap},
-    hash::Hasher,
+    collections::BTreeMap,
     ops::{Range, RangeInclusive},
 };
 
@@ -36,7 +40,7 @@ pub struct BlockParams {
 }
 
 /// Used to pass arguments for random block generation function in tests
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BlockRangeParams {
     /// The parent hash of the block.
     pub parent: Option<B256>,
@@ -50,17 +54,33 @@ pub struct BlockRangeParams {
     pub withdrawals_count: Option<Range<u8>>,
 }
 
+impl Default for BlockRangeParams {
+    fn default() -> Self {
+        Self {
+            parent: None,
+            tx_count: 0..u8::MAX / 2,
+            requests_count: None,
+            withdrawals_count: None,
+        }
+    }
+}
+
 /// Returns a random number generator that can be seeded using the `SEED` environment variable.
 ///
 /// If `SEED` is not set, a random seed is used.
 pub fn rng() -> StdRng {
     if let Ok(seed) = std::env::var("SEED") {
-        let mut hasher = DefaultHasher::new();
-        hasher.write(seed.as_bytes());
-        StdRng::seed_from_u64(hasher.finish())
+        rng_with_seed(seed.as_bytes())
     } else {
         StdRng::from_rng(thread_rng()).expect("could not build rng")
     }
+}
+
+/// Returns a random number generator from a specific seed, as bytes.
+pub fn rng_with_seed(seed: &[u8]) -> StdRng {
+    let mut seed_bytes = [0u8; 32];
+    seed_bytes[..seed.len().min(32)].copy_from_slice(seed);
+    StdRng::from_seed(seed_bytes)
 }
 
 /// Generates a range of random [`SealedHeader`]s.
@@ -85,18 +105,27 @@ pub fn random_header_range<R: Rng>(
     headers
 }
 
+/// Generate a random [`BlockWithParent`].
+pub fn random_block_with_parent<R: Rng>(
+    rng: &mut R,
+    number: u64,
+    parent: Option<B256>,
+) -> BlockWithParent {
+    BlockWithParent { parent: parent.unwrap_or_default(), block: NumHash::new(number, rng.gen()) }
+}
+
 /// Generate a random [`SealedHeader`].
 ///
 /// The header is assumed to not be correct if validated.
 pub fn random_header<R: Rng>(rng: &mut R, number: u64, parent: Option<B256>) -> SealedHeader {
-    let header = reth_primitives::Header {
+    let header = alloy_consensus::Header {
         number,
         nonce: rng.gen(),
         difficulty: U256::from(rng.gen::<u32>()),
         parent_hash: parent.unwrap_or_default(),
         ..Default::default()
     };
-    header.seal_slow()
+    SealedHeader::seal_slow(header)
 }
 
 /// Generates a random legacy [Transaction].
@@ -138,7 +167,8 @@ pub fn sign_tx_with_random_key_pair<R: Rng>(rng: &mut R, tx: Transaction) -> Tra
 pub fn sign_tx_with_key_pair(key_pair: Keypair, tx: Transaction) -> TransactionSigned {
     let signature =
         sign_message(B256::from_slice(&key_pair.secret_bytes()[..]), tx.signature_hash()).unwrap();
-    TransactionSigned::from_transaction_and_signature(tx, signature)
+
+    TransactionSigned::new_unhashed(tx, signature)
 }
 
 /// Generates a set of [Keypair]s based on the desired count.
@@ -166,7 +196,7 @@ pub fn random_block<R: Rng>(rng: &mut R, number: u64, block_params: BlockParams)
     let tx_count = block_params.tx_count.unwrap_or_else(|| rng.gen::<u8>());
     let transactions: Vec<TransactionSigned> =
         (0..tx_count).map(|_| random_signed_tx(rng)).collect();
-    let total_gas = transactions.iter().fold(0, |sum, tx| sum + tx.transaction.gas_limit());
+    let total_gas = transactions.iter().fold(0, |sum, tx| sum + tx.transaction().gas_limit());
 
     // Generate ommers
     let ommers_count = block_params.ommers_count.unwrap_or_else(|| rng.gen_range(0..2));
@@ -177,11 +207,6 @@ pub fn random_block<R: Rng>(rng: &mut R, number: u64, block_params: BlockParams)
     // Calculate roots
     let transactions_root = proofs::calculate_transaction_root(&transactions);
     let ommers_hash = proofs::calculate_ommers_root(&ommers);
-
-    let requests = block_params
-        .requests_count
-        .map(|count| (0..count).map(|_| random_request(rng)).collect::<Vec<_>>());
-    let requests_root = requests.as_ref().map(|requests| proofs::calculate_requests_root(requests));
 
     let withdrawals = block_params.withdrawals_count.map(|count| {
         (0..count)
@@ -195,25 +220,25 @@ pub fn random_block<R: Rng>(rng: &mut R, number: u64, block_params: BlockParams)
     });
     let withdrawals_root = withdrawals.as_ref().map(|w| proofs::calculate_withdrawals_root(w));
 
-    SealedBlock {
-        header: Header {
-            parent_hash: block_params.parent.unwrap_or_default(),
-            number,
-            gas_used: total_gas,
-            gas_limit: total_gas,
-            transactions_root,
-            ommers_hash,
-            base_fee_per_gas: Some(rng.gen()),
-            requests_root,
-            withdrawals_root,
-            ..Default::default()
-        }
-        .seal_slow(),
-        body: transactions,
-        ommers,
-        withdrawals: withdrawals.map(Withdrawals::new),
-        requests: requests.map(Requests),
+    let header = Header {
+        parent_hash: block_params.parent.unwrap_or_default(),
+        number,
+        gas_used: total_gas,
+        gas_limit: total_gas,
+        transactions_root,
+        ommers_hash,
+        base_fee_per_gas: Some(rng.gen()),
+        // TODO(onbjerg): Proper EIP-7685 request support
+        requests_hash: None,
+        withdrawals_root,
+        ..Default::default()
+    };
+
+    Block {
+        header,
+        body: BlockBody { transactions, ommers, withdrawals: withdrawals.map(Withdrawals::new) },
     }
+    .seal_slow()
 }
 
 /// Generate a range of random blocks.
@@ -241,7 +266,7 @@ pub fn random_block_range<R: Rng>(
             idx,
             BlockParams {
                 parent: Some(
-                    blocks.last().map(|block: &SealedBlock| block.header.hash()).unwrap_or(parent),
+                    blocks.last().map(|block: &SealedBlock| block.hash()).unwrap_or(parent),
                 ),
                 tx_count: Some(tx_count),
                 ommers_count: None,
@@ -441,35 +466,16 @@ pub fn random_log<R: Rng>(rng: &mut R, address: Option<Address>, topics_count: O
     )
 }
 
-/// Generate random request
-pub fn random_request<R: Rng>(rng: &mut R) -> Request {
-    let request_type = rng.gen_range(0..3);
-    match request_type {
-        0 => Request::DepositRequest(DepositRequest {
-            pubkey: rng.gen(),
-            withdrawal_credentials: rng.gen(),
-            amount: rng.gen(),
-            signature: rng.gen(),
-            index: rng.gen(),
-        }),
-        1 => Request::WithdrawalRequest(WithdrawalRequest {
-            source_address: rng.gen(),
-            validator_pubkey: rng.gen(),
-            amount: rng.gen(),
-        }),
-        2 => Request::ConsolidationRequest(ConsolidationRequest {
-            source_address: rng.gen(),
-            source_pubkey: rng.gen(),
-            target_pubkey: rng.gen(),
-        }),
-        _ => panic!("invalid request type"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_primitives::{hex, public_key_to_address, AccessList, Signature, TxEip1559};
+    use alloy_consensus::TxEip1559;
+    use alloy_eips::eip2930::AccessList;
+    use alloy_primitives::{hex, PrimitiveSignature as Signature};
+    use reth_primitives_traits::{
+        crypto::secp256k1::{public_key_to_address, sign_message},
+        SignedTransaction,
+    };
     use std::str::FromStr;
 
     #[test]
@@ -496,7 +502,7 @@ mod tests {
                 sign_message(B256::from_slice(&key_pair.secret_bytes()[..]), signature_hash)
                     .unwrap();
 
-            let signed = TransactionSigned::from_transaction_and_signature(tx.clone(), signature);
+            let signed = TransactionSigned::new_unhashed(tx.clone(), signature);
             let recovered = signed.recover_signer().unwrap();
 
             let expected = public_key_to_address(key_pair.public_key());
@@ -533,17 +539,17 @@ mod tests {
                 .unwrap();
         let signature = sign_message(secret, hash).unwrap();
 
-        let expected = Signature {
-            r: U256::from_str(
+        let expected = Signature::new(
+            U256::from_str(
                 "18515461264373351373200002665853028612451056578545711640558177340181847433846",
             )
             .unwrap(),
-            s: U256::from_str(
+            U256::from_str(
                 "46948507304638947509940763649030358759909902576025900602547168820602576006531",
             )
             .unwrap(),
-            odd_y_parity: false,
-        };
+            false,
+        );
         assert_eq!(expected, signature);
     }
 }

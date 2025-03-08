@@ -1,4 +1,5 @@
 //! Utils for `stages`.
+use alloy_primitives::{BlockNumber, TxNumber};
 use reth_config::config::EtlConfig;
 use reth_db::BlockNumberList;
 use reth_db_api::{
@@ -9,8 +10,11 @@ use reth_db_api::{
     DatabaseError,
 };
 use reth_etl::Collector;
-use reth_primitives::BlockNumber;
-use reth_provider::DBProvider;
+use reth_primitives::StaticFileSegment;
+use reth_provider::{
+    providers::StaticFileProvider, BlockReader, DBProvider, ProviderError,
+    StaticFileProviderFactory,
+};
 use reth_stages_api::StageError;
 use std::{collections::HashMap, hash::Hash, ops::RangeBounds};
 use tracing::info;
@@ -51,14 +55,14 @@ where
     let mut changeset_cursor = provider.tx_ref().cursor_read::<CS>()?;
 
     let mut collector = Collector::new(etl_config.file_size, etl_config.dir.clone());
-    let mut cache: HashMap<P, Vec<u64>> = HashMap::new();
+    let mut cache: HashMap<P, Vec<u64>> = HashMap::default();
 
     let mut collect = |cache: &HashMap<P, Vec<u64>>| {
-        for (key, indice_list) in cache {
-            let last = indice_list.last().expect("qed");
+        for (key, indices) in cache {
+            let last = indices.last().expect("qed");
             collector.insert(
                 sharded_key_factory(*key, *last),
-                BlockNumberList::new_pre_sorted(indice_list),
+                BlockNumberList::new_pre_sorted(indices.iter().copied()),
             )?;
         }
         Ok::<(), StageError>(())
@@ -220,9 +224,9 @@ where
                 let value = BlockNumberList::new_pre_sorted(chunk);
 
                 if append_only {
-                    cursor.append(key, value)?;
+                    cursor.append(key, &value)?;
                 } else {
-                    cursor.upsert(key, value)?;
+                    cursor.upsert(key, &value)?;
                 }
             }
         }
@@ -243,4 +247,40 @@ impl LoadMode {
     const fn is_flush(&self) -> bool {
         matches!(self, Self::Flush)
     }
+}
+
+/// Called when database is ahead of static files. Attempts to find the first block we are missing
+/// transactions for.
+pub(crate) fn missing_static_data_error<Provider>(
+    last_tx_num: TxNumber,
+    static_file_provider: &StaticFileProvider<Provider::Primitives>,
+    provider: &Provider,
+    segment: StaticFileSegment,
+) -> Result<StageError, ProviderError>
+where
+    Provider: BlockReader + StaticFileProviderFactory,
+{
+    let mut last_block =
+        static_file_provider.get_highest_static_file_block(segment).unwrap_or_default();
+
+    // To be extra safe, we make sure that the last tx num matches the last block from its indices.
+    // If not, get it.
+    loop {
+        if let Some(indices) = provider.block_body_indices(last_block)? {
+            if indices.last_tx_num() <= last_tx_num {
+                break
+            }
+        }
+        if last_block == 0 {
+            break
+        }
+        last_block -= 1;
+    }
+
+    let missing_block = Box::new(provider.sealed_header(last_block + 1)?.unwrap_or_default());
+
+    Ok(StageError::MissingStaticFileData {
+        block: Box::new(missing_block.block_with_parent()),
+        segment,
+    })
 }

@@ -17,7 +17,7 @@
 //! # use reth_downloaders::headers::reverse_headers::ReverseHeadersDownloaderBuilder;
 //! # use reth_network_p2p::test_utils::{TestBodiesClient, TestHeadersClient};
 //! # use reth_evm_ethereum::execute::EthExecutorProvider;
-//! # use reth_primitives::B256;
+//! # use alloy_primitives::B256;
 //! # use reth_chainspec::MAINNET;
 //! # use reth_prune_types::PruneModes;
 //! # use reth_network_peers::PeerId;
@@ -30,19 +30,20 @@
 //! # use reth_provider::test_utils::{create_test_provider_factory, MockNodeTypesWithDB};
 //! # use reth_static_file::StaticFileProducer;
 //! # use reth_config::config::StageConfig;
-//! # use reth_consensus::Consensus;
+//! # use reth_consensus::{Consensus, ConsensusError};
 //! # use reth_consensus::test_utils::TestConsensus;
+//! # use reth_consensus::FullConsensus;
 //! #
 //! # let chain_spec = MAINNET.clone();
-//! # let consensus: Arc<dyn Consensus> = Arc::new(TestConsensus::default());
+//! # let consensus: Arc<dyn FullConsensus<reth_primitives::EthPrimitives, Error = ConsensusError>> = Arc::new(TestConsensus::default());
 //! # let headers_downloader = ReverseHeadersDownloaderBuilder::default().build(
 //! #    Arc::new(TestHeadersClient::default()),
-//! #    consensus.clone()
+//! #    consensus.clone().as_header_validator()
 //! # );
 //! # let provider_factory = create_test_provider_factory();
 //! # let bodies_downloader = BodiesDownloaderBuilder::default().build(
 //! #    Arc::new(TestBodiesClient { responder: |_| Ok((PeerId::ZERO, vec![]).into()) }),
-//! #    consensus.clone(),
+//! #    consensus.clone().as_consensus(),
 //! #    provider_factory.clone()
 //! # );
 //! # let (tip_tx, tip_rx) = watch::channel(B256::default());

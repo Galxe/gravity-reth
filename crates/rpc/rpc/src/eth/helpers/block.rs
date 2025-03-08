@@ -1,49 +1,54 @@
 //! Contains RPC handler implementations specific to blocks.
 
-use reth_primitives::{BlockId, TransactionMeta};
-use reth_provider::{BlockReaderIdExt, HeaderProvider};
+use alloy_consensus::{transaction::TransactionMeta, BlockHeader};
+use alloy_rpc_types_eth::{BlockId, TransactionReceipt};
+use reth_chainspec::EthChainSpec;
+use reth_primitives_traits::{BlockBody, SignedTransaction};
+use reth_provider::{BlockReader, ChainSpecProvider};
 use reth_rpc_eth_api::{
     helpers::{EthBlocks, LoadBlock, LoadPendingBlock, LoadReceipt, SpawnBlocking},
-    FromEthApiError,
+    RpcNodeCoreExt, RpcReceipt,
 };
-use reth_rpc_eth_types::{EthStateCache, ReceiptBuilder};
-use reth_rpc_types::AnyTransactionReceipt;
+use reth_rpc_eth_types::{EthApiError, EthReceiptBuilder};
 
 use crate::EthApi;
 
 impl<Provider, Pool, Network, EvmConfig> EthBlocks for EthApi<Provider, Pool, Network, EvmConfig>
 where
-    Self: LoadBlock,
-    Provider: HeaderProvider,
+    Self: LoadBlock<
+        Error = EthApiError,
+        NetworkTypes: alloy_network::Network<ReceiptResponse = TransactionReceipt>,
+        Provider: BlockReader<
+            Transaction = reth_primitives::TransactionSigned,
+            Receipt = reth_primitives::Receipt,
+        >,
+    >,
+    Provider: BlockReader + ChainSpecProvider,
 {
-    #[inline]
-    fn provider(&self) -> impl HeaderProvider {
-        self.inner.provider()
-    }
-
     async fn block_receipts(
         &self,
         block_id: BlockId,
-    ) -> Result<Option<Vec<AnyTransactionReceipt>>, Self::Error>
+    ) -> Result<Option<Vec<RpcReceipt<Self::NetworkTypes>>>, Self::Error>
     where
         Self: LoadReceipt,
     {
         if let Some((block, receipts)) = self.load_block_and_receipts(block_id).await? {
-            let block_number = block.number;
-            let base_fee = block.base_fee_per_gas;
+            let block_number = block.number();
+            let base_fee = block.base_fee_per_gas();
             let block_hash = block.hash();
-            let excess_blob_gas = block.excess_blob_gas;
-            let timestamp = block.timestamp;
-            let block = block.unseal();
+            let excess_blob_gas = block.excess_blob_gas();
+            let timestamp = block.timestamp();
+            let blob_params = self.provider().chain_spec().blob_params_at_timestamp(timestamp);
 
-            let receipts = block
-                .body
-                .into_iter()
+            return block
+                .body()
+                .transactions()
+                .iter()
                 .zip(receipts.iter())
                 .enumerate()
                 .map(|(idx, (tx, receipt))| {
                     let meta = TransactionMeta {
-                        tx_hash: tx.hash,
+                        tx_hash: *tx.tx_hash(),
                         index: idx as u64,
                         block_hash,
                         block_number,
@@ -51,13 +56,11 @@ where
                         excess_blob_gas,
                         timestamp,
                     };
-
-                    ReceiptBuilder::new(&tx, meta, receipt, &receipts)
+                    EthReceiptBuilder::new(tx, meta, receipt, &receipts, blob_params)
                         .map(|builder| builder.build())
-                        .map_err(Self::Error::from_eth_err)
                 })
-                .collect::<Result<Vec<_>, Self::Error>>();
-            return receipts.map(Some)
+                .collect::<Result<Vec<_>, Self::Error>>()
+                .map(Some)
         }
 
         Ok(None)
@@ -66,16 +69,7 @@ where
 
 impl<Provider, Pool, Network, EvmConfig> LoadBlock for EthApi<Provider, Pool, Network, EvmConfig>
 where
-    Self: LoadPendingBlock + SpawnBlocking,
-    Provider: BlockReaderIdExt,
+    Self: LoadPendingBlock + SpawnBlocking + RpcNodeCoreExt,
+    Provider: BlockReader,
 {
-    #[inline]
-    fn provider(&self) -> impl BlockReaderIdExt {
-        self.inner.provider()
-    }
-
-    #[inline]
-    fn cache(&self) -> &EthStateCache {
-        self.inner.cache()
-    }
 }

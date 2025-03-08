@@ -1,67 +1,23 @@
 //! [EIP-7251](https://eips.ethereum.org/EIPS/eip-7251) system call implementation.
-use alloc::{boxed::Box, format, string::ToString, vec::Vec};
+use crate::Evm;
+use alloc::format;
+use alloy_eips::eip7251::CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS;
+use alloy_primitives::Bytes;
 use core::fmt::Display;
-
-use crate::ConfigureEvm;
-use alloy_eips::eip7251::{ConsolidationRequest, CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS};
 use reth_execution_errors::{BlockExecutionError, BlockValidationError};
-use reth_primitives::{Buf, Header, Request};
-use revm::{interpreter::Host, Database, DatabaseCommit, Evm};
-use revm_primitives::{
-    Address, BlockEnv, Bytes, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, ExecutionResult, FixedBytes,
-    ResultAndState,
-};
-
-/// Apply the [EIP-7251](https://eips.ethereum.org/EIPS/eip-7251) post block contract call.
-///
-/// This constructs a new [Evm] with the given DB, and environment
-/// ([`CfgEnvWithHandlerCfg`] and [`BlockEnv`]) to execute the post block contract call.
-///
-/// This uses [`apply_consolidation_requests_contract_call`] to ultimately calculate the
-/// [requests](Request).
-pub fn post_block_consolidation_requests_contract_call<EvmConfig, DB>(
-    evm_config: &EvmConfig,
-    db: &mut DB,
-    initialized_cfg: &CfgEnvWithHandlerCfg,
-    initialized_block_env: &BlockEnv,
-) -> Result<Vec<Request>, BlockExecutionError>
-where
-    DB: Database + DatabaseCommit,
-    DB::Error: Display,
-    EvmConfig: ConfigureEvm<Header = Header>,
-{
-    // apply post-block EIP-7251 contract call
-    let mut evm_post_block = Evm::builder()
-        .with_db(db)
-        .with_env_with_handler_cfg(EnvWithHandlerCfg::new_with_cfg_env(
-            initialized_cfg.clone(),
-            initialized_block_env.clone(),
-            Default::default(),
-        ))
-        .build();
-
-    // initialize a block from the env, because the post block call needs the block itself
-    apply_consolidation_requests_contract_call(evm_config, &mut evm_post_block)
-}
+use revm_primitives::{ExecutionResult, ResultAndState};
 
 /// Applies the post-block call to the EIP-7251 consolidation requests contract.
 ///
 /// If Prague is not active at the given timestamp, then this is a no-op, and an empty vector is
 /// returned. Otherwise, the consolidation requests are returned.
+///
+/// Note: this does not commit the state changes to the database, it only transact the call.
 #[inline]
-pub fn apply_consolidation_requests_contract_call<EvmConfig, EXT, DB>(
-    evm_config: &EvmConfig,
-    evm: &mut Evm<'_, EXT, DB>,
-) -> Result<Vec<Request>, BlockExecutionError>
-where
-    DB: Database + DatabaseCommit,
-    DB::Error: core::fmt::Display,
-    EvmConfig: ConfigureEvm<Header = Header>,
-{
-    // get previous env
-    let previous_env = Box::new(evm.context.env().clone());
-
-    // Fill transaction environment with the EIP-7251 consolidation requests contract message data.
+pub(crate) fn transact_consolidation_requests_contract_call(
+    evm: &mut impl Evm<Error: Display>,
+) -> Result<ResultAndState, BlockExecutionError> {
+    // Execute EIP-7251 consolidation requests contract message data.
     //
     // This requirement for the consolidation requests contract call defined by
     // [EIP-7251](https://eips.ethereum.org/EIPS/eip-7251) is:
@@ -70,17 +26,13 @@ where
     // after processing all transactions and after performing the block body requests validations)
     // clienst software MUST [..] call the contract as `SYSTEM_ADDRESS` and empty input data to
     // trigger the system subroutine execute.
-    evm_config.fill_tx_env_system_contract_call(
-        &mut evm.context.evm.env,
+    let mut res = match evm.transact_system_call(
         alloy_eips::eip7002::SYSTEM_ADDRESS,
         CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS,
         Bytes::new(),
-    );
-
-    let ResultAndState { result, mut state, .. } = match evm.transact() {
+    ) {
         Ok(res) => res,
         Err(e) => {
-            evm.context.evm.env = previous_env;
             return Err(BlockValidationError::ConsolidationRequestsContractCall {
                 message: format!("execution failed: {e}"),
             }
@@ -88,61 +40,34 @@ where
         }
     };
 
-    // cleanup the state
-    state.remove(&alloy_eips::eip7002::SYSTEM_ADDRESS);
-    state.remove(&evm.block().coinbase);
-    evm.context.evm.db.commit(state);
+    // NOTE: Revm currently marks these accounts as "touched" when we do the above transact calls,
+    // and includes them in the result.
+    //
+    // There should be no state changes to these addresses anyways as a result of this system call,
+    // so we can just remove them from the state returned.
+    res.state.remove(&alloy_eips::eip7002::SYSTEM_ADDRESS);
+    res.state.remove(&evm.block().coinbase);
 
-    // re-set the previous env
-    evm.context.evm.env = previous_env;
+    Ok(res)
+}
 
-    let mut data = match result {
+/// Calls the consolidation requests system contract, and returns the requests from the execution
+/// output.
+#[inline]
+pub(crate) fn post_commit(result: ExecutionResult) -> Result<Bytes, BlockExecutionError> {
+    match result {
         ExecutionResult::Success { output, .. } => Ok(output.into_data()),
         ExecutionResult::Revert { output, .. } => {
             Err(BlockValidationError::ConsolidationRequestsContractCall {
                 message: format!("execution reverted: {output}"),
-            })
+            }
+            .into())
         }
         ExecutionResult::Halt { reason, .. } => {
             Err(BlockValidationError::ConsolidationRequestsContractCall {
                 message: format!("execution halted: {reason:?}"),
-            })
-        }
-    }?;
-
-    // Consolidations are encoded as a series of consolidation requests, each with the following
-    // format:
-    //
-    // +------+--------+---------------+
-    // | addr | pubkey | target pubkey |
-    // +------+--------+---------------+
-    //    20      48        48
-
-    const CONSOLIDATION_REQUEST_SIZE: usize = 20 + 48 + 48;
-    let mut consolidation_requests = Vec::with_capacity(data.len() / CONSOLIDATION_REQUEST_SIZE);
-    while data.has_remaining() {
-        if data.remaining() < CONSOLIDATION_REQUEST_SIZE {
-            return Err(BlockValidationError::ConsolidationRequestsContractCall {
-                message: "invalid consolidation request length".to_string(),
             }
             .into())
         }
-
-        let mut source_address = Address::ZERO;
-        data.copy_to_slice(source_address.as_mut_slice());
-
-        let mut source_pubkey = FixedBytes::<48>::ZERO;
-        data.copy_to_slice(source_pubkey.as_mut_slice());
-
-        let mut target_pubkey = FixedBytes::<48>::ZERO;
-        data.copy_to_slice(target_pubkey.as_mut_slice());
-
-        consolidation_requests.push(Request::ConsolidationRequest(ConsolidationRequest {
-            source_address,
-            source_pubkey,
-            target_pubkey,
-        }));
     }
-
-    Ok(consolidation_requests)
 }

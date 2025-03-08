@@ -1,27 +1,28 @@
 //! Builds an RPC receipt response w.r.t. data layout of network.
 
-use reth_primitives::{Receipt, TransactionMeta, TransactionSigned};
-use reth_rpc_eth_api::{helpers::LoadReceipt, FromEthApiError};
-use reth_rpc_eth_types::{EthApiError, EthStateCache, ReceiptBuilder};
-use reth_rpc_types::AnyTransactionReceipt;
+use alloy_consensus::transaction::TransactionMeta;
+use reth_chainspec::EthChainSpec;
+use reth_primitives::{Receipt, TransactionSigned};
+use reth_provider::{BlockReader, ChainSpecProvider, ReceiptProvider, TransactionsProvider};
+use reth_rpc_eth_api::{helpers::LoadReceipt, FromEthApiError, RpcNodeCoreExt, RpcReceipt};
+use reth_rpc_eth_types::{EthApiError, EthReceiptBuilder};
 
 use crate::EthApi;
 
 impl<Provider, Pool, Network, EvmConfig> LoadReceipt for EthApi<Provider, Pool, Network, EvmConfig>
 where
-    Self: Send + Sync,
+    Self: RpcNodeCoreExt<
+        Provider: TransactionsProvider<Transaction = TransactionSigned>
+                      + ReceiptProvider<Receipt = reth_primitives::Receipt>,
+    >,
+    Provider: BlockReader + ChainSpecProvider,
 {
-    #[inline]
-    fn cache(&self) -> &EthStateCache {
-        self.inner.cache()
-    }
-
     async fn build_transaction_receipt(
         &self,
         tx: TransactionSigned,
         meta: TransactionMeta,
         receipt: Receipt,
-    ) -> Result<AnyTransactionReceipt, Self::Error> {
+    ) -> Result<RpcReceipt<Self::NetworkTypes>, Self::Error> {
         let hash = meta.block_hash;
         // get all receipts for the block
         let all_receipts = self
@@ -30,7 +31,8 @@ where
             .await
             .map_err(Self::Error::from_eth_err)?
             .ok_or(EthApiError::HeaderNotFound(hash.into()))?;
+        let blob_params = self.provider().chain_spec().blob_params_at_timestamp(meta.timestamp);
 
-        Ok(ReceiptBuilder::new(&tx, meta, &receipt, &all_receipts)?.build())
+        Ok(EthReceiptBuilder::new(&tx, meta, &receipt, &all_receipts, blob_params)?.build())
     }
 }

@@ -1,12 +1,15 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use reth_beacon_consensus::BeaconConsensusEngineHandle;
+use alloy_rpc_types_engine::{ClientCode, ClientVersionV1};
 use reth_chainspec::MAINNET;
-use reth_ethereum_engine_primitives::EthEngineTypes;
-use reth_evm_ethereum::EthEvmConfig;
+use reth_consensus::noop::NoopConsensus;
+use reth_engine_primitives::BeaconConsensusEngineHandle;
+use reth_ethereum_engine_primitives::{EthEngineTypes, EthereumEngineValidator};
+use reth_evm::execute::BasicBlockExecutorProvider;
+use reth_evm_ethereum::{execute::EthExecutionStrategyFactory, EthEvmConfig};
 use reth_network_api::noop::NoopNetwork;
 use reth_payload_builder::test_utils::spawn_test_payload_service;
-use reth_provider::test_utils::{NoopProvider, TestCanonStateSubscriptions};
+use reth_provider::test_utils::NoopProvider;
 use reth_rpc::EthApi;
 use reth_rpc_builder::{
     auth::{AuthRpcModule, AuthServerConfig, AuthServerHandle},
@@ -15,7 +18,6 @@ use reth_rpc_builder::{
 use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApi};
 use reth_rpc_layer::JwtSecret;
 use reth_rpc_server_types::RpcModuleSelection;
-use reth_rpc_types::engine::{ClientCode, ClientVersionV1};
 use reth_tasks::TokioTaskExecutor;
 use reth_transaction_pool::{
     noop::NoopTransactionPool,
@@ -32,8 +34,7 @@ pub const fn test_address() -> SocketAddr {
 pub async fn launch_auth(secret: JwtSecret) -> AuthServerHandle {
     let config = AuthServerConfig::builder(secret).socket_addr(test_address()).build();
     let (tx, _rx) = unbounded_channel();
-    let beacon_engine_handle =
-        BeaconConsensusEngineHandle::<EthEngineTypes>::new(tx, Default::default());
+    let beacon_engine_handle = BeaconConsensusEngineHandle::<EthEngineTypes>::new(tx);
     let client = ClientVersionV1 {
         code: ClientCode::RH,
         name: "Reth".to_string(),
@@ -50,6 +51,7 @@ pub async fn launch_auth(secret: JwtSecret) -> AuthServerHandle {
         Box::<TokioTaskExecutor>::default(),
         client,
         EngineCapabilities::default(),
+        EthereumEngineValidator::new(MAINNET.clone()),
     );
     let module = AuthRpcModule::new(engine_api);
     module.start_server(config).await.unwrap()
@@ -121,14 +123,18 @@ pub fn test_rpc_builder() -> RpcModuleBuilder<
     TestPool,
     NoopNetwork,
     TokioTaskExecutor,
-    TestCanonStateSubscriptions,
     EthEvmConfig,
+    BasicBlockExecutorProvider<EthExecutionStrategyFactory>,
+    NoopConsensus,
 > {
     RpcModuleBuilder::default()
         .with_provider(NoopProvider::default())
         .with_pool(TestPoolBuilder::default().into())
         .with_network(NoopNetwork::default())
         .with_executor(TokioTaskExecutor::default())
-        .with_events(TestCanonStateSubscriptions::default())
         .with_evm_config(EthEvmConfig::new(MAINNET.clone()))
+        .with_block_executor(
+            BasicBlockExecutorProvider::new(EthExecutionStrategyFactory::mainnet()),
+        )
+        .with_consensus(NoopConsensus::default())
 }

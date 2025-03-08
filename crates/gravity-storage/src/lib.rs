@@ -2,9 +2,8 @@ pub mod block_view_storage;
 
 use std::sync::Arc;
 
-use reth_evm::execute::ParallelDatabase;
-use reth_primitives::B256;
-use reth_revm::DatabaseRef;
+use alloy_primitives::B256;
+use reth_evm::ParallelDatabase;
 use reth_storage_api::errors::provider::ProviderError;
 use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::db::BundleState;

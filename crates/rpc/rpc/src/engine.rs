@@ -1,15 +1,15 @@
 use alloy_eips::{BlockId, BlockNumberOrTag};
-use alloy_network::Network;
 use alloy_primitives::{Address, Bytes, B256, U256, U64};
+use alloy_rpc_types_eth::{
+    state::StateOverride, transaction::TransactionRequest, BlockOverrides,
+    EIP1186AccountProofResponse, Filter, Log, SyncStatus,
+};
+use alloy_serde::JsonStorageKey;
 use jsonrpsee::core::RpcResult as Result;
 use reth_rpc_api::{EngineEthApiServer, EthApiServer, EthFilterApiServer};
 /// Re-export for convenience
 pub use reth_rpc_engine_api::EngineApi;
-use reth_rpc_eth_api::{EthApiTypes, RpcBlock, RpcReceipt, RpcTransaction};
-use reth_rpc_types::{
-    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Filter, JsonStorageKey, Log,
-    SyncStatus, TransactionRequest, WithOtherFields,
-};
+use reth_rpc_eth_api::{FullEthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction};
 use tracing_futures::Instrument;
 
 macro_rules! engine_span {
@@ -34,18 +34,15 @@ impl<Eth, EthFilter> EngineEthApi<Eth, EthFilter> {
 }
 
 #[async_trait::async_trait]
-impl<Eth, EthFilter> EngineEthApiServer<RpcBlock<Eth::NetworkTypes>>
+impl<Eth, EthFilter> EngineEthApiServer<RpcBlock<Eth::NetworkTypes>, RpcReceipt<Eth::NetworkTypes>>
     for EngineEthApi<Eth, EthFilter>
 where
     Eth: EthApiServer<
             RpcTransaction<Eth::NetworkTypes>,
             RpcBlock<Eth::NetworkTypes>,
             RpcReceipt<Eth::NetworkTypes>,
-        > + EthApiTypes<
-            NetworkTypes: Network<
-                TransactionResponse = WithOtherFields<reth_rpc_types::Transaction>,
-            >,
-        >,
+            RpcHeader<Eth::NetworkTypes>,
+        > + FullEthApiTypes,
     EthFilter: EthFilterApiServer<RpcTransaction<Eth::NetworkTypes>>,
 {
     /// Handler for: `eth_syncing`
@@ -106,9 +103,23 @@ where
         self.eth.block_by_number(number, full).instrument(engine_span!()).await
     }
 
+    async fn block_receipts(
+        &self,
+        block_id: BlockId,
+    ) -> Result<Option<Vec<RpcReceipt<Eth::NetworkTypes>>>> {
+        self.eth.block_receipts(block_id).instrument(engine_span!()).await
+    }
+
     /// Handler for: `eth_sendRawTransaction`
     async fn send_raw_transaction(&self, bytes: Bytes) -> Result<B256> {
         self.eth.send_raw_transaction(bytes).instrument(engine_span!()).await
+    }
+
+    async fn transaction_receipt(
+        &self,
+        hash: B256,
+    ) -> Result<Option<RpcReceipt<Eth::NetworkTypes>>> {
+        self.eth.transaction_receipt(hash).instrument(engine_span!()).await
     }
 
     /// Handler for `eth_getLogs`

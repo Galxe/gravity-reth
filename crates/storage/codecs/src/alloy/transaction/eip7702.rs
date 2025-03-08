@@ -1,10 +1,11 @@
+//! Compact implementation for [`AlloyTxEip7702`]
+
 use crate::Compact;
 use alloc::vec::Vec;
-use alloy_consensus::transaction::TxEip7702 as AlloyTxEip7702;
+use alloy_consensus::TxEip7702 as AlloyTxEip7702;
 use alloy_eips::{eip2930::AccessList, eip7702::SignedAuthorization};
 use alloy_primitives::{Address, Bytes, ChainId, U256};
 use reth_codecs_derive::add_arbitrary_tests;
-use serde::{Deserialize, Serialize};
 
 /// [EIP-7702 Set Code Transaction](https://eips.ethereum.org/EIPS/eip-7702)
 ///
@@ -13,10 +14,15 @@ use serde::{Deserialize, Serialize};
 /// By deriving `Compact` here, any future changes or enhancements to the `Compact` derive
 /// will automatically apply to this type.
 ///
-/// Notice: Make sure this struct is 1:1 with [`alloy_consensus::transaction::TxEip7702`]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Compact)]
-#[cfg_attr(test, derive(arbitrary::Arbitrary))]
-#[add_arbitrary_tests(compact)]
+/// Notice: Make sure this struct is 1:1 with [`alloy_consensus::TxEip7702`]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Compact)]
+#[reth_codecs(crate = "crate")]
+#[cfg_attr(
+    any(test, feature = "test-utils"),
+    derive(arbitrary::Arbitrary, serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(feature = "test-utils", allow(unreachable_pub), visibility::make(pub))]
+#[add_arbitrary_tests(crate, compact)]
 pub(crate) struct TxEip7702 {
     chain_id: ChainId,
     nonce: u64,
@@ -40,7 +46,7 @@ impl Compact for AlloyTxEip7702 {
             nonce: self.nonce,
             max_fee_per_gas: self.max_fee_per_gas,
             max_priority_fee_per_gas: self.max_priority_fee_per_gas,
-            gas_limit: self.gas_limit as u64,
+            gas_limit: self.gas_limit,
             to: self.to,
             value: self.value,
             input: self.input.clone(),
@@ -57,7 +63,7 @@ impl Compact for AlloyTxEip7702 {
             nonce: tx.nonce,
             max_fee_per_gas: tx.max_fee_per_gas,
             max_priority_fee_per_gas: tx.max_priority_fee_per_gas,
-            gas_limit: tx.gas_limit as u128,
+            gas_limit: tx.gas_limit,
             to: tx.to,
             value: tx.value,
             input: tx.input,

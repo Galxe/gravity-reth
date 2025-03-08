@@ -1,10 +1,10 @@
 use std::{collections::HashMap, future::Future, sync::Arc};
 
+use alloy_eips::BlockId;
 use alloy_primitives::{Address, U256};
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
 use reth_errors::RethResult;
-use reth_primitives::BlockId;
 use reth_provider::{BlockReaderIdExt, ChangeSetReader, StateProviderFactory};
 use reth_rpc_api::RethApiServer;
 use reth_rpc_eth_types::{EthApiError, EthResult};
@@ -71,9 +71,9 @@ where
         let state = self.provider().state_by_block_id(block_id)?;
         let accounts_before = self.provider().account_block_changeset(block_number)?;
         let hash_map = accounts_before.iter().try_fold(
-            HashMap::new(),
+            HashMap::default(),
             |mut hash_map, account_before| -> RethResult<_> {
-                let current_balance = state.account_balance(account_before.address)?;
+                let current_balance = state.account_balance(&account_before.address)?;
                 let prev_balance = account_before.info.map(|info| info.balance);
                 if current_balance != prev_balance {
                     hash_map.insert(account_before.address, current_balance.unwrap_or_default());

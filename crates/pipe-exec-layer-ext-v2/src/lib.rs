@@ -1,27 +1,30 @@
 //! Pipeline execution layer extension
-
+#[macro_use]
 mod channel;
 mod metrics;
 
 use channel::Channel;
 use metrics::PipeExecLayerMetrics;
 
-use alloy_primitives::B256;
-use reth_chain_state::ExecutedBlock;
+use alloy_consensus::{constants::EMPTY_WITHDRAWALS, BlockHeader, Header, EMPTY_OMMER_ROOT_HASH};
+use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
+use alloy_primitives::{Address, B256, U256};
+use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
+use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
-    execute::{BlockExecutionInput, BlockExecutorProvider, Executor, ParallelExecutorProvider},
-    ConfigureEvmEnv, NextBlockEnvAttributes,
+    database::*,
+    execute::{BlockExecutorProvider, Executor},
+    parallel_database, ConfigureEvmEnv, NextBlockEnvAttributes,
 };
 use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
-use reth_primitives::{
-    constants::{BEACON_NONCE, EMPTY_WITHDRAWALS},
-    proofs, Address, Block, BlockWithSenders, Header, Receipt, TransactionSigned, Withdrawals,
-    EMPTY_OMMER_ROOT_HASH, U256,
+use reth_primitives::{EthPrimitives, NodePrimitives};
+use reth_primitives_traits::{
+    proofs::{self},
+    Block as _, RecoveredBlock,
 };
-use revm::db::WrapDatabaseRef;
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
 
 use once_cell::sync::{Lazy, OnceCell};
 
@@ -59,9 +62,9 @@ pub struct OrderedBlock {
 }
 
 #[derive(Debug)]
-pub enum PipeExecLayerEvent {
+pub enum PipeExecLayerEvent<N: NodePrimitives> {
     /// Make executed block canonical
-    MakeCanonical(ExecutedBlock, oneshot::Sender<()>),
+    MakeCanonical(ExecutedBlockWithTrieUpdates<N>, oneshot::Sender<()>),
 }
 
 #[derive(Debug)]
@@ -88,7 +91,7 @@ struct Core<Storage: GravityStorage> {
     storage: Storage,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
-    event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent>,
+    event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<u64 /* block number */, (Header, Instant)>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
     seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
@@ -126,6 +129,8 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
     }
 }
 
+const BLOCK_GAS_LIMIT_1G: u64 = 1_000_000_000;
+
 impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, ordered_block: OrderedBlock) {
         let block_number = ordered_block.number;
@@ -143,7 +148,8 @@ impl<Storage: GravityStorage> Core<Storage> {
         let (parent_block_header, prev_start_execute_time) =
             self.execute_block_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
-        let (mut block, outcome) = self.execute_ordered_block(ordered_block, &parent_block_header);
+        let (mut block, senders, outcome) =
+            self.execute_ordered_block(ordered_block, &parent_block_header);
         self.storage.insert_bundle_state(block_number, &outcome.state);
         self.metrics.execute_duration.record(start_time.elapsed());
         self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
@@ -155,8 +161,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
-        let start_time = Instant::now();
-        let (state_root, hashed_state, trie_output) =
+        let (state_root, hashed_state, trie_updates) =
             self.storage.state_root_with_updates(block_number).unwrap();
         self.metrics.merklize_duration.record(start_time.elapsed());
         self.merklize_barrier.notify(block_number, ()).unwrap();
@@ -200,14 +205,12 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Make the block canonical
         let prev_finish_commit_time =
             self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
-        let start_time = Instant::now();
-        self.make_canonical(ExecutedBlock {
-            block: Arc::new(block.block),
-            senders: Arc::new(block.senders),
-            execution_output: Arc::new(execution_outcome),
+        self.make_canonical(ExecutedBlockWithTrieUpdates::new(
+            Arc::new(RecoveredBlock::new_sealed(block, senders)),
+            Arc::new(execution_outcome),
             hashed_state,
-            trie: trie_output,
-        })
+            trie_updates,
+        ))
         .await;
         self.storage.update_canonical(block_number, block_hash);
         let finish_commit_time = Instant::now();
@@ -231,7 +234,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         &self,
         ordered_block: OrderedBlock,
         parent_header: &Header,
-    ) -> (BlockWithSenders, BlockExecutionOutput<Receipt>) {
+    ) -> (Block, Vec<Address>, BlockExecutionOutput<Receipt>) {
         debug!(target: "execute_ordered_block",
             id=?ordered_block.id,
             parent_id=?ordered_block.parent_id,
@@ -239,47 +242,47 @@ impl<Storage: GravityStorage> Core<Storage> {
             "ready to execute block"
         );
 
-        let (_, block_env) = self.evm_config.next_cfg_and_block_env(
-            parent_header,
-            NextBlockEnvAttributes {
-                timestamp: ordered_block.timestamp,
-                suggested_fee_recipient: ordered_block.coinbase,
-                prev_randao: ordered_block.prev_randao,
-            },
-        );
-
-        let mut block = BlockWithSenders {
-            block: Block {
-                header: Header {
-                    ommers_hash: EMPTY_OMMER_ROOT_HASH,
-                    beneficiary: ordered_block.coinbase,
+        let evm_env = self
+            .evm_config
+            .next_evm_env(
+                parent_header,
+                NextBlockEnvAttributes {
                     timestamp: ordered_block.timestamp,
-                    mix_hash: ordered_block.prev_randao,
-                    nonce: BEACON_NONCE,
-                    base_fee_per_gas: Some(block_env.basefee.to::<u64>()),
-                    number: ordered_block.number,
-                    gas_limit: block_env
-                        .gas_limit
-                        .try_into()
-                        .unwrap_or(self.chain_spec.max_gas_limit),
-                    difficulty: U256::ZERO,
-                    excess_blob_gas: block_env.blob_excess_gas_and_price.map(|v| v.excess_blob_gas),
-                    ..Default::default()
+                    suggested_fee_recipient: ordered_block.coinbase,
+                    prev_randao: ordered_block.prev_randao,
+                    gas_limit: BLOCK_GAS_LIMIT_1G,
                 },
-                body: ordered_block.transactions,
+            )
+            .unwrap();
+
+        let mut block = Block {
+            header: Header {
+                ommers_hash: EMPTY_OMMER_ROOT_HASH,
+                beneficiary: ordered_block.coinbase,
+                timestamp: ordered_block.timestamp,
+                mix_hash: ordered_block.prev_randao,
+                nonce: BEACON_NONCE.into(),
+                base_fee_per_gas: Some(evm_env.block_env.basefee.to::<u64>()),
+                number: ordered_block.number,
+                gas_limit: evm_env.block_env.gas_limit.to(),
+                difficulty: U256::ZERO,
                 ..Default::default()
             },
-            senders: ordered_block.senders,
+            body: BlockBody {
+                transactions: ordered_block.transactions,
+                ommers: vec![],
+                ..Default::default()
+            },
         };
 
         if self.chain_spec.is_shanghai_active_at_timestamp(block.timestamp) {
             if ordered_block.withdrawals.is_empty() {
                 block.header.withdrawals_root = Some(EMPTY_WITHDRAWALS);
-                block.withdrawals = Some(Withdrawals::default());
+                block.body.withdrawals = Some(Withdrawals::default());
             } else {
                 block.header.withdrawals_root =
                     Some(proofs::calculate_withdrawals_root(&ordered_block.withdrawals));
-                block.withdrawals = Some(ordered_block.withdrawals);
+                block.body.withdrawals = Some(ordered_block.withdrawals);
             }
         }
 
@@ -288,35 +291,26 @@ impl<Storage: GravityStorage> Core<Storage> {
             // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
             // execution?
             block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
-            let mut blob_gas_used: u64 = 0;
-            for tx in &block.body {
-                if let Some(blob_tx) = tx.transaction.as_eip4844() {
-                    blob_gas_used += blob_tx.blob_gas();
-                }
-            }
-            block.header.blob_gas_used = Some(blob_gas_used);
+
+            // TODO(nekomoto): fill `excess_blob_gas` and `blob_gas_used` fields
+            block.header.excess_blob_gas = Some(0);
+            block.header.blob_gas_used = Some(0);
         }
 
         let (parent_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
         assert_eq!(parent_id, ordered_block.parent_id);
 
-        let executor_provider =
-            EthExecutorProvider::new(self.chain_spec.clone(), self.evm_config.clone());
-        let outcome =
-            if let Some(executor_provider) = executor_provider.try_into_parallel_provider() {
-                executor_provider.executor(state).execute(BlockExecutionInput {
-                    block: &block,
-                    total_difficulty: block_env.difficulty,
-                })
-            } else {
-                executor_provider.executor(WrapDatabaseRef(state)).execute(BlockExecutionInput {
-                    block: &block,
-                    total_difficulty: block_env.difficulty,
-                })
-            }
-            .unwrap_or_else(|err| {
-                panic!("failed to execute block {:?}: {:?}\n{:?}", ordered_block.id, err, block)
-            });
+        let executor = EthExecutorProvider::ethereum(self.chain_spec.clone())
+            .executor(parallel_database! { state });
+
+        let recovered_block = RecoveredBlock::new_unhashed(block, ordered_block.senders);
+
+        let outcome = executor.execute(&recovered_block).unwrap_or_else(|err| {
+            panic!(
+                "failed to execute block {:?}: {:?}\n{:?}",
+                ordered_block.id, err, recovered_block
+            )
+        });
 
         debug!(target: "execute_ordered_block",
             id=?ordered_block.id,
@@ -325,38 +319,36 @@ impl<Storage: GravityStorage> Core<Storage> {
             "block executed"
         );
 
+        let (mut block, senders) = recovered_block.split();
         block.header.gas_used = outcome.gas_used;
-        (block, outcome)
+        (block, senders, outcome)
     }
 
     /// Calculate the receipts root, logs bloom, and transactions root, etc. and fill them into the
     /// block header.
     fn calculate_roots(
         &self,
-        block: &mut BlockWithSenders,
+        block: &mut Block,
         execution_outcome: BlockExecutionOutput<Receipt>,
     ) -> ExecutionOutcome {
         // only determine cancun fields when active
         if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
-            block.requests = Some(execution_outcome.requests.clone().into());
-            block.header.requests_root =
-                Some(proofs::calculate_requests_root(&execution_outcome.requests));
+            block.header.requests_hash = Some(execution_outcome.requests.requests_hash());
         }
 
         let execution_outcome = ExecutionOutcome::new(
             execution_outcome.state,
-            vec![execution_outcome.receipts.into_iter().map(|r| Some(r)).collect::<Vec<_>>()]
-                .into(),
+            vec![execution_outcome.receipts],
             block.number,
             vec![execution_outcome.requests.into()],
         );
 
         let receipts_root =
-            execution_outcome.receipts_root_slow(block.number).expect("Number is in range");
+            execution_outcome.ethereum_receipts_root(block.number).expect("Number is in range");
         let logs_bloom =
             execution_outcome.block_logs_bloom(block.number).expect("Number is in range");
 
-        let transactions_root = proofs::calculate_transaction_root(&block.body);
+        let transactions_root = proofs::calculate_transaction_root(&block.body.transactions);
 
         // Fill the block header with the calculated values
         block.header.transactions_root = transactions_root;
@@ -366,8 +358,8 @@ impl<Storage: GravityStorage> Core<Storage> {
         execution_outcome
     }
 
-    async fn make_canonical(&self, executed_block: ExecutedBlock) {
-        let block_number = executed_block.block.number;
+    async fn make_canonical(&self, executed_block: ExecutedBlockWithTrieUpdates) {
+        let block_number = executed_block.recovered_block.number();
 
         // Make executed block canonical
         let (tx, rx) = oneshot::channel();
@@ -420,13 +412,17 @@ impl Drop for PipeExecLayerApi {
 
 /// Called by EL.
 #[derive(Debug)]
-pub struct PipeExecLayerExt {
+pub struct PipeExecLayerExt<N: NodePrimitives> {
     /// Receive events from PipeExecService
-    pub event_rx: std::sync::Mutex<std::sync::mpsc::Receiver<PipeExecLayerEvent>>,
+    pub event_rx: std::sync::Mutex<std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>>,
 }
 
 /// A static instance of `PipeExecLayerExt` used for dispatching events.
-pub static PIPE_EXEC_LAYER_EXT: OnceCell<PipeExecLayerExt> = OnceCell::new();
+pub static PIPE_EXEC_LAYER_EXT: OnceCell<Box<dyn Any + Send + Sync>> = OnceCell::new();
+
+pub fn get_pipe_exec_layer_ext<N: NodePrimitives>() -> Option<&'static PipeExecLayerExt<N>> {
+    PIPE_EXEC_LAYER_EXT.get().map(|ext| ext.downcast_ref::<PipeExecLayerExt<N>>().unwrap())
+}
 
 /// Whether to validate the block before inserting it into `TreeState`.
 pub static PIPE_VALIDATE_BLOCK_BEFORE_INSERT: Lazy<bool> =
@@ -469,7 +465,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     };
     tokio::spawn(service.run(latest_block_number));
 
-    PIPE_EXEC_LAYER_EXT.get_or_init(|| PipeExecLayerExt { event_rx: event_rx.into() });
+    PIPE_EXEC_LAYER_EXT.get_or_init(|| Box::new(PipeExecLayerExt { event_rx: event_rx.into() }));
 
     PipeExecLayerApi {
         ordered_block_tx,

@@ -1,21 +1,20 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
-use alloy_primitives::{Address, BlockNumber, Bytes, B256};
-use reth_primitives::{Account, Bytecode, StorageKey, StorageValue};
+use alloy_primitives::{map::B256Map, Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
+use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
-    AccountReader, BlockHashReader, StateProofProvider, StateProvider, StateProviderBox,
-    StateRootProvider, StorageRootProvider,
+    AccountReader, BlockHashReader, HashedPostStateProvider, StateProofProvider, StateProvider,
+    StateProviderBox, StateRootProvider, StorageRootProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
-    updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof, TrieInput,
+    updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
+    MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
 };
+use revm::db::states::BundleState;
 
 use flume as mpmc;
 use paste::paste;
@@ -29,6 +28,23 @@ enum StateProviderTask {
 }
 
 macro_rules! provider_fn {
+    {$func_name:ident ($($param_name:ident : & $param_type:ty),*) -> $return_type:ty} => {
+        fn $func_name(&self, $($param_name: & $param_type),*) -> ProviderResult<$return_type> {
+            if self
+                .provider_busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let result = self.provider.$func_name($($param_name),*);
+                self.provider_busy.store(false, Ordering::Release);
+                return result;
+            }
+
+            let (tx, rx) = oneshot::channel();
+            let _ = self.task_tx.send(paste! {StateProviderTask::[< $func_name:camel >]}($($param_name),* .clone(), tx));
+            tokio::task::block_in_place(|| rx.blocking_recv().unwrap())
+        }
+    };
     {$func_name:ident ($($param_name:ident : $param_type:ty),*) -> $return_type:ty} => {
         fn $func_name(&self, $($param_name: $param_type),*) -> ProviderResult<$return_type> {
             if self
@@ -50,19 +66,25 @@ macro_rules! provider_fn {
 
 impl StateProviderTask {
     fn process(self, state_provider: &dyn StateProvider) {
-        macro_rules! match_task {
-            {$($task: ident ($($param:ident),*)), *} => {
-                paste! {
-                    match self {
-                        $(Self::$task($($param),*, tx) => {
-                            let _ = tx.send(tokio::task::block_in_place(|| state_provider.[< $task:snake >]($($param),*)));
-                        }),*
-                    }
-                }
-            };
+        match self {
+            Self::Storage(address, key, tx) => {
+                let _ =
+                    tx.send(tokio::task::block_in_place(|| state_provider.storage(address, key)));
+            }
+            Self::BytecodeByHash(code_hash, tx) => {
+                let _ = tx.send(tokio::task::block_in_place(|| {
+                    state_provider.bytecode_by_hash(&code_hash)
+                }));
+            }
+            Self::BasicAccount(address, tx) => {
+                let _ =
+                    tx.send(tokio::task::block_in_place(|| state_provider.basic_account(&address)));
+            }
+            Self::BlockHash(block_number, tx) => {
+                let _ = tx
+                    .send(tokio::task::block_in_place(|| state_provider.block_hash(block_number)));
+            }
         }
-
-        match_task! {Storage(address, key), BytecodeByHash(code_hash), BasicAccount(address), BlockHash(block_number)}
     }
 }
 
@@ -101,7 +123,7 @@ impl ParallelStateProvider {
 impl StateProvider for ParallelStateProvider {
     provider_fn! {storage(address: Address, key: StorageKey) -> Option<StorageValue>}
 
-    provider_fn! {bytecode_by_hash(code_hash: B256) -> Option<Bytecode>}
+    provider_fn! {bytecode_by_hash(code_hash: &B256) -> Option<Bytecode>}
 }
 
 #[allow(unused)]
@@ -118,7 +140,7 @@ impl BlockHashReader for ParallelStateProvider {
 }
 
 impl AccountReader for ParallelStateProvider {
-    provider_fn! {basic_account(address: Address) -> Option<Account>}
+    provider_fn! {basic_account(address: &Address) -> Option<Account>}
 }
 
 #[allow(unused)]
@@ -164,6 +186,24 @@ impl StorageRootProvider for ParallelStateProvider {
     ) -> ProviderResult<B256> {
         todo!()
     }
+
+    fn storage_proof(
+        &self,
+        address: Address,
+        slot: B256,
+        hashed_storage: HashedStorage,
+    ) -> ProviderResult<StorageProof> {
+        todo!()
+    }
+
+    fn storage_multiproof(
+        &self,
+        address: Address,
+        slots: &[B256],
+        hashed_storage: HashedStorage,
+    ) -> ProviderResult<StorageMultiProof> {
+        todo!()
+    }
 }
 
 #[allow(unused)]
@@ -180,16 +220,19 @@ impl StateProofProvider for ParallelStateProvider {
     fn multiproof(
         &self,
         input: TrieInput,
-        targets: HashMap<B256, HashSet<B256>>,
+        targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
         todo!()
     }
 
-    fn witness(
-        &self,
-        input: TrieInput,
-        target: HashedPostState,
-    ) -> ProviderResult<HashMap<B256, Bytes>> {
+    /// Get trie witness for provided state.
+    fn witness(&self, input: TrieInput, target: HashedPostState) -> ProviderResult<B256Map<Bytes>> {
+        todo!()
+    }
+}
+
+impl HashedPostStateProvider for ParallelStateProvider {
+    fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState {
         todo!()
     }
 }

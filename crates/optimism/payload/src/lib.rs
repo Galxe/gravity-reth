@@ -12,9 +12,11 @@
 #![cfg(feature = "optimism")]
 
 pub mod builder;
-pub use builder::OptimismPayloadBuilder;
+pub use builder::OpPayloadBuilder;
 pub mod error;
 pub mod payload;
-pub use payload::{
-    OptimismBuiltPayload, OptimismPayloadAttributes, OptimismPayloadBuilderAttributes,
-};
+pub use payload::{OpBuiltPayload, OpPayloadAttributes, OpPayloadBuilderAttributes};
+mod traits;
+pub use traits::*;
+
+pub mod config;

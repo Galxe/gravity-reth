@@ -13,13 +13,14 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
-reth-primitives.workspace = true
+alloy-primitives.workspace = true
 revm.workspace = true
 reth-payload-builder.workspace = true
 reth-storage-api.workspace = true
-reth-revm.workspace = true
 reth-evm.workspace = true
+reth-revm.workspace = true
 reth-trie.workspace = true
+reth-primitives-traits.workspace = true
 
 tracing.workspace = true
 tokio.workspace = true

@@ -1,19 +1,18 @@
-use reth_primitives::{revm_primitives::Bytecode, Address, B256, U256};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{
     errors::provider::ProviderError, StateProviderBox, StateProviderFactory, STATE_PROVIDER_OPTS,
 };
-use reth_trie::{updates::TrieUpdates, HashedPostState};
+use reth_trie::{updates::TrieUpdates, HashedPostState, KeccakKeyHasher};
 use revm::{
     db::{
         states::{CacheAccount, PlainAccount},
         BundleState,
     },
-    primitives::{AccountInfo, BLOCK_HASH_HISTORY},
+    primitives::{AccountInfo, Address, Bytecode, HashMap, B256, BLOCK_HASH_HISTORY, U256},
     DatabaseRef,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     sync::{Arc, Mutex},
 };
 
@@ -138,7 +137,8 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
                 .collect(),
             contracts: bundle_state.contracts.clone(),
         };
-        let hashed_state = Arc::new(HashedPostState::from_bundle_state(&bundle_state.state));
+        let hashed_state =
+            Arc::new(HashedPostState::from_bundle_state::<KeccakKeyHasher>(&bundle_state.state));
         let mut storage = self.inner.lock().unwrap();
         storage.block_number_to_view.insert(block_number, (Arc::new(block_view), hashed_state));
     }

@@ -1,17 +1,17 @@
-use crate::db::checksum::ChecksumViewer;
+use crate::{common::CliNodeTypes, db::checksum::ChecksumViewer};
 use clap::Parser;
 use comfy_table::{Cell, Row, Table as ComfyTable};
 use eyre::WrapErr;
 use human_bytes::human_bytes;
 use itertools::Itertools;
-use reth_chainspec::ChainSpec;
+use reth_chainspec::EthereumHardforks;
 use reth_db::{mdbx, static_file::iter_static_files, DatabaseEnv, TableViewer, Tables};
 use reth_db_api::database::Database;
 use reth_db_common::DbTool;
 use reth_fs_util as fs;
-use reth_node_builder::{NodeTypesWithDB, NodeTypesWithDBAdapter, NodeTypesWithEngine};
+use reth_node_builder::{NodePrimitives, NodeTypesWithDB, NodeTypesWithDBAdapter};
 use reth_node_core::dirs::{ChainPath, DataDirPath};
-use reth_provider::providers::StaticFileProvider;
+use reth_provider::providers::{ProviderNodeTypes, StaticFileProvider};
 use reth_static_file_types::SegmentRangeInclusive;
 use std::{sync::Arc, time::Duration};
 
@@ -38,7 +38,7 @@ pub struct Command {
 
 impl Command {
     /// Execute `db stats` command
-    pub fn execute<N: NodeTypesWithEngine<ChainSpec = ChainSpec>>(
+    pub fn execute<N: CliNodeTypes<ChainSpec: EthereumHardforks>>(
         self,
         data_dir: ChainPath<DataDirPath>,
         tool: &DbTool<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>,
@@ -49,7 +49,7 @@ impl Command {
             println!("\n");
         }
 
-        let static_files_stats_table = self.static_files_stats_table(data_dir)?;
+        let static_files_stats_table = self.static_files_stats_table::<N::Primitives>(data_dir)?;
         println!("{static_files_stats_table}");
 
         println!("\n");
@@ -143,7 +143,7 @@ impl Command {
         Ok(table)
     }
 
-    fn static_files_stats_table(
+    fn static_files_stats_table<N: NodePrimitives>(
         &self,
         data_dir: ChainPath<DataDirPath>,
     ) -> eyre::Result<ComfyTable> {
@@ -173,7 +173,8 @@ impl Command {
         }
 
         let static_files = iter_static_files(data_dir.static_files())?;
-        let static_file_provider = StaticFileProvider::read_only(data_dir.static_files(), false)?;
+        let static_file_provider =
+            StaticFileProvider::<N>::read_only(data_dir.static_files(), false)?;
 
         let mut total_data_size = 0;
         let mut total_index_size = 0;
@@ -263,10 +264,18 @@ impl Command {
 
                 let block_range =
                     SegmentRangeInclusive::new(first_ranges.0.start(), last_ranges.0.end());
-                let tx_range = first_ranges
-                    .1
-                    .zip(last_ranges.1)
-                    .map(|(first, last)| SegmentRangeInclusive::new(first.start(), last.end()));
+
+                // Transaction ranges can be empty, so we need to find the first and last which are
+                // not.
+                let tx_range = {
+                    let start = ranges
+                        .iter()
+                        .find_map(|(_, tx_range)| tx_range.map(|r| r.start()))
+                        .unwrap_or_default();
+                    let end =
+                        ranges.iter().rev().find_map(|(_, tx_range)| tx_range.map(|r| r.end()));
+                    end.map(|end| SegmentRangeInclusive::new(start, end))
+                };
 
                 let mut row = Row::new();
                 row.add_cell(Cell::new(segment))
@@ -317,10 +326,7 @@ impl Command {
         Ok(table)
     }
 
-    fn checksum_report<N: NodeTypesWithDB<ChainSpec = ChainSpec>>(
-        &self,
-        tool: &DbTool<N>,
-    ) -> eyre::Result<ComfyTable> {
+    fn checksum_report<N: ProviderNodeTypes>(&self, tool: &DbTool<N>) -> eyre::Result<ComfyTable> {
         let mut table = ComfyTable::new();
         table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
         table.set_header(vec![Cell::new("Table"), Cell::new("Checksum"), Cell::new("Elapsed")]);

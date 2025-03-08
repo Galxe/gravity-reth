@@ -1,11 +1,15 @@
-use crate::db::get::{maybe_json_value_parser, table_key};
+use crate::{
+    common::CliNodeTypes,
+    db::get::{maybe_json_value_parser, table_key},
+};
 use ahash::RandomState;
 use clap::Parser;
-use reth_chainspec::ChainSpec;
+use reth_chainspec::EthereumHardforks;
 use reth_db::{DatabaseEnv, RawKey, RawTable, RawValue, TableViewer, Tables};
 use reth_db_api::{cursor::DbCursorRO, table::Table, transaction::DbTx};
 use reth_db_common::DbTool;
-use reth_node_builder::{NodeTypesWithDB, NodeTypesWithDBAdapter, NodeTypesWithEngine};
+use reth_node_builder::{NodeTypesWithDB, NodeTypesWithDBAdapter};
+use reth_provider::{providers::ProviderNodeTypes, DBProvider};
 use std::{
     hash::{BuildHasher, Hasher},
     sync::Arc,
@@ -35,7 +39,7 @@ pub struct Command {
 
 impl Command {
     /// Execute `db checksum` command
-    pub fn execute<N: NodeTypesWithEngine<ChainSpec = ChainSpec>>(
+    pub fn execute<N: CliNodeTypes<ChainSpec: EthereumHardforks>>(
         self,
         tool: &DbTool<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>,
     ) -> eyre::Result<()> {
@@ -63,9 +67,7 @@ impl<N: NodeTypesWithDB> ChecksumViewer<'_, N> {
     }
 }
 
-impl<N: NodeTypesWithDB<ChainSpec = ChainSpec>> TableViewer<(u64, Duration)>
-    for ChecksumViewer<'_, N>
-{
+impl<N: ProviderNodeTypes> TableViewer<(u64, Duration)> for ChecksumViewer<'_, N> {
     type Error = eyre::Report;
 
     fn view<T: Table>(&self) -> Result<(u64, Duration), Self::Error> {
@@ -80,17 +82,17 @@ impl<N: NodeTypesWithDB<ChainSpec = ChainSpec>> TableViewer<(u64, Duration)>
         let mut cursor = tx.cursor_read::<RawTable<T>>()?;
         let walker = match (self.start_key.as_deref(), self.end_key.as_deref()) {
             (Some(start), Some(end)) => {
-                let start_key = table_key::<T>(start).map(RawKey::<T::Key>::new)?;
-                let end_key = table_key::<T>(end).map(RawKey::<T::Key>::new)?;
+                let start_key = table_key::<T>(start).map(RawKey::new)?;
+                let end_key = table_key::<T>(end).map(RawKey::new)?;
                 cursor.walk_range(start_key..=end_key)?
             }
             (None, Some(end)) => {
-                let end_key = table_key::<T>(end).map(RawKey::<T::Key>::new)?;
+                let end_key = table_key::<T>(end).map(RawKey::new)?;
 
                 cursor.walk_range(..=end_key)?
             }
             (Some(start), None) => {
-                let start_key = table_key::<T>(start).map(RawKey::<T::Key>::new)?;
+                let start_key = table_key::<T>(start).map(RawKey::new)?;
                 cursor.walk_range(start_key..)?
             }
             (None, None) => cursor.walk_range(..)?,

@@ -1,13 +1,18 @@
 //! Support for launching execution extensions.
 
-use std::{fmt, fmt::Debug};
-
+use alloy_eips::BlockNumHash;
 use futures::future;
-use reth_exex::{ExExContext, ExExHandle, ExExManager, ExExManagerHandle};
-use reth_node_api::{FullNodeComponents, NodeTypes};
+use reth_chain_state::ForkChoiceSubscriptions;
+use reth_chainspec::EthChainSpec;
+use reth_exex::{
+    ExExContext, ExExHandle, ExExManager, ExExManagerHandle, ExExNotificationSource, Wal,
+    DEFAULT_EXEX_MANAGER_CAPACITY,
+};
+use reth_node_api::{FullNodeComponents, NodeTypes, PrimitivesTy};
 use reth_primitives::Head;
 use reth_provider::CanonStateSubscriptions;
 use reth_tracing::tracing::{debug, info};
+use std::{fmt, fmt::Debug};
 use tracing::Instrument;
 
 use crate::{common::WithConfigs, exex::BoxedLaunchExEx};
@@ -35,13 +40,26 @@ impl<Node: FullNodeComponents + Clone> ExExLauncher<Node> {
     ///
     /// Spawns all extensions and returns the handle to the exex manager if any extensions are
     /// installed.
-    pub async fn launch(self) -> Option<ExExManagerHandle> {
+    pub async fn launch(
+        self,
+    ) -> eyre::Result<Option<ExExManagerHandle<PrimitivesTy<Node::Types>>>> {
         let Self { head, extensions, components, config_container } = self;
+        let head = BlockNumHash::new(head.number, head.hash);
 
         if extensions.is_empty() {
             // nothing to launch
-            return None
+            return Ok(None)
         }
+
+        info!(target: "reth::cli", "Loading ExEx Write-Ahead Log...");
+        let exex_wal = Wal::new(
+            config_container
+                .config
+                .datadir
+                .clone()
+                .resolve_datadir(config_container.config.chain.chain())
+                .exex_wal(),
+        )?;
 
         let mut exex_handles = Vec::with_capacity(extensions.len());
         let mut exexes = Vec::with_capacity(extensions.len());
@@ -53,6 +71,7 @@ impl<Node: FullNodeComponents + Clone> ExExLauncher<Node> {
                 head,
                 components.provider().clone(),
                 components.block_executor().clone(),
+                exex_wal.handle(),
             );
             exex_handles.push(handle);
 
@@ -93,8 +112,13 @@ impl<Node: FullNodeComponents + Clone> ExExLauncher<Node> {
 
         // spawn exex manager
         debug!(target: "reth::cli", "spawning exex manager");
-        // todo(onbjerg): rm magic number
-        let exex_manager = ExExManager::new(exex_handles, 1024);
+        let exex_manager = ExExManager::new(
+            components.provider().clone(),
+            exex_handles,
+            DEFAULT_EXEX_MANAGER_CAPACITY,
+            exex_wal,
+            components.provider().finalized_block_stream(),
+        );
         let exex_manager_handle = exex_manager.handle();
         components.task_executor().spawn_critical("exex manager", async move {
             exex_manager.await.expect("exex manager crashed");
@@ -108,7 +132,7 @@ impl<Node: FullNodeComponents + Clone> ExExLauncher<Node> {
             async move {
                 while let Ok(notification) = canon_state_notifications.recv().await {
                     handle
-                        .send_async(notification.into())
+                        .send_async(ExExNotificationSource::BlockchainTree, notification.into())
                         .await
                         .expect("blockchain tree notification could not be sent to exex manager");
                 }
@@ -117,7 +141,7 @@ impl<Node: FullNodeComponents + Clone> ExExLauncher<Node> {
 
         info!(target: "reth::cli", "ExEx Manager started");
 
-        Some(exex_manager_handle)
+        Ok(Some(exex_manager_handle))
     }
 }
 

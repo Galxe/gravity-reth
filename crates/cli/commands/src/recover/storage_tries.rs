@@ -1,6 +1,7 @@
-use crate::common::{AccessRights, Environment, EnvironmentArgs};
+use crate::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
+use alloy_consensus::BlockHeader;
 use clap::Parser;
-use reth_chainspec::ChainSpec;
+use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_runner::CliContext;
 use reth_db::tables;
@@ -8,7 +9,6 @@ use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRW},
     transaction::DbTx,
 };
-use reth_node_builder::NodeTypesWithEngine;
 use reth_provider::{BlockNumReader, HeaderProvider, ProviderError};
 use reth_trie::StateRoot;
 use reth_trie_db::DatabaseStateRoot;
@@ -21,9 +21,9 @@ pub struct Command<C: ChainSpecParser> {
     env: EnvironmentArgs<C>,
 }
 
-impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
+impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C> {
     /// Execute `storage-tries` recovery command
-    pub async fn execute<N: NodeTypesWithEngine<ChainSpec = C::ChainSpec>>(
+    pub async fn execute<N: CliNodeTypes<ChainSpec = C::ChainSpec>>(
         self,
         _ctx: CliContext,
     ) -> eyre::Result<()> {
@@ -33,7 +33,7 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
         let best_block = provider.best_block_number()?;
         let best_header = provider
             .sealed_header(best_block)?
-            .ok_or(ProviderError::HeaderNotFound(best_block.into()))?;
+            .ok_or_else(|| ProviderError::HeaderNotFound(best_block.into()))?;
 
         let mut deleted_tries = 0;
         let tx_mut = provider.tx_mut();
@@ -52,10 +52,10 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
         }
 
         let state_root = StateRoot::from_tx(tx_mut).root()?;
-        if state_root != best_header.state_root {
+        if state_root != best_header.state_root() {
             eyre::bail!(
                 "Recovery failed. Incorrect state root. Expected: {:?}. Received: {:?}",
-                best_header.state_root,
+                best_header.state_root(),
                 state_root
             );
         }

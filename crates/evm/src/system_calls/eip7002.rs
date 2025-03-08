@@ -1,67 +1,22 @@
 //! [EIP-7002](https://eips.ethereum.org/EIPS/eip-7002) system call implementation.
-use alloc::{boxed::Box, format, string::ToString, vec::Vec};
+use crate::Evm;
+use alloc::format;
+use alloy_eips::eip7002::WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS;
+use alloy_primitives::Bytes;
 use core::fmt::Display;
-
-use crate::ConfigureEvm;
-use alloy_eips::eip7002::{WithdrawalRequest, WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS};
 use reth_execution_errors::{BlockExecutionError, BlockValidationError};
-use reth_primitives::{Buf, Header, Request};
-use revm::{interpreter::Host, Database, DatabaseCommit, Evm};
-use revm_primitives::{
-    Address, BlockEnv, Bytes, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, ExecutionResult, FixedBytes,
-    ResultAndState,
-};
-
-/// Apply the [EIP-7002](https://eips.ethereum.org/EIPS/eip-7002) post block contract call.
-///
-/// This constructs a new [Evm] with the given DB, and environment
-/// ([`CfgEnvWithHandlerCfg`] and [`BlockEnv`]) to execute the post block contract call.
-///
-/// This uses [`apply_withdrawal_requests_contract_call`] to ultimately calculate the
-/// [requests](Request).
-pub fn post_block_withdrawal_requests_contract_call<EvmConfig, DB>(
-    evm_config: &EvmConfig,
-    db: &mut DB,
-    initialized_cfg: &CfgEnvWithHandlerCfg,
-    initialized_block_env: &BlockEnv,
-) -> Result<Vec<Request>, BlockExecutionError>
-where
-    DB: Database + DatabaseCommit,
-    DB::Error: Display,
-    EvmConfig: ConfigureEvm<Header = Header>,
-{
-    // apply post-block EIP-7002 contract call
-    let mut evm_post_block = Evm::builder()
-        .with_db(db)
-        .with_env_with_handler_cfg(EnvWithHandlerCfg::new_with_cfg_env(
-            initialized_cfg.clone(),
-            initialized_block_env.clone(),
-            Default::default(),
-        ))
-        .build();
-
-    // initialize a block from the env, because the post block call needs the block itself
-    apply_withdrawal_requests_contract_call(evm_config, &mut evm_post_block)
-}
+use revm_primitives::{ExecutionResult, ResultAndState};
 
 /// Applies the post-block call to the EIP-7002 withdrawal requests contract.
 ///
-/// If Prague is not active at the given timestamp, then this is a no-op, and an empty vector is
-/// returned. Otherwise, the withdrawal requests are returned.
+/// If Prague is not active at the given timestamp, then this is a no-op.
+///
+/// Note: this does not commit the state changes to the database, it only transact the call.
 #[inline]
-pub fn apply_withdrawal_requests_contract_call<EvmConfig, EXT, DB>(
-    evm_config: &EvmConfig,
-    evm: &mut Evm<'_, EXT, DB>,
-) -> Result<Vec<Request>, BlockExecutionError>
-where
-    DB: Database + DatabaseCommit,
-    DB::Error: core::fmt::Display,
-    EvmConfig: ConfigureEvm<Header = Header>,
-{
-    // get previous env
-    let previous_env = Box::new(evm.context.env().clone());
-
-    // Fill transaction environment with the EIP-7002 withdrawal requests contract message data.
+pub(crate) fn transact_withdrawal_requests_contract_call(
+    evm: &mut impl Evm<Error: Display>,
+) -> Result<ResultAndState, BlockExecutionError> {
+    // Execute EIP-7002 withdrawal requests contract message data.
     //
     // This requirement for the withdrawal requests contract call defined by
     // [EIP-7002](https://eips.ethereum.org/EIPS/eip-7002) is:
@@ -69,17 +24,13 @@ where
     // At the end of processing any execution block where `block.timestamp >= FORK_TIMESTAMP` (i.e.
     // after processing all transactions and after performing the block body withdrawal requests
     // validations), call the contract as `SYSTEM_ADDRESS`.
-    evm_config.fill_tx_env_system_contract_call(
-        &mut evm.context.evm.env,
+    let mut res = match evm.transact_system_call(
         alloy_eips::eip7002::SYSTEM_ADDRESS,
         WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
         Bytes::new(),
-    );
-
-    let ResultAndState { result, mut state, .. } = match evm.transact() {
+    ) {
         Ok(res) => res,
         Err(e) => {
-            evm.context.evm.env = previous_env;
             return Err(BlockValidationError::WithdrawalRequestsContractCall {
                 message: format!("execution failed: {e}"),
             }
@@ -87,57 +38,34 @@ where
         }
     };
 
-    // cleanup the state
-    state.remove(&alloy_eips::eip7002::SYSTEM_ADDRESS);
-    state.remove(&evm.block().coinbase);
-    evm.context.evm.db.commit(state);
+    // NOTE: Revm currently marks these accounts as "touched" when we do the above transact calls,
+    // and includes them in the result.
+    //
+    // There should be no state changes to these addresses anyways as a result of this system call,
+    // so we can just remove them from the state returned.
+    res.state.remove(&alloy_eips::eip7002::SYSTEM_ADDRESS);
+    res.state.remove(&evm.block().coinbase);
 
-    // re-set the previous env
-    evm.context.evm.env = previous_env;
+    Ok(res)
+}
 
-    let mut data = match result {
+/// Calls the withdrawals requests system contract, and returns the requests from the execution
+/// output.
+#[inline]
+pub(crate) fn post_commit(result: ExecutionResult) -> Result<Bytes, BlockExecutionError> {
+    match result {
         ExecutionResult::Success { output, .. } => Ok(output.into_data()),
         ExecutionResult::Revert { output, .. } => {
             Err(BlockValidationError::WithdrawalRequestsContractCall {
                 message: format!("execution reverted: {output}"),
-            })
+            }
+            .into())
         }
         ExecutionResult::Halt { reason, .. } => {
             Err(BlockValidationError::WithdrawalRequestsContractCall {
                 message: format!("execution halted: {reason:?}"),
-            })
-        }
-    }?;
-
-    // Withdrawals are encoded as a series of withdrawal requests, each with the following
-    // format:
-    //
-    // +------+--------+--------+
-    // | addr | pubkey | amount |
-    // +------+--------+--------+
-    //    20      48        8
-
-    const WITHDRAWAL_REQUEST_SIZE: usize = 20 + 48 + 8;
-    let mut withdrawal_requests = Vec::with_capacity(data.len() / WITHDRAWAL_REQUEST_SIZE);
-    while data.has_remaining() {
-        if data.remaining() < WITHDRAWAL_REQUEST_SIZE {
-            return Err(BlockValidationError::WithdrawalRequestsContractCall {
-                message: "invalid withdrawal request length".to_string(),
             }
             .into())
         }
-
-        let mut source_address = Address::ZERO;
-        data.copy_to_slice(source_address.as_mut_slice());
-
-        let mut validator_pubkey = FixedBytes::<48>::ZERO;
-        data.copy_to_slice(validator_pubkey.as_mut_slice());
-
-        let amount = data.get_u64();
-
-        withdrawal_requests
-            .push(WithdrawalRequest { source_address, validator_pubkey, amount }.into());
     }
-
-    Ok(withdrawal_requests)
 }

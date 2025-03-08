@@ -56,7 +56,9 @@ pub use datadir_args::DatadirArgs;
 mod benchmark_args;
 pub use benchmark_args::BenchmarkArgs;
 
-pub mod utils;
+/// EngineArgs for configuring the engine
+mod engine;
+pub use engine::EngineArgs;
 
 mod error;
 pub mod types;

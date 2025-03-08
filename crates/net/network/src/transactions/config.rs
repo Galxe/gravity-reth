@@ -1,5 +1,3 @@
-use derive_more::Constructor;
-
 use super::{
     DEFAULT_MAX_COUNT_TRANSACTIONS_SEEN_BY_PEER,
     DEFAULT_SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESP_ON_PACK_GET_POOLED_TRANSACTIONS_REQ,
@@ -9,6 +7,7 @@ use crate::transactions::constants::tx_fetcher::{
     DEFAULT_MAX_CAPACITY_CACHE_PENDING_FETCH, DEFAULT_MAX_COUNT_CONCURRENT_REQUESTS,
     DEFAULT_MAX_COUNT_CONCURRENT_REQUESTS_PER_PEER,
 };
+use derive_more::Constructor;
 
 /// Configuration for managing transactions within the network.
 #[derive(Debug, Clone)]
@@ -18,6 +17,9 @@ pub struct TransactionsManagerConfig {
     pub transaction_fetcher_config: TransactionFetcherConfig,
     /// Max number of seen transactions to store for each peer.
     pub max_transactions_seen_by_peer_history: u32,
+    /// How new pending transactions are propagated.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub propagation_mode: TransactionPropagationMode,
 }
 
 impl Default for TransactionsManagerConfig {
@@ -25,6 +27,31 @@ impl Default for TransactionsManagerConfig {
         Self {
             transaction_fetcher_config: TransactionFetcherConfig::default(),
             max_transactions_seen_by_peer_history: DEFAULT_MAX_COUNT_TRANSACTIONS_SEEN_BY_PEER,
+            propagation_mode: TransactionPropagationMode::default(),
+        }
+    }
+}
+
+/// Determines how new pending transactions are propagated to other peers in full.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TransactionPropagationMode {
+    /// Send full transactions to sqrt of current peers.
+    #[default]
+    Sqrt,
+    /// Always send transactions in full.
+    All,
+    /// Send full transactions to a maximum number of peers
+    Max(usize),
+}
+
+impl TransactionPropagationMode {
+    /// Returns the number of peers full transactions should be propagated to.
+    pub(crate) fn full_peer_count(&self, peer_count: usize) -> usize {
+        match self {
+            Self::Sqrt => (peer_count as f64).sqrt().round() as usize,
+            Self::All => peer_count,
+            Self::Max(max) => peer_count.min(*max),
         }
     }
 }

@@ -5,8 +5,8 @@
 use alloy_primitives::{Address, B256, U256};
 use reth_errors::ProviderResult;
 use reth_revm::{database::StateProviderDatabase, db::CacheDB, DatabaseRef};
-use reth_storage_api::StateProvider;
-use reth_trie::HashedStorage;
+use reth_storage_api::{HashedPostStateProvider, StateProvider};
+use reth_trie::{HashedStorage, MultiProofTargets};
 use revm::Database;
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ pub type StateCacheDb<'a> = CacheDB<StateProviderDatabase<StateProviderTraitObjW
 #[allow(missing_debug_implementations)]
 pub struct StateProviderTraitObjWrapper<'a>(pub &'a dyn StateProvider);
 
-impl<'a> reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper<'a> {
+impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper<'_> {
     fn state_root(
         &self,
         hashed_state: reth_trie::HashedPostState,
@@ -57,7 +57,7 @@ impl<'a> reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper<'a
     }
 }
 
-impl<'a> reth_storage_api::StorageRootProvider for StateProviderTraitObjWrapper<'a> {
+impl reth_storage_api::StorageRootProvider for StateProviderTraitObjWrapper<'_> {
     fn storage_root(
         &self,
         address: Address,
@@ -65,9 +65,27 @@ impl<'a> reth_storage_api::StorageRootProvider for StateProviderTraitObjWrapper<
     ) -> ProviderResult<B256> {
         self.0.storage_root(address, hashed_storage)
     }
+
+    fn storage_proof(
+        &self,
+        address: Address,
+        slot: B256,
+        hashed_storage: HashedStorage,
+    ) -> ProviderResult<reth_trie::StorageProof> {
+        self.0.storage_proof(address, slot, hashed_storage)
+    }
+
+    fn storage_multiproof(
+        &self,
+        address: Address,
+        slots: &[B256],
+        hashed_storage: HashedStorage,
+    ) -> ProviderResult<reth_trie::StorageMultiProof> {
+        self.0.storage_multiproof(address, slots, hashed_storage)
+    }
 }
 
-impl<'a> reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper<'a> {
+impl reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper<'_> {
     fn proof(
         &self,
         input: reth_trie::TrieInput,
@@ -80,7 +98,7 @@ impl<'a> reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper<'
     fn multiproof(
         &self,
         input: reth_trie::TrieInput,
-        targets: std::collections::HashMap<B256, std::collections::HashSet<B256>>,
+        targets: MultiProofTargets,
     ) -> ProviderResult<reth_trie::MultiProof> {
         self.0.multiproof(input, targets)
     }
@@ -89,26 +107,33 @@ impl<'a> reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper<'
         &self,
         input: reth_trie::TrieInput,
         target: reth_trie::HashedPostState,
-    ) -> reth_errors::ProviderResult<std::collections::HashMap<B256, alloy_primitives::Bytes>> {
+    ) -> reth_errors::ProviderResult<alloy_primitives::map::B256Map<alloy_primitives::Bytes>> {
         self.0.witness(input, target)
     }
 }
 
-impl<'a> reth_storage_api::AccountReader for StateProviderTraitObjWrapper<'a> {
+impl reth_storage_api::AccountReader for StateProviderTraitObjWrapper<'_> {
     fn basic_account(
         &self,
-        address: revm_primitives::Address,
+        address: &revm_primitives::Address,
     ) -> reth_errors::ProviderResult<Option<reth_primitives::Account>> {
         self.0.basic_account(address)
     }
 }
 
-impl<'a> reth_storage_api::BlockHashReader for StateProviderTraitObjWrapper<'a> {
+impl reth_storage_api::BlockHashReader for StateProviderTraitObjWrapper<'_> {
     fn block_hash(
         &self,
         block_number: alloy_primitives::BlockNumber,
     ) -> reth_errors::ProviderResult<Option<B256>> {
         self.0.block_hash(block_number)
+    }
+
+    fn convert_block_hash(
+        &self,
+        hash_or_number: alloy_rpc_types_eth::BlockHashOrNumber,
+    ) -> reth_errors::ProviderResult<Option<B256>> {
+        self.0.convert_block_hash(hash_or_number)
     }
 
     fn canonical_hashes_range(
@@ -118,50 +143,52 @@ impl<'a> reth_storage_api::BlockHashReader for StateProviderTraitObjWrapper<'a> 
     ) -> reth_errors::ProviderResult<Vec<B256>> {
         self.0.canonical_hashes_range(start, end)
     }
+}
 
-    fn convert_block_hash(
+impl HashedPostStateProvider for StateProviderTraitObjWrapper<'_> {
+    fn hashed_post_state(
         &self,
-        hash_or_number: reth_rpc_types::BlockHashOrNumber,
-    ) -> reth_errors::ProviderResult<Option<B256>> {
-        self.0.convert_block_hash(hash_or_number)
+        bundle_state: &revm::db::BundleState,
+    ) -> reth_trie::HashedPostState {
+        self.0.hashed_post_state(bundle_state)
     }
 }
 
-impl<'a> StateProvider for StateProviderTraitObjWrapper<'a> {
-    fn account_balance(
-        &self,
-        addr: revm_primitives::Address,
-    ) -> reth_errors::ProviderResult<Option<U256>> {
-        self.0.account_balance(addr)
-    }
-
-    fn account_code(
-        &self,
-        addr: revm_primitives::Address,
-    ) -> reth_errors::ProviderResult<Option<reth_primitives::Bytecode>> {
-        self.0.account_code(addr)
-    }
-
-    fn account_nonce(
-        &self,
-        addr: revm_primitives::Address,
-    ) -> reth_errors::ProviderResult<Option<u64>> {
-        self.0.account_nonce(addr)
-    }
-
-    fn bytecode_by_hash(
-        &self,
-        code_hash: B256,
-    ) -> reth_errors::ProviderResult<Option<reth_primitives::Bytecode>> {
-        self.0.bytecode_by_hash(code_hash)
-    }
-
+impl StateProvider for StateProviderTraitObjWrapper<'_> {
     fn storage(
         &self,
         account: revm_primitives::Address,
         storage_key: alloy_primitives::StorageKey,
     ) -> reth_errors::ProviderResult<Option<alloy_primitives::StorageValue>> {
         self.0.storage(account, storage_key)
+    }
+
+    fn bytecode_by_hash(
+        &self,
+        code_hash: &B256,
+    ) -> reth_errors::ProviderResult<Option<reth_primitives::Bytecode>> {
+        self.0.bytecode_by_hash(code_hash)
+    }
+
+    fn account_code(
+        &self,
+        addr: &revm_primitives::Address,
+    ) -> reth_errors::ProviderResult<Option<reth_primitives::Bytecode>> {
+        self.0.account_code(addr)
+    }
+
+    fn account_balance(
+        &self,
+        addr: &revm_primitives::Address,
+    ) -> reth_errors::ProviderResult<Option<U256>> {
+        self.0.account_balance(addr)
+    }
+
+    fn account_nonce(
+        &self,
+        addr: &revm_primitives::Address,
+    ) -> reth_errors::ProviderResult<Option<u64>> {
+        self.0.account_nonce(addr)
     }
 }
 
@@ -170,7 +197,7 @@ impl<'a> StateProvider for StateProviderTraitObjWrapper<'a> {
 #[allow(missing_debug_implementations)]
 pub struct StateCacheDbRefMutWrapper<'a, 'b>(pub &'b mut StateCacheDb<'a>);
 
-impl<'a, 'b> Database for StateCacheDbRefMutWrapper<'a, 'b> {
+impl<'a> Database for StateCacheDbRefMutWrapper<'a, '_> {
     type Error = <StateCacheDb<'a> as Database>::Error;
     fn basic(
         &mut self,
@@ -196,7 +223,7 @@ impl<'a, 'b> Database for StateCacheDbRefMutWrapper<'a, 'b> {
     }
 }
 
-impl<'a, 'b> DatabaseRef for StateCacheDbRefMutWrapper<'a, 'b> {
+impl<'a> DatabaseRef for StateCacheDbRefMutWrapper<'a, '_> {
     type Error = <StateCacheDb<'a> as Database>::Error;
 
     fn basic_ref(

@@ -3,12 +3,10 @@ mod macros;
 mod ethereum;
 pub use ethereum::EthereumHardfork;
 
-mod optimism;
-pub use optimism::OptimismHardfork;
-
 mod dev;
 pub use dev::DEV_HARDFORKS;
 
+use alloc::boxed::Box;
 use core::{
     any::Any,
     hash::{Hash, Hasher},
@@ -20,6 +18,11 @@ use dyn_clone::DynClone;
 pub trait Hardfork: Any + DynClone + Send + Sync + 'static {
     /// Fork name.
     fn name(&self) -> &'static str;
+
+    /// Returns boxed value.
+    fn boxed(&self) -> Box<dyn Hardfork + '_> {
+        Box::new(self)
+    }
 }
 
 dyn_clone::clone_trait_object!(Hardfork);
@@ -47,7 +50,6 @@ impl Hash for dyn Hardfork + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hardfork::optimism::OptimismHardfork;
     use std::str::FromStr;
 
     #[test]
@@ -95,24 +97,6 @@ mod tests {
 
         let hardforks: Vec<EthereumHardfork> =
             hardfork_str.iter().map(|h| EthereumHardfork::from_str(h).unwrap()).collect();
-
-        assert_eq!(hardforks, expected_hardforks);
-    }
-
-    #[test]
-    fn check_op_hardfork_from_str() {
-        let hardfork_str = ["beDrOck", "rEgOlITH", "cAnYoN", "eCoToNe", "FJorD", "GRaNiTe"];
-        let expected_hardforks = [
-            OptimismHardfork::Bedrock,
-            OptimismHardfork::Regolith,
-            OptimismHardfork::Canyon,
-            OptimismHardfork::Ecotone,
-            OptimismHardfork::Fjord,
-            OptimismHardfork::Granite,
-        ];
-
-        let hardforks: Vec<OptimismHardfork> =
-            hardfork_str.iter().map(|h| OptimismHardfork::from_str(h).unwrap()).collect();
 
         assert_eq!(hardforks, expected_hardforks);
     }

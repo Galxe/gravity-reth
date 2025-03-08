@@ -1,19 +1,20 @@
 //! A generic [`NodeComponentsBuilder`]
 
-use std::{future::Future, marker::PhantomData};
-
-use reth_consensus::Consensus;
-use reth_evm::execute::BlockExecutorProvider;
-use reth_primitives::Header;
-use reth_transaction_pool::TransactionPool;
-
 use crate::{
     components::{
         Components, ConsensusBuilder, ExecutorBuilder, NetworkBuilder, NodeComponents,
         PayloadServiceBuilder, PoolBuilder,
     },
-    BuilderContext, ConfigureEvm, FullNodeTypes,
+    BuilderContext, FullNodeTypes,
 };
+use reth_consensus::{ConsensusError, FullConsensus};
+use reth_evm::{execute::BlockExecutorProvider, ConfigureEvmFor};
+use reth_network::NetworkPrimitives;
+use reth_node_api::{BlockTy, BodyTy, HeaderTy, PrimitivesTy, TxTy};
+use reth_transaction_pool::{PoolTransaction, TransactionPool};
+use std::{future::Future, marker::PhantomData};
+
+use super::PayloadBuilderFor;
 
 /// A generic, general purpose and customizable [`NodeComponentsBuilder`] implementation.
 ///
@@ -278,6 +279,7 @@ where
             network_builder,
             executor_builder,
             consensus_builder: _,
+
             _marker,
         } = self;
         ComponentsBuilder {
@@ -295,13 +297,36 @@ impl<Node, PoolB, PayloadB, NetworkB, ExecB, ConsB> NodeComponentsBuilder<Node>
     for ComponentsBuilder<Node, PoolB, PayloadB, NetworkB, ExecB, ConsB>
 where
     Node: FullNodeTypes,
-    PoolB: PoolBuilder<Node>,
-    NetworkB: NetworkBuilder<Node, PoolB::Pool>,
+    PoolB: PoolBuilder<
+        Node,
+        Pool: TransactionPool<
+            Transaction: PoolTransaction<
+                Pooled = <NetworkB::Primitives as NetworkPrimitives>::PooledTransaction,
+            >,
+        >,
+    >,
+    NetworkB: NetworkBuilder<
+        Node,
+        PoolB::Pool,
+        Primitives: NetworkPrimitives<
+            BlockHeader = HeaderTy<Node::Types>,
+            BlockBody = BodyTy<Node::Types>,
+            Block = BlockTy<Node::Types>,
+        >,
+    >,
     PayloadB: PayloadServiceBuilder<Node, PoolB::Pool>,
     ExecB: ExecutorBuilder<Node>,
     ConsB: ConsensusBuilder<Node>,
 {
-    type Components = Components<Node, PoolB::Pool, ExecB::EVM, ExecB::Executor, ConsB::Consensus>;
+    type Components = Components<
+        Node,
+        NetworkB::Primitives,
+        PoolB::Pool,
+        ExecB::EVM,
+        ExecB::Executor,
+        ConsB::Consensus,
+        PayloadB::PayloadBuilder,
+    >;
 
     async fn build_components(
         self,
@@ -309,7 +334,7 @@ where
     ) -> eyre::Result<Self::Components> {
         let Self {
             pool_builder,
-            payload_builder,
+            payload_builder: payload_builder_builder,
             network_builder,
             executor_builder: evm_builder,
             consensus_builder,
@@ -319,7 +344,10 @@ where
         let (evm_config, executor) = evm_builder.build_evm(context).await?;
         let pool = pool_builder.build_pool(context).await?;
         let network = network_builder.build_network(context, pool.clone()).await?;
-        let payload_builder = payload_builder.spawn_payload_service(context, pool.clone()).await?;
+        let payload_builder =
+            payload_builder_builder.build_payload_builder(context, pool.clone()).await?;
+        let payload_builder_handle = payload_builder_builder
+            .spawn_payload_builder_service(context, payload_builder.clone())?;
         let consensus = consensus_builder.build_consensus(context).await?;
 
         Ok(Components {
@@ -327,6 +355,7 @@ where
             evm_config,
             network,
             payload_builder,
+            payload_builder_handle,
             executor,
             consensus,
         })
@@ -366,17 +395,27 @@ pub trait NodeComponentsBuilder<Node: FullNodeTypes>: Send {
     ) -> impl Future<Output = eyre::Result<Self::Components>> + Send;
 }
 
-impl<Node, F, Fut, Pool, EVM, Executor, Cons> NodeComponentsBuilder<Node> for F
+impl<Node, N, F, Fut, Pool, EVM, Executor, Cons, Payload> NodeComponentsBuilder<Node> for F
 where
+    N: NetworkPrimitives<
+        BlockHeader = HeaderTy<Node::Types>,
+        BlockBody = BodyTy<Node::Types>,
+        Block = BlockTy<Node::Types>,
+    >,
     Node: FullNodeTypes,
     F: FnOnce(&BuilderContext<Node>) -> Fut + Send,
-    Fut: Future<Output = eyre::Result<Components<Node, Pool, EVM, Executor, Cons>>> + Send,
-    Pool: TransactionPool + Unpin + 'static,
-    EVM: ConfigureEvm<Header = Header>,
-    Executor: BlockExecutorProvider,
-    Cons: Consensus + Clone + Unpin + 'static,
+    Fut: Future<Output = eyre::Result<Components<Node, N, Pool, EVM, Executor, Cons, Payload>>>
+        + Send,
+    Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Node::Types>>>
+        + Unpin
+        + 'static,
+    EVM: ConfigureEvmFor<PrimitivesTy<Node::Types>>,
+    Executor: BlockExecutorProvider<Primitives = PrimitivesTy<Node::Types>>,
+    Cons:
+        FullConsensus<PrimitivesTy<Node::Types>, Error = ConsensusError> + Clone + Unpin + 'static,
+    Payload: PayloadBuilderFor<Node::Types> + Unpin + 'static,
 {
-    type Components = Components<Node, Pool, EVM, Executor, Cons>;
+    type Components = Components<Node, N, Pool, EVM, Executor, Cons, Payload>;
 
     fn build_components(
         self,

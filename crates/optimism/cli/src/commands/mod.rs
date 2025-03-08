@@ -2,7 +2,6 @@ use crate::chainspec::OpChainSpecParser;
 use clap::Subcommand;
 use import::ImportOpCommand;
 use import_receipts::ImportReceiptsOpCommand;
-use reth_chainspec::ChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::{
     config_cmd, db, dump_genesis, init_cmd,
@@ -11,18 +10,17 @@ use reth_cli_commands::{
 };
 use std::fmt;
 
-/// Helper function to build an import pipeline.
-mod build_pipeline;
 pub mod import;
 pub mod import_receipts;
 pub mod init_state;
 
+#[cfg(feature = "dev")]
+pub mod test_vectors;
+
 /// Commands to be executed
 #[derive(Debug, Subcommand)]
-pub enum Commands<
-    Spec: ChainSpecParser<ChainSpec = ChainSpec> = OpChainSpecParser,
-    Ext: clap::Args + fmt::Debug = NoArgs,
-> {
+pub enum Commands<Spec: ChainSpecParser = OpChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs>
+{
     /// Start the node
     #[command(name = "node")]
     Node(Box<node::NodeCommand<Spec, Ext>>),
@@ -58,4 +56,8 @@ pub enum Commands<
     /// Prune according to the configuration without any limits
     #[command(name = "prune")]
     Prune(prune::PruneCommand<Spec>),
+    /// Generate Test Vectors
+    #[cfg(feature = "dev")]
+    #[command(name = "test-vectors")]
+    TestVectors(test_vectors::Command),
 }

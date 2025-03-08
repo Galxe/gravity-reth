@@ -4,14 +4,16 @@ use crate::{
     error::PeerRequestResult,
     headers::client::{HeadersClient, HeadersRequest},
     priority::Priority,
+    BlockClient,
 };
+use alloy_consensus::Header;
+use alloy_eips::{BlockHashOrNumber, BlockNumHash};
 use alloy_primitives::B256;
 use parking_lot::Mutex;
 use reth_eth_wire_types::HeadersDirection;
+use reth_ethereum_primitives::{Block, BlockBody};
 use reth_network_peers::{PeerId, WithPeerId};
-use reth_primitives::{
-    BlockBody, BlockHashOrNumber, BlockNumHash, Header, SealedBlock, SealedHeader,
-};
+use reth_primitives_traits::{SealedBlock, SealedHeader};
 use std::{collections::HashMap, sync::Arc};
 
 /// A headers+bodies client implementation that does nothing.
@@ -41,6 +43,7 @@ impl DownloadClient for NoopFullBlockClient {
 
 /// Implements the `BodiesClient` trait for the `NoopFullBlockClient` struct.
 impl BodiesClient for NoopFullBlockClient {
+    type Body = BlockBody;
     /// Defines the output type of the function.
     type Output = futures::future::Ready<PeerRequestResult<Vec<BlockBody>>>;
 
@@ -66,6 +69,7 @@ impl BodiesClient for NoopFullBlockClient {
 }
 
 impl HeadersClient for NoopFullBlockClient {
+    type Header = Header;
     /// The output type representing a future containing a peer request result with a vector of
     /// headers.
     type Output = futures::future::Ready<PeerRequestResult<Vec<Header>>>;
@@ -107,8 +111,8 @@ pub struct TestFullBlockClient {
 impl Default for TestFullBlockClient {
     fn default() -> Self {
         Self {
-            headers: Arc::new(Mutex::new(HashMap::new())),
-            bodies: Arc::new(Mutex::new(HashMap::new())),
+            headers: Arc::new(Mutex::new(HashMap::default())),
+            bodies: Arc::new(Mutex::new(HashMap::default())),
             soft_limit: 20,
         }
     }
@@ -128,13 +132,12 @@ impl TestFullBlockClient {
     }
 
     /// Get the block with the highest block number.
-    pub fn highest_block(&self) -> Option<SealedBlock> {
+    pub fn highest_block(&self) -> Option<SealedBlock<Block>> {
         self.headers.lock().iter().max_by_key(|(_, header)| header.number).and_then(
             |(hash, header)| {
-                self.bodies
-                    .lock()
-                    .get(hash)
-                    .map(|body| SealedBlock::new(header.clone().seal(*hash), body.clone()))
+                self.bodies.lock().get(hash).map(|body| {
+                    SealedBlock::from_parts_unchecked(header.clone(), body.clone(), *hash)
+                })
             },
         )
     }
@@ -154,6 +157,7 @@ impl DownloadClient for TestFullBlockClient {
 
 /// Implements the `HeadersClient` trait for the `TestFullBlockClient` struct.
 impl HeadersClient for TestFullBlockClient {
+    type Header = Header;
     /// Specifies the associated output type.
     type Output = futures::future::Ready<PeerRequestResult<Vec<Header>>>;
 
@@ -187,15 +191,15 @@ impl HeadersClient for TestFullBlockClient {
             .filter_map(|_| {
                 headers.iter().find_map(|(hash, header)| {
                     // Checks if the header matches the specified block or number.
-                    if BlockNumHash::new(header.number, *hash).matches_block_or_num(&block) {
-                        match request.direction {
-                            HeadersDirection::Falling => block = header.parent_hash.into(),
-                            HeadersDirection::Rising => block = (header.number + 1).into(),
-                        }
-                        Some(header.clone())
-                    } else {
-                        None
-                    }
+                    BlockNumHash::new(header.number, *hash).matches_block_or_num(&block).then(
+                        || {
+                            match request.direction {
+                                HeadersDirection::Falling => block = header.parent_hash.into(),
+                                HeadersDirection::Rising => block = (header.number + 1).into(),
+                            }
+                            header.clone()
+                        },
+                    )
                 })
             })
             .collect::<Vec<_>>();
@@ -207,6 +211,7 @@ impl HeadersClient for TestFullBlockClient {
 
 /// Implements the `BodiesClient` trait for the `TestFullBlockClient` struct.
 impl BodiesClient for TestFullBlockClient {
+    type Body = BlockBody;
     /// Defines the output type of the function.
     type Output = futures::future::Ready<PeerRequestResult<Vec<BlockBody>>>;
 
@@ -239,4 +244,8 @@ impl BodiesClient for TestFullBlockClient {
                 .collect(),
         )))
     }
+}
+
+impl BlockClient for TestFullBlockClient {
+    type Block = reth_ethereum_primitives::Block;
 }

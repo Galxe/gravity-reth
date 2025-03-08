@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use alloy_primitives::{Bytes, TxKind, U256};
+use alloy_consensus::{Header, TxEip2930};
+use alloy_primitives::{Bytes, PrimitiveSignature as Signature, TxKind, U256};
 use rand::Rng;
 use reth_eth_wire::HeadersDirection;
 use reth_network::{
@@ -15,9 +16,7 @@ use reth_network_p2p::{
     bodies::client::BodiesClient,
     headers::client::{HeadersClient, HeadersRequest},
 };
-use reth_primitives::{
-    Block, BlockBody, Header, Signature, Transaction, TransactionSigned, TxEip2930,
-};
+use reth_primitives::{Block, Transaction, TransactionSigned};
 use reth_provider::test_utils::MockEthProvider;
 
 /// Returns a new [`TransactionSigned`] with some random parameters
@@ -32,9 +31,9 @@ pub fn rng_transaction(rng: &mut impl rand::RngCore) -> TransactionSigned {
         input: Bytes::from(vec![1, 2]),
         access_list: Default::default(),
     });
-    let signature = Signature { odd_y_parity: true, r: U256::default(), s: U256::default() };
+    let signature = Signature::new(U256::default(), U256::default(), true);
 
-    TransactionSigned::from_transaction_and_signature(request, signature)
+    TransactionSigned::new_unhashed(request, signature)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -65,8 +64,8 @@ async fn test_get_body() {
     for _ in 0..100 {
         // Set a new random block to the mock storage and request it via the network
         let block_hash = rng.gen();
-        let mut block = Block::default();
-        block.body.push(rng_transaction(&mut rng));
+        let mut block: Block = Block::default();
+        block.body.transactions.push(rng_transaction(&mut rng));
 
         mock_provider.add_block(block_hash, block.clone());
 
@@ -75,13 +74,7 @@ async fn test_get_body() {
 
         let blocks = res.unwrap().1;
         assert_eq!(blocks.len(), 1);
-        let expected = BlockBody {
-            transactions: block.body,
-            ommers: block.ommers,
-            withdrawals: None,
-            requests: None,
-        };
-        assert_eq!(blocks[0], expected);
+        assert_eq!(blocks[0], block.body);
     }
 }
 

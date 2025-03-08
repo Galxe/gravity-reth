@@ -1,13 +1,13 @@
 //! Additional `eth_` RPC API for bundles.
 //!
-//! See also <https://docs.flashbots.net/flashbots-auction/searchers/advanced/rpc-endpoint>
+//! See also <https://docs.flashbots.net/flashbots-auction/advanced/rpc-endpoint>
 
 use alloy_primitives::{Bytes, B256};
-use jsonrpsee::proc_macros::rpc;
-use reth_rpc_types::mev::{
+use alloy_rpc_types_mev::{
     CancelBundleRequest, CancelPrivateTransactionRequest, EthBundleHash, EthCallBundle,
     EthCallBundleResponse, EthSendBundle, PrivateTransactionRequest,
 };
+use jsonrpsee::proc_macros::rpc;
 
 /// A subset of the [EthBundleApi] API interface that only supports `eth_callBundle`.
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "eth"))]
@@ -24,7 +24,7 @@ pub trait EthCallBundleApi {
 
 /// The __full__ Eth bundle rpc interface.
 ///
-/// See also <https://docs.flashbots.net/flashbots-auction/searchers/advanced/rpc-endpoint>
+/// See also <https://docs.flashbots.net/flashbots-auction/advanced/rpc-endpoint>
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "eth"))]
 #[cfg_attr(feature = "client", rpc(server, client, namespace = "eth"))]
 pub trait EthBundleApi {
@@ -41,7 +41,7 @@ pub trait EthBundleApi {
         request: EthCallBundle,
     ) -> jsonrpsee::core::RpcResult<EthCallBundleResponse>;
 
-    /// `eth_cancelBundle` is used to prevent a submitted bundle from being included on-chain. See [bundle cancellations](https://docs.flashbots.net/flashbots-auction/searchers/advanced/bundle-cancellations) for more information.
+    /// `eth_cancelBundle` is used to prevent a submitted bundle from being included on-chain. See [bundle cancellations](https://docs.flashbots.net/flashbots-auction/advanced/bundle-cancellations) for more information.
     #[method(name = "cancelBundle")]
     async fn cancel_bundle(&self, request: CancelBundleRequest) -> jsonrpsee::core::RpcResult<()>;
 

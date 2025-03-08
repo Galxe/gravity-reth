@@ -1,9 +1,10 @@
+//! Compact implementation for [`AlloyTxEip2930`]
+
 use crate::Compact;
-use alloy_consensus::transaction::TxEip2930 as AlloyTxEip2930;
+use alloy_consensus::TxEip2930 as AlloyTxEip2930;
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Bytes, ChainId, TxKind, U256};
 use reth_codecs_derive::add_arbitrary_tests;
-use serde::{Deserialize, Serialize};
 
 /// Transaction with an [`AccessList`] ([EIP-2930](https://eips.ethereum.org/EIPS/eip-2930)).
 ///
@@ -12,10 +13,15 @@ use serde::{Deserialize, Serialize};
 /// By deriving `Compact` here, any future changes or enhancements to the `Compact` derive
 /// will automatically apply to this type.
 ///
-/// Notice: Make sure this struct is 1:1 with [`alloy_consensus::transaction::TxEip2930`]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Compact)]
-#[cfg_attr(test, derive(arbitrary::Arbitrary))]
-#[add_arbitrary_tests(compact)]
+/// Notice: Make sure this struct is 1:1 with [`alloy_consensus::TxEip2930`]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Compact)]
+#[reth_codecs(crate = "crate")]
+#[cfg_attr(
+    any(test, feature = "test-utils"),
+    derive(arbitrary::Arbitrary, serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(feature = "test-utils", allow(unreachable_pub), visibility::make(pub))]
+#[add_arbitrary_tests(crate, compact)]
 pub(crate) struct TxEip2930 {
     chain_id: ChainId,
     nonce: u64,
@@ -36,7 +42,7 @@ impl Compact for AlloyTxEip2930 {
             chain_id: self.chain_id,
             nonce: self.nonce,
             gas_price: self.gas_price,
-            gas_limit: self.gas_limit as u64,
+            gas_limit: self.gas_limit,
             to: self.to,
             value: self.value,
             access_list: self.access_list.clone(),
@@ -51,7 +57,7 @@ impl Compact for AlloyTxEip2930 {
             chain_id: tx.chain_id,
             nonce: tx.nonce,
             gas_price: tx.gas_price,
-            gas_limit: tx.gas_limit as u128,
+            gas_limit: tx.gas_limit,
             to: tx.to,
             value: tx.value,
             access_list: tx.access_list,
