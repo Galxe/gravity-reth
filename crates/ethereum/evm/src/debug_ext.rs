@@ -22,6 +22,7 @@ pub(crate) struct DebugExtArgs {
     pub compare_with_seq_exec: bool,
     pub with_hints: bool,
     pub update_db_metrics: bool,
+    pub dump_block_number: Option<u64>,
 }
 
 pub(crate) static DEBUG_EXT: Lazy<DebugExtArgs> = Lazy::new(|| DebugExtArgs {
@@ -31,8 +32,9 @@ pub(crate) static DEBUG_EXT: Lazy<DebugExtArgs> = Lazy::new(|| DebugExtArgs {
     dump_block_env: std::env::var("EVM_BLOCK_ENV").is_ok(),
     dump_receipts: std::env::var("EVM_DUMP_RECEIPTS").is_ok(),
     compare_with_seq_exec: std::env::var("EVM_COMPARE_WITH_SEQ_EXEC").is_ok(),
-    with_hints: std::env::var("WITH_HINTS").is_ok(),
-    update_db_metrics: std::env::var("UPDATE_DB_METRICS").is_ok(),
+    with_hints: std::env::var("GREVM_WITH_HINTS").is_ok(),
+    update_db_metrics: std::env::var("GREVM_UPDATE_DB_METRICS").is_ok(),
+    dump_block_number: std::env::var("EVM_DUMP_BLOCK_NUMBER").ok().map(|s| s.parse().unwrap()),
 });
 
 pub(crate) fn dump_block_env(
