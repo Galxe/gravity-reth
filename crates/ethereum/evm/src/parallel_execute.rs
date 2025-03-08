@@ -56,7 +56,7 @@ where
     pub fn new(db: DB, chain_spec: Arc<ChainSpec>, evm_config: EvmConfig) -> Self {
         let system_caller = SystemCaller::new(evm_config.clone(), chain_spec.clone());
         Self {
-            state: Some(ParallelState::new(db, true, false)),
+            state: Some(ParallelState::new(db, true, DEBUG_EXT.update_db_metrics)),
             chain_spec,
             evm_config,
             system_caller,
@@ -145,7 +145,12 @@ where
             });
             let (results, parallel_state) = executor.take_result_and_state();
 
-            if output.is_err() ||
+            let should_dump = DEBUG_EXT
+                .dump_block_number
+                .map_or(false, |dump_block_number| block.number == dump_block_number);
+
+            if should_dump ||
+                output.is_err() ||
                 !crate::debug_ext::compare_transition_state(
                     seq_state.0.as_ref().unwrap(),
                     parallel_state.transition_state.as_ref().unwrap(),
