@@ -71,7 +71,7 @@ impl PrometheusRecorder {
     }
 
     /// Installs Prometheus as the metrics recorder.
-    pub fn install() -> eyre::Result<PrometheusHandle> {
+    pub fn install() -> eyre::Result<Self> {
         let recorder = PrometheusBuilder::new()
             .set_buckets_for_metric(
                 Matcher::Full("grevm.db_latency_us".to_owned()),

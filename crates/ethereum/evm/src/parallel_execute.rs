@@ -140,8 +140,8 @@ where
             let executor =
                 Scheduler::new(spec_id, env.clone(), txs.clone(), state, DEBUG_EXT.with_hints);
             let output = executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
-                hash: Default::default(),
-                error: Box::new(e),
+                hash: block.transactions_with_sender().nth(e.txid).unwrap().1.recalculate_hash(),
+                error: Box::new(e.error),
             });
             let (results, parallel_state) = executor.take_result_and_state();
 
@@ -174,17 +174,14 @@ where
                 panic!("Transition state mismatch, block number: {}", block.number);
             }
 
-            output.map_err(|e| BlockValidationError::EVM {
-                hash: Default::default(),
-                error: Box::new(e),
-            })?;
+            output?;
 
             (results, parallel_state)
         } else {
             let executor = Scheduler::new(spec_id, env, txs, state, DEBUG_EXT.with_hints);
             executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
-                hash: Default::default(),
-                error: Box::new(e),
+                hash: block.transactions_with_sender().nth(e.txid).unwrap().1.recalculate_hash(),
+                error: Box::new(e.error),
             })?;
             executor.take_result_and_state()
         };
