@@ -6,9 +6,12 @@ mod metrics;
 use channel::Channel;
 use metrics::PipeExecLayerMetrics;
 
-use alloy_consensus::{constants::EMPTY_WITHDRAWALS, BlockHeader, Header, EMPTY_OMMER_ROOT_HASH};
+use alloy_consensus::{
+    constants::EMPTY_WITHDRAWALS, BlockHeader, Header, Transaction, EMPTY_OMMER_ROOT_HASH,
+};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::{Address, B256, U256};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
@@ -23,6 +26,10 @@ use reth_primitives::{EthPrimitives, NodePrimitives};
 use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
+};
+use revm::{
+    primitives::{AccountInfo, HashMap, HashSet},
+    DatabaseRef,
 };
 use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
 
@@ -234,9 +241,11 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     fn execute_ordered_block(
         &self,
-        ordered_block: OrderedBlock,
+        mut ordered_block: OrderedBlock,
         parent_header: &Header,
     ) -> (Block, Vec<Address>, BlockExecutionOutput<Receipt>) {
+        assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
+
         debug!(target: "execute_ordered_block",
             id=?ordered_block.id,
             parent_id=?ordered_block.parent_id,
@@ -270,11 +279,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 difficulty: U256::ZERO,
                 ..Default::default()
             },
-            body: BlockBody {
-                transactions: ordered_block.transactions,
-                ommers: vec![],
-                ..Default::default()
-            },
+            body: BlockBody::default(),
         };
 
         if self.chain_spec.is_shanghai_active_at_timestamp(block.timestamp) {
@@ -302,10 +307,21 @@ impl<Storage: GravityStorage> Core<Storage> {
         let (parent_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
         assert_eq!(parent_id, ordered_block.parent_id);
 
+        // Discard the invalid txs
+        let start_time = Instant::now();
+        let (txs, senders) = filter_invalid_txs(
+            &state,
+            ordered_block.transactions,
+            ordered_block.senders,
+            evm_env.block_env.basefee,
+        );
+        self.metrics.filter_transaction_duration.record(start_time.elapsed());
+
+        block.body.transactions = txs;
+        let recovered_block = RecoveredBlock::new_unhashed(block, senders);
+
         let executor = EthExecutorProvider::ethereum(self.chain_spec.clone())
             .executor(parallel_database! { state });
-
-        let recovered_block = RecoveredBlock::new_unhashed(block, ordered_block.senders);
 
         let outcome = executor.execute(&recovered_block).unwrap_or_else(|err| {
             panic!(
@@ -375,6 +391,82 @@ impl<Storage: GravityStorage> Core<Storage> {
         execution_args.block_number_to_block_id.into_iter().for_each(|(block_number, block_id)| {
             self.storage.insert_block_id(block_number, block_id);
         });
+    }
+}
+
+/// Return the filtered valid transactions with sender without changing the relative order of
+/// the transactions.
+fn filter_invalid_txs<DB: ParallelDatabase>(
+    db: DB,
+    txs: Vec<TransactionSigned>,
+    senders: Vec<Address>,
+    base_fee_per_gas: U256,
+) -> (Vec<TransactionSigned>, Vec<Address>) {
+    let mut sender_idx: HashMap<&Address, Vec<usize>> = HashMap::default();
+    for (i, sender) in senders.iter().enumerate() {
+        sender_idx.entry(sender).or_insert_with(Vec::new).push(i);
+    }
+
+    let is_tx_valid = |tx: &TransactionSigned, sender: &Address, account: &mut AccountInfo| {
+        if account.nonce != tx.transaction().nonce() {
+            debug!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                nonce=?tx.transaction().nonce(),
+                account_nonce=?account.nonce,
+                "nonce mismatch"
+            );
+            return false;
+        }
+        let gas_spent = U256::from(tx.transaction().gas_limit()) *
+            (U256::from(tx.transaction().priority_fee_or_price()) + base_fee_per_gas);
+        if account.balance < gas_spent {
+            debug!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                balance=?account.balance,
+                gas_spent=?gas_spent,
+                "insufficient balance"
+            );
+            return false;
+        }
+        account.balance -= gas_spent;
+        account.nonce += 1;
+        true
+    };
+
+    let invalid_idxs = sender_idx
+        .into_par_iter()
+        .flat_map(|(sender, idxs)| {
+            if let Some(mut account) = db.basic_ref(*sender).unwrap() {
+                idxs.into_iter()
+                    .filter(|&idx| !is_tx_valid(&txs[idx], sender, &mut account))
+                    .collect()
+            } else {
+                // Sender should exist in the state
+                debug!(target: "filter_invalid_txs",
+                    tx_hash=?txs[idxs[0]].hash(),
+                    sender=?sender,
+                    "sender not found"
+                );
+                idxs
+            }
+        })
+        .collect::<HashSet<_>>();
+
+    if !invalid_idxs.is_empty() {
+        let mut filtered_txs = Vec::with_capacity(txs.len() - invalid_idxs.len());
+        let mut filtered_senders = Vec::with_capacity(filtered_txs.capacity());
+        for (i, (tx, sender)) in txs.into_iter().zip(senders.into_iter()).enumerate() {
+            if invalid_idxs.contains(&i) {
+                continue;
+            }
+            filtered_txs.push(tx);
+            filtered_senders.push(sender);
+        }
+        (filtered_txs, filtered_senders)
+    } else {
+        (txs, senders)
     }
 }
 

@@ -27,6 +27,7 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 tokio.workspace = true
 once_cell.workspace = true
+rayon.workspace = true
 
 # ethereum
 revm.workspace = true

@@ -25,4 +25,6 @@ pub(crate) struct PipeExecLayerMetrics {
     pub(crate) start_execute_time_diff: Histogram,
     /// Time difference between two adjacent blocks completing commit
     pub(crate) finish_commit_time_diff: Histogram,
+    /// How long it took for transactions to be filtered
+    pub(crate) filter_transaction_duration: Histogram,
 }
