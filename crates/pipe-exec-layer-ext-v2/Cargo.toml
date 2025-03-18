@@ -36,6 +36,7 @@ revm.workspace = true
 tracing.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
