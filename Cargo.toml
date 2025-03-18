@@ -655,6 +655,7 @@ snmalloc-rs = { version = "0.3.7", features = ["build_cc"] }
 #
 # See: https://github.com/eira-fransham/crunchy/issues/13
 crunchy = "=0.2.2"
+hickory-resolver = "0.25.0"
 
 # [patch.crates-io]
 # alloy-consensus = { git = "https://github.com/alloy-rs/alloy", rev = "cfb13aa" }
