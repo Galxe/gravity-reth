@@ -633,6 +633,7 @@ impl ChainSpec {
             C::Optimism => Some(op_nodes()),
             C::BaseGoerli | C::BaseSepolia => Some(base_testnet_nodes()),
             C::OptimismSepolia | C::OptimismGoerli | C::OptimismKovan => Some(op_testnet_nodes()),
+            C::Dev => Some(vec![]), // empty bootnodes for dev
             _ => None,
         }
     }
