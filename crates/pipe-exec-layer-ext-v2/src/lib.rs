@@ -27,10 +27,7 @@ use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
 };
-use revm::{
-    primitives::{AccountInfo, HashMap, HashSet},
-    DatabaseRef,
-};
+use revm::primitives::{AccountInfo, HashMap, HashSet};
 use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
 
 use once_cell::sync::{Lazy, OnceCell};
@@ -241,7 +238,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     fn execute_ordered_block(
         &self,
-        mut ordered_block: OrderedBlock,
+        ordered_block: OrderedBlock,
         parent_header: &Header,
     ) -> (Block, Vec<Address>, BlockExecutionOutput<Receipt>) {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
@@ -324,10 +321,14 @@ impl<Storage: GravityStorage> Core<Storage> {
             .executor(parallel_database! { state });
 
         let outcome = executor.execute(&recovered_block).unwrap_or_else(|err| {
-            panic!(
-                "failed to execute block {:?}: {:?}\n{:?}",
-                ordered_block.id, err, recovered_block
+            serde_json::to_writer(
+                std::io::BufWriter::new(
+                    std::fs::File::create(format!("{}.json", ordered_block.id)).unwrap(),
+                ),
+                &recovered_block,
             )
+            .unwrap();
+            panic!("failed to execute block {:?}: {:?}", ordered_block.id, err)
         });
 
         debug!(target: "execute_ordered_block",
