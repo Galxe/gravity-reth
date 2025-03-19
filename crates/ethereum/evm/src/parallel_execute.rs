@@ -22,10 +22,7 @@ use reth_grevm::{ParallelState, Scheduler};
 use reth_primitives::{EthPrimitives, Receipt, RecoveredBlock};
 use reth_primitives_traits::SignedTransaction;
 use revm::{
-    db::{
-        states::{CacheAccount, State},
-        PlainAccount, WrapDatabaseRef,
-    },
+    db::{states::State, WrapDatabaseRef},
     DatabaseCommit,
 };
 use revm_primitives::{Account, AccountStatus, EvmState};
@@ -137,6 +134,23 @@ where
                 (seq_state.transition_state, seq_state.cache, seq_state.block_hashes)
             };
 
+            let dump_block = DEBUG_EXT
+                .dump_block_number
+                .map_or(false, |dump_block_number| block.number == dump_block_number);
+            if dump_block {
+                crate::debug_ext::dump_block_env(
+                    &revm_primitives::EnvWithHandlerCfg::new_with_spec_id(
+                        Box::new(env.clone()),
+                        spec_id,
+                    ),
+                    &txs.as_ref(),
+                    &seq_state.1,
+                    &seq_state.0.as_ref().unwrap(),
+                    &seq_state.2,
+                )
+                .unwrap();
+            }
+
             let executor =
                 Scheduler::new(spec_id, env.clone(), txs.clone(), state, DEBUG_EXT.with_hints);
             let output = executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
@@ -149,8 +163,7 @@ where
                 .dump_block_number
                 .map_or(false, |dump_block_number| block.number == dump_block_number);
 
-            if should_dump ||
-                output.is_err() ||
+            if output.is_err() ||
                 !crate::debug_ext::compare_transition_state(
                     seq_state.0.as_ref().unwrap(),
                     parallel_state.transition_state.as_ref().unwrap(),
@@ -168,14 +181,22 @@ where
                     "parallel_transitions.json",
                 )
                 .unwrap();
-                crate::debug_ext::dump_block_env(
-                    &revm_primitives::EnvWithHandlerCfg::new_with_spec_id(Box::new(env), spec_id),
-                    &txs.as_ref(),
-                    &seq_state.1,
-                    &seq_state.0.as_ref().unwrap(),
-                    &seq_state.2,
-                )
-                .unwrap();
+
+                if !dump_block {
+                    // Block has been dumped already, no need to dump it again
+                    crate::debug_ext::dump_block_env(
+                        &revm_primitives::EnvWithHandlerCfg::new_with_spec_id(
+                            Box::new(env),
+                            spec_id,
+                        ),
+                        &txs.as_ref(),
+                        &seq_state.1,
+                        &seq_state.0.as_ref().unwrap(),
+                        &seq_state.2,
+                    )
+                    .unwrap();
+                }
+
                 panic!("Transition state mismatch, block number: {}", block.number);
             }
 

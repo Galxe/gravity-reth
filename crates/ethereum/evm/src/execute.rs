@@ -215,6 +215,34 @@ where
                 logs: result.into_logs(),
             });
         }
+
+        drop(evm);
+
+        let dump_block = DEBUG_EXT
+            .dump_block_number
+            .map_or(false, |dump_block_number| block.number == dump_block_number);
+        if dump_block {
+            let evm_env = self.evm_config.evm_env(block.header());
+            let spec_id = evm_env.spec.into();
+            let env = revm_primitives::Env {
+                cfg: evm_env.cfg_env,
+                block: evm_env.block_env,
+                ..Default::default()
+            };
+            let mut txs = Vec::with_capacity(block.transaction_count());
+            for (sender, tx) in block.transactions_with_sender() {
+                txs.push(self.evm_config.tx_env(tx, *sender).into());
+            }
+            crate::debug_ext::dump_block_env(
+                &revm_primitives::EnvWithHandlerCfg::new_with_spec_id(Box::new(env), spec_id),
+                &txs,
+                &self.state.cache,
+                &self.state.transition_state.as_ref().unwrap(),
+                &self.state.block_hashes,
+            )
+            .unwrap();
+        }
+
         Ok(ExecuteOutput { receipts, gas_used: cumulative_gas_used })
     }
 
