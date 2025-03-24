@@ -410,7 +410,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
 
     let is_tx_valid = |tx: &TransactionSigned, sender: &Address, account: &mut AccountInfo| {
         if account.nonce != tx.transaction().nonce() {
-            debug!(target: "filter_invalid_txs",
+            warn!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 nonce=?tx.transaction().nonce(),
@@ -419,10 +419,12 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
             );
             return false;
         }
-        let gas_spent = U256::from(tx.transaction().gas_limit()) *
-            (U256::from(tx.transaction().priority_fee_or_price()) + base_fee_per_gas);
+        let gas_spent =
+            U256::from(tx.transaction().effective_gas_price(Some(base_fee_per_gas.to())))
+                .saturating_mul(U256::from(tx.transaction().gas_limit()))
+                .saturating_add(tx.transaction().value());
         if account.balance < gas_spent {
-            debug!(target: "filter_invalid_txs",
+            warn!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 balance=?account.balance,
@@ -444,11 +446,11 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
                     .filter(|&idx| !is_tx_valid(&txs[idx], sender, &mut account))
                     .collect()
             } else {
-                // Sender should exist in the state
-                debug!(target: "filter_invalid_txs",
+                // Sender does not exist in the state trie, balance is 0
+                warn!(target: "filter_invalid_txs",
                     tx_hash=?txs[idxs[0]].hash(),
                     sender=?sender,
-                    "sender not found"
+                    "insufficient balance"
                 );
                 idxs
             }
