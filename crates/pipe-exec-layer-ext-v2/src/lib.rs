@@ -122,7 +122,7 @@ struct Core<Storage: GravityStorage> {
 }
 
 impl<Storage: GravityStorage> PipeExecService<Storage> {
-    async fn run(mut self, mut latest_block_number: u64) {
+    async fn run(mut self) {
         self.core.init_storage(self.execution_args_rx.await.unwrap());
         loop {
             let start_time = Instant::now();
@@ -136,11 +136,6 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
                 }
             };
             self.core.metrics.recv_block_time_diff.record(start_time.elapsed());
-            // TODO: read latest block id from storage
-            // assert_eq!(ordered_block.parent_id, latest_block_id);
-            // latest_block_id = ordered_block.id;
-            assert_eq!(ordered_block.number, latest_block_number + 1);
-            latest_block_number = ordered_block.number;
 
             let core = self.core.clone();
             tokio::spawn(async move {
@@ -642,7 +637,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
         ordered_block_rx,
         execution_args_rx,
     };
-    tokio::spawn(service.run(latest_block_number));
+    tokio::spawn(service.run());
 
     PIPE_EXEC_LAYER_EXT.get_or_init(|| {
         Box::new(PipeExecLayerExt {
