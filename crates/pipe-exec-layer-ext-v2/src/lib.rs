@@ -46,6 +46,8 @@ pub struct ExecutedBlockMeta {
     pub block_id: B256,
     /// Block hash of the executed block
     pub block_hash: B256,
+    /// Block number of the executed block
+    pub block_number: u64,
 }
 
 #[derive(Debug)]
