@@ -774,15 +774,10 @@ where
 
     fn try_recv_pipe_exec_event(
         &self,
-        pipe_exec_layer_ext: &PipeExecLayerExt<N>,
+        event_rx: &mut std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>,
     ) -> Result<Option<PipeExecLayerEvent<N>>, RecvError> {
         if self.persistence_state.in_progress() {
-            match pipe_exec_layer_ext
-                .event_rx
-                .lock()
-                .unwrap()
-                .recv_timeout(std::time::Duration::from_millis(500))
-            {
+            match event_rx.recv_timeout(std::time::Duration::from_millis(500)) {
                 Ok(event) => return Ok(Some(event)),
                 Err(err) => match err {
                     RecvTimeoutError::Timeout => Ok(None),
@@ -790,7 +785,7 @@ where
                 },
             }
         } else {
-            pipe_exec_layer_ext.event_rx.lock().unwrap().recv().map(Some)
+            event_rx.recv().map(Some)
         }
     }
 
@@ -848,33 +843,16 @@ where
     pub fn run(mut self) {
         // Wait for the pipe exec layer to be initialized
         std::thread::sleep(std::time::Duration::from_secs(3));
-        let pipe_exec_layer_ext = get_pipe_exec_layer_ext::<N>();
+        let mut pipe_event_rx =
+            get_pipe_exec_layer_ext::<N>().unwrap().event_rx.lock().unwrap().take().unwrap();
         loop {
-            match pipe_exec_layer_ext {
-                Some(ext) => match self.try_recv_pipe_exec_event(ext) {
-                    Ok(Some(event)) => self.on_pipe_exec_event(event),
-                    Ok(None) => {}
-                    Err(RecvError) => {
-                        error!(target: "engine::tree", "Pipe exec layer channel disconnected");
-                        return
-                    }
-                },
-                None => match self.try_recv_engine_message() {
-                    Ok(Some(msg)) => {
-                        debug!(target: "engine::tree", %msg, "received new engine message");
-                        if let Err(fatal) = self.on_engine_message(msg) {
-                            error!(target: "engine::tree", %fatal, "insert block fatal error");
-                            return
-                        }
-                    }
-                    Ok(None) => {
-                        debug!(target: "engine::tree", "received no engine message for some time, while waiting for persistence task to complete");
-                    }
-                    Err(_err) => {
-                        error!(target: "engine::tree", "Engine channel disconnected");
-                        return
-                    }
-                },
+            match self.try_recv_pipe_exec_event(&mut pipe_event_rx) {
+                Ok(Some(event)) => self.on_pipe_exec_event(event),
+                Ok(None) => {}
+                Err(RecvError) => {
+                    error!(target: "engine::tree", "Pipe exec layer channel disconnected");
+                    return
+                }
             }
 
             if let Err(err) = self.advance_persistence() {

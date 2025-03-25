@@ -10,7 +10,7 @@ use alloy_consensus::{
     constants::EMPTY_WITHDRAWALS, BlockHeader, Header, Transaction, EMPTY_OMMER_ROOT_HASH,
 };
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, TxHash, B256, U256};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
@@ -100,6 +100,7 @@ struct Core<Storage: GravityStorage> {
     merklize_barrier: Channel<u64 /* block number */, ()>,
     seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
     make_canonical_barrier: Channel<u64 /* block number */, Instant>,
+    discard_txs_tx: UnboundedSender<Vec<TxHash>>,
     metrics: PipeExecLayerMetrics,
 }
 
@@ -306,7 +307,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Discard the invalid txs
         let start_time = Instant::now();
-        let (txs, senders) = filter_invalid_txs(
+        let (txs, senders) = self.filter_invalid_txs(
             &state,
             ordered_block.transactions,
             ordered_block.senders,
@@ -393,16 +394,45 @@ impl<Storage: GravityStorage> Core<Storage> {
             self.storage.insert_block_id(block_number, block_id);
         });
     }
+
+    /// Return the filtered valid transactions with sender without changing the relative order of
+    /// the transactions.
+    fn filter_invalid_txs(
+        &self,
+        db: &Storage::StateView,
+        txs: Vec<TransactionSigned>,
+        senders: Vec<Address>,
+        base_fee_per_gas: U256,
+    ) -> (Vec<TransactionSigned>, Vec<Address>) {
+        let invalid_idxs = filter_invalid_txs(db, &txs, &senders, base_fee_per_gas);
+        if !invalid_idxs.is_empty() {
+            let _ = self
+                .discard_txs_tx
+                .send(invalid_idxs.iter().map(|&idx| txs[idx].hash()).cloned().collect::<Vec<_>>());
+
+            let mut filtered_txs = Vec::with_capacity(txs.len() - invalid_idxs.len());
+            let mut filtered_senders = Vec::with_capacity(filtered_txs.capacity());
+            for (i, (tx, sender)) in txs.into_iter().zip(senders.into_iter()).enumerate() {
+                if invalid_idxs.contains(&i) {
+                    continue;
+                }
+                filtered_txs.push(tx);
+                filtered_senders.push(sender);
+            }
+            (filtered_txs, filtered_senders)
+        } else {
+            (txs, senders)
+        }
+    }
 }
 
-/// Return the filtered valid transactions with sender without changing the relative order of
-/// the transactions.
+/// Return the invalid transaction indexes.
 fn filter_invalid_txs<DB: ParallelDatabase>(
     db: DB,
-    txs: Vec<TransactionSigned>,
-    senders: Vec<Address>,
+    txs: &Vec<TransactionSigned>,
+    senders: &Vec<Address>,
     base_fee_per_gas: U256,
-) -> (Vec<TransactionSigned>, Vec<Address>) {
+) -> HashSet<usize> {
     let mut sender_idx: HashMap<&Address, Vec<usize>> = HashMap::default();
     for (i, sender) in senders.iter().enumerate() {
         sender_idx.entry(sender).or_insert_with(Vec::new).push(i);
@@ -438,7 +468,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
         true
     };
 
-    let invalid_idxs = sender_idx
+    sender_idx
         .into_par_iter()
         .flat_map(|(sender, idxs)| {
             if let Some(mut account) = db.basic_ref(*sender).unwrap() {
@@ -455,22 +485,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
                 idxs
             }
         })
-        .collect::<HashSet<_>>();
-
-    if !invalid_idxs.is_empty() {
-        let mut filtered_txs = Vec::with_capacity(txs.len() - invalid_idxs.len());
-        let mut filtered_senders = Vec::with_capacity(filtered_txs.capacity());
-        for (i, (tx, sender)) in txs.into_iter().zip(senders.into_iter()).enumerate() {
-            if invalid_idxs.contains(&i) {
-                continue;
-            }
-            filtered_txs.push(tx);
-            filtered_senders.push(sender);
-        }
-        (filtered_txs, filtered_senders)
-    } else {
-        (txs, senders)
-    }
+        .collect::<HashSet<_>>()
 }
 
 /// Called by Coordinator
@@ -511,7 +526,9 @@ impl Drop for PipeExecLayerApi {
 #[derive(Debug)]
 pub struct PipeExecLayerExt<N: NodePrimitives> {
     /// Receive events from PipeExecService
-    pub event_rx: std::sync::Mutex<std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>>,
+    pub event_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>>>,
+    /// Receive discarded txs from PipeExecService
+    pub discard_txs: tokio::sync::Mutex<Option<UnboundedReceiver<Vec<TxHash>>>>,
 }
 
 /// A static instance of `PipeExecLayerExt` used for dispatching events.
@@ -537,6 +554,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     let executed_block_hash_ch = Arc::new(Channel::new());
     let verified_block_hash_ch = Arc::new(Channel::new());
     let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (discard_txs_tx, discard_txs_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let latest_block_number = latest_block_header.number;
     let start_time = Instant::now();
@@ -555,6 +573,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
             merklize_barrier: Channel::new_with_states([(latest_block_number, ())]),
             seal_barrier: Channel::new_with_states([(latest_block_number, latest_block_hash)]),
             make_canonical_barrier: Channel::new_with_states([(latest_block_number, start_time)]),
+            discard_txs_tx,
             metrics: PipeExecLayerMetrics::default(),
         }),
         ordered_block_rx,
@@ -562,7 +581,12 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     };
     tokio::spawn(service.run(latest_block_number));
 
-    PIPE_EXEC_LAYER_EXT.get_or_init(|| Box::new(PipeExecLayerExt { event_rx: event_rx.into() }));
+    PIPE_EXEC_LAYER_EXT.get_or_init(|| {
+        Box::new(PipeExecLayerExt {
+            event_rx: std::sync::Mutex::new(Some(event_rx)),
+            discard_txs: tokio::sync::Mutex::new(Some(discard_txs_rx)),
+        })
+    });
 
     PipeExecLayerApi {
         ordered_block_tx,

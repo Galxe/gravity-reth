@@ -9,7 +9,7 @@ use crate::{
 };
 use alloy_consensus::{BlockHeader, Typed2718};
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{Address, BlockHash, BlockNumber};
+use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash};
 use alloy_rlp::Encodable;
 use futures_util::{
     future::{BoxFuture, Fuse, FusedFuture},
@@ -19,6 +19,7 @@ use reth_chain_state::CanonStateNotification;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_execution_types::ChangedAccount;
 use reth_fs_util::FsPathError;
+use reth_pipe_exec_layer_ext_v2::{get_pipe_exec_layer_ext, PipeExecLayerExt};
 use reth_primitives::{transaction::SignedTransactionIntoRecoveredExt, SealedHeader};
 use reth_primitives_traits::{NodePrimitives, SignedTransaction};
 use reth_storage_api::{errors::provider::ProviderError, BlockReaderIdExt, StateProviderFactory};
@@ -31,7 +32,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    sync::oneshot,
+    sync::{mpsc, oneshot},
     time::{self, Duration},
 };
 use tracing::{debug, error, info, trace, warn};
@@ -159,6 +160,11 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
     // toggle for the first notification
     let mut first_event = true;
 
+    // Wait for PipeExecLayerExt to be available
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let mut discard_txs_rx =
+        get_pipe_exec_layer_ext::<N>().unwrap().discard_txs.lock().await.take().unwrap();
+
     // The update loop that waits for new blocks and reorgs and performs pool updated
     // Listen for new chain events and derive the update action for the pool
     loop {
@@ -249,6 +255,14 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
                 if first_event {
                     maintained_state = MaintainedPoolState::Drifted;
                     first_event = false
+                }
+            }
+            discard_txs = discard_txs_rx.recv() => {
+                if let Some(discard_txs) = discard_txs {
+                    debug!(target: "txpool", count=%discard_txs.len(), "discarding transactions");
+                    pool.remove_transactions(discard_txs);
+                } else {
+                    break;
                 }
             }
             _ = stale_eviction_interval.tick() => {
