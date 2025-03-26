@@ -74,6 +74,23 @@ impl BlockViewStorageInner {
             block_number_to_id,
         }
     }
+
+    fn prune_block_id(&mut self, canonical_block_number: u64) {
+        if canonical_block_number <= BLOCK_HASH_HISTORY {
+            return;
+        }
+
+        // Only keep the last BLOCK_HASH_HISTORY block hashes before the canonical block number,
+        // including the canonical block number.
+        let target_block_number = canonical_block_number - BLOCK_HASH_HISTORY;
+        while let Some((&first_key, _)) = self.block_number_to_id.first_key_value() {
+            if first_key <= target_block_number {
+                self.block_number_to_id.pop_first();
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage<Client> {
@@ -118,9 +135,6 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
     fn insert_block_id(&self, block_number: u64, block_id: B256) {
         let mut storage = self.inner.lock().unwrap();
         storage.block_number_to_id.insert(block_number, block_id);
-        while storage.block_number_to_id.len() > BLOCK_HASH_HISTORY as usize {
-            storage.block_number_to_id.pop_first();
-        }
     }
 
     fn insert_bundle_state(&self, block_number: u64, bundle_state: &BundleState) {
@@ -145,11 +159,12 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
 
     fn update_canonical(&self, block_number: u64, block_hash: B256) {
         let mut storage = self.inner.lock().unwrap();
-        assert!(block_number > storage.state_provider_info.1);
         let gc_block_number = storage.state_provider_info.1;
+        assert_eq!(block_number, gc_block_number + 1);
         storage.state_provider_info = (block_hash, block_number);
         storage.block_number_to_view.remove(&gc_block_number);
         storage.block_number_to_trie_updates.remove(&gc_block_number);
+        storage.prune_block_id(block_number);
     }
 
     fn state_root_with_updates(
