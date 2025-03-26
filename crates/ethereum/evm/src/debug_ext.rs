@@ -16,9 +16,6 @@ use revm_primitives::{EnvWithHandlerCfg, TxEnv};
 pub(crate) struct DebugExtArgs {
     pub disable_grevm: bool,
     pub dump_path: String,
-    pub dump_transitions: bool,
-    pub dump_block_env: bool,
-    pub dump_receipts: bool,
     pub compare_with_seq_exec: bool,
     pub with_hints: bool,
     pub update_db_metrics: bool,
@@ -28,9 +25,6 @@ pub(crate) struct DebugExtArgs {
 pub(crate) static DEBUG_EXT: Lazy<DebugExtArgs> = Lazy::new(|| DebugExtArgs {
     disable_grevm: std::env::var("EVM_DISABLE_GREVM").is_ok(),
     dump_path: std::env::var("EVM_DUMP_PATH").unwrap_or("data/blocks".to_string()),
-    dump_transitions: std::env::var("EVM_DUMP_TRANSITIONS").is_ok(),
-    dump_block_env: std::env::var("EVM_BLOCK_ENV").is_ok(),
-    dump_receipts: std::env::var("EVM_DUMP_RECEIPTS").is_ok(),
     compare_with_seq_exec: std::env::var("EVM_COMPARE_WITH_SEQ_EXEC").is_ok(),
     with_hints: std::env::var("GREVM_WITH_HINTS").is_ok(),
     update_db_metrics: std::env::var("GREVM_UPDATE_DB_METRICS").is_ok(),
@@ -99,19 +93,6 @@ pub(crate) fn dump_block_env(
     serde_json::to_writer(
         BufWriter::new(std::fs::File::create(format!("{path}/block_hashes.json"))?),
         block_hashes,
-    )?;
-
-    Ok(())
-}
-
-pub(crate) fn dump_receipts(block_number: u64, receipts: &[Receipt]) -> Result<(), Box<dyn Error>> {
-    let path = format!("{}/{}", DEBUG_EXT.dump_path, block_number);
-    std::fs::create_dir_all(&path)?;
-
-    // Write receipts data to file
-    serde_json::to_writer(
-        BufWriter::new(std::fs::File::create(format!("{path}/receipts.json"))?),
-        receipts,
     )?;
 
     Ok(())

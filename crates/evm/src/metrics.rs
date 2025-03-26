@@ -152,7 +152,7 @@ mod tests {
         state: EvmState,
     }
 
-    impl<DB: Database + Default> Executor<DB> for MockExecutor {
+    impl<'db> Executor<'db> for MockExecutor {
         type Primitives = EthPrimitives;
         type Error = std::convert::Infallible;
 
@@ -186,8 +186,8 @@ mod tests {
             })
         }
 
-        fn into_state(self) -> revm::db::State<DB> {
-            State::builder().with_database(Default::default()).build()
+        fn into_state(self) -> Box<dyn crate::State + 'db> {
+            Box::new(State::builder().with_database(EmptyDB::default()).build())
         }
 
         fn size_hint(&self) -> usize {
@@ -243,7 +243,7 @@ mod tests {
             state
         };
         let executor = MockExecutor { state };
-        let _result = metrics.execute_metered::<_, EmptyDB>(executor, &input, state_hook).unwrap();
+        let _result = metrics.execute_metered(executor, &input, state_hook).unwrap();
 
         let snapshot = snapshotter.snapshot().into_vec();
 
@@ -275,7 +275,7 @@ mod tests {
         let state = EvmState::default();
 
         let executor = MockExecutor { state };
-        let _result = metrics.execute_metered::<_, EmptyDB>(executor, &input, state_hook).unwrap();
+        let _result = metrics.execute_metered(executor, &input, state_hook).unwrap();
 
         let actual_output = rx.try_recv().unwrap();
         assert_eq!(actual_output, expected_output);

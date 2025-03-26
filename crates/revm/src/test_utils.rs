@@ -14,6 +14,7 @@ use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher,
     MultiProof, MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
 };
+use std::sync::Arc;
 
 /// Mock state for testing
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
@@ -100,7 +101,7 @@ impl StateRootProvider for StateProviderTest {
         _hashed_state_vec: Vec<Arc<HashedPostState>>,
         _trie_updates_vec: Vec<Arc<TrieUpdates>>,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        todo!()
+        unimplemented!("state root computation is not supported")
     }
 }
 

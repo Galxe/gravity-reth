@@ -295,7 +295,7 @@ where
         Box::new(self.state.take().unwrap())
     }
 
-    fn with_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
+    fn with_state_hook(&mut self, _hook: Option<Box<dyn OnStateHook>>) {
         todo!("Implement state hook")
     }
 
@@ -316,7 +316,7 @@ fn balance_increment_state<DB>(
 where
     DB: ParallelDatabase,
 {
-    let mut load_account = |address: &Address| -> Result<(Address, Account), BlockExecutionError> {
+    let load_account = |address: &Address| -> Result<(Address, Account), BlockExecutionError> {
         let info = state
             .cache
             .accounts

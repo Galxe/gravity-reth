@@ -4,7 +4,11 @@ use alloy_consensus::{constants::ETH_TO_WEI, BlockHeader, Header, TxEip2930};
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::{b256, Address, TxKind, U256};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthereumHardfork, MAINNET, MIN_TRANSACTION_GAS};
-use reth_evm::execute::{BlockExecutionOutput, BlockExecutorProvider, Executor};
+use reth_evm::{
+    database::*,
+    execute::{BlockExecutionOutput, BlockExecutorProvider, Executor},
+    parallel_database,
+};
 use reth_evm_ethereum::execute::EthExecutorProvider;
 use reth_node_api::FullNodePrimitives;
 use reth_primitives::{Block, BlockBody, Receipt, RecoveredBlock, Transaction};
@@ -66,7 +70,9 @@ where
 
     // Execute the block to produce a block execution output
     let mut block_execution_output = EthExecutorProvider::ethereum(chain_spec)
-        .executor(StateProviderDatabase::new(LatestStateProviderRef::new(&provider)))
+        .executor(parallel_database!(StateProviderDatabase::new(LatestStateProviderRef::new(
+            &provider
+        ))))
         .execute(block)?;
     block_execution_output.state.reverts.sort();
 
@@ -194,8 +200,9 @@ where
 
     let provider = provider_factory.provider()?;
 
-    let executor = EthExecutorProvider::ethereum(chain_spec)
-        .executor(StateProviderDatabase::new(LatestStateProviderRef::new(&provider)));
+    let executor = EthExecutorProvider::ethereum(chain_spec).executor(parallel_database!(
+        StateProviderDatabase::new(LatestStateProviderRef::new(&provider))
+    ));
 
     let mut execution_outcome = executor.execute_batch(vec![&block1, &block2])?;
     execution_outcome.state_mut().reverts.sort();

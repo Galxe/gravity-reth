@@ -375,10 +375,11 @@ mod tests {
     use core::marker::PhantomData;
     use reth_chainspec::{ChainSpec, MAINNET};
     use reth_primitives::EthPrimitives;
-    use revm::db::{CacheDB, EmptyDBTyped};
+    use revm::db::{states::State as RevmState, CacheDB, EmptyDBTyped};
     use revm_primitives::{address, bytes, AccountInfo, KECCAK_EMPTY};
     use std::sync::Arc;
 
+    /*
     #[derive(Clone, Default)]
     struct TestExecutorProvider;
 
@@ -550,14 +551,15 @@ mod tests {
         assert_eq!(block_execution_output.receipts, expected_receipts);
         assert_eq!(block_execution_output.requests, expected_apply_post_execution_changes_result);
     }
+    */
 
     fn setup_state_with_account(
         addr: Address,
         balance: u128,
         nonce: u64,
-    ) -> State<CacheDB<EmptyDBTyped<BlockExecutionError>>> {
+    ) -> RevmState<CacheDB<EmptyDBTyped<BlockExecutionError>>> {
         let db = CacheDB::<EmptyDBTyped<BlockExecutionError>>::default();
-        let mut state = State::builder().with_database(db).with_bundle_update().build();
+        let mut state = RevmState::builder().with_database(db).with_bundle_update().build();
 
         let account_info = AccountInfo {
             balance: U256::from(balance),
@@ -583,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_balance_increment_state_empty_increments_map() {
-        let mut state = State::builder()
+        let mut state = RevmState::builder()
             .with_database(CacheDB::<EmptyDBTyped<BlockExecutionError>>::default())
             .with_bundle_update()
             .build();

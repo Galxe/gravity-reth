@@ -9,7 +9,7 @@ use crate::{
 };
 use alloy_consensus::{BlockHeader, Typed2718};
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash};
+use alloy_primitives::{Address, BlockHash, BlockNumber};
 use alloy_rlp::Encodable;
 use futures_util::{
     future::{BoxFuture, Fuse, FusedFuture},
@@ -19,7 +19,7 @@ use reth_chain_state::CanonStateNotification;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_execution_types::ChangedAccount;
 use reth_fs_util::FsPathError;
-use reth_pipe_exec_layer_ext_v2::{get_pipe_exec_layer_ext, PipeExecLayerExt};
+use reth_pipe_exec_layer_ext_v2::get_pipe_exec_layer_ext;
 use reth_primitives::{transaction::SignedTransactionIntoRecoveredExt, SealedHeader};
 use reth_primitives_traits::{NodePrimitives, SignedTransaction};
 use reth_storage_api::{errors::provider::ProviderError, BlockReaderIdExt, StateProviderFactory};
@@ -32,7 +32,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::oneshot,
     time::{self, Duration},
 };
 use tracing::{debug, error, info, trace, warn};

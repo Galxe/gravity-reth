@@ -28,7 +28,8 @@ use reth_primitives_traits::SignedTransaction;
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
     BlockBodyIndicesProvider, DatabaseProviderFactory, HashedPostStateProvider, OmmersProvider,
-    StageCheckpointReader, StateCommitmentProvider, StateProofProvider, StorageRootProvider,
+    StageCheckpointReader, StateCommitmentProvider, StateProofProvider, StateProviderOptions,
+    StorageRootProvider,
 };
 use reth_storage_errors::provider::{ConsistentViewError, ProviderError, ProviderResult};
 use reth_trie::{
@@ -775,7 +776,7 @@ impl<T: Transaction, ChainSpec: EthChainSpec + 'static> StateProvider
 impl<T: SignedTransaction, ChainSpec: EthChainSpec + 'static> StateProviderFactory
     for MockEthProvider<T, ChainSpec>
 {
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
+    fn latest_with_opts(&self, _opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -809,11 +810,19 @@ impl<T: SignedTransaction, ChainSpec: EthChainSpec + 'static> StateProviderFacto
         Ok(Box::new(self.clone()))
     }
 
-    fn history_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
-    fn state_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 

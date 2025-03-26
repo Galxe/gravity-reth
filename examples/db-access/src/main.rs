@@ -12,6 +12,7 @@ use reth_ethereum::{
     rpc::eth::primitives::{Filter, FilteredParams},
     TransactionSigned,
 };
+use reth_storage_api::StateProviderOptions;
 
 // Providers are zero cost abstractions on top of an opened MDBX Transaction
 // exposing a familiar API to query the chain's information without requiring knowledge
@@ -44,10 +45,12 @@ fn main() -> eyre::Result<()> {
     drop(provider);
 
     // Run the example against latest state
-    state_provider_example(factory.latest()?)?;
+    state_provider_example(factory.latest(StateProviderOptions::default())?)?;
 
     // Run it with historical state
-    state_provider_example(factory.history_by_block_number(block_num)?)?;
+    state_provider_example(
+        factory.history_by_block_number(block_num, StateProviderOptions::default())?,
+    )?;
 
     Ok(())
 }

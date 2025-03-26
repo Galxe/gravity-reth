@@ -152,11 +152,11 @@ mod tests {
         // Verify that the balance increments map contains the correct values for each address
         assert_eq!(
             *balance_increments.get(&Address::from([1; 20])).unwrap(),
-            (1000 * GWEI_TO_WEI).into()
+            (1000 * GWEI_TO_WEI) as u128
         );
         assert_eq!(
             *balance_increments.get(&Address::from([2; 20])).unwrap(),
-            (500 * GWEI_TO_WEI).into()
+            (500 * GWEI_TO_WEI) as u128
         );
     }
 
