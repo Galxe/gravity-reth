@@ -38,22 +38,25 @@ impl std::fmt::Display for GravityStorageError {
 pub trait GravityStorage: Send + Sync + 'static {
     type StateView: ParallelDatabase;
 
-    // get state view for execute
+    /// get state view for execute
     fn get_state_view(
         &self,
         block_number: u64,
     ) -> Result<(B256, Self::StateView), GravityStorageError>;
 
-    // Insert the mapping from block_number to block_id
+    /// Insert the mapping from block_number to block_id
     fn insert_block_id(&self, block_number: u64, block_id: B256);
 
-    // Insert the mapping from block_number to bundle_state
+    /// Get the block_id by block_number
+    fn get_block_id(&self, block_number: u64) -> Option<B256>;
+
+    /// Insert the mapping from block_number to bundle_state
     fn insert_bundle_state(&self, block_number: u64, bundle_state: &BundleState);
 
-    // Update canonical to block_number and reclaim the intermediate result cache
+    /// Update canonical to block_number and reclaim the intermediate result cache
     fn update_canonical(&self, block_number: u64, block_hash: B256);
 
-    // calculate state root by block_number
+    /// calculate state root by block_number
     fn state_root_with_updates(
         &self,
         block_number: u64,

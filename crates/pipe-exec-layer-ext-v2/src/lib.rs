@@ -109,7 +109,7 @@ struct Core<Storage: GravityStorage> {
     execution_result_tx: UnboundedSender<ExecutionResult>,
     /// Receive verified block hash from Coordinator
     verified_block_hash_rx: Arc<Channel<B256 /* block id */, Option<B256> /* block hash */>>,
-    storage: Storage,
+    storage: Arc<Storage>,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
@@ -542,13 +542,14 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
 
 /// Called by Coordinator
 #[derive(Debug)]
-pub struct PipeExecLayerApi {
+pub struct PipeExecLayerApi<Storage> {
     ordered_block_tx: UnboundedSender<OrderedBlock>,
     execution_result_rx: Mutex<UnboundedReceiver<ExecutionResult>>,
     verified_block_hash_tx: Arc<Channel<B256 /* block id */, Option<B256> /* block hash */>>,
+    storage: Arc<Storage>,
 }
 
-impl PipeExecLayerApi {
+impl<Storage: GravityStorage> PipeExecLayerApi<Storage> {
     /// Push ordered block to EL for execution.
     /// Returns `None` if the channel has been closed.
     pub fn push_ordered_block(&self, block: OrderedBlock) -> Option<()> {
@@ -572,9 +573,14 @@ impl PipeExecLayerApi {
     ) -> Option<()> {
         self.verified_block_hash_tx.notify(block_id, block_hash)
     }
+
+    /// Get the block id by block number.
+    pub fn get_block_id(&self, block_number: u64) -> Option<B256> {
+        self.storage.get_block_id(block_number)
+    }
 }
 
-impl Drop for PipeExecLayerApi {
+impl<Storage> Drop for PipeExecLayerApi<Storage> {
     fn drop(&mut self) {
         self.verified_block_hash_tx.close();
     }
@@ -607,12 +613,14 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     latest_block_header: Header,
     latest_block_hash: B256,
     execution_args_rx: oneshot::Receiver<ExecutionArgs>,
-) -> PipeExecLayerApi {
+) -> PipeExecLayerApi<Storage> {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (execution_result_tx, execution_result_rx) = tokio::sync::mpsc::unbounded_channel();
     let verified_block_hash_ch = Arc::new(Channel::new());
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (discard_txs_tx, discard_txs_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let storage = Arc::new(storage);
 
     let latest_block_number = latest_block_header.number;
     let start_time = Instant::now();
@@ -620,7 +628,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
         core: Arc::new(Core {
             execution_result_tx,
             verified_block_hash_rx: verified_block_hash_ch.clone(),
-            storage,
+            storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
             event_tx,
@@ -650,5 +658,6 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
         ordered_block_tx,
         execution_result_rx: Mutex::new(execution_result_rx),
         verified_block_hash_tx: verified_block_hash_ch,
+        storage,
     }
 }
