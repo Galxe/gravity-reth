@@ -1,19 +1,15 @@
 //! Helpers for testing.
 
 use crate::{
-    execute::{
-        BasicBlockExecutor, BlockExecutionOutput, BlockExecutionStrategy, BlockExecutorProvider,
-        Executor,
-    },
+    execute::{BasicBlockExecutor, BlockExecutionOutput, BlockExecutorProvider, Executor},
     system_calls::OnStateHook,
-    Database,
+    Database, DatabaseEnum, ParallelDatabase, State,
 };
 use alloy_eips::eip7685::Requests;
 use parking_lot::Mutex;
 use reth_execution_errors::BlockExecutionError;
 use reth_execution_types::{BlockExecutionResult, ExecutionOutcome};
 use reth_primitives::{EthPrimitives, NodePrimitives, RecoveredBlock};
-use revm::State;
 use std::sync::Arc;
 
 /// A [`BlockExecutorProvider`] that returns mocked execution results.
@@ -32,19 +28,18 @@ impl MockExecutorProvider {
 impl BlockExecutorProvider for MockExecutorProvider {
     type Primitives = EthPrimitives;
 
-    type Executor<DB: Database> = Self;
+    type Executor<'db> = Self;
 
-    type ParallelProvider<'a> = NoopBlockExecutorProvider;
-
-    fn executor<DB>(&self, _: DB) -> Self::Executor<DB>
+    fn executor<'db, DB, PDB>(&self, _: DatabaseEnum<DB, PDB>) -> Self::Executor<'db>
     where
         DB: Database,
+        PDB: ParallelDatabase,
     {
         self.clone()
     }
 }
 
-impl<DB: Database> Executor<DB> for MockExecutorProvider {
+impl<'db> Executor<'db> for MockExecutorProvider {
     type Primitives = EthPrimitives;
     type Error = BlockExecutionError;
 
@@ -73,7 +68,7 @@ impl<DB: Database> Executor<DB> for MockExecutorProvider {
     where
         F: OnStateHook + 'static,
     {
-        <Self as Executor<DB>>::execute_one(self, block)
+        <Self as Executor<'db>>::execute_one(self, block)
     }
 
     fn execute(
@@ -100,9 +95,9 @@ impl<DB: Database> Executor<DB> for MockExecutorProvider {
         _f: F,
     ) -> Result<BlockExecutionOutput<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     where
-        F: FnMut(&revm::db::State<DB>),
+        F: FnMut(&dyn State),
     {
-        <Self as Executor<DB>>::execute(self, block)
+        <Self as Executor<'db>>::execute(self, block)
     }
 
     fn execute_with_state_hook<F>(
@@ -113,10 +108,10 @@ impl<DB: Database> Executor<DB> for MockExecutorProvider {
     where
         F: OnStateHook + 'static,
     {
-        <Self as Executor<DB>>::execute(self, block)
+        <Self as Executor<'db>>::execute(self, block)
     }
 
-    fn into_state(self) -> revm::db::State<DB> {
+    fn into_state(self) -> Box<dyn State + 'db> {
         unreachable!()
     }
 
@@ -125,14 +120,14 @@ impl<DB: Database> Executor<DB> for MockExecutorProvider {
     }
 }
 
-impl<S> BasicBlockExecutor<S>
+impl<'db, Primitives> BasicBlockExecutor<'db, Primitives>
 where
-    S: BlockExecutionStrategy,
+    Primitives: NodePrimitives,
 {
     /// Provides safe read access to the state
     pub fn with_state<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(&State<S::DB>) -> R,
+        F: FnOnce(&dyn State) -> R,
     {
         f(self.strategy.state_ref())
     }
@@ -140,7 +135,7 @@ where
     /// Provides safe write access to the state
     pub fn with_state_mut<F, R>(&mut self, f: F) -> R
     where
-        F: FnOnce(&mut State<S::DB>) -> R,
+        F: FnOnce(&mut dyn State) -> R,
     {
         f(self.strategy.state_mut())
     }

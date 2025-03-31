@@ -355,14 +355,18 @@ mod tests {
     };
     use alloy_primitives::{b256, fixed_bytes, keccak256, Bytes, TxKind, B256, U256};
     use reth_chainspec::{ChainSpecBuilder, ForkCondition};
-    use reth_evm::execute::{BasicBlockExecutorProvider, BlockExecutorProvider, Executor};
+    use reth_evm::{
+        execute::{BasicBlockExecutorProvider, BlockExecutorProvider, Executor},
+        parallel_database,
+    };
     use reth_execution_types::BlockExecutionResult;
     use reth_primitives::{Account, Block, BlockBody, Transaction};
     use reth_primitives_traits::{crypto::secp256k1::public_key_to_address, Block as _};
     use reth_revm::{
-        database::StateProviderDatabase, test_utils::StateProviderTest, Database, TransitionState,
+        database::StateProviderDatabase, test_utils::StateProviderTest, TransitionState,
     };
     use reth_testing_utils::generators::{self, sign_tx_with_key_pair};
+    use revm::db::BundleState;
     use revm_primitives::{address, EvmState, BLOCKHASH_SERVE_WINDOW};
     use secp256k1::{Keypair, Secp256k1};
     use std::{collections::HashMap, sync::mpsc};
@@ -430,7 +434,7 @@ mod tests {
 
         let provider = executor_provider(chain_spec);
 
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // attempt to execute a block without parent beacon block root, expect err
         let err = executor
@@ -514,7 +518,7 @@ mod tests {
 
         // attempt to execute an empty block with parent beacon block root, this should not fail
         provider
-            .executor(StateProviderDatabase::new(&db))
+            .executor(parallel_database!(StateProviderDatabase::new(&db)))
             .execute_one(&RecoveredBlock::new_unhashed(
                 Block {
                     header,
@@ -555,7 +559,7 @@ mod tests {
             ..Header::default()
         };
 
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // attempt to execute an empty block with parent beacon block root, this should not fail
         executor
@@ -590,7 +594,7 @@ mod tests {
 
         let mut header = chain_spec.genesis_header().clone();
         let provider = executor_provider(chain_spec);
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // attempt to execute the genesis block with non-zero parent beacon block root, expect err
         header.parent_beacon_block_root = Some(B256::with_last_byte(0x69));
@@ -618,15 +622,10 @@ mod tests {
 
         // there is no system contract call so there should be NO STORAGE CHANGES
         // this means we'll check the transition state
-        let transition_state = executor.with_state_mut(|state| {
-            state
-                .transition_state
-                .take()
-                .expect("the evm should be initialized with bundle updates")
-        });
+        let bundle_state = executor.into_state().take_bundle();
 
         // assert that it is the default (empty) transition state
-        assert_eq!(transition_state, TransitionState::default());
+        assert_eq!(bundle_state, BundleState::default());
     }
 
     #[test]
@@ -654,7 +653,7 @@ mod tests {
         let provider = executor_provider(chain_spec);
 
         // execute header
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // Now execute a block with the fixed header, ensure that it does not fail
         executor
@@ -721,7 +720,7 @@ mod tests {
         );
 
         let provider = executor_provider(chain_spec);
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // construct the header for block one
         let header = Header { timestamp: 1, number: 1, ..Header::default() };
@@ -762,7 +761,7 @@ mod tests {
 
         let header = chain_spec.genesis_header().clone();
         let provider = executor_provider(chain_spec);
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // attempt to execute genesis block, this should not fail
         executor
@@ -809,7 +808,7 @@ mod tests {
             ..Header::default()
         };
         let provider = executor_provider(chain_spec);
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // attempt to execute the fork activation block, this should not fail
         executor
@@ -853,7 +852,7 @@ mod tests {
         );
 
         let provider = executor_provider(chain_spec);
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         let header = Header {
             parent_hash: B256::random(),
@@ -896,7 +895,7 @@ mod tests {
         let header_hash = header.hash_slow();
 
         let provider = executor_provider(chain_spec);
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // attempt to execute the genesis block, this should not fail
         executor
@@ -1046,7 +1045,7 @@ mod tests {
 
         let provider = executor_provider(chain_spec);
 
-        let mut executor = provider.executor(StateProviderDatabase::new(&db));
+        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         let BlockExecutionResult { receipts, requests, .. } = executor
             .execute_one(
@@ -1122,7 +1121,8 @@ mod tests {
         );
 
         // Create an executor from the state provider
-        let mut executor = executor_provider(chain_spec).executor(StateProviderDatabase::new(&db));
+        let mut executor = executor_provider(chain_spec)
+            .executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         // Execute the block and capture the result
         let exec_result = executor.execute_one(
@@ -1189,7 +1189,7 @@ mod tests {
         );
 
         let provider = executor_provider(chain_spec);
-        let executor = provider.executor(StateProviderDatabase::new(&db));
+        let executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
 
         let (tx, rx) = mpsc::channel();
         let tx_clone = tx.clone();

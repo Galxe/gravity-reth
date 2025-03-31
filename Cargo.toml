@@ -193,7 +193,7 @@ members = [
     "examples/rpc-db/",
     "examples/stateful-precompile/",
     "examples/txpool-tracing/",
-    "examples/custom-beacon-withdrawals",
+    #"examples/custom-beacon-withdrawals",
     "testing/ef-tests/",
     "testing/testing-utils",
     "crates/pipe-exec-layer-ext-v2/",
