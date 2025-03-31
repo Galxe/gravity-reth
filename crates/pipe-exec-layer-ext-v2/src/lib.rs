@@ -86,10 +86,25 @@ struct PipeExecService<Storage: GravityStorage> {
     execution_args_rx: oneshot::Receiver<ExecutionArgs>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TxInfo {
+    pub tx_hash: TxHash,
+    pub sender: Address,
+    pub nonce: u64,
+    pub is_discarded: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionResult {
+    pub block_id: B256,
+    pub block_hash: B256,
+    pub txs_info: Vec<TxInfo>,
+}
+
 #[derive(Debug)]
 struct Core<Storage: GravityStorage> {
     /// Send executed block hash to Coordinator
-    executed_block_hash_tx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
+    execution_result_tx: Arc<Channel<B256 /* block id */, ExecutionResult>>,
     /// Receive verified block hash from Coordinator
     verified_block_hash_rx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
     storage: Storage,
@@ -112,7 +127,7 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
             let ordered_block = match self.ordered_block_rx.recv().await {
                 Some(ordered_block) => ordered_block,
                 None => {
-                    self.core.executed_block_hash_tx.close();
+                    self.core.execution_result_tx.close();
                     self.core.execute_block_barrier.close();
                     self.core.merklize_barrier.close();
                     self.core.make_canonical_barrier.close();
@@ -136,6 +151,13 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
 
 const BLOCK_GAS_LIMIT_1G: u64 = 1_000_000_000;
 
+struct ExecuteOrderedBlockResult {
+    /// Block without roots and block hash
+    block_without_roots: RecoveredBlock<Block>,
+    execution_output: BlockExecutionOutput<Receipt>,
+    txs_info: Vec<TxInfo>,
+}
+
 impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, ordered_block: OrderedBlock) {
         let block_number = ordered_block.number;
@@ -153,16 +175,17 @@ impl<Storage: GravityStorage> Core<Storage> {
         let (parent_block_header, prev_start_execute_time) =
             self.execute_block_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
-        let (mut block, senders, outcome) =
+        let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info } =
             self.execute_ordered_block(ordered_block, &parent_block_header);
-        self.storage.insert_bundle_state(block_number, &outcome.state);
+        self.storage.insert_bundle_state(block_number, &execution_output.state);
         self.metrics.execute_duration.record(start_time.elapsed());
         self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
         self.execute_block_barrier
-            .notify(block_number, (block.header.clone(), start_time))
+            .notify(block_number, (block_without_roots.header().clone(), start_time))
             .unwrap();
 
-        let execution_outcome = self.calculate_roots(&mut block, outcome);
+        let (mut block, senders) = block_without_roots.split();
+        let execution_outcome = self.calculate_roots(&mut block, execution_output);
 
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
@@ -183,22 +206,24 @@ impl<Storage: GravityStorage> Core<Storage> {
         block.header.parent_hash = parent_hash;
 
         // Seal the block
-        let block = block.seal_slow();
-        let block_hash = block.hash();
+        let sealed_block = block.seal_slow();
+        let block_hash = sealed_block.hash();
         self.metrics.seal_duration.record(start_time.elapsed());
         self.seal_barrier.notify(block_number, block_hash).unwrap();
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
             block_hash=?block_hash,
-            transactions_root=?block.header().transactions_root,
-            receipts_root=?block.header().receipts_root,
+            transactions_root=?sealed_block.transactions_root,
+            receipts_root=?sealed_block.receipts_root,
             "block sealed"
         );
 
         // Commit the executed block hash to Coordinator
         let start_time = Instant::now();
-        self.verify_executed_block_hash(ExecutedBlockMeta { block_id, block_hash }).await.unwrap();
+        self.verify_executed_block_hash(ExecutionResult { block_id, block_hash, txs_info })
+            .await
+            .unwrap();
         self.metrics.verify_duration.record(start_time.elapsed());
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
@@ -207,13 +232,13 @@ impl<Storage: GravityStorage> Core<Storage> {
             "block verified"
         );
 
-        let gas_used = block.gas_used;
+        let gas_used = sealed_block.gas_used;
 
         // Make the block canonical
         let prev_finish_commit_time =
             self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
         self.make_canonical(ExecutedBlockWithTrieUpdates::new(
-            Arc::new(RecoveredBlock::new_sealed(block, senders)),
+            Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
             Arc::new(execution_outcome),
             hashed_state,
             trie_updates,
@@ -230,10 +255,12 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
     /// Returns `None` if the channel has been closed.
-    async fn verify_executed_block_hash(&self, block_meta: ExecutedBlockMeta) -> Option<()> {
-        self.executed_block_hash_tx.notify(block_meta.block_id, block_meta.block_hash)?;
-        let block_hash = self.verified_block_hash_rx.wait(block_meta.block_id).await?;
-        assert_eq!(block_meta.block_hash, block_hash);
+    async fn verify_executed_block_hash(&self, execution_result: ExecutionResult) -> Option<()> {
+        let block_id = execution_result.block_id;
+        let executed_block_hash = execution_result.block_hash;
+        self.execution_result_tx.notify(block_id, execution_result)?;
+        let block_hash = self.verified_block_hash_rx.wait(block_id).await?;
+        assert_eq!(executed_block_hash, block_hash);
         Some(())
     }
 
@@ -241,7 +268,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         &self,
         ordered_block: OrderedBlock,
         parent_header: &Header,
-    ) -> (Block, Vec<Address>, BlockExecutionOutput<Receipt>) {
+    ) -> ExecuteOrderedBlockResult {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
 
         debug!(target: "execute_ordered_block",
@@ -307,7 +334,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Discard the invalid txs
         let start_time = Instant::now();
-        let (txs, senders) = self.filter_invalid_txs(
+        let (txs, senders, txs_info) = self.filter_invalid_txs(
             &state,
             ordered_block.transactions,
             ordered_block.senders,
@@ -339,9 +366,11 @@ impl<Storage: GravityStorage> Core<Storage> {
             "block executed"
         );
 
-        let (mut block, senders) = recovered_block.split();
-        block.header.gas_used = outcome.gas_used;
-        (block, senders, outcome)
+        ExecuteOrderedBlockResult {
+            block_without_roots: recovered_block,
+            execution_output: outcome,
+            txs_info,
+        }
     }
 
     /// Calculate the receipts root, logs bloom, and transactions root, etc. and fill them into the
@@ -351,6 +380,8 @@ impl<Storage: GravityStorage> Core<Storage> {
         block: &mut Block,
         execution_outcome: BlockExecutionOutput<Receipt>,
     ) -> ExecutionOutcome {
+        block.header.gas_used = execution_outcome.gas_used;
+
         // only determine cancun fields when active
         if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
             block.header.requests_hash = Some(execution_outcome.requests.requests_hash());
@@ -403,7 +434,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         txs: Vec<TransactionSigned>,
         senders: Vec<Address>,
         base_fee_per_gas: U256,
-    ) -> (Vec<TransactionSigned>, Vec<Address>) {
+    ) -> (Vec<TransactionSigned>, Vec<Address>, Vec<TxInfo>) {
         let invalid_idxs = filter_invalid_txs(db, &txs, &senders, base_fee_per_gas);
         if !invalid_idxs.is_empty() {
             let _ = self
@@ -412,16 +443,39 @@ impl<Storage: GravityStorage> Core<Storage> {
 
             let mut filtered_txs = Vec::with_capacity(txs.len() - invalid_idxs.len());
             let mut filtered_senders = Vec::with_capacity(filtered_txs.capacity());
+            let mut txs_info = Vec::with_capacity(txs.len());
             for (i, (tx, sender)) in txs.into_iter().zip(senders.into_iter()).enumerate() {
                 if invalid_idxs.contains(&i) {
+                    txs_info.push(TxInfo {
+                        tx_hash: *tx.hash(),
+                        sender,
+                        nonce: tx.transaction().nonce(),
+                        is_discarded: true,
+                    });
                     continue;
                 }
+
+                txs_info.push(TxInfo {
+                    tx_hash: *tx.hash(),
+                    sender,
+                    nonce: tx.transaction().nonce(),
+                    is_discarded: false,
+                });
                 filtered_txs.push(tx);
                 filtered_senders.push(sender);
             }
-            (filtered_txs, filtered_senders)
+            (filtered_txs, filtered_senders, txs_info)
         } else {
-            (txs, senders)
+            let mut txs_info = Vec::with_capacity(txs.len());
+            for (tx, sender) in txs.iter().zip(senders.iter()) {
+                txs_info.push(TxInfo {
+                    tx_hash: *tx.hash(),
+                    sender: *sender,
+                    nonce: tx.transaction().nonce(),
+                    is_discarded: false,
+                });
+            }
+            (txs, senders, txs_info)
         }
     }
 }
@@ -492,7 +546,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
 #[derive(Debug)]
 pub struct PipeExecLayerApi {
     ordered_block_tx: UnboundedSender<OrderedBlock>,
-    executed_block_hash_rx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
+    execution_result_rx: Arc<Channel<B256 /* block id */, ExecutionResult>>,
     verified_block_hash_tx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
 }
 
@@ -505,8 +559,8 @@ impl PipeExecLayerApi {
 
     /// Pull executed block hash from EL for verification.
     /// Returns `None` if the channel has been closed.
-    pub async fn pull_executed_block_hash(&self, block_id: B256) -> Option<B256> {
-        self.executed_block_hash_rx.wait(block_id).await
+    pub async fn pull_execution_result(&self, block_id: B256) -> Option<ExecutionResult> {
+        self.execution_result_rx.wait(block_id).await
     }
 
     /// Push verified block hash to EL for commit.
@@ -551,7 +605,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     execution_args_rx: oneshot::Receiver<ExecutionArgs>,
 ) -> PipeExecLayerApi {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
-    let executed_block_hash_ch = Arc::new(Channel::new());
+    let execution_result_ch = Arc::new(Channel::new());
     let verified_block_hash_ch = Arc::new(Channel::new());
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (discard_txs_tx, discard_txs_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -560,7 +614,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     let start_time = Instant::now();
     let service = PipeExecService {
         core: Arc::new(Core {
-            executed_block_hash_tx: executed_block_hash_ch.clone(),
+            execution_result_tx: execution_result_ch.clone(),
             verified_block_hash_rx: verified_block_hash_ch.clone(),
             storage,
             evm_config: EthEvmConfig::new(chain_spec.clone()),
@@ -590,7 +644,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
 
     PipeExecLayerApi {
         ordered_block_tx,
-        executed_block_hash_rx: executed_block_hash_ch,
+        execution_result_rx: execution_result_ch,
         verified_block_hash_tx: verified_block_hash_ch,
     }
 }
