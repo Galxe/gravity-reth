@@ -109,7 +109,10 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
             return Err(GravityStorageError::TooNew(target_block_number));
         }
 
-        let block_id = *storage.block_number_to_id.get(&target_block_number).unwrap();
+        let block_id = *storage
+            .block_number_to_id
+            .get(&target_block_number)
+            .unwrap_or_else(|| panic!("Block number {} not found", target_block_number));
         let block_number_to_id = storage.block_number_to_id.clone();
         let block_views: Vec<_> = storage
             .block_number_to_view
