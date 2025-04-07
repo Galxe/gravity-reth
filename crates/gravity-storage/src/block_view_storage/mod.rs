@@ -140,6 +140,11 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         storage.block_number_to_id.insert(block_number, block_id);
     }
 
+    fn get_block_id(&self, block_number: u64) -> Option<B256> {
+        let storage = self.inner.lock().unwrap();
+        storage.block_number_to_id.get(&block_number).cloned()
+    }
+
     fn insert_bundle_state(&self, block_number: u64, bundle_state: &BundleState) {
         let block_view = BlockView {
             accounts: bundle_state
