@@ -99,6 +99,7 @@ pub struct TxInfo {
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub block_id: B256,
+    pub block_number: u64,
     pub block_hash: B256,
     pub txs_info: Vec<TxInfo>,
 }
@@ -217,9 +218,14 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Commit the executed block hash to Coordinator
         let start_time = Instant::now();
-        self.verify_executed_block_hash(ExecutionResult { block_id, block_hash, txs_info })
-            .await
-            .unwrap();
+        self.verify_executed_block_hash(ExecutionResult {
+            block_id,
+            block_number,
+            block_hash,
+            txs_info,
+        })
+        .await
+        .unwrap();
         self.metrics.verify_duration.record(start_time.elapsed());
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
