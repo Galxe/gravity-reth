@@ -186,6 +186,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
+        let start_time = Instant::now();
         let (state_root, hashed_state, trie_updates) =
             self.storage.state_root_with_updates(block_number).unwrap();
         self.metrics.merklize_duration.record(start_time.elapsed());
@@ -239,6 +240,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Make the block canonical
         let prev_finish_commit_time =
             self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
+        let start_time = Instant::now();
         self.make_canonical(ExecutedBlockWithTrieUpdates::new(
             Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
             Arc::new(execution_outcome),
