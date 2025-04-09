@@ -31,7 +31,7 @@ use hyper as _;
 use jsonwebtoken as _;
 use pin_project as _;
 use tower as _;
-
+mod metric;
 mod admin;
 mod debug;
 mod engine;
@@ -59,3 +59,4 @@ pub use trace::TraceApi;
 pub use txpool::TxPoolApi;
 pub use validation::{ValidationApi, ValidationApiConfig};
 pub use web3::Web3Api;
+pub(crate) use metric::get_rpc_metrics;

@@ -1,6 +1,6 @@
 //! Contains RPC handler implementations specific to transactions
 
-use crate::EthApi;
+use crate::{get_rpc_metrics, EthApi};
 use alloy_primitives::{Bytes, B256};
 use reth_provider::{BlockReader, BlockReaderIdExt, ProviderTx, TransactionsProvider};
 use reth_rpc_eth_api::{
@@ -25,6 +25,7 @@ where
     ///
     /// Returns the hash of the transaction.
     async fn send_raw_transaction(&self, tx: Bytes) -> Result<B256, Self::Error> {
+        get_rpc_metrics().txn_recv_counter.increment(1);
         let recovered = recover_raw_transaction(&tx)?;
 
         // broadcast raw transaction to subscribers if there is any.
