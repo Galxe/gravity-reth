@@ -1,8 +1,12 @@
+use reth_provider::{
+    providers::ConsistentDbView, BlockNumReader, BlockReader, DatabaseProviderFactory, HeaderProvider, StateCommitmentProvider
+};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{
     errors::provider::ProviderError, StateProviderBox, StateProviderFactory, STATE_PROVIDER_OPTS,
 };
-use reth_trie::{updates::TrieUpdates, HashedPostState, KeccakKeyHasher};
+use reth_trie::{updates::TrieUpdates, HashedPostState, KeccakKeyHasher, TrieInput};
+use reth_trie_parallel::root::ParallelStateRoot;
 use revm::{
     db::{
         states::{CacheAccount, PlainAccount},
@@ -12,15 +16,16 @@ use revm::{
     DatabaseRef,
 };
 use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
+    collections::BTreeMap, hash::Hash, sync::{Arc, Mutex, MutexGuard}
 };
+use tracing::info;
 
 use crate::{GravityStorage, GravityStorageError};
 
 pub struct BlockViewStorage<Client> {
     client: Client,
     inner: Mutex<BlockViewStorageInner>,
+    legacy_state_root: bool,
 }
 
 struct BlockViewStorageInner {
@@ -47,12 +52,22 @@ fn get_state_provider<Client: StateProviderFactory + 'static>(
     }
 }
 
-impl<Client: StateProviderFactory + 'static> BlockViewStorage<Client> {
+impl<Client> BlockViewStorage<Client>
+where
+    Client: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
+        + StateCommitmentProvider
+        + StateProviderFactory
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
     pub fn new(
         client: Client,
         latest_block_number: u64,
         latest_block_hash: B256,
         block_number_to_id: BTreeMap<u64, B256>,
+        legacy_state_root: bool,
     ) -> Self {
         Self {
             client,
@@ -61,6 +76,7 @@ impl<Client: StateProviderFactory + 'static> BlockViewStorage<Client> {
                 latest_block_hash,
                 block_number_to_id,
             )),
+            legacy_state_root,
         }
     }
 }
@@ -93,7 +109,37 @@ impl BlockViewStorageInner {
     }
 }
 
-impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage<Client> {
+// Extract common function to get historical states
+fn get_historical_states(
+    storage: &MutexGuard<'_, BlockViewStorageInner>,
+    base_block_number: u64,
+    block_number: u64,
+) -> (Vec<Arc<HashedPostState>>, Vec<Arc<TrieUpdates>>) {
+    let hashed_state_vec: Vec<_> = storage
+        .block_number_to_view
+        .range(base_block_number + 1..block_number)
+        .map(|(_, view)| view.1.clone())
+        .collect();
+        
+    let trie_updates_vec: Vec<_> = storage
+        .block_number_to_trie_updates
+        .range(base_block_number + 1..block_number)
+        .map(|(_, trie_updates)| trie_updates.clone())
+        .collect();
+        
+    (hashed_state_vec, trie_updates_vec)
+}
+
+impl<Client> GravityStorage for BlockViewStorage<Client>
+where
+    Client: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
+        + StateCommitmentProvider
+        + StateProviderFactory
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
     type StateView = BlockViewProvider;
 
     fn get_state_view(
@@ -168,10 +214,26 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
     fn update_canonical(&self, block_number: u64, block_hash: B256) {
         let mut storage = self.inner.lock().unwrap();
         let gc_block_number = storage.state_provider_info.1;
-        assert_eq!(block_number, gc_block_number + 1);
-        storage.state_provider_info = (block_hash, block_number);
-        storage.block_number_to_view.remove(&gc_block_number);
-        storage.block_number_to_trie_updates.remove(&gc_block_number);
+        if self.legacy_state_root {
+            let provider_ro = self.client.database_provider_ro().unwrap();
+            let last_num = provider_ro.last_block_number().unwrap();
+            if last_num > gc_block_number {
+                storage.state_provider_info = provider_ro
+                    .sealed_header(last_num)
+                    .unwrap()
+                    .map(|h| (h.hash(), last_num))
+                    .unwrap();
+                for block_number_ in gc_block_number..last_num {
+                    storage.block_number_to_view.remove(&block_number_);
+                    storage.block_number_to_trie_updates.remove(&block_number_);
+                }
+            }
+        } else {
+            assert_eq!(block_number, gc_block_number + 1);
+            storage.state_provider_info = (block_hash, block_number);
+            storage.block_number_to_view.remove(&gc_block_number);
+            storage.block_number_to_trie_updates.remove(&gc_block_number);
+        }
         storage.prune_block_id(block_number);
     }
 
@@ -179,34 +241,55 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         &self,
         block_number: u64,
     ) -> Result<(B256, Arc<HashedPostState>, Arc<TrieUpdates>), GravityStorageError> {
-        let storage = self.inner.lock().unwrap();
-        let (base_block_hash, base_block_number) = storage.state_provider_info;
-        let hashed_state_vec: Vec<_> = storage
-            .block_number_to_view
-            .range(base_block_number + 1..block_number)
-            .map(|(_, view)| view.1.clone())
-            .collect();
-        let trie_updates_vec: Vec<_> = storage
-            .block_number_to_trie_updates
-            .range(base_block_number + 1..block_number)
-            .map(|(_, trie_updates)| trie_updates.clone())
-            .collect();
-        let hashed_state = storage.block_number_to_view.get(&block_number).unwrap().1.clone();
-        drop(storage);
+        let hashed_state = {
+            let storage = self.inner.lock().unwrap();
+            storage.block_number_to_view.get(&block_number).unwrap().1.clone()
+        };
 
-        // Block number should be continuous
-        assert_eq!(hashed_state_vec.len() as u64, block_number - base_block_number - 1);
-        assert_eq!(trie_updates_vec.len() as u64, block_number - base_block_number - 1);
+        let (state_root, trie_updates) = 
+            if self.legacy_state_root {
+                let consistent_view = ConsistentDbView::new_with_latest_tip(
+                    self.client.clone(),
+                )
+                .unwrap();
+                let (base_block_hash, base_block_number) = consistent_view.tip.unwrap();
+                let mut input = TrieInput::default();
+                let revert_state = consistent_view.revert_state_with_block_number(base_block_hash, base_block_number).unwrap();
+                input.append(revert_state);
 
-        // TODO: implement parallel state root calculation
-        let state_provider = get_state_provider(&self.client, base_block_hash, false)?;
-        let (state_root, trie_updates) = state_provider
-            .state_root_with_updates_v2(
-                hashed_state.as_ref().clone(),
-                hashed_state_vec,
-                trie_updates_vec,
-            )
-            .unwrap();
+                let (hashed_state_vec, trie_updates_vec) = {
+                    let storage = self.inner.lock().unwrap();
+                    get_historical_states(&storage, base_block_number, block_number)
+                };
+
+                // Extend with contents of parent in-memory blocks
+                for (hashed_state, trie_update) in hashed_state_vec.iter().zip(trie_updates_vec.iter()) {
+                    input.append_cached_ref(trie_update.as_ref(), hashed_state.as_ref());
+                }
+                // Extend with block we are validating root for.
+                input.append_ref(hashed_state.as_ref());
+
+                ParallelStateRoot::new(consistent_view, input).incremental_root_with_updates().unwrap()
+            } else {
+                let storage = self.inner.lock().unwrap();
+                let (base_block_hash, base_block_number) = storage.state_provider_info;
+                let (hashed_state_vec, trie_updates_vec) = {
+                    let storage = self.inner.lock().unwrap();
+                    get_historical_states(&storage, base_block_number, block_number)
+                };
+
+                // Block number should be continuous
+                assert_eq!(hashed_state_vec.len() as u64, block_number - base_block_number - 1);
+                assert_eq!(trie_updates_vec.len() as u64, block_number - base_block_number - 1);
+                let state_provider = get_state_provider(&self.client, base_block_hash, false)?;
+                state_provider
+                    .state_root_with_updates_v2(
+                        hashed_state.as_ref().clone(),
+                        hashed_state_vec,
+                        trie_updates_vec,
+                    )
+                    .unwrap()
+            };
         let trie_updates = Arc::new(trie_updates);
 
         {
