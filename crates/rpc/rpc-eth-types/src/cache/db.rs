@@ -51,8 +51,8 @@ impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper<'_> {
         &self,
         state: reth_trie::HashedPostState,
         hashed_state_vec: Vec<Arc<reth_trie::HashedPostState>>,
-        trie_updates_vec:Vec<Arc<reth_trie::updates::TrieUpdates>>,
-    ) -> ProviderResult<(B256, reth_trie::updates::TrieUpdates)>  {
+        trie_updates_vec: Vec<Arc<reth_trie::updates::TrieUpdates>>,
+    ) -> ProviderResult<(B256, reth_trie::updates::TrieUpdates)> {
         todo!()
     }
 }

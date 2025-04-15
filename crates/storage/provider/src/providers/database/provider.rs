@@ -57,7 +57,7 @@ use reth_prune_types::{
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
     BlockBodyIndicesProvider, BlockBodyReader, NodePrimitivesProvider, OmmersProvider,
-    StateProvider, StorageChangeSetReader, TryIntoHistoricalStateProvider,
+    PersistBlockCache, StateProvider, StorageChangeSetReader, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
@@ -160,7 +160,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
     /// State provider for latest state
     pub fn latest<'a>(&'a self) -> Box<dyn StateProvider + 'a> {
         trace!(target: "providers::db", "Returning latest state provider");
-        Box::new(LatestStateProviderRef::new(self))
+        Box::new(LatestStateProviderRef::new(self, None))
     }
 
     /// Storage provider for state at that given block hash
@@ -173,7 +173,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
         if block_number == self.best_block_number().unwrap_or_default() &&
             block_number == self.last_block_number().unwrap_or_default()
         {
-            return Ok(Box::new(LatestStateProviderRef::new(self)))
+            return Ok(Box::new(LatestStateProviderRef::new(self, None)))
         }
 
         // +1 as the changeset that we want is the one that was applied after this block.
@@ -374,11 +374,12 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
     fn try_into_history_at_block(
         self,
         mut block_number: BlockNumber,
+        cache: Option<PersistBlockCache>,
     ) -> ProviderResult<StateProviderBox> {
         if block_number == self.best_block_number().unwrap_or_default() &&
             block_number == self.last_block_number().unwrap_or_default()
         {
-            return Ok(Box::new(LatestStateProvider::new(self)))
+            return Ok(Box::new(LatestStateProvider::new(self, cache)))
         }
 
         // +1 as the changeset that we want is the one that was applied after this block.

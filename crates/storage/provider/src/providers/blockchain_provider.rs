@@ -145,7 +145,9 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
         opts: StateProviderOptions,
     ) -> ProviderResult<MemoryOverlayStateProvider<N::Primitives>> {
         let anchor_hash = state.anchor().hash;
-        let latest_historical = self.database.history_by_block_hash(anchor_hash, opts)?;
+        let cache = self.canonical_in_memory_state.persist_block_cache();
+        let latest_historical =
+            self.database.history_by_block_hash(anchor_hash, opts.with_cache(cache))?;
         Ok(state.state_provider(latest_historical))
     }
 

@@ -34,7 +34,7 @@ use reth_network::{
 };
 use reth_network_peers::{mainnet_nodes, TrustedPeer};
 use secp256k1::SecretKey;
-use tracing::{error, debug};
+use tracing::{debug, error};
 
 use crate::version::P2P_CLIENT_VERSION;
 

@@ -5,7 +5,6 @@
 ///
 /// Used to implement provider traits.
 
-
 macro_rules! delegate_impls_to_as_ref {
     (for $target:ty => $($trait:ident $(where [$($generics:tt)*])? {  $(fn $func:ident$(<$($generic_arg:ident: $generic_arg_ty:path),*>)?(&self, $($arg:ident: $argty:ty),*) -> $ret:path;)* })* ) => {
 

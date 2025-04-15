@@ -1,4 +1,6 @@
-use crate::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory, PrefixSetLoader};
+use crate::{
+    DatabaseHashedCursorFactory, DatabaseTrieCursorFactory, PrefixSetLoader, TrieCacheReader,
+};
 use alloy_primitives::{
     map::{AddressMap, B256Map},
     Address, BlockNumber, B256, U256,
@@ -116,9 +118,10 @@ pub trait DatabaseStateRoot<'a, TX>: Sized {
 
     /// Calculates the state root and trie updates for provided [`HashedPostState`] using
     /// cached intermediate nodes.
-    fn overlay_root_from_nodes_with_updates(
+    fn overlay_root_from_nodes_with_updates<R: TrieCacheReader>(
         tx: &'a TX,
         input: TrieInput,
+        cache: Option<R>,
     ) -> Result<(B256, TrieUpdates), StateRootError>;
 }
 
@@ -204,15 +207,22 @@ impl<'a, TX: DbTx> DatabaseStateRoot<'a, TX>
         .root()
     }
 
-    fn overlay_root_from_nodes_with_updates(
+    fn overlay_root_from_nodes_with_updates<R: TrieCacheReader>(
         tx: &'a TX,
         input: TrieInput,
+        cache: Option<R>,
     ) -> Result<(B256, TrieUpdates), StateRootError> {
         let state_sorted = input.state.into_sorted();
         let nodes_sorted = input.nodes.into_sorted();
         StateRoot::new(
-            InMemoryTrieCursorFactory::new(DatabaseTrieCursorFactory::new(tx), &nodes_sorted),
-            HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(tx), &state_sorted),
+            InMemoryTrieCursorFactory::new(
+                DatabaseTrieCursorFactory::with_cache(tx, cache.clone()),
+                &nodes_sorted,
+            ),
+            HashedPostStateCursorFactory::new(
+                DatabaseHashedCursorFactory::with_cache(tx, cache),
+                &state_sorted,
+            ),
         )
         .with_prefix_sets(input.prefix_sets.freeze())
         .root_with_updates()
