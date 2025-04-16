@@ -19,20 +19,29 @@ use std::{
 #[derive(Metrics)]
 #[metrics(scope = "storage")]
 struct CacheMetrics {
-    /// Hit ratio
-    cache_hit_ratio: Histogram,
+    /// Block cache hit ratio
+    block_cache_hit_ratio: Histogram,
+    /// Trie cache hit ratio
+    trie_cache_hit_ratio: Histogram,
     /// Number of cached items
     cache_num_items: Histogram,
 }
 
 #[derive(Default)]
 struct CacheMetricsReporter {
-    visit_cnt: AtomicU64,
-    hit_cnt: AtomicU64,
+    block_cache_hit_record: HitRecorder,
+    trie_cache_hit_record: HitRecorder,
     cached_items: AtomicU64,
+    metrics: CacheMetrics,
 }
 
-impl CacheMetricsReporter {
+#[derive(Default)]
+struct HitRecorder {
+    visit_cnt: AtomicU64,
+    hit_cnt: AtomicU64,
+}
+
+impl HitRecorder {
     fn visit(&self) {
         self.visit_cnt.fetch_add(1, Ordering::Relaxed);
     }
@@ -41,20 +50,24 @@ impl CacheMetricsReporter {
         self.hit_cnt.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn report(&self) -> f64 {
+        let visit_cnt = self.visit_cnt.swap(0, Ordering::Relaxed);
+        let hit_cnt = self.hit_cnt.swap(0, Ordering::Relaxed);
+        let hit_ratio = if visit_cnt > 0 { hit_cnt as f64 / visit_cnt as f64 } else { 1.0 };
+        hit_ratio
+    }
+}
+
+impl CacheMetricsReporter {
     fn cached_items(&self, num: u64) {
         self.cached_items.store(num, Ordering::Relaxed);
     }
 
     fn report(&self) {
-        let metrics = CacheMetrics::default();
-        let visit_cnt = self.visit_cnt.load(Ordering::Relaxed);
-        let hit_cnt = self.hit_cnt.load(Ordering::Relaxed);
-        let hit_ratio = if visit_cnt > 0 { hit_cnt as f64 / visit_cnt as f64 } else { 0.0 };
+        self.metrics.block_cache_hit_ratio.record(self.block_cache_hit_record.report());
+        self.metrics.trie_cache_hit_ratio.record(self.trie_cache_hit_record.report());
         let cached_items = self.cached_items.load(Ordering::Relaxed) as f64;
-        metrics.cache_hit_ratio.record(hit_ratio);
-        metrics.cache_num_items.record(cached_items);
-        self.visit_cnt.fetch_sub(visit_cnt, Ordering::Relaxed);
-        self.hit_cnt.fetch_sub(hit_cnt, Ordering::Relaxed);
+        self.metrics.cache_num_items.record(cached_items);
     }
 }
 
@@ -170,10 +183,10 @@ impl Default for PersistBlockCache {
 
 impl TrieCacheReader for PersistBlockCache {
     fn hashed_account(&self, hash_address: B256) -> Option<Account> {
-        self.inner.metrics.visit();
+        self.inner.metrics.trie_cache_hit_record.visit();
         self.cache.get(&CacheKey::HashAccount(hash_address)).and_then(|v| match v {
             CacheValue::HashAccount(account) => {
-                self.inner.metrics.hit();
+                self.inner.metrics.trie_cache_hit_record.hit();
                 Some(account)
             }
             _ => None,
@@ -181,10 +194,10 @@ impl TrieCacheReader for PersistBlockCache {
     }
 
     fn hashed_storage(&self, hash_address: B256, hash_slot: B256) -> Option<U256> {
-        self.inner.metrics.visit();
+        self.inner.metrics.trie_cache_hit_record.visit();
         self.cache.get(&CacheKey::HashStorage(hash_address, hash_slot)).and_then(|v| match v {
             CacheValue::HashStorage(value) => {
-                self.inner.metrics.hit();
+                self.inner.metrics.trie_cache_hit_record.hit();
                 Some(value)
             }
             _ => None,
@@ -192,10 +205,10 @@ impl TrieCacheReader for PersistBlockCache {
     }
 
     fn trie_account(&self, nibbles: Nibbles) -> Option<BranchNodeCompact> {
-        self.inner.metrics.visit();
+        self.inner.metrics.trie_cache_hit_record.visit();
         self.cache.get(&CacheKey::TrieAccout(nibbles)).and_then(|v| match v {
             CacheValue::TrieAccout(branch) => {
-                self.inner.metrics.hit();
+                self.inner.metrics.trie_cache_hit_record.hit();
                 Some(branch)
             }
             _ => None,
@@ -203,10 +216,10 @@ impl TrieCacheReader for PersistBlockCache {
     }
 
     fn trie_storage(&self, hash_address: B256, nibbles: Nibbles) -> Option<BranchNodeCompact> {
-        self.inner.metrics.visit();
+        self.inner.metrics.trie_cache_hit_record.visit();
         self.cache.get(&CacheKey::TrieStorage(hash_address, nibbles)).and_then(|v| match v {
             CacheValue::TrieStorage(branch) => {
-                self.inner.metrics.hit();
+                self.inner.metrics.trie_cache_hit_record.hit();
                 Some(branch)
             }
             _ => None,
@@ -216,10 +229,10 @@ impl TrieCacheReader for PersistBlockCache {
 
 impl PersistBlockCache {
     pub fn basic_account(&self, address: &Address) -> Option<Account> {
-        self.inner.metrics.visit();
+        self.inner.metrics.block_cache_hit_record.visit();
         self.cache.get(&CacheKey::StateAccount(*address)).and_then(|v| match v {
             CacheValue::StateAccount(account) => {
-                self.inner.metrics.hit();
+                self.inner.metrics.block_cache_hit_record.hit();
                 Some(account)
             }
             _ => None,
@@ -227,10 +240,10 @@ impl PersistBlockCache {
     }
 
     pub fn bytecode_by_hash(&self, code_hash: &B256) -> Option<Bytecode> {
-        self.inner.metrics.visit();
+        self.inner.metrics.block_cache_hit_record.visit();
         self.cache.get(&CacheKey::StateContract(*code_hash)).and_then(|v| match v {
             CacheValue::StateContract(code) => {
-                self.inner.metrics.hit();
+                self.inner.metrics.block_cache_hit_record.hit();
                 Some(code)
             }
             _ => None,
@@ -238,10 +251,10 @@ impl PersistBlockCache {
     }
 
     pub fn storage(&self, address: Address, slot: B256) -> Option<U256> {
-        self.inner.metrics.visit();
+        self.inner.metrics.block_cache_hit_record.visit();
         self.cache.get(&CacheKey::StateStorage(address, slot)).and_then(|v| match v {
             CacheValue::StateStorage(value) => {
-                self.inner.metrics.hit();
+                self.inner.metrics.block_cache_hit_record.hit();
                 Some(value)
             }
             _ => None,
