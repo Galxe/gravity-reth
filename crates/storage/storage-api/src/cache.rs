@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, B256, U256};
 use core::sync::atomic::{AtomicU64, Ordering};
 use dashmap::{DashMap, DashSet};
-use metrics::Histogram;
+use metrics::{Gauge, Histogram};
 use metrics_derive::Metrics;
 use moka::sync::Cache;
 use reth_primitives::{Account, Bytecode};
@@ -20,11 +20,11 @@ use std::{
 #[metrics(scope = "storage")]
 struct CacheMetrics {
     /// Block cache hit ratio
-    block_cache_hit_ratio: Histogram,
+    block_cache_hit_ratio: Gauge,
     /// Trie cache hit ratio
-    trie_cache_hit_ratio: Histogram,
+    trie_cache_hit_ratio: Gauge,
     /// Number of cached items
-    cache_num_items: Histogram,
+    cache_num_items: Gauge,
 }
 
 #[derive(Default)]
@@ -50,11 +50,14 @@ impl HitRecorder {
         self.hit_cnt.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn report(&self) -> f64 {
+    fn report(&self) -> Option<f64> {
         let visit_cnt = self.visit_cnt.swap(0, Ordering::Relaxed);
         let hit_cnt = self.hit_cnt.swap(0, Ordering::Relaxed);
-        let hit_ratio = if visit_cnt > 0 { hit_cnt as f64 / visit_cnt as f64 } else { 1.0 };
-        hit_ratio
+        if visit_cnt > 0 {
+            Some(hit_cnt as f64 / visit_cnt as f64)
+        } else {
+            None
+        }
     }
 }
 
@@ -64,10 +67,14 @@ impl CacheMetricsReporter {
     }
 
     fn report(&self) {
-        self.metrics.block_cache_hit_ratio.record(self.block_cache_hit_record.report());
-        self.metrics.trie_cache_hit_ratio.record(self.trie_cache_hit_record.report());
+        if let Some(hit_ratio) = self.block_cache_hit_record.report() {
+            self.metrics.block_cache_hit_ratio.set(hit_ratio);
+        }
+        if let Some(hit_ratio) = self.trie_cache_hit_record.report() {
+            self.metrics.trie_cache_hit_ratio.set(hit_ratio);
+        }
         let cached_items = self.cached_items.load(Ordering::Relaxed) as f64;
-        self.metrics.cache_num_items.record(cached_items);
+        self.metrics.cache_num_items.set(cached_items);
     }
 }
 
