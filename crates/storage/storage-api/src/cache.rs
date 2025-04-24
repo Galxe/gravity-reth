@@ -37,13 +37,13 @@ struct CacheMetricsReporter {
 
 #[derive(Default)]
 struct HitRecorder {
-    visit_cnt: AtomicU64,
+    not_hit_cnt: AtomicU64,
     hit_cnt: AtomicU64,
 }
 
 impl HitRecorder {
-    fn visit(&self) {
-        self.visit_cnt.fetch_add(1, Ordering::Relaxed);
+    fn not_hit(&self) {
+        self.not_hit_cnt.fetch_add(1, Ordering::Relaxed);
     }
 
     fn hit(&self) {
@@ -51,8 +51,9 @@ impl HitRecorder {
     }
 
     fn report(&self) -> Option<f64> {
-        let visit_cnt = self.visit_cnt.swap(0, Ordering::Relaxed);
+        let not_hit_cnt = self.not_hit_cnt.swap(0, Ordering::Relaxed);
         let hit_cnt = self.hit_cnt.swap(0, Ordering::Relaxed);
+        let visit_cnt = not_hit_cnt + hit_cnt;
         if visit_cnt > 0 {
             Some(hit_cnt as f64 / visit_cnt as f64)
         } else {
@@ -190,82 +191,110 @@ impl Default for PersistBlockCache {
 
 impl TrieCacheReader for PersistBlockCache {
     fn hashed_account(&self, hash_address: B256) -> Option<Account> {
-        self.inner.metrics.trie_cache_hit_record.visit();
-        self.cache.get(&CacheKey::HashAccount(hash_address)).and_then(|v| match v {
-            CacheValue::HashAccount(account) => {
-                self.inner.metrics.trie_cache_hit_record.hit();
-                Some(account)
+        if let Some(cached) = self.cache.get(&CacheKey::HashAccount(hash_address)) {
+            match cached {
+                CacheValue::HashAccount(account) => {
+                    self.inner.metrics.trie_cache_hit_record.hit();
+                    Some(account)
+                }
+                _ => unreachable!("Unexpected cache value"),
             }
-            _ => None,
-        })
+        } else {
+            self.inner.metrics.trie_cache_hit_record.not_hit();
+            None
+        }
     }
 
     fn hashed_storage(&self, hash_address: B256, hash_slot: B256) -> Option<U256> {
-        self.inner.metrics.trie_cache_hit_record.visit();
-        self.cache.get(&CacheKey::HashStorage(hash_address, hash_slot)).and_then(|v| match v {
-            CacheValue::HashStorage(value) => {
-                self.inner.metrics.trie_cache_hit_record.hit();
-                Some(value)
+        if let Some(cached) = self.cache.get(&CacheKey::HashStorage(hash_address, hash_slot)) {
+            match cached {
+                CacheValue::HashStorage(value) => {
+                    self.inner.metrics.trie_cache_hit_record.hit();
+                    Some(value)
+                }
+                _ => unreachable!("Unexpected cache value"),
             }
-            _ => None,
-        })
+        } else {
+            self.inner.metrics.trie_cache_hit_record.not_hit();
+            None
+        }
     }
 
     fn trie_account(&self, nibbles: Nibbles) -> Option<BranchNodeCompact> {
-        self.inner.metrics.trie_cache_hit_record.visit();
-        self.cache.get(&CacheKey::TrieAccout(nibbles)).and_then(|v| match v {
-            CacheValue::TrieAccout(branch) => {
-                self.inner.metrics.trie_cache_hit_record.hit();
-                Some(branch)
+        if let Some(cached) = self.cache.get(&CacheKey::TrieAccout(nibbles)) {
+            match cached {
+                CacheValue::TrieAccout(branch) => {
+                    self.inner.metrics.trie_cache_hit_record.hit();
+                    Some(branch)
+                }
+                _ => unreachable!("Unexpected cache value"),
             }
-            _ => None,
-        })
+        } else {
+            self.inner.metrics.trie_cache_hit_record.not_hit();
+            None
+        }
     }
 
     fn trie_storage(&self, hash_address: B256, nibbles: Nibbles) -> Option<BranchNodeCompact> {
-        self.inner.metrics.trie_cache_hit_record.visit();
-        self.cache.get(&CacheKey::TrieStorage(hash_address, nibbles)).and_then(|v| match v {
-            CacheValue::TrieStorage(branch) => {
-                self.inner.metrics.trie_cache_hit_record.hit();
-                Some(branch)
+        if let Some(cached) = self.cache.get(&CacheKey::TrieStorage(hash_address, nibbles)) {
+            match cached {
+                CacheValue::TrieStorage(branch) => {
+                    self.inner.metrics.trie_cache_hit_record.hit();
+                    Some(branch)
+                }
+                _ => unreachable!("Unexpected cache value"),
             }
-            _ => None,
-        })
+        } else {
+            self.inner.metrics.trie_cache_hit_record.not_hit();
+            None
+        }
     }
 }
 
 impl PersistBlockCache {
     pub fn basic_account(&self, address: &Address) -> Option<Account> {
-        self.inner.metrics.block_cache_hit_record.visit();
-        self.cache.get(&CacheKey::StateAccount(*address)).and_then(|v| match v {
-            CacheValue::StateAccount(account) => {
-                self.inner.metrics.block_cache_hit_record.hit();
-                Some(account)
+        if let Some(cached) = self.cache.get(&CacheKey::StateAccount(*address)) {
+            match cached {
+                CacheValue::StateAccount(account) => {
+                    self.inner.metrics.block_cache_hit_record.hit();
+                    Some(account)
+                }
+                _ => unreachable!("Unexpected cache value"),
             }
-            _ => None,
-        })
+        } else {
+            self.inner.metrics.block_cache_hit_record.not_hit();
+            None
+        }
     }
 
     pub fn bytecode_by_hash(&self, code_hash: &B256) -> Option<Bytecode> {
-        self.inner.metrics.block_cache_hit_record.visit();
-        self.cache.get(&CacheKey::StateContract(*code_hash)).and_then(|v| match v {
-            CacheValue::StateContract(code) => {
-                self.inner.metrics.block_cache_hit_record.hit();
-                Some(code)
+        if let Some(cached) = self.cache.get(&CacheKey::StateContract(*code_hash)) {
+            match cached {
+                CacheValue::StateContract(code) => {
+                    self.inner.metrics.block_cache_hit_record.hit();
+                    Some(code)
+                }
+                _ => unreachable!("Unexpected cache value"),
             }
-            _ => None,
-        })
+        } else {
+            self.inner.metrics.block_cache_hit_record.not_hit();
+            None
+        }
     }
 
     pub fn storage(&self, address: Address, slot: B256) -> Option<U256> {
-        self.inner.metrics.block_cache_hit_record.visit();
-        self.cache.get(&CacheKey::StateStorage(address, slot)).and_then(|v| match v {
-            CacheValue::StateStorage(value) => {
-                self.inner.metrics.block_cache_hit_record.hit();
-                Some(value)
+        if let Some(cached) = self.cache.get(&CacheKey::StateStorage(address, slot)) {
+            match cached {
+                CacheValue::StateStorage(value) => {
+                    self.inner.metrics.block_cache_hit_record.hit();
+                    Some(value)
+                }
+                _ => unreachable!("Unexpected cache value"),
             }
-            _ => None,
-        })
+        } else {
+            self.inner.metrics.block_cache_hit_record.not_hit();
+            None
+        }
     }
 
     pub fn clear(&self) {
