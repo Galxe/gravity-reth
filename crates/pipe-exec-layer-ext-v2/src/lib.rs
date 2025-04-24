@@ -142,6 +142,7 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
                 id=?ordered_block.id,
                 parent_id=?ordered_block.parent_id,
                 number=?ordered_block.number,
+                num_txs=?ordered_block.transactions.len(),
                 elapsed=?elapsed,
                 "new ordered block"
             );
