@@ -27,3 +27,4 @@ reth-trie-parallel.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
+once_cell.workspace = true
