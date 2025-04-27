@@ -18,13 +18,10 @@ pub struct EngineArgs {
     /// Configure the target number of blocks to keep in memory.
     #[arg(long = "engine.memory-block-buffer-target", default_value_t = DEFAULT_MEMORY_BLOCK_BUFFER_TARGET)]
     pub memory_block_buffer_target: u64,
+
     /// Enable legacy state root
     #[arg(long = "engine.legacy-state-root", default_value = "false")]
     pub legacy_state_root_task_enabled: bool,
-
-    // Enable parallel_state_root
-    #[arg(long = "engine.parallel-state-root", default_value = "false")]
-    pub parallel_state_root: bool,
 
     /// Enable state root task
     #[arg(long = "engine.state-root-task", default_value = "false", hide = true)]
@@ -54,7 +51,6 @@ impl Default for EngineArgs {
             state_root_task_compare_updates: false,
             caching_and_prewarming_enabled: false,
             cross_block_cache_size: DEFAULT_CROSS_BLOCK_CACHE_SIZE_MB,
-            parallel_state_root: false,
         }
     }
 }

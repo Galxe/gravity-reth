@@ -8,7 +8,6 @@ use reth_trie::HashedPostState;
 use reth_trie_db::{DatabaseHashedPostState, StateCommitment};
 
 pub use reth_storage_errors::provider::ConsistentViewError;
-use tracing::info;
 
 /// A consistent view over state in the database.
 ///
