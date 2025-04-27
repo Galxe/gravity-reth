@@ -19,6 +19,7 @@ use std::{
     collections::BTreeMap, hash::Hash, sync::{Arc, Mutex, MutexGuard}
 };
 use once_cell::sync::Lazy;
+use tracing::info;
 
 use crate::{GravityStorage, GravityStorageError};
 
@@ -69,6 +70,7 @@ where
         latest_block_hash: B256,
         block_number_to_id: BTreeMap<u64, B256>,
     ) -> Self {
+        info!("USE_PARALLEL_STATE_ROOT is {}", *USE_PARALLEL_STATE_ROOT);
         Self {
             client,
             inner: Mutex::new(BlockViewStorageInner::new(
