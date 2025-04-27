@@ -1,7 +1,7 @@
 use crate::{BlockNumReader, DatabaseProviderFactory, HeaderProvider};
 use alloy_primitives::B256;
 use reth_errors::ProviderError;
-use reth_storage_api::{DBProvider, StateCommitmentProvider};
+use reth_storage_api::{BlockHashReader, DBProvider, StateCommitmentProvider};
 use reth_storage_errors::provider::ProviderResult;
 
 use reth_trie::HashedPostState;
@@ -27,7 +27,7 @@ pub use reth_storage_errors::provider::ConsistentViewError;
 #[derive(Clone, Debug)]
 pub struct ConsistentDbView<Factory> {
     factory: Factory,
-    tip: Option<(B256, u64)>,
+    pub tip: Option<(B256, u64)>,
 }
 
 impl<Factory> ConsistentDbView<Factory>
@@ -46,6 +46,19 @@ where
         let last_num = provider_ro.last_block_number()?;
         let tip = provider_ro.sealed_header(last_num)?.map(|h| (h.hash(), last_num));
         Ok(Self::new(provider, tip))
+    }
+
+    pub fn revert_state_with_block_number(&self, block_hash: B256, block_number: u64) -> ProviderResult<HashedPostState> {
+        let provider = self.provider_ro()?;
+        if block_number == provider.best_block_number()? &&
+            block_number == provider.last_block_number()?
+        {
+            Ok(HashedPostState::default())
+        } else {
+            Ok(HashedPostState::from_reverts::<
+                <Factory::StateCommitment as StateCommitment>::KeyHasher,
+            >(provider.tx_ref(), block_number + 1)?)
+        }
     }
 
     /// Retrieve revert hashed state down to the given block hash.
