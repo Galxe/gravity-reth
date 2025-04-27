@@ -1,5 +1,7 @@
+use once_cell::sync::Lazy;
 use reth_provider::{
-    providers::ConsistentDbView, BlockNumReader, BlockReader, DatabaseProviderFactory, HeaderProvider, StateCommitmentProvider
+    providers::ConsistentDbView, BlockNumReader, BlockReader, DatabaseProviderFactory,
+    HeaderProvider, StateCommitmentProvider,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{
@@ -16,14 +18,16 @@ use revm::{
     DatabaseRef,
 };
 use std::{
-    collections::BTreeMap, hash::Hash, sync::{Arc, Mutex, MutexGuard}
+    collections::BTreeMap,
+    hash::Hash,
+    sync::{Arc, Mutex, MutexGuard},
 };
-use once_cell::sync::Lazy;
 use tracing::info;
 
 use crate::{GravityStorage, GravityStorageError};
 
-static USE_PARALLEL_STATE_ROOT: Lazy<bool> = Lazy::new(|| std::env::var("USE_PARALLEL_STATE_ROOT").is_ok());
+static USE_PARALLEL_STATE_ROOT: Lazy<bool> =
+    Lazy::new(|| std::env::var("USE_PARALLEL_STATE_ROOT").is_ok());
 
 pub struct BlockViewStorage<Client> {
     client: Client,
@@ -112,7 +116,7 @@ impl BlockViewStorageInner {
 
 // Extract common function to get historical states
 fn get_historical_states(
-    storage: &MutexGuard<'_, BlockViewStorageInner>,
+    storage: &BlockViewStorageInner,
     base_block_number: u64,
     block_number: u64,
 ) -> (Vec<Arc<HashedPostState>>, Vec<Arc<TrieUpdates>>) {
@@ -121,13 +125,13 @@ fn get_historical_states(
         .range(base_block_number + 1..block_number)
         .map(|(_, view)| view.1.clone())
         .collect();
-        
+
     let trie_updates_vec: Vec<_> = storage
         .block_number_to_trie_updates
         .range(base_block_number + 1..block_number)
         .map(|(_, trie_updates)| trie_updates.clone())
         .collect();
-        
+
     (hashed_state_vec, trie_updates_vec)
 }
 
@@ -247,48 +251,48 @@ where
             storage.block_number_to_view.get(&block_number).unwrap().1.clone()
         };
 
-        let (state_root, trie_updates) = 
-            if *USE_PARALLEL_STATE_ROOT {
-                let consistent_view = ConsistentDbView::new_with_best_tip(
-                    self.client.clone(),
-                )
+        let (state_root, trie_updates) = if *USE_PARALLEL_STATE_ROOT {
+            let consistent_view = ConsistentDbView::new_with_best_tip(self.client.clone()).unwrap();
+            let (_, base_block_number) = consistent_view.tip.unwrap();
+            let mut input = TrieInput::default();
+            let revert_state = consistent_view
+                .revert_state_with_block_number(base_block_hash, base_block_number)
                 .unwrap();
-                let (_, base_block_number) = consistent_view.tip.unwrap();
-                let mut input = TrieInput::default();
+            input.append(revert_state);
 
-                let (hashed_state_vec, trie_updates_vec) = {
-                    let storage = self.inner.lock().unwrap();
-                    get_historical_states(&storage, base_block_number, block_number)
-                };
-
-                // Extend with contents of parent in-memory blocks
-                for (hashed_state, trie_update) in hashed_state_vec.iter().zip(trie_updates_vec.iter()) {
-                    input.append_cached_ref(trie_update.as_ref(), hashed_state.as_ref());
-                }
-                // Extend with block we are validating root for.
-                input.append_ref(hashed_state.as_ref());
-
-                ParallelStateRoot::new(consistent_view, input).incremental_root_with_updates().unwrap()
-            } else {
+            let (hashed_state_vec, trie_updates_vec) = {
                 let storage = self.inner.lock().unwrap();
-                let (base_block_hash, base_block_number) = storage.state_provider_info;
-                let (hashed_state_vec, trie_updates_vec) = {
-                    get_historical_states(&storage, base_block_number, block_number)
-                };
-                drop(storage);
-
-                // Block number should be continuous
-                assert_eq!(hashed_state_vec.len() as u64, block_number - base_block_number - 1);
-                assert_eq!(trie_updates_vec.len() as u64, block_number - base_block_number - 1);
-                let state_provider = get_state_provider(&self.client, base_block_hash, false)?;
-                state_provider
-                    .state_root_with_updates_v2(
-                        hashed_state.as_ref().clone(),
-                        hashed_state_vec,
-                        trie_updates_vec,
-                    )
-                    .unwrap()
+                get_historical_states(&storage, base_block_number, block_number)
             };
+
+            // Extend with contents of parent in-memory blocks
+            for (hashed_state, trie_update) in hashed_state_vec.iter().zip(trie_updates_vec.iter())
+            {
+                input.append_cached_ref(trie_update.as_ref(), hashed_state.as_ref());
+            }
+            // Extend with block we are validating root for.
+            input.append_ref(hashed_state.as_ref());
+
+            ParallelStateRoot::new(consistent_view, input).incremental_root_with_updates().unwrap()
+        } else {
+            let storage = self.inner.lock().unwrap();
+            let (base_block_hash, base_block_number) = storage.state_provider_info;
+            let (hashed_state_vec, trie_updates_vec) =
+                { get_historical_states(&storage, base_block_number, block_number) };
+            drop(storage);
+
+            // Block number should be continuous
+            assert_eq!(hashed_state_vec.len() as u64, block_number - base_block_number - 1);
+            assert_eq!(trie_updates_vec.len() as u64, block_number - base_block_number - 1);
+            let state_provider = get_state_provider(&self.client, base_block_hash, false)?;
+            state_provider
+                .state_root_with_updates_v2(
+                    hashed_state.as_ref().clone(),
+                    hashed_state_vec,
+                    trie_updates_vec,
+                )
+                .unwrap()
+        };
         let trie_updates = Arc::new(trie_updates);
 
         {
