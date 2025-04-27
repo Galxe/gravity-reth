@@ -18,7 +18,6 @@ use revm::{
 use std::{
     collections::BTreeMap, hash::Hash, sync::{Arc, Mutex, MutexGuard}
 };
-use tracing::info;
 
 use crate::{GravityStorage, GravityStorageError};
 
