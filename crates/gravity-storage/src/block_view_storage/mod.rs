@@ -25,7 +25,7 @@ use crate::{GravityStorage, GravityStorageError};
 pub struct BlockViewStorage<Client> {
     client: Client,
     inner: Mutex<BlockViewStorageInner>,
-    legacy_state_root: bool,
+    parallel_state_root: bool,
 }
 
 struct BlockViewStorageInner {
@@ -67,7 +67,7 @@ where
         latest_block_number: u64,
         latest_block_hash: B256,
         block_number_to_id: BTreeMap<u64, B256>,
-        legacy_state_root: bool,
+        parallel_state_root: bool,
     ) -> Self {
         Self {
             client,
@@ -76,7 +76,7 @@ where
                 latest_block_hash,
                 block_number_to_id,
             )),
-            legacy_state_root,
+            parallel_state_root,
         }
     }
 }
@@ -214,7 +214,7 @@ where
     fn update_canonical(&self, block_number: u64, block_hash: B256) {
         let mut storage = self.inner.lock().unwrap();
         let gc_block_number = storage.state_provider_info.1;
-        if self.legacy_state_root {
+        if self.parallel_state_root {
             let provider_ro = self.client.database_provider_ro().unwrap();
             let last_num = provider_ro.last_block_number().unwrap();
             if last_num > gc_block_number {
@@ -247,7 +247,7 @@ where
         };
 
         let (state_root, trie_updates) = 
-            if self.legacy_state_root {
+            if self.parallel_state_root {
                 let consistent_view = ConsistentDbView::new_with_latest_tip(
                     self.client.clone(),
                 )
