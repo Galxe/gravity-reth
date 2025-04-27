@@ -28,3 +28,5 @@ tracing.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 once_cell.workspace = true
+reth-metrics.workspace = true
+metrics.workspace = true

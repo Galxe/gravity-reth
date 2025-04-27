@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use reth_metrics::{metrics::Histogram, Metrics};
 use reth_provider::{
     providers::ConsistentDbView, BlockNumReader, BlockReader, DatabaseProviderFactory,
     HeaderProvider, StateCommitmentProvider,
@@ -21,6 +22,7 @@ use std::{
     collections::BTreeMap,
     hash::Hash,
     sync::{Arc, Mutex, MutexGuard},
+    time::Instant,
 };
 use tracing::info;
 
@@ -29,9 +31,19 @@ use crate::{GravityStorage, GravityStorageError};
 static USE_PARALLEL_STATE_ROOT: Lazy<bool> =
     Lazy::new(|| std::env::var("USE_PARALLEL_STATE_ROOT").is_ok());
 
+#[derive(Metrics)]
+#[metrics(scope = "block_view_storage")]
+struct BlockViewStorageMetrics {
+    /// How long it took for parallel state root calculation
+    parallel_state_root_duration: Histogram,
+    /// How long it took for parallel state root input calculation
+    parallel_state_root_input_duration: Histogram,
+}
+
 pub struct BlockViewStorage<Client> {
     client: Client,
     inner: Mutex<BlockViewStorageInner>,
+    metrics: BlockViewStorageMetrics,
 }
 
 struct BlockViewStorageInner {
@@ -82,6 +94,7 @@ where
                 latest_block_hash,
                 block_number_to_id,
             )),
+            metrics: BlockViewStorageMetrics::default(),
         }
     }
 }
@@ -254,6 +267,7 @@ where
         let (state_root, trie_updates) = if *USE_PARALLEL_STATE_ROOT {
             let consistent_view = ConsistentDbView::new_with_best_tip(self.client.clone()).unwrap();
             let (_, base_block_number) = consistent_view.tip.unwrap();
+            let start_time = Instant::now();
             let mut input = TrieInput::default();
             let revert_state = consistent_view
                 .revert_state_with_block_number(base_block_hash, base_block_number)
@@ -272,8 +286,14 @@ where
             }
             // Extend with block we are validating root for.
             input.append_ref(hashed_state.as_ref());
+            self.metrics.parallel_state_root_input_duration.record(start_time.elapsed());
 
-            ParallelStateRoot::new(consistent_view, input).incremental_root_with_updates().unwrap()
+            let start_time = Instant::now();
+            let result = ParallelStateRoot::new(consistent_view, input)
+                .incremental_root_with_updates()
+                .unwrap();
+            self.metrics.parallel_state_root_duration.record(start_time.elapsed());
+            result
         } else {
             let storage = self.inner.lock().unwrap();
             let (base_block_hash, base_block_number) = storage.state_provider_info;
