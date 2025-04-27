@@ -21,7 +21,7 @@ use revm::{
 use std::{
     collections::BTreeMap,
     hash::Hash,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 use tracing::info;
@@ -51,6 +51,7 @@ struct BlockViewStorageInner {
     block_number_to_view: BTreeMap<u64, (Arc<BlockView>, Arc<HashedPostState>)>,
     block_number_to_trie_updates: BTreeMap<u64, Arc<TrieUpdates>>,
     block_number_to_id: BTreeMap<u64, B256>,
+    trie_input_cache: Option<TrieInputCache>,
 }
 
 fn get_state_provider<Client: StateProviderFactory + 'static>(
@@ -106,6 +107,7 @@ impl BlockViewStorageInner {
             block_number_to_view: BTreeMap::new(),
             block_number_to_trie_updates: BTreeMap::new(),
             block_number_to_id,
+            trie_input_cache: None,
         }
     }
 
@@ -146,6 +148,13 @@ fn get_historical_states(
         .collect();
 
     (hashed_state_vec, trie_updates_vec)
+}
+
+#[derive(Default, Debug, Clone)]
+struct TrieInputCache {
+    trie_input: TrieInput,
+    base_block_number: u64,
+    last_block_number: u64,
 }
 
 impl<Client> GravityStorage for BlockViewStorage<Client>
@@ -268,24 +277,39 @@ where
             let consistent_view = ConsistentDbView::new_with_best_tip(self.client.clone()).unwrap();
             let (_, base_block_number) = consistent_view.tip.unwrap();
             let start_time = Instant::now();
-            let mut input = TrieInput::default();
-            let revert_state = consistent_view
-                .revert_state_with_block_number(base_block_hash, base_block_number)
-                .unwrap();
-            input.append(revert_state);
-
-            let (hashed_state_vec, trie_updates_vec) = {
-                let storage = self.inner.lock().unwrap();
-                get_historical_states(&storage, base_block_number, block_number)
+            let input_cache =
+                self.inner.lock().unwrap().trie_input_cache.take().and_then(|input_cache| {
+                    if input_cache.base_block_number == base_block_number {
+                        assert_eq!(input_cache.last_block_number + 1, block_number);
+                        Some(input_cache.trie_input)
+                    } else {
+                        assert!(input_cache.base_block_number < base_block_number);
+                        None
+                    }
+                });
+            let mut input = if let Some(input_cache) = input_cache {
+                input_cache
+            } else {
+                let mut input = TrieInput::default();
+                let (hashed_state_vec, trie_updates_vec) = {
+                    let storage = self.inner.lock().unwrap();
+                    get_historical_states(&storage, base_block_number, block_number)
+                };
+                // Extend with contents of parent in-memory blocks
+                for (hashed_state, trie_update) in
+                    hashed_state_vec.iter().zip(trie_updates_vec.iter())
+                {
+                    input.append_cached_ref(trie_update.as_ref(), hashed_state.as_ref());
+                }
+                input
             };
-
-            // Extend with contents of parent in-memory blocks
-            for (hashed_state, trie_update) in hashed_state_vec.iter().zip(trie_updates_vec.iter())
-            {
-                input.append_cached_ref(trie_update.as_ref(), hashed_state.as_ref());
-            }
             // Extend with block we are validating root for.
             input.append_ref(hashed_state.as_ref());
+            self.inner.lock().unwrap().trie_input_cache = Some(TrieInputCache {
+                trie_input: input.clone(),
+                base_block_number,
+                last_block_number: block_number,
+            });
             self.metrics.parallel_state_root_input_duration.record(start_time.elapsed());
 
             let start_time = Instant::now();
