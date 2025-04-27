@@ -54,6 +54,7 @@ impl Default for EngineArgs {
             state_root_task_compare_updates: false,
             caching_and_prewarming_enabled: false,
             cross_block_cache_size: DEFAULT_CROSS_BLOCK_CACHE_SIZE_MB,
+            parallel_state_root: false,
         }
     }
 }
