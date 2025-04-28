@@ -392,8 +392,8 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
             let change_set = execution_output.bundle.to_plain_state(OriginalValuesKnown::No);
             persist_block_cache.write_state_changes(change_set);
             // insert hashes and intermediate merkle nodes
-            persist_block_cache.write_hashed_state(Arc::unwrap_or_clone(hashed_state));
-            persist_block_cache.write_trie_updates(Arc::unwrap_or_clone(trie));
+            // persist_block_cache.write_hashed_state(Arc::unwrap_or_clone(hashed_state));
+            // persist_block_cache.write_trie_updates(Arc::unwrap_or_clone(trie));
 
             persist_block_cache.commit(block_number);
         }
