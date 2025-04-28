@@ -210,19 +210,13 @@ impl<'a, TX: DbTx> DatabaseStateRoot<'a, TX>
     fn overlay_root_from_nodes_with_updates<R: TrieCacheReader>(
         tx: &'a TX,
         input: TrieInput,
-        cache: Option<R>,
+        _cache: Option<R>,
     ) -> Result<(B256, TrieUpdates), StateRootError> {
         let state_sorted = input.state.into_sorted();
         let nodes_sorted = input.nodes.into_sorted();
         StateRoot::new(
-            InMemoryTrieCursorFactory::new(
-                DatabaseTrieCursorFactory::with_cache(tx, cache.clone()),
-                &nodes_sorted,
-            ),
-            HashedPostStateCursorFactory::new(
-                DatabaseHashedCursorFactory::with_cache(tx, cache),
-                &state_sorted,
-            ),
+            InMemoryTrieCursorFactory::new(DatabaseTrieCursorFactory::new(tx), &nodes_sorted),
+            HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(tx), &state_sorted),
         )
         .with_prefix_sets(input.prefix_sets.freeze())
         .root_with_updates()
