@@ -129,23 +129,24 @@ impl BlockViewStorageInner {
     }
 }
 
-// Extract common function to get historical states
+/// Get historical states from start block number (inclusive) to end block number (exclusive).
 fn get_historical_states(
     storage: &BlockViewStorageInner,
-    base_block_number: u64,
-    block_number: u64,
+    start: u64,
+    end: u64,
 ) -> (Vec<Arc<HashedPostState>>, Vec<Arc<TrieUpdates>>) {
-    let hashed_state_vec: Vec<_> = storage
-        .block_number_to_view
-        .range(base_block_number + 1..block_number)
-        .map(|(_, view)| view.1.clone())
-        .collect();
+    let hashed_state_vec: Vec<_> =
+        storage.block_number_to_view.range(start..end).map(|(_, view)| view.1.clone()).collect();
 
     let trie_updates_vec: Vec<_> = storage
         .block_number_to_trie_updates
-        .range(base_block_number + 1..block_number)
+        .range(start..end)
         .map(|(_, trie_updates)| trie_updates.clone())
         .collect();
+
+    // Block number should be continuous
+    assert_eq!(hashed_state_vec.len() as u64, end - start);
+    assert_eq!(trie_updates_vec.len() as u64, end - start);
 
     (hashed_state_vec, trie_updates_vec)
 }
@@ -280,20 +281,35 @@ where
             let input_cache =
                 self.inner.lock().unwrap().trie_input_cache.take().and_then(|input_cache| {
                     if input_cache.base_block_number == base_block_number {
-                        assert_eq!(input_cache.last_block_number + 1, block_number);
+                        assert_eq!(input_cache.last_block_number + 2, block_number);
                         Some(input_cache.trie_input)
                     } else {
                         assert!(input_cache.base_block_number < base_block_number);
                         None
                     }
                 });
-            let mut input = if let Some(input_cache) = input_cache {
-                input_cache
+            let mut input = if let Some(mut input) = input_cache {
+                let storage = self.inner.lock().unwrap();
+                // Extend with contents of the last in-memory block
+                let trie_updates = storage
+                    .block_number_to_trie_updates
+                    .get(&(block_number - 1))
+                    .unwrap_or_else(|| panic!("Block number {} not found", block_number))
+                    .clone();
+                let hashed_state = storage
+                    .block_number_to_view
+                    .get(&(block_number - 1))
+                    .unwrap_or_else(|| panic!("Block number {} not found", block_number))
+                    .1
+                    .clone();
+                drop(storage);
+                input.append_cached_ref(trie_updates.as_ref(), hashed_state.as_ref());
+                input
             } else {
                 let mut input = TrieInput::default();
                 let (hashed_state_vec, trie_updates_vec) = {
                     let storage = self.inner.lock().unwrap();
-                    get_historical_states(&storage, base_block_number, block_number)
+                    get_historical_states(&storage, base_block_number + 1, block_number)
                 };
                 // Extend with contents of parent in-memory blocks
                 for (hashed_state, trie_update) in
@@ -303,13 +319,13 @@ where
                 }
                 input
             };
-            // Extend with block we are validating root for.
-            input.append_ref(hashed_state.as_ref());
             self.inner.lock().unwrap().trie_input_cache = Some(TrieInputCache {
                 trie_input: input.clone(),
                 base_block_number,
-                last_block_number: block_number,
+                last_block_number: block_number - 1,
             });
+            // Extend with block we are validating root for.
+            input.append_ref(hashed_state.as_ref());
             self.metrics.parallel_state_root_input_duration.record(start_time.elapsed());
 
             let start_time = Instant::now();
@@ -322,12 +338,9 @@ where
             let storage = self.inner.lock().unwrap();
             let (base_block_hash, base_block_number) = storage.state_provider_info;
             let (hashed_state_vec, trie_updates_vec) =
-                { get_historical_states(&storage, base_block_number, block_number) };
+                get_historical_states(&storage, base_block_number + 1, block_number);
             drop(storage);
 
-            // Block number should be continuous
-            assert_eq!(hashed_state_vec.len() as u64, block_number - base_block_number - 1);
-            assert_eq!(trie_updates_vec.len() as u64, block_number - base_block_number - 1);
             let state_provider = get_state_provider(&self.client, base_block_hash, false)?;
             state_provider
                 .state_root_with_updates_v2(
