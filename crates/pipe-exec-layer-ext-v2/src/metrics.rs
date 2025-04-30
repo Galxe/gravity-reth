@@ -17,6 +17,8 @@ pub(crate) struct PipeExecLayerMetrics {
     pub(crate) verify_duration: Histogram,
     /// How long it took for blocks to be made canonical
     pub(crate) make_canonical_duration: Histogram,
+    /// How long it took for a block to be processed totally
+    pub(crate) process_block_duration: Histogram,
     /// Total gas used
     pub(crate) total_gas_used: Counter,
     /// Time difference between two adjacent ordered blocks received
