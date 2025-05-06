@@ -149,7 +149,9 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
 
             let core = self.core.clone();
             tokio::spawn(async move {
+                let start_time = Instant::now();
                 core.process(ordered_block).await;
+                core.metrics.process_block_duration.record(start_time.elapsed());
             });
         }
     }

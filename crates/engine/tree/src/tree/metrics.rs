@@ -48,6 +48,8 @@ pub(crate) struct EngineMetrics {
     pub(crate) new_payload_messages: Counter,
     /// Histogram of persistence operation durations (in seconds)
     pub(crate) persistence_duration: Histogram,
+    /// Histogram of persistence operation durations per block (in seconds)
+    pub(crate) persistence_duration_per_block: Histogram,
     /// Tracks the how often we failed to deliver a newPayload response.
     ///
     /// This effectively tracks how often the message sender dropped the channel and indicates a CL
