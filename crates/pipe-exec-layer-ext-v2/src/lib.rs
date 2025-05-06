@@ -136,7 +136,16 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
                     return;
                 }
             };
-            self.core.metrics.recv_block_time_diff.record(start_time.elapsed());
+            let elapsed = start_time.elapsed();
+            self.core.metrics.recv_block_time_diff.record(elapsed);
+            info!(target: "PipeExecService.run",
+                id=?ordered_block.id,
+                parent_id=?ordered_block.parent_id,
+                number=?ordered_block.number,
+                num_txs=?ordered_block.transactions.len(),
+                elapsed=?elapsed,
+                "new ordered block"
+            );
 
             let core = self.core.clone();
             tokio::spawn(async move {
@@ -159,12 +168,6 @@ impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, ordered_block: OrderedBlock) {
         let block_number = ordered_block.number;
         let block_id = ordered_block.id;
-        debug!(target: "PipeExecService.process",
-            id=?block_id,
-            parent_id=?ordered_block.parent_id,
-            number=?block_number,
-            "new ordered block"
-        );
 
         self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
@@ -175,7 +178,15 @@ impl<Storage: GravityStorage> Core<Storage> {
         let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info } =
             self.execute_ordered_block(ordered_block, &parent_block_header);
         self.storage.insert_bundle_state(block_number, &execution_output.state);
-        self.metrics.execute_duration.record(start_time.elapsed());
+        let elapsed = start_time.elapsed();
+        info!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            gas_used=execution_output.gas_used,
+            elapsed=?elapsed,
+            "block executed"
+        );
+        self.metrics.execute_duration.record(elapsed);
         self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
         self.execute_block_barrier
             .notify(block_number, (block_without_roots.header().clone(), start_time))
@@ -189,21 +200,22 @@ impl<Storage: GravityStorage> Core<Storage> {
         let start_time = Instant::now();
         let (state_root, hashed_state, trie_updates) =
             self.storage.state_root_with_updates(block_number).unwrap();
-        self.metrics.merklize_duration.record(start_time.elapsed());
+        let elapsed = start_time.elapsed();
+        self.metrics.merklize_duration.record(elapsed);
         self.merklize_barrier.notify(block_number, ()).unwrap();
-        debug!(target: "PipeExecService.process",
+        info!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
             state_root=?state_root,
+            elapsed=?elapsed,
             "state trie merklized"
         );
         block.header.state_root = state_root;
 
+        // Seal the block
         let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
         block.header.parent_hash = parent_hash;
-
-        // Seal the block
         let sealed_block = block.seal_slow();
         let block_hash = sealed_block.hash();
         self.metrics.seal_duration.record(start_time.elapsed());
@@ -227,11 +239,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         })
         .await
         .unwrap();
-        self.metrics.verify_duration.record(start_time.elapsed());
-        debug!(target: "PipeExecService.process",
+        let elapsed = start_time.elapsed();
+        self.metrics.verify_duration.record(elapsed);
+        info!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
             block_hash=?block_hash,
+            elapsed=?elapsed,
             "block verified"
         );
 
@@ -249,8 +263,16 @@ impl<Storage: GravityStorage> Core<Storage> {
         ))
         .await;
         self.storage.update_canonical(block_number, block_hash);
+        let elapsed = start_time.elapsed();
+        info!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            block_hash=?block_hash,
+            elapsed=?elapsed,
+            "block made canonical"
+        );
         let finish_commit_time = Instant::now();
-        self.metrics.make_canonical_duration.record(start_time.elapsed());
+        self.metrics.make_canonical_duration.record(elapsed);
         self.metrics.finish_commit_time_diff.record(finish_commit_time - prev_finish_commit_time);
         self.make_canonical_barrier.notify(block_number, finish_commit_time).unwrap();
 
@@ -277,7 +299,7 @@ impl<Storage: GravityStorage> Core<Storage> {
     ) -> ExecuteOrderedBlockResult {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
 
-        debug!(target: "execute_ordered_block",
+        info!(target: "execute_ordered_block",
             id=?ordered_block.id,
             parent_id=?ordered_block.parent_id,
             number=?ordered_block.number,
@@ -365,13 +387,6 @@ impl<Storage: GravityStorage> Core<Storage> {
             panic!("failed to execute block {:?}: {:?}", ordered_block.id, err)
         });
 
-        debug!(target: "execute_ordered_block",
-            id=?ordered_block.id,
-            parent_id=?ordered_block.parent_id,
-            number=?ordered_block.number,
-            "block executed"
-        );
-
         ExecuteOrderedBlockResult {
             block_without_roots: recovered_block,
             execution_output: outcome,
@@ -422,8 +437,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         let (tx, rx) = oneshot::channel();
         self.event_tx.send(PipeExecLayerEvent::MakeCanonical(executed_block, tx)).unwrap();
         rx.await.unwrap();
-
-        debug!(target: "make_canonical", block_number=?block_number, "block made canonical");
     }
 
     fn init_storage(&self, execution_args: ExecutionArgs) {
