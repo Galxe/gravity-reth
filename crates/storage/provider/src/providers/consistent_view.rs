@@ -48,17 +48,12 @@ where
         Ok(Self::new(provider, tip))
     }
 
-    pub fn revert_state_with_block_number(&self, block_hash: B256, block_number: u64) -> ProviderResult<HashedPostState> {
-        let provider = self.provider_ro()?;
-        if block_number == provider.best_block_number()? &&
-            block_number == provider.last_block_number()?
-        {
-            Ok(HashedPostState::default())
-        } else {
-            Ok(HashedPostState::from_reverts::<
-                <Factory::StateCommitment as StateCommitment>::KeyHasher,
-            >(provider.tx_ref(), block_number + 1)?)
-        }
+    /// Creates new consistent database view with best tip.
+    pub fn new_with_best_tip(provider: Factory) -> ProviderResult<Self> {
+        let provider_ro = provider.database_provider_ro()?;
+        let last_num = provider_ro.best_block_number()?;
+        let tip = provider_ro.sealed_header(last_num)?.map(|h| (h.hash(), last_num));
+        Ok(Self::new(provider, tip))
     }
 
     /// Retrieve revert hashed state down to the given block hash.
