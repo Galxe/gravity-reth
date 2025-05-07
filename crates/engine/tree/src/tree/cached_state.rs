@@ -252,15 +252,6 @@ impl<S: StateRootProvider> StateRootProvider for CachedStateProvider<S> {
     ) -> ProviderResult<(B256, TrieUpdates)> {
         self.state_provider.state_root_with_updates(hashed_state)
     }
-
-    fn state_root_with_updates_v2(
-        &self,
-        state: HashedPostState,
-        hashed_state_vec: Vec<Arc<HashedPostState>>,
-        trie_updates_vec: Vec<Arc<TrieUpdates>>,
-    ) -> ProviderResult<(B256, TrieUpdates)> {
-        todo!()
-    }
 }
 
 impl<S: StateProofProvider> StateProofProvider for CachedStateProvider<S> {

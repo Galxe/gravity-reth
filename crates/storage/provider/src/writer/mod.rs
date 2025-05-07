@@ -165,6 +165,7 @@ where
             trie,
         } in blocks
         {
+            #[cfg(not(pipe_test))]
             self.database()
                 .insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
 

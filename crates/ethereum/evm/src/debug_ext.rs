@@ -8,7 +8,6 @@ use std::{
 
 use alloy_primitives::{Address, B256};
 use once_cell::sync::Lazy;
-use reth_primitives::Receipt;
 use reth_revm::{db::PlainAccount, CacheState, TransitionState};
 use revm_primitives::{EnvWithHandlerCfg, TxEnv};
 

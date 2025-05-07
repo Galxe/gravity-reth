@@ -166,15 +166,6 @@ impl StateRootProvider for ParallelStateProvider {
     ) -> ProviderResult<(B256, TrieUpdates)> {
         todo!()
     }
-
-    fn state_root_with_updates_v2(
-        &self,
-        state: HashedPostState,
-        hashed_state_vec: Vec<Arc<HashedPostState>>,
-        trie_updates_vec: Vec<Arc<TrieUpdates>>,
-    ) -> ProviderResult<(B256, TrieUpdates)> {
-        todo!()
-    }
 }
 
 #[allow(unused)]
