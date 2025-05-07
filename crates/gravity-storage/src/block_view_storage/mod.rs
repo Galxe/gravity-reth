@@ -217,7 +217,7 @@ where
         let gc_block_number = storage.state_provider_info.1;
         if *USE_PARALLEL_STATE_ROOT {
             let provider_ro = self.client.database_provider_ro().unwrap();
-            let last_num = provider_ro.last_block_number().unwrap();
+            let last_num = provider_ro.best_block_number().unwrap();
             if last_num > gc_block_number {
                 storage.state_provider_info = provider_ro
                     .sealed_header(last_num)
@@ -249,14 +249,12 @@ where
 
         let (state_root, trie_updates) = 
             if *USE_PARALLEL_STATE_ROOT {
-                let consistent_view = ConsistentDbView::new_with_latest_tip(
+                let consistent_view = ConsistentDbView::new_with_best_tip(
                     self.client.clone(),
                 )
                 .unwrap();
-                let (base_block_hash, base_block_number) = consistent_view.tip.unwrap();
+                let (_, base_block_number) = consistent_view.tip.unwrap();
                 let mut input = TrieInput::default();
-                let revert_state = consistent_view.revert_state_with_block_number(base_block_hash, base_block_number).unwrap();
-                input.append(revert_state);
 
                 let (hashed_state_vec, trie_updates_vec) = {
                     let storage = self.inner.lock().unwrap();
