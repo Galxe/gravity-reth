@@ -44,6 +44,9 @@ arbitrary = { workspace = true, features = ["derive"], optional = true }
 # misc
 rayon = { workspace = true, optional = true }
 
+# tracing
+tracing.workspace = true
+
 [dev-dependencies]
 reth-primitives-traits = { workspace = true, features = ["serde"] }
 reth-codecs.workspace = true

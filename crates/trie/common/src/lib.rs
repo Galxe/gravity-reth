@@ -37,6 +37,9 @@ pub use storage::StorageTrieEntry;
 mod subnode;
 pub use subnode::StoredSubNode;
 
+mod parallel_hash_builder;
+pub use parallel_hash_builder::ParallelHashBuilder;
+
 /// The implementation of a container for storing intermediate changes to a trie.
 /// The container indicates when the trie has been modified.
 pub mod prefix_set;

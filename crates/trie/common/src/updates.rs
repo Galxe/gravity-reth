@@ -1,4 +1,4 @@
-use crate::{BranchNodeCompact, HashBuilder, Nibbles};
+use crate::{BranchNodeCompact, HashBuilder, Nibbles, ParallelHashBuilder};
 use alloc::vec::Vec;
 use alloy_primitives::{
     map::{B256Map, B256Set, HashMap, HashSet},
@@ -87,6 +87,26 @@ impl TrieUpdates {
     pub fn finalize(
         &mut self,
         hash_builder: HashBuilder,
+        removed_keys: HashSet<Nibbles>,
+        destroyed_accounts: B256Set,
+    ) {
+        // Retrieve updated nodes from hash builder.
+        let (_, updated_nodes) = hash_builder.split();
+        self.account_nodes.extend(exclude_empty_from_pair(updated_nodes));
+
+        // Add deleted node paths.
+        self.removed_nodes.extend(exclude_empty(removed_keys));
+
+        // Add deleted storage tries for destroyed accounts.
+        for destroyed in destroyed_accounts {
+            self.storage_tries.entry(destroyed).or_default().set_deleted(true);
+        }
+    }
+
+    /// Finalize state trie updates.
+    pub fn finalize_v2(
+        &mut self,
+        hash_builder: ParallelHashBuilder,
         removed_keys: HashSet<Nibbles>,
         destroyed_accounts: B256Set,
     ) {
