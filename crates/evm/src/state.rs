@@ -1,9 +1,9 @@
 use alloy_primitives::{Address, U256};
-use reth_grevm::ParallelState;
+use reth_grevm::{ParallelBundleState, ParallelState};
 use revm::{
     db::{states::bundle_state::BundleRetention, BundleState},
     primitives::AccountInfo,
-    Database,
+    Database, TransitionState,
 };
 use std::error::Error;
 
@@ -64,7 +64,9 @@ where
     }
 
     fn merge_transitions(&mut self, retention: BundleRetention) {
-        self.merge_transitions(retention);
+        if let Some(transition_state) = self.transition_state.as_mut().map(TransitionState::take) {
+            self.bundle_state.parallel_apply_transitions_and_create_reverts(transition_state, retention);
+        }
     }
 
     fn basic(
