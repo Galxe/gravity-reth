@@ -2,12 +2,16 @@
 
 use alloy_primitives::{keccak256, B256};
 use alloy_trie::{
-    nodes::{BranchNode, BranchNodeRef, ExtensionNodeRef, LeafNode, RlpNode},
+    nodes::{BranchNodeRef, ExtensionNodeRef, LeafNode, RlpNode},
     BranchNodeCompact, HashMap, Nibbles, TrieMask, EMPTY_ROOT_HASH,
 };
 use core::cmp;
-use std::sync::mpsc::{self, Receiver, Sender};
-use tracing::{info, trace};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use std::sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc,
+    };
+use tracing::trace;
 
 mod value;
 pub use value::{HashBuilderValue, HashBuilderValueRef};
@@ -40,8 +44,17 @@ pub use value::{HashBuilderValue, HashBuilderValueRef};
 pub enum RawRlpNode {
     Leaf(LeafNode),
     Word(B256),
-    Extension((Nibbles, Box<RawRlpNode>)),
-    Branch((Vec<RawRlpNode>, TrieMask, TrieMask, usize, Option<Sender<Vec<B256>>>)),
+    Extension((Nibbles, Arc<RawRlpNode>)),
+    Branch(
+        (
+            Vec<Arc<RawRlpNode>>,
+            TrieMask,
+            TrieMask,
+            usize,
+            Option<Sender<Vec<B256>>>,
+            Option<Sender<B256>>,
+        ),
+    ),
     Default,
 }
 
@@ -52,36 +65,41 @@ impl Default for RawRlpNode {
 }
 
 impl RawRlpNode {
-    fn rlp(self) -> RlpNode {
+    fn rlp(&self) -> RlpNode {
         let mut rlp_buf = vec![];
         match self {
             RawRlpNode::Leaf(leaf_node) => leaf_node.as_ref().rlp(&mut rlp_buf),
-            RawRlpNode::Word(word) => RlpNode::word_rlp(&word),
+            RawRlpNode::Word(word) => RlpNode::word_rlp(word),
             RawRlpNode::Extension((key, child)) => {
-                ExtensionNodeRef::new(&key, &child.rlp()).rlp(&mut rlp_buf)
+                ExtensionNodeRef::new(key, &child.rlp()).rlp(&mut rlp_buf)
             }
-            RawRlpNode::Branch((stack, state_mask, hash_mask, first_child_idx, tx)) => {
-                let mut futures = vec![];
-                for raw_rlp_node in stack.into_iter().skip(first_child_idx) {
-                     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-                        rayon::spawn(move || {
-                            let _ = tx.send(raw_rlp_node.rlp());
-                        });
-                    futures.push(rx);
-                }
-                let mut children = vec![];
-                for _ in 0..first_child_idx {
-                    children.push(RlpNode::default());
-                }
-                futures.into_iter().for_each(|rx| {
-                    let res = rx.recv().unwrap();
-                    children.push(res);
-                });
-                let branch_node = BranchNodeRef::new(&children, state_mask);
+            RawRlpNode::Branch((
+                stack,
+                state_mask,
+                hash_mask,
+                first_child_idx,
+                tx,
+                root_hash_tx,
+            )) => {
+                let children: Vec<RlpNode> = stack
+                    .par_iter()
+                    .skip(*first_child_idx)
+                    .map(|raw_rlp_node| raw_rlp_node.rlp())
+                    .collect();
+
+                let mut all_children = vec![RlpNode::default(); *first_child_idx];
+                all_children.extend(children);
+                let branch_node = BranchNodeRef::new(&all_children, *state_mask);
                 if let Some(tx) = tx {
-                    let _ = tx.send(branch_node.child_hashes(hash_mask).collect());
+                    let _ = tx.send(branch_node.child_hashes(*hash_mask).collect());
                 }
-                branch_node.rlp(&mut rlp_buf)
+                let rlp = branch_node.rlp(&mut rlp_buf);
+                if let Some(tx) = root_hash_tx {
+                    let hash =
+                        if let Some(hash) = rlp.as_hash() { hash } else { keccak256(rlp.clone()) };
+                    let _ = tx.send(hash);
+                }
+                rlp
             }
             _ => panic!("Cannot be Default"),
         }
@@ -93,7 +111,7 @@ impl RawRlpNode {
 pub struct ParallelHashBuilder {
     pub key: Nibbles,
     pub value: HashBuilderValue,
-    pub stack: Vec<RawRlpNode>, // RlpNode
+    pub stack: Vec<Arc<RawRlpNode>>, // RlpNode
 
     pub state_masks: Vec<TrieMask>,
     pub tree_masks: Vec<TrieMask>,
@@ -101,8 +119,11 @@ pub struct ParallelHashBuilder {
 
     pub stored_in_database: bool,
 
-    pub updated_branch_nodes:
-        Option<HashMap<Nibbles, (BranchNodeCompact, Option<Receiver<Vec<B256>>>)>>,
+    pub updated_branch_nodes: Option<
+        HashMap<Nibbles, (BranchNodeCompact, Option<Receiver<Vec<B256>>>, Option<Receiver<B256>>)>,
+    >,
+
+    pub counter: usize,
 }
 
 impl ParallelHashBuilder {
@@ -129,9 +150,12 @@ impl ParallelHashBuilder {
         let res = updates
             .unwrap_or_default()
             .into_iter()
-            .map(|(key, (mut branch_node, rx))| {
+            .map(|(key, (mut branch_node, rx, root_hash_rx))| {
                 if let Some(rx) = rx {
                     branch_node.hashes = rx.recv().unwrap().into();
+                }
+                if let Some(root_hash_rx) = root_hash_rx {
+                    branch_node.root_hash = Some(root_hash_rx.recv().unwrap());
                 }
                 (key, branch_node)
             })
@@ -178,7 +202,8 @@ impl ParallelHashBuilder {
         if !self.key.is_empty() {
             self.update(&key);
         } else if key.is_empty() {
-            self.stack.push(RawRlpNode::Word(value.clone()));
+            self.stack.push(Arc::new(RawRlpNode::Word(value.clone())));
+            self.counter += 1;
         }
         self.set_key_value(key, HashBuilderValueRef::Hash(&value));
         self.stored_in_database = stored_in_database;
@@ -213,7 +238,7 @@ impl ParallelHashBuilder {
     }
 
     fn current_root(&mut self) -> B256 {
-        if let Some(node_ref) = self.stack.pop() {
+        if let Some(node_ref) = self.stack.last() {
             let rlp = node_ref.rlp();
             if let Some(hash) = rlp.as_hash() {
                 hash
@@ -290,20 +315,22 @@ impl ParallelHashBuilder {
             if !build_extensions {
                 match self.value.as_ref() {
                     HashBuilderValueRef::Bytes(leaf_value) => {
-                        let leaf_node = RawRlpNode::Leaf(LeafNode::new(
+                        let leaf_node = Arc::new(RawRlpNode::Leaf(LeafNode::new(
                             short_node_key.clone(),
                             leaf_value.to_vec(),
-                        ));
+                        )));
                         trace!(
                             target: "trie::hash_builder",
                             ?leaf_node,
                             "pushing leaf node",
                         );
                         self.stack.push(leaf_node);
+                        self.counter += 1;
                     }
                     HashBuilderValueRef::Hash(hash) => {
                         trace!(target: "trie::hash_builder", ?hash, "pushing branch node hash");
-                        self.stack.push(RawRlpNode::Word(*hash));
+                        self.stack.push(Arc::new(RawRlpNode::Word(*hash)));
+                        self.counter += 1;
 
                         if self.stored_in_database {
                             self.tree_masks[current.len() - 1] |=
@@ -321,13 +348,14 @@ impl ParallelHashBuilder {
                 self.update_masks(&current, len_from);
                 let stack_last = self.stack.pop().expect("there should be at least one stack item");
                 let extension_node =
-                    RawRlpNode::Extension((short_node_key.clone(), Box::new(stack_last)));
+                    Arc::new(RawRlpNode::Extension((short_node_key.clone(), stack_last)));
                 trace!(
                     target: "trie::hash_builder",
                     ?extension_node,
                     "pushing extension node",
                 );
                 self.stack.push(extension_node);
+                self.counter += 1;
                 self.resize_masks(len_from);
             }
 
@@ -338,10 +366,16 @@ impl ParallelHashBuilder {
 
             // Insert branch nodes in the stack
             if !succeeding.is_empty() || preceding_exists {
+                let (root_hash_tx, root_hash_rx) = if len == 0 {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    (Some(tx), Some(rx))
+                } else {
+                    (None, None)
+                };
                 // Pushes the corresponding branch node to the stack
-                let rx = self.push_branch_node(&current, len);
+                let rx = self.push_branch_node(&current, len, root_hash_tx);
                 // Need to store the branch node in an efficient format outside of the hash builder
-                self.store_branch_node(&current, len, rx);
+                self.store_branch_node(&current, len, rx, root_hash_rx);
             }
 
             self.state_masks.resize(len, TrieMask::default());
@@ -372,20 +406,45 @@ impl ParallelHashBuilder {
     ///
     /// Returns the hashes of the children of the branch node, only if `updated_branch_nodes` is
     /// enabled.
-    fn push_branch_node(&mut self, current: &Nibbles, len: usize) -> Option<Receiver<Vec<B256>>> {
+    fn push_branch_node(
+        &mut self,
+        current: &Nibbles,
+        len: usize,
+        sender: Option<Sender<B256>>,
+    ) -> Option<Receiver<Vec<B256>>> {
         let state_mask = self.state_masks[len];
         let hash_mask = self.hash_masks[len];
         let first_child_idx = self.stack.len() - state_mask.count_ones() as usize;
         // Avoid calculating this value if it's not needed.
         let (branch_node, rx) = if self.updated_branch_nodes.is_some() {
             let (tx, rx) = mpsc::channel();
-            (RawRlpNode::Branch((self.stack.clone(), state_mask, hash_mask, first_child_idx, Some(tx))), Some(rx))
+            (
+                Arc::new(RawRlpNode::Branch((
+                    self.stack.clone(),
+                    state_mask,
+                    hash_mask,
+                    first_child_idx,
+                    Some(tx),
+                    sender,
+                ))),
+                Some(rx),
+            )
         } else {
-            (RawRlpNode::Branch((self.stack.clone(), state_mask, hash_mask, first_child_idx, None)), None)
+            (
+                Arc::new(RawRlpNode::Branch((
+                    self.stack.clone(),
+                    state_mask,
+                    hash_mask,
+                    first_child_idx,
+                    None,
+                    sender,
+                ))),
+                None,
+            )
         };
 
         // Clears the stack from the branch node elements
-        info!(
+        trace!(
             target: "trie::hash_builder",
             new_len = first_child_idx,
             old_len = self.stack.len(),
@@ -395,6 +454,7 @@ impl ParallelHashBuilder {
 
         trace!(target: "trie::hash_builder", ?branch_node, "pushing branch node with {state_mask:?} mask from stack");
         self.stack.push(branch_node);
+        self.counter += 1;
         rx
     }
 
@@ -407,6 +467,7 @@ impl ParallelHashBuilder {
         current: &Nibbles,
         len: usize,
         rx: Option<Receiver<Vec<B256>>>,
+        root_hash_rx: Option<Receiver<B256>>,
     ) {
         if len > 0 {
             let parent_index = len - 1;
@@ -428,10 +489,13 @@ impl ParallelHashBuilder {
                     self.tree_masks[len],
                     self.hash_masks[len],
                     vec![B256::ZERO; hashes_len],
-                    (len == 0).then(|| self.current_root()),
+                    None,
                 );
                 trace!(target: "trie::hash_builder", ?node, "intermediate node");
-                self.updated_branch_nodes.as_mut().unwrap().insert(common_prefix, (node, rx));
+                self.updated_branch_nodes
+                    .as_mut()
+                    .unwrap()
+                    .insert(common_prefix, (node, rx, root_hash_rx));
             }
         }
     }
