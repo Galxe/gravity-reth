@@ -20,9 +20,10 @@ use reth_trie::{
 };
 
 use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use thiserror::Error;
 use tracing::*;
+use reth_metrics::{metrics::Histogram, Metrics};
 
 #[derive(Metrics)]
 #[metrics(scope = "parallel_state_root")]
