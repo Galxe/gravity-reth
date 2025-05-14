@@ -235,6 +235,16 @@ impl StorageTrieUpdates {
         self.removed_nodes.extend(exclude_empty(removed_keys));
     }
 
+    /// Finalize storage trie updates for by taking updates from walker and hash builder.
+    pub fn finalize_v2(&mut self, hash_builder: ParallelHashBuilder, removed_keys: HashSet<Nibbles>) {
+        // Retrieve updated nodes from hash builder.
+        let (_, updated_nodes) = hash_builder.split();
+        self.storage_nodes.extend(exclude_empty_from_pair(updated_nodes));
+
+        // Add deleted node paths.
+        self.removed_nodes.extend(exclude_empty(removed_keys));
+    }
+
     /// Convert storage trie updates into [`StorageTrieUpdatesSorted`].
     pub fn into_sorted(self) -> StorageTrieUpdatesSorted {
         let mut storage_nodes = Vec::from_iter(self.storage_nodes);

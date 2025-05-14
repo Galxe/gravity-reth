@@ -7,7 +7,7 @@ use crate::{
     trie_cursor::TrieCursorFactory,
     updates::{StorageTrieUpdates, TrieUpdates},
     walker::TrieWalker,
-    HashBuilder, Nibbles, TRIE_ACCOUNT_RLP_MAX_SIZE,
+    ParallelHashBuilder, HashBuilder, Nibbles, TRIE_ACCOUNT_RLP_MAX_SIZE,
 };
 use alloy_consensus::EMPTY_ROOT_HASH;
 use alloy_primitives::{keccak256, Address, B256};
@@ -410,7 +410,7 @@ where
         let walker =
             TrieWalker::new(trie_cursor, self.prefix_set).with_deletions_retained(retain_updates);
 
-        let mut hash_builder = HashBuilder::default().with_updates(retain_updates);
+        let mut hash_builder = ParallelHashBuilder::default().with_updates(retain_updates);
 
         let mut storage_node_iter = TrieNodeIter::new(walker, hashed_storage_cursor);
         while let Some(node) = storage_node_iter.try_next()? {
@@ -433,7 +433,7 @@ where
 
         let mut trie_updates = StorageTrieUpdates::default();
         let removed_keys = storage_node_iter.walker.take_removed_keys();
-        trie_updates.finalize(hash_builder, removed_keys);
+        trie_updates.finalize_v2(hash_builder, removed_keys);
 
         let stats = tracker.finish();
 

@@ -129,7 +129,7 @@ pub struct ParallelHashBuilder {
 impl ParallelHashBuilder {
     /// Enables the Hash Builder to store updated branch nodes.
     ///
-    /// Call [HashBuilder::split] to get the updates to branch nodes.
+    /// Call [ParallelHashBuilder::split] to get the updates to branch nodes.
     pub fn with_updates(mut self, retain_updates: bool) -> Self {
         self.set_updates(retain_updates);
         self
@@ -137,14 +137,14 @@ impl ParallelHashBuilder {
 
     /// Enables the Hash Builder to store updated branch nodes.
     ///
-    /// Call [HashBuilder::split] to get the updates to branch nodes.
+    /// Call [ParallelHashBuilder::split] to get the updates to branch nodes.
     pub fn set_updates(&mut self, retain_updates: bool) {
         if retain_updates {
             self.updated_branch_nodes = Some(HashMap::default());
         }
     }
 
-    /// Splits the [HashBuilder] into a [HashBuilder] and hash builder updates.
+    /// Splits the [ParallelHashBuilder] into a [ParallelHashBuilder] and hash builder updates.
     pub fn split(mut self) -> (Self, HashMap<Nibbles, BranchNodeCompact>) {
         let updates = self.updated_branch_nodes.take();
         let res = updates
@@ -522,5 +522,218 @@ impl ParallelHashBuilder {
         );
         self.tree_masks.resize(new_len, TrieMask::default());
         self.hash_masks.resize(new_len, TrieMask::default());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::collections::BTreeMap;
+    use alloy_primitives::{b256, hex, U256};
+    use alloy_rlp::Encodable;
+
+    pub(crate) fn triehash_trie_root<I, K, V>(iter: I) -> B256
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<[u8]> + Ord,
+        V: AsRef<[u8]>,
+    {
+        struct Keccak256Hasher;
+        impl hash_db::Hasher for Keccak256Hasher {
+            type Out = B256;
+            type StdHasher = plain_hasher::PlainHasher;
+
+            const LENGTH: usize = 32;
+
+            fn hash(x: &[u8]) -> Self::Out {
+                alloy_primitives::keccak256(x)
+            }
+        }
+
+        // We use `trie_root` instead of `sec_trie_root` because we assume
+        // the incoming keys are already hashed, which makes sense given
+        // we're going to be using the Hashed tables & pre-hash the data
+        // on the way in.
+        triehash::trie_root::<Keccak256Hasher, _, _, _>(iter)
+    }
+
+    // Hashes the keys, RLP encodes the values, compares the trie builder with the upstream root.
+    fn assert_hashed_trie_root<'a, I, K>(iter: I)
+    where
+        I: Iterator<Item = (K, &'a U256)>,
+        K: AsRef<[u8]> + Ord,
+    {
+        let hashed = iter
+            .map(|(k, v)| (keccak256(k.as_ref()), alloy_rlp::encode(v).to_vec()))
+            // Collect into a btree map to sort the data
+            .collect::<BTreeMap<_, _>>();
+
+        let mut hb = ParallelHashBuilder::default();
+
+        hashed.iter().for_each(|(key, val)| {
+            let nibbles = Nibbles::unpack(key);
+            hb.add_leaf(nibbles, val);
+        });
+
+        assert_eq!(hb.root(), triehash_trie_root(&hashed));
+    }
+
+    // No hashing involved
+    fn assert_trie_root<I, K, V>(iter: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<[u8]> + Ord,
+        V: AsRef<[u8]>,
+    {
+        let mut hb = ParallelHashBuilder::default();
+
+        let data = iter.into_iter().collect::<BTreeMap<_, _>>();
+        data.iter().for_each(|(key, val)| {
+            let nibbles = Nibbles::unpack(key);
+            hb.add_leaf(nibbles, val.as_ref());
+        });
+
+        assert_eq!(hb.root(), triehash_trie_root(data));
+    }
+
+    #[test]
+    fn empty() {
+        assert_eq!(ParallelHashBuilder::default().root(), EMPTY_ROOT_HASH);
+    }
+
+    #[test]
+    fn test_generates_branch_node() {
+        let mut hb = ParallelHashBuilder::default().with_updates(true);
+
+        // We have 1 branch node update to be stored at 0x01, indicated by the first nibble.
+        // That branch root node has 4 children:
+        // - Leaf at nibble `0`: It has an empty value.
+        // - Branch at nibble `1`: It has 2 leaf nodes with empty values at nibbles `0` and `1`.
+        // - Branch at nibble `2`: It has 2 leaf nodes with empty values at nibbles `0` and `2`.
+        // - Leaf at nibble `3`: It has an empty value.
+        //
+        // This is enough information to construct the intermediate node value:
+        // 1. State Mask: 0b1111. All children of the branch node set at nibbles `0`, `1`, `2` and
+        //    `3`.
+        // 2. Hash Mask: 0b0110. Of the above items, nibbles `1` and `2` correspond to children that
+        //    are branch nodes.
+        // 3. Tree Mask: 0b0000. None of the children are stored in the database (yet).
+        // 4. Hashes: Hashes of the 2 sub-branch roots, at nibbles `1` and `2`. Calculated by
+        //    hashing the 0th and 1st element for the branch at nibble `1` , and the 0th and 2nd
+        //    element for the branch at nibble `2`. This basically means that every
+        //    BranchNodeCompact is capable of storing up to 2 levels deep of nodes (?).
+        let data = BTreeMap::from([
+            (
+                // Leaf located at nibble `0` of the branch root node that doesn't result in
+                // creating another branch node
+                hex!("1000000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                hex!("1100000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                hex!("1110000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                hex!("1200000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                hex!("1220000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                // Leaf located at nibble `3` of the branch root node that doesn't result in
+                // creating another branch node
+                hex!("1320000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+        ]);
+        data.iter().for_each(|(key, val)| {
+            let nibbles = Nibbles::unpack(key);
+            hb.add_leaf(nibbles, val.as_ref());
+        });
+        let _root = hb.root();
+
+        let (_, updates) = hb.split();
+
+        let update = updates.get(&Nibbles::from_nibbles_unchecked(hex!("01"))).unwrap();
+        // Nibbles 0, 1, 2, 3 have children
+        assert_eq!(update.state_mask, TrieMask::new(0b1111));
+        // None of the children are stored in the database
+        assert_eq!(update.tree_mask, TrieMask::new(0b0000));
+        // Children under nibbles `1` and `2` are branch nodes with `hashes`
+        assert_eq!(update.hash_mask, TrieMask::new(0b0110));
+        // Calculated when running the hash builder
+        assert_eq!(update.hashes.len(), 2);
+
+        assert_eq!(_root, triehash_trie_root(data));
+    }
+
+    #[test]
+    fn test_root_raw_data() {
+        let data = [
+            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
+            (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
+            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
+        ];
+        assert_trie_root(data);
+    }
+
+    #[test]
+    fn test_root_rlp_hashed_data() {
+        let data: HashMap<_, _, _> = HashMap::from([
+            (B256::with_last_byte(1), U256::from(2)),
+            (B256::with_last_byte(3), U256::from(4)),
+        ]);
+        assert_hashed_trie_root(data.iter());
+    }
+
+    #[test]
+    fn test_root_known_hash() {
+        let root_hash = b256!("45596e474b536a6b4d64764e4f75514d544577646c414e684271706871446456");
+        let mut hb = ParallelHashBuilder::default();
+        hb.add_branch(Nibbles::default(), root_hash, false);
+        assert_eq!(hb.root(), root_hash);
+    }
+
+    #[test]
+    fn manual_branch_node_ok() {
+        let raw_input = vec![
+            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
+        ];
+        let expected = triehash_trie_root(raw_input.clone());
+
+        // We create the hash builder and add the leaves
+        let mut hb = ParallelHashBuilder::default();
+        for (key, val) in &raw_input {
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice());
+        }
+
+        // Manually create the branch node that should be there after the first 2 leaves are added.
+        // Skip the 0th element given in this example they have a common prefix and will
+        // collapse to a Branch node.
+        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone());
+        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone());
+        let mut branch: [&dyn Encodable; 17] = [b""; 17];
+        // We set this to `4` and `7` because that matches the 2nd element of the corresponding
+        // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
+        branch[4] = &leaf1;
+        branch[7] = &leaf2;
+        let mut branch_node_rlp = Vec::new();
+        alloy_rlp::encode_list::<_, dyn Encodable>(&branch, &mut branch_node_rlp);
+        let branch_node_hash = keccak256(branch_node_rlp);
+
+        let mut hb2 = ParallelHashBuilder::default();
+        // Insert the branch with the `0x6` shared prefix.
+        hb2.add_branch(Nibbles::from_nibbles_unchecked([0x6]), branch_node_hash, false);
+
+        assert_eq!(hb.root(), expected);
+        assert_eq!(hb2.root(), expected);
     }
 }

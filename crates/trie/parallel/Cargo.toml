@@ -50,6 +50,7 @@ rayon.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
+moka = { version = "0.12.10", features = ["sync", "future"] }
 
 [features]
 default = ["metrics"]
