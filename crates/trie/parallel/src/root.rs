@@ -24,6 +24,15 @@ use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tracing::*;
 
+#[derive(Metrics)]
+#[metrics(scope = "parallel_state_root")]
+struct ParallelStateRootMetricsV2 {
+    /// How long it took for parallel state root modify tree
+    parallel_state_root_modify_duration: Histogram,
+    /// How long it took for parallel state root calculation
+    parallel_state_root_calculate_duration: Histogram,
+}
+
 /// Parallel incremental state root calculator.
 ///
 /// The calculator starts off by launching tasks to compute storage roots.
@@ -44,6 +53,7 @@ pub struct ParallelStateRoot<Factory> {
     /// Parallel state root metrics.
     #[cfg(feature = "metrics")]
     metrics: ParallelStateRootMetrics,
+    metrics_v2: ParallelStateRootMetricsV2,
 }
 
 impl<Factory> ParallelStateRoot<Factory> {
@@ -54,6 +64,7 @@ impl<Factory> ParallelStateRoot<Factory> {
             input,
             #[cfg(feature = "metrics")]
             metrics: ParallelStateRootMetrics::default(),
+            metrics_v2: ParallelStateRootMetricsV2::default(),
         }
     }
 }
@@ -158,6 +169,7 @@ where
 
         let mut hash_builder = ParallelHashBuilder::default().with_updates(retain_updates);
         let mut account_rlp = Vec::with_capacity(TRIE_ACCOUNT_RLP_MAX_SIZE);
+        let mut start_time = Instant::now();
         while let Some(node) = account_node_iter.try_next().map_err(ProviderError::Database)? {
             match node {
                 TrieElement::Branch(node) => {
@@ -199,8 +211,11 @@ where
                 }
             }
         }
+        self.metrics_v2.parallel_state_root_modify_duration.record(start_time.elapsed());
 
+        start_time = Instant::now();
         let root = hash_builder.root();
+        self.metrics_v2.parallel_state_root_calculate_duration.record(start_time.elapsed());
 
         let removed_keys = account_node_iter.walker.take_removed_keys();
         trie_updates.finalize_v2(hash_builder, removed_keys, prefix_sets.destroyed_accounts);
