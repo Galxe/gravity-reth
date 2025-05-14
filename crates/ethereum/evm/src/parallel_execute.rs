@@ -159,10 +159,6 @@ where
             });
             let (results, parallel_state) = executor.take_result_and_state();
 
-            let should_dump = DEBUG_EXT
-                .dump_block_number
-                .map_or(false, |dump_block_number| block.number == dump_block_number);
-
             if output.is_err() ||
                 !crate::debug_ext::compare_transition_state(
                     seq_state.0.as_ref().unwrap(),

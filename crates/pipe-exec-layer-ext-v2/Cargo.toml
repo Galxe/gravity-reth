@@ -39,4 +39,15 @@ metrics.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+reth-cli.workspace = true
+reth-cli-commands.workspace = true
+reth-cli-runner.workspace = true
+reth-node-ethereum.workspace = true
+reth-node-builder.workspace = true
+reth-provider.workspace = true
+reth-ethereum-cli.workspace = true
+reth-db.workspace = true
+reth-node-api.workspace = true
+reth-tracing.workspace = true
+eyre.workspace = true
 rand.workspace = true

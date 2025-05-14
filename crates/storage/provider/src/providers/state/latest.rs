@@ -100,25 +100,6 @@ impl<Provider: DBProvider + StateCommitmentProvider> StateRootProvider
         StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input, self.1.clone())
             .map_err(|err| ProviderError::Database(err.into()))
     }
-
-    fn state_root_with_updates_v2(
-        &self,
-        state: HashedPostState,
-        hashed_state_vec: Vec<Arc<HashedPostState>>,
-        trie_updates_vec: Vec<Arc<TrieUpdates>>,
-    ) -> ProviderResult<(B256, TrieUpdates)> {
-        let mut input = TrieInput::from_state(state);
-        let mut state = HashedPostState::default();
-        let mut nodes = TrieUpdates::default();
-        hashed_state_vec.iter().for_each(|hashed_state| {
-            state.extend_ref(hashed_state.as_ref());
-        });
-        trie_updates_vec.iter().for_each(|trie_updates| {
-            nodes.extend_ref(trie_updates.as_ref());
-        });
-        input.prepend_cached(nodes, state);
-        self.state_root_from_nodes_with_updates(input)
-    }
 }
 
 impl<Provider: DBProvider + StateCommitmentProvider> StorageRootProvider

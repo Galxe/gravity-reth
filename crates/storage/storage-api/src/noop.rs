@@ -387,15 +387,6 @@ impl<C: Send + Sync, N: NodePrimitives> StateRootProvider for NoopProvider<C, N>
     ) -> ProviderResult<(B256, TrieUpdates)> {
         Ok((B256::default(), TrieUpdates::default()))
     }
-
-    fn state_root_with_updates_v2(
-        &self,
-        _state: HashedPostState,
-        _hashed_state_vec: Vec<Arc<HashedPostState>>,
-        _trie_updates_vec: Vec<Arc<TrieUpdates>>,
-    ) -> ProviderResult<(B256, TrieUpdates)> {
-        Ok((B256::default(), TrieUpdates::default()))
-    }
 }
 
 impl<C: Send + Sync, N: NodePrimitives> StorageRootProvider for NoopProvider<C, N> {

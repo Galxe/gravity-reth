@@ -8,7 +8,6 @@ use reth_revm::{database::StateProviderDatabase, db::CacheDB, DatabaseRef};
 use reth_storage_api::{HashedPostStateProvider, StateProvider};
 use reth_trie::{HashedStorage, MultiProofTargets};
 use revm::Database;
-use std::sync::Arc;
 
 /// Helper alias type for the state's [`CacheDB`]
 pub type StateCacheDb<'a> = CacheDB<StateProviderDatabase<StateProviderTraitObjWrapper<'a>>>;
@@ -45,15 +44,6 @@ impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper<'_> {
         input: reth_trie::TrieInput,
     ) -> reth_errors::ProviderResult<(B256, reth_trie::updates::TrieUpdates)> {
         self.0.state_root_from_nodes_with_updates(input)
-    }
-
-    fn state_root_with_updates_v2(
-        &self,
-        state: reth_trie::HashedPostState,
-        hashed_state_vec: Vec<Arc<reth_trie::HashedPostState>>,
-        trie_updates_vec: Vec<Arc<reth_trie::updates::TrieUpdates>>,
-    ) -> ProviderResult<(B256, reth_trie::updates::TrieUpdates)> {
-        todo!()
     }
 }
 
