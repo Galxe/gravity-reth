@@ -678,21 +678,14 @@ where
         &self,
         origin: TransactionOrigin,
         tx: T::Transaction,
-    ) -> Vec<PoolResult<TxHash>> {    
-        let mut hashes_to_wait_for = Vec::new();
-        hashes_to_wait_for.push(tx.hash().clone());
+    ) -> PoolResult<TxHash> {    
         let mut buffer = self.buffer.lock().await;
+        let hash = tx.hash();
         buffer.buffer.push((origin, tx));
         let notify = buffer.event.clone();
         drop(buffer);
-        if hashes_to_wait_for.is_empty() {
-            return Vec::new();
-        }
         notify.notified().await;
-        hashes_to_wait_for.iter()
-            .map(|hash| self.add_txn_res.remove(hash).unwrap())
-            .map(|(_, res)| res)
-            .collect()
+        self.add_txn_res.remove(&hash).unwrap().1
     }
     
 

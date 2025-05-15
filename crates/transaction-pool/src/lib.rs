@@ -384,8 +384,6 @@ where
             return self.pool
                     .send_transaction(origin, transaction)
                     .await
-                    .pop()
-                    .expect("result length is the same as the input");
         }
         if get_enable_batch_insert()  {
             {
