@@ -157,7 +157,7 @@ fn get_batch_insert_time() -> u64 {
     if val == 0 {
         let size = std::env::var("BATCH_INSERT_TIME").unwrap_or("50".to_string()).parse().unwrap_or(50);
         assert!(size > 0, "BATCH_INSERT_TIME must be greater than 0");
-        BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::Acquire);
+        BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::Release);
         return BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
     }
     val

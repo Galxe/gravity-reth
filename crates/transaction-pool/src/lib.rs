@@ -224,7 +224,7 @@ fn get_enable_batch_insert() -> bool {
     let val = ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::Acquire);
     if val == 2 {
         let env = std::env::var("RETH_TXPOOL_BATCH_INSERT").unwrap_or("false".to_string());
-        ENABLE_BATCH_INSERT.store(env.parse().unwrap_or(0), std::sync::atomic::Ordering::Acquire);
+        ENABLE_BATCH_INSERT.store(env.parse().unwrap_or(0), std::sync::atomic::Ordering::Release);
     }
     val == 1
 }
