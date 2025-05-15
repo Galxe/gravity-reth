@@ -20,7 +20,7 @@ use reth_trie::{
 };
 
 use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
 use thiserror::Error;
 use tracing::*;
 use reth_metrics::{metrics::Histogram, Metrics};
@@ -170,11 +170,13 @@ where
 
         let mut hash_builder = ParallelHashBuilder::default().with_updates(retain_updates);
         let mut account_rlp = Vec::with_capacity(TRIE_ACCOUNT_RLP_MAX_SIZE);
-        let mut start_time = Instant::now();
+        let mut modify_time = Duration::ZERO;
         while let Some(node) = account_node_iter.try_next().map_err(ProviderError::Database)? {
             match node {
                 TrieElement::Branch(node) => {
+                    let mut start_time = Instant::now();
                     hash_builder.add_branch(node.key, node.value, node.children_are_in_trie);
+                    modify_time += start_time.elapsed();
                 }
                 TrieElement::Leaf(hashed_address, account) => {
                     let (storage_root, _, updates) = match storage_roots.remove(&hashed_address) {
@@ -208,11 +210,13 @@ where
                     account_rlp.clear();
                     let account = account.into_trie_account(storage_root);
                     account.encode(&mut account_rlp as &mut dyn BufMut);
+                    let mut start_time = Instant::now();
                     hash_builder.add_leaf(Nibbles::unpack(hashed_address), &account_rlp);
+                    modify_time += start_time.elapsed();
                 }
             }
         }
-        self.metrics_v2.parallel_state_root_modify_duration.record(start_time.elapsed());
+        self.metrics_v2.parallel_state_root_modify_duration.record(modify_time);
 
         start_time = Instant::now();
         let root = hash_builder.root();
