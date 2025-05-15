@@ -680,7 +680,7 @@ where
         tx: T::Transaction,
     ) -> PoolResult<TxHash> {    
         let mut buffer = self.buffer.lock().await;
-        let hash = tx.hash();
+        let hash = tx.hash().clone();
         buffer.buffer.push((origin, tx));
         let notify = buffer.event.clone();
         drop(buffer);
