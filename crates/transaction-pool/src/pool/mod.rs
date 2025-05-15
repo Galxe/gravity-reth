@@ -570,6 +570,7 @@ where
     pub async fn batch_add_transactions_task(
         self: Arc<Self>,
     ) {
+        info!("Batch insert task started with batch time {}", get_batch_insert_time());
         let sleep_duration = Duration::from_millis(get_batch_insert_time());
         let mut duration = Duration::from_millis(0);
         loop {
@@ -678,7 +679,7 @@ where
         &self,
         origin: TransactionOrigin,
         tx: T::Transaction,
-    ) -> PoolResult<TxHash> {    
+    ) -> PoolResult<TxHash> {
         let mut buffer = self.buffer.lock().await;
         let hash = tx.hash().clone();
         buffer.buffer.push((origin, tx));

@@ -225,6 +225,7 @@ fn get_enable_batch_insert() -> bool {
     if val == 2 {
         let env = std::env::var("RETH_TXPOOL_BATCH_INSERT").unwrap_or("false".to_string());
         ENABLE_BATCH_INSERT.store(env.parse().unwrap_or(0), std::sync::atomic::Ordering::Release);
+        return ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::Acquire) == 1;
     }
     val == 1
 }
@@ -380,7 +381,7 @@ where
         transaction: Self::Transaction,
     ) -> PoolResult<TxHash> {
         let pool = self.pool.clone();
-        if self.batch_insert_task_running.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.batch_insert_task_running.load(std::sync::atomic::Ordering::Acquire) {
             return self.pool
                     .send_transaction(origin, transaction)
                     .await
