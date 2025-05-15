@@ -221,11 +221,12 @@ pub struct Pool<V, T: TransactionOrdering, S> {
 
 static ENABLE_BATCH_INSERT: AtomicU8 = AtomicU8::new(2);
 fn get_enable_batch_insert() -> bool {
-    if ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::SeqCst) == 2 {
+    let val = ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::AcqRel);
+    if val == 2 {
         let env = std::env::var("RETH_TXPOOL_BATCH_INSERT").unwrap_or("false".to_string());
-        ENABLE_BATCH_INSERT.store(env.parse().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
+        ENABLE_BATCH_INSERT.store(env.parse().unwrap_or(0), std::sync::atomic::Ordering::AcqRel);
     }
-    ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::SeqCst) == 1
+    val == 1
 }
 
 // === impl Pool ===
