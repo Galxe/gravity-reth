@@ -182,7 +182,7 @@ use reth_execution_types::ChangedAccount;
 use reth_primitives::Recovered;
 use reth_primitives_traits::Block;
 use reth_storage_api::StateProviderFactory;
-use std::{collections::HashSet, os::unix::thread, sync::{atomic::{AtomicBool, AtomicU8}, Arc}};
+use std::{collections::HashSet, sync::{atomic::{AtomicBool, AtomicU8}, Arc}};
 use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{instrument, trace};
 

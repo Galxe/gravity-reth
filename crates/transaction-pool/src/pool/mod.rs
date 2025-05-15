@@ -81,21 +81,19 @@ use crate::{
     CanonicalStateUpdate, EthPoolTransaction, PoolConfig, TransactionOrdering,
     TransactionValidator,
 };
-use alloy_consensus::Transaction;
 use alloy_primitives::{Address, TxHash, B256};
 use best::BestTransactions;
-use event_listener::{Event, Listener};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::Notify;
 use alloy_eips::{eip4844::BlobTransactionSidecar, Typed2718};
 use reth_primitives::Recovered;
 use rustc_hash::FxHashMap;
 use dashmap::DashMap;
-use std::{collections::{HashMap, HashSet}, fmt, sync::{atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize}, Arc}, time::{Duration, Instant}, usize};
+use std::{collections::HashSet, fmt, sync::{atomic::AtomicU64, Arc}, time::{Duration, Instant}, usize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 mod events;
 use crate::{
     blobstore::BlobStore,
@@ -149,21 +147,18 @@ impl<T: PoolTransaction> TxBuffer<T> {
 
     pub fn add(&mut self, item: BatchItem<T>) -> Arc<Notify> {
         self.buffer.push(item);
-        // if self.buffer.len() >= get_buffer_insert_size() {
-        //     self.full_notify.notify_one();
-        // }
         self.event.clone()
     }
 }
 
-static BUFFER_INSERT_SIZE: AtomicUsize = AtomicUsize::new(0);
-fn get_buffer_insert_size() -> usize {
-    if BUFFER_INSERT_SIZE.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-        let size = std::env::var("RETH_TXPOOL_BUFFER_SIZE").unwrap_or("100".to_string()).parse().unwrap_or(100);
+static BATCH_INSERT_TIME: AtomicU64 = AtomicU64::new(0);
+fn get_batch_insert_time() -> u64 {
+    if BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        let size = std::env::var("RETH_TXPOOL_BUFFER_SIZE").unwrap_or("50".to_string()).parse().unwrap_or(50);
         assert!(size > 0, "RETH_TXPOOL_BUFFER_SIZE must be greater than 0");
-        BUFFER_INSERT_SIZE.store(size, std::sync::atomic::Ordering::SeqCst);
+        BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::SeqCst);
     }
-    BUFFER_INSERT_SIZE.load(std::sync::atomic::Ordering::SeqCst)
+    BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 
@@ -573,22 +568,14 @@ where
     pub async fn batch_add_transactions_task(
         self: Arc<Self>,
     ) {
-        let sleep_duration = Duration::from_millis(50);
-        // let mut duration = Duration::from_millis(0);
+        let sleep_duration = Duration::from_millis(get_batch_insert_time());
+        let mut duration = Duration::from_millis(0);
         let full_notify = self.buffer.lock().await.full_notify.clone();
         loop {
-            tokio::select! {
-                _ = full_notify.notified() => {
-                    self.process_batch_and_store_results().await;
-                }
-                _ = tokio::time::sleep(sleep_duration) => {
-                    self.process_batch_and_store_results().await;
-                }
-            }
-            // tokio::time::sleep(sleep_duration.saturating_sub(duration)).await;
-            // let start = Instant::now();
-            // self.process_batch_and_store_results().await;
-            // duration = start.elapsed();
+            tokio::time::sleep(sleep_duration.saturating_sub(duration)).await;
+            let start = Instant::now();
+            self.process_batch_and_store_results().await;
+            duration = start.elapsed();
         }
     }
 
