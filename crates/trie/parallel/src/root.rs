@@ -174,7 +174,7 @@ where
         while let Some(node) = account_node_iter.try_next().map_err(ProviderError::Database)? {
             match node {
                 TrieElement::Branch(node) => {
-                    let mut start_time = Instant::now();
+                    let start_time = Instant::now();
                     hash_builder.add_branch(node.key, node.value, node.children_are_in_trie);
                     modify_time += start_time.elapsed();
                 }
@@ -210,7 +210,7 @@ where
                     account_rlp.clear();
                     let account = account.into_trie_account(storage_root);
                     account.encode(&mut account_rlp as &mut dyn BufMut);
-                    let mut start_time = Instant::now();
+                    let start_time = Instant::now();
                     hash_builder.add_leaf(Nibbles::unpack(hashed_address), &account_rlp);
                     modify_time += start_time.elapsed();
                 }
@@ -218,7 +218,7 @@ where
         }
         self.metrics_v2.parallel_state_root_modify_duration.record(modify_time);
 
-        start_time = Instant::now();
+        let start_time = Instant::now();
         let root = hash_builder.root();
         self.metrics_v2.parallel_state_root_calculate_duration.record(start_time.elapsed());
 
