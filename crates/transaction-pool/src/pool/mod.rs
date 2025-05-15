@@ -153,11 +153,11 @@ impl<T: PoolTransaction> TxBuffer<T> {
 
 static BATCH_INSERT_TIME: AtomicU64 = AtomicU64::new(0);
 fn get_batch_insert_time() -> u64 {
-    let val = BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::AcqRel);
+    let val = BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
     if val == 0 {
         let size = std::env::var("RETH_TXPOOL_BUFFER_SIZE").unwrap_or("50".to_string()).parse().unwrap_or(50);
         assert!(size > 0, "RETH_TXPOOL_BUFFER_SIZE must be greater than 0");
-        BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::AcqRel);
+        BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::Acquire);
     }
     val
 }
