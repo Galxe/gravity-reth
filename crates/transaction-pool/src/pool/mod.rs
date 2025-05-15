@@ -155,9 +155,10 @@ static BATCH_INSERT_TIME: AtomicU64 = AtomicU64::new(0);
 fn get_batch_insert_time() -> u64 {
     let val = BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
     if val == 0 {
-        let size = std::env::var("RETH_TXPOOL_BUFFER_SIZE").unwrap_or("50".to_string()).parse().unwrap_or(50);
-        assert!(size > 0, "RETH_TXPOOL_BUFFER_SIZE must be greater than 0");
+        let size = std::env::var("BATCH_INSERT_TIME").unwrap_or("50".to_string()).parse().unwrap_or(50);
+        assert!(size > 0, "BATCH_INSERT_TIME must be greater than 0");
         BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::Acquire);
+        return BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
     }
     val
 }
@@ -571,7 +572,6 @@ where
     ) {
         let sleep_duration = Duration::from_millis(get_batch_insert_time());
         let mut duration = Duration::from_millis(0);
-        let full_notify = self.buffer.lock().await.full_notify.clone();
         loop {
             tokio::time::sleep(sleep_duration.saturating_sub(duration)).await;
             let start = Instant::now();
@@ -605,15 +605,14 @@ where
             origins_hashes_and_outcomes.push((origin, tx_outcome.tx_hash(), tx_outcome));
         }
 
-        let self_clone = self.clone(); // Clone Arc for use within the processing logic
         let mut successfully_added_hashes_in_batch = Vec::new();
 
         // --- Pool Write Lock Scope ---
-        let mut pool_guard = self_clone.pool.write(); // Assuming self.pool exists and is behind a lock
+        let mut pool_guard = self.pool.write(); // Assuming self.pool exists and is behind a lock
         
         for (origin, tx_hash, tx_outcome) in origins_hashes_and_outcomes {
             // Add transaction to the underlying pool
-            let res = self_clone.add_transaction(&mut pool_guard, origin, tx_outcome); // Assuming this fn exists
+            let res = self.add_transaction(&mut pool_guard, origin, tx_outcome); // Assuming this fn exists
 
             // Record successfully added hashes for potential discard logic later
             if let Ok(hash) = &res {
@@ -624,7 +623,7 @@ where
 
             // Store the result directly into the shared DashMap
             // Existing entries will be overwritten (e.g., if somehow submitted twice quickly)
-            self_clone.add_txn_res.insert(tx_hash, res); // Assuming PoolResult is Clone
+            self.add_txn_res.insert(tx_hash, res); // Assuming PoolResult is Clone
         }
 
         // Handle discarding worst transactions if new ones were added
@@ -640,7 +639,7 @@ where
         // Post-processing for discarded transactions (outside the main pool lock if possible)
         if !discarded_pool_transactions.is_empty() {
             // Perform blob deletion or other cleanup
-            self_clone.delete_discarded_blobs(discarded_pool_transactions.iter()); // Assuming this fn exists
+            self.delete_discarded_blobs(discarded_pool_transactions.iter()); // Assuming this fn exists
 
             let discarded_hashes_set: HashSet<TxHash> = discarded_pool_transactions
                 .iter()
@@ -649,7 +648,7 @@ where
 
             // Notify listeners about discarded transactions
             { // Scope for listener lock
-                let mut listener_guard = self_clone.event_listener.write(); // Assuming this exists
+                let mut listener_guard = self.event_listener.write(); // Assuming this exists
                 discarded_hashes_set
                     .iter()
                     .for_each(|hash| listener_guard.discarded(hash));
@@ -659,7 +658,7 @@ where
             // Update the results in the DashMap for transactions that were initially added but then discarded
             for hash in discarded_hashes_set {
                 // Use entry API for atomic update: find the entry and modify it if it was Ok.
-                self_clone.add_txn_res.entry(hash).and_modify(|result| {
+                self.add_txn_res.entry(hash).and_modify(|result| {
                     // Only overwrite if it was a successful insertion initially
                     if result.is_ok() {
                         *result = Err(PoolError::new(hash, PoolErrorKind::DiscardedOnInsert));
