@@ -37,6 +37,8 @@ futures-util.workspace = true
 parking_lot.workspace = true
 tokio = { workspace = true, default-features = false, features = ["sync"] }
 tokio-stream.workspace = true
+dashmap.workspace = true
+
 
 # metrics
 reth-metrics.workspace = true

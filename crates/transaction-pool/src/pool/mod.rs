@@ -86,13 +86,14 @@ use best::BestTransactions;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
-
+use tokio::sync::Notify;
 use alloy_eips::{eip4844::BlobTransactionSidecar, Typed2718};
 use reth_primitives::Recovered;
 use rustc_hash::FxHashMap;
-use std::{collections::HashSet, fmt, sync::Arc, time::Instant};
+use dashmap::DashMap;
+use std::{collections::HashSet, fmt, sync::{atomic::AtomicU64, Arc}, time::{Duration, Instant}, usize};
 use tokio::sync::mpsc;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 mod events;
 use crate::{
     blobstore::BlobStore,
@@ -126,6 +127,43 @@ pub const NEW_TX_LISTENER_BUFFER_SIZE: usize = 1024;
 
 const BLOB_SIDECAR_LISTENER_BUFFER_SIZE: usize = 512;
 
+type BatchItem<T: PoolTransaction> = (
+    TransactionOrigin,
+    T,
+);
+
+pub struct TxBuffer<T: PoolTransaction> {
+    buffer: Vec<BatchItem<T>>,
+    event: Arc<Notify>,
+    full_notify: Arc<Notify>,
+}
+
+impl<T: PoolTransaction> TxBuffer<T> {
+    pub fn take(&mut self) -> (Vec<BatchItem<T>>, Arc<Notify>) {
+        let origin_event = self.event.clone();
+        self.event = Arc::new(Notify::new());
+        (std::mem::take(&mut self.buffer), origin_event)
+    }
+
+    pub fn add(&mut self, item: BatchItem<T>) -> Arc<Notify> {
+        self.buffer.push(item);
+        self.event.clone()
+    }
+}
+
+static BATCH_INSERT_TIME: AtomicU64 = AtomicU64::new(0);
+fn get_batch_insert_time() -> u64 {
+    let val = BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
+    if val == 0 {
+        let size = std::env::var("BATCH_INSERT_TIME").unwrap_or("50".to_string()).parse().unwrap_or(50);
+        assert!(size > 0, "BATCH_INSERT_TIME must be greater than 0");
+        BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::Release);
+        return BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
+    }
+    val
+}
+
+
 /// Transaction pool internals.
 pub struct PoolInner<V, T, S>
 where
@@ -151,13 +189,17 @@ where
     blob_transaction_sidecar_listener: Mutex<Vec<BlobTransactionSidecarListener>>,
     /// Metrics for the blob store
     blob_store_metrics: BlobStoreMetrics,
+    /// Map of transaction hash to result of adding the transaction
+    add_txn_res: DashMap<TxHash, PoolResult<TxHash>>,
+    /// Buffer for transactions
+    buffer: tokio::sync::Mutex<TxBuffer<T::Transaction>>,
 }
 
 // === impl PoolInner ===
 
 impl<V, T, S> PoolInner<V, T, S>
 where
-    V: TransactionValidator,
+    V: TransactionValidator + 'static,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
 {
@@ -174,6 +216,8 @@ where
             config,
             blob_store,
             blob_store_metrics: Default::default(),
+            buffer: tokio::sync::Mutex::new(TxBuffer { buffer: Vec::new(), event: Arc::new(Notify::new()), full_notify: Arc::new(Notify::new()) }),
+            add_txn_res: DashMap::new(),
         }
     }
 
@@ -462,10 +506,9 @@ where
                     timestamp: Instant::now(),
                     origin,
                 };
-
+                let tx = Arc::new(tx);
                 let added = pool.add_transaction(tx, balance, state_nonce)?;
                 let hash = *added.hash();
-
                 // transaction was successfully inserted into the pool
                 if let Some(sidecar) = maybe_sidecar {
                     // notify blob sidecar listeners
@@ -479,7 +522,6 @@ where
                     // delete the replaced transaction from the blob store
                     self.delete_blob(replaced);
                 }
-
                 // Notify about new pending transactions
                 if let Some(pending) = added.as_pending() {
                     self.on_new_pending_transaction(pending);
@@ -494,7 +536,6 @@ where
 
                 // Notify listeners for _all_ transactions
                 self.on_new_transaction(added.into_new_transaction_event());
-
                 Ok(hash)
             }
             TransactionValidationOutcome::Invalid(tx, err) => {
@@ -525,6 +566,130 @@ where
         Ok(listener)
     }
 
+    /// Task responsible for receiving transactions and processing them in batches.
+    pub async fn batch_add_transactions_task(
+        self: Arc<Self>,
+    ) {
+        info!("Batch insert task started with batch time {}", get_batch_insert_time());
+        let sleep_duration = Duration::from_millis(get_batch_insert_time());
+        let mut duration = Duration::from_millis(0);
+        loop {
+            tokio::time::sleep(sleep_duration.saturating_sub(duration)).await;
+            let start = Instant::now();
+            self.process_batch_and_store_results().await;
+            duration = start.elapsed();
+        }
+    }
+
+    /// Processes a batch of transactions, adds them to the pool,
+    /// stores results in the shared DashMap, and handles discarded transactions.
+    async fn process_batch_and_store_results(
+        &self
+    ) {
+        let mut buffer = self.buffer.lock().await;
+        let (items_to_process, notify) = buffer.take();
+        drop(buffer);
+        let num_items = items_to_process.len();
+        let start = Instant::now();
+
+        // We no longer need oneshot_senders or batch_results Vec here
+        // We extract necessary info directly
+        let mut origins_hashes_and_outcomes: Vec<(
+            TransactionOrigin,
+            TxHash,
+            TransactionValidationOutcome<T::Transaction>,
+        )> = Vec::with_capacity(num_items);
+        let origins: Vec<TransactionOrigin> = items_to_process.iter().map(|(origin, _)| *origin).collect();
+        let outcomes = self.validator().validate_transactions(items_to_process).await;
+        // Extract data needed for processing, discard the notifier for this function's scope
+        for (tx_outcome, origin) in outcomes.into_iter().zip(origins) {
+            origins_hashes_and_outcomes.push((origin, tx_outcome.tx_hash(), tx_outcome));
+        }
+
+        let mut successfully_added_hashes_in_batch = Vec::new();
+
+        // --- Pool Write Lock Scope ---
+        let mut pool_guard = self.pool.write(); // Assuming self.pool exists and is behind a lock
+        
+        for (origin, tx_hash, tx_outcome) in origins_hashes_and_outcomes {
+            // Add transaction to the underlying pool
+            let res = self.add_transaction(&mut pool_guard, origin, tx_outcome); // Assuming this fn exists
+
+            // Record successfully added hashes for potential discard logic later
+            if let Ok(hash) = &res {
+                // Sanity check: Ensure the hash from the result matches the input hash
+                debug_assert_eq!(*hash, tx_hash, "Hash mismatch after add_transaction");
+                successfully_added_hashes_in_batch.push(*hash);
+            }
+
+            // Store the result directly into the shared DashMap
+            // Existing entries will be overwritten (e.g., if somehow submitted twice quickly)
+            self.add_txn_res.insert(tx_hash, res); // Assuming PoolResult is Clone
+        }
+
+        // Handle discarding worst transactions if new ones were added
+        let discarded_pool_transactions = if !successfully_added_hashes_in_batch.is_empty() {
+            pool_guard.discard_worst() // Assuming this returns Vec<DiscardedTransactionInfo> or similar
+        } else {
+            Vec::default()
+        };
+        // --- End Pool Write Lock Scope ---
+        drop(pool_guard); // Release lock explicitly
+        
+
+        // Post-processing for discarded transactions (outside the main pool lock if possible)
+        if !discarded_pool_transactions.is_empty() {
+            // Perform blob deletion or other cleanup
+            self.delete_discarded_blobs(discarded_pool_transactions.iter()); // Assuming this fn exists
+
+            let discarded_hashes_set: HashSet<TxHash> = discarded_pool_transactions
+                .iter()
+                .map(|tx| *tx.hash()) // Assuming DiscardedTransactionInfo has a hash() method
+                .collect();
+
+            // Notify listeners about discarded transactions
+            { // Scope for listener lock
+                let mut listener_guard = self.event_listener.write(); // Assuming this exists
+                discarded_hashes_set
+                    .iter()
+                    .for_each(|hash| listener_guard.discarded(hash));
+            }
+
+
+            // Update the results in the DashMap for transactions that were initially added but then discarded
+            for hash in discarded_hashes_set {
+                // Use entry API for atomic update: find the entry and modify it if it was Ok.
+                self.add_txn_res.entry(hash).and_modify(|result| {
+                    // Only overwrite if it was a successful insertion initially
+                    if result.is_ok() {
+                        *result = Err(PoolError::new(hash, PoolErrorKind::DiscardedOnInsert));
+                    }
+                });
+                // If the entry doesn't exist or was already an error, and_modify does nothing.
+            }
+        }
+        notify.notify_waiters();
+        // No need to send results via channels anymore
+        info!("Finished processing batch of {} transactions take {:?}", num_items, start.elapsed());
+    }
+
+    /// Submits transactions to the pool for asynchronous processing.
+    /// Waits for the batch containing these transactions to be processed and returns the results.
+    pub async fn send_transaction(
+        &self,
+        origin: TransactionOrigin,
+        tx: T::Transaction,
+    ) -> PoolResult<TxHash> {
+        let mut buffer = self.buffer.lock().await;
+        let hash = tx.hash().clone();
+        buffer.buffer.push((origin, tx));
+        let notify = buffer.event.clone();
+        drop(buffer);
+        notify.notified().await;
+        self.add_txn_res.remove(&hash).unwrap().1
+    }
+    
+
     /// Adds all transactions in the iterator to the pool, returning a list of results.
     ///
     /// Note: A large batch may lock the pool for a long time that blocks important operations
@@ -542,17 +707,14 @@ where
                 .into_iter()
                 .map(|tx| self.add_transaction(&mut pool, origin, tx))
                 .collect::<Vec<_>>();
-
             // Enforce the pool size limits if at least one transaction was added successfully
             let discarded = if added.iter().any(Result::is_ok) {
                 pool.discard_worst()
             } else {
                 Default::default()
             };
-
             (added, discarded)
         };
-
         if !discarded.is_empty() {
             // Delete any blobs associated with discarded blob transactions
             self.delete_discarded_blobs(discarded.iter());
@@ -575,7 +737,6 @@ where
                 }
             }
         }
-
         added
     }
 
@@ -1260,14 +1421,50 @@ impl<T: PoolTransaction> OnNewCanonicalStateOutcome<T> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        blobstore::{BlobStore, InMemoryBlobStore},
-        test_utils::{MockTransaction, TestPoolBuilder},
-        validate::ValidTransaction,
-        BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionValidationOutcome, U256,
+        blobstore::{BlobStore, InMemoryBlobStore}, pool::txpool, test_utils::{MockTransaction, TestPoolBuilder}, validate::ValidTransaction, BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionValidationOutcome, U256
     };
     use alloy_eips::eip4844::BlobTransactionSidecar;
     use reth_primitives::kzg::Blob;
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, time::Instant, usize};
+
+    #[test]
+    fn test_add_txn() {
+        // Define the maximum limit for blobs in the sub-pool.
+        let blob_limit = SubPoolLimit::new(usize::MAX, usize::MAX);
+        let test_pool = &TestPoolBuilder::default()
+            .with_config(PoolConfig { blob_limit, pending_limit: blob_limit, queued_limit: blob_limit, ..Default::default() })
+            .pool;
+        let mut txns_vec = vec![];
+        let init_size = 10000000;
+        for _ in 0..init_size {
+            test_pool.add_transactions(TransactionOrigin::Local, 
+            vec![
+                TransactionValidationOutcome::Valid {
+                    balance: U256::from(1_000),
+                    state_nonce: 0,
+                    transaction: ValidTransaction::Valid(MockTransaction::eip1559()),
+                    propagate: true,
+                },
+            ]);
+        }
+        let size = 1000;
+        for i in 0..size {
+            let txn = TransactionValidationOutcome::Valid {
+                balance: U256::from(1_000),
+                state_nonce: 0,
+                transaction: ValidTransaction::Valid(MockTransaction::eip1559()),
+                propagate: true,
+            };
+            txn.tx_hash();
+            txns_vec.push(vec![txn]);
+        }
+        let start = Instant::now();
+        for txns in txns_vec {
+            test_pool.add_transactions(TransactionOrigin::Local, txns.into_iter());
+        }
+        let elapsed = start.elapsed() / size;
+        println!("Elapsed time: {:?}", elapsed);
+    }
 
     #[test]
     fn test_discard_blobs_on_blob_tx_eviction() {

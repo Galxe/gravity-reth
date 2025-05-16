@@ -185,7 +185,9 @@ impl<T: TransactionOrdering> TxPool<T> {
 
     /// Returns all senders in the pool
     pub(crate) fn unique_senders(&self) -> HashSet<Address> {
-        self.all_transactions.txs.values().map(|tx| tx.transaction.sender()).collect()
+        self.all_transactions.txs.values()
+        .flat_map(|map| map.values().map(|tx| tx.transaction.sender()))
+        .collect()
     }
 
     /// Returns stats about the size of pool.
@@ -229,7 +231,9 @@ impl<T: TransactionOrdering> TxPool<T> {
                 for tx in removed {
                     let to = {
                         let tx =
-                            self.all_transactions.txs.get_mut(tx.id()).expect("tx exists in set");
+                            self.all_transactions.txs.get_mut(&tx.id().sender)
+                            .and_then(|map| map.get_mut(&tx.id()))
+                            .expect("tx exists in set");
 
                         // the blob fee is too high now, unset the blob fee cap block flag
                         tx.state.remove(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK);
@@ -246,7 +250,9 @@ impl<T: TransactionOrdering> TxPool<T> {
                 for tx in removed {
                     let to = {
                         let tx =
-                            self.all_transactions.txs.get_mut(tx.id()).expect("tx exists in set");
+                            self.all_transactions.txs.get_mut(&tx.id().sender)
+                            .and_then(|map| map.get_mut(&tx.id()))
+                            .expect("tx exists in set");
                         tx.state.insert(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK);
                         tx.state.insert(TxState::ENOUGH_FEE_CAP_BLOCK);
                         tx.subpool = tx.state.into();
@@ -276,7 +282,9 @@ impl<T: TransactionOrdering> TxPool<T> {
                 for tx in removed {
                     let to = {
                         let tx =
-                            self.all_transactions.txs.get_mut(tx.id()).expect("tx exists in set");
+                            self.all_transactions.txs.get_mut(&tx.id().sender)
+                            .and_then(|map| map.get_mut(&tx.id()))
+                            .expect("tx exists in set");
                         tx.state.remove(TxState::ENOUGH_FEE_CAP_BLOCK);
                         tx.subpool = tx.state.into();
                         tx.subpool
@@ -293,7 +301,9 @@ impl<T: TransactionOrdering> TxPool<T> {
                 for tx in removed {
                     let to = {
                         let tx =
-                            self.all_transactions.txs.get_mut(tx.id()).expect("tx exists in set");
+                            self.all_transactions.txs.get_mut(&tx.id().sender)
+                            .and_then(|map| map.get_mut(&tx.id()))
+                            .expect("tx exists in set");
                         tx.state.insert(TxState::ENOUGH_FEE_CAP_BLOCK);
                         tx.subpool = tx.state.into();
                         tx.subpool
@@ -616,7 +626,7 @@ impl<T: TransactionOrdering> TxPool<T> {
     /// than the block's `blobFee`.
     pub(crate) fn add_transaction(
         &mut self,
-        tx: ValidPoolTransaction<T::Transaction>,
+        tx: Arc<ValidPoolTransaction<T::Transaction>>,
         on_chain_balance: U256,
         on_chain_nonce: u64,
     ) -> PoolResult<AddedTransaction<T::Transaction>> {
@@ -1101,7 +1111,8 @@ pub(crate) struct AllTransactions<T: PoolTransaction> {
     /// _All_ transactions identified by their hash.
     by_hash: HashMap<TxHash, Arc<ValidPoolTransaction<T>>>,
     /// _All_ transaction in the pool sorted by their sender and nonce pair.
-    txs: BTreeMap<TransactionId, PoolInternalTransaction<T>>,
+    // txs: BTreeMap<TransactionId, PoolInternalTransaction<T>>,
+    txs: HashMap<SenderId, BTreeMap<TransactionId, PoolInternalTransaction<T>>>,
     /// Tracks the number of transactions by sender that are currently in the pool.
     tx_counter: FxHashMap<SenderId, usize>,
     /// The current block number the pool keeps track of.
@@ -1151,7 +1162,8 @@ impl<T: PoolTransaction> AllTransactions<T> {
 
     /// Returns the internal transaction with additional metadata
     pub(crate) fn get(&self, id: &TransactionId) -> Option<&PoolInternalTransaction<T>> {
-        self.txs.get(id)
+        // self.txs.get(id)
+        self.txs.get(&id.sender).and_then(|map| map.get(&id))
     }
 
     /// Increments the transaction counter for the sender
@@ -1226,135 +1238,150 @@ impl<T: PoolTransaction> AllTransactions<T> {
     ) -> Vec<PoolUpdate> {
         // pre-allocate a few updates
         let mut updates = Vec::with_capacity(64);
-
-        let mut iter = self.txs.iter_mut().peekable();
-
-        // Loop over all individual senders and update all affected transactions.
-        // One sender may have up to `max_account_slots` transactions here, which means, worst case
-        // `max_accounts_slots` need to be updated, for example if the first transaction is blocked
-        // due to too low base fee.
-        // However, we don't have to necessarily check every transaction of a sender. If no updates
-        // are possible (nonce gap) then we can skip to the next sender.
-
-        // The `unique_sender` loop will process the first transaction of all senders, update its
-        // state and internally update all consecutive transactions
-        'transactions: while let Some((id, tx)) = iter.next() {
-            macro_rules! next_sender {
-                ($iter:ident) => {
-                    'this: while let Some((peek, _)) = iter.peek() {
-                        if peek.sender != id.sender {
-                            break 'this
+    
+        // Iterate over each sender and their BTreeMap of transactions
+        for (current_sender_id, sender_txs) in self.txs.iter_mut() {
+            // `sender_txs` is a `&mut BTreeMap<TransactionId, PoolInternalTransaction<T>>`
+            // BTreeMap iterates by TransactionId, which includes nonce, so transactions for this sender are nonce-ordered.
+            let mut sender_tx_iter = sender_txs.iter_mut().peekable();
+    
+            // Tracks the balance if the sender was changed in the block
+            let mut changed_sender_balance_from_info: Option<&U256> = None; // Renamed for clarity
+            let mut sender_state_nonce_from_info: Option<u64> = None; // Renamed for clarity
+    
+            // Check if this sender's account was changed
+            if let Some(info) = changed_accounts.get(current_sender_id) {
+                sender_state_nonce_from_info = Some(info.state_nonce);
+                changed_sender_balance_from_info = Some(&info.balance);
+            }
+    
+            let mut processing_first_tx_of_sender_sequence = true;
+            let mut has_parked_ancestor_for_sender = false;
+            let mut cumulative_cost_for_sender = U256::ZERO;
+            let mut next_expected_nonce_for_sender: Option<u64> = None;
+    
+            // Loop over all transactions for the current sender
+            while let Some((tx_id, tx)) = sender_tx_iter.next() {
+                // tx_id is &TransactionId, tx is &mut PoolInternalTransaction<T>
+                // Note: tx_id.sender will always be equal to current_sender_id here.
+    
+                // Handle changes related to the sender's account state (nonce and initial balance)
+                if let Some(current_state_nonce) = sender_state_nonce_from_info {
+                    // This block only executes if `changed_accounts` had an entry for `current_sender_id`.
+                    // Thus, `changed_sender_balance_from_info` will also be Some.
+    
+                    // Discard all transactions with a nonce lower than the current state nonce
+                    if tx_id.nonce < current_state_nonce {
+                        updates.push(PoolUpdate {
+                            id: *tx.transaction.id(),
+                            hash: *tx.transaction.hash(),
+                            current: tx.subpool,
+                            destination: Destination::Discard,
+                        });
+                        // This transaction is discarded, continue to the next transaction OF THIS SENDER.
+                        continue;
+                    }
+    
+                    // If this is the first transaction we're processing for this sender
+                    // (i.e., its nonce >= current_state_nonce, and it's the first one we haven't skipped)
+                    if processing_first_tx_of_sender_sequence {
+                        let ancestor = TransactionId::ancestor(tx_id.nonce, current_state_nonce, *current_sender_id);
+                        // If there's no ancestor, then this is the next transaction after the on-chain state.
+                        if ancestor.is_none() { // i.e. tx_id.nonce == current_state_nonce
+                            tx.state.insert(TxState::NO_NONCE_GAPS);
+                            tx.state.insert(TxState::NO_PARKED_ANCESTORS);
+                            // The cumulative cost for the first transaction in a sequence, if it's an anchor,
+                            // is considered zero for its own calculation, its own cost is added in next_cumulative_cost.
+                            tx.cumulative_cost = U256::ZERO;
+    
+                            // CORRECTED PART:
+                            // We are in this block only if sender_state_nonce_from_info is Some,
+                            // which implies changed_accounts.get(current_sender_id) returned Some(info).
+                            // The balance from that info is stored in changed_sender_balance_from_info.
+                            let balance_for_this_check = changed_sender_balance_from_info.expect(
+                                "Balance must be Some if sender_state_nonce_from_info was Some, as they originate from the same changed SenderInfo"
+                            );
+                            if tx.transaction.cost() > balance_for_this_check {
+                                tx.state.remove(TxState::ENOUGH_BALANCE);
+                            } else {
+                                tx.state.insert(TxState::ENOUGH_BALANCE);
+                            }
                         }
-                        iter.next();
+                        // If ancestor.is_some(), there's a gap from the on-chain state.
+                        // The `tx.state.has_nonce_gap()` check below will catch this.
                     }
-                };
-            }
-            // tracks the balance if the sender was changed in the block
-            let mut changed_balance = None;
-
-            // check if this is a changed account
-            if let Some(info) = changed_accounts.get(&id.sender) {
-                // discard all transactions with a nonce lower than the current state nonce
-                if id.nonce < info.state_nonce {
-                    updates.push(PoolUpdate {
-                        id: *tx.transaction.id(),
-                        hash: *tx.transaction.hash(),
-                        current: tx.subpool,
-                        destination: Destination::Discard,
-                    });
-                    continue 'transactions
                 }
-
-                let ancestor = TransactionId::ancestor(id.nonce, info.state_nonce, id.sender);
-                // If there's no ancestor then this is the next transaction.
-                if ancestor.is_none() {
-                    tx.state.insert(TxState::NO_NONCE_GAPS);
+    
+                // Nonce gap and sequence processing logic
+                if processing_first_tx_of_sender_sequence {
+                    // This is the first transaction of this sender we are substantively processing.
+                    // If it already has a nonce gap (e.g., from on-chain state or prior validation),
+                    // we cannot proceed with this sender.
+                    if tx.state.has_nonce_gap() {
+                        // No further updates possible for this sender due to initial nonce gap.
+                        // Break from processing this sender's transactions and move to the next sender.
+                        break;
+                    }
+    
+                    // Since this is the first transaction of this sender in the current valid sequence,
+                    // it has no parked ancestors *within this sequence*.
                     tx.state.insert(TxState::NO_PARKED_ANCESTORS);
-                    tx.cumulative_cost = U256::ZERO;
-                    if tx.transaction.cost() > &info.balance {
-                        // sender lacks sufficient funds to pay for this transaction
-                        tx.state.remove(TxState::ENOUGH_BALANCE);
+                    next_expected_nonce_for_sender = Some(tx_id.nonce.saturating_add(1));
+    
+                } else { // This is a subsequent transaction for the current sender
+                    // Check if this transaction's nonce follows the previous one.
+                    if Some(tx_id.nonce) == next_expected_nonce_for_sender {
+                        tx.state.insert(TxState::NO_NONCE_GAPS); // No longer nonce gapped within the sequence
                     } else {
-                        tx.state.insert(TxState::ENOUGH_BALANCE);
+                        // A nonce gap is found within the sender's transaction sequence.
+                        // Stop processing transactions for this sender.
+                        break;
+                    }
+                    next_expected_nonce_for_sender = Some(tx_id.nonce.saturating_add(1));
+    
+                    // Update ancestor condition based on the *previous* transaction's state.
+                    if has_parked_ancestor_for_sender {
+                        tx.state.remove(TxState::NO_PARKED_ANCESTORS);
+                    } else {
+                        tx.state.insert(TxState::NO_PARKED_ANCESTORS);
                     }
                 }
-
-                changed_balance = Some(&info.balance);
-            }
-
-            // If there's a nonce gap, we can shortcircuit, because there's nothing to update yet.
-            if tx.state.has_nonce_gap() {
-                next_sender!(iter);
-                continue 'transactions
-            }
-
-            // Since this is the first transaction of the sender, it has no parked ancestors
-            tx.state.insert(TxState::NO_PARKED_ANCESTORS);
-
-            // Update the first transaction of this sender.
-            Self::update_tx_base_fee(self.pending_fees.base_fee, tx);
-            // Track if the transaction's sub-pool changed.
-            Self::record_subpool_update(&mut updates, tx);
-
-            // Track blocking transactions.
-            let mut has_parked_ancestor = !tx.state.is_pending();
-
-            let mut cumulative_cost = tx.next_cumulative_cost();
-
-            // the next expected nonce after this transaction: nonce + 1
-            let mut next_nonce_in_line = tx.transaction.nonce().saturating_add(1);
-
-            // Update all consecutive transaction of this sender
-            while let Some((peek, ref mut tx)) = iter.peek_mut() {
-                if peek.sender != id.sender {
-                    // Found the next sender we need to check
-                    continue 'transactions
-                }
-
-                if tx.transaction.nonce() == next_nonce_in_line {
-                    // no longer nonce gapped
-                    tx.state.insert(TxState::NO_NONCE_GAPS);
-                } else {
-                    // can short circuit if there's still a nonce gap
-                    next_sender!(iter);
-                    continue 'transactions
-                }
-
-                // update for next iteration of this sender's loop
-                next_nonce_in_line = next_nonce_in_line.saturating_add(1);
-
-                // update cumulative cost
-                tx.cumulative_cost = cumulative_cost;
-                // Update for next transaction
-                cumulative_cost = tx.next_cumulative_cost();
-
-                // If the account changed in the block, check the balance.
-                if let Some(changed_balance) = changed_balance {
-                    if &cumulative_cost > changed_balance {
-                        // sender lacks sufficient funds to pay for this transaction
-                        tx.state.remove(TxState::ENOUGH_BALANCE);
-                    } else {
-                        tx.state.insert(TxState::ENOUGH_BALANCE);
-                    }
-                }
-
-                // Update ancestor condition.
-                if has_parked_ancestor {
-                    tx.state.remove(TxState::NO_PARKED_ANCESTORS);
-                } else {
-                    tx.state.insert(TxState::NO_PARKED_ANCESTORS);
-                }
-                has_parked_ancestor = !tx.state.is_pending();
-
-                // Update and record sub-pool changes.
+    
+                // Common updates for any processed transaction (first or subsequent)
+    
+                // Update the transaction's sub-pool based on base fee.
                 Self::update_tx_base_fee(self.pending_fees.base_fee, tx);
+                // Track if the transaction's sub-pool changed.
                 Self::record_subpool_update(&mut updates, tx);
-
-                // Advance iterator
-                iter.next();
+    
+                // Update cumulative cost and check balance if the account changed.
+                if processing_first_tx_of_sender_sequence {
+                    // For the first tx in sequence, `cumulative_cost_for_sender` will be its `next_cumulative_cost()`.
+                    // `tx.cumulative_cost` was potentially set to U256::ZERO above if it's an anchor.
+                    cumulative_cost_for_sender = tx.next_cumulative_cost();
+                } else {
+                    // For subsequent transactions:
+                    tx.cumulative_cost = cumulative_cost_for_sender; // Set this tx's cumulative cost
+                    cumulative_cost_for_sender = tx.next_cumulative_cost(); // Update for the *next* transaction
+    
+                    // If the account changed in the block, check the balance against the new cumulative cost.
+                    // Use the balance captured earlier if the account was indeed changed.
+                    if let Some(balance_from_info) = changed_sender_balance_from_info {
+                        // Check if sender has enough for this tx and all its predecessors in the sequence.
+                        if &tx.cumulative_cost > balance_from_info {
+                            tx.state.remove(TxState::ENOUGH_BALANCE);
+                        } else {
+                            tx.state.insert(TxState::ENOUGH_BALANCE);
+                        }
+                    }
+                }
+    
+                // Update tracking variables for the next iteration for THIS SENDER
+                has_parked_ancestor_for_sender = !tx.state.is_pending();
+                processing_first_tx_of_sender_sequence = false;
             }
         }
-
+    
         updates
     }
 
@@ -1395,8 +1422,9 @@ impl<T: PoolTransaction> AllTransactions<T> {
         sender: SenderId,
     ) -> impl Iterator<Item = (&TransactionId, &PoolInternalTransaction<T>)> + '_ {
         self.txs
-            .range((sender.start_bound(), Unbounded))
-            .take_while(move |(other, _)| sender == other.sender)
+            .get(&sender) 
+            .into_iter()  
+            .flat_map(|map_ref| map_ref.iter())
     }
 
     /// Returns a mutable iterator over all transactions for the given sender, starting with the
@@ -1407,9 +1435,13 @@ impl<T: PoolTransaction> AllTransactions<T> {
         &mut self,
         sender: SenderId,
     ) -> impl Iterator<Item = (&TransactionId, &mut PoolInternalTransaction<T>)> + '_ {
+        // self.txs
+        //     .range_mut((sender.start_bound(), Unbounded))
+        //     .take_while(move |(other, _)| sender == other.sender)
         self.txs
-            .range_mut((sender.start_bound(), Unbounded))
-            .take_while(move |(other, _)| sender == other.sender)
+            .get_mut(&sender) 
+            .into_iter() 
+            .flat_map(|map_ref| map_ref.iter_mut())
     }
 
     /// Returns all transactions that _follow_ after the given id and have the same sender.
@@ -1419,7 +1451,12 @@ impl<T: PoolTransaction> AllTransactions<T> {
         &'a self,
         id: &'b TransactionId,
     ) -> impl Iterator<Item = (&'a TransactionId, &'a PoolInternalTransaction<T>)> + 'a {
-        self.txs.range((Excluded(id), Unbounded)).take_while(|(other, _)| id.sender == other.sender)
+        // self.txs.range((Excluded(id), Unbounded)).take_while(|(other, _)| id.sender == other.sender)
+        let id = *id;
+        self.txs
+            .get(&id.sender)
+            .into_iter()
+            .flat_map(move |map_ref| map_ref.range((Excluded(id), Unbounded)).map(|(id, tx)| (id, tx)))
     }
 
     /// Returns all transactions that _follow_ after the given id but have the same sender.
@@ -1430,7 +1467,12 @@ impl<T: PoolTransaction> AllTransactions<T> {
         &'a self,
         id: &'b TransactionId,
     ) -> impl Iterator<Item = (&'a TransactionId, &'a PoolInternalTransaction<T>)> + 'a {
-        self.txs.range(id..).take_while(|(other, _)| id.sender == other.sender)
+        // self.txs.range(id..).take_while(|(other, _)| id.sender == other.sender)
+        let id = *id;
+        self.txs
+            .get(&id.sender)
+            .into_iter()
+            .flat_map(move |map_ref| map_ref.range(id..).map(|(id, tx)| (id, tx)))
     }
 
     /// Returns all mutable transactions that _follow_ after the given id but have the same sender.
@@ -1441,7 +1483,11 @@ impl<T: PoolTransaction> AllTransactions<T> {
         &'a mut self,
         id: &'b TransactionId,
     ) -> impl Iterator<Item = (&'a TransactionId, &'a mut PoolInternalTransaction<T>)> + 'a {
-        self.txs.range_mut(id..).take_while(|(other, _)| id.sender == other.sender)
+        let id = *id;
+        self.txs
+            .get_mut(&id.sender)
+            .into_iter()
+            .flat_map(move |map_ref| map_ref.range_mut(id..).map(|(id, tx)| (id, tx)))
     }
 
     /// Removes a transaction from the set using its hash.
@@ -1450,7 +1496,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         tx_hash: &B256,
     ) -> Option<(Arc<ValidPoolTransaction<T>>, SubPool)> {
         let tx = self.by_hash.remove(tx_hash)?;
-        let internal = self.txs.remove(&tx.transaction_id)?;
+        let internal = self.txs.get_mut(&tx.transaction_id.sender).and_then(|map| map.remove(&tx.transaction_id))?;
         // decrement the counter for the sender.
         self.tx_decr(tx.sender_id());
         self.update_size_metrics();
@@ -1466,7 +1512,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         &mut self,
         id: &TransactionId,
     ) -> Option<(Arc<ValidPoolTransaction<T>>, SubPool)> {
-        let internal = self.txs.remove(id)?;
+        let internal = self.txs.get_mut(&id.sender).and_then(|map| map.remove(id))?;
 
         // decrement the counter for the sender.
         self.tx_decr(internal.transaction.sender_id());
@@ -1501,9 +1547,9 @@ impl<T: PoolTransaction> AllTransactions<T> {
     ///     transactions are mutually exclusive for the same sender.
     fn ensure_valid(
         &self,
-        transaction: ValidPoolTransaction<T>,
+        transaction: Arc<ValidPoolTransaction<T>>,
         on_chain_nonce: u64,
-    ) -> Result<ValidPoolTransaction<T>, InsertErr<T>> {
+    ) -> Result<Arc<ValidPoolTransaction<T>>, InsertErr<T>> {
         if !self.local_transactions_config.is_local(transaction.origin, transaction.sender_ref()) {
             let current_txs =
                 self.tx_counter.get(&transaction.sender_id()).copied().unwrap_or_default();
@@ -1512,7 +1558,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
             // If transaction's nonce matches on-chain nonce always let it through
             if current_txs >= self.max_account_slots && transaction.nonce() > on_chain_nonce {
                 return Err(InsertErr::ExceededSenderTransactionsCapacity {
-                    transaction: Arc::new(transaction),
+                    transaction: transaction,
                 })
             }
         }
@@ -1520,13 +1566,13 @@ impl<T: PoolTransaction> AllTransactions<T> {
             return Err(InsertErr::TxGasLimitMoreThanAvailableBlockGas {
                 block_gas_limit: self.block_gas_limit,
                 tx_gas_limit: transaction.gas_limit(),
-                transaction: Arc::new(transaction),
+                transaction: transaction,
             })
         }
 
         if self.contains_conflicting_transaction(&transaction) {
             // blob vs non blob transactions are mutually exclusive for the same sender
-            return Err(InsertErr::TxTypeConflict { transaction: Arc::new(transaction) })
+            return Err(InsertErr::TxTypeConflict { transaction: transaction })
         }
 
         Ok(transaction)
@@ -1539,21 +1585,21 @@ impl<T: PoolTransaction> AllTransactions<T> {
     ///      descending blob transaction into overdraft
     fn ensure_valid_blob_transaction(
         &self,
-        new_blob_tx: ValidPoolTransaction<T>,
+        new_blob_tx: Arc<ValidPoolTransaction<T>>,
         on_chain_balance: U256,
         ancestor: Option<TransactionId>,
-    ) -> Result<ValidPoolTransaction<T>, InsertErr<T>> {
+    ) -> Result<Arc<ValidPoolTransaction<T>>, InsertErr<T>> {
         if let Some(ancestor) = ancestor {
-            let Some(ancestor_tx) = self.txs.get(&ancestor) else {
+            let Some(ancestor_tx) = self.txs.get(&ancestor.sender).and_then(|map| map.get(&ancestor)) else {
                 // ancestor tx is missing, so we can't insert the new blob
                 self.metrics.blob_transactions_nonce_gaps.increment(1);
-                return Err(InsertErr::BlobTxHasNonceGap { transaction: Arc::new(new_blob_tx) })
+                return Err(InsertErr::BlobTxHasNonceGap { transaction: new_blob_tx })
             };
             if ancestor_tx.state.has_nonce_gap() {
                 // the ancestor transaction already has a nonce gap, so we can't insert the new
                 // blob
                 self.metrics.blob_transactions_nonce_gaps.increment(1);
-                return Err(InsertErr::BlobTxHasNonceGap { transaction: Arc::new(new_blob_tx) })
+                return Err(InsertErr::BlobTxHasNonceGap { transaction: new_blob_tx })
             }
 
             // the max cost executing this transaction requires
@@ -1562,7 +1608,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
             // check if the new blob would go into overdraft
             if cumulative_cost > on_chain_balance {
                 // the transaction would go into overdraft
-                return Err(InsertErr::Overdraft { transaction: Arc::new(new_blob_tx) })
+                return Err(InsertErr::Overdraft { transaction: new_blob_tx })
             }
 
             // ensure that a replacement would not shift already propagated blob transactions into
@@ -1579,14 +1625,14 @@ impl<T: PoolTransaction> AllTransactions<T> {
                         cumulative_cost += tx.transaction.cost();
                         if tx.transaction.is_eip4844() && cumulative_cost > on_chain_balance {
                             // the transaction would shift
-                            return Err(InsertErr::Overdraft { transaction: Arc::new(new_blob_tx) })
+                            return Err(InsertErr::Overdraft { transaction: new_blob_tx })
                         }
                     }
                 }
             }
         } else if new_blob_tx.cost() > &on_chain_balance {
             // the transaction would go into overdraft
-            return Err(InsertErr::Overdraft { transaction: Arc::new(new_blob_tx) })
+            return Err(InsertErr::Overdraft { transaction: new_blob_tx })
         }
 
         Ok(new_blob_tx)
@@ -1625,7 +1671,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
     /// must not be underpriced
     pub(crate) fn insert_tx(
         &mut self,
-        transaction: ValidPoolTransaction<T>,
+        transaction: Arc<ValidPoolTransaction<T>>,
         on_chain_balance: U256,
         on_chain_nonce: u64,
     ) -> InsertResult<T> {
@@ -1665,7 +1711,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
             state.insert(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK);
         }
 
-        let transaction = Arc::new(transaction);
+        let transaction = transaction;
 
         // If there's no ancestor tx then this is the next transaction.
         if ancestor.is_none() {
@@ -1694,7 +1740,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         };
 
         // try to insert the transaction
-        match self.txs.entry(*transaction.id()) {
+        match self.txs.entry(transaction.id().sender).or_insert_with(|| BTreeMap::new()).entry(*transaction.id()) {
             Entry::Vacant(entry) => {
                 // Insert the transaction in both maps
                 self.by_hash.insert(*pool_tx.transaction.hash(), pool_tx.transaction.clone());
