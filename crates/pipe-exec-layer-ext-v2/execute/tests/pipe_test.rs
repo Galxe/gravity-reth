@@ -23,14 +23,17 @@ use tracing::info;
 
 type Provider = BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>;
 
-struct MockConsensus {
-    pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>>,
+struct MockConsensus<EthApi> {
+    pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>, EthApi>,
     provider: Provider,
 }
 
-impl MockConsensus {
-    const fn new(
-        pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>>,
+impl<EthApi> MockConsensus<EthApi>
+where
+    EthApi: Send + Sync + 'static,
+{
+    fn new(
+        pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>, EthApi>,
         provider: Provider,
     ) -> Self {
         Self { pipeline_api, provider }
@@ -128,6 +131,7 @@ async fn run_pipe(
         .await?;
 
     let chain_spec = handle.node.chain_spec();
+    let eth_api = handle.node.rpc_registry.eth_api().clone();
 
     let provider: Provider = handle.node.provider;
     let db_provider = provider.database_provider_ro().unwrap();
@@ -153,8 +157,14 @@ async fn run_pipe(
     let storage = BlockViewStorage::new(provider.clone());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let pipeline_api =
-        new_pipe_exec_layer_api(chain_spec, storage, latest_block_header, latest_block_hash, rx);
+    let pipeline_api = new_pipe_exec_layer_api(
+        chain_spec,
+        storage,
+        latest_block_header,
+        latest_block_hash,
+        rx,
+        eth_api,
+    );
     tx.send(ExecutionArgs { block_number_to_block_id: BTreeMap::new() }).unwrap();
 
     let consensus = MockConsensus::new(pipeline_api, provider);

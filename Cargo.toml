@@ -214,7 +214,8 @@ members = [
     "testing/ef-tests/",
     "testing/testing-utils",
     "crates/tracing-otlp",
-    "crates/pipe-exec-layer-ext-v2/",
+    "crates/pipe-exec-layer-ext-v2/execute",
+    "crates/pipe-exec-layer-ext-v2/event-bus",
 ]
 default-members = ["bin/reth"]
 exclude = ["docs/cli"]
@@ -494,7 +495,8 @@ reth-trie = { path = "crates/trie/trie" }
 reth-trie-common = { path = "crates/trie/common", default-features = false }
 reth-trie-db = { path = "crates/trie/db" }
 reth-trie-parallel = { path = "crates/trie/parallel" }
-reth-pipe-exec-layer-ext-v2 = { path = "crates/pipe-exec-layer-ext-v2" }
+reth-pipe-exec-layer-ext-v2 = { path = "crates/pipe-exec-layer-ext-v2/execute" }
+reth-pipe-exec-layer-event-bus = { path = "crates/pipe-exec-layer-ext-v2/event-bus" }
 gravity-storage = { path = "crates/gravity-storage" }
 gravity-primitives = { path = "crates/gravity-primitives" }
 reth-trie-sparse = { path = "crates/trie/sparse", default-features = false }
