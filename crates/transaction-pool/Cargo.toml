@@ -26,8 +26,8 @@ revm-interpreter.workspace = true
 revm-primitives.workspace = true
 reth-revm.workspace = true
 gravity-storage.workspace = true
-reth-pipe-exec-layer-ext-v2.workspace = true
 gravity-primitives.workspace = true
+reth-pipe-exec-layer-event-bus.workspace = true
 
 # ethereum
 alloy-eips = { workspace = true, features = ["kzg"] }

@@ -32,6 +32,7 @@ reth-tasks.workspace = true
 reth-trie-db.workspace = true
 reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
+reth-pipe-exec-layer-event-bus.workspace = true
 reth-trie.workspace = true
 reth-pipe-exec-layer-ext-v2.workspace = true
 gravity-primitives.workspace = true
