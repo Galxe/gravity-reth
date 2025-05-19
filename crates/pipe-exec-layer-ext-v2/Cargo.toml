@@ -12,6 +12,7 @@ description = "pipeline execution layer extension"
 workspace = true
 
 [dependencies]
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", branch = "onchain-config-dev" }
 reth-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-evm-ethereum.workspace = true
