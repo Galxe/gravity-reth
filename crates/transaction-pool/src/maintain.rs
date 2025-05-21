@@ -19,7 +19,7 @@ use reth_chain_state::CanonStateNotification;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_execution_types::ChangedAccount;
 use reth_fs_util::FsPathError;
-use reth_pipe_exec_layer_ext_v2::get_pipe_exec_layer_ext;
+use reth_pipe_exec_layer_event_bus::get_pipe_exec_layer_event_bus;
 use reth_primitives::{transaction::SignedTransactionIntoRecoveredExt, SealedHeader};
 use reth_primitives_traits::{NodePrimitives, SignedTransaction};
 use reth_storage_api::{errors::provider::ProviderError, BlockReaderIdExt, StateProviderFactory};
@@ -163,7 +163,7 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
     // Wait for PipeExecLayerExt to be available
     tokio::time::sleep(Duration::from_secs(3)).await;
     let mut discard_txs_rx =
-        get_pipe_exec_layer_ext::<N>().unwrap().discard_txs.lock().await.take().unwrap();
+        get_pipe_exec_layer_event_bus::<N>().unwrap().discard_txs.lock().await.take().unwrap();
 
     // The update loop that waits for new blocks and reorgs and performs pool updated
     // Listen for new chain events and derive the update action for the pool

@@ -1,3 +1,4 @@
+use alloy_rpc_types_eth::TransactionRequest;
 use gravity_storage::block_view_storage::BlockViewStorage;
 use reth_chainspec::ChainSpec;
 use reth_cli_commands::NodeCommand;
@@ -12,6 +13,7 @@ use reth_provider::{
     providers::BlockchainProvider, BlockHashReader, BlockNumReader, BlockReader,
     DatabaseProviderFactory, HeaderProvider, TransactionVariant,
 };
+use reth_rpc_eth_api::EthApiServer;
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
@@ -118,6 +120,7 @@ async fn run_pipe(
         .await?;
 
     let chain_spec = handle.node.chain_spec();
+    let eth_api = handle.node.rpc_registry.eth_api().clone();
 
     let provider: Provider = handle.node.provider;
     let db_provider = provider.database_provider_ro().unwrap();
@@ -144,8 +147,14 @@ async fn run_pipe(
     );
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let pipeline_api =
-        new_pipe_exec_layer_api(chain_spec, storage, latest_block_header, latest_block_hash, rx);
+    let pipeline_api = new_pipe_exec_layer_api(
+        chain_spec,
+        storage,
+        latest_block_header,
+        latest_block_hash,
+        rx,
+        eth_api,
+    );
     tx.send(ExecutionArgs { block_number_to_block_id: BTreeMap::new() }).unwrap();
 
     let consensus = MockConsensus::new(pipeline_api, provider);

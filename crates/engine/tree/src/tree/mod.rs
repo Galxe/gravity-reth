@@ -44,7 +44,7 @@ use reth_evm::{
 };
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{EngineApiMessageVersion, PayloadBuilderAttributes};
-use reth_pipe_exec_layer_ext_v2::{get_pipe_exec_layer_ext, PipeExecLayerEvent};
+use reth_pipe_exec_layer_event_bus::{get_pipe_exec_layer_event_bus, PipeExecLayerEvent};
 use reth_primitives_traits::{
     Block, GotExpected, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
     SignedTransaction,
@@ -806,13 +806,12 @@ where
         let block_number = block.recovered_block.number();
         let block_hash = block.recovered_block.hash();
 
-        if *reth_pipe_exec_layer_ext_v2::PIPE_VALIDATE_BLOCK_BEFORE_INSERT {
-            self.validate_block(block.recovered_block()).unwrap_or_else(|err| {
+        #[cfg(test)]
+        self.validate_block(block.recovered_block()).unwrap_or_else(|err| {
                 panic!(
                     "Failed to validate block, block_number={block_number} block_hash={block_hash:?}: {err}",
                 )
             });
-        }
 
         self.state.tree_state.insert_executed(block);
 
@@ -844,7 +843,7 @@ where
         // Wait for the pipe exec layer to be initialized
         std::thread::sleep(std::time::Duration::from_secs(3));
         let mut pipe_event_rx =
-            get_pipe_exec_layer_ext::<N>().unwrap().event_rx.lock().unwrap().take().unwrap();
+            get_pipe_exec_layer_event_bus::<N>().unwrap().event_rx.lock().unwrap().take().unwrap();
         loop {
             match self.try_recv_pipe_exec_event(&mut pipe_event_rx) {
                 Ok(Some(event)) => self.on_pipe_exec_event(event),

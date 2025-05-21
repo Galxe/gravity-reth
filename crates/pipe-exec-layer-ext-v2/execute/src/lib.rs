@@ -2,6 +2,7 @@
 #[macro_use]
 mod channel;
 mod metrics;
+mod onchain_config;
 
 use channel::Channel;
 use metrics::PipeExecLayerMetrics;
@@ -22,7 +23,10 @@ use reth_evm::{
 };
 use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
-use reth_primitives::{EthPrimitives, NodePrimitives};
+use reth_pipe_exec_layer_event_bus::{
+    PipeExecLayerEvent, PipeExecLayerEventBus, PIPE_EXEC_LAYER_EVENT_BUS,
+};
+use reth_primitives::EthPrimitives;
 use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
@@ -30,9 +34,10 @@ use reth_primitives_traits::{
 use revm::primitives::{AccountInfo, HashMap, HashSet};
 use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
 
-use once_cell::sync::{Lazy, OnceCell};
-
 use gravity_storage::GravityStorage;
+use reth_rpc_eth_api::{
+    EthApiServer, EthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
+};
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot, Mutex,
@@ -97,12 +102,6 @@ impl ReceivedBlock {
             ReceivedBlock::HistoryBlock(block) => block.number(),
         }
     }
-}
-
-#[derive(Debug)]
-pub enum PipeExecLayerEvent<N: NodePrimitives> {
-    /// Make executed block canonical
-    MakeCanonical(ExecutedBlockWithTrieUpdates<N>, oneshot::Sender<()>),
 }
 
 #[derive(Debug)]
@@ -656,34 +655,24 @@ impl<Storage> Drop for PipeExecLayerApi<Storage> {
     }
 }
 
-/// Called by EL.
-#[derive(Debug)]
-pub struct PipeExecLayerExt<N: NodePrimitives> {
-    /// Receive events from PipeExecService
-    pub event_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>>>,
-    /// Receive discarded txs from PipeExecService
-    pub discard_txs: tokio::sync::Mutex<Option<UnboundedReceiver<Vec<TxHash>>>>,
-}
-
-/// A static instance of `PipeExecLayerExt` used for dispatching events.
-pub static PIPE_EXEC_LAYER_EXT: OnceCell<Box<dyn Any + Send + Sync>> = OnceCell::new();
-
-pub fn get_pipe_exec_layer_ext<N: NodePrimitives>() -> Option<&'static PipeExecLayerExt<N>> {
-    PIPE_EXEC_LAYER_EXT.get().map(|ext| ext.downcast_ref::<PipeExecLayerExt<N>>().unwrap())
-}
-
-/// Whether to validate the block before inserting it into `TreeState`.
-pub static PIPE_VALIDATE_BLOCK_BEFORE_INSERT: Lazy<bool> =
-    Lazy::new(|| std::env::var("PIPE_VALIDATE_BLOCK_BEFORE_INSERT").is_ok());
-
 /// Create a new `PipeExecLayerApi` instance and launch a `PipeExecService`.
-pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
+pub fn new_pipe_exec_layer_api<Storage, EthApi>(
     chain_spec: Arc<ChainSpec>,
     storage: Storage,
     latest_block_header: Header,
     latest_block_hash: B256,
     execution_args_rx: oneshot::Receiver<ExecutionArgs>,
-) -> PipeExecLayerApi<Storage> {
+    eth_api: EthApi,
+) -> PipeExecLayerApi<Storage>
+where
+    Storage: GravityStorage,
+    EthApi: EthApiServer<
+            RpcTransaction<EthApi::NetworkTypes>,
+            RpcBlock<EthApi::NetworkTypes>,
+            RpcReceipt<EthApi::NetworkTypes>,
+            RpcHeader<EthApi::NetworkTypes>,
+        > + EthApiTypes,
+{
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (execution_result_tx, execution_result_rx) = tokio::sync::mpsc::unbounded_channel();
     let verified_block_hash_ch = Arc::new(Channel::new());
@@ -717,8 +706,8 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
     };
     tokio::spawn(service.run());
 
-    PIPE_EXEC_LAYER_EXT.get_or_init(|| {
-        Box::new(PipeExecLayerExt {
+    PIPE_EXEC_LAYER_EVENT_BUS.get_or_init(|| {
+        Box::new(PipeExecLayerEventBus {
             event_rx: std::sync::Mutex::new(Some(event_rx)),
             discard_txs: tokio::sync::Mutex::new(Some(discard_txs_rx)),
         })
