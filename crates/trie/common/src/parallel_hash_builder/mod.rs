@@ -238,7 +238,7 @@ impl ParallelHashBuilder {
     }
 
     fn current_root(&mut self) -> B256 {
-        info!("lightman current_root stack size {:?}", self.stack.len());
+        info!("lightman current_root counter {:?}", self.counter);
         if let Some(node_ref) = self.stack.last() {
             let rlp = node_ref.rlp();
             if let Some(hash) = rlp.as_hash() {
