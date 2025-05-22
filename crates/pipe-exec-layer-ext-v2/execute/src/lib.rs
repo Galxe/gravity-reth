@@ -5,6 +5,7 @@ mod metrics;
 mod onchain_config;
 
 use channel::Channel;
+use gravity_api_types::config_storage::{ConfigStorage, OnChainConfig};
 use metrics::PipeExecLayerMetrics;
 
 use alloy_consensus::{
@@ -19,7 +20,7 @@ use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
     database::*,
     execute::{BlockExecutorProvider, Executor},
-    parallel_database, ConfigureEvmEnv, NextBlockEnvAttributes,
+    parallel_database, ConfigureEvm, ConfigureEvmEnv, NextBlockEnvAttributes,
 };
 use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
@@ -31,10 +32,14 @@ use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
 };
-use revm::primitives::{AccountInfo, HashMap, HashSet};
-use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
+use revm::{
+    db::WrapDatabaseRef,
+    primitives::{AccountInfo, HashMap, HashSet},
+};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use gravity_storage::GravityStorage;
+use onchain_config::{transact_metadata_contract_call, OnchainConfigFetcher};
 use reth_rpc_eth_api::{
     EthApiServer, EthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
 };
@@ -135,6 +140,13 @@ pub struct ExecutionResult {
     pub txs_info: Vec<TxInfo>,
 }
 
+#[derive(Debug, Clone)]
+struct ExecuteBlockContext {
+    parent_header: Header,
+    prev_start_execute_time: Instant,
+    epoch: u64,
+}
+
 #[derive(Debug)]
 struct Core<Storage: GravityStorage> {
     /// Send executed block hash to Coordinator
@@ -145,7 +157,7 @@ struct Core<Storage: GravityStorage> {
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
-    execute_block_barrier: Channel<u64 /* block number */, (Header, Instant)>,
+    execute_block_barrier: Channel<u64 /* block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
     seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
     make_canonical_barrier: Channel<u64 /* block number */, Instant>,
@@ -194,6 +206,7 @@ struct ExecuteOrderedBlockResult {
     block_without_roots: RecoveredBlock<Block>,
     execution_output: BlockExecutionOutput<Receipt>,
     txs_info: Vec<TxInfo>,
+    epoch: u64,
 }
 
 impl<Storage: GravityStorage> Core<Storage> {
@@ -204,11 +217,32 @@ impl<Storage: GravityStorage> Core<Storage> {
         self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
-        let (parent_block_header, prev_start_execute_time) =
+        let ExecuteBlockContext { parent_header, prev_start_execute_time, epoch } =
             self.execute_block_barrier.wait(block_number - 1).await.unwrap();
+
+        if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
+            if ordered_block.epoch != epoch {
+                // Discard the block if the epoch is not equal to the current epoch
+                info!(target: "PipeExecService.process",
+                    block_number=?block_number,
+                    block_id=?block_id,
+                    block_epoch=?ordered_block.epoch,
+                    current_epoch=?epoch,
+                    "epoch mismatch"
+                );
+                assert!(ordered_block.epoch < epoch);
+                return;
+            }
+        }
+
         let start_time = Instant::now();
-        let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info } =
-            self.execute_ordered_block(block, &parent_block_header);
+        let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info, epoch } =
+            match block {
+                ReceivedBlock::OrderedBlock(ordered_block) => {
+                    self.execute_ordered_block(ordered_block, &parent_header)
+                }
+                ReceivedBlock::HistoryBlock(recovered_block) => todo!(),
+            };
         self.storage.insert_bundle_state(block_number, &execution_output.state);
         let elapsed = start_time.elapsed();
         info!(target: "PipeExecService.process",
@@ -216,12 +250,20 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_id=?block_id,
             gas_used=execution_output.gas_used,
             elapsed=?elapsed,
+            epoch=?epoch,
             "block executed"
         );
         self.metrics.execute_duration.record(elapsed);
         self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
         self.execute_block_barrier
-            .notify(block_number, (block_without_roots.header().clone(), start_time))
+            .notify(
+                block_number,
+                ExecuteBlockContext {
+                    parent_header: block_without_roots.header().clone(),
+                    prev_start_execute_time: start_time,
+                    epoch,
+                },
+            )
             .unwrap();
 
         let (mut block, senders) = block_without_roots.split();
@@ -326,30 +368,16 @@ impl<Storage: GravityStorage> Core<Storage> {
     fn create_block_for_executor(
         &self,
         ordered_block: OrderedBlock,
-        parent_header: &Header,
+        base_fee: u64,
         state: &Storage::StateView,
     ) -> (RecoveredBlock<Block>, Vec<TxInfo>) {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
-
-        let evm_env = self
-            .evm_config
-            .next_evm_env(
-                parent_header,
-                NextBlockEnvAttributes {
-                    timestamp: ordered_block.timestamp,
-                    suggested_fee_recipient: ordered_block.coinbase,
-                    prev_randao: ordered_block.prev_randao,
-                    gas_limit: BLOCK_GAS_LIMIT_1G,
-                },
-            )
-            .unwrap();
-
         let mut block = Block {
             header: Header {
                 beneficiary: ordered_block.coinbase,
                 timestamp: ordered_block.timestamp,
                 mix_hash: ordered_block.prev_randao,
-                base_fee_per_gas: Some(evm_env.block_env.basefee.to::<u64>()),
+                base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,
                 gas_limit: BLOCK_GAS_LIMIT_1G,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
@@ -387,7 +415,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             &state,
             ordered_block.transactions,
             ordered_block.senders,
-            evm_env.block_env.basefee,
+            base_fee,
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
 
@@ -397,22 +425,47 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     fn execute_ordered_block(
         &self,
-        block: ReceivedBlock,
+        ordered_block: OrderedBlock,
         parent_header: &Header,
     ) -> ExecuteOrderedBlockResult {
-        let block_id = block.id();
-        let parent_id = block.parent_id();
-        let block_number = block.number();
+        let block_id = ordered_block.id;
+        let parent_id = ordered_block.parent_id;
+        let block_number = ordered_block.number;
+        let epoch = ordered_block.epoch;
 
         let (parent_id_, state) = self.storage.get_state_view(block_number - 1).unwrap();
         assert_eq!(parent_id, parent_id_);
 
-        let (block, txs_info) = match block {
-            ReceivedBlock::OrderedBlock(ordered_block) => {
-                self.create_block_for_executor(ordered_block, parent_header, &state)
-            }
-            ReceivedBlock::HistoryBlock(block) => (block, Vec::new()),
+        let evm_env = self
+            .evm_config
+            .next_evm_env(
+                parent_header,
+                NextBlockEnvAttributes {
+                    timestamp: ordered_block.timestamp,
+                    suggested_fee_recipient: ordered_block.coinbase,
+                    prev_randao: ordered_block.prev_randao,
+                    gas_limit: BLOCK_GAS_LIMIT_1G,
+                },
+            )
+            .unwrap();
+        let base_fee = evm_env.block_env.basefee.to::<u64>();
+        let metadata_txn_result = {
+            let mut evm = self.evm_config.evm_with_env(WrapDatabaseRef(&state), evm_env);
+            transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000)
         };
+        if metadata_txn_result.result.emit_new_epoch() {
+            // Advance epoch and discard the block.
+            info!(target: "execute_ordered_block",
+                id=?block_id,
+                parent_id=?parent_id,
+                number=?block_number,
+                new_epoch=?(epoch + 1),
+                "emit new epoch, discard the block"
+            );
+            return metadata_txn_result.into_executed_ordered_block_result(&ordered_block);
+        }
+
+        let (block, txs_info) = self.create_block_for_executor(ordered_block, base_fee, &state);
 
         info!(target: "execute_ordered_block",
             id=?block_id,
@@ -421,8 +474,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             "ready to execute block"
         );
 
-        let executor = EthExecutorProvider::ethereum(self.chain_spec.clone())
+        let mut executor = EthExecutorProvider::ethereum(self.chain_spec.clone())
             .executor(parallel_database! { state });
+        // Apply metadata transaction result to executor state
+        executor.state_mut().commit_changes(metadata_txn_result.state);
 
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
             serde_json::to_writer(
@@ -435,11 +490,14 @@ impl<Storage: GravityStorage> Core<Storage> {
             panic!("failed to execute block {:?}: {:?}", block_id, err)
         });
 
-        ExecuteOrderedBlockResult {
+        let mut result = ExecuteOrderedBlockResult {
             block_without_roots: block,
             execution_output: outcome,
             txs_info,
-        }
+            epoch,
+        };
+        metadata_txn_result.result.insert_to_executed_ordered_block_result(&mut result);
+        result
     }
 
     /// Calculate the receipts root, logs bloom, and transactions root, etc. and fill them into the
@@ -495,7 +553,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         db: &Storage::StateView,
         txs: Vec<TransactionSigned>,
         senders: Vec<Address>,
-        base_fee_per_gas: U256,
+        base_fee_per_gas: u64,
     ) -> (Vec<TransactionSigned>, Vec<Address>, Vec<TxInfo>) {
         let invalid_idxs = filter_invalid_txs(db, &txs, &senders, base_fee_per_gas);
         if !invalid_idxs.is_empty() {
@@ -547,7 +605,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
     db: DB,
     txs: &Vec<TransactionSigned>,
     senders: &Vec<Address>,
-    base_fee_per_gas: U256,
+    base_fee_per_gas: u64,
 ) -> HashSet<usize> {
     let mut sender_idx: HashMap<&Address, Vec<usize>> = HashMap::default();
     for (i, sender) in senders.iter().enumerate() {
@@ -565,10 +623,9 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
             );
             return false;
         }
-        let gas_spent =
-            U256::from(tx.transaction().effective_gas_price(Some(base_fee_per_gas.to())))
-                .saturating_mul(U256::from(tx.transaction().gas_limit()))
-                .saturating_add(tx.transaction().value());
+        let gas_spent = U256::from(tx.transaction().effective_gas_price(Some(base_fee_per_gas)))
+            .saturating_mul(U256::from(tx.transaction().gas_limit()))
+            .saturating_add(tx.transaction().value());
         if account.balance < gas_spent {
             warn!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
@@ -606,14 +663,34 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
 
 /// Called by Coordinator
 #[derive(Debug)]
-pub struct PipeExecLayerApi<Storage> {
+pub struct PipeExecLayerApi<Storage, EthApi> {
     ordered_block_tx: UnboundedSender<ReceivedBlock>,
     execution_result_rx: Mutex<UnboundedReceiver<ExecutionResult>>,
     verified_block_hash_tx: Arc<Channel<B256 /* block id */, Option<B256> /* block hash */>>,
     storage: Arc<Storage>,
+    onchain_config_fetcher: OnchainConfigFetcher<EthApi>,
 }
 
-impl<Storage: GravityStorage> PipeExecLayerApi<Storage> {
+impl<Storage, EthApi> ConfigStorage for PipeExecLayerApi<Storage, EthApi>
+where
+    Storage: Sync + Send + 'static,
+    EthApi: EthApiServer<
+            RpcTransaction<EthApi::NetworkTypes>,
+            RpcBlock<EthApi::NetworkTypes>,
+            RpcReceipt<EthApi::NetworkTypes>,
+            RpcHeader<EthApi::NetworkTypes>,
+        > + EthApiTypes,
+{
+    fn fetch_config_bytes(
+        &self,
+        config_name: OnChainConfig,
+        block_number: u64,
+    ) -> Option<bytes::Bytes> {
+        Some(self.onchain_config_fetcher.fetch_config_bytes(config_name, block_number))
+    }
+}
+
+impl<Storage: GravityStorage, EthApi> PipeExecLayerApi<Storage, EthApi> {
     /// Push ordered block to EL for execution.
     /// Returns `None` if the channel has been closed.
     pub fn push_ordered_block(&self, block: OrderedBlock) -> Option<()> {
@@ -649,7 +726,7 @@ impl<Storage: GravityStorage> PipeExecLayerApi<Storage> {
     }
 }
 
-impl<Storage> Drop for PipeExecLayerApi<Storage> {
+impl<Storage, EthApi> Drop for PipeExecLayerApi<Storage, EthApi> {
     fn drop(&mut self) {
         self.verified_block_hash_tx.close();
     }
@@ -663,7 +740,7 @@ pub fn new_pipe_exec_layer_api<Storage, EthApi>(
     latest_block_hash: B256,
     execution_args_rx: oneshot::Receiver<ExecutionArgs>,
     eth_api: EthApi,
-) -> PipeExecLayerApi<Storage>
+) -> PipeExecLayerApi<Storage, EthApi>
 where
     Storage: GravityStorage,
     EthApi: EthApiServer<
@@ -680,8 +757,17 @@ where
     let (discard_txs_tx, discard_txs_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let storage = Arc::new(storage);
+    let onchain_config_fetcher = OnchainConfigFetcher::new(eth_api);
 
     let latest_block_number = latest_block_header.number;
+    let epoch = onchain_config_fetcher.fetch_epoch(latest_block_number);
+    info!(target: "PipeExecService.new_pipe_exec_layer_api",
+        latest_block_number=?latest_block_number,
+        latest_block_hash=?latest_block_hash,
+        epoch=?epoch,
+        "new pipe exec layer api"
+    );
+
     let start_time = Instant::now();
     let service = PipeExecService {
         core: Arc::new(Core {
@@ -693,7 +779,11 @@ where
             event_tx,
             execute_block_barrier: Channel::new_with_states([(
                 latest_block_number,
-                (latest_block_header, start_time),
+                ExecuteBlockContext {
+                    parent_header: latest_block_header,
+                    prev_start_execute_time: start_time,
+                    epoch,
+                },
             )]),
             merklize_barrier: Channel::new_with_states([(latest_block_number, ())]),
             seal_barrier: Channel::new_with_states([(latest_block_number, latest_block_hash)]),
@@ -718,5 +808,6 @@ where
         execution_result_rx: Mutex::new(execution_result_rx),
         verified_block_hash_tx: verified_block_hash_ch,
         storage,
+        onchain_config_fetcher,
     }
 }

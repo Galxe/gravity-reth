@@ -58,6 +58,10 @@ impl<'db, P: NodePrimitives> Executor<'db> for NoopBlockExecutorProvider<P> {
         unreachable!()
     }
 
+    fn state_mut(&mut self) -> &mut dyn State {
+        unreachable!()
+    }
+
     fn size_hint(&self) -> usize {
         0
     }

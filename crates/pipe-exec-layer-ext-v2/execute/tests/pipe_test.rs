@@ -1,4 +1,3 @@
-use alloy_rpc_types_eth::TransactionRequest;
 use gravity_storage::block_view_storage::BlockViewStorage;
 use reth_chainspec::ChainSpec;
 use reth_cli_commands::NodeCommand;
@@ -13,7 +12,6 @@ use reth_provider::{
     providers::BlockchainProvider, BlockHashReader, BlockNumReader, BlockReader,
     DatabaseProviderFactory, HeaderProvider, TransactionVariant,
 };
-use reth_rpc_eth_api::EthApiServer;
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
@@ -21,13 +19,19 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 type Provider = BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>;
 
-struct MockConsensus {
-    pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>>,
+struct MockConsensus<EthApi> {
+    pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>, EthApi>,
     provider: Provider,
 }
 
-impl MockConsensus {
-    fn new(pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>>, provider: Provider) -> Self {
+impl<EthApi> MockConsensus<EthApi>
+where
+    EthApi: Send + Sync + 'static,
+{
+    fn new(
+        pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>, EthApi>,
+        provider: Provider,
+    ) -> Self {
         Self { pipeline_api, provider }
     }
 

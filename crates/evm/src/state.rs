@@ -1,9 +1,9 @@
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{map::HashMap, Address, U256};
 use reth_grevm::{ParallelBundleState, ParallelState};
 use revm::{
     db::{states::bundle_state::BundleRetention, BundleState},
-    primitives::AccountInfo,
-    Database, TransitionState,
+    primitives::{Account, AccountInfo},
+    Database, DatabaseCommit, TransitionState,
 };
 use std::error::Error;
 
@@ -17,6 +17,8 @@ pub trait State {
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Box<dyn Error>>;
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Box<dyn Error>>;
+
+    fn commit_changes(&mut self, changes: HashMap<Address, Account>);
 }
 
 impl<DB> State for revm::db::states::State<DB>
@@ -49,6 +51,10 @@ where
     ) -> Result<U256, Box<dyn std::error::Error>> {
         Database::storage(self, address, index).map_err(Into::into)
     }
+
+    fn commit_changes(&mut self, changes: HashMap<Address, Account>) {
+        self.commit(changes);
+    }
 }
 
 impl<DB> State for ParallelState<DB>
@@ -65,7 +71,8 @@ where
 
     fn merge_transitions(&mut self, retention: BundleRetention) {
         if let Some(transition_state) = self.transition_state.as_mut().map(TransitionState::take) {
-            self.bundle_state.parallel_apply_transitions_and_create_reverts(transition_state, retention);
+            self.bundle_state
+                .parallel_apply_transitions_and_create_reverts(transition_state, retention);
         }
     }
 
@@ -82,5 +89,9 @@ where
         index: U256,
     ) -> Result<U256, Box<dyn std::error::Error>> {
         Database::storage(self, address, index).map_err(Into::into)
+    }
+
+    fn commit_changes(&mut self, changes: HashMap<Address, Account>) {
+        self.commit(changes);
     }
 }

@@ -121,6 +121,9 @@ pub trait Executor<'db>: Sized {
     /// Consumes the executor and returns the [`State`] containing all state changes.
     fn into_state(self) -> Box<dyn State + 'db>;
 
+    /// Returns a mutable reference to the current state.
+    fn state_mut(&mut self) -> &mut dyn State;
+
     /// The size hint of the batch's tracked state size.
     ///
     /// This is used to optimize DB commits depending on the size of the state.
@@ -323,6 +326,10 @@ where
 
     fn into_state(self) -> Box<dyn State + 'db> {
         self.strategy.into_state()
+    }
+
+    fn state_mut(&mut self) -> &mut dyn State {
+        self.strategy.state_mut()
     }
 
     fn size_hint(&self) -> usize {

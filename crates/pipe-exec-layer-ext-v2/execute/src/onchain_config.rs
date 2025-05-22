@@ -1,13 +1,20 @@
-use crate::PipeExecLayerApi;
+use std::ops::Deref;
+
+use crate::{ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_eips::BlockId;
-use alloy_primitives::{Address, Bytes, TxKind};
+use alloy_primitives::{address, Address, Bytes, TxKind};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
-use gravity_api_types::config_storage::{ConfigStorage, OnChainConfig};
+use gravity_api_types::config_storage::OnChainConfig;
+use reth_evm::Evm;
 use reth_rpc_eth_api::{
     EthApiServer, EthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
 };
+use revm_primitives::{EvmState, ExecutionResult};
 
-pub struct OnchainConfigFetcher<EthApi> {
+const SYSTEM_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
+
+#[derive(Debug)]
+pub(crate) struct OnchainConfigFetcher<EthApi> {
     eth_api: EthApi,
 }
 
@@ -20,7 +27,7 @@ where
             RpcHeader<EthApi::NetworkTypes>,
         > + EthApiTypes,
 {
-    pub fn new(eth_api: EthApi) -> Self {
+    pub(crate) fn new(eth_api: EthApi) -> Self {
         Self { eth_api }
     }
 
@@ -50,11 +57,59 @@ where
             .ok()
     }
 
-    pub fn fetch_epoch(&self, block_number: u64) -> u64 {
+    pub(crate) fn fetch_epoch(&self, block_number: u64) -> u64 {
         todo!()
     }
 
-    pub fn fetch_config_bytes(&self, config_name: OnChainConfig, block_number: u64) -> Bytes {
+    pub(crate) fn fetch_config_bytes(
+        &self,
+        config_name: OnChainConfig,
+        block_number: u64,
+    ) -> bytes::Bytes {
         todo!()
     }
+}
+
+pub(crate) struct MetadataTxnResultAndState {
+    pub result: MetadataTxnResult,
+    pub state: EvmState,
+}
+
+impl MetadataTxnResultAndState {
+    pub fn into_executed_ordered_block_result(
+        self,
+        ordered_block: &OrderedBlock,
+    ) -> ExecuteOrderedBlockResult {
+        todo!()
+    }
+}
+
+pub(crate) struct MetadataTxnResult(pub ExecutionResult);
+
+impl Deref for MetadataTxnResult {
+    type Target = ExecutionResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl MetadataTxnResult {
+    pub(crate) fn emit_new_epoch(&self) -> bool {
+        todo!()
+    }
+
+    pub(crate) fn insert_to_executed_ordered_block_result(
+        self,
+        result: &mut ExecuteOrderedBlockResult,
+    ) {
+        todo!()
+    }
+}
+
+pub(crate) fn transact_metadata_contract_call(
+    evm: &mut impl Evm,
+    timestamp_us: u64,
+) -> MetadataTxnResultAndState {
+    todo!();
 }

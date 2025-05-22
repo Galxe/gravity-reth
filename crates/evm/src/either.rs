@@ -97,6 +97,13 @@ where
         }
     }
 
+    fn state_mut(&mut self) -> &mut dyn State {
+        match self {
+            Self::Left(a) => a.state_mut(),
+            Self::Right(b) => b.state_mut(),
+        }
+    }
+
     fn size_hint(&self) -> usize {
         match self {
             Self::Left(a) => a.size_hint(),
