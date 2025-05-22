@@ -11,7 +11,7 @@ use std::sync::{
         mpsc::{self, Receiver, Sender},
         Arc,
     };
-use tracing::trace;
+use tracing::{info, trace};
 
 mod value;
 pub use value::{HashBuilderValue, HashBuilderValueRef};
@@ -238,6 +238,7 @@ impl ParallelHashBuilder {
     }
 
     fn current_root(&mut self) -> B256 {
+        info!("lightman current_root stack size {:?}", self.stack.len());
         if let Some(node_ref) = self.stack.last() {
             let rlp = node_ref.rlp();
             if let Some(hash) = rlp.as_hash() {
