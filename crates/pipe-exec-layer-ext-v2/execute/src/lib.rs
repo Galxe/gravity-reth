@@ -241,7 +241,9 @@ impl<Storage: GravityStorage> Core<Storage> {
                 ReceivedBlock::OrderedBlock(ordered_block) => {
                     self.execute_ordered_block(ordered_block, &parent_header)
                 }
-                ReceivedBlock::HistoryBlock(recovered_block) => todo!(),
+                ReceivedBlock::HistoryBlock(recovered_block) => {
+                    self.execute_history_block(recovered_block)
+                }
             };
         self.storage.insert_bundle_state(block_number, &execution_output.state);
         let elapsed = start_time.elapsed();
@@ -498,6 +500,30 @@ impl<Storage: GravityStorage> Core<Storage> {
         };
         metadata_txn_result.result.insert_to_executed_ordered_block_result(&mut result);
         result
+    }
+
+    /// Only used for testing.
+    fn execute_history_block(&self, block: RecoveredBlock<Block>) -> ExecuteOrderedBlockResult {
+        let (parent_id_, state) = self.storage.get_state_view(block.number - 1).unwrap();
+        assert_eq!(block.parent_hash, parent_id_);
+        let executor = EthExecutorProvider::ethereum(self.chain_spec.clone())
+            .executor(parallel_database! { state });
+        let outcome = executor.execute(&block).unwrap_or_else(|err| {
+            serde_json::to_writer(
+                std::io::BufWriter::new(
+                    std::fs::File::create(format!("{}.json", block.number)).unwrap(),
+                ),
+                &block,
+            )
+            .unwrap();
+            panic!("failed to execute block {:?}: {:?}", block.number, err)
+        });
+        ExecuteOrderedBlockResult {
+            block_without_roots: block,
+            execution_output: outcome,
+            txs_info: vec![],
+            epoch: 0,
+        }
     }
 
     /// Calculate the receipts root, logs bloom, and transactions root, etc. and fill them into the
