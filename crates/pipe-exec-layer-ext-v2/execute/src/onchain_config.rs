@@ -3,6 +3,8 @@ use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, EMPTY_OMMER_ROOT_HAS
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockId};
 use alloy_primitives::{address, Address, Bytes, TxKind};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
+use alloy_sol_macro::sol;
+use alloy_sol_types::{SolCall, SolEvent, SolType};
 use gravity_api_types::config_storage::OnChainConfig;
 use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
 use reth_evm::Evm;
@@ -13,13 +15,17 @@ use reth_rpc_eth_api::{
 };
 use revm::db::BundleState;
 use revm_primitives::{EvmState, ExecutionResult};
+use std::sync::OnceLock;
+use tokio::runtime::Runtime;
 
 const SYSTEM_ADDRESS: Address = address!("0000000000000000000000000000000000000000");
 const BLOCK_MODULE_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
+const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000000000000f1");
 
 #[derive(Debug)]
 pub(crate) struct OnchainConfigFetcher<EthApi> {
     eth_api: EthApi,
+    runtime: OnceLock<Runtime>,
 }
 
 impl<EthApi> OnchainConfigFetcher<EthApi>
@@ -32,21 +38,32 @@ where
         > + EthApiTypes,
 {
     pub(crate) fn new(eth_api: EthApi) -> Self {
-        Self { eth_api }
+        Self { eth_api, runtime: OnceLock::new() }
     }
 
     /// Simulate the call to the contract at block number and return the result.
     /// Return None if the block is not found.
-    async fn eth_call(
+    fn eth_call(
         &self,
         from: Address,
         to: Address,
         input: Bytes,
         block_number: u64,
     ) -> Option<Bytes> {
+        let rt_handle = self
+            .runtime
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4.min(std::thread::available_parallelism().unwrap().get()))
+                    .thread_name("OnchainConfigFetcher")
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create Tokio runtime")
+            })
+            .handle();
         // TODO(nekomoto): Handle the case where the block is not found.
-        self.eth_api
-            .call(
+        rt_handle
+            .block_on(self.eth_api.call(
                 TransactionRequest {
                     from: Some(from),
                     to: Some(TxKind::Call(to)),
@@ -56,13 +73,23 @@ where
                 Some(BlockId::from(block_number)),
                 None,
                 None,
-            )
-            .await
+            ))
             .ok()
     }
 
     pub(crate) fn fetch_epoch(&self, block_number: u64) -> u64 {
-        todo!()
+        sol! {
+            function getCurrentEpoch() external view returns (uint64);
+        }
+
+        let call = getCurrentEpochCall {};
+        let input: Bytes = call.abi_encode().into();
+        let result = self
+            .eth_call(SYSTEM_ADDRESS, RECONFIGURATION_ADDRESS, input, block_number)
+            .expect("Failed to call getCurrentEpoch");
+        getCurrentEpochCall::abi_decode_returns(&result, false)
+            .expect("Failed to decode getCurrentEpoch return value")
+            ._0
     }
 
     pub(crate) fn fetch_config_bytes(
@@ -81,8 +108,19 @@ pub(crate) struct MetadataTxnResult {
 
 impl MetadataTxnResult {
     pub(crate) fn emit_new_epoch(&self) -> bool {
-        todo!()
+        sol! {
+            event NewEpoch(uint64 indexed epoch);
+        }
+
+        for log in self.result.logs() {
+            match NewEpoch::decode_log(log, false) {
+                Ok(event) => return true,
+                Err(_) => continue,
+            }
+        }
+        false
     }
+
     pub(crate) fn into_executed_ordered_block_result(
         self,
         ordered_block: &OrderedBlock,
