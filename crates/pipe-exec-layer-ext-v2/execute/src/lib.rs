@@ -204,7 +204,8 @@ const BLOCK_GAS_LIMIT_1G: u64 = 1_000_000_000;
 
 struct ExecuteOrderedBlockResult {
     /// Block without roots and block hash
-    block_without_roots: RecoveredBlock<Block>,
+    block: Block,
+    senders: Vec<Address>,
     execution_output: BlockExecutionOutput<Receipt>,
     txs_info: Vec<TxInfo>,
     epoch: u64,
@@ -237,7 +238,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         }
 
         let start_time = Instant::now();
-        let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info, epoch } =
+        let ExecuteOrderedBlockResult { mut block, senders, execution_output, txs_info, epoch } =
             match block {
                 ReceivedBlock::OrderedBlock(ordered_block) => {
                     self.execute_ordered_block(ordered_block, &parent_header)
@@ -262,14 +263,13 @@ impl<Storage: GravityStorage> Core<Storage> {
             .notify(
                 block_number,
                 ExecuteBlockContext {
-                    parent_header: block_without_roots.header().clone(),
+                    parent_header: block.header.clone(),
                     prev_start_execute_time: start_time,
                     epoch,
                 },
             )
             .unwrap();
 
-        let (mut block, senders) = block_without_roots.split();
         let execution_outcome = self.calculate_roots(&mut block, execution_output);
 
         // Merkling the state trie
@@ -496,8 +496,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             panic!("failed to execute block {:?}: {:?}", block_id, err)
         });
 
+        let (block, senders) = block.split();
         let mut result = ExecuteOrderedBlockResult {
-            block_without_roots: block,
+            block,
+            senders,
             execution_output: outcome,
             txs_info,
             epoch,
@@ -522,8 +524,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             .unwrap();
             panic!("failed to execute block {:?}: {:?}", block.number, err)
         });
+        let (block, senders) = block.split();
         ExecuteOrderedBlockResult {
-            block_without_roots: block,
+            block,
+            senders,
             execution_output: outcome,
             txs_info: vec![],
             epoch: 0,

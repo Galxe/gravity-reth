@@ -115,7 +115,8 @@ impl MetadataTxnResult {
         block.header.blob_gas_used = Some(0);
 
         ExecuteOrderedBlockResult {
-            block_without_roots: RecoveredBlock::new_unhashed(block, vec![SYSTEM_ADDRESS]),
+            block,
+            senders: vec![SYSTEM_ADDRESS],
             execution_output: BlockExecutionOutput {
                 state,
                 receipts: vec![Receipt {
@@ -136,7 +137,17 @@ impl MetadataTxnResult {
         self,
         result: &mut ExecuteOrderedBlockResult,
     ) {
-        todo!()
+        result.execution_output.receipts.insert(
+            0,
+            Receipt {
+                tx_type: self.txn.tx_type(),
+                success: true,
+                cumulative_gas_used: 0,
+                logs: self.result.into_logs(),
+            },
+        );
+        result.block.body.transactions.insert(0, self.txn);
+        result.senders.insert(0, SYSTEM_ADDRESS);
     }
 }
 
