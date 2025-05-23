@@ -33,8 +33,9 @@ use reth_primitives_traits::{
     Block as _, RecoveredBlock,
 };
 use revm::{
-    db::WrapDatabaseRef,
+    db::{states::bundle_state::BundleRetention, WrapDatabaseRef},
     primitives::{AccountInfo, HashMap, HashSet},
+    DatabaseCommit,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
@@ -389,27 +390,23 @@ impl<Storage: GravityStorage> Core<Storage> {
             body: BlockBody::default(),
         };
 
-        if self.chain_spec.is_shanghai_active_at_timestamp(block.timestamp) {
-            if ordered_block.withdrawals.is_empty() {
-                block.header.withdrawals_root = Some(EMPTY_WITHDRAWALS);
-                block.body.withdrawals = Some(Withdrawals::default());
-            } else {
-                block.header.withdrawals_root =
-                    Some(proofs::calculate_withdrawals_root(&ordered_block.withdrawals));
-                block.body.withdrawals = Some(ordered_block.withdrawals);
-            }
+        // Shanghai fork fields
+        if ordered_block.withdrawals.is_empty() {
+            block.header.withdrawals_root = Some(EMPTY_WITHDRAWALS);
+            block.body.withdrawals = Some(Withdrawals::default());
+        } else {
+            block.header.withdrawals_root =
+                Some(proofs::calculate_withdrawals_root(&ordered_block.withdrawals));
+            block.body.withdrawals = Some(ordered_block.withdrawals);
         }
 
-        // only determine cancun fields when active
-        if self.chain_spec.is_cancun_active_at_timestamp(block.timestamp) {
-            // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
-            // execution?
-            block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
-
-            // TODO(nekomoto): fill `excess_blob_gas` and `blob_gas_used` fields
-            block.header.excess_blob_gas = Some(0);
-            block.header.blob_gas_used = Some(0);
-        }
+        // Cancun fork fields
+        // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
+        // execution?
+        block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
+        // TODO(nekomoto): fill `excess_blob_gas` and `blob_gas_used` fields
+        block.header.excess_blob_gas = Some(0);
+        block.header.blob_gas_used = Some(0);
 
         // Discard the invalid txs
         let start_time = Instant::now();
@@ -451,11 +448,11 @@ impl<Storage: GravityStorage> Core<Storage> {
             )
             .unwrap();
         let base_fee = evm_env.block_env.basefee.to::<u64>();
-        let metadata_txn_result = {
+        let (metadata_txn_result, state_changes) = {
             let mut evm = self.evm_config.evm_with_env(WrapDatabaseRef(&state), evm_env);
             transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000)
         };
-        if metadata_txn_result.result.emit_new_epoch() {
+        if metadata_txn_result.emit_new_epoch() {
             // Advance epoch and discard the block.
             info!(target: "execute_ordered_block",
                 id=?block_id,
@@ -464,7 +461,14 @@ impl<Storage: GravityStorage> Core<Storage> {
                 new_epoch=?(epoch + 1),
                 "emit new epoch, discard the block"
             );
-            return metadata_txn_result.into_executed_ordered_block_result(&ordered_block);
+            let mut state = revm::db::states::State::builder()
+                .with_database_ref(state)
+                .with_bundle_update()
+                .build();
+            state.commit(state_changes);
+            state.merge_transitions(BundleRetention::Reverts);
+            return metadata_txn_result
+                .into_executed_ordered_block_result(&ordered_block, state.take_bundle());
         }
 
         let (block, txs_info) = self.create_block_for_executor(ordered_block, base_fee, &state);
@@ -479,7 +483,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let mut executor = EthExecutorProvider::ethereum(self.chain_spec.clone())
             .executor(parallel_database! { state });
         // Apply metadata transaction result to executor state
-        executor.state_mut().commit_changes(metadata_txn_result.state);
+        executor.state_mut().commit_changes(state_changes);
 
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
             serde_json::to_writer(
@@ -498,7 +502,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             txs_info,
             epoch,
         };
-        metadata_txn_result.result.insert_to_executed_ordered_block_result(&mut result);
+        metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
         result
     }
 
