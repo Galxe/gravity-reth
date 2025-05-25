@@ -1,26 +1,28 @@
 use crate::{ExecuteOrderedBlockResult, OrderedBlock};
-use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, EMPTY_OMMER_ROOT_HASH};
+use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockId};
-use alloy_primitives::{address, Address, Bytes, TxKind};
+use alloy_primitives::{address, Address, Bytes, PrimitiveSignature, TxKind, U256};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_sol_macro::sol;
-use alloy_sol_types::{SolCall, SolEvent, SolType};
+use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::config_storage::OnChainConfig;
-use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
+use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
-use reth_primitives::{Receipt, RecoveredBlock};
+use reth_primitives::Receipt;
 use reth_rpc_eth_api::{
     EthApiServer, EthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
 };
 use revm::db::BundleState;
 use revm_primitives::{EvmState, ExecutionResult};
-use std::sync::OnceLock;
+use std::{fmt::Debug, sync::OnceLock};
 use tokio::runtime::Runtime;
 
 const SYSTEM_ADDRESS: Address = address!("0000000000000000000000000000000000000000");
 const BLOCK_MODULE_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
 const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000000000000f1");
+const CONSENSUS_CONFIG_CONTRACT_ADDRESS: Address =
+    address!("00000000000000000000000000000000000000f2");
 
 #[derive(Debug)]
 pub(crate) struct OnchainConfigFetcher<EthApi> {
@@ -97,7 +99,28 @@ where
         config_name: OnChainConfig,
         block_number: u64,
     ) -> bytes::Bytes {
-        todo!()
+        match config_name {
+            OnChainConfig::ConsensusConfig => {
+                sol! {
+                    function getCurrentConfig() external view returns (bytes memory);
+                }
+                let call = getCurrentConfigCall {};
+                let input: Bytes = call.abi_encode().into();
+                let result = self
+                    .eth_call(
+                        SYSTEM_ADDRESS,
+                        CONSENSUS_CONFIG_CONTRACT_ADDRESS,
+                        input,
+                        block_number,
+                    )
+                    .expect("Failed to call getCurrentConfig");
+                getCurrentConfigCall::abi_decode_returns(&result, false)
+                    .expect("Failed to decode getCurrentConfig return value")
+                    ._0
+                    .0
+            }
+            _ => todo!("Implement fetching for other config types"),
+        }
     }
 }
 
@@ -114,7 +137,7 @@ impl MetadataTxnResult {
 
         for log in self.result.logs() {
             match NewEpoch::decode_log(log, false) {
-                Ok(event) => return true,
+                Ok(_) => return true,
                 Err(_) => continue,
             }
         }
@@ -189,9 +212,39 @@ impl MetadataTxnResult {
     }
 }
 
+fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
+    TransactionSigned::new_unhashed(
+        Transaction::Legacy(TxLegacy {
+            chain_id: None,
+            nonce: 0,
+            gas_price: 0,
+            gas_limit: 30_000_000,
+            to: TxKind::Call(contract),
+            value: U256::ZERO,
+            input,
+        }),
+        PrimitiveSignature::test_signature(),
+    )
+}
+
 pub(crate) fn transact_metadata_contract_call(
-    evm: &mut impl Evm,
+    evm: &mut impl Evm<Error: Debug>,
     timestamp_us: u64,
 ) -> (MetadataTxnResult, EvmState) {
-    todo!();
+    sol! {
+        function blockPrologue(uint64 _timestamp_microseconds) external onlyVm whenInitialized;
+    }
+
+    let call = blockPrologueCall { _timestamp_microseconds: timestamp_us };
+    let input: Bytes = call.abi_encode().into();
+    let result =
+        evm.transact_system_call(SYSTEM_ADDRESS, BLOCK_MODULE_ADDRESS, input.clone()).unwrap();
+    assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
+    (
+        MetadataTxnResult {
+            result: result.result,
+            txn: new_system_call_txn(BLOCK_MODULE_ADDRESS, input),
+        },
+        result.state,
+    )
 }
