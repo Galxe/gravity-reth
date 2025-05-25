@@ -5,7 +5,10 @@ mod metrics;
 mod onchain_config;
 
 use channel::Channel;
-use gravity_api_types::config_storage::{ConfigStorage, OnChainConfig};
+use gravity_api_types::{
+    config_storage::{ConfigStorage, OnChainConfig},
+    events::contract_event::GravityEvent,
+};
 use metrics::PipeExecLayerMetrics;
 
 use alloy_consensus::{
@@ -133,12 +136,13 @@ pub struct TxInfo {
     pub is_discarded: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ExecutionResult {
     pub block_id: B256,
     pub block_number: u64,
     pub block_hash: B256,
     pub txs_info: Vec<TxInfo>,
+    pub gravity_events: Vec<GravityEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +212,7 @@ struct ExecuteOrderedBlockResult {
     senders: Vec<Address>,
     execution_output: BlockExecutionOutput<Receipt>,
     txs_info: Vec<TxInfo>,
+    gravity_events: Vec<GravityEvent>,
     epoch: u64,
 }
 
@@ -238,15 +243,21 @@ impl<Storage: GravityStorage> Core<Storage> {
         }
 
         let start_time = Instant::now();
-        let ExecuteOrderedBlockResult { mut block, senders, execution_output, txs_info, epoch } =
-            match block {
-                ReceivedBlock::OrderedBlock(ordered_block) => {
-                    self.execute_ordered_block(ordered_block, &parent_header)
-                }
-                ReceivedBlock::HistoryBlock(recovered_block) => {
-                    self.execute_history_block(recovered_block)
-                }
-            };
+        let ExecuteOrderedBlockResult {
+            mut block,
+            senders,
+            execution_output,
+            txs_info,
+            gravity_events,
+            epoch,
+        } = match block {
+            ReceivedBlock::OrderedBlock(ordered_block) => {
+                self.execute_ordered_block(ordered_block, &parent_header)
+            }
+            ReceivedBlock::HistoryBlock(recovered_block) => {
+                self.execute_history_block(recovered_block)
+            }
+        };
         self.storage.insert_bundle_state(block_number, &execution_output.state);
         let elapsed = start_time.elapsed();
         info!(target: "PipeExecService.process",
@@ -312,6 +323,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number,
             block_hash,
             txs_info,
+            gravity_events,
         })
         .await
         .unwrap();
@@ -452,13 +464,14 @@ impl<Storage: GravityStorage> Core<Storage> {
             let mut evm = self.evm_config.evm_with_env(WrapDatabaseRef(&state), evm_env);
             transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000)
         };
-        if metadata_txn_result.emit_new_epoch() {
+        if let Some(new_epoch) = metadata_txn_result.emit_new_epoch() {
+            assert_eq!(new_epoch, epoch + 1);
             // Advance epoch and discard the block.
             info!(target: "execute_ordered_block",
                 id=?block_id,
                 parent_id=?parent_id,
                 number=?block_number,
-                new_epoch=?(epoch + 1),
+                new_epoch=?new_epoch,
                 "emit new epoch, discard the block"
             );
             let mut state = revm::db::states::State::builder()
@@ -502,6 +515,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             senders,
             execution_output: outcome,
             txs_info,
+            gravity_events: vec![],
             epoch,
         };
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
@@ -530,6 +544,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             senders,
             execution_output: outcome,
             txs_info: vec![],
+            gravity_events: vec![],
             epoch: 0,
         }
     }

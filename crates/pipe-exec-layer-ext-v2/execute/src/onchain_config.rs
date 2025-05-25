@@ -5,7 +5,7 @@ use alloy_primitives::{address, Address, Bytes, PrimitiveSignature, TxKind, U256
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
-use gravity_api_types::config_storage::OnChainConfig;
+use gravity_api_types::{config_storage::OnChainConfig, events::contract_event::GravityEvent};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
@@ -64,19 +64,21 @@ where
             })
             .handle();
         // TODO(nekomoto): Handle the case where the block is not found.
-        rt_handle
-            .block_on(self.eth_api.call(
-                TransactionRequest {
-                    from: Some(from),
-                    to: Some(TxKind::Call(to)),
-                    input: TransactionInput::new(input),
-                    ..Default::default()
-                },
-                Some(BlockId::from(block_number)),
-                None,
-                None,
-            ))
-            .ok()
+        tokio::task::block_in_place(|| {
+            rt_handle
+                .block_on(self.eth_api.call(
+                    TransactionRequest {
+                        from: Some(from),
+                        to: Some(TxKind::Call(to)),
+                        input: TransactionInput::new(input),
+                        ..Default::default()
+                    },
+                    Some(BlockId::from(block_number)),
+                    None,
+                    None,
+                ))
+                .ok()
+        })
     }
 
     pub(crate) fn fetch_epoch(&self, block_number: u64) -> u64 {
@@ -130,18 +132,18 @@ pub(crate) struct MetadataTxnResult {
 }
 
 impl MetadataTxnResult {
-    pub(crate) fn emit_new_epoch(&self) -> bool {
+    pub(crate) fn emit_new_epoch(&self) -> Option<u64> {
         sol! {
             event NewEpoch(uint64 indexed epoch);
         }
 
         for log in self.result.logs() {
             match NewEpoch::decode_log(log, false) {
-                Ok(_) => return true,
+                Ok(event) => return Some(event.epoch),
                 Err(_) => continue,
             }
         }
-        false
+        None
     }
 
     pub(crate) fn into_executed_ordered_block_result(
@@ -175,6 +177,7 @@ impl MetadataTxnResult {
         block.header.excess_blob_gas = Some(0);
         block.header.blob_gas_used = Some(0);
 
+        let new_epoch = ordered_block.epoch + 1;
         ExecuteOrderedBlockResult {
             block,
             senders: vec![SYSTEM_ADDRESS],
@@ -190,7 +193,8 @@ impl MetadataTxnResult {
                 gas_used: 0,
             },
             txs_info: vec![],
-            epoch: ordered_block.epoch + 1,
+            gravity_events: vec![GravityEvent::NewEpoch(new_epoch)],
+            epoch: new_epoch,
         }
     }
 
