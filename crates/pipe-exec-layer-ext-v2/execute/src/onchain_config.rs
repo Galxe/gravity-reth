@@ -30,6 +30,18 @@ pub(crate) struct OnchainConfigFetcher<EthApi> {
     runtime: OnceLock<Runtime>,
 }
 
+pub trait EthCallHandler {
+    /// Simulate the call to the contract at block number and return the result.
+    /// Return None if the block is not found.
+    fn eth_call(
+        &self,
+        from: Address,
+        to: Address,
+        input: Bytes,
+        block_number: u64,
+    ) -> Option<Bytes>;
+}
+
 impl<EthApi> OnchainConfigFetcher<EthApi>
 where
     EthApi: EthApiServer<
@@ -44,14 +56,7 @@ where
     }
 
     /// Simulate the call to the contract at block number and return the result.
-    /// Return None if the block is not found.
-    fn eth_call(
-        &self,
-        from: Address,
-        to: Address,
-        input: Bytes,
-        block_number: u64,
-    ) -> Option<Bytes> {
+    fn eth_call(&self, from: Address, to: Address, input: Bytes, block_number: u64) -> Bytes {
         let rt_handle = self
             .runtime
             .get_or_init(|| {
@@ -65,19 +70,37 @@ where
             .handle();
         // TODO(nekomoto): Handle the case where the block is not found.
         tokio::task::block_in_place(|| {
-            rt_handle
-                .block_on(self.eth_api.call(
-                    TransactionRequest {
-                        from: Some(from),
-                        to: Some(TxKind::Call(to)),
-                        input: TransactionInput::new(input),
-                        ..Default::default()
-                    },
-                    Some(BlockId::from(block_number)),
-                    None,
-                    None,
-                ))
-                .ok()
+            rt_handle.block_on(async {
+                const RETRY: u64 = 3;
+                let mut count = 0;
+                loop {
+                    match self
+                        .eth_api
+                        .call(
+                            TransactionRequest {
+                                from: Some(from),
+                                to: Some(TxKind::Call(to)),
+                                input: TransactionInput::new(input.clone()),
+                                ..Default::default()
+                            },
+                            Some(BlockId::from(block_number)),
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(result) => return result,
+                        Err(err) => {
+                            count += 1;
+                            if count >= RETRY {
+                                panic!("Failed to execute eth_call: {err}");
+                            }
+                            // Sleep for a short duration before retrying
+                            tokio::time::sleep(std::time::Duration::from_millis(10 * count)).await;
+                        }
+                    }
+                }
+            })
         })
     }
 
@@ -88,9 +111,7 @@ where
 
         let call = getCurrentEpochCall {};
         let input: Bytes = call.abi_encode().into();
-        let result = self
-            .eth_call(SYSTEM_ADDRESS, RECONFIGURATION_ADDRESS, input, block_number)
-            .expect("Failed to call getCurrentEpoch");
+        let result = self.eth_call(SYSTEM_ADDRESS, RECONFIGURATION_ADDRESS, input, block_number);
         getCurrentEpochCall::abi_decode_returns(&result, false)
             .expect("Failed to decode getCurrentEpoch return value")
             ._0
@@ -108,14 +129,12 @@ where
                 }
                 let call = getCurrentConfigCall {};
                 let input: Bytes = call.abi_encode().into();
-                let result = self
-                    .eth_call(
-                        SYSTEM_ADDRESS,
-                        CONSENSUS_CONFIG_CONTRACT_ADDRESS,
-                        input,
-                        block_number,
-                    )
-                    .expect("Failed to call getCurrentConfig");
+                let result = self.eth_call(
+                    SYSTEM_ADDRESS,
+                    CONSENSUS_CONFIG_CONTRACT_ADDRESS,
+                    input,
+                    block_number,
+                );
                 getCurrentConfigCall::abi_decode_returns(&result, false)
                     .expect("Failed to decode getCurrentConfig return value")
                     ._0
