@@ -66,6 +66,11 @@ impl Default for RawRlpNode {
 
 impl RawRlpNode {
     fn rlp(&self) -> RlpNode {
+        self.rlp_recursive(0)
+    
+    }
+
+    fn rlp_recursive(&self, current_depth: usize) -> RlpNode {
         let mut rlp_buf = vec![];
         match self {
             RawRlpNode::Leaf(leaf_node) => leaf_node.as_ref().rlp(&mut rlp_buf),
@@ -81,11 +86,18 @@ impl RawRlpNode {
                 tx,
                 root_hash_tx,
             )) => {
-                let children: Vec<RlpNode> = stack
-                    .par_iter()
-                    .skip(*first_child_idx)
-                    .map(|raw_rlp_node| raw_rlp_node.rlp())
-                    .collect();
+                info!("lightman current_depth {:?}", current_depth);
+                let next_depth = current_depth + 1;
+                let mut children = vec![];
+                if current_depth > 4 {
+                    children = stack.iter().map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth)).collect();
+                } else {
+                    children = stack
+                        .par_iter()
+                        .skip(*first_child_idx)
+                        .map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth))
+                        .collect();
+                }
 
                 let mut all_children = vec![RlpNode::default(); *first_child_idx];
                 all_children.extend(children);
