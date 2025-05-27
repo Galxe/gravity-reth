@@ -573,7 +573,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Fill the block header with the calculated values
         block.header.transactions_root =
             proofs::calculate_transaction_root(&block.body.transactions);
-        if !cfg!(pipe_test) || self.chain_spec.is_byzantium_active_at_block(block.number()) {
+        if !cfg!(feature = "pipe_test") || self.chain_spec.is_byzantium_active_at_block(block.number()) {
             block.header.receipts_root =
                 execution_outcome.ethereum_receipts_root(block.number).unwrap();
             block.header.logs_bloom = execution_outcome.block_logs_bloom(block.number).unwrap();

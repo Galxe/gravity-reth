@@ -104,6 +104,7 @@ where
         })
     }
 
+    #[cfg(not(feature = "pipe_test"))]
     pub(crate) fn fetch_epoch(&self, block_number: u64) -> u64 {
         sol! {
             function getCurrentEpoch() external view returns (uint64);
@@ -116,6 +117,11 @@ where
         getCurrentEpochCall::abi_decode_returns(&result, false)
             .expect("Failed to decode getCurrentEpoch return value")
             ._0
+    }
+
+    #[cfg(feature = "pipe_test")]
+    pub(crate) fn fetch_epoch(&self, block_number: u64) -> u64 {
+        0
     }
 
     pub(crate) fn fetch_config_bytes(
