@@ -72,7 +72,6 @@ impl Default for RawRlpNode {
 impl RawRlpNode {
     fn rlp(&self) -> RlpNode {
         self.rlp_recursive(0)
-    
     }
 
     fn rlp_recursive(&self, current_depth: usize) -> RlpNode {
@@ -93,7 +92,7 @@ impl RawRlpNode {
             )) => {
                 let next_depth = current_depth + 1;
                 let children: Vec<_> = if current_depth > *RLP_MAX_DEPTH {
-                    stack.iter().map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth)).collect()
+                    stack.iter().skip(*first_child_idx).map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth)).collect()
                 } else {
                     stack
                         .par_iter()
