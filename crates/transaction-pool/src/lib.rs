@@ -249,6 +249,11 @@ where
         &self.pool
     }
 
+    /// Returns the unix timestamp in milliseconds when the transaction was inserted into the pool.
+    pub fn txn_insert_time(&self, txn_hash: TxHash) -> Option<u64> {
+        self.inner().txn_insert_time.get(&txn_hash).map(|t| *t)
+    }
+
     /// Get the config the pool was configured with.
     pub fn config(&self) -> &PoolConfig {
         self.inner().config()
