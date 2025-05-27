@@ -72,11 +72,12 @@ impl RawRlpNode {
 
     fn rlp_recursive(&self, current_depth: usize) -> RlpNode {
         let mut rlp_buf = vec![];
+        let next_depth = current_depth + 1;
         match self {
             RawRlpNode::Leaf(leaf_node) => leaf_node.as_ref().rlp(&mut rlp_buf),
             RawRlpNode::Word(word) => RlpNode::word_rlp(word),
             RawRlpNode::Extension((key, child)) => {
-                ExtensionNodeRef::new(key, &child.rlp()).rlp(&mut rlp_buf)
+                ExtensionNodeRef::new(key, &child.rlp_recursive(next_depth)).rlp(&mut rlp_buf)
             }
             RawRlpNode::Branch((
                 stack,
@@ -86,18 +87,15 @@ impl RawRlpNode {
                 tx,
                 root_hash_tx,
             )) => {
-                info!("lightman current_depth {:?}", current_depth);
-                let next_depth = current_depth + 1;
-                let mut children = vec![];
-                if current_depth > 4 {
-                    children = stack.iter().map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth)).collect();
+                let children: Vec<_> = if current_depth > 4 {
+                    stack.iter().map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth)).collect()
                 } else {
-                    children = stack
+                    stack
                         .par_iter()
                         .skip(*first_child_idx)
                         .map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth))
-                        .collect();
-                }
+                        .collect()
+                };
 
                 let mut all_children = vec![RlpNode::default(); *first_child_idx];
                 all_children.extend(children);
