@@ -91,6 +91,7 @@ impl RawRlpNode {
                 root_hash_tx,
             )) => {
                 let next_depth = current_depth + 1;
+                info!("lightman current_depth {:?}", current_depth);
                 let children: Vec<_> = if current_depth > *RLP_MAX_DEPTH {
                     stack.iter().skip(*first_child_idx).map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth)).collect()
                 } else {
