@@ -5,6 +5,7 @@ use alloy_trie::{
     nodes::{BranchNodeRef, ExtensionNodeRef, LeafNode, RlpNode},
     BranchNodeCompact, HashMap, Nibbles, TrieMask, EMPTY_ROOT_HASH,
 };
+use once_cell::sync::Lazy;
 use core::cmp;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::sync::{
@@ -40,6 +41,10 @@ pub use value::{HashBuilderValue, HashBuilderValueRef};
 /// up, combining the hashes of child nodes and ultimately generating the root hash. The root hash
 /// can then be used to verify the integrity and authenticity of the trie's data by constructing and
 /// verifying Merkle proofs.
+
+static RLP_MAX_DEPTH: Lazy<usize> =
+    Lazy::new(|| std::env::var("RLP_MAX_DEPTH").unwrap_or("10".to_string()).parse::<usize>().unwrap_or(4));
+
 #[derive(Debug, Clone)]
 pub enum RawRlpNode {
     Leaf(LeafNode),
@@ -87,7 +92,7 @@ impl RawRlpNode {
                 tx,
                 root_hash_tx,
             )) => {
-                let children: Vec<_> = if current_depth > 4 {
+                let children: Vec<_> = if current_depth > *RLP_MAX_DEPTH {
                     stack.iter().map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth)).collect()
                 } else {
                     stack

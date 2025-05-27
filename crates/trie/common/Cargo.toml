@@ -44,6 +44,7 @@ proptest.workspace = true
 
 # misc
 rayon = { workspace = true, optional = true }
+once_cell.workspace = true
 
 # tracing
 tracing.workspace = true
