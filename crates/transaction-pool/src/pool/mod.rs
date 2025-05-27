@@ -193,6 +193,8 @@ where
     add_txn_res: DashMap<TxHash, PoolResult<TxHash>>,
     /// Buffer for transactions
     buffer: tokio::sync::Mutex<TxBuffer<T::Transaction>>,
+    /// send time
+    pub(crate) txn_insert_time: DashMap<TxHash, u64>,
 }
 
 // === impl PoolInner ===
@@ -218,6 +220,7 @@ where
             blob_store_metrics: Default::default(),
             buffer: tokio::sync::Mutex::new(TxBuffer { buffer: Vec::new(), event: Arc::new(Notify::new()), full_notify: Arc::new(Notify::new()) }),
             add_txn_res: DashMap::new(),
+            txn_insert_time: DashMap::new(),
         }
     }
 
@@ -602,7 +605,10 @@ where
         let origins: Vec<TransactionOrigin> = items_to_process.iter().map(|(origin, _)| *origin).collect();
         let outcomes = self.validator().validate_transactions(items_to_process).await;
         // Extract data needed for processing, discard the notifier for this function's scope
+        let system_time = std::time::SystemTime::now();
+        self.txn_insert_time.clear();
         for (tx_outcome, origin) in outcomes.into_iter().zip(origins) {
+            self.txn_insert_time.insert(tx_outcome.tx_hash(), system_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64);
             origins_hashes_and_outcomes.push((origin, tx_outcome.tx_hash(), tx_outcome));
         }
 
