@@ -18,9 +18,9 @@ use revm_primitives::{EvmState, ExecutionResult};
 use std::{fmt::Debug, sync::OnceLock};
 use tokio::runtime::Runtime;
 
-const SYSTEM_ADDRESS: Address = address!("0000000000000000000000000000000000000000");
-const BLOCK_MODULE_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
-const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000000000000f1");
+const GRAVITY_FRAMEWORK_ADDRESS: Address = address!("00000000000000000000000000000000000000ff");
+const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
+const BLOCK_MODULE_ADDRESS: Address = address!("00000000000000000000000000000000000000f1");
 const CONSENSUS_CONFIG_CONTRACT_ADDRESS: Address =
     address!("00000000000000000000000000000000000000f2");
 
@@ -111,7 +111,8 @@ where
 
         let call = getCurrentEpochCall {};
         let input: Bytes = call.abi_encode().into();
-        let result = self.eth_call(SYSTEM_ADDRESS, RECONFIGURATION_ADDRESS, input, block_number);
+        let result =
+            self.eth_call(GRAVITY_FRAMEWORK_ADDRESS, RECONFIGURATION_ADDRESS, input, block_number);
         getCurrentEpochCall::abi_decode_returns(&result, false)
             .expect("Failed to decode getCurrentEpoch return value")
             ._0
@@ -130,7 +131,7 @@ where
                 let call = getCurrentConfigCall {};
                 let input: Bytes = call.abi_encode().into();
                 let result = self.eth_call(
-                    SYSTEM_ADDRESS,
+                    GRAVITY_FRAMEWORK_ADDRESS,
                     CONSENSUS_CONFIG_CONTRACT_ADDRESS,
                     input,
                     block_number,
@@ -199,7 +200,7 @@ impl MetadataTxnResult {
         let new_epoch = ordered_block.epoch + 1;
         ExecuteOrderedBlockResult {
             block,
-            senders: vec![SYSTEM_ADDRESS],
+            senders: vec![GRAVITY_FRAMEWORK_ADDRESS],
             execution_output: BlockExecutionOutput {
                 state,
                 receipts: vec![Receipt {
@@ -231,7 +232,7 @@ impl MetadataTxnResult {
             },
         );
         result.block.body.transactions.insert(0, self.txn);
-        result.senders.insert(0, SYSTEM_ADDRESS);
+        result.senders.insert(0, GRAVITY_FRAMEWORK_ADDRESS);
     }
 }
 
@@ -260,8 +261,9 @@ pub(crate) fn transact_metadata_contract_call(
 
     let call = blockPrologueCall { _timestamp_microseconds: timestamp_us };
     let input: Bytes = call.abi_encode().into();
-    let result =
-        evm.transact_system_call(SYSTEM_ADDRESS, BLOCK_MODULE_ADDRESS, input.clone()).unwrap();
+    let result = evm
+        .transact_system_call(GRAVITY_FRAMEWORK_ADDRESS, BLOCK_MODULE_ADDRESS, input.clone())
+        .unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
     (
         MetadataTxnResult {
