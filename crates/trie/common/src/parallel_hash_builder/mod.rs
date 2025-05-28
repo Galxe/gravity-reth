@@ -43,7 +43,7 @@ pub use value::{HashBuilderValue, HashBuilderValueRef};
 /// verifying Merkle proofs.
 
 static RLP_MAX_DEPTH: Lazy<usize> =
-    Lazy::new(|| std::env::var("RLP_MAX_DEPTH").unwrap_or("10".to_string()).parse::<usize>().unwrap_or(4));
+    Lazy::new(|| std::env::var("RLP_MAX_DEPTH").unwrap_or("1".to_string()).parse::<usize>().unwrap_or(1));
 
 #[derive(Debug, Clone)]
 pub enum RawRlpNode {
@@ -91,7 +91,6 @@ impl RawRlpNode {
                 root_hash_tx,
             )) => {
                 let next_depth = current_depth + 1;
-                info!("lightman current_depth {:?}", current_depth);
                 let children: Vec<_> = if current_depth > *RLP_MAX_DEPTH {
                     stack.iter().skip(*first_child_idx).map(|raw_rlp_node| raw_rlp_node.rlp_recursive(next_depth)).collect()
                 } else {
@@ -253,7 +252,6 @@ impl ParallelHashBuilder {
     }
 
     fn current_root(&mut self) -> B256 {
-        info!("lightman current_root counter {:?}", self.counter);
         if let Some(node_ref) = self.stack.last() {
             let rlp = node_ref.rlp();
             if let Some(hash) = rlp.as_hash() {
