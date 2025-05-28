@@ -134,7 +134,7 @@ pub struct TxInfo {
     pub is_discarded: bool,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub block_id: B256,
     pub block_number: u64,
@@ -204,6 +204,7 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
 
 const BLOCK_GAS_LIMIT_1G: u64 = 1_000_000_000;
 
+#[derive(Debug)]
 struct ExecuteOrderedBlockResult {
     /// Block without roots and block hash
     block: Block,
