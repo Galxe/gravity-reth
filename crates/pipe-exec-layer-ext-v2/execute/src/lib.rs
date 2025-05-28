@@ -44,9 +44,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use gravity_storage::GravityStorage;
 use onchain_config::{transact_metadata_contract_call, OnchainConfigFetcher};
-use reth_rpc_eth_api::{
-    EthApiServer, EthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
-};
+use reth_rpc_eth_api::helpers::EthCall;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot, Mutex,
@@ -573,7 +571,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Fill the block header with the calculated values
         block.header.transactions_root =
             proofs::calculate_transaction_root(&block.body.transactions);
-        if !cfg!(feature = "pipe_test") || self.chain_spec.is_byzantium_active_at_block(block.number()) {
+        if !cfg!(feature = "pipe_test") ||
+            self.chain_spec.is_byzantium_active_at_block(block.number())
+        {
             block.header.receipts_root =
                 execution_outcome.ethereum_receipts_root(block.number).unwrap();
             block.header.logs_bloom = execution_outcome.block_logs_bloom(block.number).unwrap();
@@ -723,12 +723,7 @@ pub struct PipeExecLayerApi<Storage, EthApi> {
 impl<Storage, EthApi> ConfigStorage for PipeExecLayerApi<Storage, EthApi>
 where
     Storage: Sync + Send + 'static,
-    EthApi: EthApiServer<
-            RpcTransaction<EthApi::NetworkTypes>,
-            RpcBlock<EthApi::NetworkTypes>,
-            RpcReceipt<EthApi::NetworkTypes>,
-            RpcHeader<EthApi::NetworkTypes>,
-        > + EthApiTypes,
+    EthApi: EthCall,
 {
     fn fetch_config_bytes(
         &self,
@@ -792,12 +787,7 @@ pub fn new_pipe_exec_layer_api<Storage, EthApi>(
 ) -> PipeExecLayerApi<Storage, EthApi>
 where
     Storage: GravityStorage,
-    EthApi: EthApiServer<
-            RpcTransaction<EthApi::NetworkTypes>,
-            RpcBlock<EthApi::NetworkTypes>,
-            RpcReceipt<EthApi::NetworkTypes>,
-            RpcHeader<EthApi::NetworkTypes>,
-        > + EthApiTypes,
+    EthApi: EthCall,
 {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (execution_result_tx, execution_result_rx) = tokio::sync::mpsc::unbounded_channel();

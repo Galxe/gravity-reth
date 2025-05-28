@@ -2,7 +2,7 @@ use crate::{ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockId};
 use alloy_primitives::{address, Address, Bytes, PrimitiveSignature, TxKind, U256};
-use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
+use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequest};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::{config_storage::OnChainConfig, events::contract_event::GravityEvent};
@@ -10,9 +10,7 @@ use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned}
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
 use reth_primitives::Receipt;
-use reth_rpc_eth_api::{
-    EthApiServer, EthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
-};
+use reth_rpc_eth_api::helpers::EthCall;
 use revm::db::BundleState;
 use revm_primitives::{EvmState, ExecutionResult};
 use std::{fmt::Debug, sync::OnceLock};
@@ -30,26 +28,9 @@ pub(crate) struct OnchainConfigFetcher<EthApi> {
     runtime: OnceLock<Runtime>,
 }
 
-pub trait EthCallHandler {
-    /// Simulate the call to the contract at block number and return the result.
-    /// Return None if the block is not found.
-    fn eth_call(
-        &self,
-        from: Address,
-        to: Address,
-        input: Bytes,
-        block_number: u64,
-    ) -> Option<Bytes>;
-}
-
 impl<EthApi> OnchainConfigFetcher<EthApi>
 where
-    EthApi: EthApiServer<
-            RpcTransaction<EthApi::NetworkTypes>,
-            RpcBlock<EthApi::NetworkTypes>,
-            RpcReceipt<EthApi::NetworkTypes>,
-            RpcHeader<EthApi::NetworkTypes>,
-        > + EthApiTypes,
+    EthApi: EthCall,
 {
     pub(crate) fn new(eth_api: EthApi) -> Self {
         Self { eth_api, runtime: OnceLock::new() }
@@ -84,8 +65,7 @@ where
                                 ..Default::default()
                             },
                             Some(BlockId::from(block_number)),
-                            None,
-                            None,
+                            EvmOverrides::new(None, None),
                         )
                         .await
                     {
