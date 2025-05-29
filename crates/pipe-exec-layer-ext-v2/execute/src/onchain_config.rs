@@ -5,7 +5,10 @@ use alloy_primitives::{address, Address, Bytes, PrimitiveSignature, TxKind, U256
 use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequest};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
-use gravity_api_types::{config_storage::OnChainConfig, events::contract_event::GravityEvent};
+use gravity_api_types::{
+    config_storage::{OnChainConfig, OnChainConfigResType},
+    events::contract_event::GravityEvent,
+};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
@@ -107,29 +110,31 @@ where
         0
     }
 
+    pub(crate) fn fetch_consensus_config(&self, block_number: u64) -> Bytes {
+        sol! {
+            function getCurrentConfig() external view returns (bytes memory);
+        }
+        let call = getCurrentConfigCall {};
+        let input: Bytes = call.abi_encode().into();
+        let result = self.eth_call(
+            GRAVITY_FRAMEWORK_ADDRESS,
+            CONSENSUS_CONFIG_CONTRACT_ADDRESS,
+            input,
+            block_number,
+        );
+        getCurrentConfigCall::abi_decode_returns(&result, false)
+            .expect("Failed to decode getCurrentConfig return value")
+            ._0
+    }
+
     pub(crate) fn fetch_config_bytes(
         &self,
         config_name: OnChainConfig,
         block_number: u64,
-    ) -> bytes::Bytes {
+    ) -> OnChainConfigResType {
         match config_name {
-            OnChainConfig::ConsensusConfig => {
-                sol! {
-                    function getCurrentConfig() external view returns (bytes memory);
-                }
-                let call = getCurrentConfigCall {};
-                let input: Bytes = call.abi_encode().into();
-                let result = self.eth_call(
-                    GRAVITY_FRAMEWORK_ADDRESS,
-                    CONSENSUS_CONFIG_CONTRACT_ADDRESS,
-                    input,
-                    block_number,
-                );
-                getCurrentConfigCall::abi_decode_returns(&result, false)
-                    .expect("Failed to decode getCurrentConfig return value")
-                    ._0
-                    .0
-            }
+            OnChainConfig::ConsensusConfig => self.fetch_consensus_config(block_number).0.into(),
+            OnChainConfig::Epoch => self.fetch_epoch(block_number).into(),
             _ => todo!("Implement fetching for other config types"),
         }
     }

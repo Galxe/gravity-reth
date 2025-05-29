@@ -33,7 +33,6 @@ alloy-sol-macro = "0.8.9"
 alloy-sol-types.workspace = true
 tokio.workspace = true
 rayon.workspace = true
-bytes.workspace = true
 
 # ethereum
 revm.workspace = true

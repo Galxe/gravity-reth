@@ -6,7 +6,7 @@ mod onchain_config;
 
 use channel::Channel;
 use gravity_api_types::{
-    config_storage::{ConfigStorage, OnChainConfig},
+    config_storage::{ConfigStorage, OnChainConfig, OnChainConfigResType},
     events::contract_event::GravityEvent,
 };
 use metrics::PipeExecLayerMetrics;
@@ -730,7 +730,7 @@ where
         &self,
         config_name: OnChainConfig,
         block_number: u64,
-    ) -> Option<bytes::Bytes> {
+    ) -> Option<OnChainConfigResType> {
         Some(self.onchain_config_fetcher.fetch_config_bytes(config_name, block_number))
     }
 }
