@@ -72,7 +72,10 @@ where
                         Ok(result) => return result,
                         Err(err) => {
                             count += 1;
-                            if count >= RETRY {
+                            tracing::warn!(
+                                "Failed to execute eth_call at {block_number}, retrying... (attempt {count}/{RETRY}): {err}"
+                            );
+                            if count > RETRY {
                                 panic!("Failed to execute eth_call: {err}");
                             }
                             // Sleep for a short duration before retrying
