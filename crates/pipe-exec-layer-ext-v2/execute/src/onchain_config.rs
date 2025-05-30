@@ -25,10 +25,11 @@ const BLOCK_MODULE_ADDRESS: Address = address!("00000000000000000000000000000000
 const CONSENSUS_CONFIG_CONTRACT_ADDRESS: Address =
     address!("00000000000000000000000000000000000000f2");
 
+static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
 #[derive(Debug)]
 pub(crate) struct OnchainConfigFetcher<EthApi> {
     eth_api: EthApi,
-    runtime: OnceLock<Runtime>,
 }
 
 impl<EthApi> OnchainConfigFetcher<EthApi>
@@ -36,13 +37,12 @@ where
     EthApi: EthCall,
 {
     pub(crate) fn new(eth_api: EthApi) -> Self {
-        Self { eth_api, runtime: OnceLock::new() }
+        Self { eth_api }
     }
 
     /// Simulate the call to the contract at block number and return the result.
     fn eth_call(&self, from: Address, to: Address, input: Bytes, block_number: u64) -> Bytes {
-        let rt_handle = self
-            .runtime
+        let rt_handle = ETH_CALL_RUNTIME
             .get_or_init(|| {
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(4.min(std::thread::available_parallelism().unwrap().get()))
