@@ -55,7 +55,7 @@ where
         // TODO(nekomoto): Handle the case where the block is not found.
         tokio::task::block_in_place(|| {
             rt_handle.block_on(async {
-                const RETRY: u64 = 3;
+                const RETRY: u64 = 5;
                 let mut count = 0;
                 loop {
                     match self
@@ -74,10 +74,10 @@ where
                     {
                         Ok(result) => return result,
                         Err(err) => {
-                            count += 1;
                             tracing::warn!(
                                 "Failed to execute eth_call at {block_number}, retrying... (attempt {count}/{RETRY}): {err}"
                             );
+                            count += 1;
                             if count > RETRY {
                                 panic!("Failed to execute eth_call: {err}");
                             }
