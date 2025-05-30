@@ -255,10 +255,12 @@ pub(crate) fn transact_metadata_contract_call(
 
     let call = blockPrologueCall { _timestamp_microseconds: timestamp_us };
     let input: Bytes = call.abi_encode().into();
-    let result = evm
+    let mut result = evm
         .transact_system_call(GRAVITY_FRAMEWORK_ADDRESS, BLOCK_MODULE_ADDRESS, input.clone())
         .unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
+    result.state.remove(&GRAVITY_FRAMEWORK_ADDRESS);
+    result.state.remove(&evm.block().coinbase);
     (
         MetadataTxnResult {
             result: result.result,
