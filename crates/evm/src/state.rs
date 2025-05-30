@@ -53,6 +53,10 @@ where
     }
 
     fn commit_changes(&mut self, changes: HashMap<Address, Account>) {
+        // Load all accounts in the changes map to ensure they are cached before committing.
+        for address in changes.keys() {
+            self.load_cache_account(*address).unwrap();
+        }
         self.commit(changes);
     }
 }
@@ -92,6 +96,10 @@ where
     }
 
     fn commit_changes(&mut self, changes: HashMap<Address, Account>) {
+        // Load all accounts in the changes map to ensure they are cached before committing.
+        for address in changes.keys() {
+            self.load_mut_cache_account(*address).unwrap();
+        }
         self.commit(changes);
     }
 }

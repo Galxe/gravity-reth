@@ -459,29 +459,35 @@ impl<Storage: GravityStorage> Core<Storage> {
             )
             .unwrap();
         let base_fee = evm_env.block_env.basefee.to::<u64>();
+
         let (metadata_txn_result, state_changes) = {
-            let mut evm = self.evm_config.evm_with_env(WrapDatabaseRef(&state), evm_env);
-            transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000)
-        };
-        if let Some(new_epoch) = metadata_txn_result.emit_new_epoch() {
-            assert_eq!(new_epoch, epoch + 1);
-            // Advance epoch and discard the block.
-            info!(target: "execute_ordered_block",
-                id=?block_id,
-                parent_id=?parent_id,
-                number=?block_number,
-                new_epoch=?new_epoch,
-                "emit new epoch, discard the block"
-            );
             let mut state = revm::db::states::State::builder()
-                .with_database_ref(state)
+                .with_database_ref(&state)
                 .with_bundle_update()
                 .build();
-            state.commit(state_changes);
-            state.merge_transitions(BundleRetention::Reverts);
-            return metadata_txn_result
-                .into_executed_ordered_block_result(&ordered_block, state.take_bundle());
-        }
+            let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
+            let (metadata_txn_result, state_changes) =
+                transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000);
+            drop(evm);
+
+            if let Some(new_epoch) = metadata_txn_result.emit_new_epoch() {
+                // New epoch triggered, advance epoch and discard the block.
+                assert_eq!(new_epoch, epoch + 1);
+                info!(target: "execute_ordered_block",
+                    id=?block_id,
+                    parent_id=?parent_id,
+                    number=?block_number,
+                    new_epoch=?new_epoch,
+                    "emit new epoch, discard the block"
+                );
+                state.commit(state_changes);
+                state.merge_transitions(BundleRetention::Reverts);
+                return metadata_txn_result
+                    .into_executed_ordered_block_result(&ordered_block, state.take_bundle());
+            }
+
+            (metadata_txn_result, state_changes)
+        };
 
         let (block, txs_info) = self.create_block_for_executor(ordered_block, base_fee, &state);
 
