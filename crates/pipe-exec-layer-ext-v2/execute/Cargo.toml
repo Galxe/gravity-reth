@@ -59,4 +59,4 @@ eyre.workspace = true
 rand.workspace = true
 
 [features]
-pipe_test = []
+pipe_test = ["reth-provider/pipe_test"]

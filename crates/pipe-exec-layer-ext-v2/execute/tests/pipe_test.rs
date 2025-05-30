@@ -141,8 +141,6 @@ async fn run_pipe(
     drop(db_provider);
     block_number_to_id.insert(latest_block_number, latest_block_hash);
 
-    // Load block number to hash from test data
-
     let storage = BlockViewStorage::new(
         provider.clone(),
         latest_block_number,
