@@ -32,6 +32,26 @@ fn mock_block_id(block_number: u64) -> B256 {
     B256::left_padding_from(&block_number.to_be_bytes())
 }
 
+fn new_ordered_block(
+    epoch: u64,
+    block_number: u64,
+    block_id: B256,
+    parent_block_id: B256,
+) -> OrderedBlock {
+    OrderedBlock {
+        epoch,
+        parent_id: parent_block_id,
+        id: block_id,
+        number: block_number,
+        timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+        coinbase: Address::ZERO,
+        prev_randao: B256::ZERO,
+        withdrawals: Default::default(),
+        transactions: vec![],
+        senders: vec![],
+    }
+}
+
 struct MockConsensus<Storage, EthApi> {
     pipeline_api: PipeExecLayerApi<Storage, EthApi>,
 }
@@ -56,22 +76,14 @@ where
         tokio::time::sleep(Duration::from_secs(3)).await;
         for block_number in latest_block_number + 1..latest_block_number + 1000 {
             let block_id = mock_block_id(block_number);
+            let parent_block_id = mock_block_id(block_number - 1);
             pipeline_api
-                .push_ordered_block(OrderedBlock {
+                .push_ordered_block(new_ordered_block(
                     epoch,
-                    parent_id: mock_block_id(block_number - 1),
-                    id: block_id,
-                    number: block_number,
-                    timestamp: SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                    coinbase: Address::ZERO,
-                    prev_randao: B256::ZERO,
-                    withdrawals: Default::default(),
-                    transactions: vec![],
-                    senders: vec![],
-                })
+                    block_number,
+                    block_id,
+                    parent_block_id,
+                ))
                 .unwrap();
             let result = pipeline_api.pull_executed_block_hash().await.unwrap();
             assert_eq!(result.block_number, block_number);
@@ -88,6 +100,15 @@ where
                             .try_into()
                             .unwrap();
                         assert_eq!(stored_epoch, new_epoch);
+                        // Mock stale epoch block
+                        pipeline_api
+                            .push_ordered_block(new_ordered_block(
+                                epoch,
+                                block_number + 1,
+                                mock_block_id(block_number + 1),
+                                block_id,
+                            ))
+                            .unwrap();
                         epoch = new_epoch;
                     }
                     _ => {}

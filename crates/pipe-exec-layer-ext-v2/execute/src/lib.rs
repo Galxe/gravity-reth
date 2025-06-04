@@ -229,6 +229,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
             if ordered_block.epoch != epoch {
                 // Discard the block if the epoch is not equal to the current epoch
+                self.execute_block_barrier.notify(
+                    block_number - 1,
+                    ExecuteBlockContext { parent_header, prev_start_execute_time, epoch },
+                );
                 info!(target: "PipeExecService.process",
                     block_number=?block_number,
                     block_id=?block_id,
@@ -441,6 +445,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let block_id = ordered_block.id;
         let parent_id = ordered_block.parent_id;
         let block_number = ordered_block.number;
+        assert_eq!(block_number, parent_header.number + 1);
         let epoch = ordered_block.epoch;
 
         let (parent_id_, state) = self.storage.get_state_view(block_number - 1).unwrap();
