@@ -1385,29 +1385,22 @@ where
             // Check if persistence has complete
             match rx.try_recv() {
                 Ok(last_persisted_hash_num) => {
-                    let elapsed = start_time.elapsed();
-                    self.metrics.engine.persistence_duration.record(elapsed);
-                    if let Some(BlockNumHash {
+                    self.metrics.engine.persistence_duration.record(start_time.elapsed());
+                    let Some(BlockNumHash {
                         hash: last_persisted_block_hash,
                         number: last_persisted_block_number,
                     }) = last_persisted_hash_num
-                    {
-                        self.metrics.engine.persistence_duration_per_block.record(
-                            elapsed.as_secs_f64() /
-                                (last_persisted_block_number -
-                                    self.persistence_state.last_persisted_block.number)
-                                    as f64,
-                        );
-                        info!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, "Finished persisting, calling finish");
-                        self.persistence_state
-                            .finish(last_persisted_block_hash, last_persisted_block_number);
-                        self.on_new_persisted_block()?;
-                    } else {
+                    else {
                         // if this happened, then we persisted no blocks because we sent an
                         // empty vec of blocks
                         warn!(target: "engine::tree", "Persistence task completed but did not persist any blocks");
                         return Ok(())
                     };
+
+                    info!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, "Finished persisting, calling finish");
+                    self.persistence_state
+                        .finish(last_persisted_block_hash, last_persisted_block_number);
+                    self.on_new_persisted_block()?;
                 }
                 Err(TryRecvError::Closed) => return Err(TryRecvError::Closed.into()),
                 Err(TryRecvError::Empty) => {
