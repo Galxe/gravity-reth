@@ -150,6 +150,7 @@ where
             number: block.recovered_block().header().number(),
         });
 
+        let num_blocks = blocks.len();
         if last_block_hash_num.is_some() {
             let provider_rw = self.provider.database_provider_rw()?;
             let static_file_provider = self.provider.static_file_provider();
@@ -157,7 +158,11 @@ where
             UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(blocks)?;
             UnifiedStorageWriter::commit(provider_rw)?;
         }
-        self.metrics.save_blocks_duration_seconds.record(start_time.elapsed());
+        let elapsed = start_time.elapsed();
+        self.metrics.save_blocks_duration_seconds.record(elapsed);
+        self.metrics
+            .save_duration_per_block_seconds
+            .record(elapsed.as_secs_f64() / num_blocks as f64);
         Ok(last_block_hash_num)
     }
 }
