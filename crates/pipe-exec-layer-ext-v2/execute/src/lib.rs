@@ -220,7 +220,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         let block_number = block.number();
         let block_id = block.id();
 
-        self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
         let ExecuteBlockContext { parent_header, prev_start_execute_time, epoch } =
@@ -244,6 +243,8 @@ impl<Storage: GravityStorage> Core<Storage> {
                 return;
             }
         }
+
+        self.storage.insert_block_id(block_number, block_id);
 
         let start_time = Instant::now();
         let ExecuteOrderedBlockResult {
