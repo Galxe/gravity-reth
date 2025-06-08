@@ -589,6 +589,7 @@ where
     async fn process_batch_and_store_results(
         &self
     ) {
+        let system_time_start = std::time::SystemTime::now();
         let mut buffer = self.buffer.lock().await;
         let (items_to_process, notify) = buffer.take();
         drop(buffer);
@@ -605,10 +606,10 @@ where
         let origins: Vec<TransactionOrigin> = items_to_process.iter().map(|(origin, _)| *origin).collect();
         let outcomes = self.validator().validate_transactions(items_to_process).await;
         // Extract data needed for processing, discard the notifier for this function's scope
-        let system_time = std::time::SystemTime::now();
+
         self.txn_insert_time.clear();
         for (tx_outcome, origin) in outcomes.into_iter().zip(origins) {
-            self.txn_insert_time.insert(tx_outcome.tx_hash(), system_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64);
+            self.txn_insert_time.insert(tx_outcome.tx_hash(), system_time_start.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64);
             origins_hashes_and_outcomes.push((origin, tx_outcome.tx_hash(), tx_outcome));
         }
 
