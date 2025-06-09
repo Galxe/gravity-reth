@@ -595,7 +595,10 @@ where
         let (items_to_process, notify) = buffer.take();
         drop(buffer);
         let num_items = items_to_process.len();
-
+        if num_items == 0 {
+            notify.notify_waiters();
+            return;
+        }
         // We no longer need oneshot_senders or batch_results Vec here
         // We extract necessary info directly
         let mut origins_hashes_and_outcomes: Vec<(
@@ -605,7 +608,8 @@ where
         )> = Vec::with_capacity(num_items);
         let origins: Vec<TransactionOrigin> = items_to_process.iter().map(|(origin, _)| *origin).collect();
         let outcomes = self.validator().validate_transactions(items_to_process).await;
-        self.blob_store_metrics.txn_validation_time.record(start.elapsed().as_millis() as f64 / outcomes.len() as f64);
+        self.blob_store_metrics.txn_validation_time.record(start.elapsed().as_millis() as f64);
+        self.blob_store_metrics.txn_batch_number.record(num_items as f64);
         // Extract data needed for processing, discard the notifier for this function's scope
 
         self.txn_insert_time.clear();
@@ -677,7 +681,7 @@ where
             }
         }
         notify.notify_waiters();
-        self.blob_store_metrics.txn_val_insertion_time.record(start.elapsed().as_millis() as f64 / num_items as f64);
+        self.blob_store_metrics.txn_val_insertion_time.record(start.elapsed().as_millis() as f64);
         // No need to send results via channels anymore
         info!("Finished processing batch of {} transactions take {:?}", num_items, start.elapsed());
     }

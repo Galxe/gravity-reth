@@ -70,6 +70,8 @@ pub struct BlobStoreMetrics {
     pub(crate) txn_validation_time: Histogram,
     /// txn insertion time
     pub(crate) txn_val_insertion_time: Histogram,
+    /// txn batch number
+    pub(crate) txn_batch_number: Histogram,
 }
 
 /// Transaction pool maintenance metrics
