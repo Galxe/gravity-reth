@@ -1,4 +1,21 @@
+use alloy_primitives::{
+    map::{HashMap, HashSet},
+    B256,
+};
+use alloy_trie::Nibbles;
+use reth_trie_common::nested_trie::Node;
+
 use crate::{prefix_set::TriePrefixSetsMut, updates::TrieUpdates, HashedPostState};
+
+#[derive(Default, Debug, Clone)]
+pub struct TrieInputV2 {
+    pub state: HashedPostState,
+    pub update_account_nodes: HashMap<Nibbles, Node>,
+    pub update_storage_nodes: HashMap<B256, HashMap<Nibbles, Node>>,
+    // path, wipe_all: Some(hashed_address)
+    pub removed_account_nodes: HashMap<Nibbles, Option<B256>>,
+    pub removed_storage_nodes: HashMap<B256, HashSet<Nibbles>>,
+}
 
 /// Inputs for trie-related computations.
 #[derive(Default, Debug, Clone)]

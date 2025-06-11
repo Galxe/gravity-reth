@@ -31,7 +31,7 @@ pub mod node_iter;
 
 /// Input for trie computation.
 mod input;
-pub use input::TrieInput;
+pub use input::{TrieInput, TrieInputV2};
 
 /// Merkle proof generation.
 pub mod proof;

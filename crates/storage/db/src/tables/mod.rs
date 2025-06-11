@@ -35,7 +35,10 @@ use reth_primitives::{Receipt, StorageEntry, TransactionSigned};
 use reth_primitives_traits::{Account, Bytecode};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::StageCheckpoint;
-use reth_trie_common::{BranchNodeCompact, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey};
+use reth_trie_common::{
+    nested_trie::StoredNode, BranchNodeCompact, StorageTrieEntry, StoredNibbles,
+    StoredNibblesSubKey,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -480,10 +483,21 @@ tables! {
         type SubKey = B256;
     }
 
+    table AccountsTrieV2 {
+        type Key = StoredNibbles;
+        type Value = StoredNode;
+    }
+
     /// Stores the current state's Merkle Patricia Tree.
     table AccountsTrie {
         type Key = StoredNibbles;
         type Value = BranchNodeCompact;
+    }
+
+    table StoragesTrieV2 {
+        type Key = B256;
+        type Value = StoredNode;
+        type SubKey = StoredNibblesSubKey;
     }
 
     /// From HashedAddress => NibblesSubKey => Intermediate value

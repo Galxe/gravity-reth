@@ -22,3 +22,5 @@ pub mod proof;
 /// Parallel state root metrics.
 #[cfg(feature = "metrics")]
 pub mod metrics;
+
+pub mod nested_hash;

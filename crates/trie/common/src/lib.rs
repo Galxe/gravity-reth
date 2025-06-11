@@ -64,3 +64,5 @@ pub mod serde_bincode_compat {
 
 /// Re-export
 pub use alloy_trie::{nodes::*, proof, BranchNodeCompact, HashBuilder, TrieMask, EMPTY_ROOT_HASH};
+
+pub mod nested_trie;
