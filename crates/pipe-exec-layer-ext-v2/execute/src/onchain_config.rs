@@ -24,6 +24,8 @@ const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000
 const BLOCK_MODULE_ADDRESS: Address = address!("00000000000000000000000000000000000000f1");
 const CONSENSUS_CONFIG_CONTRACT_ADDRESS: Address =
     address!("00000000000000000000000000000000000000f2");
+const VALIDATOR_SET_CONTRACT_ADDRESS: Address =
+    address!("00000000000000000000000000000000000000f3");
 
 static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -127,6 +129,23 @@ where
             ._0
     }
 
+    pub(crate) fn fetch_validator_set(&self, block_number: u64) -> Bytes {
+        sol! {
+            function getCurrentConfig() external view returns (bytes memory);
+        }
+        let call = getCurrentConfigCall {};
+        let input: Bytes = call.abi_encode().into();
+        let result = self.eth_call(
+            GRAVITY_FRAMEWORK_ADDRESS,
+            VALIDATOR_SET_CONTRACT_ADDRESS,
+            input,
+            block_number,
+        );
+        getCurrentConfigCall::abi_decode_returns(&result, false)
+            .expect("Failed to decode getCurrentConfig return value")
+            ._0
+    }
+
     pub(crate) fn fetch_config_bytes(
         &self,
         config_name: OnChainConfig,
@@ -135,6 +154,7 @@ where
         match config_name {
             OnChainConfig::ConsensusConfig => self.fetch_consensus_config(block_number).0.into(),
             OnChainConfig::Epoch => self.fetch_epoch(block_number).into(),
+            OnChainConfig::ValidatorSet => self.fetch_validator_set(block_number).0.into(),
             _ => todo!("Implement fetching for other config types"),
         }
     }

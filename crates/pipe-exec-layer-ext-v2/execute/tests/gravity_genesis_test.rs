@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use std::fmt::Debug;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
@@ -23,6 +24,8 @@ const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000
 const BLOCK_MODULE_ADDRESS: Address = address!("00000000000000000000000000000000000000f1");
 const CONSENSUS_CONFIG_CONTRACT_ADDRESS: Address =
     address!("00000000000000000000000000000000000000f2");
+const VALIDATOR_SET_CONTRACT_ADDRESS: Address =
+    address!("00000000000000000000000000000000000000f3");
 
 sol! {
     contract Reconfiguration {
@@ -32,6 +35,14 @@ sol! {
 
 sol! {
     contract ConsensusConfigContract {
+        function setForNextEpoch(bytes calldata newConfig) external onlyAptosFramework;
+        function getCurrentConfig() external view returns (bytes memory);
+        function getPendingConfig() external view returns (bytes memory, bool);
+    }
+}
+
+sol! {
+    contract ValidatorSetContract {
         function setForNextEpoch(bytes calldata newConfig) external onlyAptosFramework;
         function getCurrentConfig() external view returns (bytes memory);
         function getPendingConfig() external view returns (bytes memory, bool);
@@ -72,12 +83,30 @@ fn test_gravity_system_call<DB: Database<Error: Debug>>(db: DB) {
     .unwrap();
     assert_eq!(returns._0, 1);
 
+    // *evm.tx_mut() = new_system_call_txn(
+    //     CONSENSUS_CONFIG_CONTRACT_ADDRESS,
+    //     ConsensusConfigContract::getCurrentConfigCall {}.abi_encode().into(),
+    // );
+    // let result = evm.transact().unwrap();
+    // let returns = ConsensusConfigContract::getCurrentConfigCall::abi_decode_returns(
+    //     result.result.output().unwrap(),
+    //     false,
+    // )
+    // .unwrap();
+    // assert_eq!(
+    //     returns._0,
+    //     Bytes::from([
+    //         3, 1, 1, 10, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 10, 0, 0, 0,
+    //         0, 0, 0, 0, 1, 0, 0, 0,
+    //     ])
+    // );
+
     *evm.tx_mut() = new_system_call_txn(
-        CONSENSUS_CONFIG_CONTRACT_ADDRESS,
-        ConsensusConfigContract::getCurrentConfigCall {}.abi_encode().into(),
+        VALIDATOR_SET_CONTRACT_ADDRESS,
+        ValidatorSetContract::getCurrentConfigCall {}.abi_encode().into(),
     );
     let result = evm.transact().unwrap();
-    let returns = ConsensusConfigContract::getCurrentConfigCall::abi_decode_returns(
+    let returns = ValidatorSetContract::getCurrentConfigCall::abi_decode_returns(
         result.result.output().unwrap(),
         false,
     )
@@ -85,8 +114,16 @@ fn test_gravity_system_call<DB: Database<Error: Debug>>(db: DB) {
     assert_eq!(
         returns._0,
         Bytes::from([
-            3, 1, 1, 10, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 10, 0, 0, 0,
-            0, 0, 0, 0, 1, 0, 0, 0,
+            0, 1, 202, 175, 197, 182, 88, 240, 89, 13, 126, 49, 222, 145, 237, 222, 127, 5,
+            174, 145, 150, 29, 8, 4, 236, 99, 77, 117, 53, 150, 155, 125, 23, 31, 1, 0, 0, 0,
+            0, 0, 0, 0, 48, 153, 255, 137, 244, 83, 217, 169, 191, 39, 62, 58, 232, 182, 27,
+            153, 162, 179, 54, 237, 199, 182, 235, 155, 142, 48, 130, 73, 253, 89, 243, 183,
+            98, 17, 119, 29, 126, 13, 170, 169, 127, 173, 17, 81, 140, 74, 216, 234, 189, 25,
+            1, 23, 47, 105, 112, 52, 47, 49, 50, 55, 46, 48, 46, 48, 46, 49, 47, 116, 99, 112,
+            47, 50, 48, 50, 53, 25, 1, 23, 47, 105, 112, 52, 47, 49, 50, 55, 46, 48, 46, 48,
+            46, 49, 47, 116, 99, 112, 47, 50, 48, 50, 53, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0,
         ])
     )
 }
