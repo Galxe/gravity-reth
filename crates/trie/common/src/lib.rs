@@ -17,7 +17,7 @@ pub use hashed_state::*;
 
 /// Input for trie computation.
 mod input;
-pub use input::TrieInput;
+pub use input::{TrieInput, TrieInputV2};
 
 /// The implementation of hash builder.
 pub mod hash_builder;
@@ -68,3 +68,5 @@ pub mod serde_bincode_compat {
 
 /// Re-export
 pub use alloy_trie::{nodes::*, proof, BranchNodeCompact, HashBuilder, TrieMask, EMPTY_ROOT_HASH};
+
+pub mod nested_trie;

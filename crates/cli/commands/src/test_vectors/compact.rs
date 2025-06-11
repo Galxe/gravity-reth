@@ -33,7 +33,9 @@ use reth_stages_types::{
     StorageHashingCheckpoint,
 };
 use reth_trie::{hash_builder::HashBuilderValue, TrieMask};
-use reth_trie_common::{hash_builder::HashBuilderState, StoredNibbles, StoredNibblesSubKey};
+use reth_trie_common::{
+    hash_builder::HashBuilderState, nested_trie::StoredNode, StoredNibbles, StoredNibblesSubKey,
+};
 use std::{fs::File, io::BufReader};
 
 pub const VECTORS_FOLDER: &str = "testdata/micro/compact";
@@ -124,7 +126,8 @@ compact_types!(
         StoredNibblesSubKey,
         // StorageTrieEntry, // todo branchnodecompact arbitrary
         // StoredSubNode, // todo branchnodecompact arbitrary
-        HashBuilderState
+        HashBuilderState,
+        StoredNode
     ],
     // These types require an extra identifier which is usually stored elsewhere (eg. parent type).
     identifier: [
