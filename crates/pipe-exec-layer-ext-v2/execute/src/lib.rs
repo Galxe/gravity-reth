@@ -476,7 +476,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000);
             drop(evm);
 
-            if let Some(new_epoch) = metadata_txn_result.emit_new_epoch() {
+            if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
                 // New epoch triggered, advance epoch and discard the block.
                 assert_eq!(new_epoch, epoch + 1);
                 info!(target: "execute_ordered_block",
@@ -489,7 +489,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 state.commit(state_changes);
                 state.merge_transitions(BundleRetention::Reverts);
                 return metadata_txn_result
-                    .into_executed_ordered_block_result(&ordered_block, state.take_bundle());
+                    .into_executed_ordered_block_result(&ordered_block, state.take_bundle(), validators);
             }
 
             (metadata_txn_result, state_changes)

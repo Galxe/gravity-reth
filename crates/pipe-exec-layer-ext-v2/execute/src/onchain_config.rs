@@ -166,14 +166,14 @@ pub(crate) struct MetadataTxnResult {
 }
 
 impl MetadataTxnResult {
-    pub(crate) fn emit_new_epoch(&self) -> Option<u64> {
+    pub(crate) fn emit_new_epoch(&self) -> Option<(u64, Bytes)> {
         sol! {
-            event NewEpoch(uint64 indexed epoch);
+            event NewEpoch(uint64 indexed epoch, bytes validators);
         }
 
         for log in self.result.logs() {
             match NewEpoch::decode_log(log, false) {
-                Ok(event) => return Some(event.epoch),
+                Ok(event) => return Some((event.epoch, event.validators.clone().into())),
                 Err(_) => continue,
             }
         }
@@ -184,6 +184,7 @@ impl MetadataTxnResult {
         self,
         ordered_block: &OrderedBlock,
         state: BundleState,
+        validators: Bytes,
     ) -> ExecuteOrderedBlockResult {
         let tx_type = self.txn.tx_type();
         let mut block = Block {
@@ -227,7 +228,7 @@ impl MetadataTxnResult {
                 gas_used: 0,
             },
             txs_info: vec![],
-            gravity_events: vec![GravityEvent::NewEpoch(new_epoch)],
+            gravity_events: vec![GravityEvent::NewEpoch(new_epoch, validators.clone().into())],
             epoch: new_epoch,
         }
     }
