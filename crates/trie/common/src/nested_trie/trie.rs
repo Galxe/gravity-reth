@@ -4,7 +4,7 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     B256,
 };
-use alloy_trie::{nodes::RlpNode, EMPTY_ROOT_HASH};
+use alloy_trie::EMPTY_ROOT_HASH;
 use nybbles::Nibbles;
 use reth_storage_errors::db::DatabaseError;
 
@@ -84,19 +84,33 @@ where
                 self.update_nodes.insert(prefix, Node::FullNode { children: convert, flags });
             }
             Node::ShortNode { key, value, flags } => {
-                let next_node = *value;
-                let convert = if let Node::ValueNode(value) = &next_node {
-                    Box::new(Node::HashNode(RlpNode::from_rlp(value)))
-                } else {
-                    Box::new(Node::HashNode(next_node.cached_rlp().unwrap().clone()))
-                };
-                let mut next_path = prefix.clone();
-                next_path.extend_from_slice_unchecked(&key);
-                self.take_output_inner(next_node, next_path);
-                self.update_nodes.insert(prefix, Node::ShortNode { key, value: convert, flags });
-            }
-            Node::ValueNode(value) => {
-                self.update_nodes.insert(prefix, Node::ValueNode(value));
+                match *value {
+                    next_node @ Node::FullNode { .. } => {
+                        let convert =
+                            Box::new(Node::HashNode(next_node.cached_rlp().unwrap().clone()));
+                        let mut next_path = prefix.clone();
+                        next_path.extend_from_slice_unchecked(&key);
+                        self.take_output_inner(next_node, next_path);
+                        self.update_nodes
+                            .insert(prefix, Node::ShortNode { key, value: convert, flags });
+                    }
+                    leaf_node @ Node::ValueNode { .. } => {
+                        self.update_nodes.insert(
+                            prefix,
+                            Node::ShortNode { key, value: Box::new(leaf_node), flags },
+                        );
+                    }
+                    hash_node @ Node::HashNode(..) => {
+                        // When two consecutive ShortNodes are merged into one ShortNode,
+                        // the child node may not be visited and still is a HashNode.
+                        self.update_nodes.insert(
+                            prefix,
+                            Node::ShortNode { key, value: Box::new(hash_node), flags },
+                        );
+                    }
+                    // assert next_node != HashNode, because current node is dirty
+                    Node::ShortNode { .. } => unreachable!("Consecutive ShortNodes"),
+                }
             }
             _ => unreachable!(),
         }
@@ -168,7 +182,6 @@ where
 
                     let branch = Node::FullNode { children, flags: NodeFlag::dirty_node() };
                     if matchlen == 0 {
-                        self.removed_nodes.insert(prefix);
                         Ok((true, branch))
                     } else {
                         Ok((
@@ -208,13 +221,13 @@ where
         Ok(())
     }
 
-    pub fn parallel_insert<F>(
+    pub fn parallel_update<F>(
         &mut self,
-        batches: [Vec<(Nibbles, Node)>; 16],
+        batches: [Vec<(Nibbles, Option<Node>)>; 16], // Some for insert, None for delete
         f: F,
     ) -> Result<(), DatabaseError>
     where
-        F: Fn() -> R + Send + Sync,
+        F: Fn() -> Result<R, DatabaseError> + Send + Sync,
     {
         if self.parallel && self.root.is_some() {
             let root = self.root.take().unwrap();
@@ -230,17 +243,35 @@ where
                         scope.spawn(|| {
                             let prefix = batch[0].0.slice(0..1);
                             let child_root = child.take().map(|n| *n);
-                            let mut child_trie = Trie::new_with_root(f(), child_root);
+                            let reader = match f() {
+                                Ok(reader) => reader,
+                                Err(e) => {
+                                    abort.get_or_init(|| e);
+                                    return;
+                                }
+                            };
+                            let mut child_trie = Trie::new_with_root(reader, child_root);
                             for (key, value) in batch {
                                 let child_root = child_trie.root.take();
-                                match child_trie.insert_inner(
-                                    child_root,
-                                    prefix.clone(),
-                                    key.slice(1..),
-                                    value,
-                                ) {
+                                let result = if let Some(value) = value {
+                                    child_trie
+                                        .insert_inner(
+                                            child_root,
+                                            prefix.clone(),
+                                            key.slice(1..),
+                                            value,
+                                        )
+                                        .map(|(dirty, node)| (dirty, Some(node)))
+                                } else {
+                                    child_trie.delete_inner(
+                                        child_root,
+                                        prefix.clone(),
+                                        key.slice(1..),
+                                    )
+                                };
+                                match result {
                                     Ok((_, node)) => {
-                                        child_trie.root = Some(node);
+                                        child_trie.root = node;
                                     }
                                     Err(e) => {
                                         abort.get_or_init(|| e);
@@ -250,17 +281,60 @@ where
                             }
                             let _ = child_trie.hash();
                             *child = child_trie.root.take().map(|n| Box::new(n));
-                            let mut removed_nodes = removed_nodes.lock().unwrap();
-                            removed_nodes.extend(child_trie.removed_nodes);
+                            if !child_trie.removed_nodes.is_empty() {
+                                removed_nodes.lock().unwrap().extend(child_trie.removed_nodes);
+                            }
                         });
                     }
                 });
                 if let Some(abort) = abort.into_inner() {
                     return Err(abort);
                 }
+                let mut removed_nodes = removed_nodes.into_inner().unwrap();
+                // check the root node can be FullNode or other
+                let mut pos = -1;
+                for (i, child) in children.iter().enumerate() {
+                    if child.is_some() {
+                        if pos == -1 {
+                            pos = i as i32;
+                        } else {
+                            pos = -2;
+                            break;
+                        }
+                    }
+                }
+                if pos >= 0 {
+                    // Fall back into a extension node
+                    let nibble_path = Nibbles::from_nibbles_unchecked([pos as u8]);
+                    let single_child = *children[pos as usize].take().unwrap();
+                    let single_child = self.resolve(single_child, nibble_path.clone())?.unwrap();
 
-                self.root = Some(Node::FullNode { children, flags: NodeFlag::dirty_node() });
-                let removed_nodes = removed_nodes.into_inner().unwrap();
+                    let new_node = if let Node::ShortNode { key: cn_key, value: cn_value, .. } =
+                        single_child
+                    {
+                        let mut new_key = nibble_path.clone();
+                        new_key.extend_from_slice_unchecked(&cn_key);
+                        removed_nodes.insert(nibble_path.clone());
+                        Node::ShortNode {
+                            key: new_key,
+                            value: cn_value,
+                            flags: NodeFlag::dirty_node(),
+                        }
+                    } else {
+                        Node::ShortNode {
+                            key: nibble_path,
+                            value: Box::new(single_child),
+                            flags: NodeFlag::dirty_node(),
+                        }
+                    };
+                    self.root = Some(new_node);
+                } else if pos == -2 {
+                    self.root = Some(Node::FullNode { children, flags: NodeFlag::dirty_node() });
+                } else if pos == -1 {
+                    self.root = None;
+                    removed_nodes.insert(Nibbles::new());
+                }
+
                 if self.removed_nodes.is_empty() {
                     self.removed_nodes = removed_nodes;
                 } else {
@@ -273,7 +347,11 @@ where
         }
         for batch in batches {
             for (key, value) in batch {
-                self.insert(key, value)?;
+                if let Some(value) = value {
+                    self.insert(key, value)?;
+                } else {
+                    self.delete(key)?;
+                }
             }
         }
         Ok(())
@@ -351,13 +429,18 @@ where
                             child_path.push_unchecked(pos as u8);
                             single_child = self.resolve(single_child, child_path)?.unwrap();
                         }
-                        self.removed_nodes.insert(prefix);
                         if let Node::ShortNode { key: cn_key, value: cn_value, .. } = single_child {
                             // Replace the entire full node with the short node.
                             // Mark the original short node as deleted since the
                             // value is embedded into the parent now.
                             let mut new_key = Nibbles::from_nibbles_unchecked([pos as u8]);
                             new_key.extend_from_slice_unchecked(&cn_key);
+                            // current node is fall back into short node, and will concat the next
+                            // short node, so the next short node is
+                            // removed.
+                            let mut delete_child_path = prefix.clone();
+                            delete_child_path.push_unchecked(pos as u8);
+                            self.removed_nodes.insert(delete_child_path);
                             Ok((
                                 true,
                                 Some(Node::ShortNode {
@@ -396,9 +479,6 @@ where
                         // The matched short node is deleted entirely and track
                         // it in the deletion set. The same the valueNode doesn't
                         // need to be tracked at all since it's always embedded.
-                        let mut removed_path = prefix.clone();
-                        removed_path.extend_from_slice_unchecked(&key);
-                        self.removed_nodes.insert(removed_path);
                         self.removed_nodes.insert(prefix);
                         return Ok((true, None)); // remove n entirely for whole matches
                     }
@@ -422,7 +502,11 @@ where
                         Node::ShortNode { key: child_key, value: child_value, .. } => {
                             let mut extend_key = node_key.clone();
                             extend_key.extend_from_slice_unchecked(&child_key);
-                            self.removed_nodes.insert(prefix);
+                            // the next short node is concat by current short node,
+                            // so the next short node is removed.
+                            let mut delete_next_path = prefix.clone();
+                            delete_next_path.extend_from_slice_unchecked(&node_key);
+                            self.removed_nodes.insert(delete_next_path);
                             Ok((
                                 true,
                                 Some(Node::ShortNode {
@@ -442,12 +526,6 @@ where
                         )),
                     }
                 }
-                Node::ValueNode(_) => {
-                    let mut removed_path = prefix.clone();
-                    removed_path.extend_from_slice_unchecked(&key);
-                    self.removed_nodes.insert(removed_path);
-                    Ok((true, None))
-                }
                 Node::HashNode(rlp_node) => {
                     let real_node = self.reader.read(&prefix)?;
                     let (dirty, new_node) = self.delete_inner(real_node, prefix, key)?;
@@ -457,6 +535,7 @@ where
                         Ok((false, Some(Node::HashNode(rlp_node))))
                     }
                 }
+                _ => unreachable!(),
             }
         } else {
             Ok((false, None))

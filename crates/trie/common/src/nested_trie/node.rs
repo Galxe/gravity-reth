@@ -3,6 +3,9 @@ use alloy_rlp::{length_of_length, BufMut, Encodable, Header, EMPTY_STRING_CODE};
 use alloy_trie::nodes::{encode_path_leaf, RlpNode};
 use nybbles::Nibbles;
 
+/// Cache hash value(RlpNode) of current Node to prevent duplicate caculations,
+/// and the `dirty` indicates whether current Node has been updated.
+/// NodeFlag is not stored in database, and read as default when a Node is loaded
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct NodeFlag {
     pub rlp: Option<RlpNode>,
@@ -18,18 +21,33 @@ impl NodeFlag {
         Self { rlp: None, dirty: true }
     }
 
+    // mark current node as dirty, and wipe the cached hash
     pub fn mark_diry(&mut self) {
         self.rlp.take();
         self.dirty = true;
     }
 
+    // for test use: serialize and deserialize
     pub fn reset(&mut self) {
         self.rlp.take();
         self.dirty = false;
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Nested node type for MPT node:
+///
+/// `FullNode` for branch node
+///
+/// `ShortNode` for extension node(when value is HashNode), or leaf node(when value is ValueNode)
+///
+/// `ValueNode` to store the slot value or trie account
+///
+/// `HashNode` is used as the index of nested `Node` for extension/branch node
+///
+/// The nested `Node` of extension/branch node is read as `HashNode` when loaded from database,
+/// and replaced as the actual `Node` after updated. As the same way, when storing extension/branch
+/// node, nested node need to be replaced with `HashNode` which do not have a nested structure.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Node {
     FullNode { children: [Option<Box<Node>>; 17], flags: NodeFlag },
     ShortNode { key: Nibbles, value: Box<Node>, flags: NodeFlag },
@@ -37,6 +55,41 @@ pub enum Node {
     HashNode(RlpNode),
 }
 
+/// Deep copying nested `Node` is a very costly operation, and to void accidental copy, only the
+/// copy of non-nested `Node` is allowed.
+impl Clone for Node {
+    fn clone(&self) -> Self {
+        match self {
+            Self::FullNode { children, flags } => {
+                // only nested hash node can be cloned
+                for child in children {
+                    if let Some(child) = child {
+                        match child.as_ref() {
+                            Node::HashNode(_) => {}
+                            _ => {
+                                panic!("Only non-nested node can be cloned!");
+                            }
+                        }
+                    }
+                }
+                Self::FullNode { children: children.clone(), flags: flags.clone() }
+            }
+            Self::ShortNode { key, value, flags } => {
+                match value.as_ref() {
+                    Node::FullNode { .. } | Node::ShortNode { .. } => {
+                        panic!("Only non-nested node can be cloned!");
+                    }
+                    _ => {}
+                }
+                Self::ShortNode { key: key.clone(), value: value.clone(), flags: flags.clone() }
+            }
+            Self::ValueNode(value) => Self::ValueNode(value.clone()),
+            Self::HashNode(rlp) => Self::HashNode(rlp.clone()),
+        }
+    }
+}
+
+/// Used for custom serialization operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NodeType {
     FullNode = 0,
@@ -57,6 +110,11 @@ impl NodeType {
     }
 }
 
+/// This is a highly bad design, which comes from the limitations of MDBX:
+/// when there is a `dup-key` query, MDBX will only return data that is greater than
+/// or equal to the key, and only return the value, not the matched key. We have to
+/// save both key-value in the value field to determine whether the exact seek is
+/// accurate. Just like `StorageEntry`.
 #[derive(Debug, Clone)]
 pub struct NodeEntry {
     pub path: Nibbles,
@@ -94,11 +152,22 @@ impl From<NodeEntry> for StoredNode {
                 buf.push(NodeType::ShortNode as u8);
                 buf.push(key.len() as u8);
                 buf.extend_from_slice(&key);
-                if let Node::HashNode(rlp) = *value {
-                    buf.push(rlp.len() as u8);
-                    buf.extend_from_slice(&rlp);
-                } else {
-                    unreachable!("Only nested HashNode can be serialized!");
+                match *value {
+                    Node::HashNode(rlp) => {
+                        // extension node
+                        buf.push(NodeType::HashNode as u8);
+                        buf.push(rlp.len() as u8);
+                        buf.extend_from_slice(&rlp);
+                    }
+                    Node::ValueNode(value) => {
+                        // leaf node
+                        buf.push(NodeType::ValueNode as u8);
+                        buf.push(value.len() as u8);
+                        buf.extend_from_slice(&value);
+                    }
+                    _ => {
+                        unreachable!("Only nested HashNode/ValueNode can be serialized!");
+                    }
                 }
             }
             Node::ValueNode(value) => {
@@ -155,14 +224,24 @@ impl From<StoredNode> for NodeEntry {
                 let mut key = Nibbles::new();
                 key.extend_from_slice_unchecked(&value[i..i + key_len]);
                 i += key_len;
-                let rlp_len = value[i] as usize;
+                let next_node_type = NodeType::from_u8(value[i]);
                 i += 1;
-                let rlp = RlpNode::from_raw(&value[i..i + rlp_len]).unwrap();
-                Node::ShortNode {
-                    key,
-                    value: Box::new(Node::HashNode(rlp)),
-                    flags: NodeFlag::new(None),
-                }
+                let next_node = match next_node_type {
+                    Some(NodeType::HashNode) => {
+                        // extension node
+                        let rlp_len = value[i] as usize;
+                        i += 1;
+                        Node::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
+                    }
+                    Some(NodeType::ValueNode) => {
+                        // leaf node
+                        let val_len = value[i] as usize;
+                        i += 1;
+                        Node::ValueNode(value[i..i + val_len].to_vec())
+                    }
+                    _ => unreachable!(),
+                };
+                Node::ShortNode { key, value: Box::new(next_node), flags: NodeFlag::new(None) }
             }
             Some(NodeType::ValueNode) => {
                 // ValueNode
@@ -203,6 +282,7 @@ impl Node {
         }
     }
 
+    // for test use
     pub fn reset(&mut self) {
         match self {
             Node::FullNode { children: _, flags } => flags.reset(),
@@ -235,6 +315,7 @@ impl Node {
             Node::ShortNode { key, value, flags } => {
                 if flags.rlp.is_none() {
                     if let Node::ValueNode(value) = value.as_ref() {
+                        // leaf node
                         let value = value.as_ref();
                         let header =
                             Header { list: true, payload_length: leaf_node_rlp_length(key, value) };
@@ -243,6 +324,7 @@ impl Node {
                         encode_path_leaf(key, true).as_slice().encode(buf);
                         Encodable::encode(value, buf);
                     } else {
+                        // extension node
                         let header = Header {
                             list: true,
                             payload_length: extension_node_rlp_length(key, value, buf),
