@@ -10,27 +10,32 @@ use alloy_consensus::{
     constants::EMPTY_WITHDRAWALS, BlockHeader, Header, Transaction, EMPTY_OMMER_ROOT_HASH,
 };
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
-use alloy_primitives::{Address, TxHash, B256, U256};
+use alloy_primitives::{
+    map::{HashMap, HashSet},
+    Address, TxHash, B256, U256,
+};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use reth_chain_state::ExecutedBlockWithTrieUpdates;
+use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
-    database::*,
-    execute::{BlockExecutorProvider, Executor},
-    parallel_database, ConfigureEvmEnv, NextBlockEnvAttributes,
+    parallel_execute::ParallelExecutor, ConfigureEvm, NextBlockEnvAttributes, ParallelDatabase,
 };
-use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
+use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{EthPrimitives, NodePrimitives};
 use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
 };
-use revm::primitives::{AccountInfo, HashMap, HashSet};
-use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
-
-use once_cell::sync::{Lazy, OnceCell};
+use reth_revm::db::WrapDatabaseRef;
+use revm::state::AccountInfo;
+use std::{
+    any::Any,
+    collections::BTreeMap,
+    sync::{Arc, LazyLock, OnceLock},
+    time::Instant,
+};
 
 use gravity_storage::GravityStorage;
 use tokio::sync::{
@@ -289,7 +294,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
             Arc::new(execution_outcome),
             hashed_state,
-            trie_updates,
+            ExecutedTrieUpdates::Present(trie_updates),
         ))
         .await;
         self.storage.update_canonical(block_number, block_hash);
@@ -334,11 +339,13 @@ impl<Storage: GravityStorage> Core<Storage> {
             .evm_config
             .next_evm_env(
                 parent_header,
-                NextBlockEnvAttributes {
+                &NextBlockEnvAttributes {
                     timestamp: ordered_block.timestamp,
                     suggested_fee_recipient: ordered_block.coinbase,
                     prev_randao: ordered_block.prev_randao,
                     gas_limit: BLOCK_GAS_LIMIT_1G,
+                    parent_beacon_block_root: Some(ordered_block.parent_id),
+                    withdrawals: Some(ordered_block.withdrawals.clone()),
                 },
             )
             .unwrap();
@@ -348,7 +355,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 beneficiary: ordered_block.coinbase,
                 timestamp: ordered_block.timestamp,
                 mix_hash: ordered_block.prev_randao,
-                base_fee_per_gas: Some(evm_env.block_env.basefee.to::<u64>()),
+                base_fee_per_gas: Some(evm_env.block_env.basefee),
                 number: ordered_block.number,
                 gas_limit: BLOCK_GAS_LIMIT_1G,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
@@ -420,9 +427,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             "ready to execute block"
         );
 
-        let executor = EthExecutorProvider::ethereum(self.chain_spec.clone())
-            .executor(parallel_database! { state });
-
+        let mut executor = self.evm_config.parallel_executor(state);
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
             serde_json::to_writer(
                 std::io::BufWriter::new(
@@ -446,26 +451,26 @@ impl<Storage: GravityStorage> Core<Storage> {
     fn calculate_roots(
         &self,
         block: &mut Block,
-        execution_outcome: BlockExecutionOutput<Receipt>,
+        execution_output: BlockExecutionOutput<Receipt>,
     ) -> ExecutionOutcome {
-        block.header.gas_used = execution_outcome.gas_used;
+        block.header.gas_used = execution_output.gas_used;
 
         // only determine cancun fields when active
         if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
-            block.header.requests_hash = Some(execution_outcome.requests.requests_hash());
+            block.header.requests_hash = Some(execution_output.requests.requests_hash());
         }
 
         let execution_outcome = ExecutionOutcome::new(
-            execution_outcome.state,
-            vec![execution_outcome.receipts],
+            execution_output.state,
+            vec![execution_output.result.receipts],
             block.number,
-            vec![execution_outcome.requests.into()],
+            vec![execution_output.result.requests.into()],
         );
 
         // Fill the block header with the calculated values
         block.header.transactions_root =
             proofs::calculate_transaction_root(&block.body.transactions);
-        if !cfg!(pipe_test) || self.chain_spec.is_byzantium_active_at_block(block.number()) {
+        if self.chain_spec.is_byzantium_active_at_block(block.number()) {
             block.header.receipts_root =
                 execution_outcome.ethereum_receipts_root(block.number).unwrap();
             block.header.logs_bloom = execution_outcome.block_logs_bloom(block.number).unwrap();
@@ -494,7 +499,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         db: &Storage::StateView,
         txs: Vec<TransactionSigned>,
         senders: Vec<Address>,
-        base_fee_per_gas: U256,
+        base_fee_per_gas: u64,
     ) -> (Vec<TransactionSigned>, Vec<Address>, Vec<TxInfo>) {
         let invalid_idxs = filter_invalid_txs(db, &txs, &senders, base_fee_per_gas);
         if !invalid_idxs.is_empty() {
@@ -510,7 +515,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                     txs_info.push(TxInfo {
                         tx_hash: *tx.hash(),
                         sender,
-                        nonce: tx.transaction().nonce(),
+                        nonce: tx.nonce(),
                         is_discarded: true,
                     });
                     continue;
@@ -519,7 +524,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 txs_info.push(TxInfo {
                     tx_hash: *tx.hash(),
                     sender,
-                    nonce: tx.transaction().nonce(),
+                    nonce: tx.nonce(),
                     is_discarded: false,
                 });
                 filtered_txs.push(tx);
@@ -532,7 +537,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 txs_info.push(TxInfo {
                     tx_hash: *tx.hash(),
                     sender: *sender,
-                    nonce: tx.transaction().nonce(),
+                    nonce: tx.nonce(),
                     is_discarded: false,
                 });
             }
@@ -546,7 +551,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
     db: DB,
     txs: &Vec<TransactionSigned>,
     senders: &Vec<Address>,
-    base_fee_per_gas: U256,
+    base_fee_per_gas: u64,
 ) -> HashSet<usize> {
     let mut sender_idx: HashMap<&Address, Vec<usize>> = HashMap::default();
     for (i, sender) in senders.iter().enumerate() {
@@ -554,20 +559,19 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
     }
 
     let is_tx_valid = |tx: &TransactionSigned, sender: &Address, account: &mut AccountInfo| {
-        if account.nonce != tx.transaction().nonce() {
+        if account.nonce != tx.nonce() {
             warn!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
-                nonce=?tx.transaction().nonce(),
+                nonce=?tx.nonce(),
                 account_nonce=?account.nonce,
                 "nonce mismatch"
             );
             return false;
         }
-        let gas_spent =
-            U256::from(tx.transaction().effective_gas_price(Some(base_fee_per_gas.to())))
-                .saturating_mul(U256::from(tx.transaction().gas_limit()))
-                .saturating_add(tx.transaction().value());
+        let gas_spent = U256::from(tx.effective_gas_price(Some(base_fee_per_gas)))
+            .saturating_mul(U256::from(tx.gas_limit()))
+            .saturating_add(tx.value());
         if account.balance < gas_spent {
             warn!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
@@ -664,15 +668,15 @@ pub struct PipeExecLayerExt<N: NodePrimitives> {
 }
 
 /// A static instance of `PipeExecLayerExt` used for dispatching events.
-pub static PIPE_EXEC_LAYER_EXT: OnceCell<Box<dyn Any + Send + Sync>> = OnceCell::new();
+pub static PIPE_EXEC_LAYER_EXT: OnceLock<Box<dyn Any + Send + Sync>> = OnceLock::new();
 
 pub fn get_pipe_exec_layer_ext<N: NodePrimitives>() -> Option<&'static PipeExecLayerExt<N>> {
     PIPE_EXEC_LAYER_EXT.get().map(|ext| ext.downcast_ref::<PipeExecLayerExt<N>>().unwrap())
 }
 
 /// Whether to validate the block before inserting it into `TreeState`.
-pub static PIPE_VALIDATE_BLOCK_BEFORE_INSERT: Lazy<bool> =
-    Lazy::new(|| std::env::var("PIPE_VALIDATE_BLOCK_BEFORE_INSERT").is_ok());
+pub static PIPE_VALIDATE_BLOCK_BEFORE_INSERT: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("PIPE_VALIDATE_BLOCK_BEFORE_INSERT").is_ok());
 
 /// Create a new `PipeExecLayerApi` instance and launch a `PipeExecService`.
 pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(

@@ -1,16 +1,16 @@
 use alloy_primitives::{Address, B256, U256};
 use core::sync::atomic::{AtomicU64, Ordering};
 use dashmap::{DashMap, DashSet};
-use metrics::{Gauge, Histogram};
+use metrics::Gauge;
 use metrics_derive::Metrics;
 use moka::sync::Cache;
-use reth_primitives::{Account, Bytecode};
-use reth_trie::{
+use reth_primitives_traits::{Account, Bytecode};
+use reth_trie_common::{
     updates::{StorageTrieUpdates, TrieUpdates},
     BranchNodeCompact, HashedPostState, Nibbles,
 };
 use reth_trie_db::TrieCacheReader;
-use revm::db::states::{PlainStorageChangeset, StateChangeset};
+use revm_database::states::{PlainStorageChangeset, StateChangeset};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,

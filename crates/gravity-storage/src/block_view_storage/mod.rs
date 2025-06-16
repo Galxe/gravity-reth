@@ -1,3 +1,4 @@
+use alloy_primitives::{map::HashMap, Address, B256, U256};
 use once_cell::sync::Lazy;
 use reth_metrics::{metrics::Histogram, Metrics};
 use reth_provider::{
@@ -11,16 +12,16 @@ use reth_storage_api::{
 use reth_trie::{updates::TrieUpdates, HashedPostState, KeccakKeyHasher, TrieInput};
 use reth_trie_parallel::root::ParallelStateRoot;
 use revm::{
-    db::{
+    database::{
         states::{CacheAccount, PlainAccount},
         BundleState,
     },
-    primitives::{AccountInfo, Address, Bytecode, HashMap, B256, BLOCK_HASH_HISTORY, U256},
+    primitives::BLOCK_HASH_HISTORY,
+    state::{AccountInfo, Bytecode},
     DatabaseRef,
 };
 use std::{
     collections::BTreeMap,
-    hash::Hash,
     sync::{Arc, Mutex},
     time::Instant,
 };

@@ -2,16 +2,16 @@ use std::sync::mpsc;
 
 use alloy_primitives::{map::HashSet, B256};
 use alloy_rlp::encode_fixed_size;
-use reth_db::{
+use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
     tables,
     transaction::DbTx,
-    DatabaseError,
 };
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, ProviderError,
     StateCommitmentProvider,
 };
+use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     nested_trie::{Node, NodeEntry, Trie, TrieOutput, TrieReader},
     HashedPostState, Nibbles, StoredNibbles, StoredNibblesSubKey, TrieInputV2,

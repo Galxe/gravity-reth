@@ -5,11 +5,12 @@ use crate::{LatestStateProviderFactory, PipelineTarget, StageCheckpoint, StageId
 use alloy_primitives::{BlockNumber, B256};
 pub use event::*;
 use futures_util::Future;
+use reth_errors::ProviderResult;
 use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, ChainStateBlockReader,
-    ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, ProviderResult,
-    StageCheckpointReader, StageCheckpointWriter, StateProviderBox, StateProviderOptions,
+    ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, StageCheckpointReader,
+    StageCheckpointWriter, StateProviderBox, StateProviderOptions,
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
@@ -75,7 +76,9 @@ pub struct Pipeline<N: ProviderNodeTypes> {
     event_sender: EventSender<PipelineEvent>,
     /// Keeps track of the progress of the pipeline.
     progress: PipelineProgress,
-    /// A receiver for the current chain tip to sync to.
+    /// A Sender for the current chain tip to sync to.
+    ///
+    /// This is used to notify the headers stage about a new sync target.
     tip_tx: Option<watch::Sender<B256>>,
     metrics_tx: Option<MetricEventsSender>,
     /// Whether an unwind should fail the syncing process. Should only be set when downloading
@@ -276,7 +279,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         Ok(())
     }
 
-    /// Unwind the stages to the target block.
+    /// Unwind the stages to the target block (exclusive).
     ///
     /// If the unwind is due to a bad block the number of that block should be specified.
     pub fn unwind(

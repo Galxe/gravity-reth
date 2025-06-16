@@ -1,11 +1,11 @@
 use gravity_storage::block_view_storage::BlockViewStorage;
 use reth_chainspec::ChainSpec;
-use reth_cli_commands::NodeCommand;
+use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
 use reth_node_api::NodeTypesWithDBAdapter;
-use reth_node_builder::{engine_tree_config, EngineNodeLauncher, NodeBuilder, WithLaunchContext};
+use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{new_pipe_exec_layer_api, ExecutionArgs, PipeExecLayerApi};
 use reth_provider::{
@@ -46,7 +46,10 @@ impl MockConsensus {
             async move {
                 for block_number in start_block..=target_block {
                     let block = provider
-                        .block_with_senders(block_number.into(), TransactionVariant::WithHash)
+                        .sealed_block_with_senders(
+                            block_number.into(),
+                            TransactionVariant::WithHash,
+                        )
                         .unwrap()
                         .unwrap();
                     let block_hash = block.hash();
@@ -111,7 +114,7 @@ async fn run_pipe(
             let launcher = EngineNodeLauncher::new(
                 builder.task_executor().clone(),
                 builder.config().datadir(),
-                engine_tree_config::TreeConfig::default(),
+                reth_engine_primitives::TreeConfig::default(),
             );
             builder.launch_with(launcher)
         })
@@ -175,7 +178,7 @@ fn test() {
 
     let datadir = std::env::var("PIPE_TEST_DATADIR").expect("Failed to get PIPE_TEST_DATADIR");
 
-    let runner = CliRunner::default();
+    let runner = CliRunner::try_default_runtime().unwrap();
     let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
         "reth",
         "--chain",
@@ -189,7 +192,12 @@ fn test() {
 
     runner
         .run_command_until_exit(|ctx| {
-            command.execute(ctx, |builder, _| async move { run_pipe(builder).await })
+            command.execute(
+                ctx,
+                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
+                    run_pipe(builder).await
+                }),
+            )
         })
         .unwrap();
 }

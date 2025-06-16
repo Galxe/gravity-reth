@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 reth-ethereum = { workspace = true, features = ["node"] }
-reth-storage-api.workspace = true
 alloy-primitives.workspace = true
 
 eyre.workspace = true
