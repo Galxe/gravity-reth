@@ -44,7 +44,9 @@ use reth_evm::{
 };
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{EngineApiMessageVersion, PayloadBuilderAttributes};
-use reth_pipe_exec_layer_event_bus::{get_pipe_exec_layer_event_bus, PipeExecLayerEvent};
+use reth_pipe_exec_layer_event_bus::{
+    get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent,
+};
 use reth_primitives_traits::{
     Block, GotExpected, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
     SignedTransaction,
@@ -557,6 +559,45 @@ pub enum TreeAction {
     },
 }
 
+struct PersistenceWaiters {
+    /// The block number that the waiters are waiting for.
+    waiters: BTreeMap<BlockNumber, oneshot::Sender<()>>,
+}
+
+impl PersistenceWaiters {
+    fn new() -> Self {
+        Self { waiters: BTreeMap::new() }
+    }
+
+    /// Adds a new waiter for the given block number.
+    fn add_waiter(&mut self, block_number: BlockNumber, tx: oneshot::Sender<()>) {
+        self.waiters.insert(block_number, tx);
+    }
+
+    /// Notifies all waiters for the given block number.
+    fn notify_waiters(&mut self, block_number: BlockNumber) {
+        while let Some((waiter_block_number, _)) = self.waiters.first_key_value() {
+            if *waiter_block_number > block_number {
+                break
+            }
+            let waiter_block_number = *waiter_block_number;
+            // Remove the waiter since it has been notified
+            let tx = self.waiters.remove(&waiter_block_number).unwrap();
+            tx.send(()).unwrap_or_else(|_| {
+                warn!(target: "engine::tree", ?waiter_block_number, "Failed to notify persistence waiter");
+            });
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.waiters.is_empty()
+    }
+
+    fn largest(&self) -> Option<BlockNumber> {
+        self.waiters.keys().next_back().cloned()
+    }
+}
+
 /// The engine API tree handler implementation.
 ///
 /// This type is responsible for processing engine API requests, maintaining the canonical state and
@@ -610,6 +651,8 @@ where
     most_recent_cache: Option<SavedCache>,
     /// Thread pool used for the state root task and prewarming
     thread_pool: Arc<rayon::ThreadPool>,
+    /// Persistence waiters that are waiting for the block to be persisted.
+    persistence_waiters: PersistenceWaiters,
 }
 
 impl<N, P: Debug, E: Debug, T: EngineTypes + Debug, V: Debug, C: Debug> std::fmt::Debug
@@ -707,6 +750,7 @@ where
             engine_kind,
             most_recent_cache: None,
             thread_pool,
+            persistence_waiters: PersistenceWaiters::new(),
         }
     }
 
@@ -777,7 +821,10 @@ where
         event_rx: &mut std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>,
     ) -> Result<Option<PipeExecLayerEvent<N>>, RecvError> {
         if self.persistence_state.in_progress() {
-            match event_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            // wait for a shorter duration if there are waiters
+            match event_rx.recv_timeout(Duration::from_millis(
+                if self.persistence_waiters.is_empty() { 500 } else { 10 },
+            )) {
                 Ok(event) => return Ok(Some(event)),
                 Err(err) => match err {
                     RecvTimeoutError::Timeout => Ok(None),
@@ -791,13 +838,26 @@ where
 
     fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent<N>) {
         match event {
-            PipeExecLayerEvent::MakeCanonical(block, tx) => {
+            PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent {
+                executed_block,
+                wait_for_persistence,
+                tx,
+            }) => {
+                let block_number = executed_block.recovered_block.number();
                 debug!(target: "on_pipe_exec_event",
-                    block_number=%block.recovered_block.number(),
-                    block_hash=%block.recovered_block.hash(),
+                    block_number=%block_number,
+                    block_hash=%executed_block.recovered_block.hash(),
                     "Received make canonical event");
-                self.make_executed_block_canonical(block);
-                tx.send(()).unwrap();
+                self.make_executed_block_canonical(executed_block);
+                if wait_for_persistence &&
+                    self.persistence_state.last_persisted_block.number < block_number
+                {
+                    // If we need to wait for persistence, we add a waiter for the block number
+                    self.persistence_waiters.add_waiter(block_number, tx);
+                } else {
+                    // If we don't need to wait for persistence, we notify the sender immediately
+                    tx.send(()).expect("Failed to send make canonical response");
+                }
             }
         }
     }
@@ -1391,6 +1451,7 @@ where
                         number: last_persisted_block_number,
                     }) = last_persisted_hash_num
                     {
+                        self.persistence_waiters.notify_waiters(last_persisted_block_number);
                         self.metrics.engine.persistence_duration_per_block.record(
                             elapsed.as_secs_f64() /
                                 (last_persisted_block_number -
@@ -1418,7 +1479,9 @@ where
         if !self.persistence_state.in_progress() {
             if let Some(new_tip_num) = self.persistence_state.remove_above_state.pop_front() {
                 self.remove_blocks(new_tip_num)
-            } else if self.should_persist() {
+            }
+
+            if self.should_persist() {
                 let blocks_to_persist = self.get_canonical_blocks_to_persist();
                 self.persist_blocks(blocks_to_persist);
             }
@@ -1707,10 +1770,15 @@ where
     /// Returns true if the canonical chain length minus the last persisted
     /// block is greater than or equal to the persistence threshold and
     /// backfill is not running.
-    pub const fn should_persist(&self) -> bool {
+    pub fn should_persist(&self) -> bool {
         if !self.backfill_sync_state.is_idle() {
             // can't persist if backfill is running
             return false
+        }
+
+        if !self.persistence_waiters.is_empty() {
+            // if there are waiters, we should persist immediately
+            return true
         }
 
         let min_block = self.persistence_state.last_persisted_block.number;
@@ -1728,8 +1796,15 @@ where
 
         let canonical_head_number = self.state.tree_state.canonical_block_number();
 
-        let target_number =
+        let mut target_number =
             canonical_head_number.saturating_sub(self.config.memory_block_buffer_target());
+        if let Some(largest_waiter) = self.persistence_waiters.largest() {
+            if largest_waiter > target_number {
+                debug!(target: "engine::tree", ?largest_waiter, "persisting up to largest waiter");
+                // ensure that we persist at least up to the largest waiter's number
+                target_number = largest_waiter;
+            }
+        }
 
         debug!(target: "engine::tree", ?last_persisted_number, ?canonical_head_number, ?target_number, ?current_hash, "Returning canonical blocks to persist");
         while let Some(block) = self.state.tree_state.blocks_by_hash.get(&current_hash) {

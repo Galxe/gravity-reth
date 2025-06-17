@@ -28,7 +28,7 @@ use reth_evm::{
 use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_pipe_exec_layer_event_bus::{
-    PipeExecLayerEvent, PipeExecLayerEventBus, PIPE_EXEC_LAYER_EVENT_BUS,
+    MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus, PIPE_EXEC_LAYER_EVENT_BUS,
 };
 use reth_primitives::EthPrimitives;
 use reth_primitives_traits::{
@@ -36,7 +36,7 @@ use reth_primitives_traits::{
     Block as _, RecoveredBlock,
 };
 use revm::{
-    db::{states::bundle_state::BundleRetention, WrapDatabaseRef},
+    db::states::bundle_state::BundleRetention,
     primitives::{AccountInfo, HashMap, HashSet},
     DatabaseCommit,
 };
@@ -246,6 +246,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         self.storage.insert_block_id(block_number, block_id);
 
+        let prev_epoch = epoch;
         let start_time = Instant::now();
         let ExecuteOrderedBlockResult {
             mut block,
@@ -320,67 +321,49 @@ impl<Storage: GravityStorage> Core<Storage> {
             "block sealed"
         );
 
-        // Commit the executed block hash to Coordinator
-        let start_time = Instant::now();
-        self.verify_executed_block_hash(ExecutionResult {
-            block_id,
-            block_number,
-            block_hash,
-            txs_info,
-            gravity_events,
-        })
-        .await
-        .unwrap();
-        let elapsed = start_time.elapsed();
-        self.metrics.verify_duration.record(elapsed);
-        info!(target: "PipeExecService.process",
-            block_number=?block_number,
-            block_id=?block_id,
-            block_hash=?block_hash,
-            elapsed=?elapsed,
-            "block verified"
-        );
-
         let gas_used = sealed_block.gas_used;
-
-        // Make the block canonical
-        let prev_finish_commit_time =
-            self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
-        let start_time = Instant::now();
-        self.make_canonical(ExecutedBlockWithTrieUpdates::new(
+        let executed_block = ExecutedBlockWithTrieUpdates::new(
             Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
             Arc::new(execution_outcome),
             hashed_state,
             trie_updates,
-        ))
-        .await;
-        self.storage.update_canonical(block_number, block_hash);
-        let elapsed = start_time.elapsed();
-        info!(target: "PipeExecService.process",
-            block_number=?block_number,
-            block_id=?block_id,
-            block_hash=?block_hash,
-            elapsed=?elapsed,
-            "block made canonical"
         );
-        let finish_commit_time = Instant::now();
-        self.metrics.make_canonical_duration.record(elapsed);
-        self.metrics.finish_commit_time_diff.record(finish_commit_time - prev_finish_commit_time);
-        self.make_canonical_barrier.notify(block_number, finish_commit_time).unwrap();
+        let execution_result =
+            ExecutionResult { block_id, block_number, block_hash, txs_info, gravity_events };
 
-        self.metrics.total_gas_used.increment(gas_used);
+        if epoch != prev_epoch {
+            // New epoch triggered, wait for the block to be made canonical and persisted before
+            // send compute result to Coordinator
+            self.make_canonical(&block_id, executed_block, true).await;
+            // Commit the executed block hash to Coordinator
+            self.verify_executed_block_hash(execution_result).await.unwrap();
+        } else {
+            self.verify_executed_block_hash(execution_result).await.unwrap();
+            self.make_canonical(&block_id, executed_block, false).await;
+        }
     }
 
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
     /// Returns `None` if the channel has been closed.
     async fn verify_executed_block_hash(&self, execution_result: ExecutionResult) -> Option<()> {
+        let start_time = Instant::now();
         let block_id = execution_result.block_id;
+        let block_number = execution_result.block_number;
         let executed_block_hash = execution_result.block_hash;
         self.execution_result_tx.send(execution_result).ok()?;
         let block_hash = self.verified_block_hash_rx.wait(block_id).await?;
         if let Some(block_hash) = block_hash {
             assert_eq!(executed_block_hash, block_hash);
         }
+        let elapsed = start_time.elapsed();
+        self.metrics.verify_duration.record(elapsed);
+        info!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            block_hash=?executed_block_hash,
+            elapsed=?elapsed,
+            "block verified"
+        );
         Some(())
     }
 
@@ -488,8 +471,11 @@ impl<Storage: GravityStorage> Core<Storage> {
                 );
                 state.commit(state_changes);
                 state.merge_transitions(BundleRetention::Reverts);
-                return metadata_txn_result
-                    .into_executed_ordered_block_result(&ordered_block, state.take_bundle(), validators);
+                return metadata_txn_result.into_executed_ordered_block_result(
+                    &ordered_block,
+                    state.take_bundle(),
+                    validators,
+                );
             }
 
             (metadata_txn_result, state_changes)
@@ -595,11 +581,40 @@ impl<Storage: GravityStorage> Core<Storage> {
         execution_outcome
     }
 
-    async fn make_canonical(&self, executed_block: ExecutedBlockWithTrieUpdates) {
-        // Make executed block canonical
+    async fn make_canonical(
+        &self,
+        block_id: &B256,
+        executed_block: ExecutedBlockWithTrieUpdates,
+        wait_for_persistence: bool,
+    ) {
+        let block_number = executed_block.recovered_block.number();
+        let block_hash = executed_block.recovered_block.hash();
+        let prev_finish_commit_time =
+            self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
+        let start_time = Instant::now();
         let (tx, rx) = oneshot::channel();
-        self.event_tx.send(PipeExecLayerEvent::MakeCanonical(executed_block, tx)).unwrap();
+        self.event_tx
+            .send(PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent {
+                executed_block,
+                wait_for_persistence,
+                tx,
+            }))
+            .unwrap();
         rx.await.unwrap();
+        self.storage.update_canonical(block_number, block_hash);
+        let elapsed = start_time.elapsed();
+        info!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            block_hash=?block_hash,
+            wait_for_persistence=?wait_for_persistence,
+            elapsed=?elapsed,
+            "block made canonical"
+        );
+        let finish_commit_time = Instant::now();
+        self.metrics.make_canonical_duration.record(elapsed);
+        self.metrics.finish_commit_time_diff.record(finish_commit_time - prev_finish_commit_time);
+        self.make_canonical_barrier.notify(block_number, finish_commit_time).unwrap();
     }
 
     fn init_storage(&self, execution_args: ExecutionArgs) {

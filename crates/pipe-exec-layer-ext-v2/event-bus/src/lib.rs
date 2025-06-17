@@ -16,9 +16,19 @@ pub fn get_pipe_exec_layer_event_bus<N: NodePrimitives>(
 }
 
 #[derive(Debug)]
+pub struct MakeCanonicalEvent<N: NodePrimitives> {
+    /// The executed block with trie updates
+    pub executed_block: ExecutedBlockWithTrieUpdates<N>,
+    /// Whether to wait for the block to be persisted
+    pub wait_for_persistence: bool,
+    /// A sender to notify when event processing is complete
+    pub tx: oneshot::Sender<()>,
+}
+
+#[derive(Debug)]
 pub enum PipeExecLayerEvent<N: NodePrimitives> {
     /// Make executed block canonical
-    MakeCanonical(ExecutedBlockWithTrieUpdates<N>, oneshot::Sender<()>),
+    MakeCanonical(MakeCanonicalEvent<N>),
 }
 
 /// Called by EL.

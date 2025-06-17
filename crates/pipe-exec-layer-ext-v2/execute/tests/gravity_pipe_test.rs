@@ -92,7 +92,7 @@ where
 
             for event in result.gravity_events {
                 match event {
-                    GravityEvent::NewEpoch(new_epoch) => {
+                    GravityEvent::NewEpoch(new_epoch, _) => {
                         assert_eq!(new_epoch, epoch + 1);
                         let stored_epoch: u64 = pipeline_api
                             .fetch_config_bytes(OnChainConfig::Epoch, block_number)
