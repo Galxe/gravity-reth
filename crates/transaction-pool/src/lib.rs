@@ -164,7 +164,7 @@ pub use crate::{
     ordering::{CoinbaseTipOrdering, Priority, TransactionOrdering},
     pool::{
         blob_tx_priority, fee_delta, state::SubPool, AllTransactionsEvents, FullTransactionEvent,
-        TransactionEvent, TransactionEvents,
+        NewTransactionEvent, TransactionEvent, TransactionEvents, TransactionListenerKind,
     },
     traits::*,
     validate::{
@@ -173,16 +173,24 @@ pub use crate::{
     },
 };
 use crate::{identifier::TransactionId, pool::PoolInner};
-use alloy_eips::eip4844::{BlobAndProofV1, BlobTransactionSidecar};
+use alloy_eips::{
+    eip4844::{BlobAndProofV1, BlobAndProofV2},
+    eip7594::BlobTransactionSidecarVariant,
+};
 use alloy_primitives::{Address, TxHash, B256, U256};
 use aquamarine as _;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
-use reth_primitives::Recovered;
-use reth_primitives_traits::Block;
+use reth_primitives_traits::{Block, Recovered};
 use reth_storage_api::StateProviderFactory;
-use std::{collections::HashSet, sync::{atomic::{AtomicBool, AtomicU8}, Arc}};
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicBool, AtomicU8},
+        Arc,
+    },
+};
 use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{instrument, trace};
 
@@ -241,7 +249,11 @@ where
     /// Create a new transaction pool instance.
     pub fn new(validator: V, ordering: T, blob_store: S, config: PoolConfig) -> Self {
         let pool = Arc::new(PoolInner::new(validator, ordering, blob_store, config));
-        Self { pool, batch_insert_task_handle: Arc::new(Mutex::new(None)), batch_insert_task_running: Arc::new(AtomicBool::new(false)) }
+        Self {
+            pool,
+            batch_insert_task_handle: Arc::new(Mutex::new(None)),
+            batch_insert_task_running: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Returns the wrapped pool.
@@ -265,7 +277,7 @@ where
     async fn validate_all(
         &self,
         origin: TransactionOrigin,
-        transactions: impl IntoIterator<Item = V::Transaction>,
+        transactions: impl IntoIterator<Item = V::Transaction> + Send,
     ) -> Vec<(TxHash, TransactionValidationOutcome<V::Transaction>)> {
         self.pool
             .validator()
@@ -385,13 +397,12 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> PoolResult<TxHash> {
+        let start = std::time::Instant::now();
         let pool = self.pool.clone();
         if self.batch_insert_task_running.load(std::sync::atomic::Ordering::Acquire) {
-            return self.pool
-                    .send_transaction(origin, transaction)
-                    .await
+            return self.pool.send_transaction(origin, transaction).await
         }
-        if get_enable_batch_insert()  {
+        if get_enable_batch_insert() {
             {
                 let mut handle = self.batch_insert_task_handle.lock().await;
                 if handle.is_none() {
@@ -405,7 +416,12 @@ where
             }
         };
         let (_, tx) = self.validate(origin, transaction).await;
+        self.pool.blob_store_metrics.txn_validation_time.record(start.elapsed().as_millis() as f64);
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
+        self.pool
+            .blob_store_metrics
+            .txn_val_insertion_time
+            .record(start.elapsed().as_millis() as f64);
         results.pop().expect("result length is the same as the input")
     }
 
@@ -626,29 +642,36 @@ where
     fn get_blob(
         &self,
         tx_hash: TxHash,
-    ) -> Result<Option<Arc<BlobTransactionSidecar>>, BlobStoreError> {
+    ) -> Result<Option<Arc<BlobTransactionSidecarVariant>>, BlobStoreError> {
         self.pool.blob_store().get(tx_hash)
     }
 
     fn get_all_blobs(
         &self,
         tx_hashes: Vec<TxHash>,
-    ) -> Result<Vec<(TxHash, Arc<BlobTransactionSidecar>)>, BlobStoreError> {
+    ) -> Result<Vec<(TxHash, Arc<BlobTransactionSidecarVariant>)>, BlobStoreError> {
         self.pool.blob_store().get_all(tx_hashes)
     }
 
     fn get_all_blobs_exact(
         &self,
         tx_hashes: Vec<TxHash>,
-    ) -> Result<Vec<Arc<BlobTransactionSidecar>>, BlobStoreError> {
+    ) -> Result<Vec<Arc<BlobTransactionSidecarVariant>>, BlobStoreError> {
         self.pool.blob_store().get_exact(tx_hashes)
     }
 
-    fn get_blobs_for_versioned_hashes(
+    fn get_blobs_for_versioned_hashes_v1(
         &self,
         versioned_hashes: &[B256],
     ) -> Result<Vec<Option<BlobAndProofV1>>, BlobStoreError> {
-        self.pool.blob_store().get_by_versioned_hashes(versioned_hashes)
+        self.pool.blob_store().get_by_versioned_hashes_v1(versioned_hashes)
+    }
+
+    fn get_blobs_for_versioned_hashes_v2(
+        &self,
+        versioned_hashes: &[B256],
+    ) -> Result<Option<Vec<BlobAndProofV2>>, BlobStoreError> {
+        self.pool.blob_store().get_by_versioned_hashes_v2(versioned_hashes)
     }
 }
 
@@ -691,6 +714,10 @@ where
 
 impl<V: 'static, T: TransactionOrdering, S> Clone for Pool<V, T, S> {
     fn clone(&self) -> Self {
-        Self { pool: Arc::clone(&self.pool), batch_insert_task_handle: self.batch_insert_task_handle.clone(), batch_insert_task_running: self.batch_insert_task_running.clone() }
+        Self {
+            pool: Arc::clone(&self.pool),
+            batch_insert_task_handle: self.batch_insert_task_handle.clone(),
+            batch_insert_task_running: self.batch_insert_task_running.clone(),
+        }
     }
 }

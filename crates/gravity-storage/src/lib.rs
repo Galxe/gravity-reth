@@ -6,7 +6,7 @@ use alloy_primitives::B256;
 use reth_evm::ParallelDatabase;
 use reth_storage_api::errors::provider::ProviderError;
 use reth_trie::{updates::TrieUpdates, HashedPostState};
-use revm::db::BundleState;
+use revm::database::BundleState;
 
 use thiserror::Error;
 

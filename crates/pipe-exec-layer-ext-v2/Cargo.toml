@@ -26,7 +26,6 @@ alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 tokio.workspace = true
-once_cell.workspace = true
 rayon.workspace = true
 
 # ethereum
@@ -39,6 +38,7 @@ metrics.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+reth-engine-primitives.workspace = true
 reth-cli.workspace = true
 reth-cli-commands.workspace = true
 reth-cli-runner.workspace = true
@@ -51,3 +51,6 @@ reth-node-api.workspace = true
 reth-tracing.workspace = true
 eyre.workspace = true
 rand.workspace = true
+
+[features]
+pipe_test = ["reth-provider/pipe_test"]

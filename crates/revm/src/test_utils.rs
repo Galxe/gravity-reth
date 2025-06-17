@@ -1,8 +1,6 @@
 use alloc::vec::Vec;
 use alloy_primitives::{
-    keccak256,
-    map::{B256Map, HashMap},
-    Address, BlockNumber, Bytes, StorageKey, B256, U256,
+    keccak256, map::HashMap, Address, BlockNumber, Bytes, StorageKey, B256, U256,
 };
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
@@ -14,7 +12,6 @@ use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher,
     MultiProof, MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
 };
-use std::sync::Arc;
 
 /// Mock state for testing
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
@@ -94,15 +91,6 @@ impl StateRootProvider for StateProviderTest {
     ) -> ProviderResult<(B256, TrieUpdates)> {
         unimplemented!("state root computation is not supported")
     }
-
-    fn state_root_with_updates_v2(
-        &self,
-        _state: HashedPostState,
-        _hashed_state_vec: Vec<Arc<HashedPostState>>,
-        _trie_updates_vec: Vec<Arc<TrieUpdates>>,
-    ) -> ProviderResult<(B256, TrieUpdates)> {
-        unimplemented!("state root computation is not supported")
-    }
 }
 
 impl StorageRootProvider for StateProviderTest {
@@ -151,17 +139,13 @@ impl StateProofProvider for StateProviderTest {
         unimplemented!("proof generation is not supported")
     }
 
-    fn witness(
-        &self,
-        _input: TrieInput,
-        _target: HashedPostState,
-    ) -> ProviderResult<B256Map<Bytes>> {
+    fn witness(&self, _input: TrieInput, _target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
         unimplemented!("witness generation is not supported")
     }
 }
 
 impl HashedPostStateProvider for StateProviderTest {
-    fn hashed_post_state(&self, bundle_state: &revm::db::BundleState) -> HashedPostState {
+    fn hashed_post_state(&self, bundle_state: &revm::database::BundleState) -> HashedPostState {
         HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
     }
 }

@@ -1,209 +1,102 @@
-//use crate::debug_ext::DEBUG_EXT;
-use crate::{
-    dao_fork::{DAO_HARDFORK_ACCOUNTS, DAO_HARDFORK_BENEFICIARY},
-    debug_ext::DEBUG_EXT,
-};
+use crate::RethReceiptBuilder;
+use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::BlockHeader;
-use alloy_eips::{eip6110, eip7685::Requests};
-use alloy_primitives::{
-    map::{DefaultHashBuilder, HashMap},
-    Address,
+use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
+use alloy_evm::{
+    block::{calc, StateChangePostBlockSource, StateChangeSource, SystemCaller},
+    eth::{dao_fork, eip6110, EthBlockExecutorFactory},
+    EvmEnv,
 };
+use alloy_primitives::{map::HashMap, Address};
+use grevm::{ParallelBundleState, ParallelState, Scheduler};
 use reth_chainspec::{ChainSpec, EthereumHardfork, EthereumHardforks};
-use reth_consensus::ConsensusError;
-use reth_ethereum_consensus::validate_block_post_execution;
+use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
-    execute::{BlockExecutionError, BlockExecutionStrategy, BlockValidationError, ExecuteOutput},
-    state_change::post_block_balance_increments,
-    system_calls::{OnStateHook, SystemCaller},
-    ConfigureEvm, Evm, ParallelDatabase,
+    execute::{
+        BlockExecutionError, BlockValidationError, ExecuteOutput, InternalBlockExecutionError,
+    },
+    parallel_execute::ParallelExecutor,
+    ConfigureEvm, ParallelDatabase,
 };
-use reth_grevm::{ParallelState, Scheduler};
-use reth_primitives::{EthPrimitives, Receipt, RecoveredBlock};
-use reth_primitives_traits::SignedTransaction;
+use reth_execution_types::BlockExecutionResult;
+use reth_primitives_traits::{BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction};
 use revm::{
-    db::{states::State, WrapDatabaseRef},
-    DatabaseCommit,
+    database::{
+        states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
+    },
+    state::{Account, AccountStatus, EvmState},
 };
-use revm_primitives::{Account, AccountStatus, EvmState};
-use std::sync::Arc;
 
-/// Grevm Block execution strategy for Ethereum.
-#[allow(missing_debug_implementations)]
-pub struct GrevmExecutionStrategy<DB, EvmConfig>
-where
-    EvmConfig: Clone,
-{
+pub struct GrevmExecutor<DB, EvmConfig> {
     /// The chainspec
     chain_spec: Arc<ChainSpec>,
     /// How to create an EVM.
     evm_config: EvmConfig,
     /// Current state for block execution.
     state: Option<ParallelState<DB>>,
-    /// Utility to call system smart contracts.
-    system_caller: SystemCaller<EvmConfig, ChainSpec>,
+    /// System caller for executing system calls.
+    system_caller: SystemCaller<Arc<ChainSpec>>,
 }
 
-impl<DB, EvmConfig> GrevmExecutionStrategy<DB, EvmConfig>
+impl<DB, EvmConfig> GrevmExecutor<DB, EvmConfig>
 where
-    EvmConfig: Clone,
+    EvmConfig: Clone
+        + ConfigureEvm<
+            Primitives = EthPrimitives,
+            BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
+        >,
     DB: ParallelDatabase,
 {
-    /// Creates a new [`EthExecutionStrategy`]
-    pub fn new(db: DB, chain_spec: Arc<ChainSpec>, evm_config: EvmConfig) -> Self {
-        let system_caller = SystemCaller::new(evm_config.clone(), chain_spec.clone());
+    /// Creates a new [`GrevmExecutor`]
+    pub fn new(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
+        let system_caller = SystemCaller::new(chain_spec.clone());
         Self {
-            state: Some(ParallelState::new(db, true, DEBUG_EXT.update_db_metrics)),
+            state: Some(ParallelState::new(db, true, false)),
             chain_spec,
-            evm_config,
+            evm_config: evm_config.clone(),
             system_caller,
         }
     }
-}
-
-impl<'db, DB, EvmConfig> BlockExecutionStrategy<'db> for GrevmExecutionStrategy<DB, EvmConfig>
-where
-    DB: ParallelDatabase + 'db,
-    EvmConfig: ConfigureEvm<
-        Header = alloy_consensus::Header,
-        Transaction = reth_primitives::TransactionSigned,
-    >,
-{
-    type Error = BlockExecutionError;
-    type Primitives = EthPrimitives;
 
     fn apply_pre_execution_changes(
         &mut self,
-        block: &RecoveredBlock<reth_primitives::Block>,
-    ) -> Result<(), Self::Error> {
+        block: &RecoveredBlock<Block>,
+    ) -> Result<(), BlockExecutionError> {
         // Set state clear flag if the block is after the Spurious Dragon hardfork.
-        let state_clear_flag = self.chain_spec.is_spurious_dragon_active_at_block(block.number());
+        let state_clear_flag = self.chain_spec.is_spurious_dragon_active_at_block(block.number);
         let state = self.state.as_mut().unwrap();
         state.set_state_clear_flag(state_clear_flag);
-
         let mut evm = self.evm_config.evm_for_block(WrapDatabaseRef(state), block.header());
-
-        self.system_caller.apply_pre_execution_changes(block.header(), &mut evm)?;
-
-        Ok(())
+        self.system_caller.apply_pre_execution_changes(block.header(), &mut evm)
     }
 
     fn execute_transactions(
         &mut self,
-        block: &RecoveredBlock<reth_primitives::Block>,
-    ) -> Result<ExecuteOutput<Receipt>, Self::Error> {
+        block: &RecoveredBlock<Block>,
+    ) -> Result<ExecuteOutput<Receipt>, BlockExecutionError> {
         let evm_env = self.evm_config.evm_env(block.header());
 
         let mut txs = Vec::with_capacity(block.transaction_count());
-        for (sender, tx) in block.transactions_with_sender() {
-            txs.push(self.evm_config.tx_env(tx, *sender).into());
+        for tx in block.transactions_recovered() {
+            txs.push(self.evm_config.tx_env(tx).into());
         }
 
-        let spec_id = evm_env.spec.into();
-        let env = revm_primitives::Env {
-            cfg: evm_env.cfg_env,
-            block: evm_env.block_env,
-            ..Default::default()
-        };
         let txs = Arc::new(txs);
         let state = self.state.take().unwrap();
 
-        let (results, state) = if DEBUG_EXT.compare_with_seq_exec {
-            let seq_state = {
-                let mut seq_state = State::builder()
-                    .with_database_ref(&state.database)
-                    .with_bundle_update()
-                    .build();
-                seq_state.cache = state.cache.as_cache_state();
-                seq_state.block_hashes.extend(
-                    state.block_hashes.iter().map(|entry| (*entry.key(), entry.value().clone())),
-                );
-                let mut evm = self.evm_config.evm_for_block(&mut seq_state, block.header());
-                for (sender, tx) in block.transactions_with_sender() {
-                    let result_and_state =
-                        evm.transact(self.evm_config.tx_env(tx, *sender)).map_err(move |err| {
-                            // Ensure hash is calculated for error log, if not already done
-                            BlockValidationError::EVM {
-                                hash: tx.recalculate_hash(),
-                                error: Box::new(err),
-                            }
-                        })?;
-                    evm.db_mut().commit(result_and_state.state);
-                }
-                drop(evm);
-                (seq_state.transition_state, seq_state.cache, seq_state.block_hashes)
-            };
-
-            let dump_block = DEBUG_EXT
-                .dump_block_number
-                .map_or(false, |dump_block_number| block.number == dump_block_number);
-            if dump_block {
-                crate::debug_ext::dump_block_env(
-                    &revm_primitives::EnvWithHandlerCfg::new_with_spec_id(
-                        Box::new(env.clone()),
-                        spec_id,
-                    ),
-                    &txs.as_ref(),
-                    &seq_state.1,
-                    &seq_state.0.as_ref().unwrap(),
-                    &seq_state.2,
-                )
-                .unwrap();
-            }
-
-            let executor =
-                Scheduler::new(spec_id, env.clone(), txs.clone(), state, DEBUG_EXT.with_hints);
-            let output = executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
-                hash: block.transactions_with_sender().nth(e.txid).unwrap().1.recalculate_hash(),
-                error: Box::new(e.error),
-            });
-            let (results, parallel_state) = executor.take_result_and_state();
-
-            if output.is_err() ||
-                !crate::debug_ext::compare_transition_state(
-                    seq_state.0.as_ref().unwrap(),
-                    parallel_state.transition_state.as_ref().unwrap(),
-                )
-            {
-                crate::debug_ext::dump_transitions(
-                    block.number,
-                    seq_state.0.as_ref().unwrap(),
-                    "seq_transitions.json",
-                )
-                .unwrap();
-                crate::debug_ext::dump_transitions(
-                    block.number,
-                    parallel_state.transition_state.as_ref().unwrap(),
-                    "parallel_transitions.json",
-                )
-                .unwrap();
-
-                if !dump_block {
-                    // Block has been dumped already, no need to dump it again
-                    crate::debug_ext::dump_block_env(
-                        &revm_primitives::EnvWithHandlerCfg::new_with_spec_id(
-                            Box::new(env),
-                            spec_id,
-                        ),
-                        &txs.as_ref(),
-                        &seq_state.1,
-                        &seq_state.0.as_ref().unwrap(),
-                        &seq_state.2,
-                    )
-                    .unwrap();
-                }
-
-                panic!("Transition state mismatch, block number: {}", block.number);
-            }
-
-            output?;
-
-            (results, parallel_state)
-        } else {
-            let executor = Scheduler::new(spec_id, env, txs, state, DEBUG_EXT.with_hints);
-            executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
-                hash: block.transactions_with_sender().nth(e.txid).unwrap().1.recalculate_hash(),
-                error: Box::new(e.error),
+        let (results, state) = {
+            let EvmEnv { cfg_env, block_env } = evm_env;
+            let executor = Scheduler::new(cfg_env, block_env, txs, state, false);
+            executor.parallel_execute(None).map_err(|e| {
+                BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
+                    hash: block
+                        .transactions_with_sender()
+                        .nth(e.txid)
+                        .unwrap()
+                        .1
+                        .recalculate_hash(),
+                    error: Box::new(e.error),
+                })
             })?;
             executor.take_result_and_state()
         };
@@ -228,17 +121,13 @@ where
 
     fn apply_post_execution_changes(
         &mut self,
-        block: &RecoveredBlock<reth_primitives::Block>,
+        block: &RecoveredBlock<Block>,
         receipts: &[Receipt],
-    ) -> Result<Requests, Self::Error> {
-        let mut evm = self
-            .evm_config
-            .evm_for_block(WrapDatabaseRef(self.state.as_mut().unwrap()), block.header());
-
+    ) -> Result<Requests, BlockExecutionError> {
         let requests = if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
             // Collect all EIP-6110 deposits
             let deposit_requests =
-                crate::eip6110::parse_deposits_from_receipts(&self.chain_spec, receipts)?;
+                eip6110::parse_deposits_from_receipts(&self.chain_spec, receipts)?;
 
             let mut requests = Requests::default();
 
@@ -246,12 +135,14 @@ where
                 requests.push_request_with_type(eip6110::DEPOSIT_REQUEST_TYPE, deposit_requests);
             }
 
+            let mut evm = self
+                .evm_config
+                .evm_for_block(WrapDatabaseRef(self.state.as_mut().unwrap()), block.header());
             requests.extend(self.system_caller.apply_post_execution_changes(&mut evm)?);
             requests
         } else {
             Requests::default()
         };
-        drop(evm);
 
         let mut balance_increments = post_block_balance_increments(&self.chain_spec, block);
         let state = self.state.as_mut().unwrap();
@@ -260,58 +151,144 @@ where
         if self.chain_spec.fork(EthereumHardfork::Dao).transitions_at_block(block.number()) {
             // drain balances from hardcoded addresses.
             let drained_balance: u128 = state
-                .drain_balances(DAO_HARDFORK_ACCOUNTS)
+                .drain_balances(dao_fork::DAO_HARDFORK_ACCOUNTS)
                 .map_err(|_| BlockValidationError::IncrementBalanceFailed)?
                 .into_iter()
                 .sum();
 
             // return balance to DAO beneficiary.
-            *balance_increments.entry(DAO_HARDFORK_BENEFICIARY).or_default() += drained_balance;
+            *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
+                drained_balance;
         }
         // increment balances
         state
             .increment_balances(balance_increments.clone())
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
         // call state hook with changes due to balance increments.
-        let balance_state = balance_increment_state(&balance_increments, state)?;
-        self.system_caller.on_state(&balance_state);
+        self.system_caller.try_on_state_with(|| {
+            balance_increment_state(&balance_increments, state).map(|state| {
+                (
+                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
+                    Cow::Owned(state),
+                )
+            })
+        })?;
 
         Ok(requests)
     }
+}
 
-    fn state_ref(&self) -> &dyn reth_evm::State {
-        self.state.as_ref().unwrap()
+impl<DB, EvmConfig> ParallelExecutor for GrevmExecutor<DB, EvmConfig>
+where
+    EvmConfig: ConfigureEvm<
+        Primitives = EthPrimitives,
+        BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
+    >,
+    DB: ParallelDatabase,
+{
+    type Error = BlockExecutionError;
+    type Primitives = EvmConfig::Primitives;
+
+    fn execute_one(
+        &mut self,
+        block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+    ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
+    {
+        self.apply_pre_execution_changes(block)?;
+        let ExecuteOutput { receipts, gas_used } = if block.transaction_count() == 0 {
+            ExecuteOutput { receipts: Vec::new(), gas_used: 0 }
+        } else {
+            self.execute_transactions(block)?
+        };
+        let requests = self.apply_post_execution_changes(block, &receipts)?;
+        let state_mut =
+            self.state.as_mut().expect("state should be set before calling merge_transitions");
+        if let Some(transition_state) =
+            state_mut.transition_state.as_mut().map(TransitionState::take)
+        {
+            state_mut.bundle_state.parallel_apply_transitions_and_create_reverts(
+                transition_state,
+                BundleRetention::Reverts,
+            );
+        }
+        Ok(BlockExecutionResult { receipts, gas_used, requests })
     }
 
-    fn state_mut(&mut self) -> &mut dyn reth_evm::State {
-        self.state.as_mut().unwrap()
+    fn take_bundle(&mut self) -> BundleState {
+        self.state.as_mut().expect("state should be set before calling take_bundle").take_bundle()
     }
 
-    fn into_state(mut self: Box<Self>) -> Box<dyn reth_evm::State + 'db> {
-        Box::new(self.state.take().unwrap())
-    }
-
-    fn with_state_hook(&mut self, _hook: Option<Box<dyn OnStateHook>>) {
-        todo!("Implement state hook")
-    }
-
-    fn validate_block_post_execution(
-        &self,
-        block: &RecoveredBlock<reth_primitives::Block>,
-        receipts: &[Receipt],
-        requests: &Requests,
-    ) -> Result<(), ConsensusError> {
-        validate_block_post_execution(block, &self.chain_spec.clone(), receipts, requests)
+    fn size_hint(&self) -> usize {
+        self.state
+            .as_ref()
+            .expect("state should be set before calling size_hint")
+            .bundle_size_hint()
     }
 }
 
-fn balance_increment_state<DB>(
-    balance_increments: &HashMap<Address, u128, DefaultHashBuilder>,
-    state: &ParallelState<DB>,
-) -> Result<EvmState, BlockExecutionError>
+#[inline]
+fn post_block_balance_increments<ChainSpec, Block>(
+    chain_spec: &ChainSpec,
+    block: &RecoveredBlock<Block>,
+) -> HashMap<Address, u128>
 where
-    DB: ParallelDatabase,
+    ChainSpec: EthereumHardforks,
+    Block: reth_primitives_traits::Block,
 {
+    let mut balance_increments = HashMap::default();
+
+    // Add block rewards if they are enabled.
+    if let Some(base_block_reward) = calc::base_block_reward(chain_spec, block.header().number()) {
+        // Ommer rewards
+        if let Some(ommers) = block.body().ommers() {
+            for ommer in ommers {
+                *balance_increments.entry(ommer.beneficiary()).or_default() +=
+                    calc::ommer_reward(base_block_reward, block.header().number(), ommer.number());
+            }
+        }
+
+        // Full block reward
+        *balance_increments.entry(block.header().beneficiary()).or_default() += calc::block_reward(
+            base_block_reward,
+            block.body().ommers().map(|s| s.len()).unwrap_or(0),
+        );
+    }
+
+    // process withdrawals
+    insert_post_block_withdrawals_balance_increments(
+        chain_spec,
+        block.header().timestamp(),
+        block.body().withdrawals().as_ref().map(|w| w.as_slice()),
+        &mut balance_increments,
+    );
+
+    balance_increments
+}
+
+#[inline]
+fn insert_post_block_withdrawals_balance_increments(
+    spec: impl EthereumHardforks,
+    block_timestamp: u64,
+    withdrawals: Option<&[Withdrawal]>,
+    balance_increments: &mut HashMap<Address, u128>,
+) {
+    // Process withdrawals
+    if spec.is_shanghai_active_at_timestamp(block_timestamp) {
+        if let Some(withdrawals) = withdrawals {
+            for withdrawal in withdrawals {
+                if withdrawal.amount > 0 {
+                    *balance_increments.entry(withdrawal.address).or_default() +=
+                        withdrawal.amount_wei().to::<u128>();
+                }
+            }
+        }
+    }
+}
+
+fn balance_increment_state<DB: ParallelDatabase>(
+    balance_increments: &HashMap<Address, u128>,
+    state: &ParallelState<DB>,
+) -> Result<EvmState, BlockExecutionError> {
     let load_account = |address: &Address| -> Result<(Address, Account), BlockExecutionError> {
         let info = state
             .cache
