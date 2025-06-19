@@ -6,7 +6,7 @@ use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B2
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx};
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
-    DBProvider, PersistBlockCache, StateCommitmentProvider, StateProofProvider, StorageRootProvider,
+    DBProvider, StateCommitmentProvider, StateProofProvider, StorageRootProvider,
 };
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_trie::{
@@ -25,32 +25,22 @@ use reth_trie_db::{
 ///
 /// Wraps a [`DBProvider`] to get access to database.
 #[derive(Debug)]
-pub struct LatestStateProviderRef<'b, Provider>(&'b Provider, Option<PersistBlockCache>);
+pub struct LatestStateProviderRef<'b, Provider>(&'b Provider);
 
 impl<'b, Provider: DBProvider> LatestStateProviderRef<'b, Provider> {
     /// Create new state provider
-    pub const fn new(provider: &'b Provider, cache: Option<PersistBlockCache>) -> Self {
-        Self(provider, cache)
+    pub const fn new(provider: &'b Provider) -> Self {
+        Self(provider)
     }
 
     fn tx(&self) -> &Provider::Tx {
         self.0.tx_ref()
-    }
-
-    fn cache(&self) -> &Option<PersistBlockCache> {
-        &self.1
     }
 }
 
 impl<Provider: DBProvider> AccountReader for LatestStateProviderRef<'_, Provider> {
     /// Get basic account information.
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
-        if let Some(cache) = self.cache() {
-            let cache_value = cache.basic_account(address);
-            if cache_value.is_some() {
-                return Ok(cache_value);
-            }
-        }
         self.tx().get_by_encoded_key::<tables::PlainAccountState>(address).map_err(Into::into)
     }
 }
@@ -95,7 +85,7 @@ impl<Provider: DBProvider + StateCommitmentProvider> StateRootProvider
         &self,
         input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input, self.1.clone())
+        StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
             .map_err(|err| ProviderError::Database(err.into()))
     }
 }
@@ -179,12 +169,6 @@ impl<Provider: DBProvider + BlockHashReader + StateCommitmentProvider> StateProv
         account: Address,
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
-        if let Some(cache) = self.cache() {
-            let cache_value = cache.storage(account, storage_key);
-            if cache_value.is_some() {
-                return Ok(cache_value);
-            }
-        }
         let mut cursor = self.tx().cursor_dup_read::<tables::PlainStorageState>()?;
         if let Some(entry) = cursor.seek_by_key_subkey(account, storage_key)? {
             if entry.key == storage_key {
@@ -196,12 +180,6 @@ impl<Provider: DBProvider + BlockHashReader + StateCommitmentProvider> StateProv
 
     /// Get account code by its hash
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
-        if let Some(cache) = self.cache() {
-            let cache_value = cache.bytecode_by_hash(code_hash);
-            if cache_value.is_some() {
-                return Ok(cache_value);
-            }
-        }
         self.tx().get_by_encoded_key::<tables::Bytecodes>(code_hash).map_err(Into::into)
     }
 }
@@ -214,18 +192,18 @@ impl<Provider: StateCommitmentProvider> StateCommitmentProvider
 
 /// State provider for the latest state.
 #[derive(Debug)]
-pub struct LatestStateProvider<Provider>(Provider, Option<PersistBlockCache>);
+pub struct LatestStateProvider<Provider>(Provider);
 
 impl<Provider: DBProvider + StateCommitmentProvider> LatestStateProvider<Provider> {
     /// Create new state provider
-    pub const fn new(db: Provider, cache: Option<PersistBlockCache>) -> Self {
-        Self(db, cache)
+    pub const fn new(db: Provider) -> Self {
+        Self(db)
     }
 
     /// Returns a new provider that takes the `TX` as reference
     #[inline(always)]
-    fn as_ref(&self) -> LatestStateProviderRef<'_, Provider> {
-        LatestStateProviderRef::new(&self.0, self.1.clone())
+    const fn as_ref(&self) -> LatestStateProviderRef<'_, Provider> {
+        LatestStateProviderRef::new(&self.0)
     }
 }
 

@@ -3,9 +3,9 @@ use alloy_primitives::{map::B256Map, Address, Bytes, B256};
 use reth_db_api::DatabaseError;
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie_common::{
-    updates::{StorageTrieUpdates, TrieUpdates},
+    updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesV2},
     AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
-    StorageProof, TrieInput, TrieInputV2,
+    StorageProof, TrieInput,
 };
 use std::sync::Arc;
 
@@ -141,5 +141,5 @@ pub trait StorageTrieWriter: Send + Sync {
 }
 
 pub trait TrieWriterV2 {
-    fn write(&self, input: TrieInputV2) -> Result<usize, DatabaseError>;
+    fn write(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError>;
 }

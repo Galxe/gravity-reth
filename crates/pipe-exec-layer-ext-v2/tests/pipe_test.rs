@@ -10,7 +10,7 @@ use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{new_pipe_exec_layer_api, ExecutionArgs, PipeExecLayerApi};
 use reth_provider::{
     providers::BlockchainProvider, BlockHashReader, BlockNumReader, BlockReader,
-    DatabaseProviderFactory, HeaderProvider, TransactionVariant,
+    DatabaseProviderFactory, HeaderProvider, TransactionVariant, PERSIST_BLOCK_CACHE,
 };
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
@@ -139,12 +139,7 @@ async fn run_pipe(
 
     // Load block number to hash from test data
 
-    let storage = BlockViewStorage::new(
-        provider.clone(),
-        latest_block_number,
-        latest_block_hash,
-        block_number_to_id,
-    );
+    let storage = BlockViewStorage::new(provider.clone());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let pipeline_api =

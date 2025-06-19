@@ -18,7 +18,7 @@
 extern crate alloc;
 
 use crate::execute::BasicBlockBuilder;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use alloy_eips::{
     eip2718::{EIP2930_TX_TYPE_ID, LEGACY_TX_TYPE_ID},
     eip2930::AccessList,

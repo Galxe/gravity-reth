@@ -1,18 +1,20 @@
 use alloy_primitives::{Address, B256, U256};
-use core::sync::atomic::{AtomicU64, Ordering};
-use dashmap::{DashMap, DashSet};
+use core::{
+    ops::Deref,
+    sync::atomic::{AtomicU64, Ordering},
+};
+use dashmap::DashMap;
 use metrics::Gauge;
 use metrics_derive::Metrics;
-use moka::sync::Cache;
-use reth_primitives_traits::{Account, Bytecode};
-use reth_trie_common::{
-    updates::{StorageTrieUpdates, TrieUpdates},
-    BranchNodeCompact, HashedPostState, Nibbles,
-};
-use reth_trie_db::TrieCacheReader;
+use once_cell::sync::Lazy;
+use reth_primitives_traits::Account;
+use reth_trie_common::{nested_trie::Node, updates::TrieUpdatesV2, Nibbles};
+use revm_bytecode::Bytecode;
 use revm_database::states::{PlainStorageChangeset, StateChangeset};
 use std::{
     sync::{Arc, Mutex},
+    thread,
+    thread::JoinHandle,
     time::Duration,
 };
 
@@ -79,459 +81,260 @@ impl CacheMetricsReporter {
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Clone)]
-enum CacheKey {
-    StateAccount(Address),
-    StateContract(B256),
-    StateStorage(Address, B256),
-    HashAccount(B256),
-    HashStorage(B256, B256),
-    TrieAccout(Nibbles),
-    TrieStorage(B256, Nibbles),
+struct ValueWithTip<V> {
+    value: V,
+    block_number: u64,
 }
 
-#[derive(Clone)]
-enum CacheValue {
-    StateAccount(Account),
-    StateContract(Bytecode),
-    StateStorage(U256),
-    HashAccount(Account),
-    HashStorage(U256),
-    TrieAccout(BranchNodeCompact),
-    TrieStorage(BranchNodeCompact),
+impl<V> ValueWithTip<V> {
+    fn new(value: V, block_number: u64) -> Self {
+        Self { value, block_number }
+    }
 }
 
 #[derive(Default)]
-struct PersistBlockCacheInner {
-    account_state: DashMap<Address, DashSet<B256>>,
-    hashed_state: DashMap<B256, DashSet<B256>>,
-    trie_updates: DashMap<B256, DashSet<Nibbles>>,
-    block_number: Mutex<(Option<u64>, bool)>,
+pub struct PersistBlockCacheInner {
+    accounts: DashMap<Address, ValueWithTip<Account>>,
+    storage: DashMap<Address, DashMap<U256, ValueWithTip<U256>>>,
+    contracts: DashMap<B256, Bytecode>,
+    account_trie: DashMap<Nibbles, ValueWithTip<Node>>,
+    storage_trie: DashMap<B256, DashMap<Nibbles, ValueWithTip<Node>>>,
+    persist_block_number: Mutex<Option<u64>>,
     metrics: CacheMetricsReporter,
+    daemon_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-#[derive(Clone)]
-pub struct PersistBlockCache {
-    inner: Arc<PersistBlockCacheInner>,
-    cache: Arc<Cache<CacheKey, CacheValue>>,
+#[derive(Clone, Debug)]
+pub struct PersistBlockCache(Arc<PersistBlockCacheInner>);
+
+impl Deref for PersistBlockCache {
+    type Target = PersistBlockCacheInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.as_ref()
+    }
 }
 
-impl std::fmt::Debug for PersistBlockCache {
+impl std::fmt::Debug for PersistBlockCacheInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PersistBlockCache").field("num_cached", &self.cache.entry_count()).finish()
+        f.debug_struct("PersistBlockCache")
+            .field("num_cached", &self.metrics.cached_items.load(Ordering::Relaxed))
+            .finish()
     }
 }
 
-impl Default for PersistBlockCache {
-    fn default() -> Self {
-        let inner = Arc::new(PersistBlockCacheInner::default());
-        let eviction_storages = inner.clone();
-        let cache = Cache::builder()
-            .max_capacity(1000_000)
-            .time_to_live(Duration::from_secs(60 * 60))
-            .time_to_idle(Duration::from_secs(10 * 60))
-            .eviction_listener(move |k: Arc<CacheKey>, _, _| match k.as_ref() {
-                CacheKey::StateStorage(address, slot) => {
-                    let mut remove = false;
-                    if let Some(cached_slots) = eviction_storages.account_state.get(address) {
-                        cached_slots.remove(slot);
-                        remove = cached_slots.is_empty();
-                    }
-                    if remove {
-                        match eviction_storages.account_state.entry(*address) {
-                            dashmap::Entry::Occupied(entry) => {
-                                if entry.get().is_empty() {
-                                    entry.remove();
-                                }
-                            }
-                            dashmap::Entry::Vacant(_) => {}
-                        }
-                    }
-                }
-                CacheKey::HashStorage(hash_address, hash_slot) => {
-                    let mut remove = false;
-                    if let Some(cached_slots) = eviction_storages.hashed_state.get(hash_address) {
-                        cached_slots.remove(hash_slot);
-                        remove = cached_slots.is_empty();
-                    }
-                    if remove {
-                        match eviction_storages.hashed_state.entry(*hash_address) {
-                            dashmap::Entry::Occupied(entry) => {
-                                if entry.get().is_empty() {
-                                    entry.remove();
-                                }
-                            }
-                            dashmap::Entry::Vacant(_) => {}
-                        }
-                    }
-                }
-                CacheKey::TrieStorage(hash_address, nibbles) => {
-                    let mut remove = false;
-                    if let Some(cached_slots) = eviction_storages.trie_updates.get(hash_address) {
-                        cached_slots.remove(nibbles);
-                        remove = cached_slots.is_empty();
-                    }
-                    if remove {
-                        match eviction_storages.trie_updates.entry(*hash_address) {
-                            dashmap::Entry::Occupied(entry) => {
-                                if entry.get().is_empty() {
-                                    entry.remove();
-                                }
-                            }
-                            dashmap::Entry::Vacant(_) => {}
-                        }
-                    }
-                }
-                _ => {}
-            })
-            .build();
-        Self { inner, cache: Arc::new(cache) }
+impl PersistBlockCacheInner {
+    fn entry_count(&self) -> usize {
+        let mut num_items = self.accounts.len();
+        num_items += self.storage.iter().map(|s| s.len()).sum::<usize>();
+        num_items += self.account_trie.len();
+        num_items += self.storage_trie.iter().map(|s| s.len()).sum::<usize>();
+        num_items
     }
 }
 
-impl TrieCacheReader for PersistBlockCache {
-    fn hashed_account(&self, hash_address: B256) -> Option<Account> {
-        if let Some(cached) = self.cache.get(&CacheKey::HashAccount(hash_address)) {
-            match cached {
-                CacheValue::HashAccount(account) => {
-                    self.inner.metrics.trie_cache_hit_record.hit();
-                    Some(account)
-                }
-                _ => unreachable!("Unexpected cache value"),
-            }
-        } else {
-            self.inner.metrics.trie_cache_hit_record.not_hit();
-            None
-        }
-    }
-
-    fn hashed_storage(&self, hash_address: B256, hash_slot: B256) -> Option<U256> {
-        if let Some(cached) = self.cache.get(&CacheKey::HashStorage(hash_address, hash_slot)) {
-            match cached {
-                CacheValue::HashStorage(value) => {
-                    self.inner.metrics.trie_cache_hit_record.hit();
-                    Some(value)
-                }
-                _ => unreachable!("Unexpected cache value"),
-            }
-        } else {
-            self.inner.metrics.trie_cache_hit_record.not_hit();
-            None
-        }
-    }
-
-    fn trie_account(&self, nibbles: Nibbles) -> Option<BranchNodeCompact> {
-        if let Some(cached) = self.cache.get(&CacheKey::TrieAccout(nibbles)) {
-            match cached {
-                CacheValue::TrieAccout(branch) => {
-                    self.inner.metrics.trie_cache_hit_record.hit();
-                    Some(branch)
-                }
-                _ => unreachable!("Unexpected cache value"),
-            }
-        } else {
-            self.inner.metrics.trie_cache_hit_record.not_hit();
-            None
-        }
-    }
-
-    fn trie_storage(&self, hash_address: B256, nibbles: Nibbles) -> Option<BranchNodeCompact> {
-        if let Some(cached) = self.cache.get(&CacheKey::TrieStorage(hash_address, nibbles)) {
-            match cached {
-                CacheValue::TrieStorage(branch) => {
-                    self.inner.metrics.trie_cache_hit_record.hit();
-                    Some(branch)
-                }
-                _ => unreachable!("Unexpected cache value"),
-            }
-        } else {
-            self.inner.metrics.trie_cache_hit_record.not_hit();
-            None
-        }
-    }
-}
+pub static PERSIST_BLOCK_CACHE: Lazy<PersistBlockCache> = Lazy::new(|| PersistBlockCache::new());
 
 impl PersistBlockCache {
-    pub fn basic_account(&self, address: &Address) -> Option<Account> {
-        if let Some(cached) = self.cache.get(&CacheKey::StateAccount(*address)) {
-            match cached {
-                CacheValue::StateAccount(account) => {
-                    self.inner.metrics.block_cache_hit_record.hit();
-                    Some(account)
+    pub fn new() -> Self {
+        let inner = Arc::new(PersistBlockCacheInner::default());
+
+        let weak_inner = Arc::downgrade(&inner);
+        let handle = thread::spawn(move || {
+            let interval = Duration::from_secs(5); // 5s
+            loop {
+                thread::sleep(interval);
+                if let Some(inner) = weak_inner.upgrade() {
+                    let num_items = inner.entry_count();
+                    inner.metrics.cached_items.store(num_items as u64, Ordering::Release);
+                    inner.metrics.report();
+                } else {
+                    break;
                 }
-                _ => unreachable!("Unexpected cache value"),
             }
+        });
+        inner.daemon_handle.lock().unwrap().replace(handle);
+
+        Self(inner)
+    }
+
+    pub fn basic_account(&self, address: &Address) -> Option<Account> {
+        if let Some(value) = self.accounts.get(address) {
+            self.metrics.block_cache_hit_record.hit();
+            Some(value.value.clone())
         } else {
-            self.inner.metrics.block_cache_hit_record.not_hit();
+            self.metrics.block_cache_hit_record.not_hit();
             None
         }
     }
 
     pub fn bytecode_by_hash(&self, code_hash: &B256) -> Option<Bytecode> {
-        if let Some(cached) = self.cache.get(&CacheKey::StateContract(*code_hash)) {
-            match cached {
-                CacheValue::StateContract(code) => {
-                    self.inner.metrics.block_cache_hit_record.hit();
-                    Some(code)
-                }
-                _ => unreachable!("Unexpected cache value"),
-            }
+        if let Some(value) = self.contracts.get(code_hash) {
+            self.metrics.block_cache_hit_record.hit();
+            Some(value.clone())
         } else {
-            self.inner.metrics.block_cache_hit_record.not_hit();
+            self.metrics.block_cache_hit_record.not_hit();
             None
         }
     }
 
-    pub fn storage(&self, address: Address, slot: B256) -> Option<U256> {
-        if let Some(cached) = self.cache.get(&CacheKey::StateStorage(address, slot)) {
-            match cached {
-                CacheValue::StateStorage(value) => {
-                    self.inner.metrics.block_cache_hit_record.hit();
-                    Some(value)
-                }
-                _ => unreachable!("Unexpected cache value"),
+    pub fn storage(&self, address: &Address, slot: &U256) -> Option<U256> {
+        if let Some(storage) = self.storage.get(address) {
+            if let Some(value) = storage.get(slot) {
+                self.metrics.block_cache_hit_record.hit();
+                Some(value.value.clone())
+            } else {
+                self.metrics.block_cache_hit_record.not_hit();
+                None
             }
         } else {
-            self.inner.metrics.block_cache_hit_record.not_hit();
+            self.metrics.block_cache_hit_record.not_hit();
             None
         }
     }
 
-    pub fn clear(&self) {
-        let mut check = self.inner.block_number.lock().unwrap();
-        if !check.1 {
-            panic!("Cannot clear cache while writing");
+    pub fn trie_account(&self, nibbles: &Nibbles) -> Option<Node> {
+        if let Some(value) = self.account_trie.get(nibbles) {
+            self.metrics.trie_cache_hit_record.hit();
+            Some(value.value.clone())
+        } else {
+            self.metrics.trie_cache_hit_record.not_hit();
+            None
         }
-        self.inner.account_state.clear();
-        self.inner.hashed_state.clear();
-        self.inner.trie_updates.clear();
-        self.cache.invalidate_all();
-        check.0 = None;
     }
 
-    pub fn update_lock(&self, block_number: u64) {
-        let mut check = self.inner.block_number.lock().unwrap();
-        if let Some(last_block_number) = check.0 {
-            let expect = last_block_number + 1;
-            if block_number != expect {
+    pub fn trie_storage(&self, hash_address: &B256, nibbles: &Nibbles) -> Option<Node> {
+        if let Some(storage) = self.storage_trie.get(hash_address) {
+            if let Some(value) = storage.get(nibbles) {
+                self.metrics.trie_cache_hit_record.hit();
+                Some(value.value.clone())
+            } else {
+                self.metrics.trie_cache_hit_record.not_hit();
+                None
+            }
+        } else {
+            self.metrics.trie_cache_hit_record.not_hit();
+            None
+        }
+    }
+
+    pub fn persist_tip(&self, block_number: u64) {
+        let mut guard = self.persist_block_number.lock().unwrap();
+        if let Some(ref mut persist_block_number) = *guard {
+            if block_number != *persist_block_number + 1 {
                 panic!(
-                    "Write discontinuous block number, expect {}, actual {}",
-                    expect, block_number
+                    "Persist uncontinuous block, expect: {}, actual: {}",
+                    *persist_block_number + 1,
+                    block_number
                 );
             }
+            *persist_block_number = block_number;
+        } else {
+            *guard = Some(block_number);
         }
-        if check.1 {
-            panic!("Cannot write two blocks simultaneously");
-        }
-        check.1 = true;
     }
 
-    pub fn commit(&self, block_number: u64) {
-        self.inner.metrics.cached_items(self.cache.entry_count());
-        let mut check = self.inner.block_number.lock().unwrap();
-        if !check.1 {
-            panic!("Should check continuous before commit");
-        }
-        check.1 = false;
-
-        if let Some(last_block_number) = check.0 {
-            let expect = last_block_number + 1;
-            if block_number != expect {
-                panic!(
-                    "Commit discontinuous block number, expect {}, actual {}",
-                    expect, block_number
-                );
-            }
-        }
-        check.0 = Some(block_number);
-        self.inner.metrics.report();
-    }
-
-    pub fn write_state_changes(&self, changes: StateChangeset) {
+    pub fn write_state_changes(&self, block_number: u64, changes: StateChangeset) {
         // write account to database.
         for (address, account) in changes.accounts {
             if let Some(account) = account {
-                self.cache.insert(
-                    CacheKey::StateAccount(address),
-                    CacheValue::StateAccount(account.into()),
-                );
+                self.accounts.insert(address, ValueWithTip::new(account.into(), block_number));
             } else {
-                self.cache.remove(&CacheKey::StateAccount(address));
+                self.accounts.remove(&address);
             }
         }
 
         // Write bytecode
         for (hash, bytecode) in changes.contracts {
-            self.cache.insert(
-                CacheKey::StateContract(hash),
-                CacheValue::StateContract(Bytecode(bytecode)),
-            );
+            self.contracts.insert(hash, bytecode);
         }
 
         // Write new storage state and wipe storage if needed.
         for PlainStorageChangeset { address, wipe_storage, storage } in changes.storage {
             // Wiping of storage.
             if wipe_storage {
-                if let Some((_, storage_slots)) = self.inner.account_state.remove(&address) {
-                    for slot in storage_slots {
-                        self.cache.remove(&CacheKey::StateStorage(address, slot));
-                    }
-                }
+                self.storage.remove(&address);
             }
             for (slot, value) in storage {
-                let slot: B256 = slot.into();
                 if value.is_zero() {
                     // delete slot
-                    self.cache.remove(&CacheKey::StateStorage(address, slot));
                     let mut clean = false;
-                    if let Some(cached_slots) = self.inner.account_state.get(&address) {
-                        cached_slots.remove(&slot);
-                        clean = cached_slots.is_empty();
+                    if let Some(storage) = self.storage.get(&address) {
+                        storage.remove(&slot);
+                        clean = storage.is_empty();
                     }
                     if clean {
-                        match self.inner.account_state.entry(address) {
+                        match self.storage.entry(address) {
                             dashmap::Entry::Occupied(entry) => {
                                 if entry.get().is_empty() {
                                     entry.remove();
                                 }
                             }
-                            dashmap::Entry::Vacant(_) => {}
+                            _ => {}
                         }
                     }
                 } else {
-                    self.cache.insert(
-                        CacheKey::StateStorage(address, slot),
-                        CacheValue::StateStorage(value),
-                    );
-                    if let Some(cached_slots) = self.inner.account_state.get(&address) {
-                        cached_slots.insert(slot);
+                    if let Some(storage) = self.storage.get(&address) {
+                        storage.insert(slot, ValueWithTip::new(value, block_number));
                     } else {
-                        self.inner.account_state.entry(address).or_default().insert(slot);
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn write_hashed_state(&self, hashed_state: HashedPostState) {
-        // Write hashed account updates.
-        for (hashed_address, account) in hashed_state.accounts {
-            if let Some(account) = account {
-                self.cache.insert(
-                    CacheKey::HashAccount(hashed_address),
-                    CacheValue::HashAccount(account),
-                );
-            } else {
-                self.cache.remove(&CacheKey::HashAccount(hashed_address));
-            }
-        }
-
-        // Write hashed storage changes.
-        for (hashed_address, storage) in hashed_state.storages {
-            if storage.wiped {
-                if let Some((_, storage_slots)) = self.inner.hashed_state.remove(&hashed_address) {
-                    for slot in storage_slots {
-                        self.cache.remove(&CacheKey::HashStorage(hashed_address, slot));
-                    }
-                }
-
-                for (hashed_slot, value) in storage.storage {
-                    if value.is_zero() {
-                        // delete slot
-                        self.cache.remove(&CacheKey::HashStorage(hashed_address, hashed_slot));
-                        let mut clean = false;
-                        if let Some(cached_slots) = self.inner.hashed_state.get(&hashed_address) {
-                            cached_slots.remove(&hashed_slot);
-                            clean = cached_slots.is_empty();
-                        }
-                        if clean {
-                            match self.inner.hashed_state.entry(hashed_address) {
-                                dashmap::Entry::Occupied(entry) => {
-                                    if entry.get().is_empty() {
-                                        entry.remove();
-                                    }
-                                }
-                                dashmap::Entry::Vacant(_) => {}
-                            }
-                        }
-                    } else {
-                        self.cache.insert(
-                            CacheKey::HashStorage(hashed_address, hashed_slot),
-                            CacheValue::HashStorage(value),
-                        );
-                        if let Some(cached_slots) = self.inner.hashed_state.get(&hashed_address) {
-                            cached_slots.insert(hashed_slot);
-                        } else {
-                            self.inner
-                                .hashed_state
-                                .entry(hashed_address)
-                                .or_default()
-                                .insert(hashed_slot);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn write_trie_updates(&self, trie_updates: TrieUpdates) {
-        if trie_updates.is_empty() {
-            return;
-        }
-
-        // Merge updated and removed nodes. Updated nodes must take precedence.
-        let TrieUpdates { account_nodes, removed_nodes, storage_tries } = trie_updates;
-        for removed_node in removed_nodes {
-            if !account_nodes.contains_key(&removed_node) {
-                self.cache.remove(&CacheKey::TrieAccout(removed_node));
-            }
-        }
-        for (nibbles, node) in account_nodes {
-            if !nibbles.is_empty() {
-                self.cache.insert(CacheKey::TrieAccout(nibbles), CacheValue::TrieAccout(node));
-            }
-        }
-
-        for (hashed_address, StorageTrieUpdates { is_deleted, storage_nodes, removed_nodes }) in
-            storage_tries
-        {
-            if is_deleted {
-                if let Some((_, nibble_slots)) = self.inner.trie_updates.remove(&hashed_address) {
-                    for nibbles in nibble_slots {
-                        self.cache.remove(&CacheKey::TrieStorage(hashed_address, nibbles));
-                    }
-                }
-            }
-            for removed_node in removed_nodes {
-                if !storage_nodes.contains_key(&removed_node) {
-                    self.cache.remove(&CacheKey::TrieStorage(hashed_address, removed_node.clone()));
-                    let mut clean = false;
-                    if let Some(cached_slots) = self.inner.trie_updates.get(&hashed_address) {
-                        cached_slots.remove(&removed_node);
-                        clean = cached_slots.is_empty();
-                    }
-                    if clean {
-                        match self.inner.trie_updates.entry(hashed_address) {
+                        match self.storage.entry(address) {
                             dashmap::Entry::Occupied(entry) => {
-                                if entry.get().is_empty() {
-                                    entry.remove();
-                                }
+                                entry.get().insert(slot, ValueWithTip::new(value, block_number));
                             }
-                            dashmap::Entry::Vacant(_) => {}
+                            dashmap::Entry::Vacant(entry) => {
+                                let data = DashMap::new();
+                                data.insert(slot, ValueWithTip::new(value, block_number));
+                                entry.insert(data);
+                            }
                         }
                     }
                 }
             }
-            for (nibbles, node) in storage_nodes {
-                if !nibbles.is_empty() {
-                    self.cache.insert(
-                        CacheKey::TrieStorage(hashed_address, nibbles.clone()),
-                        CacheValue::TrieStorage(node),
-                    );
-                    if let Some(cached_slots) = self.inner.trie_updates.get(&hashed_address) {
-                        cached_slots.insert(nibbles);
-                    } else {
-                        self.inner.trie_updates.entry(hashed_address).or_default().insert(nibbles);
+        }
+    }
+
+    pub fn write_trie_updates(&self, input: &TrieUpdatesV2, block_number: u64) {
+        for path in &input.removed_nodes {
+            self.account_trie.remove(path);
+        }
+        for (path, node) in &input.account_nodes {
+            self.account_trie.insert(path.clone(), ValueWithTip::new(node.clone(), block_number));
+        }
+
+        for (hashed_address, storage_trie_update) in &input.storage_tries {
+            if storage_trie_update.is_deleted {
+                self.storage_trie.remove(hashed_address);
+            } else {
+                if let Some(storage) = self.storage_trie.get(hashed_address) {
+                    for path in &storage_trie_update.removed_nodes {
+                        storage.remove(path);
+                    }
+                }
+                if let Some(storage) = self.storage_trie.get(hashed_address) {
+                    for (path, node) in &storage_trie_update.storage_nodes {
+                        storage.insert(path.clone(), ValueWithTip::new(node.clone(), block_number));
+                    }
+                } else {
+                    match self.storage_trie.entry(*hashed_address) {
+                        dashmap::Entry::Occupied(entry) => {
+                            let data = entry.get();
+                            for (path, node) in &storage_trie_update.storage_nodes {
+                                data.insert(
+                                    path.clone(),
+                                    ValueWithTip::new(node.clone(), block_number),
+                                );
+                            }
+                        }
+                        dashmap::Entry::Vacant(entry) => {
+                            let data = DashMap::new();
+                            for (path, node) in &storage_trie_update.storage_nodes {
+                                data.insert(
+                                    path.clone(),
+                                    ValueWithTip::new(node.clone(), block_number),
+                                );
+                            }
+                            entry.insert(data);
+                        }
                     }
                 }
             }

@@ -4,7 +4,7 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     B256,
 };
-use alloy_trie::EMPTY_ROOT_HASH;
+use alloy_trie::{BranchNodeCompact, EMPTY_ROOT_HASH};
 use nybbles::Nibbles;
 use reth_storage_errors::db::DatabaseError;
 
@@ -20,6 +20,12 @@ pub struct TrieOutput {
     pub update_nodes: HashMap<Nibbles, Node>,
 }
 
+#[derive(Default, Debug, Clone)]
+pub struct CompatibleTrieOutput {
+    pub removed_nodes: HashSet<Nibbles>,
+    pub update_nodes: HashMap<Nibbles, BranchNodeCompact>,
+}
+
 #[derive(Debug)]
 pub struct Trie<R>
 where
@@ -27,41 +33,41 @@ where
 {
     root: Option<Node>,
     reader: R,
-    removed_nodes: HashSet<Nibbles>,
-    update_nodes: HashMap<Nibbles, Node>,
+    trie_output: TrieOutput,
     parallel: bool,
+    compatible: Option<CompatibleTrieOutput>,
 }
 
 impl<R> Trie<R>
 where
     R: TrieReader,
 {
-    pub fn new(mut reader: R, parallel: bool) -> Result<Self, DatabaseError> {
+    pub fn new(mut reader: R, parallel: bool, compatible: bool) -> Result<Self, DatabaseError> {
         let root = reader.read(&Nibbles::new())?;
         Ok(Self {
             root,
             reader,
-            removed_nodes: Default::default(),
-            update_nodes: Default::default(),
+            trie_output: Default::default(),
             parallel,
+            compatible: compatible.then_some(Default::default()),
         })
     }
 
-    fn new_with_root(reader: R, root: Option<Node>) -> Self {
+    fn new_with_root(reader: R, root: Option<Node>, compatible: bool) -> Self {
         Self {
             root,
             reader,
-            removed_nodes: Default::default(),
-            update_nodes: Default::default(),
+            trie_output: Default::default(),
             parallel: false,
+            compatible: compatible.then_some(Default::default()),
         }
     }
 
-    pub fn take_output(mut self) -> TrieOutput {
+    pub fn take_output(mut self) -> (TrieOutput, Option<CompatibleTrieOutput>) {
         if let Some(root) = self.root.take() {
             self.take_output_inner(root, Nibbles::new());
         }
-        TrieOutput { removed_nodes: self.removed_nodes, update_nodes: self.update_nodes }
+        (self.trie_output, self.compatible)
     }
 
     fn take_output_inner(&mut self, node: Node, prefix: Nibbles) {
@@ -71,6 +77,11 @@ where
         // convert child to hash node
         match node {
             Node::FullNode { children, flags } => {
+                if let Some(compatible) = &mut self.compatible {
+                    compatible
+                        .update_nodes
+                        .insert(prefix.clone(), Node::to_branch_node_compact(&children));
+                }
                 let mut convert: [Option<Box<Node>>; 17] = Default::default();
                 for (nibble, child) in children.into_iter().enumerate() {
                     if let Some(child) = child {
@@ -81,7 +92,9 @@ where
                         convert[nibble] = Some(Box::new(Node::HashNode(rlp)));
                     }
                 }
-                self.update_nodes.insert(prefix, Node::FullNode { children: convert, flags });
+                self.trie_output
+                    .update_nodes
+                    .insert(prefix, Node::FullNode { children: convert, flags });
             }
             Node::ShortNode { key, value, flags } => {
                 match *value {
@@ -91,11 +104,12 @@ where
                         let mut next_path = prefix.clone();
                         next_path.extend_from_slice_unchecked(&key);
                         self.take_output_inner(next_node, next_path);
-                        self.update_nodes
+                        self.trie_output
+                            .update_nodes
                             .insert(prefix, Node::ShortNode { key, value: convert, flags });
                     }
                     leaf_node @ Node::ValueNode { .. } => {
-                        self.update_nodes.insert(
+                        self.trie_output.update_nodes.insert(
                             prefix,
                             Node::ShortNode { key, value: Box::new(leaf_node), flags },
                         );
@@ -103,7 +117,7 @@ where
                     hash_node @ Node::HashNode(..) => {
                         // When two consecutive ShortNodes are merged into one ShortNode,
                         // the child node may not be visited and still is a HashNode.
-                        self.update_nodes.insert(
+                        self.trie_output.update_nodes.insert(
                             prefix,
                             Node::ShortNode { key, value: Box::new(hash_node), flags },
                         );
@@ -234,6 +248,7 @@ where
             if let Node::FullNode { mut children, .. } = root {
                 let abort: OnceLock<DatabaseError> = Default::default();
                 let removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
+                let compatible_removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
 
                 std::thread::scope(|scope| {
                     for (child, batch) in children.iter_mut().zip(batches.into_iter()) {
@@ -250,7 +265,8 @@ where
                                     return;
                                 }
                             };
-                            let mut child_trie = Trie::new_with_root(reader, child_root);
+                            let mut child_trie =
+                                Trie::new_with_root(reader, child_root, self.compatible.is_some());
                             for (key, value) in batch {
                                 let child_root = child_trie.root.take();
                                 let result = if let Some(value) = value {
@@ -281,8 +297,17 @@ where
                             }
                             let _ = child_trie.hash();
                             *child = child_trie.root.take().map(|n| Box::new(n));
-                            if !child_trie.removed_nodes.is_empty() {
-                                removed_nodes.lock().unwrap().extend(child_trie.removed_nodes);
+                            if !child_trie.trie_output.removed_nodes.is_empty() {
+                                removed_nodes
+                                    .lock()
+                                    .unwrap()
+                                    .extend(child_trie.trie_output.removed_nodes);
+                            }
+                            if let Some(compatible) = child_trie.compatible {
+                                compatible_removed_nodes
+                                    .lock()
+                                    .unwrap()
+                                    .extend(compatible.removed_nodes);
                             }
                         });
                     }
@@ -291,6 +316,7 @@ where
                     return Err(abort);
                 }
                 let mut removed_nodes = removed_nodes.into_inner().unwrap();
+                let mut compatible_removed_nodes = compatible_removed_nodes.into_inner().unwrap();
                 // check the root node can be FullNode or other
                 let mut pos = -1;
                 for (i, child) in children.iter().enumerate() {
@@ -315,6 +341,7 @@ where
                         let mut new_key = nibble_path.clone();
                         new_key.extend_from_slice_unchecked(&cn_key);
                         removed_nodes.insert(nibble_path.clone());
+                        compatible_removed_nodes.insert(nibble_path.clone());
                         Node::ShortNode {
                             key: new_key,
                             value: cn_value,
@@ -333,12 +360,20 @@ where
                 } else if pos == -1 {
                     self.root = None;
                     removed_nodes.insert(Nibbles::new());
+                    compatible_removed_nodes.insert(Nibbles::new());
                 }
 
-                if self.removed_nodes.is_empty() {
-                    self.removed_nodes = removed_nodes;
+                if self.trie_output.removed_nodes.is_empty() {
+                    self.trie_output.removed_nodes = removed_nodes;
                 } else {
-                    self.removed_nodes.extend(removed_nodes);
+                    self.trie_output.removed_nodes.extend(removed_nodes);
+                }
+                if let Some(compatible) = &mut self.compatible {
+                    if compatible.removed_nodes.is_empty() {
+                        compatible.removed_nodes = compatible_removed_nodes;
+                    } else {
+                        compatible.removed_nodes.extend(compatible_removed_nodes);
+                    }
                 }
                 return Ok(());
             } else {
@@ -417,6 +452,9 @@ where
                     }
                     // pos can't be -2
                     if pos >= 0 {
+                        if let Some(compatible) = &mut self.compatible {
+                            compatible.removed_nodes.insert(prefix.clone());
+                        }
                         let mut single_child = *children[pos as usize].take().unwrap();
                         if pos != 16 {
                             // If the remaining entry is a short node, it replaces
@@ -440,7 +478,7 @@ where
                             // removed.
                             let mut delete_child_path = prefix.clone();
                             delete_child_path.push_unchecked(pos as u8);
-                            self.removed_nodes.insert(delete_child_path);
+                            self.trie_output.removed_nodes.insert(delete_child_path);
                             Ok((
                                 true,
                                 Some(Node::ShortNode {
@@ -479,7 +517,7 @@ where
                         // The matched short node is deleted entirely and track
                         // it in the deletion set. The same the valueNode doesn't
                         // need to be tracked at all since it's always embedded.
-                        self.removed_nodes.insert(prefix);
+                        self.trie_output.removed_nodes.insert(prefix);
                         return Ok((true, None)); // remove n entirely for whole matches
                     }
                     let next_node = Some(*node_value);
@@ -506,7 +544,7 @@ where
                             // so the next short node is removed.
                             let mut delete_next_path = prefix.clone();
                             delete_next_path.extend_from_slice_unchecked(&node_key);
-                            self.removed_nodes.insert(delete_next_path);
+                            self.trie_output.removed_nodes.insert(delete_next_path);
                             Ok((
                                 true,
                                 Some(Node::ShortNode {

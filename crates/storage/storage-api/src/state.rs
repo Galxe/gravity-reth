@@ -1,7 +1,5 @@
 use std::{num::NonZero, sync::LazyLock};
 
-use crate::PersistBlockCache;
-
 use super::{
     AccountReader, BlockHashReader, BlockIdReader, StateProofProvider, StateRootProvider,
     StorageRootProvider,
@@ -11,6 +9,7 @@ use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{Address, BlockHash, BlockNumber, StorageKey, StorageValue, B256, U256};
 use auto_impl::auto_impl;
+use once_cell::sync::Lazy;
 use reth_execution_types::ExecutionOutcome;
 use reth_primitives_traits::Bytecode;
 use reth_storage_errors::provider::ProviderResult;
@@ -120,46 +119,37 @@ pub trait TryIntoHistoricalStateProvider {
     fn try_into_history_at_block(
         self,
         block_number: BlockNumber,
-        cache: Option<PersistBlockCache>,
     ) -> ProviderResult<StateProviderBox>;
 }
 
 #[derive(Debug, Clone)]
 pub struct StateProviderOptions {
     pub parallel: NonZero<usize>,
-    pub cache: Option<PersistBlockCache>,
+    pub raw_db: bool,
 }
 
-pub static USE_STORAGE_CACHE: LazyLock<bool> =
-    LazyLock::new(|| std::env::var("USE_STORAGE_CACHE").is_ok());
-
 /// General options for state providers.
-pub static STATE_PROVIDER_OPTS: LazyLock<StateProviderOptions> =
-    LazyLock::new(|| StateProviderOptions {
-        parallel: NonZero::new(
-            std::env::var("STATE_PROVIDER_OPTS_PARALLEL")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(8),
-        )
-        .unwrap(),
-        cache: None,
-    });
+pub static STATE_PROVIDER_OPTS: Lazy<StateProviderOptions> = Lazy::new(|| StateProviderOptions {
+    parallel: NonZero::new(
+        std::env::var("STATE_PROVIDER_OPTS_PARALLEL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8),
+    )
+    .unwrap(),
+    raw_db: false,
+});
 
 impl Default for StateProviderOptions {
     fn default() -> Self {
-        Self { parallel: NonZero::new(1).unwrap(), cache: None }
+        Self { parallel: NonZero::new(1).unwrap(), raw_db: false }
     }
 }
 
 impl StateProviderOptions {
-    pub fn with_cache(mut self, cache: PersistBlockCache) -> Self {
-        self.cache = if *USE_STORAGE_CACHE { Some(cache) } else { None };
+    pub fn with_raw_db(mut self) -> Self {
+        self.raw_db = true;
         self
-    }
-
-    pub fn get_cache(&self) -> Option<PersistBlockCache> {
-        self.cache.clone()
     }
 }
 

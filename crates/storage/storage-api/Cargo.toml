@@ -26,19 +26,21 @@ reth-trie-db = { workspace = true, optional = true }
 revm-database.workspace = true
 reth-ethereum-primitives.workspace = true
 
+# revm
+revm-bytecode.workspace = true
+
 # ethereum
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-rpc-types-engine.workspace = true
 
-# misc
-moka.workspace = true
+#misc
 dashmap = { workspace = true, features = ["inline"] }
-
 auto_impl.workspace = true
 metrics.workspace = true
 metrics-derive.workspace = true
+once_cell.workspace = true
 
 [features]
 default = ["std"]

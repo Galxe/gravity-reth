@@ -1,6 +1,11 @@
+use std::sync::Arc;
+
 use alloy_primitives::{keccak256, B256};
 use alloy_rlp::{length_of_length, BufMut, Encodable, Header, EMPTY_STRING_CODE};
-use alloy_trie::nodes::{encode_path_leaf, RlpNode};
+use alloy_trie::{
+    nodes::{encode_path_leaf, RlpNode},
+    BranchNodeCompact, TrieMask,
+};
 use nybbles::Nibbles;
 
 /// Cache hash value(RlpNode) of current Node to prevent duplicate caculations,
@@ -119,6 +124,11 @@ impl NodeType {
 pub struct NodeEntry {
     pub path: Nibbles,
     pub node: Node,
+}
+impl NodeEntry {
+    pub fn new(path: &Nibbles, node: &Node) -> Self {
+        Self { path: path.clone(), node: node.clone() }
+    }
 }
 pub type StoredNode = Vec<u8>;
 
@@ -288,6 +298,46 @@ impl Node {
             Node::FullNode { children: _, flags } => flags.reset(),
             Node::ShortNode { key: _, value: _, flags } => flags.reset(),
             _ => {}
+        }
+    }
+
+    pub fn to_branch_node_compact(children: &[Option<Box<Node>>; 17]) -> BranchNodeCompact {
+        let mut state_mask = TrieMask::default();
+        let mut tree_mask = TrieMask::default();
+        let mut hash_mask = TrieMask::default();
+        let mut hashes = Vec::new();
+
+        for (i, child) in children.iter().enumerate() {
+            if let Some(child) = child {
+                state_mask.set_bit(i as u8);
+                match child.as_ref() {
+                    Node::HashNode(rlp) => {
+                        hash_mask.set_bit(i as u8);
+                        let hash =
+                            rlp.as_hash().unwrap_or_else(|| alloy_primitives::keccak256(rlp));
+                        hashes.push(hash);
+                    }
+                    _ => {
+                        tree_mask.set_bit(i as u8);
+                    }
+                }
+            }
+        }
+
+        BranchNodeCompact {
+            state_mask,
+            tree_mask,
+            hash_mask,
+            hashes: Arc::new(hashes),
+            root_hash: None,
+        }
+    }
+
+    pub fn branch_node_compact(&self) -> BranchNodeCompact {
+        if let Node::FullNode { children, .. } = self {
+            Self::to_branch_node_compact(children)
+        } else {
+            panic!("Only FullNode can be converted to BranchNodeCompact")
         }
     }
 

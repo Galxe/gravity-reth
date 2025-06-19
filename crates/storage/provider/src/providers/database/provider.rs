@@ -16,7 +16,7 @@ use crate::{
     OriginalValuesKnown, ProviderError, PruneCheckpointReader, PruneCheckpointWriter, RevertsInit,
     StageCheckpointReader, StateCommitmentProvider, StateProviderBox, StateWriter,
     StaticFileProviderFactory, StatsReader, StorageLocation, StorageReader, StorageTrieWriter,
-    TransactionVariant, TransactionsProvider, TransactionsProviderExt, TrieWriter,
+    TransactionVariant, TransactionsProvider, TransactionsProviderExt, TrieWriter, TrieWriterV2,
 };
 use alloy_consensus::{
     transaction::{SignerRecoverable, TransactionMeta},
@@ -60,8 +60,9 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
+    nested_trie::{NodeEntry, StoredNode},
     prefix_set::{PrefixSet, PrefixSetMut, TriePrefixSets},
-    updates::{StorageTrieUpdates, TrieUpdates},
+    updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesV2},
     HashedPostStateSorted, Nibbles, StateRoot, StoredNibbles,
 };
 use reth_trie_db::{DatabaseStateRoot, DatabaseStorageTrieCursor};
@@ -158,7 +159,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
     /// State provider for latest state
     pub fn latest<'a>(&'a self) -> Box<dyn StateProvider + 'a> {
         trace!(target: "providers::db", "Returning latest state provider");
-        Box::new(LatestStateProviderRef::new(self, None))
+        Box::new(LatestStateProviderRef::new(self))
     }
 
     /// Storage provider for state at that given block hash
@@ -171,7 +172,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
         if block_number == self.best_block_number().unwrap_or_default() &&
             block_number == self.last_block_number().unwrap_or_default()
         {
-            return Ok(Box::new(LatestStateProviderRef::new(self, None)))
+            return Ok(Box::new(LatestStateProviderRef::new(self)))
         }
 
         // +1 as the changeset that we want is the one that was applied after this block.
@@ -372,10 +373,9 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
     fn try_into_history_at_block(
         self,
         mut block_number: BlockNumber,
-        cache: Option<PersistBlockCache>,
     ) -> ProviderResult<StateProviderBox> {
         if block_number == self.best_block_number().unwrap_or_default() {
-            return Ok(Box::new(LatestStateProvider::new(self, cache)))
+            return Ok(Box::new(LatestStateProvider::new(self)))
         }
 
         // +1 as the changeset that we want is the one that was applied after this block.
@@ -2290,6 +2290,58 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             start_block_number,
             Vec::new(),
         ))
+    }
+}
+
+impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvider<TX, N> {
+    fn write(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
+        let mut num_updated = 0;
+        let tx = self.tx_ref();
+        let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
+        let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
+        for path in &input.removed_nodes {
+            if account_trie_cursor.seek_exact(path.clone().into())?.is_some() {
+                account_trie_cursor.delete_current()?;
+            }
+        }
+        for (path, node) in &input.account_nodes {
+            account_trie_cursor
+                .upsert(path.clone().into(), &StoredNode::from(NodeEntry::new(path, node)))?;
+            num_updated += 1;
+        }
+
+        for (hashed_address, storage_trie_update) in &input.storage_tries {
+            if storage_trie_update.is_deleted {
+                // self-destruct
+                if storage_trie_cursor.seek_exact(*hashed_address)?.is_some() {
+                    storage_trie_cursor.delete_current_duplicates()?;
+                }
+            } else {
+                for path in &storage_trie_update.removed_nodes {
+                    if let Some(entry) = storage_trie_cursor
+                        .seek_by_key_subkey(*hashed_address, path.clone().into())?
+                    {
+                        if NodeEntry::from(entry).path == path.clone() {
+                            storage_trie_cursor.delete_current()?;
+                        }
+                    }
+                }
+                for (path, node) in &storage_trie_update.storage_nodes {
+                    if let Some(entry) = storage_trie_cursor
+                        .seek_by_key_subkey(*hashed_address, path.clone().into())?
+                    {
+                        if NodeEntry::from(entry).path == path.clone() {
+                            storage_trie_cursor.delete_current()?;
+                        }
+                    }
+                    storage_trie_cursor
+                        .upsert(*hashed_address, &StoredNode::from(NodeEntry::new(path, node)))?;
+                    num_updated += 1;
+                }
+            }
+        }
+
+        Ok(num_updated)
     }
 }
 

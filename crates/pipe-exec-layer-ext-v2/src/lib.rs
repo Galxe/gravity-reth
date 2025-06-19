@@ -14,6 +14,7 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     Address, TxHash, B256, U256,
 };
+use gravity_storage::GravityStorage;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
@@ -28,22 +29,28 @@ use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
 };
-use reth_revm::db::WrapDatabaseRef;
-use revm::state::AccountInfo;
+use reth_provider::{
+    OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE, STATE_PROVIDER_OPTS,
+};
 use std::{
     any::Any,
     collections::BTreeMap,
     sync::{Arc, LazyLock, OnceLock},
     time::Instant,
 };
-
-use gravity_storage::GravityStorage;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot, Mutex,
 };
 
+use once_cell::sync::Lazy;
+use reth_revm::state::AccountInfo;
+use reth_trie::{updates::TrieUpdatesV2, HashedPostState, KeccakKeyHasher};
 use tracing::*;
+
+static COMPATIBLE_TRIE_OUTPUT: Lazy<bool> = Lazy::new(|| {
+    std::env::var("COMPATIBLE_TRIE_OUTPUT").ok().and_then(|v| v.parse().ok()).unwrap_or(false)
+});
 
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutedBlockMeta {
@@ -154,6 +161,7 @@ struct Core<Storage: GravityStorage> {
     seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
     make_canonical_barrier: Channel<u64 /* block number */, Instant>,
     discard_txs_tx: UnboundedSender<Vec<TxHash>>,
+    cache: PersistBlockCache,
     metrics: PipeExecLayerMetrics,
 }
 
@@ -213,7 +221,12 @@ impl<Storage: GravityStorage> Core<Storage> {
         let start_time = Instant::now();
         let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info } =
             self.execute_ordered_block(block, &parent_block_header);
-        self.storage.insert_bundle_state(block_number, &execution_output.state);
+        let write_start = Instant::now();
+        let change_set = execution_output.state.to_plain_state(OriginalValuesKnown::No);
+        self.cache.write_state_changes(block_number, change_set);
+        let hashed_state =
+            HashedPostState::from_bundle_state::<KeccakKeyHasher>(&execution_output.state.state);
+        self.metrics.cache_accout_state.record(write_start.elapsed());
         let elapsed = start_time.elapsed();
         info!(target: "PipeExecService.process",
             block_number=?block_number,
@@ -234,8 +247,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
-        let (state_root, hashed_state, trie_updates) =
-            self.storage.state_root_with_updates(block_number).unwrap();
+        let (state_root, trie_updates, compatible_trie_pudates) =
+            self.storage.state_root(&hashed_state, *COMPATIBLE_TRIE_OUTPUT).unwrap();
+        let write_start = Instant::now();
+        self.cache.write_trie_updates(&trie_updates, block_number);
+        self.metrics.cache_trie_state.record(write_start.elapsed());
         let elapsed = start_time.elapsed();
         self.metrics.merklize_duration.record(elapsed);
         self.merklize_barrier.notify(block_number, ()).unwrap();
@@ -290,13 +306,24 @@ impl<Storage: GravityStorage> Core<Storage> {
         let prev_finish_commit_time =
             self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
-        self.make_canonical(ExecutedBlockWithTrieUpdates::new(
-            Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
-            Arc::new(execution_outcome),
-            hashed_state,
-            ExecutedTrieUpdates::Present(trie_updates),
-        ))
-        .await;
+        let make_canonical = if let Some(compatible_trie_updates) = compatible_trie_pudates {
+            self.make_canonical(ExecutedBlockWithTrieUpdates::new(
+                Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
+                Arc::new(execution_outcome),
+                Arc::new(hashed_state),
+                ExecutedTrieUpdates::Present(Arc::new(compatible_trie_updates)),
+                Arc::new(trie_updates),
+            ))
+        } else {
+            self.make_canonical(ExecutedBlockWithTrieUpdates::new(
+                Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
+                Arc::new(execution_outcome),
+                Default::default(),
+                ExecutedTrieUpdates::empty(),
+                Arc::new(trie_updates),
+            ))
+        };
+        make_canonical.await;
         self.storage.update_canonical(block_number, block_hash);
         let elapsed = start_time.elapsed();
         info!(target: "PipeExecService.process",
@@ -409,9 +436,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let block_id = block.id();
         let parent_id = block.parent_id();
         let block_number = block.number();
-
-        let (parent_id_, state) = self.storage.get_state_view(block_number - 1).unwrap();
-        assert_eq!(parent_id, parent_id_);
+        let state = self.storage.get_state_view(STATE_PROVIDER_OPTS.clone()).unwrap();
 
         let (block, txs_info) = match block {
             ReceivedBlock::OrderedBlock(ordered_block) => {
@@ -712,6 +737,7 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
             seal_barrier: Channel::new_with_states([(latest_block_number, latest_block_hash)]),
             make_canonical_barrier: Channel::new_with_states([(latest_block_number, start_time)]),
             discard_txs_tx,
+            cache: PERSIST_BLOCK_CACHE.clone(),
             metrics: PipeExecLayerMetrics::default(),
         }),
         ordered_block_rx,

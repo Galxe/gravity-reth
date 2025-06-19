@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 
-use alloy_primitives::{map::HashSet, B256};
+use alloy_primitives::B256;
 use alloy_rlp::encode_fixed_size;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
@@ -8,23 +8,26 @@ use reth_db_api::{
     transaction::DbTx,
 };
 use reth_provider::{
-    providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, ProviderError,
-    StateCommitmentProvider,
+    providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory,
+    PersistBlockCache, ProviderResult, StateCommitmentProvider,
 };
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
-    nested_trie::{Node, NodeEntry, Trie, TrieOutput, TrieReader},
-    HashedPostState, Nibbles, StoredNibbles, StoredNibblesSubKey, TrieInputV2,
+    nested_trie::{CompatibleTrieOutput, Node, NodeEntry, Trie, TrieOutput, TrieReader},
+    updates::StorageTrieUpdates,
+    HashedPostState, Nibbles, StorageTrieUpdatesV2, StoredNibbles, StoredNibblesSubKey,
 };
+use reth_trie_common::updates::{TrieUpdates, TrieUpdatesV2};
 
 struct StorageTrieReader<C> {
     hashed_address: B256,
     cursor: C,
+    cache: Option<PersistBlockCache>,
 }
 
 impl<C> StorageTrieReader<C> {
-    fn new(cursor: C, hashed_address: B256) -> Self {
-        Self { cursor, hashed_address }
+    fn new(cursor: C, hashed_address: B256, cache: Option<PersistBlockCache>) -> Self {
+        Self { cursor, hashed_address, cache }
     }
 }
 
@@ -33,6 +36,12 @@ where
     C: DbCursorRO<tables::StoragesTrieV2> + DbDupCursorRO<tables::StoragesTrieV2> + Send + Sync,
 {
     fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError> {
+        if let Some(cache) = &self.cache {
+            let value = cache.trie_storage(&self.hashed_address, &path);
+            if value.is_some() {
+                return Ok(value);
+            }
+        }
         Ok(self
             .cursor
             .seek_by_key_subkey(self.hashed_address, StoredNibblesSubKey(path.clone()))?
@@ -42,13 +51,19 @@ where
     }
 }
 
-struct AccountTrieReader<C>(C);
+struct AccountTrieReader<C>(C, Option<PersistBlockCache>);
 
 impl<C> TrieReader for AccountTrieReader<C>
 where
     C: DbCursorRO<tables::AccountsTrieV2> + Send + Sync,
 {
     fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError> {
+        if let Some(cache) = &self.1 {
+            let value = cache.trie_account(path);
+            if value.is_some() {
+                return Ok(value);
+            }
+        }
         Ok(self
             .0
             .seek_exact(StoredNibbles(path.clone()))?
@@ -60,11 +75,12 @@ where
 pub struct NestedStateRoot<Factory> {
     /// Consistent view of the database.
     view: ConsistentDbView<Factory>,
+    cache: Option<PersistBlockCache>,
 }
 
 impl<Factory> NestedStateRoot<Factory> {
-    pub fn new(view: ConsistentDbView<Factory>) -> Self {
-        Self { view }
+    pub fn new(view: ConsistentDbView<Factory>, cache: Option<PersistBlockCache>) -> Self {
+        Self { view, cache }
     }
 }
 
@@ -79,26 +95,30 @@ where
 {
     pub fn calculate(
         &self,
-        hashed_state: HashedPostState,
-    ) -> Result<(B256, TrieInputV2), ProviderError> {
-        let mut trie_input = TrieInputV2::default();
+        hashed_state: &HashedPostState,
+        compatible: bool,
+    ) -> ProviderResult<(B256, TrieUpdatesV2, Option<TrieUpdates>)> {
+        let mut trie_update = TrieUpdatesV2::default();
+        let mut compatible_trie_update = compatible.then_some(TrieUpdates::default());
         let mut removed_account_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let (tx, rx) = mpsc::channel();
         let mut num_task = 0;
-        for (hashed_address, account) in hashed_state.accounts.clone() {
+        let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
+        for (hashed_address, account) in hashed_accounts.clone() {
             if let Some(account) = account {
                 let view = self.view.clone();
                 let tx = tx.clone();
-                let storage = hashed_state.storages.get(&hashed_address).cloned();
+                let storage = hashed_storages.get(&hashed_address).cloned();
+                let cache = self.cache.clone();
                 num_task += 1;
                 // calculate storage root in parallel
                 rayon::spawn_fifo(move || {
-                    let result = (|| -> Result<(B256, Vec<u8>, TrieOutput), ProviderError> {
+                    let result = (|| -> ProviderResult<(B256, Vec<u8>, (TrieOutput, Option<CompatibleTrieOutput>))> {
                         let provider_ro = view.provider_ro()?;
                         let cursor =
                             provider_ro.tx_ref().cursor_dup_read::<tables::StoragesTrieV2>()?;
-                        let trie_reader = StorageTrieReader::new(cursor, hashed_address);
-                        let mut storage_trie = Trie::new(trie_reader, false)?;
+                        let trie_reader = StorageTrieReader::new(cursor, hashed_address, cache);
+                        let mut storage_trie = Trie::new(trie_reader, false, compatible)?;
                         let mut delete_slots = vec![];
                         if let Some(storage) = storage {
                             for (hashed_slot, value) in storage.storage {
@@ -125,25 +145,46 @@ where
                 let nibbles = Nibbles::unpack(hashed_address);
                 let index = nibbles[0] as usize;
                 removed_account_nodes[index].push((nibbles.clone(), None));
-                trie_input.removed_account_nodes.insert(nibbles, Some(hashed_address));
+                trie_update.storage_tries.insert(hashed_address, StorageTrieUpdatesV2::deleted());
+                if let Some(compatible) = &mut compatible_trie_update {
+                    compatible.storage_tries.insert(hashed_address, StorageTrieUpdates::deleted());
+                }
             }
         }
-        trie_input.state = hashed_state;
         let provider_ro = self.view.provider_ro()?;
         // Paralle update account trie. Split updated account into 16 groups.
         let mut update_account_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let create_reader = || {
             let cursor = provider_ro.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
-            Ok(AccountTrieReader(cursor))
+            Ok(AccountTrieReader(cursor, self.cache.clone()))
         };
         for _ in 0..num_task {
-            let (hashed_address, rlp_account, trie_output) =
+            let (hashed_address, rlp_account, (trie_output, compatible_output)) =
                 rx.recv().expect("Failed to receive storage trie")?;
-            if !trie_output.removed_nodes.is_empty() {
-                trie_input.removed_storage_nodes.insert(hashed_address, trie_output.removed_nodes);
-            }
-            if !trie_output.update_nodes.is_empty() {
-                trie_input.update_storage_nodes.insert(hashed_address, trie_output.update_nodes);
+            assert!(trie_update
+                .storage_tries
+                .insert(
+                    hashed_address,
+                    StorageTrieUpdatesV2 {
+                        is_deleted: false,
+                        storage_nodes: trie_output.update_nodes,
+                        removed_nodes: trie_output.removed_nodes,
+                    }
+                )
+                .is_none());
+            if let Some(compatible) = &mut compatible_trie_update {
+                let compatible_output = compatible_output.unwrap();
+                assert!(compatible
+                    .storage_tries
+                    .insert(
+                        hashed_address,
+                        StorageTrieUpdates {
+                            is_deleted: false,
+                            storage_nodes: compatible_output.update_nodes,
+                            removed_nodes: compatible_output.removed_nodes,
+                        }
+                    )
+                    .is_none());
             }
             // Each updated path in a group has the same first nibble
             let nibbles = Nibbles::unpack(hashed_address);
@@ -151,18 +192,22 @@ where
             update_account_nodes[index].push((nibbles, Some(Node::ValueNode(rlp_account))));
         }
         let cursor = provider_ro.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
-        let mut account_trie = Trie::new(AccountTrieReader(cursor), true)?;
+        let mut account_trie =
+            Trie::new(AccountTrieReader(cursor, self.cache.clone()), true, compatible)?;
         account_trie.parallel_update(update_account_nodes, create_reader)?;
         account_trie.parallel_update(removed_account_nodes, create_reader)?;
 
         let root_hash = account_trie.hash();
-        let TrieOutput { removed_nodes, update_nodes } = account_trie.take_output();
-        for nibbles in removed_nodes {
-            trie_input.removed_account_nodes.entry(nibbles).or_insert(None);
+        let (output, compatible_output) = account_trie.take_output();
+        trie_update.account_nodes = output.update_nodes;
+        trie_update.removed_nodes = output.removed_nodes;
+        if let Some(compatible) = &mut compatible_trie_update {
+            let compatible_output = compatible_output.unwrap();
+            compatible.account_nodes = compatible_output.update_nodes;
+            compatible.removed_nodes = compatible_output.removed_nodes;
         }
-        trie_input.update_account_nodes = update_nodes;
 
-        Ok((root_hash, trie_input))
+        Ok((root_hash, trie_update, compatible_trie_update))
     }
 }
 
@@ -177,7 +222,7 @@ mod tests {
     use alloy_primitives::{keccak256, map::HashMap, Address, U256};
     use alloy_rlp::encode_fixed_size;
     use rand::Rng;
-    use reth_primitives::Account;
+    use reth_primitives_traits::Account;
     use reth_provider::{test_utils::create_test_provider_factory, TrieWriterV2};
     use reth_trie::{
         nested_trie::{Node, NodeEntry, StoredNode, Trie, TrieReader},
@@ -218,47 +263,39 @@ mod tests {
     }
 
     impl TrieWriterV2 for InmemoryTrieDB {
-        fn write(&self, input: TrieInputV2) -> Result<usize, DatabaseError> {
+        fn write(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
             let mut account_trie = self.account_trie.lock().unwrap();
             let mut storage_trie = self.storage_trie.lock().unwrap();
-            let TrieInputV2 {
-                state: _state,
-                update_account_nodes,
-                update_storage_nodes,
-                removed_account_nodes,
-                removed_storage_nodes,
-            } = input;
             let mut num_update = 0;
 
-            for (path, hashed_address) in removed_account_nodes {
-                if let Some(hashed_address) = hashed_address {
-                    if let Some(destruct_account) = storage_trie.remove(&hashed_address) {
-                        num_update += destruct_account.len();
-                    }
-                }
-                if account_trie.remove(&path).is_some() {
+            for path in &input.removed_nodes {
+                if account_trie.remove(path).is_some() {
                     num_update += 1;
                 }
             }
-            for (path, node) in update_account_nodes {
+            for (path, node) in input.account_nodes.clone() {
                 account_trie.insert(path.clone(), StoredNode::from(NodeEntry { path, node }));
                 num_update += 1;
             }
 
-            for (hashed_address, pathes) in removed_storage_nodes {
-                if let Some(storage) = storage_trie.get_mut(&hashed_address) {
-                    for path in pathes {
-                        if storage.remove(&path).is_some() {
-                            num_update += 1;
+            for (hashed_address, storage_trie_update) in &input.storage_tries {
+                if storage_trie_update.is_deleted {
+                    if let Some(destruct_account) = storage_trie.remove(hashed_address) {
+                        num_update += destruct_account.len();
+                    }
+                } else {
+                    if let Some(storage) = storage_trie.get_mut(hashed_address) {
+                        for path in &storage_trie_update.removed_nodes {
+                            if storage.remove(path).is_some() {
+                                num_update += 1;
+                            }
                         }
                     }
-                }
-            }
-            for (hashed_address, update) in update_storage_nodes {
-                let storage = storage_trie.entry(hashed_address).or_default();
-                for (path, node) in update {
-                    storage.insert(path.clone(), StoredNode::from(NodeEntry { path, node }));
-                    num_update += 1;
+                    let storage = storage_trie.entry(*hashed_address).or_default();
+                    for (path, node) in storage_trie_update.storage_nodes.clone() {
+                        storage.insert(path.clone(), StoredNode::from(NodeEntry { path, node }));
+                        num_update += 1;
+                    }
                 }
             }
 
@@ -270,16 +307,17 @@ mod tests {
         state: HashMap<Address, (Account, HashMap<B256, U256>)>,
         db: Arc<InmemoryTrieDB>,
         is_insert: bool,
-    ) -> (B256, TrieInputV2) {
+    ) -> (B256, TrieUpdatesV2) {
         let (tx, rx) = mpsc::channel();
         let num_task = state.len();
+        let is_compatible = false;
         for (address, (account, storage)) in state {
             let db = db.clone();
             let tx = tx.clone();
             rayon::spawn_fifo(move || {
                 let hashed_address = keccak256(address);
                 let storage_reader = InmemoryStorageTrieReader(db, hashed_address);
-                let mut storage_trie = Trie::new(storage_reader, false).unwrap();
+                let mut storage_trie = Trie::new(storage_reader, false, is_compatible).unwrap();
                 for (hashed_slot, value) in
                     storage.into_iter().map(|(k, v)| (keccak256(k), encode_fixed_size(&v)))
                 {
@@ -302,40 +340,40 @@ mod tests {
         }
 
         // paralle insert
-        let mut trie_input = TrieInputV2::default();
+        let mut trie_updates = TrieUpdatesV2::default();
         let mut batches: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let create_reader = || Ok(InmemoryAccountTrieReader(db.clone()));
         for _ in 0..num_task {
-            let (hashed_address, rlp_account, trie_output) =
+            let (hashed_address, rlp_account, (trie_output, compatible_trie_output)) =
                 rx.recv().expect("Failed to receive storage trie");
-            if !trie_output.removed_nodes.is_empty() {
-                trie_input.removed_storage_nodes.insert(hashed_address, trie_output.removed_nodes);
-            }
-            if !trie_output.update_nodes.is_empty() {
-                trie_input.update_storage_nodes.insert(hashed_address, trie_output.update_nodes);
-            }
+            let storage_trie_update = if is_insert {
+                StorageTrieUpdatesV2 {
+                    is_deleted: false,
+                    storage_nodes: trie_output.update_nodes,
+                    removed_nodes: trie_output.removed_nodes,
+                }
+            } else {
+                StorageTrieUpdatesV2::deleted()
+            };
             let nibbles = Nibbles::unpack(hashed_address);
             let index = nibbles[0] as usize;
             batches[index].push((nibbles, is_insert.then_some(Node::ValueNode(rlp_account))));
-            if !is_insert {
-                trie_input
-                    .removed_account_nodes
-                    .insert(Nibbles::unpack(hashed_address), Some(hashed_address));
-            }
+            assert!(trie_updates
+                .storage_tries
+                .insert(hashed_address, storage_trie_update)
+                .is_none());
         }
         let account_reader = InmemoryAccountTrieReader(db.clone());
-        let mut account_trie = Trie::new(account_reader, true).unwrap();
+        let mut account_trie = Trie::new(account_reader, true, is_compatible).unwrap();
 
         // parallel update
         account_trie.parallel_update(batches, create_reader).unwrap();
 
         let root_hash = account_trie.hash();
-        let TrieOutput { removed_nodes, update_nodes } = account_trie.take_output();
-        for nibbles in removed_nodes {
-            trie_input.removed_account_nodes.entry(nibbles).or_insert(None);
-        }
-        trie_input.update_account_nodes = update_nodes;
-        (root_hash, trie_input)
+        let (output, compatible_output) = account_trie.take_output();
+        trie_updates.account_nodes = output.update_nodes;
+        trie_updates.removed_nodes = output.removed_nodes;
+        (root_hash, trie_updates)
     }
 
     fn random_state() -> HashMap<Address, (Account, HashMap<B256, U256>)> {
@@ -390,11 +428,11 @@ mod tests {
         assert_eq!(state_root1, test_utils::state_root(state1.clone()));
 
         // write into db
-        let _ = db.write(trie_input1).unwrap();
+        let _ = db.write(&trie_input1).unwrap();
         let state2 = random_state();
         let (state_root2, trie_input2) = calculate(state2.clone(), db.clone(), true);
         let state_merged = merge_state(state1.clone(), state2.clone());
-        let _ = db.write(trie_input2).unwrap();
+        let _ = db.write(&trie_input2).unwrap();
 
         // compare state root
         assert_eq!(state_root2, test_utils::state_root(state_merged.clone()));
@@ -406,11 +444,11 @@ mod tests {
         if state_merged.len() == state1.len() + state2.len() {
             let (delete_root1, delete_input1) = calculate(state2.clone(), db.clone(), false);
             assert_eq!(delete_root1, state_root1);
-            let _ = db.write(delete_input1.clone()).unwrap();
+            let _ = db.write(&delete_input1).unwrap();
             let (delete_root2, delete_input2) = calculate(state1.clone(), db.clone(), false);
             // has deleted all data, so the state root is EMPTY_ROOT_HASH
             assert_eq!(delete_root2, EMPTY_ROOT_HASH);
-            let _ = db.write(delete_input2.clone()).unwrap();
+            let _ = db.write(&delete_input2).unwrap();
             assert!(db.account_trie.lock().unwrap().is_empty());
             assert!(db.storage_trie.lock().unwrap().is_empty());
         }
@@ -434,7 +472,7 @@ mod tests {
         }
 
         let (parallel_root_hash, ..) =
-            NestedStateRoot::new(consistent_view).calculate(hashed_state).unwrap();
+            NestedStateRoot::new(consistent_view, None).calculate(&hashed_state, true).unwrap();
         assert_eq!(parallel_root_hash, test_utils::state_root(state))
     }
 }

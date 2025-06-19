@@ -23,12 +23,16 @@ use alloy_eips::{
     eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip4844::env_settings::EnvKzgSettings,
     eip7840::BlobParams,
 };
+use gravity_storage::block_view_storage::BlockViewProvider;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_primitives_traits::{
     constants::MAX_TX_GAS_LIMIT_OSAKA, transaction::error::InvalidTransactionError, Block,
     GotExpected, SealedBlock,
 };
-use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_revm::{database::StateProviderDatabase, DatabaseRef};
+use reth_storage_api::{
+    StateProvider, StateProviderFactory, StateProviderOptions, PERSIST_BLOCK_CACHE,
+};
 use reth_tasks::TaskSpawner;
 use std::{
     marker::PhantomData,
@@ -89,7 +93,7 @@ where
         &self,
         origin: TransactionOrigin,
         transaction: Tx,
-        state: &mut Option<Box<dyn StateProvider>>,
+        state: &mut Option<BlockViewProvider>,
     ) -> TransactionValidationOutcome<Tx> {
         self.inner.validate_one_with_provider(origin, transaction, state)
     }
@@ -231,17 +235,24 @@ where
     fn validate_one_with_provider(
         &self,
         origin: TransactionOrigin,
-        transaction: Tx,
-        maybe_state: &mut Option<Box<dyn StateProvider>>,
+        mut transaction: Tx,
+        maybe_state: &mut Option<BlockViewProvider>,
     ) -> TransactionValidationOutcome<Tx> {
         match self.validate_one_no_state(origin, transaction) {
             Ok(transaction) => {
                 // stateless checks passed, pass transaction down stateful validation pipeline
                 // If we don't have a state provider yet, fetch the latest state
                 if maybe_state.is_none() {
-                    match self.client.latest() {
-                        Ok(new_state) => {
-                            *maybe_state = Some(new_state);
+                    match self
+                        .client
+                        .latest_with_opts(StateProviderOptions::default().with_raw_db())
+                    {
+                        Ok(state) => {
+                            let state_with_cache = BlockViewProvider::new(
+                                StateProviderDatabase::new(state),
+                                Some(PERSIST_BLOCK_CACHE.clone()),
+                            );
+                            *maybe_state = Some(state_with_cache);
                         }
                         Err(err) => {
                             return TransactionValidationOutcome::Error(
@@ -252,7 +263,7 @@ where
                     }
                 }
 
-                let state = maybe_state.as_deref().expect("provider is set");
+                let state = maybe_state.as_ref().expect("provider is set");
 
                 self.validate_one_against_state(origin, transaction, state)
             }
@@ -474,17 +485,14 @@ where
     }
 
     /// Validates a single transaction using given state provider.
-    fn validate_one_against_state<P>(
+    fn validate_one_against_state(
         &self,
         origin: TransactionOrigin,
         mut transaction: Tx,
-        state: P,
-    ) -> TransactionValidationOutcome<Tx>
-    where
-        P: StateProvider,
-    {
+        state: &BlockViewProvider,
+    ) -> TransactionValidationOutcome<Tx> {
         // Use provider to get account info
-        let account = match state.basic_account(transaction.sender_ref()) {
+        let account = match state.basic_ref(transaction.sender()) {
             Ok(account) => account.unwrap_or_default(),
             Err(err) => {
                 return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
@@ -497,10 +505,10 @@ where
         //
         // Any other case means that the account is not an EOA, and should not be able to send
         // transactions.
-        if let Some(code_hash) = &account.bytecode_hash {
+        if !account.is_empty_code_hash() {
             let is_eip7702 = if self.fork_tracker.is_prague_activated() {
-                match state.bytecode_by_hash(code_hash) {
-                    Ok(bytecode) => bytecode.unwrap_or_default().is_eip7702(),
+                match state.code_by_hash_ref(account.code_hash) {
+                    Ok(bytecode) => bytecode.is_eip7702(),
                     Err(err) => {
                         return TransactionValidationOutcome::Error(
                             *transaction.hash(),
@@ -619,7 +627,7 @@ where
         TransactionValidationOutcome::Valid {
             balance: account.balance,
             state_nonce: account.nonce,
-            bytecode_hash: account.bytecode_hash,
+            bytecode_hash: Some(account.code_hash),
             transaction: ValidTransaction::new(transaction, maybe_blob_sidecar),
             // by this point assume all external transactions should be propagated
             propagate: match origin {

@@ -143,7 +143,7 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
         .notify(|err, _| warn!(target: "reth::cli", "Error requesting body: {err}. Retrying..."))
         .await?;
 
-        let state_provider = LatestStateProviderRef::new(&provider, None);
+        let state_provider = LatestStateProviderRef::new(&provider);
         let db = StateProviderDatabase::new(&state_provider);
 
         let evm_config = EthEvmConfig::ethereum(provider_factory.chain_spec());

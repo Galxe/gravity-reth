@@ -1,9 +1,33 @@
-use crate::{BranchNodeCompact, HashBuilder, Nibbles};
+use crate::{nested_trie::Node, BranchNodeCompact, HashBuilder, Nibbles};
 use alloc::vec::Vec;
 use alloy_primitives::{
     map::{B256Map, B256Set, HashMap, HashSet},
     B256,
 };
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct TrieUpdatesV2 {
+    pub account_nodes: HashMap<Nibbles, Node>,
+    pub removed_nodes: HashSet<Nibbles>,
+    pub storage_tries: B256Map<StorageTrieUpdatesV2>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct StorageTrieUpdatesV2 {
+    pub is_deleted: bool,
+    pub storage_nodes: HashMap<Nibbles, Node>,
+    pub removed_nodes: HashSet<Nibbles>,
+}
+
+impl StorageTrieUpdatesV2 {
+    pub fn deleted() -> Self {
+        Self {
+            is_deleted: true,
+            storage_nodes: HashMap::default(),
+            removed_nodes: HashSet::default(),
+        }
+    }
+}
 
 /// The aggregation of trie updates.
 #[derive(PartialEq, Eq, Clone, Default, Debug)]

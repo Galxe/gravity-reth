@@ -415,7 +415,7 @@ where
         let db: Box<dyn StateProvider> = if let Some(factory) = factory {
             Box::new(factory.latest(STATE_PROVIDER_OPTS.clone())?)
         } else {
-            Box::new(LatestStateProviderRef::new(provider, None))
+            Box::new(LatestStateProviderRef::new(provider))
         };
         let mut executor = self.evm_config.parallel_executor(StateProviderDatabase(db));
 

@@ -131,6 +131,7 @@ where
                                     ..Default::default()
                                 },
                                 trie: ExecutedTrieUpdates::empty(),
+                                triev2: Default::default(),
                             });
                         }
                     }

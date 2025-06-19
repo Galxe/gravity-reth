@@ -143,9 +143,7 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
         opts: StateProviderOptions,
     ) -> ProviderResult<MemoryOverlayStateProvider<N::Primitives>> {
         let anchor_hash = state.anchor().hash;
-        let cache = self.canonical_in_memory_state.persist_block_cache();
-        let latest_historical =
-            self.database.history_by_block_hash(anchor_hash, opts.with_cache(cache))?;
+        let latest_historical = self.database.history_by_block_hash(anchor_hash, opts)?;
         Ok(state.state_provider(latest_historical))
     }
 
@@ -513,8 +511,11 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     /// Storage provider for latest block
     fn latest_with_opts(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting latest block state provider");
-        // use latest state provider if the head state exists
-        if let Some(state) = self.canonical_in_memory_state.head_state() {
+        if opts.raw_db {
+            trace!(target: "providers::blockchain", "Using raw database for latest state provider");
+            self.database.latest(opts)
+        } else if let Some(state) = self.canonical_in_memory_state.head_state() {
+            // use latest state provider if the head state exists
             trace!(target: "providers::blockchain", "Using head state for latest state provider");
             Ok(self.block_state_provider(&state, opts)?.boxed())
         } else {
