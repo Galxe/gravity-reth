@@ -4,6 +4,7 @@ use crate::{
     parallel_execute::ParallelExecutor, BlockExecutionError, ConfigureEvm, EvmEnvFor,
     ParallelDatabase,
 };
+use alloc::boxed::Box;
 use reth_primitives_traits::{BlockTy, HeaderTy, SealedBlock, SealedHeader};
 
 use alloc::boxed::Box;

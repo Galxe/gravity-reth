@@ -10,7 +10,8 @@ use reth_evm::{
         BlockExecutionError, BlockExecutor, BlockExecutorFactory, BlockExecutorFor, CommitChanges,
     },
     eth::{EthBlockExecutionCtx, EthEvmContext},
-    ConfigureEvm, Database, EthEvm, EthEvmFactory, Evm, EvmEnvFor, EvmFactory,
+    parallel_execute::ParallelExecutor,
+    ConfigureEvm, Database, EthEvm, EthEvmFactory, Evm, EvmEnvFor, EvmFactory, ParallelDatabase,
 };
 use reth_execution_types::{BlockExecutionResult, ExecutionOutcome};
 use reth_primitives_traits::{BlockTy, SealedBlock, SealedHeader};
@@ -166,5 +167,13 @@ impl ConfigureEvm for MockEvmConfig {
         attributes: Self::NextBlockEnvCtx,
     ) -> reth_evm::ExecutionCtxFor<'_, Self> {
         self.inner.context_for_next_block(parent, attributes)
+    }
+
+    fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+    ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
+    {
+        self.inner.parallel_executor(db)
     }
 }
