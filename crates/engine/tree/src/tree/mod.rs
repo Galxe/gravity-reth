@@ -3636,7 +3636,7 @@ mod tests {
 
     #[test]
     fn test_tree_state_normal_descendant() {
-        let mut tree_state = TreeState::new(BlockNumHash::default());
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
         let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
 
         tree_state.insert_executed(blocks[0].clone());

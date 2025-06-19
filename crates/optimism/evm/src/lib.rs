@@ -213,6 +213,18 @@ where
             extra_data: attributes.extra_data,
         }
     }
+
+    fn parallel_executor<'a, DB: reth_evm::ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+    ) -> Box<
+        dyn reth_evm::parallel_execute::ParallelExecutor<
+                Primitives = Self::Primitives,
+                Error = reth_execution_errors::BlockExecutionError,
+            > + 'a,
+    > {
+        todo!("Parallel execution is not yet implemented for OP EVM")
+    }
 }
 #[cfg(test)]
 mod tests {
