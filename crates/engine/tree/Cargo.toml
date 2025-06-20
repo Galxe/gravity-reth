@@ -34,6 +34,7 @@ reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
 reth-trie.workspace = true
 reth-pipe-exec-layer-ext-v2.workspace = true
+gravity-primitives.workspace = true
 
 # alloy
 alloy-evm.workspace = true

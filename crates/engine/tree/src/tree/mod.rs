@@ -499,6 +499,14 @@ where
     ///
     /// This will block the current thread and process incoming messages.
     pub fn run(mut self) {
+        if gravity_primitives::CONFIG.disable_pipe_execution {
+            self.run_inner();
+        } else {
+            self.pipe_run_inner();
+        }
+    }
+
+    fn pipe_run_inner(mut self) {
         // Wait for the pipe exec layer to be initialized
         std::thread::sleep(std::time::Duration::from_secs(3));
         let mut pipe_event_rx =
@@ -509,6 +517,32 @@ where
                 Ok(None) => {}
                 Err(RecvError) => {
                     error!(target: "engine::tree", "Pipe exec layer channel disconnected");
+                    return
+                }
+            }
+
+            if let Err(err) = self.advance_persistence() {
+                error!(target: "engine::tree", %err, "Advancing persistence failed");
+                return
+            }
+        }
+    }
+
+    fn run_inner(mut self) {
+        loop {
+            match self.try_recv_engine_message() {
+                Ok(Some(msg)) => {
+                    debug!(target: "engine::tree", %msg, "received new engine message");
+                    if let Err(fatal) = self.on_engine_message(msg) {
+                        error!(target: "engine::tree", %fatal, "insert block fatal error");
+                        return
+                    }
+                }
+                Ok(None) => {
+                    debug!(target: "engine::tree", "received no engine message for some time, while waiting for persistence task to complete");
+                }
+                Err(_err) => {
+                    error!(target: "engine::tree", "Engine channel disconnected");
                     return
                 }
             }
