@@ -5,6 +5,8 @@ use std::sync::LazyLock;
 /// Configuration options for the Gravity Reth.
 #[derive(Debug)]
 pub struct Config {
+    /// Whether to use pipe execution.
+    pub disable_pipe_execution: bool,
     /// Whether to disable the Grevm executor.
     pub disable_grevm: bool,
     /// Whether to use the storage cache.
@@ -14,8 +16,13 @@ pub struct Config {
 }
 
 /// Global configuration instance, initialized lazily.
-pub static CONFIG: LazyLock<Config> = LazyLock::new(|| Config {
-    disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
-    use_storage_cache: std::env::var("GRETH_USE_STORAGE_CACHE").is_ok(),
-    use_parallel_state_root: std::env::var("GRETH_USE_PARALLEL_STATE_ROOT").is_ok(),
+pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
+    let config = Config {
+        disable_pipe_execution: std::env::var("GRETH_DISABLE_PIPE_EXECUTION").is_ok(),
+        disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
+        use_storage_cache: std::env::var("GRETH_USE_STORAGE_CACHE").is_ok(),
+        use_parallel_state_root: std::env::var("GRETH_USE_PARALLEL_STATE_ROOT").is_ok(),
+    };
+    println!("Gravity Reth config: {:#?}", config);
+    config
 });
