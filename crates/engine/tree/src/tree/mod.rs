@@ -3814,6 +3814,7 @@ mod tests {
                     hashed_state: Arc::new(HashedPostState::default()),
                 },
                 trie: ExecutedTrieUpdates::empty(),
+                triev2: Default::default(),
             });
         }
         test_harness.tree.state.tree_state.set_canonical_head(chain_a.last().unwrap().num_hash());
@@ -3826,6 +3827,7 @@ mod tests {
                     hashed_state: Arc::new(HashedPostState::default()),
                 },
                 trie: ExecutedTrieUpdates::empty(),
+                triev2: Default::default(),
             });
         }
 

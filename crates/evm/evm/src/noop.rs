@@ -7,8 +7,6 @@ use crate::{
 use alloc::boxed::Box;
 use reth_primitives_traits::{BlockTy, HeaderTy, SealedBlock, SealedHeader};
 
-use alloc::boxed::Box;
-
 /// A no-op EVM config that panics on any call. Used as a typesystem hack to satisfy
 /// [`ConfigureEvm`] bounds.
 #[derive(Debug, Clone)]
