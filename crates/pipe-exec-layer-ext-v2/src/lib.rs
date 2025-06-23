@@ -43,14 +43,11 @@ use tokio::sync::{
     oneshot, Mutex,
 };
 
+use gravity_primitives::CONFIG;
 use once_cell::sync::Lazy;
 use reth_revm::state::AccountInfo;
 use reth_trie::{updates::TrieUpdatesV2, HashedPostState, KeccakKeyHasher};
 use tracing::*;
-
-static COMPATIBLE_TRIE_OUTPUT: Lazy<bool> = Lazy::new(|| {
-    std::env::var("COMPATIBLE_TRIE_OUTPUT").ok().and_then(|v| v.parse().ok()).unwrap_or(false)
-});
 
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutedBlockMeta {
@@ -222,8 +219,12 @@ impl<Storage: GravityStorage> Core<Storage> {
         let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info } =
             self.execute_ordered_block(block, &parent_block_header);
         let write_start = Instant::now();
-        let change_set = execution_output.state.to_plain_state(OriginalValuesKnown::No);
-        self.cache.write_state_changes(block_number, change_set);
+        self.cache.write_state_changes(
+            block_number,
+            OriginalValuesKnown::No,
+            &execution_output.state.state,
+            &execution_output.state.contracts,
+        );
         let hashed_state =
             HashedPostState::from_bundle_state::<KeccakKeyHasher>(&execution_output.state.state);
         self.metrics.cache_accout_state.record(write_start.elapsed());
@@ -248,7 +249,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
         let (state_root, trie_updates, compatible_trie_pudates) =
-            self.storage.state_root(&hashed_state, *COMPATIBLE_TRIE_OUTPUT).unwrap();
+            self.storage.state_root(&hashed_state, CONFIG.compatible_trie_output).unwrap();
         let write_start = Instant::now();
         self.cache.write_trie_updates(&trie_updates, block_number);
         self.metrics.cache_trie_state.record(write_start.elapsed());

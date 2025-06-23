@@ -41,6 +41,7 @@ auto_impl.workspace = true
 metrics.workspace = true
 metrics-derive.workspace = true
 once_cell.workspace = true
+rayon.workspace = true
 
 [features]
 default = ["std"]

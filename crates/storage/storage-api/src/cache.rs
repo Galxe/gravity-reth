@@ -1,3 +1,4 @@
+use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_primitives::{Address, B256, U256};
 use core::{
     ops::Deref,
@@ -7,10 +8,11 @@ use dashmap::DashMap;
 use metrics::Gauge;
 use metrics_derive::Metrics;
 use once_cell::sync::Lazy;
+use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use reth_primitives_traits::Account;
 use reth_trie_common::{nested_trie::Node, updates::TrieUpdatesV2, Nibbles};
 use revm_bytecode::Bytecode;
-use revm_database::states::{PlainStorageChangeset, StateChangeset};
+use revm_database::{states::StorageSlot, BundleAccount, OriginalValuesKnown};
 use std::{
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
@@ -242,115 +244,161 @@ impl PersistBlockCache {
         }
     }
 
-    pub fn write_state_changes(&self, block_number: u64, changes: StateChangeset) {
+    pub fn write_state_changes<'a>(
+        &self,
+        block_number: u64,
+        is_value_known: OriginalValuesKnown,
+        state: impl IntoParallelIterator<Item = (&'a Address, &'a BundleAccount)>,
+        contracts: impl IntoParallelIterator<Item = (&'a B256, &'a Bytecode)>,
+    ) {
         self.metrics.merged_block_number.store(block_number, Ordering::Relaxed);
-        // write account to database.
-        for (address, account) in changes.accounts {
-            if let Some(account) = account {
-                self.accounts.insert(address, ValueWithTip::new(account.into(), block_number));
-            } else {
-                self.accounts.remove(&address);
-            }
-        }
 
         // Write bytecode
-        for (hash, bytecode) in changes.contracts {
-            self.contracts.insert(hash, bytecode);
-        }
+        contracts
+            .into_par_iter()
+            .filter(|(b, _)| **b != KECCAK_EMPTY)
+            .map(|(b, code)| (*b, code.clone()))
+            .for_each(|(hash, bytecode)| {
+                self.contracts.insert(hash, bytecode);
+            });
 
-        // Write new storage state and wipe storage if needed.
-        for PlainStorageChangeset { address, wipe_storage, storage } in changes.storage {
-            // Wiping of storage.
-            if wipe_storage {
-                self.storage.remove(&address);
-            }
-            for (slot, value) in storage {
-                if value.is_zero() {
-                    // delete slot
-                    let mut clean = false;
-                    if let Some(storage) = self.storage.get(&address) {
-                        storage.remove(&slot);
-                        clean = storage.is_empty();
-                    }
-                    if clean {
-                        match self.storage.entry(address) {
-                            dashmap::Entry::Occupied(entry) => {
-                                if entry.get().is_empty() {
-                                    entry.remove();
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+        state.into_par_iter().for_each(|(address, account)| {
+            // Append account info if it is changed.
+            let was_destroyed = account.was_destroyed();
+            if is_value_known.is_not_known() || account.is_info_changed() {
+                // write account to database.
+                let info = account.info.clone();
+                if let Some(info) = info {
+                    self.accounts.insert(*address, ValueWithTip::new(info.into(), block_number));
                 } else {
-                    if let Some(storage) = self.storage.get(&address) {
-                        storage.insert(slot, ValueWithTip::new(value, block_number));
+                    self.accounts.remove(address);
+                }
+            }
+
+            if was_destroyed {
+                self.storage.remove(address);
+            }
+            let write_slot = |kv: (U256, StorageSlot)| {
+                let (slot, slot_value) = kv;
+                // If storage was destroyed that means that storage was wiped.
+                // In that case we need to check if present storage value is different then ZERO.
+                let destroyed_and_not_zero = was_destroyed && !slot_value.present_value.is_zero();
+
+                // If account is not destroyed check if original values was changed,
+                // so we can update it.
+                let not_destroyed_and_changed = !was_destroyed && slot_value.is_changed();
+
+                if is_value_known.is_not_known() ||
+                    destroyed_and_not_zero ||
+                    not_destroyed_and_changed
+                {
+                    let value = slot_value.present_value;
+                    if value.is_zero() {
+                        // delete slot
+                        if let Some(storage) = self.storage.get(address) {
+                            storage.remove(&slot);
+                        }
                     } else {
-                        match self.storage.entry(address) {
-                            dashmap::Entry::Occupied(entry) => {
-                                entry.get().insert(slot, ValueWithTip::new(value, block_number));
-                            }
-                            dashmap::Entry::Vacant(entry) => {
-                                let data = DashMap::new();
-                                data.insert(slot, ValueWithTip::new(value, block_number));
-                                entry.insert(data);
+                        if let Some(storage) = self.storage.get(address) {
+                            storage.insert(slot, ValueWithTip::new(value, block_number));
+                        } else {
+                            match self.storage.entry(*address) {
+                                dashmap::Entry::Occupied(entry) => {
+                                    entry
+                                        .get()
+                                        .insert(slot, ValueWithTip::new(value, block_number));
+                                }
+                                dashmap::Entry::Vacant(entry) => {
+                                    let data = DashMap::new();
+                                    data.insert(slot, ValueWithTip::new(value, block_number));
+                                    entry.insert(data);
+                                }
                             }
                         }
                     }
                 }
+            };
+
+            // Append storage changes
+            // Note: Assumption is that revert is going to remove whole plain storage from
+            // database so we can check if plain state was wiped or not.
+            if account.storage.len() > 256 {
+                account.storage.par_iter().map(|(k, v)| (*k, *v)).for_each(write_slot);
+            } else {
+                for kv in account.storage.iter().map(|(k, v)| (*k, *v)) {
+                    write_slot(kv);
+                }
             }
-        }
+        })
     }
 
     pub fn write_trie_updates(&self, input: &TrieUpdatesV2, block_number: u64) {
-        for path in &input.removed_nodes {
+        input.removed_nodes.par_iter().for_each(|path| {
             self.account_trie.remove(path);
-        }
-        for (path, node) in &input.account_nodes {
+        });
+        input.account_nodes.par_iter().for_each(|(path, node)| {
             self.account_trie
                 .insert(path.clone(), ValueWithTip::new(node.clone().reset(), block_number));
-        }
+        });
 
-        for (hashed_address, storage_trie_update) in &input.storage_tries {
+        let write_slot = |data: &DashMap<Nibbles, ValueWithTip<Node>>, kv: (&Nibbles, &Node)| {
+            data.insert(kv.0.clone(), ValueWithTip::new(kv.1.clone().reset(), block_number));
+        };
+        input.storage_tries.par_iter().for_each(|(hashed_address, storage_trie_update)| {
             if storage_trie_update.is_deleted {
                 self.storage_trie.remove(hashed_address);
             } else {
                 if let Some(storage) = self.storage_trie.get(hashed_address) {
-                    for path in &storage_trie_update.removed_nodes {
-                        storage.remove(path);
+                    if storage_trie_update.removed_nodes.len() > 256 {
+                        storage_trie_update.removed_nodes.par_iter().for_each(|path| {
+                            storage.remove(path);
+                        });
+                    } else {
+                        for path in &storage_trie_update.removed_nodes {
+                            storage.remove(path);
+                        }
                     }
                 }
+
                 if let Some(storage) = self.storage_trie.get(hashed_address) {
-                    for (path, node) in &storage_trie_update.storage_nodes {
-                        storage.insert(
-                            path.clone(),
-                            ValueWithTip::new(node.clone().reset(), block_number),
-                        );
+                    if storage_trie_update.storage_nodes.len() > 256 {
+                        storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
+                            write_slot(storage.value(), kv);
+                        });
+                    } else {
+                        for kv in &storage_trie_update.storage_nodes {
+                            write_slot(storage.value(), kv);
+                        }
                     }
                 } else {
                     match self.storage_trie.entry(*hashed_address) {
                         dashmap::Entry::Occupied(entry) => {
-                            let data = entry.get();
-                            for (path, node) in &storage_trie_update.storage_nodes {
-                                data.insert(
-                                    path.clone(),
-                                    ValueWithTip::new(node.clone().reset(), block_number),
-                                );
+                            if storage_trie_update.storage_nodes.len() > 256 {
+                                storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
+                                    write_slot(entry.get(), kv);
+                                });
+                            } else {
+                                for kv in &storage_trie_update.storage_nodes {
+                                    write_slot(entry.get(), kv);
+                                }
                             }
                         }
                         dashmap::Entry::Vacant(entry) => {
                             let data = DashMap::new();
-                            for (path, node) in &storage_trie_update.storage_nodes {
-                                data.insert(
-                                    path.clone(),
-                                    ValueWithTip::new(node.clone().reset(), block_number),
-                                );
+                            if storage_trie_update.storage_nodes.len() > 256 {
+                                storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
+                                    write_slot(&data, kv);
+                                });
+                            } else {
+                                for kv in &storage_trie_update.storage_nodes {
+                                    write_slot(&data, kv);
+                                }
                             }
                             entry.insert(data);
                         }
                     }
                 }
             }
-        }
+        });
     }
 }

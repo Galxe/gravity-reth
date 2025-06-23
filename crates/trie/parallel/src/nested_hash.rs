@@ -98,7 +98,7 @@ where
     ) -> ProviderResult<(B256, TrieUpdatesV2, Option<TrieUpdates>)> {
         let mut trie_update = TrieUpdatesV2::default();
         let mut compatible_trie_update = compatible.then_some(TrieUpdates::default());
-        let mut removed_account_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
+        let mut updated_account_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let (tx, rx) = mpsc::channel();
         let mut num_task = 0;
         let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
@@ -117,27 +117,33 @@ where
                             Ok((hashed_address, alloy_rlp::encode(account), (Default::default(), compatible.then_some(Default::default()))))
                         } else {
                             let provider_ro = view.provider_ro()?;
+                            let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
+                            let create_reader = || {
+                                let cursor =
+                                    provider_ro.tx_ref().cursor_dup_read::<tables::StoragesTrieV2>()?;
+                                Ok(StorageTrieReader::new(cursor, hashed_address, cache.clone()))
+                            };
+
                             let cursor =
                                 provider_ro.tx_ref().cursor_dup_read::<tables::StoragesTrieV2>()?;
-                            let trie_reader = StorageTrieReader::new(cursor, hashed_address, cache);
-                            let mut storage_trie = Trie::new(trie_reader, false, compatible)?;
-                            let mut delete_slots = vec![];
+                            let trie_reader = StorageTrieReader::new(cursor, hashed_address, cache.clone());
+                            // only make the large storage trie parallel
+                            let parallel = storage.as_ref().map(|s| s.storage.len() > 256).unwrap_or(false);
+                            let mut storage_trie = Trie::new(trie_reader, parallel, compatible)?;
                             if let Some(storage) = storage {
                                 for (hashed_slot, value) in storage.storage {
-                                    if value.is_zero() {
-                                        delete_slots.push(hashed_slot);
+                                    let nibbles = Nibbles::unpack(hashed_slot);
+                                    let index = nibbles[0] as usize;
+                                    let value = if value.is_zero() {
+                                        None
                                     } else {
                                         let value = encode_fixed_size(&value);
-                                        storage_trie.insert(
-                                            Nibbles::unpack(hashed_slot),
-                                            Node::ValueNode(value.to_vec()),
-                                        )?;
-                                    }
+                                        Some(Node::ValueNode(value.to_vec()))
+                                    };
+                                    updated_storage_nodes[index].push((nibbles, value));
                                 }
                             }
-                            for delete_slot in delete_slots {
-                                storage_trie.delete(Nibbles::unpack(delete_slot))?;
-                            }
+                            storage_trie.parallel_update(updated_storage_nodes, create_reader)?;
                             let account = account.into_trie_account(storage_trie.hash());
                             Ok((hashed_address, alloy_rlp::encode(account), storage_trie.take_output()))
                         }
@@ -147,7 +153,7 @@ where
             } else {
                 let nibbles = Nibbles::unpack(hashed_address);
                 let index = nibbles[0] as usize;
-                removed_account_nodes[index].push((nibbles.clone(), None));
+                updated_account_nodes[index].push((nibbles.clone(), None));
                 trie_update.storage_tries.insert(hashed_address, StorageTrieUpdatesV2::deleted());
                 if let Some(compatible) = &mut compatible_trie_update {
                     compatible.storage_tries.insert(hashed_address, StorageTrieUpdates::deleted());
@@ -155,8 +161,6 @@ where
             }
         }
         let provider_ro = self.view.provider_ro()?;
-        // Paralle update account trie. Split updated account into 16 groups.
-        let mut update_account_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let create_reader = || {
             let cursor = provider_ro.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
@@ -192,13 +196,12 @@ where
             // Each updated path in a group has the same first nibble
             let nibbles = Nibbles::unpack(hashed_address);
             let index = nibbles[0] as usize;
-            update_account_nodes[index].push((nibbles, Some(Node::ValueNode(rlp_account))));
+            updated_account_nodes[index].push((nibbles, Some(Node::ValueNode(rlp_account))));
         }
         let cursor = provider_ro.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
         let mut account_trie =
             Trie::new(AccountTrieReader(cursor, self.cache.clone()), true, compatible)?;
-        account_trie.parallel_update(update_account_nodes, create_reader)?;
-        account_trie.parallel_update(removed_account_nodes, create_reader)?;
+        account_trie.parallel_update(updated_account_nodes, create_reader)?;
 
         let root_hash = account_trie.hash();
         let (output, compatible_output) = account_trie.take_output();
@@ -313,19 +316,20 @@ mod tests {
             let tx = tx.clone();
             rayon::spawn_fifo(move || {
                 let hashed_address = keccak256(address);
-                let storage_reader = InmemoryStorageTrieReader(db, hashed_address);
-                let mut storage_trie = Trie::new(storage_reader, false, is_compatible).unwrap();
+                let create_reader = || Ok(InmemoryStorageTrieReader(db.clone(), hashed_address));
+                let storage_reader = InmemoryStorageTrieReader(db.clone(), hashed_address);
+                let mut storage_trie = Trie::new(storage_reader, true, is_compatible).unwrap();
+                let mut batches: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
                 for (hashed_slot, value) in
                     storage.into_iter().map(|(k, v)| (keccak256(k), encode_fixed_size(&v)))
                 {
-                    if is_insert {
-                        storage_trie
-                            .insert(Nibbles::unpack(hashed_slot), Node::ValueNode(value.to_vec()))
-                            .unwrap();
-                    } else {
-                        storage_trie.delete(Nibbles::unpack(hashed_slot)).unwrap();
-                    }
+                    let nibbles = Nibbles::unpack(hashed_slot);
+                    let index = nibbles[0] as usize;
+                    batches[index]
+                        .push((nibbles, is_insert.then_some(Node::ValueNode(value.to_vec()))));
                 }
+                // parallel update
+                storage_trie.parallel_update(batches, create_reader).unwrap();
                 let storage_root = storage_trie.hash();
                 let account = account.into_trie_account(storage_root);
                 let _ = tx.send((
