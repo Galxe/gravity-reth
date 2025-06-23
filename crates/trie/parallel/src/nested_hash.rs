@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 
-use alloy_primitives::B256;
+use alloy_primitives::{B256, KECCAK256_EMPTY};
 use alloy_rlp::encode_fixed_size;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
@@ -13,9 +13,10 @@ use reth_provider::{
 };
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
-    nested_trie::{CompatibleTrieOutput, Node, NodeEntry, Trie, TrieOutput, TrieReader},
+    nested_trie::{CompatibleTrieOutput, Node, Trie, TrieOutput, TrieReader},
     updates::StorageTrieUpdates,
     HashedPostState, Nibbles, StorageTrieUpdatesV2, StoredNibbles, StoredNibblesSubKey,
+    EMPTY_ROOT_HASH,
 };
 use reth_trie_common::updates::{TrieUpdates, TrieUpdatesV2};
 
@@ -42,12 +43,12 @@ where
                 return Ok(value);
             }
         }
+        let path = StoredNibblesSubKey(path.clone());
         Ok(self
             .cursor
-            .seek_by_key_subkey(self.hashed_address, StoredNibblesSubKey(path.clone()))?
-            .map(|v| NodeEntry::from(v))
-            .filter(|e| e.path == *path)
-            .map(|e| e.node))
+            .seek_by_key_subkey(self.hashed_address, path.clone())?
+            .filter(|e| e.path == path)
+            .map(|e| e.node.into()))
     }
 }
 
@@ -64,10 +65,7 @@ where
                 return Ok(value);
             }
         }
-        Ok(self
-            .0
-            .seek_exact(StoredNibbles(path.clone()))?
-            .map(|(_, value)| NodeEntry::from(value).node))
+        Ok(self.0.seek_exact(StoredNibbles(path.clone()))?.map(|(_, value)| value.into()))
     }
 }
 
@@ -114,30 +112,35 @@ where
                 // calculate storage root in parallel
                 rayon::spawn_fifo(move || {
                     let result = (|| -> ProviderResult<(B256, Vec<u8>, (TrieOutput, Option<CompatibleTrieOutput>))> {
-                        let provider_ro = view.provider_ro()?;
-                        let cursor =
-                            provider_ro.tx_ref().cursor_dup_read::<tables::StoragesTrieV2>()?;
-                        let trie_reader = StorageTrieReader::new(cursor, hashed_address, cache);
-                        let mut storage_trie = Trie::new(trie_reader, false, compatible)?;
-                        let mut delete_slots = vec![];
-                        if let Some(storage) = storage {
-                            for (hashed_slot, value) in storage.storage {
-                                if value.is_zero() {
-                                    delete_slots.push(hashed_slot);
-                                } else {
-                                    let value = encode_fixed_size(&value);
-                                    storage_trie.insert(
-                                        Nibbles::unpack(hashed_slot),
-                                        Node::ValueNode(value.to_vec()),
-                                    )?;
+                        if account.get_bytecode_hash() == KECCAK256_EMPTY &&  storage.as_ref().map(|s| s.is_empty()).unwrap_or(true){
+                            let account = account.into_trie_account(EMPTY_ROOT_HASH);
+                            Ok((hashed_address, alloy_rlp::encode(account), (Default::default(), compatible.then_some(Default::default()))))
+                        } else {
+                            let provider_ro = view.provider_ro()?;
+                            let cursor =
+                                provider_ro.tx_ref().cursor_dup_read::<tables::StoragesTrieV2>()?;
+                            let trie_reader = StorageTrieReader::new(cursor, hashed_address, cache);
+                            let mut storage_trie = Trie::new(trie_reader, false, compatible)?;
+                            let mut delete_slots = vec![];
+                            if let Some(storage) = storage {
+                                for (hashed_slot, value) in storage.storage {
+                                    if value.is_zero() {
+                                        delete_slots.push(hashed_slot);
+                                    } else {
+                                        let value = encode_fixed_size(&value);
+                                        storage_trie.insert(
+                                            Nibbles::unpack(hashed_slot),
+                                            Node::ValueNode(value.to_vec()),
+                                        )?;
+                                    }
                                 }
                             }
+                            for delete_slot in delete_slots {
+                                storage_trie.delete(Nibbles::unpack(delete_slot))?;
+                            }
+                            let account = account.into_trie_account(storage_trie.hash());
+                            Ok((hashed_address, alloy_rlp::encode(account), storage_trie.take_output()))
                         }
-                        for delete_slot in delete_slots {
-                            storage_trie.delete(Nibbles::unpack(delete_slot))?;
-                        }
-                        let account = account.into_trie_account(storage_trie.hash());
-                        Ok((hashed_address, alloy_rlp::encode(account), storage_trie.take_output()))
                     })();
                     let _ = tx.send(result);
                 });
@@ -225,7 +228,7 @@ mod tests {
     use reth_primitives_traits::Account;
     use reth_provider::{test_utils::create_test_provider_factory, TrieWriterV2};
     use reth_trie::{
-        nested_trie::{Node, NodeEntry, StoredNode, Trie, TrieReader},
+        nested_trie::{Node, Trie, TrieReader},
         test_utils, HashedPostState, HashedStorage, EMPTY_ROOT_HASH,
     };
 
@@ -239,13 +242,7 @@ mod tests {
 
     impl TrieReader for InmemoryAccountTrieReader {
         fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError> {
-            Ok(self
-                .0
-                .account_trie
-                .lock()
-                .unwrap()
-                .get(path)
-                .map(|v| NodeEntry::from(v.clone()).node))
+            Ok(self.0.account_trie.lock().unwrap().get(path).map(|v| v.clone().into()))
         }
     }
 
@@ -258,7 +255,7 @@ mod tests {
                 .unwrap()
                 .get(&self.1)
                 .and_then(|storage| storage.get(path))
-                .map(|v| NodeEntry::from(v.clone()).node))
+                .map(|v| v.clone().into()))
         }
     }
 
@@ -274,7 +271,7 @@ mod tests {
                 }
             }
             for (path, node) in input.account_nodes.clone() {
-                account_trie.insert(path.clone(), StoredNode::from(NodeEntry { path, node }));
+                account_trie.insert(path.clone(), node.into());
                 num_update += 1;
             }
 
@@ -293,7 +290,7 @@ mod tests {
                     }
                     let storage = storage_trie.entry(*hashed_address).or_default();
                     for (path, node) in storage_trie_update.storage_nodes.clone() {
-                        storage.insert(path.clone(), StoredNode::from(NodeEntry { path, node }));
+                        storage.insert(path.clone(), node.into());
                         num_update += 1;
                     }
                 }

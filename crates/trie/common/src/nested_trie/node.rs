@@ -8,6 +8,8 @@ use alloy_trie::{
 };
 use nybbles::Nibbles;
 
+use crate::StoredNibblesSubKey;
+
 /// Cache hash value(RlpNode) of current Node to prevent duplicate caculations,
 /// and the `dirty` indicates whether current Node has been updated.
 /// NodeFlag is not stored in database, and read as default when a Node is loaded
@@ -32,7 +34,6 @@ impl NodeFlag {
         self.dirty = true;
     }
 
-    // for test use: serialize and deserialize
     pub fn reset(&mut self) {
         self.rlp.take();
         self.dirty = false;
@@ -117,30 +118,58 @@ impl NodeType {
 
 /// This is a highly bad design, which comes from the limitations of MDBX:
 /// when there is a `dup-key` query, MDBX will only return data that is greater than
-/// or equal to the key, and only return the value, not the matched key. We have to
+/// or equal to the key, and only return the value, without the matched key. We have to
 /// save both key-value in the value field to determine whether the exact seek is
 /// accurate. Just like `StorageEntry`.
-#[derive(Debug, Clone)]
-pub struct NodeEntry {
-    pub path: Nibbles,
-    pub node: Node,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
+pub struct StoredNodeEntry {
+    pub path: StoredNibblesSubKey,
+    pub node: StoredNode,
 }
-impl NodeEntry {
-    pub fn new(path: &Nibbles, node: &Node) -> Self {
-        Self { path: path.clone(), node: node.clone() }
+
+impl StoredNodeEntry {
+    pub fn new(path: StoredNibblesSubKey, node: Node) -> Self {
+        Self { path, node: node.into() }
+    }
+
+    pub fn create(path: &StoredNibblesSubKey, node: &Node) -> Self {
+        Self::new(path.clone(), node.clone())
     }
 }
+
+#[cfg(any(test, feature = "reth-codec"))]
+impl reth_codecs::Compact for StoredNodeEntry {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let path_len = self.path.to_compact(buf);
+        let node_len = self.node.to_compact(buf);
+        path_len + node_len
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (path, buf) = StoredNibblesSubKey::from_compact(buf, 33);
+        let (node, buf) = StoredNode::from_compact(buf, len - 33);
+        let this = Self { path, node };
+        (this, buf)
+    }
+}
+
+/// The `Node` structure is nested, and using `derive(serde)` for serialization
+/// would result in data that is not compact enough for our needs.
+/// Therefore, we implement a custom serialization method for `Node` and store
+/// the serialized data directly as a `Vec<u8>`.
+/// To ensure forward compatibility with future changes to the `Node` structure,
+/// a `version` field is included to indicate the serialization format version.
 pub type StoredNode = Vec<u8>;
 
-impl From<NodeEntry> for StoredNode {
-    fn from(value: NodeEntry) -> Self {
-        let NodeEntry { path, node } = value;
+impl From<Node> for StoredNode {
+    fn from(node: Node) -> Self {
         let mut buf = Vec::with_capacity(1024);
         // version
         buf.push(0u8);
-        // path
-        buf.push(path.len() as u8);
-        buf.extend_from_slice(&path);
         match node {
             Node::FullNode { children, .. } => {
                 buf.push(NodeType::FullNode as u8);
@@ -195,7 +224,7 @@ impl From<NodeEntry> for StoredNode {
     }
 }
 
-impl From<StoredNode> for NodeEntry {
+impl From<StoredNode> for Node {
     fn from(value: StoredNode) -> Self {
         let mut i = 0;
         let version = value[i];
@@ -203,14 +232,9 @@ impl From<StoredNode> for NodeEntry {
             panic!("Unresolved Node version");
         }
         i += 1;
-        let path_len = value[i] as usize;
-        i += 1;
-        let mut path = Nibbles::new();
-        path.extend_from_slice_unchecked(&value[i..i + path_len]);
-        i += path_len;
         let node_type = NodeType::from_u8(value[i]);
         i += 1;
-        let node = match node_type {
+        match node_type {
             Some(NodeType::FullNode) => {
                 // FullNode
                 let mut children: [Option<Box<Node>>; 17] = Default::default();
@@ -268,8 +292,7 @@ impl From<StoredNode> for NodeEntry {
             _ => {
                 unreachable!("Unexpected Node type: {:?}", node_type);
             }
-        };
-        NodeEntry { path, node }
+        }
     }
 }
 
@@ -292,13 +315,13 @@ impl Node {
         }
     }
 
-    // for test use
-    pub fn reset(&mut self) {
-        match self {
+    pub fn reset(mut self) -> Self {
+        match &mut self {
             Node::FullNode { children: _, flags } => flags.reset(),
             Node::ShortNode { key: _, value: _, flags } => flags.reset(),
             _ => {}
         }
+        self
     }
 
     pub fn to_branch_node_compact(children: &[Option<Box<Node>>; 17]) -> BranchNodeCompact {

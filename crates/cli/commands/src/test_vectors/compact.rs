@@ -34,7 +34,8 @@ use reth_stages_types::{
 };
 use reth_trie::{hash_builder::HashBuilderValue, TrieMask};
 use reth_trie_common::{
-    hash_builder::HashBuilderState, nested_trie::StoredNode, StoredNibbles, StoredNibblesSubKey,
+    hash_builder::HashBuilderState, nested_trie::StoredNodeEntry, StoredNibbles,
+    StoredNibblesSubKey,
 };
 use std::{fs::File, io::BufReader};
 
@@ -127,7 +128,7 @@ compact_types!(
         // StorageTrieEntry, // todo branchnodecompact arbitrary
         // StoredSubNode, // todo branchnodecompact arbitrary
         HashBuilderState,
-        StoredNode
+        StoredNodeEntry
     ],
     // These types require an extra identifier which is usually stored elsewhere (eg. parent type).
     identifier: [
