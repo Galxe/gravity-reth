@@ -55,15 +55,15 @@ use reth_prune_types::{
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
-    BlockBodyIndicesProvider, BlockBodyReader, NodePrimitivesProvider, PersistBlockCache,
-    StateProvider, StorageChangeSetReader, TryIntoHistoricalStateProvider,
+    BlockBodyIndicesProvider, BlockBodyReader, NodePrimitivesProvider, StateProvider,
+    StorageChangeSetReader, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
-    nested_trie::{NodeEntry, StoredNode},
+    nested_trie::{StoredNode, StoredNodeEntry},
     prefix_set::{PrefixSet, PrefixSetMut, TriePrefixSets},
     updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesV2},
-    HashedPostStateSorted, Nibbles, StateRoot, StoredNibbles,
+    HashedPostStateSorted, Nibbles, StateRoot, StoredNibbles, StoredNibblesSubKey,
 };
 use reth_trie_db::{DatabaseStateRoot, DatabaseStorageTrieCursor};
 use revm_database::states::{
@@ -2305,8 +2305,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
             }
         }
         for (path, node) in &input.account_nodes {
-            account_trie_cursor
-                .upsert(path.clone().into(), &StoredNode::from(NodeEntry::new(path, node)))?;
+            account_trie_cursor.upsert(path.clone().into(), &node.clone().into())?;
             num_updated += 1;
         }
 
@@ -2318,24 +2317,26 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                 }
             } else {
                 for path in &storage_trie_update.removed_nodes {
-                    if let Some(entry) = storage_trie_cursor
-                        .seek_by_key_subkey(*hashed_address, path.clone().into())?
+                    let path = StoredNibblesSubKey(path.clone());
+                    if let Some(entry) =
+                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
                     {
-                        if NodeEntry::from(entry).path == path.clone() {
+                        if entry.path == path {
                             storage_trie_cursor.delete_current()?;
                         }
                     }
                 }
                 for (path, node) in &storage_trie_update.storage_nodes {
-                    if let Some(entry) = storage_trie_cursor
-                        .seek_by_key_subkey(*hashed_address, path.clone().into())?
+                    let path = StoredNibblesSubKey(path.clone());
+                    if let Some(entry) =
+                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
                     {
-                        if NodeEntry::from(entry).path == path.clone() {
+                        if StoredNodeEntry::from(entry).path == path.clone() {
                             storage_trie_cursor.delete_current()?;
                         }
                     }
                     storage_trie_cursor
-                        .upsert(*hashed_address, &StoredNode::from(NodeEntry::new(path, node)))?;
+                        .upsert(*hashed_address, &StoredNodeEntry::new(path, node.clone()))?;
                     num_updated += 1;
                 }
             }

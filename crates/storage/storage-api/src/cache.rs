@@ -13,8 +13,7 @@ use revm_bytecode::Bytecode;
 use revm_database::states::{PlainStorageChangeset, StateChangeset};
 use std::{
     sync::{Arc, Mutex},
-    thread,
-    thread::JoinHandle,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -27,6 +26,10 @@ struct CacheMetrics {
     trie_cache_hit_ratio: Gauge,
     /// Number of cached items
     cache_num_items: Gauge,
+    /// Lastest pre-merged block number
+    latest_merged_block_number: Gauge,
+    /// Latest stored block number
+    latest_stored_block_number: Gauge,
 }
 
 #[derive(Default)]
@@ -34,6 +37,8 @@ struct CacheMetricsReporter {
     block_cache_hit_record: HitRecorder,
     trie_cache_hit_record: HitRecorder,
     cached_items: AtomicU64,
+    merged_block_number: AtomicU64,
+    stored_block_number: AtomicU64,
     metrics: CacheMetrics,
 }
 
@@ -65,10 +70,6 @@ impl HitRecorder {
 }
 
 impl CacheMetricsReporter {
-    fn cached_items(&self, num: u64) {
-        self.cached_items.store(num, Ordering::Relaxed);
-    }
-
     fn report(&self) {
         if let Some(hit_ratio) = self.block_cache_hit_record.report() {
             self.metrics.block_cache_hit_ratio.set(hit_ratio);
@@ -78,6 +79,12 @@ impl CacheMetricsReporter {
         }
         let cached_items = self.cached_items.load(Ordering::Relaxed) as f64;
         self.metrics.cache_num_items.set(cached_items);
+        self.metrics
+            .latest_merged_block_number
+            .set(self.merged_block_number.load(Ordering::Relaxed) as f64);
+        self.metrics
+            .latest_stored_block_number
+            .set(self.stored_block_number.load(Ordering::Relaxed) as f64);
     }
 }
 
@@ -141,7 +148,7 @@ impl PersistBlockCache {
 
         let weak_inner = Arc::downgrade(&inner);
         let handle = thread::spawn(move || {
-            let interval = Duration::from_secs(5); // 5s
+            let interval = Duration::from_secs(15); // 15s
             loop {
                 thread::sleep(interval);
                 if let Some(inner) = weak_inner.upgrade() {
@@ -219,6 +226,7 @@ impl PersistBlockCache {
     }
 
     pub fn persist_tip(&self, block_number: u64) {
+        self.metrics.stored_block_number.store(block_number, Ordering::Relaxed);
         let mut guard = self.persist_block_number.lock().unwrap();
         if let Some(ref mut persist_block_number) = *guard {
             if block_number != *persist_block_number + 1 {
@@ -235,6 +243,7 @@ impl PersistBlockCache {
     }
 
     pub fn write_state_changes(&self, block_number: u64, changes: StateChangeset) {
+        self.metrics.merged_block_number.store(block_number, Ordering::Relaxed);
         // write account to database.
         for (address, account) in changes.accounts {
             if let Some(account) = account {
@@ -298,7 +307,8 @@ impl PersistBlockCache {
             self.account_trie.remove(path);
         }
         for (path, node) in &input.account_nodes {
-            self.account_trie.insert(path.clone(), ValueWithTip::new(node.clone(), block_number));
+            self.account_trie
+                .insert(path.clone(), ValueWithTip::new(node.clone().reset(), block_number));
         }
 
         for (hashed_address, storage_trie_update) in &input.storage_tries {
@@ -312,7 +322,10 @@ impl PersistBlockCache {
                 }
                 if let Some(storage) = self.storage_trie.get(hashed_address) {
                     for (path, node) in &storage_trie_update.storage_nodes {
-                        storage.insert(path.clone(), ValueWithTip::new(node.clone(), block_number));
+                        storage.insert(
+                            path.clone(),
+                            ValueWithTip::new(node.clone().reset(), block_number),
+                        );
                     }
                 } else {
                     match self.storage_trie.entry(*hashed_address) {
@@ -321,7 +334,7 @@ impl PersistBlockCache {
                             for (path, node) in &storage_trie_update.storage_nodes {
                                 data.insert(
                                     path.clone(),
-                                    ValueWithTip::new(node.clone(), block_number),
+                                    ValueWithTip::new(node.clone().reset(), block_number),
                                 );
                             }
                         }
@@ -330,7 +343,7 @@ impl PersistBlockCache {
                             for (path, node) in &storage_trie_update.storage_nodes {
                                 data.insert(
                                     path.clone(),
-                                    ValueWithTip::new(node.clone(), block_number),
+                                    ValueWithTip::new(node.clone().reset(), block_number),
                                 );
                             }
                             entry.insert(data);
