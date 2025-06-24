@@ -88,8 +88,6 @@ mod tests {
 
         let mut executor = provider.batch_executor(db);
 
-        let mut executor = provider.executor(parallel_database!(StateProviderDatabase::new(&db)));
-
         // attempt to execute a block without parent beacon block root, expect err
         let err = executor
             .execute_one(&RecoveredBlock::new_unhashed(
@@ -284,7 +282,7 @@ mod tests {
         });
 
         // assert that it is the default (empty) transition state
-        assert_eq!(bundle_state, BundleState::default());
+        assert_eq!(transition_state, TransitionState::default());
     }
 
     #[test]

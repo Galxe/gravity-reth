@@ -3636,7 +3636,7 @@ mod tests {
 
     #[test]
     fn test_tree_state_normal_descendant() {
-        let mut tree_state = TreeState::new(BlockNumHash::default());
+        let mut tree_state = TreeState::new(BlockNumHash::default(), EngineApiKind::Ethereum);
         let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
 
         tree_state.insert_executed(blocks[0].clone());
@@ -3814,6 +3814,7 @@ mod tests {
                     hashed_state: Arc::new(HashedPostState::default()),
                 },
                 trie: ExecutedTrieUpdates::empty(),
+                triev2: Default::default(),
             });
         }
         test_harness.tree.state.tree_state.set_canonical_head(chain_a.last().unwrap().num_hash());
@@ -3826,6 +3827,7 @@ mod tests {
                     hashed_state: Arc::new(HashedPostState::default()),
                 },
                 trie: ExecutedTrieUpdates::empty(),
+                triev2: Default::default(),
             });
         }
 

@@ -59,7 +59,7 @@ paste.workspace = true
 
 # test-utils
 reth-ethereum-engine-primitives = { workspace = true, optional = true }
-tokio.workspace = true
+tokio = {workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 # parallel utils
 rayon.workspace = true
@@ -82,7 +82,6 @@ assert_matches.workspace = true
 rand.workspace = true
 eyre.workspace = true
 
-tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
 alloy-consensus.workspace = true
 
 [features]

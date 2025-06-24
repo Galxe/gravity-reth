@@ -224,7 +224,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{keccak256, map::HashMap, Address, U256};
     use alloy_rlp::encode_fixed_size;
-    use rand::Rng;
+    use rand_08::Rng;
     use reth_primitives_traits::Account;
     use reth_provider::{test_utils::create_test_provider_factory, TrieWriterV2};
     use reth_trie::{
@@ -374,7 +374,7 @@ mod tests {
     }
 
     fn random_state() -> HashMap<Address, (Account, HashMap<B256, U256>)> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand_08::thread_rng();
         (0..100)
             .map(|_| {
                 let address = Address::random();

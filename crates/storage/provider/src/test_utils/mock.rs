@@ -2,8 +2,8 @@ use crate::{
     traits::{BlockSource, ReceiptProvider},
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BlockReaderIdExt,
     ChainSpecProvider, ChangeSetReader, EthStorage, HeaderProvider, ReceiptProviderIdExt,
-    StateProvider, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
-    TransactionVariant, TransactionsProvider,
+    StateProvider, StateProviderBox, StateProviderFactory, StateProviderOptions, StateReader,
+    StateRootProvider, TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::{constants::EMPTY_ROOT_HASH, transaction::TransactionMeta, Header};
 use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumberOrTag};
@@ -31,7 +31,7 @@ use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
     BlockBodyIndicesProvider, DBProvider, DatabaseProviderFactory, HashedPostStateProvider,
     NodePrimitivesProvider, StageCheckpointReader, StateCommitmentProvider, StateProofProvider,
-    StateProviderOptions, StorageRootProvider,
+    StorageRootProvider,
 };
 use reth_storage_errors::provider::{ConsistentViewError, ProviderError, ProviderResult};
 use reth_trie::{
@@ -897,7 +897,7 @@ where
 impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StateProviderFactory
     for MockEthProvider<T, ChainSpec>
 {
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
+    fn latest_with_opts(&self, _opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -931,11 +931,19 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StatePr
         Ok(Box::new(self.clone()))
     }
 
-    fn history_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
-    fn state_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash_with_opts(
+        &self,
+        _block: BlockHash,
+        _opts: StateProviderOptions,
+    ) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -943,36 +951,12 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StatePr
         Ok(Box::new(self.clone()))
     }
 
-    fn pending_state_by_hash(&self, _block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
-        Ok(Some(Box::new(self.clone())))
-    }
-
-    fn latest_with_opts(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
-        todo!()
-    }
-
-    fn history_by_block_hash_with_opts(
-        &self,
-        block: BlockHash,
-        opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox> {
-        todo!()
-    }
-
-    fn state_by_block_hash_with_opts(
-        &self,
-        block: BlockHash,
-        opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox> {
-        todo!()
-    }
-
     fn pending_state_by_hash_with_opts(
         &self,
-        block_hash: B256,
-        opts: StateProviderOptions,
+        _block_hash: B256,
+        _opts: StateProviderOptions,
     ) -> ProviderResult<Option<StateProviderBox>> {
-        todo!()
+        Ok(Some(Box::new(self.clone())))
     }
 }
 

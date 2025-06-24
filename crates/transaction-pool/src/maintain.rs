@@ -19,7 +19,7 @@ use reth_chain_state::CanonStateNotification;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_execution_types::ChangedAccount;
 use reth_fs_util::FsPathError;
-use reth_pipe_exec_layer_ext_v2::{get_pipe_exec_layer_ext, PipeExecLayerExt};
+use reth_pipe_exec_layer_ext_v2::get_pipe_exec_layer_ext;
 use reth_primitives_traits::{
     transaction::signed::SignedTransaction, NodePrimitives, SealedHeader,
 };

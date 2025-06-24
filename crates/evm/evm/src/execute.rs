@@ -532,6 +532,10 @@ mod tests {
             unreachable!()
         }
 
+        fn take_bundle(&mut self) -> BundleState {
+            unreachable!()
+        }
+
         fn size_hint(&self) -> usize {
             0
         }

@@ -342,6 +342,7 @@ impl<Txs> OpBuilder<'_, Txs> {
                 hashed_state: Arc::new(hashed_state),
             },
             trie: ExecutedTrieUpdates::Present(Arc::new(trie_updates)),
+            triev2: Default::default(),
         };
 
         let no_tx_pool = ctx.attributes().no_tx_pool;

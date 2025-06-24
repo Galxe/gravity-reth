@@ -1399,7 +1399,6 @@ mod tests {
         BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionValidationOutcome, U256,
     };
     use alloy_eips::eip4844::BlobTransactionSidecar;
-    use reth_primitives::kzg::Blob;
     use std::{fs, path::PathBuf, time::Instant, usize};
 
     #[test]

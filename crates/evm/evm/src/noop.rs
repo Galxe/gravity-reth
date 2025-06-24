@@ -4,9 +4,8 @@ use crate::{
     parallel_execute::ParallelExecutor, BlockExecutionError, ConfigureEvm, EvmEnvFor,
     ParallelDatabase,
 };
-use reth_primitives_traits::{BlockTy, HeaderTy, SealedBlock, SealedHeader};
-
 use alloc::boxed::Box;
+use reth_primitives_traits::{BlockTy, HeaderTy, SealedBlock, SealedHeader};
 
 /// A no-op EVM config that panics on any call. Used as a typesystem hack to satisfy
 /// [`ConfigureEvm`] bounds.

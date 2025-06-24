@@ -10,6 +10,7 @@ use reth_ethereum::{
         ReceiptProvider, StateProvider, TransactionsProvider,
     },
     rpc::eth::primitives::Filter,
+    storage::StateProviderOptions,
     TransactionSigned,
 };
 
@@ -44,10 +45,12 @@ fn main() -> eyre::Result<()> {
     drop(provider);
 
     // Run the example against latest state
-    state_provider_example(factory.latest()?)?;
+    state_provider_example(factory.latest(StateProviderOptions::default())?)?;
 
     // Run it with historical state
-    state_provider_example(factory.history_by_block_number(block_num)?)?;
+    state_provider_example(
+        factory.history_by_block_number(block_num, StateProviderOptions::default())?,
+    )?;
 
     Ok(())
 }

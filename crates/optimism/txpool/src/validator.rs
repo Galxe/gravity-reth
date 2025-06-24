@@ -1,5 +1,6 @@
 use crate::{supervisor::SupervisorClient, InvalidCrossTx, OpPooledTx};
 use alloy_consensus::{BlockHeader, Transaction};
+use gravity_storage::block_view_storage::BlockViewProvider;
 use op_revm::L1BlockInfo;
 use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
@@ -181,7 +182,7 @@ where
         &self,
         origin: TransactionOrigin,
         transaction: Tx,
-        state: &mut Option<Box<dyn StateProvider>>,
+        state: &mut Option<BlockViewProvider>,
     ) -> TransactionValidationOutcome<Tx> {
         if transaction.is_eip4844() {
             return TransactionValidationOutcome::Invalid(
