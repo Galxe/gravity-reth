@@ -24,6 +24,7 @@ reth-ethereum-primitives.workspace = true
 reth-trie.workspace = true
 reth-provider.workspace = true
 gravity-storage.workspace = true
+gravity-primitives.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
