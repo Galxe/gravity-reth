@@ -1,9 +1,9 @@
 use crate::GravityStorage;
 use alloy_primitives::{Address, B256, U256};
 use reth_provider::{
-    providers::ConsistentDbView, BlockNumReader, BlockReader, DatabaseProviderFactory,
-    HeaderProvider, PersistBlockCache, ProviderError, ProviderResult, StateCommitmentProvider,
-    StateProviderBox, StateProviderOptions, PERSIST_BLOCK_CACHE,
+    BlockNumReader, BlockReader, DatabaseProviderFactory, HeaderProvider, PersistBlockCache,
+    ProviderError, ProviderResult, StateCommitmentProvider, StateProviderBox, StateProviderOptions,
+    PERSIST_BLOCK_CACHE,
 };
 use reth_revm::{
     bytecode::Bytecode, database::StateProviderDatabase, primitives::BLOCK_HASH_HISTORY,
@@ -60,8 +60,8 @@ where
         hashed_state: &HashedPostState,
         compatible: bool,
     ) -> ProviderResult<(B256, TrieUpdatesV2, Option<TrieUpdates>)> {
-        let consistent_view = ConsistentDbView::new_with_best_tip(self.client.clone())?;
-        let nested_hash = NestedStateRoot::new(consistent_view, Some(self.cache.clone()));
+        let provider = self.client.database_provider_ro()?;
+        let nested_hash = NestedStateRoot::new(provider, Some(self.cache.clone()));
         nested_hash.calculate(hashed_state, compatible)
     }
 

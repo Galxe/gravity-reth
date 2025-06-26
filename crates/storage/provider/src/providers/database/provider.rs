@@ -60,7 +60,7 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
-    nested_trie::{StoredNode, StoredNodeEntry},
+    nested_trie::{StorageNodeEntry, StoredNode},
     prefix_set::{PrefixSet, PrefixSetMut, TriePrefixSets},
     updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesV2},
     HashedPostStateSorted, Nibbles, StateRoot, StoredNibbles, StoredNibblesSubKey,
@@ -2331,12 +2331,12 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                     if let Some(entry) =
                         storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
                     {
-                        if StoredNodeEntry::from(entry).path == path.clone() {
+                        if StorageNodeEntry::from(entry).path == path.clone() {
                             storage_trie_cursor.delete_current()?;
                         }
                     }
                     storage_trie_cursor
-                        .upsert(*hashed_address, &StoredNodeEntry::new(path, node.clone()))?;
+                        .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
                     num_updated += 1;
                 }
             }

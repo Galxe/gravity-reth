@@ -1,33 +1,33 @@
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
-use alloy_primitives::{B256, KECCAK256_EMPTY};
+use alloy_primitives::{
+    map::{B256Map, HashMap},
+    B256, KECCAK256_EMPTY,
+};
 use alloy_rlp::encode_fixed_size;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
     tables,
     transaction::DbTx,
 };
-use reth_provider::{
-    providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory,
-    PersistBlockCache, ProviderResult, StateCommitmentProvider,
-};
+use reth_provider::{DBProvider, PersistBlockCache, ProviderResult};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     nested_trie::{CompatibleTrieOutput, Node, Trie, TrieOutput, TrieReader},
     updates::StorageTrieUpdates,
-    HashedPostState, Nibbles, StorageTrieUpdatesV2, StoredNibbles, StoredNibblesSubKey,
-    EMPTY_ROOT_HASH,
+    HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles,
+    StoredNibblesSubKey, EMPTY_ROOT_HASH,
 };
 use reth_trie_common::updates::{TrieUpdates, TrieUpdatesV2};
 
-struct StorageTrieReader<C> {
+pub struct StorageTrieReader<C> {
     hashed_address: B256,
     cursor: C,
     cache: Option<PersistBlockCache>,
 }
 
 impl<C> StorageTrieReader<C> {
-    fn new(cursor: C, hashed_address: B256, cache: Option<PersistBlockCache>) -> Self {
+    pub fn new(cursor: C, hashed_address: B256, cache: Option<PersistBlockCache>) -> Self {
         Self { cursor, hashed_address, cache }
     }
 }
@@ -52,7 +52,13 @@ where
     }
 }
 
-struct AccountTrieReader<C>(C, Option<PersistBlockCache>);
+pub struct AccountTrieReader<C>(C, Option<PersistBlockCache>);
+
+impl<C> AccountTrieReader<C> {
+    pub fn new(cursor: C, cache: Option<PersistBlockCache>) -> Self {
+        Self(cursor, cache)
+    }
+}
 
 impl<C> TrieReader for AccountTrieReader<C>
 where
@@ -70,26 +76,47 @@ where
 }
 
 #[derive(Debug)]
-pub struct NestedStateRoot<Factory> {
-    /// Consistent view of the database.
-    view: ConsistentDbView<Factory>,
+pub struct NestedStateRoot<Provider> {
+    provider: Arc<Provider>,
     cache: Option<PersistBlockCache>,
 }
 
-impl<Factory> NestedStateRoot<Factory> {
-    pub fn new(view: ConsistentDbView<Factory>, cache: Option<PersistBlockCache>) -> Self {
-        Self { view, cache }
+impl<Provider> NestedStateRoot<Provider> {
+    pub fn new(provider: Provider, cache: Option<PersistBlockCache>) -> Self {
+        Self { provider: Arc::new(provider), cache }
     }
 }
 
-impl<Factory> NestedStateRoot<Factory>
+impl<Provider> NestedStateRoot<Provider>
 where
-    Factory: DatabaseProviderFactory<Provider: BlockReader>
-        + StateCommitmentProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    Provider: DBProvider<Tx: DbTx>,
+{
+    pub fn read_hashed_state(&self) -> ProviderResult<HashedPostState> {
+        let mut accounts = HashMap::default();
+        let mut storages: B256Map<HashedStorage> = HashMap::default();
+
+        let mut account_cursor = self.provider.tx_ref().cursor_read::<tables::HashedAccounts>()?;
+        let account_walker = account_cursor.walk(None)?;
+        for account in account_walker {
+            let (hashed_address, account) = account?;
+            accounts.insert(hashed_address, Some(account));
+        }
+
+        let mut storage_cursor =
+            self.provider.tx_ref().cursor_dup_read::<tables::HashedStorages>()?;
+        let storage_walker = storage_cursor.walk_dup(None, None)?;
+        for storage in storage_walker {
+            let (hashed_address, entry) = storage?;
+            storages.entry(hashed_address).or_default().storage.insert(entry.key, entry.value);
+        }
+
+        Ok(HashedPostState { accounts, storages })
+    }
+}
+
+impl<Provider> NestedStateRoot<Provider>
+where
+    Provider: DBProvider<Tx: DbTx> + Send + Sync + 'static,
 {
     pub fn calculate(
         &self,
@@ -104,7 +131,7 @@ where
         let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
         for (hashed_address, account) in hashed_accounts.clone() {
             if let Some(account) = account {
-                let view = self.view.clone();
+                let provider_ro = self.provider.clone();
                 let tx = tx.clone();
                 let storage = hashed_storages.get(&hashed_address).cloned();
                 let cache = self.cache.clone();
@@ -116,7 +143,6 @@ where
                             let account = account.into_trie_account(EMPTY_ROOT_HASH);
                             Ok((hashed_address, alloy_rlp::encode(account), (Default::default(), compatible.then_some(Default::default()))))
                         } else {
-                            let provider_ro = view.provider_ro()?;
                             let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
                             let create_reader = || {
                                 let cursor =
@@ -160,9 +186,8 @@ where
                 }
             }
         }
-        let provider_ro = self.view.provider_ro()?;
         let create_reader = || {
-            let cursor = provider_ro.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
+            let cursor = self.provider.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
         };
         for _ in 0..num_task {
@@ -198,7 +223,7 @@ where
             let index = nibbles[0] as usize;
             updated_account_nodes[index].push((nibbles, Some(Node::ValueNode(rlp_account))));
         }
-        let cursor = provider_ro.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
+        let cursor = self.provider.tx_ref().cursor_read::<tables::AccountsTrieV2>()?;
         let mut account_trie =
             Trie::new(AccountTrieReader(cursor, self.cache.clone()), true, compatible)?;
         account_trie.parallel_update(updated_account_nodes, create_reader)?;
@@ -229,7 +254,9 @@ mod tests {
     use alloy_rlp::encode_fixed_size;
     use rand_08::Rng;
     use reth_primitives_traits::Account;
-    use reth_provider::{test_utils::create_test_provider_factory, TrieWriterV2};
+    use reth_provider::{
+        test_utils::create_test_provider_factory, DatabaseProviderFactory, TrieWriterV2,
+    };
     use reth_trie::{
         nested_trie::{Node, Trie, TrieReader},
         test_utils, HashedPostState, HashedStorage, EMPTY_ROOT_HASH,
@@ -460,7 +487,7 @@ mod tests {
         let state = random_state();
         // test paralle root hash
         let factory = create_test_provider_factory();
-        let consistent_view = ConsistentDbView::new(factory.clone(), None);
+        let provider = factory.database_provider_ro().unwrap();
         let mut hashed_state = HashedPostState::default();
         for (address, (account, storage)) in state.clone() {
             let hashed_address = keccak256(address);
@@ -473,7 +500,7 @@ mod tests {
         }
 
         let (parallel_root_hash, ..) =
-            NestedStateRoot::new(consistent_view, None).calculate(&hashed_state, true).unwrap();
+            NestedStateRoot::new(provider, None).calculate(&hashed_state, true).unwrap();
         assert_eq!(parallel_root_hash, test_utils::state_root(state))
     }
 }

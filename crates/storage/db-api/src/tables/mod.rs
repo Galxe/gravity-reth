@@ -33,7 +33,7 @@ use reth_primitives_traits::{Account, Bytecode, StorageEntry};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::StageCheckpoint;
 use reth_trie_common::{
-    nested_trie::{StoredNode, StoredNodeEntry},
+    nested_trie::{StorageNodeEntry, StoredNode},
     BranchNodeCompact, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
 };
 use serde::{Deserialize, Serialize};
@@ -489,7 +489,7 @@ tables! {
 
     table StoragesTrieV2 {
         type Key = B256;
-        type Value = StoredNodeEntry;
+        type Value = StorageNodeEntry;
         type SubKey = StoredNibblesSubKey;
     }
 

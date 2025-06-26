@@ -2,11 +2,15 @@
 
 use alloy_consensus::BlockHeader;
 use alloy_genesis::GenesisAccount;
-use alloy_primitives::{map::HashMap, Address, B256, U256};
+use alloy_primitives::{keccak256, map::HashMap, Address, B256, U256};
 use reth_chainspec::EthChainSpec;
 use reth_codecs::Compact;
 use reth_config::config::EtlConfig;
-use reth_db_api::{tables, transaction::DbTxMut, DatabaseError};
+use reth_db_api::{
+    tables,
+    transaction::{DbTx, DbTxMut},
+    DatabaseError,
+};
 use reth_etl::Collector;
 use reth_primitives_traits::{Account, Bytecode, GotExpected, NodePrimitives, StorageEntry};
 use reth_provider::{
@@ -14,12 +18,16 @@ use reth_provider::{
     BlockHashReader, BlockNumReader, BundleStateInit, ChainSpecProvider, DBProvider,
     DatabaseProviderFactory, ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter,
     OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader, StageCheckpointWriter,
-    StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter,
+    StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter, TrieWriterV2,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
-use reth_trie::{IntermediateStateRootState, StateRoot as StateRootComputer, StateRootProgress};
+use reth_trie::{
+    HashedPostState, HashedStorage, IntermediateStateRootState, StateRoot as StateRootComputer,
+    StateRootProgress,
+};
 use reth_trie_db::DatabaseStateRoot;
+use reth_trie_parallel::nested_hash::NestedStateRoot;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use tracing::{debug, error, info, trace};
@@ -88,8 +96,10 @@ where
         + HeaderProvider
         + HashingWriter
         + StateWriter
+        + TrieWriterV2
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
+    PF::Provider: Send + Sync + 'static,
 {
     let chain = factory.chain_spec();
 
@@ -128,6 +138,11 @@ where
 
     let alloc = &genesis.alloc;
 
+    insert_world_trie(
+        factory.database_provider_ro()?,
+        factory.database_provider_rw()?,
+        alloc.iter(),
+    )?;
     // use transaction to insert genesis header
     let provider_rw = factory.database_provider_rw()?;
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
@@ -288,6 +303,40 @@ where
 
     trace!(target: "reth::cli", "Inserted storage hashes");
 
+    Ok(())
+}
+
+pub fn insert_world_trie<'a, 'b, Reader, Writer>(
+    reader: Reader,
+    writer: Writer,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
+) -> ProviderResult<()>
+where
+    Reader: DBProvider<Tx: DbTx> + Send + Sync + 'static,
+    Writer: DBProvider<Tx: DbTxMut> + TrieWriterV2,
+{
+    let mut accounts = HashMap::default();
+    let mut storages = HashMap::default();
+
+    for (address, account) in alloc {
+        let hashed_address = keccak256(*address);
+        accounts.insert(hashed_address, Some(Account::from(account)));
+        let mut hashed_storages = HashedStorage::default();
+        if let Some(storage) = account.storage.as_ref() {
+            for (slot, slot_value) in storage.clone() {
+                hashed_storages.storage.insert(keccak256(slot), slot_value.into());
+            }
+        }
+        storages.insert(hashed_address, hashed_storages);
+    }
+    let hashed_state = HashedPostState { accounts, storages };
+    let nested_hash = NestedStateRoot::new(reader, None);
+    let (root_hash, trie_updates, _) = nested_hash.calculate(&hashed_state, false)?;
+
+    writer.write(&trie_updates)?;
+    info!(target: "reth::cli",
+    root_hash=?root_hash,
+    "Inserted world trie");
     Ok(())
 }
 

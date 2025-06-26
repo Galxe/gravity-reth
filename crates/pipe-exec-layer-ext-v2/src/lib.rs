@@ -19,9 +19,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
-use reth_evm::{
-    parallel_execute::ParallelExecutor, ConfigureEvm, NextBlockEnvAttributes, ParallelDatabase,
-};
+use reth_evm::{ConfigureEvm, NextBlockEnvAttributes, ParallelDatabase};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{EthPrimitives, NodePrimitives};
@@ -44,9 +42,8 @@ use tokio::sync::{
 };
 
 use gravity_primitives::CONFIG;
-use once_cell::sync::Lazy;
 use reth_revm::state::AccountInfo;
-use reth_trie::{updates::TrieUpdatesV2, HashedPostState, KeccakKeyHasher};
+use reth_trie::{HashedPostState, KeccakKeyHasher};
 use tracing::*;
 
 #[derive(Debug, Clone, Copy)]

@@ -123,12 +123,12 @@ impl NodeType {
 /// accurate. Just like `StorageEntry`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
-pub struct StoredNodeEntry {
+pub struct StorageNodeEntry {
     pub path: StoredNibblesSubKey,
     pub node: StoredNode,
 }
 
-impl StoredNodeEntry {
+impl StorageNodeEntry {
     pub fn new(path: StoredNibblesSubKey, node: Node) -> Self {
         Self { path, node: node.into() }
     }
@@ -139,7 +139,7 @@ impl StoredNodeEntry {
 }
 
 #[cfg(any(test, feature = "reth-codec"))]
-impl reth_codecs::Compact for StoredNodeEntry {
+impl reth_codecs::Compact for StorageNodeEntry {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
