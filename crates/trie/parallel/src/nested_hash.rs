@@ -44,11 +44,13 @@ where
             }
         }
         let path = StoredNibblesSubKey(path.clone());
-        Ok(self
+        let result = self
             .cursor
             .seek_by_key_subkey(self.hashed_address, path.clone())?
             .filter(|e| e.path == path)
-            .map(|e| e.node.into()))
+            .map(|e| e.node.into());
+        println!("Debug: get persist storage trie node from db: {:?} - {:?}: {:?}", self.hashed_address, path, result);
+        Ok(result)
     }
 }
 
@@ -71,7 +73,9 @@ where
                 return Ok(value);
             }
         }
-        Ok(self.0.seek_exact(StoredNibbles(path.clone()))?.map(|(_, value)| value.into()))
+        let result = self.0.seek_exact(StoredNibbles(path.clone()))?.map(|(_, value)| value.into());
+        println!("Debug: get persist account trie node from db: {:?}: {:?}", path, result);
+        Ok(result)
     }
 }
 

@@ -205,7 +205,12 @@ impl PersistBlockCache {
     pub fn trie_account(&self, nibbles: &Nibbles) -> Option<Node> {
         if let Some(value) = self.account_trie.get(nibbles) {
             self.metrics.trie_cache_hit_record.hit();
-            Some(value.value.clone())
+            if value.block_number <= self.metrics.stored_block_number.load(Ordering::Relaxed) {
+                println!("Debug: get persist account trie node: {:?}: {:?}", nibbles, value.value);
+                None
+            } else {
+                Some(value.value.clone())
+            }
         } else {
             self.metrics.trie_cache_hit_record.not_hit();
             None
@@ -216,7 +221,12 @@ impl PersistBlockCache {
         if let Some(storage) = self.storage_trie.get(hash_address) {
             if let Some(value) = storage.get(nibbles) {
                 self.metrics.trie_cache_hit_record.hit();
-                Some(value.value.clone())
+                if value.block_number <= self.metrics.stored_block_number.load(Ordering::Relaxed) {
+                    println!("Debug: get persist storage trie node: {:?} - {:?}: {:?}", hash_address, nibbles, value.value);
+                    None
+                } else {
+                    Some(value.value.clone())
+                }
             } else {
                 self.metrics.trie_cache_hit_record.not_hit();
                 None
