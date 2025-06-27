@@ -1393,13 +1393,12 @@ impl<T: PoolTransaction> OnNewCanonicalStateOutcome<T> {
 mod tests {
     use crate::{
         blobstore::{BlobStore, InMemoryBlobStore},
-        pool::txpool,
         test_utils::{MockTransaction, TestPoolBuilder},
         validate::ValidTransaction,
         BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionValidationOutcome, U256,
     };
-    use alloy_eips::eip4844::BlobTransactionSidecar;
-    use std::{fs, path::PathBuf, time::Instant, usize};
+    use alloy_eips::{eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant};
+    use std::{fs, path::PathBuf, time::Instant};
 
     #[test]
     fn test_add_txn() {
@@ -1429,12 +1428,14 @@ mod tests {
             );
         }
         let size = 1000;
-        for i in 0..size {
+        for _ in 0..size {
             let txn = TransactionValidationOutcome::Valid {
                 balance: U256::from(1_000),
                 state_nonce: 0,
+                bytecode_hash: None,
                 transaction: ValidTransaction::Valid(MockTransaction::eip1559()),
                 propagate: true,
+                authorities: None,
             };
             txn.tx_hash();
             txns_vec.push(vec![txn]);

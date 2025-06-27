@@ -2215,7 +2215,7 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = AllTransactions::default();
         let tx = MockTransaction::eip4844().inc_price().inc_limit();
-        let valid_tx = f.validated(tx);
+        let valid_tx = Arc::new(f.validated(tx));
         let InsertOk { updates, replaced_tx, move_to, state, .. } =
             pool.insert_tx(valid_tx.clone(), on_chain_balance, on_chain_nonce).unwrap();
         assert!(updates.is_empty());
@@ -2225,7 +2225,7 @@ mod tests {
         assert!(state.contains(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK));
         assert_eq!(move_to, SubPool::Pending);
 
-        let inserted = pool.txs.get(&valid_tx.transaction_id).unwrap();
+        let inserted = pool.txs.get(&valid_tx.sender_id()).unwrap().get(valid_tx.id()).unwrap();
         assert_eq!(inserted.subpool, SubPool::Pending);
     }
 
@@ -2240,13 +2240,13 @@ mod tests {
         };
         let tx = MockTransaction::eip4844().inc_price().inc_limit();
         pool.pending_fees.blob_fee = tx.max_fee_per_blob_gas().unwrap() + 1;
-        let valid_tx = f.validated(tx);
+        let valid_tx = Arc::new(f.validated(tx));
         let InsertOk { state, .. } =
             pool.insert_tx(valid_tx.clone(), on_chain_balance, on_chain_nonce).unwrap();
         assert!(state.contains(TxState::NO_NONCE_GAPS));
         assert!(!state.contains(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK));
 
-        let _ = pool.txs.get(&valid_tx.transaction_id).unwrap();
+        let _ = pool.txs.get(&valid_tx.sender_id()).unwrap().get(valid_tx.id()).unwrap();
     }
 
     #[test]
@@ -2261,14 +2261,14 @@ mod tests {
         let tx = MockTransaction::eip4844().inc_price().inc_limit();
 
         pool.pending_fees.blob_fee = tx.max_fee_per_blob_gas().unwrap() + 1;
-        let valid_tx = f.validated(tx.clone());
+        let valid_tx = Arc::new(f.validated(tx.clone()));
         let InsertOk { state, .. } =
             pool.insert_tx(valid_tx.clone(), on_chain_balance, on_chain_nonce).unwrap();
         assert!(state.contains(TxState::NO_NONCE_GAPS));
         assert!(!state.contains(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK));
 
-        let _ = pool.txs.get(&valid_tx.transaction_id).unwrap();
-        pool.remove_transaction(&valid_tx.transaction_id);
+        let _ = pool.txs.get(&valid_tx.sender_id()).unwrap().get(valid_tx.id()).unwrap();
+        pool.remove_transaction(valid_tx.id());
 
         pool.pending_fees.blob_fee = tx.max_fee_per_blob_gas().unwrap();
         let InsertOk { state, .. } =
@@ -2292,14 +2292,14 @@ mod tests {
 
         let validated = f.validated(tx.clone());
         let id = *validated.id();
-        pool.add_transaction(validated, on_chain_balance, on_chain_nonce, None).unwrap();
+        pool.add_transaction(validated.into(), on_chain_balance, on_chain_nonce, None).unwrap();
 
         // assert pool lengths
         assert!(pool.blob_pool.is_empty());
         assert_eq!(pool.pending_pool.len(), 1);
 
         // check tx state and derived subpool
-        let internal_tx = pool.all_transactions.txs.get(&id).unwrap();
+        let internal_tx = pool.all_transactions.txs.get(&id.sender).unwrap().get(&id).unwrap();
         assert!(internal_tx.state.contains(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK));
         assert_eq!(internal_tx.subpool, SubPool::Pending);
 
@@ -2308,7 +2308,7 @@ mod tests {
         pool.set_block_info(block_info);
 
         // check that the tx is promoted
-        let internal_tx = pool.all_transactions.txs.get(&id).unwrap();
+        let internal_tx = pool.all_transactions.txs.get(&id.sender).unwrap().get(&id).unwrap();
         assert!(!internal_tx.state.contains(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK));
         assert_eq!(internal_tx.subpool, SubPool::Blob);
 
@@ -2332,14 +2332,14 @@ mod tests {
 
         let validated = f.validated(tx.clone());
         let id = *validated.id();
-        pool.add_transaction(validated, on_chain_balance, on_chain_nonce, None).unwrap();
+        pool.add_transaction(validated.into(), on_chain_balance, on_chain_nonce, None).unwrap();
 
         // assert pool lengths
         assert!(pool.pending_pool.is_empty());
         assert_eq!(pool.blob_pool.len(), 1);
 
         // check tx state and derived subpool
-        let internal_tx = pool.all_transactions.txs.get(&id).unwrap();
+        let internal_tx = pool.all_transactions.txs.get(&id.sender).unwrap().get(&id).unwrap();
         assert!(!internal_tx.state.contains(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK));
         assert_eq!(internal_tx.subpool, SubPool::Blob);
 
@@ -2348,7 +2348,7 @@ mod tests {
         pool.set_block_info(block_info);
 
         // check that the tx is promoted
-        let internal_tx = pool.all_transactions.txs.get(&id).unwrap();
+        let internal_tx = pool.all_transactions.txs.get(&id.sender).unwrap().get(&id).unwrap();
         assert!(internal_tx.state.contains(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK));
         assert_eq!(internal_tx.subpool, SubPool::Pending);
 
@@ -2535,13 +2535,13 @@ mod tests {
 
             let validated = f.validated(tx.clone());
             let id = *validated.id();
-            pool.add_transaction(validated, on_chain_balance, on_chain_nonce, None).unwrap();
+            pool.add_transaction(validated.into(), on_chain_balance, on_chain_nonce, None).unwrap();
 
             // assert pool lengths
             promotion_test.assert_single_tx_starting_subpool(&pool);
 
             // check tx state and derived subpool, it should not move into the blob pool
-            let internal_tx = pool.all_transactions.txs.get(&id).unwrap();
+            let internal_tx = pool.all_transactions.txs.get(&id.sender).unwrap().get(&id).unwrap();
             assert_eq!(
                 internal_tx.subpool, promotion_test.subpool,
                 "Subpools do not match at start of test: {promotion_test:?}"
@@ -2553,7 +2553,7 @@ mod tests {
             pool.set_block_info(block_info);
 
             // check tx state and derived subpool, it should not move into the blob pool
-            let internal_tx = pool.all_transactions.txs.get(&id).unwrap();
+            let internal_tx = pool.all_transactions.txs.get(&id.sender).unwrap().get(&id).unwrap();
             assert_eq!(
                 internal_tx.subpool, promotion_test.new_subpool,
                 "Subpools do not match at end of test: {promotion_test:?}"
@@ -2571,7 +2571,7 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = AllTransactions::default();
         let tx = MockTransaction::eip1559().inc_price().inc_limit();
-        let valid_tx = f.validated(tx);
+        let valid_tx = Arc::new(f.validated(tx));
         let InsertOk { updates, replaced_tx, move_to, state, .. } =
             pool.insert_tx(valid_tx.clone(), on_chain_balance, on_chain_nonce).unwrap();
         assert!(updates.is_empty());
@@ -2580,7 +2580,7 @@ mod tests {
         assert!(state.contains(TxState::ENOUGH_BALANCE));
         assert_eq!(move_to, SubPool::Pending);
 
-        let inserted = pool.txs.get(&valid_tx.transaction_id).unwrap();
+        let inserted = pool.txs.get(&valid_tx.sender_id()).unwrap().get(valid_tx.id()).unwrap();
         assert_eq!(inserted.subpool, SubPool::Pending);
     }
 
@@ -2593,7 +2593,7 @@ mod tests {
         let mut tx = MockTransaction::eip1559().inc_price().inc_limit();
         tx.set_priority_fee(100);
         tx.set_max_fee(100);
-        let valid_tx = f.validated(tx.clone());
+        let valid_tx = Arc::new(f.validated(tx.clone()));
         let InsertOk { updates, replaced_tx, move_to, state, .. } =
             pool.insert_tx(valid_tx.clone(), on_chain_balance, on_chain_nonce).unwrap();
         assert!(updates.is_empty());
@@ -2613,7 +2613,7 @@ mod tests {
         res.unwrap_err();
         assert_eq!(pool.len(), 1);
 
-        let valid_tx = f.validated(tx.next());
+        let valid_tx = Arc::new(f.validated(tx.next()));
         let InsertOk { updates, replaced_tx, move_to, state, .. } =
             pool.insert_tx(valid_tx.clone(), on_chain_balance, on_chain_nonce).unwrap();
 
@@ -2636,7 +2636,7 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = TxPool::new(MockOrdering::default(), Default::default());
         let tx = MockTransaction::eip1559().inc_price().inc_limit();
-        let tx = f.validated(tx);
+        let tx = Arc::new(f.validated(tx));
         pool.add_transaction(tx.clone(), on_chain_balance, on_chain_nonce, None).unwrap();
         match pool.add_transaction(tx, on_chain_balance, on_chain_nonce, None).unwrap_err().kind {
             PoolErrorKind::AlreadyImported => {}
@@ -2651,9 +2651,9 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = AllTransactions::default();
         let tx = MockTransaction::eip1559().inc_price().inc_limit();
-        let first = f.validated(tx.clone());
+        let first = Arc::new(f.validated(tx.clone()));
         let _ = pool.insert_tx(first.clone(), on_chain_balance, on_chain_nonce).unwrap();
-        let replacement = f.validated(tx.rng_hash().inc_price());
+        let replacement = Arc::new(f.validated(tx.rng_hash().inc_price()));
         let InsertOk { updates, replaced_tx, .. } =
             pool.insert_tx(replacement.clone(), on_chain_balance, on_chain_nonce).unwrap();
         assert!(updates.is_empty());
@@ -2676,8 +2676,8 @@ mod tests {
         let tx = MockTransaction::eip1559().inc_price().inc_limit();
         let first = f.validated(tx.clone());
         let first_added =
-            pool.add_transaction(first, on_chain_balance, on_chain_nonce, None).unwrap();
-        let replacement = f.validated(tx.rng_hash().inc_price());
+            pool.add_transaction(first.into(), on_chain_balance, on_chain_nonce, None).unwrap();
+        let replacement = Arc::new(f.validated(tx.rng_hash().inc_price()));
         let replacement_added = pool
             .add_transaction(replacement.clone(), on_chain_balance, on_chain_nonce, None)
             .unwrap();
@@ -2701,10 +2701,10 @@ mod tests {
         let mut pool = AllTransactions::default();
         let tx = MockTransaction::eip1559().inc_price().inc_limit();
         let first = f.validated(tx.clone());
-        let _res = pool.insert_tx(first, on_chain_balance, on_chain_nonce);
+        let _res = pool.insert_tx(first.into(), on_chain_balance, on_chain_nonce);
         let mut replacement = f.validated(tx.rng_hash());
         replacement.transaction = replacement.transaction.decr_price();
-        let err = pool.insert_tx(replacement, on_chain_balance, on_chain_nonce).unwrap_err();
+        let err = pool.insert_tx(replacement.into(), on_chain_balance, on_chain_nonce).unwrap_err();
         assert!(matches!(err, InsertErr::Underpriced { .. }));
     }
 
@@ -2717,15 +2717,16 @@ mod tests {
         let mut tx = MockTransaction::eip1559().inc_price().inc_limit();
         tx.set_priority_fee(100);
         tx.set_max_fee(100);
-        let first = f.validated(tx.clone());
+        let first = Arc::new(f.validated(tx.clone()));
         let _ = pool.insert_tx(first.clone(), on_chain_balance, on_chain_nonce).unwrap();
         let mut replacement = f.validated(tx.rng_hash().inc_price());
 
         // a price bump of 9% is not enough for a default min price bump of 10%
         replacement.transaction.set_priority_fee(109);
         replacement.transaction.set_max_fee(109);
-        let err =
-            pool.insert_tx(replacement.clone(), on_chain_balance, on_chain_nonce).unwrap_err();
+        let err = pool
+            .insert_tx(replacement.clone().into(), on_chain_balance, on_chain_nonce)
+            .unwrap_err();
         assert!(matches!(err, InsertErr::Underpriced { .. }));
         // ensure first tx is not removed
         assert!(pool.contains(first.hash()));
@@ -2734,8 +2735,9 @@ mod tests {
         // should also fail if the bump in max fee is not enough
         replacement.transaction.set_priority_fee(110);
         replacement.transaction.set_max_fee(109);
-        let err =
-            pool.insert_tx(replacement.clone(), on_chain_balance, on_chain_nonce).unwrap_err();
+        let err = pool
+            .insert_tx(replacement.clone().into(), on_chain_balance, on_chain_nonce)
+            .unwrap_err();
         assert!(matches!(err, InsertErr::Underpriced { .. }));
         assert!(pool.contains(first.hash()));
         assert_eq!(pool.len(), 1);
@@ -2743,7 +2745,7 @@ mod tests {
         // should also fail if the bump in priority fee is not enough
         replacement.transaction.set_priority_fee(109);
         replacement.transaction.set_max_fee(110);
-        let err = pool.insert_tx(replacement, on_chain_balance, on_chain_nonce).unwrap_err();
+        let err = pool.insert_tx(replacement.into(), on_chain_balance, on_chain_nonce).unwrap_err();
         assert!(matches!(err, InsertErr::Underpriced { .. }));
         assert!(pool.contains(first.hash()));
         assert_eq!(pool.len(), 1);
@@ -2757,10 +2759,10 @@ mod tests {
         let mut pool = AllTransactions::default();
         let tx = MockTransaction::eip1559().inc_price().inc_limit();
         let first = f.validated(tx.clone());
-        pool.insert_tx(first, on_chain_balance, on_chain_nonce).unwrap();
+        pool.insert_tx(first.into(), on_chain_balance, on_chain_nonce).unwrap();
         let tx = MockTransaction::eip4844().set_sender(tx.sender()).inc_price_by(100).inc_limit();
         let blob = f.validated(tx);
-        let err = pool.insert_tx(blob, on_chain_balance, on_chain_nonce).unwrap_err();
+        let err = pool.insert_tx(blob.into(), on_chain_balance, on_chain_nonce).unwrap_err();
         assert!(matches!(err, InsertErr::TxTypeConflict { .. }), "{err:?}");
     }
 
@@ -2772,10 +2774,10 @@ mod tests {
         let mut pool = AllTransactions::default();
         let tx = MockTransaction::eip4844().inc_price().inc_limit();
         let first = f.validated(tx.clone());
-        pool.insert_tx(first, on_chain_balance, on_chain_nonce).unwrap();
+        pool.insert_tx(first.into(), on_chain_balance, on_chain_nonce).unwrap();
         let tx = MockTransaction::eip1559().set_sender(tx.sender()).inc_price_by(100).inc_limit();
         let tx = f.validated(tx);
-        let err = pool.insert_tx(tx, on_chain_balance, on_chain_nonce).unwrap_err();
+        let err = pool.insert_tx(tx.into(), on_chain_balance, on_chain_nonce).unwrap_err();
         assert!(matches!(err, InsertErr::TxTypeConflict { .. }), "{err:?}");
     }
 
@@ -2787,7 +2789,7 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = AllTransactions::default();
         let tx = MockTransaction::eip1559().inc_nonce().inc_price().inc_limit();
-        let first = f.validated(tx.clone());
+        let first = Arc::new(f.validated(tx.clone()));
         let _res = pool.insert_tx(first.clone(), on_chain_balance, on_chain_nonce);
 
         let first_in_pool = pool.get(first.id()).unwrap();
@@ -2797,7 +2799,7 @@ mod tests {
 
         let prev = f.validated(tx.prev());
         let InsertOk { updates, replaced_tx, state, move_to, .. } =
-            pool.insert_tx(prev, on_chain_balance, on_chain_nonce).unwrap();
+            pool.insert_tx(prev.into(), on_chain_balance, on_chain_nonce).unwrap();
 
         // no updates since still in queued pool
         assert!(updates.is_empty());
@@ -2818,7 +2820,7 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = AllTransactions::default();
         let tx = MockTransaction::eip1559().inc_nonce().set_gas_price(100).inc_limit();
-        let first = f.validated(tx.clone());
+        let first = Arc::new(f.validated(tx.clone()));
         let _res = pool.insert_tx(first.clone(), on_chain_balance, on_chain_nonce).unwrap();
 
         let first_in_pool = pool.get(first.id()).unwrap();
@@ -2828,7 +2830,7 @@ mod tests {
 
         let prev = f.validated(tx.prev());
         let InsertOk { updates, replaced_tx, state, move_to, .. } =
-            pool.insert_tx(prev, on_chain_balance, on_chain_nonce).unwrap();
+            pool.insert_tx(prev.into(), on_chain_balance, on_chain_nonce).unwrap();
 
         // updated previous tx
         assert_eq!(updates.len(), 1);
@@ -2850,7 +2852,7 @@ mod tests {
         let mut pool = AllTransactions::default();
         pool.pending_fees.base_fee = pool.minimal_protocol_basefee.checked_add(1).unwrap();
         let tx = MockTransaction::eip1559().inc_nonce().inc_limit();
-        let first = f.validated(tx.clone());
+        let first = Arc::new(f.validated(tx.clone()));
 
         let _res = pool.insert_tx(first.clone(), on_chain_balance, on_chain_nonce);
 
@@ -2862,7 +2864,7 @@ mod tests {
 
         let prev = f.validated(tx.prev());
         let InsertOk { updates, replaced_tx, state, move_to, .. } =
-            pool.insert_tx(prev, on_chain_balance, on_chain_nonce).unwrap();
+            pool.insert_tx(prev.into(), on_chain_balance, on_chain_nonce).unwrap();
 
         assert!(!state.contains(TxState::ENOUGH_FEE_CAP_BLOCK));
         // no updates since still in queued pool
@@ -2887,7 +2889,8 @@ mod tests {
         let unblocked_tx = tx.clone();
         for _ in 0..pool.max_account_slots {
             tx = tx.next();
-            pool.insert_tx(f.validated(tx.clone()), on_chain_balance, on_chain_nonce).unwrap();
+            pool.insert_tx(f.validated(tx.clone()).into(), on_chain_balance, on_chain_nonce)
+                .unwrap();
         }
 
         assert_eq!(
@@ -2895,12 +2898,13 @@ mod tests {
             pool.tx_count(f.ids.sender_id(tx.get_sender()).unwrap())
         );
 
-        let err =
-            pool.insert_tx(f.validated(tx.next()), on_chain_balance, on_chain_nonce).unwrap_err();
+        let err = pool
+            .insert_tx(f.validated(tx.next()).into(), on_chain_balance, on_chain_nonce)
+            .unwrap_err();
         assert!(matches!(err, InsertErr::ExceededSenderTransactionsCapacity { .. }));
 
         assert!(pool
-            .insert_tx(f.validated(unblocked_tx), on_chain_balance, on_chain_nonce)
+            .insert_tx(f.validated(unblocked_tx).into(), on_chain_balance, on_chain_nonce)
             .is_ok());
     }
 
@@ -2915,7 +2919,7 @@ mod tests {
         for _ in 0..pool.max_account_slots {
             tx = tx.next();
             pool.insert_tx(
-                f.validated_with_origin(TransactionOrigin::Local, tx.clone()),
+                f.validated_with_origin(TransactionOrigin::Local, tx.clone()).into(),
                 on_chain_balance,
                 on_chain_nonce,
             )
@@ -2928,7 +2932,7 @@ mod tests {
         );
 
         pool.insert_tx(
-            f.validated_with_origin(TransactionOrigin::Local, tx.next()),
+            f.validated_with_origin(TransactionOrigin::Local, tx.next()).into(),
             on_chain_balance,
             on_chain_nonce,
         )
@@ -2945,7 +2949,7 @@ mod tests {
         let tx = MockTransaction::eip1559().with_gas_limit(30_000_001);
 
         assert!(matches!(
-            pool.insert_tx(f.validated(tx), on_chain_balance, on_chain_nonce),
+            pool.insert_tx(f.validated(tx).into(), on_chain_balance, on_chain_nonce),
             Err(InsertErr::TxGasLimitMoreThanAvailableBlockGas { .. })
         ));
     }
@@ -2960,7 +2964,7 @@ mod tests {
         let tx = MockTransaction::eip1559().with_gas_limit(30_000_000);
 
         let InsertOk { state, .. } =
-            pool.insert_tx(f.validated(tx), on_chain_balance, on_chain_nonce).unwrap();
+            pool.insert_tx(f.validated(tx).into(), on_chain_balance, on_chain_nonce).unwrap();
         assert!(state.contains(TxState::NOT_TOO_MUCH_GAS));
     }
 
@@ -2972,7 +2976,7 @@ mod tests {
         let tx = MockTransaction::eip1559().inc_price_by(10);
         let validated = f.validated(tx.clone());
         let id = *validated.id();
-        pool.add_transaction(validated, U256::from(1_000), 0, None).unwrap();
+        pool.add_transaction(validated.into(), U256::from(1_000), 0, None).unwrap();
 
         assert_eq!(pool.pending_pool.len(), 1);
 
@@ -2981,7 +2985,10 @@ mod tests {
         assert!(pool.pending_pool.is_empty());
         assert_eq!(pool.basefee_pool.len(), 1);
 
-        assert_eq!(pool.all_transactions.txs.get(&id).unwrap().subpool, SubPool::BaseFee)
+        assert_eq!(
+            pool.all_transactions.txs.get(&id.sender).unwrap().get(&id).unwrap().subpool,
+            SubPool::BaseFee
+        )
     }
 
     #[test]
@@ -2992,7 +2999,7 @@ mod tests {
         let tx = MockTransaction::eip1559().inc_price_by(10);
         let validated = f.validated(tx.clone());
         let id = *validated.id();
-        pool.add_transaction(validated, U256::from(1_000), 0, None).unwrap();
+        pool.add_transaction(validated.into(), U256::from(1_000), 0, None).unwrap();
 
         assert_eq!(pool.pending_pool.len(), 1);
 
@@ -3004,7 +3011,10 @@ mod tests {
         assert!(pool.pending_pool.is_empty());
         assert_eq!(pool.basefee_pool.len(), 1);
 
-        assert_eq!(pool.all_transactions.txs.get(&id).unwrap().subpool, SubPool::BaseFee)
+        assert_eq!(
+            pool.all_transactions.txs.get(&id.sender).unwrap().get(&id).unwrap().subpool,
+            SubPool::BaseFee
+        )
     }
 
     #[test]
@@ -3015,14 +3025,14 @@ mod tests {
 
         // Create a mock transaction and add it to the pool.
         let tx = MockTransaction::eip1559();
-        pool.add_transaction(f.validated(tx.clone()), U256::from(1_000), 0, None).unwrap();
+        pool.add_transaction(f.validated(tx.clone()).into(), U256::from(1_000), 0, None).unwrap();
 
         // Create another mock transaction with an incremented price.
         let tx1 = tx.inc_price().next();
 
         // Validate the second mock transaction and add it to the pool.
         let tx1_validated = f.validated(tx1.clone());
-        pool.add_transaction(tx1_validated, U256::from(1_000), 0, None).unwrap();
+        pool.add_transaction(tx1_validated.into(), U256::from(1_000), 0, None).unwrap();
 
         // Ensure that the calculated next nonce for the sender matches the expected value.
         assert_eq!(
@@ -3054,7 +3064,7 @@ mod tests {
             mock_tx.set_nonce(nonce);
 
             let validated_tx = f.validated(mock_tx);
-            pool.add_transaction(validated_tx, U256::from(1000), 0, None).unwrap();
+            pool.add_transaction(validated_tx.into(), U256::from(1000), 0, None).unwrap();
         }
 
         // Get last consecutive transaction
@@ -3088,11 +3098,11 @@ mod tests {
         let tx = MockTransaction::eip1559().inc_price_by(10);
         let validated = f.validated(tx.clone());
         let id = *validated.id();
-        pool.add_transaction(validated, U256::from(1_000), 0, None).unwrap();
+        pool.add_transaction(validated.into(), U256::from(1_000), 0, None).unwrap();
 
         let next = tx.next();
         let validated = f.validated(next.clone());
-        pool.add_transaction(validated, U256::from(1_000), 0, None).unwrap();
+        pool.add_transaction(validated.into(), U256::from(1_000), 0, None).unwrap();
 
         assert_eq!(pool.pending_pool.len(), 2);
 
@@ -3140,7 +3150,7 @@ mod tests {
 
         // add all the transactions to the parked pool
         for tx in a_txs {
-            pool.add_transaction(f.validated(tx), U256::from(1_000), 0, None).unwrap();
+            pool.add_transaction(f.validated(tx).into(), U256::from(1_000), 0, None).unwrap();
         }
 
         // truncate the pool, it should remove at least one transaction
@@ -3178,7 +3188,7 @@ mod tests {
 
         // add all the transactions to the parked pool
         for tx in a_txs {
-            pool.add_transaction(f.validated(tx), U256::from(1_000), 0, None).unwrap();
+            pool.add_transaction(f.validated(tx).into(), U256::from(1_000), 0, None).unwrap();
         }
 
         // truncate the pool, it should remove at least one transaction
@@ -3198,7 +3208,7 @@ mod tests {
             let tx = MockTransaction::eip1559().inc_price_by(10).inc_nonce();
             let validated = f.validated(tx.clone());
             let _id = *validated.id();
-            pool.add_transaction(validated, U256::from(1_000), 0, None).unwrap();
+            pool.add_transaction(validated.into(), U256::from(1_000), 0, None).unwrap();
         }
 
         let size = pool.size();
@@ -3208,7 +3218,7 @@ mod tests {
             let tx = MockTransaction::eip1559().inc_price_by(10).inc_nonce();
             let validated = f.validated(tx.clone());
             let _id = *validated.id();
-            pool.add_transaction(validated, U256::from(1_000), 0, None).unwrap();
+            pool.add_transaction(validated.into(), U256::from(1_000), 0, None).unwrap();
 
             pool.discard_worst();
             pool.assert_invariants();
@@ -3228,7 +3238,7 @@ mod tests {
             let tx = MockTransaction::eip4844().inc_price_by(100).with_blob_fee(100);
             let validated = f.validated(tx.clone());
             let _id = *validated.id();
-            pool.add_transaction(validated, U256::from(1_000), 0, None).unwrap();
+            pool.add_transaction(validated.into(), U256::from(1_000), 0, None).unwrap();
         }
 
         let size = pool.size();
@@ -3238,7 +3248,7 @@ mod tests {
             let tx = MockTransaction::eip4844().inc_price_by(100).with_blob_fee(100);
             let validated = f.validated(tx.clone());
             let _id = *validated.id();
-            pool.add_transaction(validated, U256::from(1_000), 0, None).unwrap();
+            pool.add_transaction(validated.into(), U256::from(1_000), 0, None).unwrap();
 
             pool.discard_worst();
             pool.assert_invariants();
@@ -3258,9 +3268,9 @@ mod tests {
         let tx_2 = tx_1.next();
 
         // Create 3 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
-        let v2 = f.validated(tx_2);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
+        let v2 = Arc::new(f.validated(tx_2));
 
         let _res =
             pool.add_transaction(v0.clone(), on_chain_balance, on_chain_nonce, None).unwrap();
@@ -3303,9 +3313,9 @@ mod tests {
         let tx_2 = tx_1.next();
 
         // Create 3 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
-        let v2 = f.validated(tx_2);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
+        let v2 = Arc::new(f.validated(tx_2));
 
         // Add first 2 to the pool
         let _res =
@@ -3349,8 +3359,8 @@ mod tests {
         let tx_1 = tx_0.next();
 
         // Create 2 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
 
         // Add them to the pool
         let _res =
@@ -3380,10 +3390,10 @@ mod tests {
         let tx_3 = tx_2.next();
 
         // Create 4 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
-        let v2 = f.validated(tx_2);
-        let v3 = f.validated(tx_3);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
+        let v2 = Arc::new(f.validated(tx_2));
+        let v3 = Arc::new(f.validated(tx_3));
 
         // Add them to the pool
         let _res =
@@ -3419,10 +3429,10 @@ mod tests {
         let tx_3 = tx_2.next();
 
         // Create 4 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
-        let v2 = f.validated(tx_2);
-        let v3 = f.validated(tx_3);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
+        let v2 = Arc::new(f.validated(tx_2));
+        let v3 = Arc::new(f.validated(tx_3));
 
         // Add them to the pool
         let _res = pool.add_transaction(v0, on_chain_balance, on_chain_nonce, None).unwrap();
@@ -3443,7 +3453,7 @@ mod tests {
         // reinsert
         let removed_tx = removed_txs.pop().unwrap();
         let v1 = f.validated(removed_tx.transaction.clone());
-        let _res = pool.add_transaction(v1, on_chain_balance, on_chain_nonce, None).unwrap();
+        let _res = pool.add_transaction(v1.into(), on_chain_balance, on_chain_nonce, None).unwrap();
         assert_eq!(0, pool.queued_transactions().len());
         assert_eq!(4, pool.pending_transactions().len());
     }
@@ -3462,11 +3472,11 @@ mod tests {
         let tx_4 = tx_3.next();
 
         // Create 5 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
-        let v2 = f.validated(tx_2);
-        let v3 = f.validated(tx_3);
-        let v4 = f.validated(tx_4);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
+        let v2 = Arc::new(f.validated(tx_2));
+        let v3 = Arc::new(f.validated(tx_3));
+        let v4 = Arc::new(f.validated(tx_4));
 
         // Add them to the pool
         let _res =
@@ -3498,10 +3508,10 @@ mod tests {
         let tx_3 = tx_2.next();
 
         // Create 4 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
-        let v2 = f.validated(tx_2);
-        let v3 = f.validated(tx_3);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
+        let v2 = Arc::new(f.validated(tx_2));
+        let v3 = Arc::new(f.validated(tx_3));
 
         // Add them to the  pool
         let _res =
@@ -3535,11 +3545,11 @@ mod tests {
         let tx_4 = tx_3.next();
 
         // Create 5 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
-        let v2 = f.validated(tx_2);
-        let v3 = f.validated(tx_3);
-        let v4 = f.validated(tx_4);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
+        let v2 = Arc::new(f.validated(tx_2));
+        let v3 = Arc::new(f.validated(tx_3));
+        let v4 = Arc::new(f.validated(tx_4));
 
         // Add them to the pool
         let _res =
@@ -3574,10 +3584,10 @@ mod tests {
         let tx_3 = tx_2.next();
 
         // Create 4 transactions
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
-        let v2 = f.validated(tx_2);
-        let v3 = f.validated(tx_3);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
+        let v2 = Arc::new(f.validated(tx_2));
+        let v3 = Arc::new(f.validated(tx_3));
 
         // Add first 2 to the pool
         let _res =
@@ -3679,8 +3689,13 @@ mod tests {
             tx6.clone(),
             tx7.clone(),
         ] {
-            pool.add_transaction(f.validated(tx.clone()), on_chain_balance, on_chain_nonce, None)
-                .unwrap();
+            pool.add_transaction(
+                f.validated(tx.clone()).into(),
+                on_chain_balance,
+                on_chain_nonce,
+                None,
+            )
+            .unwrap();
         }
 
         let base_fee = base_fee as u64;
@@ -3758,8 +3773,8 @@ mod tests {
         let tx_0 = MockTransaction::eip1559().with_nonce(1).set_gas_price(100).inc_limit();
         let tx_1 = tx_0.next();
 
-        let v0 = f.validated(tx_0);
-        let v1 = f.validated(tx_1);
+        let v0 = Arc::new(f.validated(tx_0));
+        let v1 = Arc::new(f.validated(tx_1));
 
         // nonce gap, tx should be queued
         pool.add_transaction(v0.clone(), U256::MAX, 0, None).unwrap();
@@ -3795,7 +3810,7 @@ mod tests {
         for tx_nonce in 40..48 {
             let tx = f.validated(template.clone().with_nonce(tx_nonce).rng_hash());
             submitted_txs.push(*tx.id());
-            pool.add_transaction(tx, on_chain_balance, on_chain_nonce, None).unwrap();
+            pool.add_transaction(tx.into(), on_chain_balance, on_chain_nonce, None).unwrap();
         }
 
         // A block is mined with two txs (so nonce is changed from 40 to 42).
@@ -3808,7 +3823,7 @@ mod tests {
         // Add 4 txs.
         for tx_nonce in 48..52 {
             pool.add_transaction(
-                f.validated(template.clone().with_nonce(tx_nonce).rng_hash()),
+                f.validated(template.clone().with_nonce(tx_nonce).rng_hash()).into(),
                 on_chain_balance,
                 on_chain_nonce,
                 None,
