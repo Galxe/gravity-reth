@@ -28,7 +28,8 @@ use reth_evm::{
 use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_pipe_exec_layer_event_bus::{
-    MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus, PIPE_EXEC_LAYER_EVENT_BUS,
+    get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus,
+    WaitForPersistenceEvent, PIPE_EXEC_LAYER_EVENT_BUS,
 };
 use reth_primitives::EthPrimitives;
 use reth_primitives_traits::{
@@ -331,16 +332,8 @@ impl<Storage: GravityStorage> Core<Storage> {
         let execution_result =
             ExecutionResult { block_id, block_number, block_hash, txs_info, gravity_events };
 
-        if epoch != prev_epoch {
-            // New epoch triggered, wait for the block to be made canonical and persisted before
-            // send compute result to Coordinator
-            self.make_canonical(&block_id, executed_block, true).await;
-            // Commit the executed block hash to Coordinator
-            self.verify_executed_block_hash(execution_result).await.unwrap();
-        } else {
-            self.verify_executed_block_hash(execution_result).await.unwrap();
-            self.make_canonical(&block_id, executed_block, false).await;
-        }
+        self.verify_executed_block_hash(execution_result).await.unwrap();
+        self.make_canonical(&block_id, executed_block).await;
     }
 
     /// Push executed block hash to Coordinator and wait for verification result from Coordinator.
@@ -581,12 +574,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         execution_outcome
     }
 
-    async fn make_canonical(
-        &self,
-        block_id: &B256,
-        executed_block: ExecutedBlockWithTrieUpdates,
-        wait_for_persistence: bool,
-    ) {
+    async fn make_canonical(&self, block_id: &B256, executed_block: ExecutedBlockWithTrieUpdates) {
         let block_number = executed_block.recovered_block.number();
         let block_hash = executed_block.recovered_block.hash();
         let prev_finish_commit_time =
@@ -594,11 +582,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let start_time = Instant::now();
         let (tx, rx) = oneshot::channel();
         self.event_tx
-            .send(PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent {
-                executed_block,
-                wait_for_persistence,
-                tx,
-            }))
+            .send(PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }))
             .unwrap();
         rx.await.unwrap();
         self.storage.update_canonical(block_number, block_hash);
@@ -607,7 +591,6 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number=?block_number,
             block_id=?block_id,
             block_hash=?block_hash,
-            wait_for_persistence=?wait_for_persistence,
             elapsed=?elapsed,
             "block made canonical"
         );
@@ -744,6 +727,7 @@ pub struct PipeExecLayerApi<Storage, EthApi> {
     ordered_block_tx: UnboundedSender<ReceivedBlock>,
     execution_result_rx: Mutex<UnboundedReceiver<ExecutionResult>>,
     verified_block_hash_tx: Arc<Channel<B256 /* block id */, Option<B256> /* block hash */>>,
+    event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     storage: Arc<Storage>,
     onchain_config_fetcher: OnchainConfigFetcher<EthApi>,
 }
@@ -790,6 +774,19 @@ impl<Storage: GravityStorage, EthApi> PipeExecLayerApi<Storage, EthApi> {
         block_hash: Option<B256>,
     ) -> Option<()> {
         self.verified_block_hash_tx.notify(block_id, block_hash)
+    }
+
+    /// Wait for the block with the given block number to be persisted in the storage.
+    /// Returns `None` if the channel has been closed.
+    pub async fn wait_for_block_persistence(&self, block_number: u64) -> Option<()> {
+        let (tx, rx) = oneshot::channel();
+        self.event_tx
+            .send(PipeExecLayerEvent::WaitForPersistence(WaitForPersistenceEvent {
+                block_number,
+                tx,
+            }))
+            .ok()?;
+        rx.await.ok()
     }
 
     /// Get the block id by block number.
@@ -843,7 +840,7 @@ where
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
-            event_tx,
+            event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
                 latest_block_number,
                 ExecuteBlockContext {
@@ -874,6 +871,7 @@ where
         ordered_block_tx,
         execution_result_rx: Mutex::new(execution_result_rx),
         verified_block_hash_tx: verified_block_hash_ch,
+        event_tx,
         storage,
         onchain_config_fetcher,
     }

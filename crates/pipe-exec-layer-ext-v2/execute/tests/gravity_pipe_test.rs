@@ -72,6 +72,7 @@ where
             .unwrap()
             .try_into()
             .unwrap();
+        println!("The latest_block_number is {latest_block_number}, epoch is {epoch}");
 
         tokio::time::sleep(Duration::from_secs(3)).await;
         for block_number in latest_block_number + 1..latest_block_number + 1000 {
@@ -94,6 +95,7 @@ where
                 match event {
                     GravityEvent::NewEpoch(new_epoch, _) => {
                         assert_eq!(new_epoch, epoch + 1);
+                        pipeline_api.wait_for_block_persistence(block_number).await.unwrap();
                         let stored_epoch: u64 = pipeline_api
                             .fetch_config_bytes(OnChainConfig::Epoch, block_number)
                             .unwrap()
@@ -143,7 +145,6 @@ async fn run_pipe(
     let provider = handle.node.provider;
     let db_provider = provider.database_provider_ro().unwrap();
     let latest_block_number = db_provider.best_block_number().unwrap();
-    println!("The latest_block_number is {}", latest_block_number);
     let latest_block_hash = db_provider.block_hash(latest_block_number).unwrap().unwrap();
     let latest_block_header = db_provider.header_by_number(latest_block_number).unwrap().unwrap();
     let mut block_number_to_id = BTreeMap::new();

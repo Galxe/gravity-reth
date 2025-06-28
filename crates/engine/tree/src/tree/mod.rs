@@ -45,7 +45,7 @@ use reth_evm::{
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{EngineApiMessageVersion, PayloadBuilderAttributes};
 use reth_pipe_exec_layer_event_bus::{
-    get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent,
+    get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, WaitForPersistenceEvent,
 };
 use reth_primitives_traits::{
     Block, GotExpected, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
@@ -838,25 +838,28 @@ where
 
     fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent<N>) {
         match event {
-            PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent {
-                executed_block,
-                wait_for_persistence,
-                tx,
-            }) => {
+            PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }) => {
                 let block_number = executed_block.recovered_block.number();
                 debug!(target: "on_pipe_exec_event",
                     block_number=%block_number,
                     block_hash=%executed_block.recovered_block.hash(),
                     "Received make canonical event");
                 self.make_executed_block_canonical(executed_block);
-                if wait_for_persistence &&
-                    self.persistence_state.last_persisted_block.number < block_number
-                {
-                    // If we need to wait for persistence, we add a waiter for the block number
+                tx.send(()).expect("Failed to send make canonical event");
+            }
+            PipeExecLayerEvent::WaitForPersistence(WaitForPersistenceEvent {
+                block_number,
+                tx,
+            }) => {
+                info!(target: "on_pipe_exec_event",
+                    block_number=%block_number,
+                    "Received wait for persistence event");
+                if self.persistence_state.last_persisted_block.number < block_number {
+                    // The block is not yet persisted, so we add a waiter for the block number
                     self.persistence_waiters.add_waiter(block_number, tx);
                 } else {
-                    // If we don't need to wait for persistence, we notify the sender immediately
-                    tx.send(()).expect("Failed to send make canonical response");
+                    // The block is already persisted, so we can notify the sender immediately
+                    tx.send(()).expect("Failed to send wait for persistence event");
                 }
             }
         }
