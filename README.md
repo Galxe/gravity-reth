@@ -1,4 +1,16 @@
-# reth
+# Gravity reth
+
+This is a fork of [reth](https://github.com/paradigmxyz/reth) with some performance optimizations.
+We aim to contribute to the Reth project with the shared goal of making the open-source EVM faster. Ideally, we will upstream our optimizations to Reth, retaining only those changes that are highly specific to Gravity and not broadly applicable.
+
+Please refer to [this document](./docs/benchmark/gravity-reth-063025.md) to learn more about our recent performance optimization benchmarks.
+
+Related links:
+
+- [About Gravity Chain Architecture](https://docs.gravity.xyz/research/litepaper)
+- [Grevm2 Technical Report](https://docs.gravity.xyz/research/grevm2)
+
+Huge thanks to [Paradigm](https://github.com/paradigmxyz) for their great work on reth.
 
 [![bench status](https://github.com/paradigmxyz/reth/actions/workflows/bench.yml/badge.svg)](https://github.com/paradigmxyz/reth/actions/workflows/bench.yml)
 [![CI status](https://github.com/paradigmxyz/reth/workflows/unit/badge.svg)][gh-ci]
