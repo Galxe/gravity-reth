@@ -44,7 +44,7 @@ Based on the above observations, Gravity-Reth incorporates targeted optimization
 | Greth (Pipeline-only) | 20k     | 0.2s           | 4k txns       | 95ms           | 240ms        | 5.8k      |
 | **Greth All**         | **41k** | **0.15s**      | **6.2k txns** | **52ms**       | **34ms**     | **11.1k** |
 
-![](../../assets//erc20-transfer-test.png)
+![](../../assets/erc20-transfer-test.png)
 _Figure 1: ERC20 Transfer Performance Comparison Across Different Account Scales_
 
 **Result**: Gravity reth achieves **1.5 Gigagas/s** throughput, representing a **4x improvement** over vanilla Reth.
