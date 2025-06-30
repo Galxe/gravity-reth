@@ -1,3 +1,4 @@
+use metrics::Gauge;
 use reth_metrics::{
     metrics::{Counter, Histogram},
     Metrics,
@@ -33,4 +34,8 @@ pub(crate) struct PipeExecLayerMetrics {
     pub(crate) finish_commit_time_diff: Histogram,
     /// How long it took for transactions to be filtered
     pub(crate) filter_transaction_duration: Histogram,
+    /// block height of starting process
+    pub(crate) start_process_block_number: Gauge,
+    /// block height of end process
+    pub(crate) end_process_block_number: Gauge,
 }

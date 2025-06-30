@@ -14,10 +14,12 @@ use reth_trie_common::{nested_trie::Node, updates::TrieUpdatesV2, Nibbles};
 use revm_bytecode::Bytecode;
 use revm_database::{states::StorageSlot, BundleAccount, OriginalValuesKnown};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
 };
+
+const MAX_PERSISTENCE_GAP: u64 = 64;
 
 #[derive(Metrics)]
 #[metrics(scope = "storage")]
@@ -103,11 +105,13 @@ impl<V> ValueWithTip<V> {
 
 #[derive(Default)]
 pub struct PersistBlockCacheInner {
+    persist_wait: Arc<(Mutex<bool>, Condvar)>,
     accounts: DashMap<Address, ValueWithTip<Account>>,
     storage: DashMap<Address, DashMap<U256, ValueWithTip<U256>>>,
     contracts: DashMap<B256, Bytecode>,
     account_trie: DashMap<Nibbles, ValueWithTip<Node>>,
     storage_trie: DashMap<B256, DashMap<Nibbles, ValueWithTip<Node>>>,
+    merged_block_number: Mutex<Option<u64>>,
     persist_block_number: Mutex<Option<u64>>,
     metrics: CacheMetricsReporter,
     daemon_handle: Mutex<Option<JoinHandle<()>>>,
@@ -146,7 +150,11 @@ pub static PERSIST_BLOCK_CACHE: Lazy<PersistBlockCache> = Lazy::new(|| PersistBl
 
 impl PersistBlockCache {
     pub fn new() -> Self {
-        let inner = Arc::new(PersistBlockCacheInner::default());
+        let inner = PersistBlockCacheInner {
+            persist_wait: Arc::new((Mutex::new(false), Condvar::new())),
+            ..Default::default()
+        };
+        let inner = Arc::new(inner);
 
         let weak_inner = Arc::downgrade(&inner);
         let handle = thread::spawn(move || {
@@ -165,6 +173,14 @@ impl PersistBlockCache {
         inner.daemon_handle.lock().unwrap().replace(handle);
 
         Self(inner)
+    }
+
+    pub fn wait_persist_gap(&self) {
+        let (lock, cvar) = self.persist_wait.as_ref();
+        let mut large_gap = lock.lock().unwrap();
+        while *large_gap {
+            large_gap = cvar.wait(large_gap).unwrap();
+        }
     }
 
     pub fn basic_account(&self, address: &Address) -> Option<Account> {
@@ -242,6 +258,12 @@ impl PersistBlockCache {
         } else {
             *guard = Some(block_number);
         }
+        if let Some(merged_block_number) = self.merged_block_number.lock().unwrap().clone() {
+            let (lock, cvar) = self.persist_wait.as_ref();
+            let mut large_gap = lock.lock().unwrap();
+            *large_gap = merged_block_number - block_number >= MAX_PERSISTENCE_GAP;
+            cvar.notify_all();
+        }
     }
 
     pub fn write_state_changes<'a>(
@@ -252,6 +274,21 @@ impl PersistBlockCache {
         contracts: impl IntoParallelIterator<Item = (&'a B256, &'a Bytecode)>,
     ) {
         self.metrics.merged_block_number.store(block_number, Ordering::Relaxed);
+        {
+            let mut guard = self.merged_block_number.lock().unwrap();
+            if let Some(ref mut merged_block_number) = *guard {
+                if block_number != *merged_block_number + 1 {
+                    panic!(
+                        "Merged uncontinuous block, expect: {}, actual: {}",
+                        *merged_block_number + 1,
+                        block_number
+                    );
+                }
+                *merged_block_number = block_number;
+            } else {
+                *guard = Some(block_number);
+            }
+        }
 
         // Write bytecode
         contracts

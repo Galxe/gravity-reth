@@ -60,7 +60,7 @@ where
         hashed_state: &HashedPostState,
         compatible: bool,
     ) -> ProviderResult<(B256, TrieUpdatesV2, Option<TrieUpdates>)> {
-        let provider = self.client.database_provider_ro()?;
+        let provider = || self.client.database_provider_ro();
         let nested_hash = NestedStateRoot::new(provider, Some(self.cache.clone()));
         nested_hash.calculate(hashed_state, compatible)
     }

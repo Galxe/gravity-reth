@@ -99,7 +99,6 @@ where
         + TrieWriterV2
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
-    PF::Provider: Send + Sync + 'static,
 {
     let chain = factory.chain_spec();
 
@@ -138,13 +137,10 @@ where
 
     let alloc = &genesis.alloc;
 
-    insert_world_trie(
-        factory.database_provider_ro()?,
-        factory.database_provider_rw()?,
-        alloc.iter(),
-    )?;
     // use transaction to insert genesis header
     let provider_rw = factory.database_provider_rw()?;
+    let nested_provider = || factory.database_provider_ro();
+    insert_world_trie(nested_provider, &provider_rw, alloc.iter())?;
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
     insert_genesis_history(&provider_rw, alloc.iter())?;
 
@@ -306,13 +302,14 @@ where
     Ok(())
 }
 
-pub fn insert_world_trie<'a, 'b, Reader, Writer>(
-    reader: Reader,
-    writer: Writer,
+pub fn insert_world_trie<'a, 'b, P, F, Writer>(
+    provider: F,
+    writer: &Writer,
     alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
 ) -> ProviderResult<()>
 where
-    Reader: DBProvider<Tx: DbTx> + Send + Sync + 'static,
+    P: DBProvider<Tx: DbTx>,
+    F: Fn() -> ProviderResult<P> + Send + Sync,
     Writer: DBProvider<Tx: DbTxMut> + TrieWriterV2,
 {
     let mut accounts = HashMap::default();
@@ -330,7 +327,7 @@ where
         storages.insert(hashed_address, hashed_storages);
     }
     let hashed_state = HashedPostState { accounts, storages };
-    let nested_hash = NestedStateRoot::new(reader, None);
+    let nested_hash = NestedStateRoot::new(provider, None);
     let (root_hash, trie_updates, _) = nested_hash.calculate(&hashed_state, false)?;
 
     writer.write(&trie_updates)?;
