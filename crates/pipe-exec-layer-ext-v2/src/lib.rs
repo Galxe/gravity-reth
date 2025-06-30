@@ -204,14 +204,17 @@ struct ExecuteOrderedBlockResult {
 
 impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, block: ReceivedBlock) {
+        // Wait untile there's no large gap between cache and db
         let block_number = block.number();
         let block_id = block.id();
+        self.metrics.start_process_block_number.set(block_number as f64);
 
         self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
         let (parent_block_header, prev_start_execute_time) =
             self.execute_block_barrier.wait(block_number - 1).await.unwrap();
+        self.cache.wait_persist_gap();
         let start_time = Instant::now();
         let ExecuteOrderedBlockResult { block_without_roots, execution_output, txs_info } =
             self.execute_ordered_block(block, &parent_block_header);
@@ -336,6 +339,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         self.metrics.finish_commit_time_diff.record(finish_commit_time - prev_finish_commit_time);
         self.make_canonical_barrier.notify(block_number, finish_commit_time).unwrap();
 
+        self.metrics.end_process_block_number.set(block_number as f64);
         self.metrics.total_gas_used.increment(gas_used);
     }
 

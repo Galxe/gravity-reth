@@ -6,7 +6,7 @@ use alloy_primitives::{
 };
 use alloy_trie::{BranchNodeCompact, EMPTY_ROOT_HASH};
 use nybbles::Nibbles;
-use reth_storage_errors::db::DatabaseError;
+use reth_storage_errors::{db::DatabaseError, ProviderResult};
 
 use crate::nested_trie::node::{Node, NodeFlag};
 
@@ -20,10 +20,22 @@ pub struct TrieOutput {
     pub update_nodes: HashMap<Nibbles, Node>,
 }
 
+impl TrieOutput {
+    pub fn is_empty(&self) -> bool {
+        self.removed_nodes.is_empty() && self.update_nodes.is_empty()
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct CompatibleTrieOutput {
     pub removed_nodes: HashSet<Nibbles>,
     pub update_nodes: HashMap<Nibbles, BranchNodeCompact>,
+}
+
+impl CompatibleTrieOutput {
+    pub fn is_empty(&self) -> bool {
+        self.removed_nodes.is_empty() && self.update_nodes.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -239,32 +251,26 @@ where
         &mut self,
         batches: [Vec<(Nibbles, Option<Node>)>; 16], // Some for insert, None for delete
         f: F,
-    ) -> Result<(), DatabaseError>
+    ) -> ProviderResult<()>
     where
-        F: Fn() -> Result<R, DatabaseError> + Send + Sync,
+        F: Fn() -> ProviderResult<R> + Send + Sync,
     {
         if self.parallel && self.root.is_some() {
             let root = self.root.take().unwrap();
             if let Node::FullNode { mut children, .. } = root {
-                let abort: OnceLock<DatabaseError> = Default::default();
                 let removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
                 let compatible_removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
 
-                std::thread::scope(|scope| {
+                std::thread::scope(|scope| -> ProviderResult<()> {
+                    let mut handles = Vec::new();
                     for (child, batch) in children.iter_mut().zip(batches.into_iter()) {
                         if batch.is_empty() {
                             continue;
                         }
-                        scope.spawn(|| {
+                        handles.push(scope.spawn(|| -> ProviderResult<()> {
                             let prefix = batch[0].0.slice(0..1);
                             let child_root = child.take().map(|n| *n);
-                            let reader = match f() {
-                                Ok(reader) => reader,
-                                Err(e) => {
-                                    abort.get_or_init(|| e);
-                                    return;
-                                }
-                            };
+                            let reader = f()?;
                             let mut child_trie =
                                 Trie::new_with_root(reader, child_root, self.compatible.is_some());
                             for (key, value) in batch {
@@ -285,15 +291,8 @@ where
                                         key.slice(1..),
                                     )
                                 };
-                                match result {
-                                    Ok((_, node)) => {
-                                        child_trie.root = node;
-                                    }
-                                    Err(e) => {
-                                        abort.get_or_init(|| e);
-                                        return;
-                                    }
-                                }
+                                let (_, node) = result?;
+                                child_trie.root = node;
                             }
                             let _ = child_trie.hash();
                             *child = child_trie.root.take().map(|n| Box::new(n));
@@ -309,12 +308,14 @@ where
                                     .unwrap()
                                     .extend(compatible.removed_nodes);
                             }
-                        });
+                            Ok(())
+                        }));
                     }
-                });
-                if let Some(abort) = abort.into_inner() {
-                    return Err(abort);
-                }
+                    for handle in handles {
+                        handle.join().unwrap()?;
+                    }
+                    Ok(())
+                })?;
                 let mut removed_nodes = removed_nodes.into_inner().unwrap();
                 let mut compatible_removed_nodes = compatible_removed_nodes.into_inner().unwrap();
                 // check the root node can be FullNode or other
