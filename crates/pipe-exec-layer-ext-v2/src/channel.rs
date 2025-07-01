@@ -54,7 +54,7 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
         match state {
             Some(State::Notified(v)) => Some(v),
             Some(State::Waiting(_)) => {
-                panic!("unexpected state: {:?}", key);
+                panic!("unexpected state: {key:?}");
             }
             None => {
                 let (tx, rx) = oneshot::channel();
@@ -80,7 +80,7 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
                 let _ = tx.send(val);
             }
             Some(State::Notified(_)) => {
-                panic!("unexpected state: {:?}", key);
+                panic!("unexpected state: {key:?}");
             }
             None => {
                 inner.states.insert(key, State::Notified(val));

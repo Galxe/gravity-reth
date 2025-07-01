@@ -480,13 +480,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         let mut executor = self.evm_config.parallel_executor(state);
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
             serde_json::to_writer(
-                std::io::BufWriter::new(
-                    std::fs::File::create(format!("{}.json", block_id)).unwrap(),
-                ),
+                std::io::BufWriter::new(std::fs::File::create(format!("{block_id}.json")).unwrap()),
                 &block,
             )
             .unwrap();
-            panic!("failed to execute block {:?}: {:?}", block_id, err)
+            panic!("failed to execute block {block_id:?}: {err:?}")
         });
 
         ExecuteOrderedBlockResult {
