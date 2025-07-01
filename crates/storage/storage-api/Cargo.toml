@@ -35,7 +35,7 @@ alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-rpc-types-engine.workspace = true
 
-#misc
+# misc
 dashmap = { workspace = true, features = ["inline"] }
 auto_impl.workspace = true
 metrics.workspace = true

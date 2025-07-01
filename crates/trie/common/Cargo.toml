@@ -12,7 +12,7 @@ description = "Commonly used types for trie usage in reth."
 workspace = true
 
 [dependencies]
-#reth
+# reth
 reth-storage-errors.workspace = true
 # alloy
 alloy-primitives.workspace = true
