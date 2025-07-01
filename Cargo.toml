@@ -7,7 +7,6 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
-
 [dependencies]
 reth.workspace = true
 reth-node-builder.workspace = true
@@ -207,7 +206,7 @@ members = [
     "examples/rpc-db/",
     "examples/precompile-cache/",
     "examples/txpool-tracing/",
-    #"examples/custom-beacon-withdrawals",
+    "examples/custom-beacon-withdrawals",
     "testing/ef-tests/",
     "testing/testing-utils",
     "crates/tracing-otlp",
@@ -613,7 +612,7 @@ url = { version = "2.3", default-features = false }
 zstd = "0.13"
 byteorder = "1"
 mini-moka = "0.10"
-moka = { version="0.12.10", features=["sync"] }
+moka = { version = "0.12.10", features = ["sync"] }
 tar-no-std = { version = "0.3.2", default-features = false }
 miniz_oxide = { version = "0.8.4", default-features = false }
 

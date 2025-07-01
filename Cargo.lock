@@ -3282,6 +3282,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-custom-beacon-withdrawals"
+version = "0.0.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-sol-macro",
+ "alloy-sol-types",
+ "eyre",
+ "reth-ethereum",
+]
+
+[[package]]
 name = "example-custom-dev-node"
 version = "0.0.0"
 dependencies = [

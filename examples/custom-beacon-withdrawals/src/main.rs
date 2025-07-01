@@ -18,7 +18,9 @@ use reth_ethereum::{
     evm::{
         primitives::{
             execute::{BlockExecutionError, BlockExecutor, InternalBlockExecutionError},
+            parallel_execute::ParallelExecutor,
             Database, Evm, EvmEnv, InspectorFor, NextBlockEnvAttributes, OnStateHook,
+            ParallelDatabase,
         },
         revm::{
             context::{result::ExecutionResult, TxEnv},
@@ -154,6 +156,14 @@ impl ConfigureEvm for CustomEvmConfig {
         attributes: Self::NextBlockEnvCtx,
     ) -> EthBlockExecutionCtx<'_> {
         self.inner.context_for_next_block(parent, attributes)
+    }
+
+    fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+    ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
+    {
+        self.inner.parallel_executor(db)
     }
 }
 
