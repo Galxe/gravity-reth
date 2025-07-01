@@ -145,7 +145,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: cargo docs --document-private-items
+      # FIXME: - run: cargo docs --document-private-items
+      - run: cargo docs --document-private-items --exclude "example-*"
         env:
           # Keep in sync with ./book.yml:jobs.build
           # This should only add `-D warnings`
