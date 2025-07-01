@@ -60,6 +60,8 @@ std = [
     "reth-storage-errors/std",
     "reth-db-models/std",
     "reth-trie-common/std",
+    "revm-bytecode/std",
+    "once_cell/std",
 ]
 
 db-api = [

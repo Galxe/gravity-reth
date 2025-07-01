@@ -94,6 +94,8 @@ serde = [
     "reth-primitives-traits/serde",
     "reth-ethereum-primitives/serde",
     "reth-chain-state/serde",
+    "dashmap/serde",
+    "reth-revm/serde",
 ]
 test-utils = [
     "rand",
@@ -105,6 +107,7 @@ test-utils = [
     "reth-primitives-traits/test-utils",
     "reth-ethereum-primitives/test-utils",
     "alloy-primitives/rand",
+    "reth-revm/test-utils",
 ]
 arbitrary = [
     "proptest",
@@ -120,6 +123,7 @@ arbitrary = [
     "revm-interpreter/arbitrary",
     "reth-ethereum-primitives/arbitrary",
     "revm-primitives/arbitrary",
+    "dashmap/arbitrary",
 ]
 
 [[bench]]
