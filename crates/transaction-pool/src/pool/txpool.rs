@@ -1581,9 +1581,10 @@ impl<T: PoolTransaction> AllTransactions<T> {
         // self.txs.range((Excluded(id), Unbounded)).take_while(|(other, _)| id.sender ==
         // other.sender)
         let id = *id;
-        self.txs.get(&id.sender).into_iter().flat_map(move |map_ref| {
-            map_ref.range((Excluded(id), Unbounded))
-        })
+        self.txs
+            .get(&id.sender)
+            .into_iter()
+            .flat_map(move |map_ref| map_ref.range((Excluded(id), Unbounded)))
     }
 
     /// Returns all transactions that _follow_ after the given id but have the same sender.
@@ -1596,10 +1597,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
     ) -> impl Iterator<Item = (&'a TransactionId, &'a PoolInternalTransaction<T>)> + 'a {
         // self.txs.range(id..).take_while(|(other, _)| id.sender == other.sender)
         let id = *id;
-        self.txs
-            .get(&id.sender)
-            .into_iter()
-            .flat_map(move |map_ref| map_ref.range(id..))
+        self.txs.get(&id.sender).into_iter().flat_map(move |map_ref| map_ref.range(id..))
     }
 
     /// Returns all mutable transactions that _follow_ after the given id but have the same sender.
@@ -1611,10 +1609,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         id: &'b TransactionId,
     ) -> impl Iterator<Item = (&'a TransactionId, &'a mut PoolInternalTransaction<T>)> + 'a {
         let id = *id;
-        self.txs
-            .get_mut(&id.sender)
-            .into_iter()
-            .flat_map(move |map_ref| map_ref.range_mut(id..))
+        self.txs.get_mut(&id.sender).into_iter().flat_map(move |map_ref| map_ref.range_mut(id..))
     }
 
     /// Removes a transaction from the set using its hash.
@@ -1918,12 +1913,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         };
 
         // try to insert the transaction
-        match self
-            .txs
-            .entry(transaction.id().sender)
-            .or_default()
-            .entry(*transaction.id())
-        {
+        match self.txs.entry(transaction.id().sender).or_default().entry(*transaction.id()) {
             Entry::Vacant(entry) => {
                 // Insert the transaction in both maps
                 self.by_hash.insert(*pool_tx.transaction.hash(), pool_tx.transaction.clone());

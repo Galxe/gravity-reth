@@ -30,9 +30,7 @@ use reth_primitives_traits::{
     GotExpected, SealedBlock,
 };
 use reth_revm::{database::StateProviderDatabase, DatabaseRef};
-use reth_storage_api::{
-    StateProviderFactory, StateProviderOptions, PERSIST_BLOCK_CACHE,
-};
+use reth_storage_api::{StateProviderFactory, StateProviderOptions, PERSIST_BLOCK_CACHE};
 use reth_tasks::TaskSpawner;
 use std::{
     marker::PhantomData,
