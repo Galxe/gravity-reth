@@ -12,7 +12,7 @@ use crate::StoredNibblesSubKey;
 
 /// Cache hash value(RlpNode) of current Node to prevent duplicate caculations,
 /// and the `dirty` indicates whether current Node has been updated.
-/// NodeFlag is not stored in database, and read as default when a Node is loaded
+/// `NodeFlag` is not stored in database, and read as default when a Node is loaded
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct NodeFlag {
     /// Cached hash for current node
@@ -23,12 +23,12 @@ pub struct NodeFlag {
 
 impl NodeFlag {
     /// Create a new node with hash
-    pub fn new(rlp: Option<RlpNode>) -> Self {
+    pub const fn new(rlp: Option<RlpNode>) -> Self {
         Self { rlp, dirty: false }
     }
 
     /// Create a dirty node
-    pub fn dirty_node() -> Self {
+    pub const fn dirty_node() -> Self {
         Self { rlp: None, dirty: true }
     }
 
@@ -49,7 +49,8 @@ impl NodeFlag {
 ///
 /// `FullNode` for branch node
 ///
-/// `ShortNode` for extension node(when value is HashNode), or leaf node(when value is ValueNode)
+/// `ShortNode` for extension node(when value is `HashNode`), or leaf node(when value is
+/// `ValueNode`)
 ///
 /// `ValueNode` to store the slot value or trie account
 ///
@@ -67,7 +68,7 @@ pub enum Node {
         /// Node flag to mark dirty and cache node hash
         flags: NodeFlag,
     },
-    /// extension node(when value is HashNode), or leaf node(when value is ValueNode)
+    /// extension node(when value is `HashNode`), or leaf node(when value is `ValueNode`)
     ShortNode {
         /// shared prefix(Extension Node), or key end(Leaf Node)
         key: Nibbles,
@@ -89,13 +90,11 @@ impl Clone for Node {
         match self {
             Self::FullNode { children, flags } => {
                 // only nested hash node can be cloned
-                for child in children {
-                    if let Some(child) = child {
-                        match child.as_ref() {
-                            Node::HashNode(_) => {}
-                            _ => {
-                                panic!("Only non-nested node can be cloned!");
-                            }
+                for child in children.iter().flatten() {
+                    match child.as_ref() {
+                        Self::HashNode(_) => {}
+                        _ => {
+                            panic!("Only non-nested node can be cloned!");
                         }
                     }
                 }
@@ -103,7 +102,7 @@ impl Clone for Node {
             }
             Self::ShortNode { key, value, flags } => {
                 match value.as_ref() {
-                    Node::FullNode { .. } | Node::ShortNode { .. } => {
+                    Self::FullNode { .. } | Self::ShortNode { .. } => {
                         panic!("Only non-nested node can be cloned!");
                     }
                     _ => {}
@@ -118,6 +117,7 @@ impl Clone for Node {
 
 /// Used for custom serialization operations
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 enum NodeType {
     FullNode = 0,
     ShortNode = 1,
@@ -126,12 +126,12 @@ enum NodeType {
 }
 
 impl NodeType {
-    fn from_u8(v: u8) -> Option<Self> {
+    const fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Some(NodeType::FullNode),
-            1 => Some(NodeType::ShortNode),
-            2 => Some(NodeType::ValueNode),
-            3 => Some(NodeType::HashNode),
+            0 => Some(Self::FullNode),
+            1 => Some(Self::ShortNode),
+            2 => Some(Self::ValueNode),
+            3 => Some(Self::HashNode),
             _ => None,
         }
     }
@@ -192,7 +192,7 @@ pub type StoredNode = Vec<u8>;
 
 impl From<Node> for StoredNode {
     fn from(node: Node) -> Self {
-        let mut buf = Vec::with_capacity(1024);
+        let mut buf = Self::with_capacity(1024);
         // version
         buf.push(0u8);
         match node {
@@ -253,17 +253,15 @@ impl From<StoredNode> for Node {
     fn from(value: StoredNode) -> Self {
         let mut i = 0;
         let version = value[i];
-        if version != 0 {
-            panic!("Unresolved Node version");
-        }
+        assert!(version == 0, "Unresolved Node version");
         i += 1;
         let node_type = NodeType::from_u8(value[i]);
         i += 1;
         match node_type {
             Some(NodeType::FullNode) => {
                 // FullNode
-                let mut children: [Option<Box<Node>>; 17] = Default::default();
-                for child in children.iter_mut() {
+                let mut children: [Option<Box<Self>>; 17] = Default::default();
+                for child in &mut children {
                     let marker = value[i];
                     i += 1;
                     if marker == 1 {
@@ -271,10 +269,10 @@ impl From<StoredNode> for Node {
                         i += 1;
                         let rlp = RlpNode::from_raw(&value[i..i + len]).unwrap();
                         i += len;
-                        *child = Some(Box::new(Node::HashNode(rlp)));
+                        *child = Some(Box::new(Self::HashNode(rlp)));
                     }
                 }
-                Node::FullNode { children, flags: NodeFlag::new(None) }
+                Self::FullNode { children, flags: NodeFlag::new(None) }
             }
             Some(NodeType::ShortNode) => {
                 // ShortNode
@@ -290,29 +288,29 @@ impl From<StoredNode> for Node {
                         // extension node
                         let rlp_len = value[i] as usize;
                         i += 1;
-                        Node::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
+                        Self::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
                     }
                     Some(NodeType::ValueNode) => {
                         // leaf node
                         let val_len = value[i] as usize;
                         i += 1;
-                        Node::ValueNode(value[i..i + val_len].to_vec())
+                        Self::ValueNode(value[i..i + val_len].to_vec())
                     }
                     _ => unreachable!(),
                 };
-                Node::ShortNode { key, value: Box::new(next_node), flags: NodeFlag::new(None) }
+                Self::ShortNode { key, value: Box::new(next_node), flags: NodeFlag::new(None) }
             }
             Some(NodeType::ValueNode) => {
                 // ValueNode
                 let val_len = value[i] as usize;
                 i += 1;
-                Node::ValueNode(value[i..i + val_len].to_vec())
+                Self::ValueNode(value[i..i + val_len].to_vec())
             }
             Some(NodeType::HashNode) => {
                 // HashNode
                 let rlp_len = value[i] as usize;
                 i += 1;
-                Node::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
+                Self::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
             }
             _ => {
                 unreachable!("Unexpected Node type: {:?}", node_type);
@@ -323,37 +321,40 @@ impl From<StoredNode> for Node {
 
 impl Node {
     /// Get the cached hash
-    pub fn cached_rlp(&self) -> Option<&RlpNode> {
+    pub const fn cached_rlp(&self) -> Option<&RlpNode> {
         match self {
-            Node::FullNode { children: _, flags } => flags.rlp.as_ref(),
-            Node::ShortNode { key: _, value: _, flags } => flags.rlp.as_ref(),
-            Node::ValueNode(_) => None,
-            Node::HashNode(rlp_node) => Some(&rlp_node),
+            Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
+                flags.rlp.as_ref()
+            }
+            Self::ValueNode(_) => None,
+            Self::HashNode(rlp_node) => Some(rlp_node),
         }
     }
 
     /// Test whether current node is changed
-    pub fn dirty(&self) -> bool {
+    pub const fn dirty(&self) -> bool {
         match self {
-            Node::FullNode { children: _, flags } => flags.dirty,
-            Node::ShortNode { key: _, value: _, flags } => flags.dirty,
-            Node::ValueNode(_) => true,
-            Node::HashNode(_) => false,
+            Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
+                flags.dirty
+            }
+            Self::ValueNode(_) => true,
+            Self::HashNode(_) => false,
         }
     }
 
     /// Reset current node
     pub fn reset(mut self) -> Self {
         match &mut self {
-            Node::FullNode { children: _, flags } => flags.reset(),
-            Node::ShortNode { key: _, value: _, flags } => flags.reset(),
+            Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
+                flags.reset()
+            }
             _ => {}
         }
         self
     }
 
     /// Convert to `BranchNodeCompact`
-    pub fn convert_node_compact(children: &[Option<Box<Node>>; 17]) -> BranchNodeCompact {
+    pub fn convert_node_compact(children: &[Option<Box<Self>>; 17]) -> BranchNodeCompact {
         let mut state_mask = TrieMask::default();
         let mut tree_mask = TrieMask::default();
         let mut hash_mask = TrieMask::default();
@@ -363,7 +364,7 @@ impl Node {
             if let Some(child) = child {
                 state_mask.set_bit(i as u8);
                 match child.as_ref() {
-                    Node::HashNode(rlp) => {
+                    Self::HashNode(rlp) => {
                         hash_mask.set_bit(i as u8);
                         let hash =
                             rlp.as_hash().unwrap_or_else(|| alloy_primitives::keccak256(rlp));
@@ -387,7 +388,7 @@ impl Node {
 
     /// Convert to `BranchNodeCompact`
     pub fn branch_node_compact(&self) -> BranchNodeCompact {
-        if let Node::FullNode { children, .. } = self {
+        if let Self::FullNode { children, .. } = self {
             Self::convert_node_compact(children)
         } else {
             panic!("Only FullNode can be converted to BranchNodeCompact")
@@ -397,7 +398,7 @@ impl Node {
     /// Build hash for current node
     pub fn build_hash(&mut self, buf: &mut Vec<u8>) -> &RlpNode {
         match self {
-            Node::FullNode { children, flags } => {
+            Self::FullNode { children, flags } => {
                 if flags.rlp.is_none() {
                     let header = Header {
                         list: true,
@@ -416,9 +417,9 @@ impl Node {
                 }
                 flags.rlp.as_ref().unwrap()
             }
-            Node::ShortNode { key, value, flags } => {
+            Self::ShortNode { key, value, flags } => {
                 if flags.rlp.is_none() {
-                    if let Node::ValueNode(value) = value.as_ref() {
+                    if let Self::ValueNode(value) = value.as_ref() {
                         // leaf node
                         let value = value.as_ref();
                         let header =
@@ -442,7 +443,7 @@ impl Node {
                 }
                 flags.rlp.as_ref().unwrap()
             }
-            Node::HashNode(rlp_node) => rlp_node,
+            Self::HashNode(rlp_node) => rlp_node,
             _ => unreachable!(),
         }
     }

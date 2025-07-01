@@ -253,7 +253,7 @@ where
         }
     }
 
-    /// Insert ValueNode by the full path
+    /// Insert `ValueNode` by the full path
     pub fn insert(&mut self, key: Nibbles, value: Node) -> Result<(), DatabaseError> {
         let root = self.root.take();
         let (_, new_root) = self.insert_inner(root, Nibbles::new(), key, value)?;
@@ -261,7 +261,7 @@ where
         Ok(())
     }
 
-    /// Parallel insert/delete ValueNode by full path.
+    /// Parallel insert/delete `ValueNode` by full path.
     /// Each path is partitioned by the first nibble.
     /// Node for delete, and Some for insert.
     pub fn parallel_update<F>(
@@ -289,7 +289,7 @@ where
                             let child_root = child.take().map(|n| *n);
                             let reader = f()?;
                             let mut child_trie =
-                                Trie::new_with_root(reader, child_root, self.compatible.is_some());
+                                Self::new_with_root(reader, child_root, self.compatible.is_some());
                             for (key, value) in batch {
                                 let child_root = child_trie.root.take();
                                 let result = if let Some(value) = value {
@@ -312,7 +312,7 @@ where
                                 child_trie.root = node;
                             }
                             let _ = child_trie.hash();
-                            *child = child_trie.root.take().map(|n| Box::new(n));
+                            *child = child_trie.root.take().map(Box::new);
                             if !child_trie.trie_output.removed_nodes.is_empty() {
                                 removed_nodes
                                     .lock()
@@ -359,7 +359,7 @@ where
                         let mut new_key = nibble_path.clone();
                         new_key.extend_from_slice_unchecked(&cn_key);
                         removed_nodes.insert(nibble_path.clone());
-                        compatible_removed_nodes.insert(nibble_path.clone());
+                        compatible_removed_nodes.insert(nibble_path);
                         Node::ShortNode {
                             key: new_key,
                             value: cn_value,
@@ -394,9 +394,8 @@ where
                     }
                 }
                 return Ok(());
-            } else {
-                self.root = Some(root);
             }
+            self.root = Some(root);
         }
         for batch in batches {
             for (key, value) in batch {
@@ -410,7 +409,7 @@ where
         Ok(())
     }
 
-    /// Delete ValueNode by full path
+    /// Delete `ValueNode` by full path
     pub fn delete(&mut self, key: Nibbles) -> Result<(), DatabaseError> {
         let root = self.root.take();
         let (_, new_root) = self.delete_inner(root, Nibbles::new(), key)?;
@@ -432,7 +431,7 @@ where
                     let mut new_prefix = prefix.clone();
                     new_prefix.push_unchecked(key[0]);
                     let (dirty, new_node) = self.delete_inner(child, new_prefix, key.slice(1..))?;
-                    children[index] = new_node.map(|n| Box::new(n));
+                    children[index] = new_node.map(Box::new);
                     if !dirty {
                         return Ok((false, Some(Node::FullNode { children, flags })));
                     }
@@ -614,13 +613,11 @@ where
             if let Node::FullNode { children, flags } = root {
                 if self.parallel && flags.rlp.is_none() {
                     std::thread::scope(|scope| {
-                        for child in children {
-                            if let Some(node) = child {
-                                scope.spawn(|| {
-                                    let mut buf = Vec::new();
-                                    node.build_hash(&mut buf);
-                                });
-                            }
+                        for node in children.iter_mut().flatten() {
+                            scope.spawn(|| {
+                                let mut buf = Vec::new();
+                                node.build_hash(&mut buf);
+                            });
                         }
                     });
                 }
