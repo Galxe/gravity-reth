@@ -720,6 +720,7 @@ pub struct PipeExecLayerExt<N: NodePrimitives> {
 /// A static instance of `PipeExecLayerExt` used for dispatching events.
 pub static PIPE_EXEC_LAYER_EXT: OnceLock<Box<dyn Any + Send + Sync>> = OnceLock::new();
 
+/// Get a reference to the `PipeExecLayerExt` instance.
 pub fn get_pipe_exec_layer_ext<N: NodePrimitives>() -> Option<&'static PipeExecLayerExt<N>> {
     PIPE_EXEC_LAYER_EXT.get().map(|ext| ext.downcast_ref::<PipeExecLayerExt<N>>().unwrap())
 }
