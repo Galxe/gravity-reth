@@ -1,6 +1,8 @@
 # June 30 Update: Gravity Reth Performance Benchmarks
 
-Gravity reth demonstrates significant performance improvements over vanilla reth through multiple optimizations. Our benchmarks show **2.5-6x+ performance improvement** compared to native Reth 1.4.8, depending on the workload, e.g. the number of accounts and contract complexity.
+Gravity reth demonstrates significant performance improvements over vanilla reth through multiple optimizations. Our benchmarks show 2.5-6x+ performance improvement compared to native Reth 1.4.8, depending on the workload, e.g. the number of accounts and contract complexity.
+In high-throughput scenarios, Gravity Reth reaches up to 1.5–1.9 Gigagas/s sustained execution throughput, enabling industry-leading performance among EVM-compatible Layer 1s.
+
 
 ## Background: Using Reth As The Core Execution Engine
 
@@ -64,6 +66,8 @@ Because of our optimizations, the performance of Gravity reth under high account
 ![](../../assets/account-scale-impact.png)
 _Figure 2: Impact of Account Scale on Execution Performance_
 
+While TPS decreases gradually with increasing account scale, Gravity-Reth maintains Gigagas/s throughput above 1.3 at 1 million accounts, showcasing robust parallelization and cache efficiency even in large state environments.
+
 ### Contract Complexity Impact (ERC20 vs Uniswap)
 
 | Metric         | ERC20 Transfer      | Uniswap Swap        |
@@ -74,7 +78,7 @@ _Figure 2: Impact of Account Scale on Execution Performance_
 | Merklization   | 34ms                | 30ms                |
 
 ## Key Findings
-
+-   Gravity-Reth consistently achieves 1.5–1.9 Gigagas/s across varied workloads, ensuring both speed and scalability for demanding L1 usage
 -   **Grevm** significantly optimizes the Execution phase, while **Pipeline** reduces block intervals and increases TPS
 -   **Merklization** becomes the bottleneck for block finality, which has been substantially reduced in the latest version
 -   Performance remains robust even with increasing account scale, demonstrating effective LRU cache design for hot state access
