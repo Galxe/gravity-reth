@@ -1,4 +1,4 @@
-use std::{num::NonZero, sync::LazyLock};
+use std::num::NonZero;
 
 use super::{
     AccountReader, BlockHashReader, BlockIdReader, StateProofProvider, StateRootProvider,
@@ -122,9 +122,12 @@ pub trait TryIntoHistoricalStateProvider {
     ) -> ProviderResult<StateProviderBox>;
 }
 
+/// Options for database provider
 #[derive(Debug, Clone)]
 pub struct StateProviderOptions {
+    /// number of thread to parallel
     pub parallel: NonZero<usize>,
+    /// return database directly
     pub raw_db: bool,
 }
 
@@ -147,6 +150,7 @@ impl Default for StateProviderOptions {
 }
 
 impl StateProviderOptions {
+    /// return database directly
     pub fn with_raw_db(mut self) -> Self {
         self.raw_db = true;
         self

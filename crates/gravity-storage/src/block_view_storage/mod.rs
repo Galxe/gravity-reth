@@ -17,6 +17,8 @@ use reth_trie::{
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use std::{collections::BTreeMap, sync::Mutex};
 
+/// Block view for pipeline execution
+#[allow(missing_debug_implementations)]
 pub struct BlockViewStorage<Client> {
     client: Client,
     cache: PersistBlockCache,
@@ -33,6 +35,7 @@ where
         + Sync
         + 'static,
 {
+    /// Create a new `BlockViewStorage`
     pub fn new(client: Client) -> Self {
         Self { client, cache: PERSIST_BLOCK_CACHE.clone(), block_number_to_id: Default::default() }
     }
@@ -91,12 +94,16 @@ where
         }
     }
 }
+
+/// Block view provider
+#[allow(missing_debug_implementations)]
 pub struct BlockViewProvider {
     db: StateProviderDatabase<StateProviderBox>,
     cache: Option<PersistBlockCache>,
 }
 
 impl BlockViewProvider {
+    /// Create a new `BlockViewProvider`
     pub fn new(
         db: StateProviderDatabase<StateProviderBox>,
         cache: Option<PersistBlockCache>,
@@ -136,7 +143,7 @@ impl DatabaseRef for BlockViewProvider {
         self.db.storage_ref(address, index)
     }
 
-    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
         unimplemented!("not support block_hash_ref in BlockViewProvider")
     }
 }

@@ -1,3 +1,6 @@
+//! Storage for pipeline execution
+
+/// Block view for pipeline execution
 pub mod block_view_storage;
 
 use alloy_primitives::B256;
@@ -8,7 +11,9 @@ use reth_trie::{
     HashedPostState,
 };
 
+/// Gravity storage for pipeline execution
 pub trait GravityStorage: Send + Sync + 'static {
+    /// parallel database to support concurrent read
     type StateView: ParallelDatabase;
 
     /// get state view for execute

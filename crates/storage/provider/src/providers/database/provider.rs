@@ -60,7 +60,7 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
-    nested_trie::{StorageNodeEntry, StoredNode},
+    nested_trie::StorageNodeEntry,
     prefix_set::{PrefixSet, PrefixSetMut, TriePrefixSets},
     updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesV2},
     HashedPostStateSorted, Nibbles, StateRoot, StoredNibbles, StoredNibblesSubKey,

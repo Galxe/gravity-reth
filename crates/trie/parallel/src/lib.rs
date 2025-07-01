@@ -26,4 +26,5 @@ pub mod proof_task;
 #[cfg(feature = "metrics")]
 pub mod metrics;
 
+/// Parallel state root for nested trie
 pub mod nested_hash;

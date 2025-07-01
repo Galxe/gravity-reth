@@ -15,12 +15,12 @@ use reth_metrics::{metrics::Gauge, Metrics};
 use reth_primitives_traits::{
     BlockBody as _, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader, SignedTransaction,
 };
-use reth_storage_api::{PersistBlockCache, StateProviderBox};
+use reth_storage_api::StateProviderBox;
 use reth_trie::{
     updates::{TrieUpdates, TrieUpdatesV2},
     HashedPostState,
 };
-use revm_database::OriginalValuesKnown;
+
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{broadcast, watch};
 
@@ -879,6 +879,7 @@ pub struct ExecutedBlockWithTrieUpdates<N: NodePrimitives = EthPrimitives> {
     /// If [`ExecutedTrieUpdates::Missing`], the trie updates should be computed when persisting
     /// the block **on top of the canonical parent**.
     pub trie: ExecutedTrieUpdates,
+    /// trie updates for nested trie
     pub triev2: Arc<TrieUpdatesV2>,
 }
 

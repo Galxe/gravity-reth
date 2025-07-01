@@ -302,6 +302,7 @@ where
     Ok(())
 }
 
+/// Insert the genesis world trie
 pub fn insert_world_trie<'a, 'b, P, F, Writer>(
     provider: F,
     writer: &Writer,
