@@ -1,3 +1,5 @@
+//! Parallel EVM executor using Grevm
+
 use crate::RethReceiptBuilder;
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::BlockHeader;
@@ -27,6 +29,8 @@ use revm::{
     state::{Account, AccountStatus, EvmState},
 };
 
+/// EVM executor using Grevm that executes blocks in parallel.
+#[derive(Debug)]
 pub struct GrevmExecutor<DB, EvmConfig> {
     /// The chainspec
     chain_spec: Arc<ChainSpec>,
