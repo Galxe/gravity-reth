@@ -1,4 +1,5 @@
-#[allow(unused_variables)]
+#![allow(unused_variables)]
+
 use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
