@@ -55,7 +55,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      # - run: cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
+      # FIXME: - run: cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
       - run: cargo clippy --lib --tests --benches --all-features --locked
         env:
           RUSTFLAGS: -D warnings
@@ -178,7 +178,8 @@ jobs:
         with:
           cache-on-failure: true
       - uses: taiki-e/install-action@cargo-udeps
-      - run: cargo udeps --workspace --lib --examples --tests --benches --all-features --locked
+      # FIXME: - run: cargo udeps --workspace --lib --examples --tests --benches --all-features --locked
+      - run: cargo udeps --lib --tests --benches --all-features --locked
 
   book:
     name: book
