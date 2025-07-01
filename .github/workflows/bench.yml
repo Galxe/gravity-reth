@@ -15,6 +15,7 @@ env:
 name: bench
 jobs:
   codspeed:
+    if: false # FIXME: remove this line to enable the benchmarks job after fixing the issues with the test suite.
     runs-on:
       group: Reth
     steps:

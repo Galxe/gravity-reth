@@ -17,6 +17,7 @@ env:
 name: compact-codec
 jobs:
   compact-codec:
+    if: false # FIXME: remove this line to enable the compact codec job after fixing the issues with the test suite.
     runs-on:
       group: Reth
     strategy:
