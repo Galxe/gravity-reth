@@ -5,21 +5,30 @@ use alloy_primitives::{
     B256,
 };
 
+/// The aggregation of nested trie updates
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct TrieUpdatesV2 {
+    /// Collection of updated intermedidate account nodes indexed by full path.
     pub account_nodes: HashMap<Nibbles, Node>,
+    /// Collection of removed intermediate account nodes indexed by full path.
     pub removed_nodes: HashSet<Nibbles>,
+    /// Collection of updated storage tries indexed by the hashed address.
     pub storage_tries: B256Map<StorageTrieUpdatesV2>,
 }
 
+/// Trie updates for nested storage trie of a single account.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct StorageTrieUpdatesV2 {
+    /// Flag indicating whether the trie was deleted.
     pub is_deleted: bool,
+    /// Collection of updated storage trie nodes.
     pub storage_nodes: HashMap<Nibbles, Node>,
+    /// Collection of removed storage trie nodes.
     pub removed_nodes: HashSet<Nibbles>,
 }
 
 impl StorageTrieUpdatesV2 {
+    /// Returns empty storage trie updates with `deleted` set to `true`.
     pub fn deleted() -> Self {
         Self {
             is_deleted: true,

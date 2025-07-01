@@ -40,6 +40,7 @@ pub trait StateRootProvider: Send + Sync {
         input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)>;
 
+    /// todo(ashin): should be removed
     fn state_root_with_updates_v2(
         &self,
         state: HashedPostState,
@@ -140,6 +141,8 @@ pub trait StorageTrieWriter: Send + Sync {
     ) -> ProviderResult<usize>;
 }
 
+/// Trie writer for nested trie
 pub trait TrieWriterV2 {
+    /// Write trie updates for nested trie
     fn write(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError>;
 }

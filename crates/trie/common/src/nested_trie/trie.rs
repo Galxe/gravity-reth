@@ -1,4 +1,4 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use alloy_primitives::{
     map::{HashMap, HashSet},
@@ -10,34 +10,45 @@ use reth_storage_errors::{db::DatabaseError, ProviderResult};
 
 use crate::nested_trie::node::{Node, NodeFlag};
 
+/// Node reader for nested trie
 pub trait TrieReader {
+    /// Read node of the given full path
     fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError>;
 }
 
+/// Trie output of collection trie updates
 #[derive(Default, Debug, Clone)]
 pub struct TrieOutput {
+    /// Collection of removed intermediate nodes indexed by full path.
     pub removed_nodes: HashSet<Nibbles>,
+    /// Collection of updated nodes indexed by full path.
     pub update_nodes: HashMap<Nibbles, Node>,
 }
 
 impl TrieOutput {
+    /// Empty trie output
     pub fn is_empty(&self) -> bool {
         self.removed_nodes.is_empty() && self.update_nodes.is_empty()
     }
 }
 
+/// Compatible for origin `BranchNodeCompact` trie
 #[derive(Default, Debug, Clone)]
 pub struct CompatibleTrieOutput {
+    /// Collection of removed intermediate nodes indexed by full path.
     pub removed_nodes: HashSet<Nibbles>,
+    /// Collection of updated nodes indexed by full path.
     pub update_nodes: HashMap<Nibbles, BranchNodeCompact>,
 }
 
 impl CompatibleTrieOutput {
+    /// Empty trie output
     pub fn is_empty(&self) -> bool {
         self.removed_nodes.is_empty() && self.update_nodes.is_empty()
     }
 }
 
+/// Nested trie
 #[derive(Debug)]
 pub struct Trie<R>
 where
@@ -54,6 +65,7 @@ impl<R> Trie<R>
 where
     R: TrieReader,
 {
+    /// Create a nested trie
     pub fn new(mut reader: R, parallel: bool, compatible: bool) -> Result<Self, DatabaseError> {
         let root = reader.read(&Nibbles::new())?;
         Ok(Self {
@@ -75,6 +87,7 @@ where
         }
     }
 
+    /// Take the trie output
     pub fn take_output(mut self) -> (TrieOutput, Option<CompatibleTrieOutput>) {
         if let Some(root) = self.root.take() {
             self.take_output_inner(root, Nibbles::new());
@@ -92,7 +105,7 @@ where
                 if let Some(compatible) = &mut self.compatible {
                     compatible
                         .update_nodes
-                        .insert(prefix.clone(), Node::to_branch_node_compact(&children));
+                        .insert(prefix.clone(), Node::convert_node_compact(&children));
                 }
                 let mut convert: [Option<Box<Node>>; 17] = Default::default();
                 for (nibble, child) in children.into_iter().enumerate() {
@@ -164,7 +177,7 @@ where
                         self.insert_inner(child, new_prefix, key.slice(1..), value)?;
                     children[index] = Some(Box::new(new_node));
                     if dirty {
-                        flags.mark_diry();
+                        flags.mark_dirty();
                     }
                     Ok((dirty, Node::FullNode { children, flags }))
                 }
@@ -179,7 +192,7 @@ where
                         let (dirty, new_node) =
                             self.insert_inner(next_node, new_prefix, key.slice(matchlen..), value)?;
                         if dirty {
-                            flags.mark_diry();
+                            flags.mark_dirty();
                         }
                         return Ok((
                             dirty,
@@ -240,6 +253,7 @@ where
         }
     }
 
+    /// Insert ValueNode by the full path
     pub fn insert(&mut self, key: Nibbles, value: Node) -> Result<(), DatabaseError> {
         let root = self.root.take();
         let (_, new_root) = self.insert_inner(root, Nibbles::new(), key, value)?;
@@ -247,6 +261,9 @@ where
         Ok(())
     }
 
+    /// Parallel insert/delete ValueNode by full path.
+    /// Each path is partitioned by the first nibble.
+    /// Node for delete, and Some for insert.
     pub fn parallel_update<F>(
         &mut self,
         batches: [Vec<(Nibbles, Option<Node>)>; 16], // Some for insert, None for delete
@@ -393,6 +410,7 @@ where
         Ok(())
     }
 
+    /// Delete ValueNode by full path
     pub fn delete(&mut self, key: Nibbles) -> Result<(), DatabaseError> {
         let root = self.root.take();
         let (_, new_root) = self.delete_inner(root, Nibbles::new(), key)?;
@@ -589,6 +607,8 @@ where
         }
     }
 
+    /// Get the hash value of the root node(state root for account trie, storage root for storage
+    /// trie)
     pub fn hash(&mut self) -> B256 {
         if let Some(root) = &mut self.root {
             if let Node::FullNode { children, flags } = root {

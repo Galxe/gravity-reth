@@ -15,25 +15,30 @@ use crate::StoredNibblesSubKey;
 /// NodeFlag is not stored in database, and read as default when a Node is loaded
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct NodeFlag {
+    /// Cached hash for current node
     pub rlp: Option<RlpNode>,
+    /// Whether current node is changed
     pub dirty: bool,
 }
 
 impl NodeFlag {
+    /// Create a new node with hash
     pub fn new(rlp: Option<RlpNode>) -> Self {
         Self { rlp, dirty: false }
     }
 
+    /// Create a dirty node
     pub fn dirty_node() -> Self {
         Self { rlp: None, dirty: true }
     }
 
-    // mark current node as dirty, and wipe the cached hash
-    pub fn mark_diry(&mut self) {
+    /// Mark current node as dirty, and wipe the cached hash
+    pub fn mark_dirty(&mut self) {
         self.rlp.take();
         self.dirty = true;
     }
 
+    /// Reset current node
     pub fn reset(&mut self) {
         self.rlp.take();
         self.dirty = false;
@@ -55,9 +60,25 @@ impl NodeFlag {
 /// node, nested node need to be replaced with `HashNode` which do not have a nested structure.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Node {
-    FullNode { children: [Option<Box<Node>>; 17], flags: NodeFlag },
-    ShortNode { key: Nibbles, value: Box<Node>, flags: NodeFlag },
+    /// Branch Node
+    FullNode {
+        /// Children of each branch + Current node value(always None for ethereum)
+        children: [Option<Box<Node>>; 17],
+        /// Node flag to mark dirty and cache node hash
+        flags: NodeFlag,
+    },
+    /// extension node(when value is HashNode), or leaf node(when value is ValueNode)
+    ShortNode {
+        /// shared prefix(Extension Node), or key end(Leaf Node)
+        key: Nibbles,
+        /// next node(Extension Node), or leaf value(Leaf Node)
+        value: Box<Node>,
+        /// node flag
+        flags: NodeFlag,
+    },
+    /// value node for leaf node
     ValueNode(Vec<u8>),
+    /// hash node to retrieve the real nested node
     HashNode(RlpNode),
 }
 
@@ -116,7 +137,7 @@ impl NodeType {
     }
 }
 
-/// This is a highly bad design, which comes from the limitations of MDBX:
+/// This is a terrible design, which comes from the limitations of MDBX:
 /// when there is a `dup-key` query, MDBX will only return data that is greater than
 /// or equal to the key, and only return the value, without the matched key. We have to
 /// save both key-value in the value field to determine whether the exact seek is
@@ -124,15 +145,19 @@ impl NodeType {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
 pub struct StorageNodeEntry {
+    /// dup-key for storage slot
     pub path: StoredNibblesSubKey,
+    /// stored node
     pub node: StoredNode,
 }
 
 impl StorageNodeEntry {
+    /// Create a new storage node
     pub fn new(path: StoredNibblesSubKey, node: Node) -> Self {
         Self { path, node: node.into() }
     }
 
+    /// Create a new storage node with reference
     pub fn create(path: &StoredNibblesSubKey, node: &Node) -> Self {
         Self::new(path.clone(), node.clone())
     }
@@ -142,7 +167,7 @@ impl StorageNodeEntry {
 impl reth_codecs::Compact for StorageNodeEntry {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
-        B: bytes::BufMut + AsMut<[u8]>,
+        B: BufMut + AsMut<[u8]>,
     {
         let path_len = self.path.to_compact(buf);
         let node_len = self.node.to_compact(buf);
@@ -297,6 +322,7 @@ impl From<StoredNode> for Node {
 }
 
 impl Node {
+    /// Get the cached hash
     pub fn cached_rlp(&self) -> Option<&RlpNode> {
         match self {
             Node::FullNode { children: _, flags } => flags.rlp.as_ref(),
@@ -306,6 +332,7 @@ impl Node {
         }
     }
 
+    /// Test whether current node is changed
     pub fn dirty(&self) -> bool {
         match self {
             Node::FullNode { children: _, flags } => flags.dirty,
@@ -315,6 +342,7 @@ impl Node {
         }
     }
 
+    /// Reset current node
     pub fn reset(mut self) -> Self {
         match &mut self {
             Node::FullNode { children: _, flags } => flags.reset(),
@@ -324,7 +352,8 @@ impl Node {
         self
     }
 
-    pub fn to_branch_node_compact(children: &[Option<Box<Node>>; 17]) -> BranchNodeCompact {
+    /// Convert to `BranchNodeCompact`
+    pub fn convert_node_compact(children: &[Option<Box<Node>>; 17]) -> BranchNodeCompact {
         let mut state_mask = TrieMask::default();
         let mut tree_mask = TrieMask::default();
         let mut hash_mask = TrieMask::default();
@@ -356,14 +385,16 @@ impl Node {
         }
     }
 
+    /// Convert to `BranchNodeCompact`
     pub fn branch_node_compact(&self) -> BranchNodeCompact {
         if let Node::FullNode { children, .. } = self {
-            Self::to_branch_node_compact(children)
+            Self::convert_node_compact(children)
         } else {
             panic!("Only FullNode can be converted to BranchNodeCompact")
         }
     }
 
+    /// Build hash for current node
     pub fn build_hash(&mut self, buf: &mut Vec<u8>) -> &RlpNode {
         match self {
             Node::FullNode { children, flags } => {
@@ -416,6 +447,7 @@ impl Node {
         }
     }
 
+    /// Get the hash of current node
     pub fn hash(&self) -> B256 {
         if let Some(node_ref) = self.cached_rlp() {
             if let Some(hash) = node_ref.as_hash() {

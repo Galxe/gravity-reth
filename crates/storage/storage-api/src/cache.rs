@@ -92,6 +92,7 @@ impl CacheMetricsReporter {
     }
 }
 
+#[allow(dead_code)]
 struct ValueWithTip<V> {
     value: V,
     block_number: u64,
@@ -103,6 +104,7 @@ impl<V> ValueWithTip<V> {
     }
 }
 
+/// Inner of `PersistBlockCache`
 #[derive(Default)]
 pub struct PersistBlockCacheInner {
     persist_wait: Arc<(Mutex<bool>, Condvar)>,
@@ -117,6 +119,7 @@ pub struct PersistBlockCacheInner {
     daemon_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Cache account state and world trie
 #[derive(Clone, Debug)]
 pub struct PersistBlockCache(Arc<PersistBlockCacheInner>);
 
@@ -146,9 +149,11 @@ impl PersistBlockCacheInner {
     }
 }
 
+/// Single instance of cached state
 pub static PERSIST_BLOCK_CACHE: Lazy<PersistBlockCache> = Lazy::new(|| PersistBlockCache::new());
 
 impl PersistBlockCache {
+    /// Create a new `PersistBlockCache`
     pub fn new() -> Self {
         let inner = PersistBlockCacheInner {
             persist_wait: Arc::new((Mutex::new(false), Condvar::new())),
@@ -175,6 +180,7 @@ impl PersistBlockCache {
         Self(inner)
     }
 
+    /// Wait if there's a large gap between executed block and persist block
     pub fn wait_persist_gap(&self) {
         let (lock, cvar) = self.persist_wait.as_ref();
         let mut large_gap = lock.lock().unwrap();
@@ -183,6 +189,7 @@ impl PersistBlockCache {
         }
     }
 
+    /// Get account from cache
     pub fn basic_account(&self, address: &Address) -> Option<Account> {
         if let Some(value) = self.accounts.get(address) {
             self.metrics.block_cache_hit_record.hit();
@@ -193,6 +200,7 @@ impl PersistBlockCache {
         }
     }
 
+    /// Get byte code from cache
     pub fn bytecode_by_hash(&self, code_hash: &B256) -> Option<Bytecode> {
         if let Some(value) = self.contracts.get(code_hash) {
             self.metrics.block_cache_hit_record.hit();
@@ -203,6 +211,7 @@ impl PersistBlockCache {
         }
     }
 
+    /// Get storage slot from cache
     pub fn storage(&self, address: &Address, slot: &U256) -> Option<U256> {
         if let Some(storage) = self.storage.get(address) {
             if let Some(value) = storage.get(slot) {
@@ -218,6 +227,7 @@ impl PersistBlockCache {
         }
     }
 
+    /// Get account trie node from cache
     pub fn trie_account(&self, nibbles: &Nibbles) -> Option<Node> {
         if let Some(value) = self.account_trie.get(nibbles) {
             self.metrics.trie_cache_hit_record.hit();
@@ -228,6 +238,7 @@ impl PersistBlockCache {
         }
     }
 
+    /// Get storage trie node from cache
     pub fn trie_storage(&self, hash_address: &B256, nibbles: &Nibbles) -> Option<Node> {
         if let Some(storage) = self.storage_trie.get(hash_address) {
             if let Some(value) = storage.get(nibbles) {
@@ -243,6 +254,7 @@ impl PersistBlockCache {
         }
     }
 
+    /// Hint for the persist block number
     pub fn persist_tip(&self, block_number: u64) {
         self.metrics.stored_block_number.store(block_number, Ordering::Relaxed);
         let mut guard = self.persist_block_number.lock().unwrap();
@@ -266,6 +278,7 @@ impl PersistBlockCache {
         }
     }
 
+    /// Write account state after a block is executed.
     pub fn write_state_changes<'a>(
         &self,
         block_number: u64,
@@ -369,6 +382,7 @@ impl PersistBlockCache {
         })
     }
 
+    /// Write trie updates.
     pub fn write_trie_updates(&self, input: &TrieUpdatesV2, block_number: u64) {
         input.removed_nodes.par_iter().for_each(|path| {
             self.account_trie.remove(path);

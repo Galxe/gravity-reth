@@ -22,6 +22,7 @@ use reth_storage_errors::provider::ProviderResult;
 #[derive(Clone, Debug)]
 pub struct ConsistentDbView<Factory> {
     factory: Factory,
+    /// tip for block hash and number
     pub tip: Option<(B256, u64)>,
 }
 

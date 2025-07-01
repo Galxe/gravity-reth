@@ -22,6 +22,8 @@ use reth_trie::{
 };
 use reth_trie_common::updates::{TrieUpdates, TrieUpdatesV2};
 
+/// Storage trie node reader
+#[allow(missing_debug_implementations)]
 pub struct StorageTrieReader<C> {
     hashed_address: B256,
     cursor: C,
@@ -29,6 +31,7 @@ pub struct StorageTrieReader<C> {
 }
 
 impl<C> StorageTrieReader<C> {
+    /// Create a new `StorageTrieReader`
     pub fn new(cursor: C, hashed_address: B256, cache: Option<PersistBlockCache>) -> Self {
         Self { cursor, hashed_address, cache }
     }
@@ -54,9 +57,12 @@ where
     }
 }
 
+/// Account trie node reader
+#[allow(missing_debug_implementations)]
 pub struct AccountTrieReader<C>(C, Option<PersistBlockCache>);
 
 impl<C> AccountTrieReader<C> {
+    /// Create a new `AccountTrieReader`
     pub fn new(cursor: C, cache: Option<PersistBlockCache>) -> Self {
         Self(cursor, cache)
     }
@@ -77,6 +83,7 @@ where
     }
 }
 
+/// Root hash for nested trie
 #[derive(Debug)]
 pub struct NestedStateRoot<P, F>
 where
@@ -92,10 +99,12 @@ where
     P: DBProvider<Tx: DbTx>,
     F: Fn() -> ProviderResult<P>,
 {
+    /// Create a new `NestedStateRoot`
     pub fn new(provider: F, cache: Option<PersistBlockCache>) -> Self {
         Self { provider, cache }
     }
 
+    /// Compatible with origin `BranchNodeCompact` trie
     pub fn read_hashed_state(&self) -> ProviderResult<HashedPostState> {
         let mut accounts = HashMap::default();
         let mut storages: B256Map<HashedStorage> = HashMap::default();
@@ -125,6 +134,7 @@ where
     P: DBProvider<Tx: DbTx>,
     F: Fn() -> ProviderResult<P> + Send + Sync,
 {
+    /// Calculate the root hash of nested trie
     pub fn calculate(
         &self,
         hashed_state: &HashedPostState,
@@ -427,7 +437,7 @@ mod tests {
         let mut batches: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let create_reader = || Ok(InmemoryAccountTrieReader(db.clone()));
         for _ in 0..num_task {
-            let (hashed_address, rlp_account, (trie_output, compatible_trie_output)) =
+            let (hashed_address, rlp_account, (trie_output, _)) =
                 rx.recv().expect("Failed to receive storage trie");
             let storage_trie_update = if is_insert {
                 StorageTrieUpdatesV2 {
@@ -453,7 +463,7 @@ mod tests {
         account_trie.parallel_update(batches, create_reader).unwrap();
 
         let root_hash = account_trie.hash();
-        let (output, compatible_output) = account_trie.take_output();
+        let (output, _) = account_trie.take_output();
         trie_updates.account_nodes = output.update_nodes;
         trie_updates.removed_nodes = output.removed_nodes;
         (root_hash, trie_updates)
