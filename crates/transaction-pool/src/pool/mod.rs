@@ -676,7 +676,9 @@ where
             {
                 // Scope for listener lock
                 let mut listener_guard = self.event_listener.write(); // Assuming this exists
-                discarded_hashes_set.iter().for_each(|hash| listener_guard.discarded(hash));
+                for hash in discarded_hashes_set.iter() {
+                    listener_guard.discarded(hash);
+                }
             }
 
             // Update the results in the DashMap for transactions that were initially added but then
