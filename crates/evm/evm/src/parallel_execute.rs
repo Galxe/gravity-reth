@@ -21,7 +21,7 @@ pub trait ParallelExecutor {
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>;
 
-    /// Takes the BundleState changeset from the State, replacing it with an empty one.
+    /// Takes the `BundleState` changeset from the State, replacing it with an empty one.
     fn take_bundle(&mut self) -> BundleState;
 
     /// The size hint of the batch's tracked state size.
@@ -52,7 +52,7 @@ pub struct WrapExecutor<DB: Database, T: Executor<DB>>(pub T, PhantomData<DB>);
 
 impl<DB: Database, T: Executor<DB>> WrapExecutor<DB, T> {
     /// Creates a new `WrapExecutor` from the given executor.
-    pub fn new(executor: T) -> Self {
+    pub const fn new(executor: T) -> Self {
         Self(executor, PhantomData)
     }
 }

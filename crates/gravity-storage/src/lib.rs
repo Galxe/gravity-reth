@@ -26,12 +26,12 @@ pub trait GravityStorage: Send + Sync + 'static {
         compatible: bool,
     ) -> ProviderResult<(B256, TrieUpdatesV2, Option<TrieUpdates>)>;
 
-    /// Insert the mapping from block_number to block_id
+    /// Insert the mapping from `block_number` to `block_id`
     fn insert_block_id(&self, block_number: u64, block_id: B256);
 
-    /// Get the block_id by block_number
+    /// Get the `block_id` by `block_number`
     fn get_block_id(&self, block_number: u64) -> Option<B256>;
 
-    /// Update canonical to block_number and reclaim the intermediate result cache
+    /// Update canonical to `block_number` and reclaim the intermediate result cache
     fn update_canonical(&self, block_number: u64, block_hash: B256);
 }

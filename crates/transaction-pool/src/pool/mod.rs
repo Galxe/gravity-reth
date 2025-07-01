@@ -88,9 +88,7 @@ use crate::{
     TransactionValidator,
 };
 
-use alloy_eips::{
-    eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant, Typed2718,
-};
+use alloy_eips::{eip7594::BlobTransactionSidecarVariant, Typed2718};
 use alloy_primitives::{Address, TxHash, B256};
 use best::BestTransactions;
 use dashmap::DashMap;
@@ -104,7 +102,6 @@ use std::{
     fmt,
     sync::{atomic::AtomicU64, Arc},
     time::{Duration, Instant},
-    usize,
 };
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, trace, warn};
@@ -134,24 +131,19 @@ pub const NEW_TX_LISTENER_BUFFER_SIZE: usize = 1024;
 
 const BLOB_SIDECAR_LISTENER_BUFFER_SIZE: usize = 512;
 
-type BatchItem<T: PoolTransaction> = (TransactionOrigin, T);
+type BatchItem<T> = (TransactionOrigin, T);
 
-pub struct TxBuffer<T: PoolTransaction> {
+/// A buffer for transactions that are being added to the pool in batches.
+struct TxBuffer<T: PoolTransaction> {
     buffer: Vec<BatchItem<T>>,
     event: Arc<Notify>,
-    full_notify: Arc<Notify>,
 }
 
 impl<T: PoolTransaction> TxBuffer<T> {
-    pub fn take(&mut self) -> (Vec<BatchItem<T>>, Arc<Notify>) {
+    fn take(&mut self) -> (Vec<BatchItem<T>>, Arc<Notify>) {
         let origin_event = self.event.clone();
         self.event = Arc::new(Notify::new());
         (std::mem::take(&mut self.buffer), origin_event)
-    }
-
-    pub fn add(&mut self, item: BatchItem<T>) -> Arc<Notify> {
-        self.buffer.push(item);
-        self.event.clone()
     }
 }
 
@@ -159,11 +151,13 @@ static BATCH_INSERT_TIME: AtomicU64 = AtomicU64::new(0);
 fn get_batch_insert_time() -> u64 {
     let val = BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
     if val == 0 {
-        let size =
-            std::env::var("BATCH_INSERT_TIME").unwrap_or("50".to_string()).parse().unwrap_or(50);
+        let size = std::env::var("BATCH_INSERT_TIME")
+            .unwrap_or_else(|_| "50".to_string())
+            .parse()
+            .unwrap_or(50);
         assert!(size > 0, "BATCH_INSERT_TIME must be greater than 0");
         BATCH_INSERT_TIME.store(size, std::sync::atomic::Ordering::Release);
-        return BATCH_INSERT_TIME.load(std::sync::atomic::Ordering::Acquire);
+        return size;
     }
     val
 }
@@ -225,7 +219,6 @@ where
             buffer: tokio::sync::Mutex::new(TxBuffer {
                 buffer: Vec::new(),
                 event: Arc::new(Notify::new()),
-                full_notify: Arc::new(Notify::new()),
             }),
             add_txn_res: DashMap::new(),
             txn_insert_time: DashMap::new(),
@@ -603,7 +596,7 @@ where
     }
 
     /// Processes a batch of transactions, adds them to the pool,
-    /// stores results in the shared DashMap, and handles discarded transactions.
+    /// stores results in the shared `DashMap`, and handles discarded transactions.
     async fn process_batch_and_store_results(&self) {
         let system_time_start = std::time::SystemTime::now();
         let start = Instant::now();
@@ -660,11 +653,11 @@ where
         }
 
         // Handle discarding worst transactions if new ones were added
-        let discarded_pool_transactions = if !successfully_added_hashes_in_batch.is_empty() {
+        let discarded_pool_transactions = if successfully_added_hashes_in_batch.is_empty() {
+            Vec::default()
+        } else {
             pool_guard.discard_worst() // Assuming this returns Vec<DiscardedTransactionInfo> or
                                        // similar
-        } else {
-            Vec::default()
         };
         // --- End Pool Write Lock Scope ---
         drop(pool_guard); // Release lock explicitly
@@ -683,7 +676,9 @@ where
             {
                 // Scope for listener lock
                 let mut listener_guard = self.event_listener.write(); // Assuming this exists
-                discarded_hashes_set.iter().for_each(|hash| listener_guard.discarded(hash));
+                for hash in &discarded_hashes_set {
+                    listener_guard.discarded(hash);
+                }
             }
 
             // Update the results in the DashMap for transactions that were initially added but then
@@ -713,7 +708,7 @@ where
         tx: T::Transaction,
     ) -> PoolResult<TxHash> {
         let mut buffer = self.buffer.lock().await;
-        let hash = tx.hash().clone();
+        let hash = *tx.hash();
         buffer.buffer.push((origin, tx));
         let notify = buffer.event.clone();
         drop(buffer);

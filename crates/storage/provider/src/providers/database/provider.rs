@@ -2331,7 +2331,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                     if let Some(entry) =
                         storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
                     {
-                        if StorageNodeEntry::from(entry).path == path.clone() {
+                        if entry.path == path.clone() {
                             storage_trie_cursor.delete_current()?;
                         }
                     }

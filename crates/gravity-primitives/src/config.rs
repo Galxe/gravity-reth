@@ -23,6 +23,6 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
             .and_then(|v| v.parse().ok())
             .unwrap_or(false),
     };
-    println!("Gravity Reth config: {:#?}", config);
+    println!("Gravity Reth config: {config:#?}");
     config
 });

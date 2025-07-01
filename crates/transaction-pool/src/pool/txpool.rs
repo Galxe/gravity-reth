@@ -242,7 +242,7 @@ impl<T: TransactionOrdering> TxPool<T> {
                             .all_transactions
                             .txs
                             .get_mut(&tx.id().sender)
-                            .and_then(|map| map.get_mut(&tx.id()))
+                            .and_then(|map| map.get_mut(tx.id()))
                             .expect("tx exists in set");
 
                         // the blob fee is too high now, unset the blob fee cap block flag
@@ -263,7 +263,7 @@ impl<T: TransactionOrdering> TxPool<T> {
                             .all_transactions
                             .txs
                             .get_mut(&tx.id().sender)
-                            .and_then(|map| map.get_mut(&tx.id()))
+                            .and_then(|map| map.get_mut(tx.id()))
                             .expect("tx exists in set");
                         tx.state.insert(TxState::ENOUGH_BLOB_FEE_CAP_BLOCK);
                         tx.state.insert(TxState::ENOUGH_FEE_CAP_BLOCK);
@@ -297,7 +297,7 @@ impl<T: TransactionOrdering> TxPool<T> {
                             .all_transactions
                             .txs
                             .get_mut(&tx.id().sender)
-                            .and_then(|map| map.get_mut(&tx.id()))
+                            .and_then(|map| map.get_mut(tx.id()))
                             .expect("tx exists in set");
                         tx.state.remove(TxState::ENOUGH_FEE_CAP_BLOCK);
                         tx.subpool = tx.state.into();
@@ -318,7 +318,7 @@ impl<T: TransactionOrdering> TxPool<T> {
                             .all_transactions
                             .txs
                             .get_mut(&tx.id().sender)
-                            .and_then(|map| map.get_mut(&tx.id()))
+                            .and_then(|map| map.get_mut(tx.id()))
                             .expect("tx exists in set");
                         tx.state.insert(TxState::ENOUGH_FEE_CAP_BLOCK);
                         tx.subpool = tx.state.into();
@@ -1278,7 +1278,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
     /// Returns the internal transaction with additional metadata
     pub(crate) fn get(&self, id: &TransactionId) -> Option<&PoolInternalTransaction<T>> {
         // self.txs.get(id)
-        self.txs.get(&id.sender).and_then(|map| map.get(&id))
+        self.txs.get(&id.sender).and_then(|map| map.get(id))
     }
 
     /// Increments the transaction counter for the sender
@@ -1355,11 +1355,11 @@ impl<T: PoolTransaction> AllTransactions<T> {
         let mut updates = Vec::with_capacity(64);
 
         // Iterate over each sender and their BTreeMap of transactions
-        for (current_sender_id, sender_txs) in self.txs.iter_mut() {
+        for (current_sender_id, sender_txs) in &mut self.txs {
             // `sender_txs` is a `&mut BTreeMap<TransactionId, PoolInternalTransaction<T>>`
             // BTreeMap iterates by TransactionId, which includes nonce, so transactions for this
             // sender are nonce-ordered.
-            let mut sender_tx_iter = sender_txs.iter_mut().peekable();
+            let sender_tx_iter = sender_txs.iter_mut();
 
             // Tracks the balance if the sender was changed in the block
             let mut changed_sender_balance_from_info: Option<&U256> = None; // Renamed for clarity
@@ -1377,7 +1377,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
             let mut next_expected_nonce_for_sender: Option<u64> = None;
 
             // Loop over all transactions for the current sender
-            while let Some((tx_id, tx)) = sender_tx_iter.next() {
+            for (tx_id, tx) in sender_tx_iter {
                 // tx_id is &TransactionId, tx is &mut PoolInternalTransaction<T>
                 // Note: tx_id.sender will always be equal to current_sender_id here.
 
@@ -1581,9 +1581,10 @@ impl<T: PoolTransaction> AllTransactions<T> {
         // self.txs.range((Excluded(id), Unbounded)).take_while(|(other, _)| id.sender ==
         // other.sender)
         let id = *id;
-        self.txs.get(&id.sender).into_iter().flat_map(move |map_ref| {
-            map_ref.range((Excluded(id), Unbounded)).map(|(id, tx)| (id, tx))
-        })
+        self.txs
+            .get(&id.sender)
+            .into_iter()
+            .flat_map(move |map_ref| map_ref.range((Excluded(id), Unbounded)))
     }
 
     /// Returns all transactions that _follow_ after the given id but have the same sender.
@@ -1596,10 +1597,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
     ) -> impl Iterator<Item = (&'a TransactionId, &'a PoolInternalTransaction<T>)> + 'a {
         // self.txs.range(id..).take_while(|(other, _)| id.sender == other.sender)
         let id = *id;
-        self.txs
-            .get(&id.sender)
-            .into_iter()
-            .flat_map(move |map_ref| map_ref.range(id..).map(|(id, tx)| (id, tx)))
+        self.txs.get(&id.sender).into_iter().flat_map(move |map_ref| map_ref.range(id..))
     }
 
     /// Returns all mutable transactions that _follow_ after the given id but have the same sender.
@@ -1611,10 +1609,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         id: &'b TransactionId,
     ) -> impl Iterator<Item = (&'a TransactionId, &'a mut PoolInternalTransaction<T>)> + 'a {
         let id = *id;
-        self.txs
-            .get_mut(&id.sender)
-            .into_iter()
-            .flat_map(move |map_ref| map_ref.range_mut(id..).map(|(id, tx)| (id, tx)))
+        self.txs.get_mut(&id.sender).into_iter().flat_map(move |map_ref| map_ref.range_mut(id..))
     }
 
     /// Removes a transaction from the set using its hash.
@@ -1918,12 +1913,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         };
 
         // try to insert the transaction
-        match self
-            .txs
-            .entry(transaction.id().sender)
-            .or_insert_with(|| BTreeMap::new())
-            .entry(*transaction.id())
-        {
+        match self.txs.entry(transaction.id().sender).or_default().entry(*transaction.id()) {
             Entry::Vacant(entry) => {
                 // Insert the transaction in both maps
                 self.by_hash.insert(*pool_tx.transaction.hash(), pool_tx.transaction.clone());

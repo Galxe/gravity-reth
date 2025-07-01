@@ -73,7 +73,7 @@ where
     }
 
     fn get_block_id(&self, block_number: u64) -> Option<B256> {
-        self.block_number_to_id.lock().unwrap().get(&block_number).cloned()
+        self.block_number_to_id.lock().unwrap().get(&block_number).copied()
     }
 
     fn update_canonical(&self, block_number: u64, _block_hash: B256) {

@@ -151,7 +151,7 @@ impl Default for StateProviderOptions {
 
 impl StateProviderOptions {
     /// return database directly
-    pub fn with_raw_db(mut self) -> Self {
+    pub const fn with_raw_db(mut self) -> Self {
         self.raw_db = true;
         self
     }

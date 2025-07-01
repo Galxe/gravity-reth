@@ -432,11 +432,11 @@ where
 
     fn try_recv_pipe_exec_event(
         &self,
-        event_rx: &mut std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>,
+        event_rx: &std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>,
     ) -> Result<Option<PipeExecLayerEvent<N>>, RecvError> {
         if self.persistence_state.in_progress() {
             match event_rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                Ok(event) => return Ok(Some(event)),
+                Ok(event) => Ok(Some(event)),
                 Err(err) => match err {
                     RecvTimeoutError::Timeout => Ok(None),
                     RecvTimeoutError::Disconnected => Err(RecvError),
@@ -498,7 +498,7 @@ where
     /// Run the engine API handler.
     ///
     /// This will block the current thread and process incoming messages.
-    pub fn run(mut self) {
+    pub fn run(self) {
         if gravity_primitives::CONFIG.disable_pipe_execution {
             self.run_inner();
         } else {
@@ -509,10 +509,10 @@ where
     fn pipe_run_inner(mut self) {
         // Wait for the pipe exec layer to be initialized
         std::thread::sleep(std::time::Duration::from_secs(3));
-        let mut pipe_event_rx =
+        let pipe_event_rx =
             get_pipe_exec_layer_ext::<N>().unwrap().event_rx.lock().unwrap().take().unwrap();
         loop {
-            match self.try_recv_pipe_exec_event(&mut pipe_event_rx) {
+            match self.try_recv_pipe_exec_event(&pipe_event_rx) {
                 Ok(Some(event)) => self.on_pipe_exec_event(event),
                 Ok(None) => {}
                 Err(RecvError) => {

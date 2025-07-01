@@ -1,3 +1,5 @@
+//! Test executing ETH mainnet history blocks using the Pipe Execution Layer.
+
 use gravity_storage::block_view_storage::BlockViewStorage;
 use reth_chainspec::ChainSpec;
 use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
@@ -27,7 +29,10 @@ struct MockConsensus {
 }
 
 impl MockConsensus {
-    fn new(pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>>, provider: Provider) -> Self {
+    const fn new(
+        pipeline_api: PipeExecLayerApi<BlockViewStorage<Provider>>,
+        provider: Provider,
+    ) -> Self {
         Self { pipeline_api, provider }
     }
 
@@ -130,14 +135,7 @@ async fn run_pipe(
     println!("The latest_block_number is {}", latest_block_number);
     let latest_block_hash = db_provider.block_hash(latest_block_number).unwrap().unwrap();
     let latest_block_header = db_provider.header_by_number(latest_block_number).unwrap().unwrap();
-
-    let mut block_number_to_id = BTreeMap::new();
-    for block_number in latest_block_number.saturating_sub(255)..latest_block_number {
-        let block_hash = db_provider.block_hash(block_number).unwrap().unwrap();
-        block_number_to_id.insert(block_number, block_hash);
-    }
     drop(db_provider);
-    block_number_to_id.insert(latest_block_number, latest_block_hash);
 
     // write new state root
     let nested_provider = || provider.database_provider_ro();
@@ -179,7 +177,7 @@ fn test() {
         .with_stdout(LayerInfo::new(
             LogFormat::Terminal,
             LevelFilter::DEBUG.to_string(),
-            "".to_string(),
+            String::new(),
             Some("always".to_string()),
         ))
         .init();

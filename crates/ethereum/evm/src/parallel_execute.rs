@@ -82,7 +82,7 @@ where
 
         let mut txs = Vec::with_capacity(block.transaction_count());
         for tx in block.transactions_recovered() {
-            txs.push(self.evm_config.tx_env(tx).into());
+            txs.push(self.evm_config.tx_env(tx));
         }
 
         let txs = Arc::new(txs);
@@ -299,7 +299,9 @@ fn balance_increment_state<DB: ParallelDatabase>(
             .accounts
             .get(address)
             .and_then(|account| account.value().account.clone())
-            .ok_or(BlockExecutionError::msg("could not load account for balance increment"))?;
+            .ok_or_else(|| {
+                BlockExecutionError::msg("could not load account for balance increment")
+            })?;
 
         Ok((
             *address,
