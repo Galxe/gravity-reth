@@ -676,7 +676,7 @@ where
             {
                 // Scope for listener lock
                 let mut listener_guard = self.event_listener.write(); // Assuming this exists
-                for hash in discarded_hashes_set.iter() {
+                for hash in &discarded_hashes_set {
                     listener_guard.discarded(hash);
                 }
             }
