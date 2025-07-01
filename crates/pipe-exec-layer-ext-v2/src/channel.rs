@@ -98,7 +98,7 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
 
 #[cfg(test)]
 mod test {
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
     use std::sync::Arc;
     use tokio::task::JoinSet;
 
@@ -109,7 +109,7 @@ mod test {
         let mut tasks = JoinSet::new();
         for i in 1..10 {
             let barrier = barrier.clone();
-            let sleep_ms = thread_rng().gen_range(100..1000);
+            let sleep_ms = rng().random_range(100..1000);
             tasks.spawn(async move {
                 let v = barrier.wait(i - 1).await.unwrap();
                 assert_eq!(v, i - 1);

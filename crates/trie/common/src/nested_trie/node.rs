@@ -144,6 +144,7 @@ impl NodeType {
 /// accurate. Just like `StorageEntry`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
 pub struct StorageNodeEntry {
     /// dup-key for storage slot
     pub path: StoredNibblesSubKey,

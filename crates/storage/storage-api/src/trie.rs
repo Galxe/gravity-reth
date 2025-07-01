@@ -50,12 +50,12 @@ pub trait StateRootProvider: Send + Sync {
         let mut input = TrieInput::from_state(state);
         let mut state = HashedPostState::default();
         let mut nodes = TrieUpdates::default();
-        hashed_state_vec.iter().for_each(|hashed_state| {
+        for hashed_state in &hashed_state_vec {
             state.extend_ref(hashed_state.as_ref());
-        });
-        trie_updates_vec.iter().for_each(|trie_updates| {
+        }
+        for trie_updates in &trie_updates_vec {
             nodes.extend_ref(trie_updates.as_ref());
-        });
+        }
         input.prepend_cached(nodes, state);
         self.state_root_from_nodes_with_updates(input)
     }

@@ -193,7 +193,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::db", ?block_number, "Returning historical state provider for block number");
 
-        let factory = || Ok(self.provider()?.try_into_history_at_block(block_number)?);
+        let factory = || self.provider()?.try_into_history_at_block(block_number);
 
         if opts.parallel.get() > 1 {
             Ok(Box::new(ParallelStateProvider::try_new(factory, opts.parallel.get())?))

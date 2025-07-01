@@ -36,7 +36,6 @@ derive_more.workspace = true
 rayon.workspace = true
 itertools.workspace = true
 tokio = { workspace = true, features = ["rt"] }
-rand.workspace = true
 
 # `metrics` feature
 reth-metrics = { workspace = true, optional = true }
@@ -50,6 +49,7 @@ reth-trie = { workspace = true, features = ["test-utils"] }
 
 # misc
 rand_08.workspace = true
+rand.workspace = true
 rayon.workspace = true
 criterion.workspace = true
 proptest.workspace = true

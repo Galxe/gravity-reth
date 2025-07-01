@@ -65,11 +65,7 @@ impl HitRecorder {
         let not_hit_cnt = self.not_hit_cnt.swap(0, Ordering::Relaxed);
         let hit_cnt = self.hit_cnt.swap(0, Ordering::Relaxed);
         let visit_cnt = not_hit_cnt + hit_cnt;
-        if visit_cnt > 0 {
-            Some(hit_cnt as f64 / visit_cnt as f64)
-        } else {
-            None
-        }
+        (visit_cnt > 0).then(|| hit_cnt as f64 / visit_cnt as f64)
     }
 }
 
@@ -99,7 +95,7 @@ struct ValueWithTip<V> {
 }
 
 impl<V> ValueWithTip<V> {
-    fn new(value: V, block_number: u64) -> Self {
+    const fn new(value: V, block_number: u64) -> Self {
         Self { value, block_number }
     }
 }
@@ -127,7 +123,7 @@ impl Deref for PersistBlockCache {
     type Target = PersistBlockCacheInner;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.as_ref()
+        self.0.as_ref()
     }
 }
 
@@ -150,7 +146,13 @@ impl PersistBlockCacheInner {
 }
 
 /// Single instance of cached state
-pub static PERSIST_BLOCK_CACHE: Lazy<PersistBlockCache> = Lazy::new(|| PersistBlockCache::new());
+pub static PERSIST_BLOCK_CACHE: Lazy<PersistBlockCache> = Lazy::new(PersistBlockCache::new);
+
+impl Default for PersistBlockCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PersistBlockCache {
     /// Create a new `PersistBlockCache`
@@ -193,7 +195,7 @@ impl PersistBlockCache {
     pub fn basic_account(&self, address: &Address) -> Option<Account> {
         if let Some(value) = self.accounts.get(address) {
             self.metrics.block_cache_hit_record.hit();
-            Some(value.value.clone())
+            Some(value.value)
         } else {
             self.metrics.block_cache_hit_record.not_hit();
             None
@@ -216,7 +218,7 @@ impl PersistBlockCache {
         if let Some(storage) = self.storage.get(address) {
             if let Some(value) = storage.get(slot) {
                 self.metrics.block_cache_hit_record.hit();
-                Some(value.value.clone())
+                Some(value.value)
             } else {
                 self.metrics.block_cache_hit_record.not_hit();
                 None
@@ -259,18 +261,18 @@ impl PersistBlockCache {
         self.metrics.stored_block_number.store(block_number, Ordering::Relaxed);
         let mut guard = self.persist_block_number.lock().unwrap();
         if let Some(ref mut persist_block_number) = *guard {
-            if block_number != *persist_block_number + 1 {
-                panic!(
-                    "Persist uncontinuous block, expect: {}, actual: {}",
-                    *persist_block_number + 1,
-                    block_number
-                );
-            }
+            assert_eq!(
+                block_number,
+                *persist_block_number + 1,
+                "Persist uncontinuous block, expect: {}, actual: {}",
+                *persist_block_number + 1,
+                block_number
+            );
             *persist_block_number = block_number;
         } else {
             *guard = Some(block_number);
         }
-        if let Some(merged_block_number) = self.merged_block_number.lock().unwrap().clone() {
+        if let Some(merged_block_number) = *self.merged_block_number.lock().unwrap() {
             let (lock, cvar) = self.persist_wait.as_ref();
             let mut large_gap = lock.lock().unwrap();
             *large_gap = merged_block_number - block_number >= MAX_PERSISTENCE_GAP;
@@ -290,13 +292,12 @@ impl PersistBlockCache {
         {
             let mut guard = self.merged_block_number.lock().unwrap();
             if let Some(ref mut merged_block_number) = *guard {
-                if block_number != *merged_block_number + 1 {
-                    panic!(
-                        "Merged uncontinuous block, expect: {}, actual: {}",
-                        *merged_block_number + 1,
-                        block_number
-                    );
-                }
+                assert!(
+                    (block_number == *merged_block_number + 1),
+                    "Merged uncontinuous block, expect: {}, actual: {}",
+                    *merged_block_number + 1,
+                    block_number
+                );
                 *merged_block_number = block_number;
             } else {
                 *guard = Some(block_number);
@@ -348,21 +349,17 @@ impl PersistBlockCache {
                         if let Some(storage) = self.storage.get(address) {
                             storage.remove(&slot);
                         }
+                    } else if let Some(storage) = self.storage.get(address) {
+                        storage.insert(slot, ValueWithTip::new(value, block_number));
                     } else {
-                        if let Some(storage) = self.storage.get(address) {
-                            storage.insert(slot, ValueWithTip::new(value, block_number));
-                        } else {
-                            match self.storage.entry(*address) {
-                                dashmap::Entry::Occupied(entry) => {
-                                    entry
-                                        .get()
-                                        .insert(slot, ValueWithTip::new(value, block_number));
-                                }
-                                dashmap::Entry::Vacant(entry) => {
-                                    let data = DashMap::new();
-                                    data.insert(slot, ValueWithTip::new(value, block_number));
-                                    entry.insert(data);
-                                }
+                        match self.storage.entry(*address) {
+                            dashmap::Entry::Occupied(entry) => {
+                                entry.get().insert(slot, ValueWithTip::new(value, block_number));
+                            }
+                            dashmap::Entry::Vacant(entry) => {
+                                let data = DashMap::new();
+                                data.insert(slot, ValueWithTip::new(value, block_number));
+                                entry.insert(data);
                             }
                         }
                     }

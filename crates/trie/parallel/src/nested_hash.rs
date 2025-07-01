@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::sync::Mutex;
 
 use alloy_primitives::{
@@ -32,7 +34,7 @@ pub struct StorageTrieReader<C> {
 
 impl<C> StorageTrieReader<C> {
     /// Create a new `StorageTrieReader`
-    pub fn new(cursor: C, hashed_address: B256, cache: Option<PersistBlockCache>) -> Self {
+    pub const fn new(cursor: C, hashed_address: B256, cache: Option<PersistBlockCache>) -> Self {
         Self { cursor, hashed_address, cache }
     }
 }
@@ -43,7 +45,7 @@ where
 {
     fn read(&mut self, path: &Nibbles) -> Result<Option<Node>, DatabaseError> {
         if let Some(cache) = &self.cache {
-            let value = cache.trie_storage(&self.hashed_address, &path);
+            let value = cache.trie_storage(&self.hashed_address, path);
             if value.is_some() {
                 return Ok(value);
             }
@@ -63,7 +65,7 @@ pub struct AccountTrieReader<C>(C, Option<PersistBlockCache>);
 
 impl<C> AccountTrieReader<C> {
     /// Create a new `AccountTrieReader`
-    pub fn new(cursor: C, cache: Option<PersistBlockCache>) -> Self {
+    pub const fn new(cursor: C, cache: Option<PersistBlockCache>) -> Self {
         Self(cursor, cache)
     }
 }
@@ -100,7 +102,7 @@ where
     F: Fn() -> ProviderResult<P>,
 {
     /// Create a new `NestedStateRoot`
-    pub fn new(provider: F, cache: Option<PersistBlockCache>) -> Self {
+    pub const fn new(provider: F, cache: Option<PersistBlockCache>) -> Self {
         Self { provider, cache }
     }
 
@@ -160,8 +162,8 @@ where
                     let index = (partition[0].0[0] >> 4) as usize;
                     let mut updated_account_nodes = updated_account_nodes[index].lock().unwrap();
                     for (hashed_address, account) in partition {
-                        let hashed_address = hashed_address.clone();
-                        let account = account.clone();
+                        let hashed_address = *hashed_address;
+                        let account = *account;
                         let path = Nibbles::unpack(hashed_address);
                         if let Some(account) = account {
                             let storage = hashed_storages.get(&hashed_address).cloned();
@@ -535,10 +537,10 @@ mod tests {
 
         // test delete
         if state_merged.len() == state1.len() + state2.len() {
-            let (delete_root1, delete_input1) = calculate(state2.clone(), db.clone(), false);
+            let (delete_root1, delete_input1) = calculate(state2, db.clone(), false);
             assert_eq!(delete_root1, state_root1);
             let _ = db.write(&delete_input1).unwrap();
-            let (delete_root2, delete_input2) = calculate(state1.clone(), db.clone(), false);
+            let (delete_root2, delete_input2) = calculate(state1, db.clone(), false);
             // has deleted all data, so the state root is EMPTY_ROOT_HASH
             assert_eq!(delete_root2, EMPTY_ROOT_HASH);
             let _ = db.write(&delete_input2).unwrap();

@@ -516,6 +516,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
     }
 
     /// Returns `true` if the transaction with the given id is already included in this pool.
+    #[allow(dead_code)]
     pub(crate) fn contains(&self, id: &TransactionId) -> bool {
         self.by_id.contains_key(id)
     }

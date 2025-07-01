@@ -126,7 +126,7 @@ pub trait Executor<DB: Database>: Sized {
     /// Consumes the executor and returns the [`State`] containing all state changes.
     fn into_state(self) -> State<DB>;
 
-    /// Takes the BundleState changeset from the State, replacing it with an empty one.
+    /// Takes the `BundleState` changeset from the State, replacing it with an empty one.
     fn take_bundle(&mut self) -> BundleState;
 
     /// The size hint of the batch's tracked state size.
