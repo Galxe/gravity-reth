@@ -1,23 +1,23 @@
 #![allow(missing_docs)]
 use std::fmt::Debug;
 
+use alloy_consensus::Header;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
-use reth_cli_commands::NodeCommand;
+use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
-use reth_node_builder::{engine_tree_config, EngineNodeLauncher};
+use reth_evm::{ConfigureEvm, Evm};
+use reth_evm_ethereum::EthEvmConfig;
+use reth_node_builder::EngineNodeLauncher;
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_provider::{providers::BlockchainProvider, StateProviderFactory};
-use reth_revm::database::StateProviderDatabase;
+use reth_revm::{database::StateProviderDatabase, State};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
-use revm::{
-    primitives::{Env, SpecId, TxEnv},
-    Database, DatabaseCommit, EvmBuilder, StateBuilder,
-};
+use revm::{context::TxEnv, Database};
 
 const GRAVITY_FRAMEWORK_ADDRESS: Address = address!("00000000000000000000000000000000000000ff");
 const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
@@ -53,79 +53,60 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TxEnv {
     TxEnv {
         caller: GRAVITY_FRAMEWORK_ADDRESS,
         gas_limit: 30_000_000,
-        gas_price: U256::ZERO,
-        transact_to: TxKind::Call(contract),
+        gas_price: 0,
+        kind: TxKind::Call(contract),
         value: U256::ZERO,
         data: input,
+        chain_id: None,
         ..Default::default()
     }
 }
 
-fn test_gravity_system_call<DB: Database<Error: Debug>>(db: DB) {
-    let mut env = Env::default();
-    env.cfg.chain_id = 7771625;
-    let db = StateBuilder::new().with_bundle_update().with_database(db).build();
-    let mut evm = EvmBuilder::default()
-        .with_db(db)
-        .with_spec_id(SpecId::LATEST)
-        .with_env(Box::new(env))
-        .build();
+fn test_gravity_system_call<DB: Database<Error: Debug + Send + Sync + 'static>>(
+    db: DB,
+    evm_config: EthEvmConfig,
+) {
+    let evm_env = evm_config.evm_env(&Header {
+        gas_limit: 30_000_000,
+        excess_blob_gas: Some(0),
+        ..Default::default()
+    });
+    let db = State::builder().with_bundle_update().with_database(db).build();
+    let mut evm = evm_config.evm_with_env(db, evm_env);
+    let result = evm
+        .transact_raw(new_system_call_txn(
+            RECONFIGURATION_ADDRESS,
+            Reconfiguration::getCurrentEpochCall {}.abi_encode().into(),
+        ))
+        .unwrap();
+    let returns =
+        Reconfiguration::getCurrentEpochCall::abi_decode_returns(result.result.output().unwrap())
+            .unwrap();
+    assert_eq!(returns, 1);
 
-    *evm.tx_mut() = new_system_call_txn(
-        RECONFIGURATION_ADDRESS,
-        Reconfiguration::getCurrentEpochCall {}.abi_encode().into(),
-    );
-    let result = evm.transact().unwrap();
-    let returns = Reconfiguration::getCurrentEpochCall::abi_decode_returns(
-        result.result.output().unwrap(),
-        false,
-    )
-    .unwrap();
-    assert_eq!(returns._0, 1);
-
-    // *evm.tx_mut() = new_system_call_txn(
-    //     CONSENSUS_CONFIG_CONTRACT_ADDRESS,
-    //     ConsensusConfigContract::getCurrentConfigCall {}.abi_encode().into(),
-    // );
-    // let result = evm.transact().unwrap();
-    // let returns = ConsensusConfigContract::getCurrentConfigCall::abi_decode_returns(
-    //     result.result.output().unwrap(),
-    //     false,
-    // )
-    // .unwrap();
-    // assert_eq!(
-    //     returns._0,
-    //     Bytes::from([
-    //         3, 1, 1, 10, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 10, 0, 0, 0,
-    //         0, 0, 0, 0, 1, 0, 0, 0,
-    //     ])
-    // );
-
-    *evm.tx_mut() = new_system_call_txn(
-        VALIDATOR_SET_CONTRACT_ADDRESS,
-        ValidatorSetContract::getCurrentConfigCall {}.abi_encode().into(),
-    );
-    let result = evm.transact().unwrap();
+    let result = evm
+        .transact_raw(new_system_call_txn(
+            VALIDATOR_SET_CONTRACT_ADDRESS,
+            ValidatorSetContract::getCurrentConfigCall {}.abi_encode().into(),
+        ))
+        .unwrap();
     let returns = ValidatorSetContract::getCurrentConfigCall::abi_decode_returns(
         result.result.output().unwrap(),
-        false,
     )
     .unwrap();
     assert_eq!(
-        returns._0,
+        returns,
         Bytes::from([
-            0, 1, 202, 175, 197, 182, 88, 240, 89, 13, 126, 49, 222, 145, 237, 222, 127, 5,
-            174, 145, 150, 29, 8, 4, 236, 99, 77, 117, 53, 150, 155, 125, 23, 31, 1, 0, 0, 0,
-            0, 0, 0, 0, 48, 153, 255, 137, 244, 83, 217, 169, 191, 39, 62, 58, 232, 182, 27,
-            153, 162, 179, 54, 237, 199, 182, 235, 155, 142, 48, 130, 73, 253, 89, 243, 183,
-            98, 17, 119, 29, 126, 13, 170, 169, 127, 173, 17, 81, 140, 74, 216, 234, 189, 25,
-            1, 23, 47, 105, 112, 52, 47, 49, 50, 55, 46, 48, 46, 48, 46, 49, 47, 116, 99, 112,
-            47, 50, 48, 50, 53, 25, 1, 23, 47, 105, 112, 52, 47, 49, 50, 55, 46, 48, 46, 48,
-            46, 49, 47, 116, 99, 112, 47, 50, 48, 50, 53, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 1, 45, 134, 180, 10, 29, 105, 44, 7, 73, 160, 160, 66, 110, 32, 33, 238, 36,
+            226, 67, 13, 160, 245, 187, 156, 42, 230, 197, 134, 191, 62, 10, 15, 1, 0, 0, 0, 0,
+            0, 0, 0, 48, 133, 29, 65, 147, 45, 134, 111, 95, 171, 237, 102, 115, 137, 142, 21,
+            71, 62, 106, 10, 220, 245, 3, 61, 44, 147, 129, 108, 107, 17, 92, 133, 173, 52, 81,
+            224, 186, 198, 29, 87, 13, 94, 217, 242, 62, 30, 127, 119, 196, 11, 1, 9, 2, 0,
+            127, 0, 0, 1, 5, 232, 7, 11, 1, 9, 2, 0, 127, 0, 0, 1, 5, 232, 7, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
         ])
-    )
+    );
 }
 
 #[test]
@@ -147,7 +128,7 @@ fn test() {
         ))
         .init();
 
-    let runner = CliRunner::default();
+    let runner = CliRunner::try_default_runtime().unwrap();
     let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
         "reth",
         "--chain",
@@ -161,24 +142,27 @@ fn test() {
 
     runner
         .run_command_until_exit(|ctx| {
-            command.execute(ctx, |builder, _| async move {
-                let handle = builder
-                    .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
-                    .with_components(EthereumNode::components())
-                    .with_add_ons(EthereumAddOns::default())
-                    .launch_with_fn(|builder| {
-                        let launcher = EngineNodeLauncher::new(
-                            builder.task_executor().clone(),
-                            builder.config().datadir(),
-                            engine_tree_config::TreeConfig::default(),
-                        );
-                        builder.launch_with(launcher)
-                    })
-                    .await?;
-                let db = StateProviderDatabase::new(handle.node.provider.latest().unwrap());
-                test_gravity_system_call(db);
-                Ok(())
-            })
+            command.execute(
+                ctx,
+                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
+                    let handle = builder
+                        .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
+                        .with_components(EthereumNode::components())
+                        .with_add_ons(EthereumAddOns::default())
+                        .launch_with_fn(|builder| {
+                            let launcher = EngineNodeLauncher::new(
+                                builder.task_executor().clone(),
+                                builder.config().datadir(),
+                                reth_engine_primitives::TreeConfig::default(),
+                            );
+                            builder.launch_with(launcher)
+                        })
+                        .await?;
+                    let db = StateProviderDatabase::new(handle.node.provider.latest().unwrap());
+                    test_gravity_system_call(db, EthEvmConfig::new(handle.node.chain_spec()));
+                    Ok(())
+                }),
+            )
         })
         .unwrap();
 }

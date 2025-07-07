@@ -53,7 +53,7 @@ use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
 use state::TreeState;
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt::Debug,
     sync::{
         mpsc::{Receiver, RecvError, RecvTimeoutError, Sender},
@@ -91,7 +91,6 @@ pub use payload_processor::*;
 pub use persistence_state::PersistenceState;
 pub use reth_engine_primitives::TreeConfig;
 use reth_evm::execute::BlockExecutionOutput;
-use reth_pipe_exec_layer_ext_v2::{get_pipe_exec_layer_ext, PipeExecLayerEvent};
 
 pub mod state;
 
@@ -227,7 +226,7 @@ pub enum TreeAction {
 
 struct PersistenceWaiters {
     /// The block number that the waiters are waiting for.
-    waiters: BTreeMap<BlockNumber, oneshot::Sender<()>>,
+    waiters: BTreeMap<u64, oneshot::Sender<()>>,
 }
 
 impl PersistenceWaiters {
@@ -236,12 +235,12 @@ impl PersistenceWaiters {
     }
 
     /// Adds a new waiter for the given block number.
-    fn add_waiter(&mut self, block_number: BlockNumber, tx: oneshot::Sender<()>) {
+    fn add_waiter(&mut self, block_number: u64, tx: oneshot::Sender<()>) {
         self.waiters.insert(block_number, tx);
     }
 
     /// Notifies all waiters for the given block number.
-    fn notify_waiters(&mut self, block_number: BlockNumber) {
+    fn notify_waiters(&mut self, block_number: u64) {
         while let Some((waiter_block_number, _)) = self.waiters.first_key_value() {
             if *waiter_block_number > block_number {
                 break
@@ -259,7 +258,7 @@ impl PersistenceWaiters {
         self.waiters.is_empty()
     }
 
-    fn largest(&self) -> Option<BlockNumber> {
+    fn largest(&self) -> Option<u64> {
         self.waiters.keys().next_back().cloned()
     }
 }
@@ -579,7 +578,7 @@ where
         // Wait for the pipe exec layer to be initialized
         std::thread::sleep(std::time::Duration::from_secs(3));
         let pipe_event_rx =
-        get_pipe_exec_layer_event_bus::<N>().unwrap().event_rx.lock().unwrap().take().unwrap();
+            get_pipe_exec_layer_event_bus::<N>().unwrap().event_rx.lock().unwrap().take().unwrap();
         loop {
             match self.try_recv_pipe_exec_event(&pipe_event_rx) {
                 Ok(Some(event)) => self.on_pipe_exec_event(event),
@@ -1226,7 +1225,7 @@ where
             }
 
             if self.should_persist() {
-                let blocks_to_persist = self.get_canonical_blocks_to_persist();
+                let blocks_to_persist = self.get_canonical_blocks_to_persist()?;
                 self.persist_blocks(blocks_to_persist);
             }
         }

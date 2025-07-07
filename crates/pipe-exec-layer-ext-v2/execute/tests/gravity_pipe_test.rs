@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use alloy_primitives::{Address, B256};
 use gravity_api_types::{
     config_storage::{ConfigStorage, OnChainConfig},
@@ -5,11 +7,11 @@ use gravity_api_types::{
 };
 use gravity_storage::{block_view_storage::BlockViewStorage, GravityStorage};
 use reth_chainspec::ChainSpec;
-use reth_cli_commands::NodeCommand;
+use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
-use reth_node_builder::{engine_tree_config, EngineNodeLauncher, NodeBuilder, WithLaunchContext};
+use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{
     new_pipe_exec_layer_api, ExecutionArgs, OrderedBlock, PipeExecLayerApi,
@@ -133,7 +135,7 @@ async fn run_pipe(
             let launcher = EngineNodeLauncher::new(
                 builder.task_executor().clone(),
                 builder.config().datadir(),
-                engine_tree_config::TreeConfig::default(),
+                reth_engine_primitives::TreeConfig::default(),
             );
             builder.launch_with(launcher)
         })
@@ -147,14 +149,7 @@ async fn run_pipe(
     let latest_block_number = db_provider.best_block_number().unwrap();
     let latest_block_hash = db_provider.block_hash(latest_block_number).unwrap().unwrap();
     let latest_block_header = db_provider.header_by_number(latest_block_number).unwrap().unwrap();
-    let mut block_number_to_id = BTreeMap::new();
-    block_number_to_id.insert(latest_block_number, mock_block_id(latest_block_number));
-    let storage = BlockViewStorage::new(
-        provider.clone(),
-        latest_block_number,
-        latest_block_hash,
-        block_number_to_id,
-    );
+    let storage = BlockViewStorage::new(provider.clone());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let pipeline_api = new_pipe_exec_layer_api(
@@ -193,7 +188,7 @@ fn test() {
         ))
         .init();
 
-    let runner = CliRunner::default();
+    let runner = CliRunner::try_default_runtime().unwrap();
     let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
         "reth",
         "--chain",
@@ -207,7 +202,12 @@ fn test() {
 
     runner
         .run_command_until_exit(|ctx| {
-            command.execute(ctx, |builder, _| async move { run_pipe(builder).await })
+            command.execute(
+                ctx,
+                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
+                    run_pipe(builder).await
+                }),
+            )
         })
         .unwrap();
 }

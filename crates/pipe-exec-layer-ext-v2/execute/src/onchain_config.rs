@@ -1,7 +1,7 @@
 use crate::{ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockId};
-use alloy_primitives::{address, Address, Bytes, PrimitiveSignature, TxKind, U256};
+use alloy_primitives::{address, Address, Bytes, Signature, TxKind, U256};
 use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequest};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
@@ -11,11 +11,14 @@ use gravity_api_types::{
 };
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
-use reth_execution_types::BlockExecutionOutput;
+use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives::Receipt;
 use reth_rpc_eth_api::helpers::EthCall;
-use revm::db::BundleState;
-use revm_primitives::{EvmState, ExecutionResult};
+use revm::{
+    context_interface::result::{ExecutionResult, HaltReason},
+    database::BundleState,
+    state::EvmState,
+};
 use std::{fmt::Debug, sync::OnceLock};
 use tokio::runtime::Runtime;
 
@@ -102,13 +105,12 @@ where
         let input: Bytes = call.abi_encode().into();
         let result =
             self.eth_call(GRAVITY_FRAMEWORK_ADDRESS, RECONFIGURATION_ADDRESS, input, block_number);
-        getCurrentEpochCall::abi_decode_returns(&result, false)
+        getCurrentEpochCall::abi_decode_returns(&result)
             .expect("Failed to decode getCurrentEpoch return value")
-            ._0
     }
 
     #[cfg(feature = "pipe_test")]
-    pub(crate) fn fetch_epoch(&self, block_number: u64) -> u64 {
+    pub(crate) fn fetch_epoch(&self, _block_number: u64) -> u64 {
         0
     }
 
@@ -124,9 +126,8 @@ where
             input,
             block_number,
         );
-        getCurrentConfigCall::abi_decode_returns(&result, false)
+        getCurrentConfigCall::abi_decode_returns(&result)
             .expect("Failed to decode getCurrentConfig return value")
-            ._0
     }
 
     pub(crate) fn fetch_validator_set(&self, block_number: u64) -> Bytes {
@@ -141,9 +142,8 @@ where
             input,
             block_number,
         );
-        getCurrentConfigCall::abi_decode_returns(&result, false)
+        getCurrentConfigCall::abi_decode_returns(&result)
             .expect("Failed to decode getCurrentConfig return value")
-            ._0
     }
 
     pub(crate) fn fetch_config_bytes(
@@ -172,7 +172,7 @@ impl MetadataTxnResult {
         }
 
         for log in self.result.logs() {
-            match NewEpoch::decode_log(log, false) {
+            match NewEpoch::decode_log(log) {
                 Ok(event) => return Some((event.epoch, event.validators.clone().into())),
                 Err(_) => continue,
             }
@@ -186,6 +186,7 @@ impl MetadataTxnResult {
         state: BundleState,
         validators: Bytes,
     ) -> ExecuteOrderedBlockResult {
+        println!("state: {:?}", state.state);
         let tx_type = self.txn.tx_type();
         let mut block = Block {
             header: Header {
@@ -218,14 +219,16 @@ impl MetadataTxnResult {
             senders: vec![GRAVITY_FRAMEWORK_ADDRESS],
             execution_output: BlockExecutionOutput {
                 state,
-                receipts: vec![Receipt {
-                    tx_type,
-                    success: true,
-                    cumulative_gas_used: 0,
-                    logs: self.result.into_logs(),
-                }],
-                requests: Default::default(),
-                gas_used: 0,
+                result: BlockExecutionResult {
+                    receipts: vec![Receipt {
+                        tx_type,
+                        success: true,
+                        cumulative_gas_used: 0,
+                        logs: self.result.into_logs(),
+                    }],
+                    requests: Default::default(),
+                    gas_used: 0,
+                },
             },
             txs_info: vec![],
             gravity_events: vec![GravityEvent::NewEpoch(new_epoch, validators.clone().into())],
@@ -262,12 +265,12 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
             value: U256::ZERO,
             input,
         }),
-        PrimitiveSignature::test_signature(),
+        Signature::test_signature(),
     )
 }
 
 pub(crate) fn transact_metadata_contract_call(
-    evm: &mut impl Evm<Error: Debug>,
+    evm: &mut impl Evm<Error: Debug, HaltReason = HaltReason>,
     timestamp_us: u64,
 ) -> (MetadataTxnResult, EvmState) {
     sol! {
@@ -279,9 +282,10 @@ pub(crate) fn transact_metadata_contract_call(
     let mut result = evm
         .transact_system_call(GRAVITY_FRAMEWORK_ADDRESS, BLOCK_MODULE_ADDRESS, input.clone())
         .unwrap();
+    println!("result: {:?}", result);
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
     result.state.remove(&GRAVITY_FRAMEWORK_ADDRESS);
-    result.state.remove(&evm.block().coinbase);
+    result.state.remove(&evm.block().beneficiary);
     (
         MetadataTxnResult {
             result: result.result,

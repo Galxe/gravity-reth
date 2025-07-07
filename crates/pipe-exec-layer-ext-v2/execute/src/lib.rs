@@ -19,7 +19,6 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     Address, TxHash, B256, U256,
 };
-use gravity_storage::GravityStorage;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
@@ -28,8 +27,8 @@ use reth_evm::{ConfigureEvm, NextBlockEnvAttributes, ParallelDatabase};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_pipe_exec_layer_event_bus::{
-    get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus,
-    WaitForPersistenceEvent, PIPE_EXEC_LAYER_EVENT_BUS,
+    MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus, WaitForPersistenceEvent,
+    PIPE_EXEC_LAYER_EVENT_BUS,
 };
 use reth_primitives::EthPrimitives;
 use reth_primitives_traits::{
@@ -37,11 +36,10 @@ use reth_primitives_traits::{
     Block as _, RecoveredBlock,
 };
 use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
-use std::{
-    any::Any,
-    collections::BTreeMap,
-    sync::{Arc, LazyLock, OnceLock},
-    time::Instant,
+use revm::{
+    database::{states::bundle_state::BundleRetention, State},
+    state::AccountInfo,
+    DatabaseCommit,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
@@ -54,7 +52,6 @@ use tokio::sync::{
 };
 
 use gravity_primitives::CONFIG;
-use reth_revm::state::AccountInfo;
 use reth_trie::{HashedPostState, KeccakKeyHasher};
 use tracing::*;
 
@@ -169,6 +166,7 @@ pub struct ExecutionResult {
     pub block_hash: B256,
     /// Information about the transactions in the executed block
     pub txs_info: Vec<TxInfo>,
+    /// Gravity events emitted by the executed block
     pub gravity_events: Vec<GravityEvent>,
 }
 
@@ -480,9 +478,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         ordered_block: OrderedBlock,
         parent_header: &Header,
     ) -> ExecuteOrderedBlockResult {
-        let block_id = block.id();
-        let parent_id = block.parent_id();
-        let block_number = block.number();
+        let block_id = ordered_block.id;
+        let parent_id = ordered_block.parent_id;
+        let block_number = ordered_block.number;
         let state = self.storage.get_state_view().unwrap();
 
         let evm_env = self
@@ -499,13 +497,10 @@ impl<Storage: GravityStorage> Core<Storage> {
                 },
             )
             .unwrap();
-        let base_fee = evm_env.block_env.basefee.to::<u64>();
+        let base_fee = evm_env.block_env.basefee;
 
         let (metadata_txn_result, state_changes) = {
-            let mut state = revm::db::states::State::builder()
-                .with_database_ref(&state)
-                .with_bundle_update()
-                .build();
+            let mut state = State::builder().with_database_ref(&state).with_bundle_update().build();
             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
             let (metadata_txn_result, state_changes) =
                 transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000);
@@ -544,7 +539,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let mut executor = self.evm_config.parallel_executor(state);
         // Apply metadata transaction result to executor state
-        executor.state_mut().commit_changes(state_changes);
+        executor.commit_changes(state_changes);
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
             serde_json::to_writer(
                 std::io::BufWriter::new(std::fs::File::create(format!("{block_id}.json")).unwrap()),
