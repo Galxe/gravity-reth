@@ -1,3 +1,5 @@
+//! Event bus for the pipe execution layer.
+
 use alloy_primitives::TxHash;
 use once_cell::sync::OnceCell;
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
@@ -8,6 +10,7 @@ use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 /// A static instance of `PipeExecLayerEventBus` used for dispatching events.
 pub static PIPE_EXEC_LAYER_EVENT_BUS: OnceCell<Box<dyn Any + Send + Sync>> = OnceCell::new();
 
+/// Get a reference to the global `PipeExecLayerEventBus` instance.
 pub fn get_pipe_exec_layer_event_bus<N: NodePrimitives>(
 ) -> Option<&'static PipeExecLayerEventBus<N>> {
     PIPE_EXEC_LAYER_EVENT_BUS
@@ -15,6 +18,7 @@ pub fn get_pipe_exec_layer_event_bus<N: NodePrimitives>(
         .map(|ext| ext.downcast_ref::<PipeExecLayerEventBus<N>>().unwrap())
 }
 
+/// Event to make a block canonical
 #[derive(Debug)]
 pub struct MakeCanonicalEvent<N: NodePrimitives> {
     /// The executed block with trie updates
@@ -23,6 +27,7 @@ pub struct MakeCanonicalEvent<N: NodePrimitives> {
     pub tx: oneshot::Sender<()>,
 }
 
+/// Event to wait for persistence of the block
 #[derive(Debug)]
 pub struct WaitForPersistenceEvent {
     /// The block number to wait for
@@ -31,14 +36,16 @@ pub struct WaitForPersistenceEvent {
     pub tx: oneshot::Sender<()>,
 }
 
+/// Events emitted by the pipeline execution layer
 #[derive(Debug)]
 pub enum PipeExecLayerEvent<N: NodePrimitives> {
     /// Make executed block canonical
     MakeCanonical(MakeCanonicalEvent<N>),
+    /// Wait for persistence of the block
     WaitForPersistence(WaitForPersistenceEvent),
 }
 
-/// Called by EL.
+/// Event bus for the pipe execution layer.
 #[derive(Debug)]
 pub struct PipeExecLayerEventBus<N: NodePrimitives> {
     /// Receive events from PipeExecService

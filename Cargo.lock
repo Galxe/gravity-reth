@@ -8037,7 +8037,6 @@ dependencies = [
  "reth-payload-builder",
  "reth-payload-primitives",
  "reth-pipe-exec-layer-event-bus",
- "reth-pipe-exec-layer-ext-v2",
  "reth-primitives-traits",
  "reth-provider",
  "reth-prune",

@@ -6,7 +6,7 @@ use crate::execute::Executor;
 use alloy_evm::Database;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
-use revm::database::BundleState;
+use revm::{database::BundleState, state::EvmState};
 
 /// The `ParallelExecutor` trait defines the interface for executing EVM blocks in parallel.
 pub trait ParallelExecutor {
@@ -44,6 +44,9 @@ pub trait ParallelExecutor {
         let result = self.execute_one(block)?;
         Ok(BlockExecutionOutput { state: self.take_bundle(), result })
     }
+
+    /// Commits the changes to the executor state.
+    fn commit_changes(&mut self, changes: EvmState);
 }
 
 /// Wraps a [`Executor`] to provide a [`ParallelExecutor`] implementation.
@@ -78,5 +81,10 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
     #[inline]
     fn size_hint(&self) -> usize {
         self.0.size_hint()
+    }
+
+    #[inline]
+    fn commit_changes(&mut self, changes: EvmState) {
+        self.0.commit_changes(changes);
     }
 }
