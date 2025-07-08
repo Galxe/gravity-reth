@@ -1,5 +1,7 @@
 use crate::{ExecuteOrderedBlockResult, OrderedBlock};
-use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
+use alloy_consensus::{
+    constants::EMPTY_WITHDRAWALS, transaction::Recovered, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH,
+};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockId};
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, U256};
 use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequest};
@@ -10,11 +12,12 @@ use gravity_api_types::{
     events::contract_event::GravityEvent,
 };
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
-use reth_evm::Evm;
+use reth_evm::{Evm, IntoTxEnv};
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives::Receipt;
 use reth_rpc_eth_api::helpers::EthCall;
 use revm::{
+    context::TxEnv,
     context_interface::result::{ExecutionResult, HaltReason},
     database::BundleState,
     state::EvmState,
@@ -186,7 +189,6 @@ impl MetadataTxnResult {
         state: BundleState,
         validators: Bytes,
     ) -> ExecuteOrderedBlockResult {
-        println!("state: {:?}", state.state);
         let tx_type = self.txn.tx_type();
         let mut block = Block {
             header: Header {
@@ -270,27 +272,22 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
 }
 
 pub(crate) fn transact_metadata_contract_call(
-    evm: &mut impl Evm<Error: Debug, HaltReason = HaltReason>,
+    evm: &mut impl Evm<Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     timestamp_us: u64,
-) -> (MetadataTxnResult, EvmState) {
+) -> (MetadataTxnResult, EvmState)
+where
+{
     sol! {
         function blockPrologue(uint64 _timestamp_microseconds) external onlyVm whenInitialized;
     }
 
     let call = blockPrologueCall { _timestamp_microseconds: timestamp_us };
     let input: Bytes = call.abi_encode().into();
-    let mut result = evm
-        .transact_system_call(GRAVITY_FRAMEWORK_ADDRESS, BLOCK_MODULE_ADDRESS, input.clone())
-        .unwrap();
-    println!("result: {:?}", result);
+    let txn = new_system_call_txn(BLOCK_MODULE_ADDRESS, input);
+    let tx_env = Recovered::new_unchecked(txn.clone(), GRAVITY_FRAMEWORK_ADDRESS).into_tx_env();
+    let mut result = evm.transact_raw(tx_env).unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
     result.state.remove(&GRAVITY_FRAMEWORK_ADDRESS);
     result.state.remove(&evm.block().beneficiary);
-    (
-        MetadataTxnResult {
-            result: result.result,
-            txn: new_system_call_txn(BLOCK_MODULE_ADDRESS, input),
-        },
-        result.state,
-    )
+    (MetadataTxnResult { result: result.result, txn }, result.state)
 }
