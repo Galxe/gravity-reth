@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use dashmap::DashMap;
-use metrics::Gauge;
+use metrics::{Gauge, Histogram};
 use metrics_derive::Metrics;
 use once_cell::sync::Lazy;
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
@@ -16,10 +16,14 @@ use revm_database::{states::StorageSlot, BundleAccount, OriginalValuesKnown};
 use std::{
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const MAX_PERSISTENCE_GAP: u64 = 64;
+const CACHE_METRIS_INTERVAL: Duration = Duration::from_secs(15); // 15s
+const CACHE_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5min
+const CACHE_SIZE_THRESHOLD: usize = 2_000_000;
+const CACHE_CONTRACTS_THRESHOLD: usize = 2_000;
 
 #[derive(Metrics)]
 #[metrics(scope = "storage")]
@@ -33,7 +37,11 @@ struct CacheMetrics {
     /// Lastest pre-merged block number
     latest_merged_block_number: Gauge,
     /// Latest stored block number
-    latest_stored_block_number: Gauge,
+    latest_persist_block_number: Gauge,
+    /// Latest eviction block number
+    latest_eviction_block_number: Gauge,
+    /// Eviction duration
+    eviction_duration: Histogram,
 }
 
 #[derive(Default)]
@@ -42,7 +50,8 @@ struct CacheMetricsReporter {
     trie_cache_hit_record: HitRecorder,
     cached_items: AtomicU64,
     merged_block_number: AtomicU64,
-    stored_block_number: AtomicU64,
+    persist_block_number: AtomicU64,
+    eviction_block_number: AtomicU64,
     metrics: CacheMetrics,
 }
 
@@ -83,8 +92,11 @@ impl CacheMetricsReporter {
             .latest_merged_block_number
             .set(self.merged_block_number.load(Ordering::Relaxed) as f64);
         self.metrics
-            .latest_stored_block_number
-            .set(self.stored_block_number.load(Ordering::Relaxed) as f64);
+            .latest_persist_block_number
+            .set(self.persist_block_number.load(Ordering::Relaxed) as f64);
+        self.metrics
+            .latest_eviction_block_number
+            .set(self.eviction_block_number.load(Ordering::Relaxed) as f64);
     }
 }
 
@@ -106,7 +118,7 @@ pub struct PersistBlockCacheInner {
     persist_wait: Arc<(Mutex<bool>, Condvar)>,
     accounts: DashMap<Address, ValueWithTip<Account>>,
     storage: DashMap<Address, DashMap<U256, ValueWithTip<U256>>>,
-    contracts: DashMap<B256, Bytecode>,
+    contracts: DashMap<B256, ValueWithTip<Bytecode>>,
     account_trie: DashMap<Nibbles, ValueWithTip<Node>>,
     storage_trie: DashMap<B256, DashMap<Nibbles, ValueWithTip<Node>>>,
     merged_block_number: Mutex<Option<u64>>,
@@ -165,13 +177,69 @@ impl PersistBlockCache {
 
         let weak_inner = Arc::downgrade(&inner);
         let handle = thread::spawn(move || {
-            let interval = Duration::from_secs(15); // 15s
+            let interval = CACHE_METRIS_INTERVAL; // 15s
+            let eviction_interval = CACHE_EVICTION_INTERVAL; // 5min
+            let mut last_eviction_time = Instant::now();
+            let mut last_eviction_contract = Instant::now();
+            let mut last_eviction_height = 0;
+            let mut overflow = false;
             loop {
                 thread::sleep(interval);
                 if let Some(inner) = weak_inner.upgrade() {
+                    let start = Instant::now();
                     let num_items = inner.entry_count();
                     inner.metrics.cached_items.store(num_items as u64, Ordering::Release);
                     inner.metrics.report();
+
+                    // check and eviction contracts
+                    if inner.contracts.len() > CACHE_CONTRACTS_THRESHOLD &&
+                        last_eviction_contract.elapsed() >= eviction_interval
+                    {
+                        let persist_height =
+                            inner.persist_block_number.lock().unwrap().unwrap_or(0);
+                        let mut max_height = 512;
+                        while inner.contracts.len() > CACHE_CONTRACTS_THRESHOLD {
+                            let eviction_height = persist_height.saturating_sub(max_height);
+                            if eviction_height == 0 || eviction_height == persist_height {
+                                break;
+                            }
+                            inner.contracts.retain(|_, v| v.block_number > eviction_height);
+                            max_height /= 2;
+                        }
+                        last_eviction_contract = Instant::now();
+                    }
+                    // check and eviction account and trie state
+                    if num_items > CACHE_SIZE_THRESHOLD {
+                        let persist_height =
+                            inner.persist_block_number.lock().unwrap().unwrap_or(0);
+                        if last_eviction_time.elapsed() >= eviction_interval && persist_height > 0 {
+                            overflow = true;
+                            let eviction_height = if last_eviction_height == 0 {
+                                persist_height.saturating_sub(512).max(persist_height / 2)
+                            } else {
+                                (persist_height + last_eviction_height) / 2
+                            };
+                            inner.accounts.retain(|_, v| v.block_number > eviction_height);
+                            inner.storage.iter().for_each(|s| {
+                                s.retain(|_, v| v.block_number > eviction_height);
+                            });
+                            inner.storage.retain(|_, s| !s.is_empty());
+                            inner.account_trie.retain(|_, v| v.block_number > eviction_height);
+                            inner.storage_trie.iter().for_each(|s| {
+                                s.retain(|_, v| v.block_number > eviction_height);
+                            });
+                            inner.storage_trie.retain(|_, s| !s.is_empty());
+                            last_eviction_height = eviction_height;
+                            inner
+                                .metrics
+                                .eviction_block_number
+                                .store(eviction_height, Ordering::Relaxed);
+                        }
+                    } else if overflow {
+                        overflow = false;
+                        last_eviction_time = Instant::now();
+                    }
+                    inner.metrics.metrics.eviction_duration.record(start.elapsed());
                 } else {
                     break;
                 }
@@ -202,14 +270,34 @@ impl PersistBlockCache {
         }
     }
 
+    /// Cache latest read account
+    pub fn cache_account(&self, address: Address, account: Account) {
+        if let dashmap::Entry::Vacant(entry) = self.accounts.entry(address) {
+            entry.insert(ValueWithTip::new(
+                account,
+                self.metrics.persist_block_number.load(Ordering::Relaxed),
+            ));
+        }
+    }
+
     /// Get byte code from cache
     pub fn bytecode_by_hash(&self, code_hash: &B256) -> Option<Bytecode> {
         if let Some(value) = self.contracts.get(code_hash) {
             self.metrics.block_cache_hit_record.hit();
-            Some(value.clone())
+            Some(value.value.clone())
         } else {
             self.metrics.block_cache_hit_record.not_hit();
             None
+        }
+    }
+
+    /// Cache latest read bytecode
+    pub fn cache_byte_code(&self, code_hash: B256, byte_code: Bytecode) {
+        if let dashmap::Entry::Vacant(entry) = self.contracts.entry(code_hash) {
+            entry.insert(ValueWithTip::new(
+                byte_code,
+                self.metrics.persist_block_number.load(Ordering::Relaxed),
+            ));
         }
     }
 
@@ -226,6 +314,41 @@ impl PersistBlockCache {
         } else {
             self.metrics.block_cache_hit_record.not_hit();
             None
+        }
+    }
+
+    /// Cache latest read storage
+    pub fn cache_storage(&self, address: Address, slot: U256, value: U256) {
+        if let Some(storage) = self.storage.get(&address) {
+            if let dashmap::Entry::Vacant(entry) = storage.entry(slot) {
+                entry.insert(ValueWithTip::new(
+                    value,
+                    self.metrics.persist_block_number.load(Ordering::Relaxed),
+                ));
+            }
+        } else {
+            match self.storage.entry(address) {
+                dashmap::Entry::Occupied(entry) => {
+                    entry.get().insert(
+                        slot,
+                        ValueWithTip::new(
+                            value,
+                            self.metrics.persist_block_number.load(Ordering::Relaxed),
+                        ),
+                    );
+                }
+                dashmap::Entry::Vacant(entry) => {
+                    let data = DashMap::new();
+                    data.insert(
+                        slot,
+                        ValueWithTip::new(
+                            value,
+                            self.metrics.persist_block_number.load(Ordering::Relaxed),
+                        ),
+                    );
+                    entry.insert(data);
+                }
+            }
         }
     }
 
@@ -258,7 +381,7 @@ impl PersistBlockCache {
 
     /// Hint for the persist block number
     pub fn persist_tip(&self, block_number: u64) {
-        self.metrics.stored_block_number.store(block_number, Ordering::Relaxed);
+        self.metrics.persist_block_number.store(block_number, Ordering::Relaxed);
         let mut guard = self.persist_block_number.lock().unwrap();
         if let Some(ref mut persist_block_number) = *guard {
             assert_eq!(
@@ -310,7 +433,7 @@ impl PersistBlockCache {
             .filter(|(b, _)| **b != KECCAK_EMPTY)
             .map(|(b, code)| (*b, code.clone()))
             .for_each(|(hash, bytecode)| {
-                self.contracts.insert(hash, bytecode);
+                self.contracts.insert(hash, ValueWithTip::new(bytecode, block_number));
             });
 
         state.into_par_iter().for_each(|(address, account)| {

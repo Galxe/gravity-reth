@@ -131,7 +131,15 @@ impl DatabaseRef for BlockViewProvider {
                 return Ok(value);
             }
         }
-        self.db.code_by_hash_ref(code_hash)
+        match self.db.code_by_hash_ref(code_hash) {
+            Ok(byte_code) => {
+                if let Some(cache) = &self.cache {
+                    cache.cache_byte_code(code_hash, byte_code.clone());
+                }
+                Ok(byte_code)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
