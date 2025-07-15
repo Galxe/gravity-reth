@@ -80,12 +80,10 @@ impl Command {
             db_tables.sort();
             let mut total_size = 0;
             for db_table in db_tables {
-                let table_db = tx.inner.open_db(Some(db_table)).wrap_err("Could not open db.")?;
+                let table_db = tx.open_db(Some(db_table)).wrap_err("Could not open db.")?;
 
-                let stats = tx
-                    .inner
-                    .db_stat(&table_db)
-                    .wrap_err(format!("Could not find table: {db_table}"))?;
+                let stats =
+                    tx.db_stat(&table_db).wrap_err(format!("Could not find table: {db_table}"))?;
 
                 // Defaults to 16KB right now but we should
                 // re-evaluate depending on the DB we end up using
@@ -124,8 +122,8 @@ impl Command {
                 .add_cell(Cell::new(human_bytes(total_size as f64)));
             table.add_row(row);
 
-            let freelist = tx.inner.env().freelist()?;
-            let pagesize = tx.inner.db_stat(&mdbx::Database::freelist_db())?.page_size() as usize;
+            let freelist = tx.env().freelist()?;
+            let pagesize = tx.db_stat(&mdbx::Database::freelist_db())?.page_size() as usize;
             let freelist_size = freelist * pagesize;
 
             let mut row = Row::new();

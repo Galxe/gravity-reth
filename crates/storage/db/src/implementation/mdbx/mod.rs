@@ -31,6 +31,8 @@ use std::{
 use tx::Tx;
 
 pub mod cursor;
+pub mod parallel_ro_tx;
+use parallel_ro_tx::ParallelROTx;
 pub mod tx;
 
 mod utils;
@@ -179,15 +181,11 @@ pub struct DatabaseEnv {
 }
 
 impl Database for DatabaseEnv {
-    type TX = tx::Tx<RO>;
+    type TX = ParallelROTx;
     type TXMut = tx::Tx<RW>;
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
-        Tx::new_with_metrics(
-            self.inner.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?,
-            self.metrics.clone(),
-        )
-        .map_err(|e| DatabaseError::InitTx(e.into()))
+        ParallelROTx::try_new(self.inner.clone(), self.metrics.clone())
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
@@ -212,12 +210,10 @@ impl DatabaseMetrics for DatabaseEnv {
         let _ = self
             .view(|tx| {
                 for table in Tables::ALL.iter().map(Tables::name) {
-                    let table_db = tx.inner.open_db(Some(table)).wrap_err("Could not open db.")?;
+                    let table_db = tx.open_db(Some(table)).wrap_err("Could not open db.")?;
 
-                    let stats = tx
-                        .inner
-                        .db_stat(&table_db)
-                        .wrap_err(format!("Could not find table: {table}"))?;
+                    let stats =
+                        tx.db_stat(&table_db).wrap_err(format!("Could not find table: {table}"))?;
 
                     let page_size = stats.page_size() as usize;
                     let leaf_pages = stats.leaf_pages();
