@@ -262,6 +262,7 @@ where
         + BlockHashReader
         + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
         + StateCommitmentProvider,
+    ProviderRO: DBProvider + BlockHashReader + StateCommitmentProvider,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -282,7 +283,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
@@ -295,7 +296,8 @@ where
 
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
-        let db = StateProviderDatabase(LatestStateProviderRef::new(provider));
+        let provider_ro = provider_ro()?;
+        let db = StateProviderDatabase(LatestStateProviderRef::new(&provider_ro));
         let mut executor = self.evm_config.parallel_executor(db);
 
         // Progress tracking
