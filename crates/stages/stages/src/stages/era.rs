@@ -15,7 +15,7 @@ use reth_provider::{
 };
 use reth_stages_api::{ExecInput, ExecOutput, Stage, StageError, UnwindInput, UnwindOutput};
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_errors::ProviderError;
+use reth_storage_errors::{ProviderError, ProviderResult};
 use std::{
     fmt::{Debug, Formatter},
     iter,
@@ -127,7 +127,8 @@ impl<Header, Body, F> EraStage<Header, Body, F> {
     }
 }
 
-impl<Provider, N, F> Stage<Provider> for EraStage<N::BlockHeader, N::BlockBody, F>
+impl<Provider, ProviderRO, N, F> Stage<Provider, ProviderRO>
+    for EraStage<N::BlockHeader, N::BlockBody, F>
 where
     Provider: DBProvider<Tx: DbTxMut>
         + StaticFileProviderFactory<Primitives = N>
@@ -167,7 +168,12 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         let height = if let Some(era) = self.item.take() {
             let static_file_provider = provider.static_file_provider();
 
@@ -221,6 +227,7 @@ where
     fn unwind(
         &mut self,
         _provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         Ok(UnwindOutput { checkpoint: input.checkpoint.with_block_number(input.unwind_to) })

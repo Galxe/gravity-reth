@@ -7,6 +7,7 @@ use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment};
 use reth_stages_api::{
     ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
+use reth_storage_errors::ProviderResult;
 use std::fmt::Debug;
 use tracing::info;
 
@@ -41,7 +42,7 @@ impl Default for IndexAccountHistoryStage {
     }
 }
 
-impl<Provider> Stage<Provider> for IndexAccountHistoryStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for IndexAccountHistoryStage
 where
     Provider:
         DBProvider<Tx: DbTxMut> + HistoryWriter + PruneCheckpointReader + PruneCheckpointWriter,
@@ -55,6 +56,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         mut input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if let Some((target_prunable_block, prune_mode)) = self
@@ -128,6 +130,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_progress, _) =

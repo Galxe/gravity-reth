@@ -6,9 +6,9 @@ use tokio::sync::watch;
 
 /// Builds a [`Pipeline`].
 #[must_use = "call `build` to construct the pipeline"]
-pub struct PipelineBuilder<Provider> {
+pub struct PipelineBuilder<ProviderRW, ProviderRO> {
     /// All configured stages in the order they will be executed.
-    stages: Vec<BoxedStage<Provider>>,
+    stages: Vec<BoxedStage<ProviderRW, ProviderRO>>,
     /// The maximum block number to sync to.
     max_block: Option<BlockNumber>,
     /// A receiver for the current chain tip to sync to.
@@ -17,11 +17,11 @@ pub struct PipelineBuilder<Provider> {
     fail_on_unwind: bool,
 }
 
-impl<Provider> PipelineBuilder<Provider> {
+impl<ProviderRW, ProviderRO> PipelineBuilder<ProviderRW, ProviderRO> {
     /// Add a stage to the pipeline.
     pub fn add_stage<S>(mut self, stage: S) -> Self
     where
-        S: Stage<Provider> + 'static,
+        S: Stage<ProviderRW, ProviderRO> + 'static,
     {
         self.stages.push(Box::new(stage));
         self
@@ -34,7 +34,7 @@ impl<Provider> PipelineBuilder<Provider> {
     /// To customize the stages in the set (reorder, disable, insert a stage) call
     /// [`builder`][StageSet::builder] on the set which will convert it to a
     /// [`StageSetBuilder`][crate::StageSetBuilder].
-    pub fn add_stages<Set: StageSet<Provider>>(mut self, set: Set) -> Self {
+    pub fn add_stages<Set: StageSet<ProviderRW, ProviderRO>>(mut self, set: Set) -> Self {
         let states = set.builder().build();
         self.stages.reserve_exact(states.len());
         for stage in states {
@@ -77,7 +77,7 @@ impl<Provider> PipelineBuilder<Provider> {
     ) -> Pipeline<N>
     where
         N: ProviderNodeTypes,
-        ProviderFactory<N>: DatabaseProviderFactory<ProviderRW = Provider>,
+        ProviderFactory<N>: DatabaseProviderFactory<ProviderRW = ProviderRW, Provider = ProviderRO>,
     {
         let Self { stages, max_block, tip_tx, metrics_tx, fail_on_unwind } = self;
         Pipeline {
@@ -96,7 +96,7 @@ impl<Provider> PipelineBuilder<Provider> {
     }
 }
 
-impl<Provider> Default for PipelineBuilder<Provider> {
+impl<ProviderRW, ProviderRO> Default for PipelineBuilder<ProviderRW, ProviderRO> {
     fn default() -> Self {
         Self {
             stages: Vec::new(),
@@ -108,7 +108,7 @@ impl<Provider> Default for PipelineBuilder<Provider> {
     }
 }
 
-impl<Provider> std::fmt::Debug for PipelineBuilder<Provider> {
+impl<ProviderRW, ProviderRO> std::fmt::Debug for PipelineBuilder<ProviderRW, ProviderRO> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PipelineBuilder")
             .field("stages", &self.stages.iter().map(|stage| stage.id()).collect::<Vec<StageId>>())

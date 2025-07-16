@@ -24,7 +24,7 @@ use reth_stages_api::{
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_errors::provider::ProviderError;
+use reth_storage_errors::{provider::ProviderError, ProviderResult};
 use std::task::{ready, Context, Poll};
 
 use tokio::sync::watch;
@@ -185,7 +185,7 @@ where
     }
 }
 
-impl<Provider, P, D> Stage<Provider> for HeaderStage<P, D>
+impl<Provider, ProviderRO, P, D> Stage<Provider, ProviderRO> for HeaderStage<P, D>
 where
     Provider: DBProvider<Tx: DbTxMut> + StaticFileProviderFactory,
     P: HeaderSyncGapProvider<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>,
@@ -283,7 +283,12 @@ where
 
     /// Download the headers in reverse order (falling block numbers)
     /// starting from the tip of the chain
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         let current_checkpoint = input.checkpoint();
 
         if self.sync_gap.take().ok_or(StageError::MissingSyncGap)?.is_closed() {
@@ -330,6 +335,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         self.sync_gap.take();

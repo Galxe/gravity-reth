@@ -20,7 +20,7 @@ use reth_stages_api::{
     EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
     UnwindInput, UnwindOutput,
 };
-use reth_storage_errors::provider::ProviderError;
+use reth_storage_errors::{provider::ProviderError, ProviderResult};
 use tracing::*;
 
 /// The transaction lookup stage.
@@ -57,7 +57,7 @@ impl TransactionLookupStage {
     }
 }
 
-impl<Provider> Stage<Provider> for TransactionLookupStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for TransactionLookupStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + PruneCheckpointWriter
@@ -76,6 +76,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         mut input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if let Some((target_prunable_block, prune_mode)) = self
@@ -191,6 +192,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let tx = provider.tx_ref();

@@ -15,6 +15,7 @@ use reth_stages_api::{
     BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
+use reth_storage_errors::ProviderResult;
 use reth_trie::{IntermediateStateRootState, StateRoot, StateRootProgress, StoredSubNode};
 use reth_trie_db::DatabaseStateRoot;
 use std::fmt::Debug;
@@ -152,7 +153,7 @@ impl MerkleStage {
     }
 }
 
-impl<Provider> Stage<Provider> for MerkleStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for MerkleStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + TrieWriter
@@ -172,7 +173,12 @@ where
     }
 
     /// Execute the stage.
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         let (threshold, incremental_threshold) = match self {
             Self::Unwind => {
                 info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
@@ -333,6 +339,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let tx = provider.tx_ref();

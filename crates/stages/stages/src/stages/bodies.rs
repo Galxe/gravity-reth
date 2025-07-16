@@ -142,7 +142,7 @@ where
     Ok(())
 }
 
-impl<Provider, D> Stage<Provider> for BodyStage<D>
+impl<Provider, ProviderRO, D> Stage<Provider, ProviderRO> for BodyStage<D>
 where
     Provider: DBProvider<Tx: DbTxMut>
         + StaticFileProviderFactory
@@ -186,7 +186,12 @@ where
 
     /// Download block bodies from the last checkpoint for this stage up until the latest synced
     /// header, limited by the stage's batch size.
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
         }
@@ -225,6 +230,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         self.buffer.take();

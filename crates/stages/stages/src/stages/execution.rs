@@ -22,6 +22,7 @@ use reth_stages_api::{
     UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
+use reth_storage_errors::ProviderResult;
 use std::{
     cmp::Ordering,
     ops::RangeInclusive,
@@ -249,7 +250,7 @@ where
     }
 }
 
-impl<E, Provider> Stage<Provider> for ExecutionStage<E>
+impl<E, Provider, ProviderRO> Stage<Provider, ProviderRO> for ExecutionStage<E>
 where
     E: ConfigureEvm,
     Provider: DBProvider
@@ -278,7 +279,12 @@ where
     }
 
     /// Execute the stage
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
         }
@@ -485,6 +491,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_to, _) =

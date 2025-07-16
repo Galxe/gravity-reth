@@ -20,6 +20,7 @@ use reth_stages_api::{
     StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
+use reth_storage_errors::ProviderResult;
 use std::{fmt::Debug, ops::Range, sync::mpsc};
 use thiserror::Error;
 use tracing::*;
@@ -58,7 +59,7 @@ impl Default for SenderRecoveryStage {
     }
 }
 
-impl<Provider> Stage<Provider> for SenderRecoveryStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for SenderRecoveryStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + BlockReader
@@ -75,7 +76,12 @@ where
     /// [`BlockBodyIndices`][reth_db_api::tables::BlockBodyIndices],
     /// collect transactions within that range, recover signer for each transaction and store
     /// entries in the [`TransactionSenders`][reth_db_api::tables::TransactionSenders] table.
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
         }
@@ -123,6 +129,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (_, unwind_to, _) = input.unwind_block_range_with_threshold(self.commit_threshold);

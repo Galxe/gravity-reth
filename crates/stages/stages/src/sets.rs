@@ -142,15 +142,15 @@ where
     B: BodyDownloader,
 {
     /// Appends the default offline stages and default finish stage to the given builder.
-    pub fn add_offline_stages<Provider>(
-        default_offline: StageSetBuilder<Provider>,
+    pub fn add_offline_stages<Provider, ProviderRO>(
+        default_offline: StageSetBuilder<Provider, ProviderRO>,
         evm_config: E,
         consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
         stages_config: StageConfig,
         prune_modes: PruneModes,
-    ) -> StageSetBuilder<Provider>
+    ) -> StageSetBuilder<Provider, ProviderRO>
     where
-        OfflineStages<E>: StageSet<Provider>,
+        OfflineStages<E>: StageSet<Provider, ProviderRO>,
     {
         StageSetBuilder::default()
             .add_set(default_offline)
@@ -159,16 +159,16 @@ where
     }
 }
 
-impl<P, H, B, E, Provider> StageSet<Provider> for DefaultStages<P, H, B, E>
+impl<P, H, B, E, Provider, ProviderRO> StageSet<Provider, ProviderRO> for DefaultStages<P, H, B, E>
 where
     P: HeaderSyncGapProvider + 'static,
     H: HeaderDownloader + 'static,
     B: BodyDownloader + 'static,
     E: ConfigureEvm,
-    OnlineStages<P, H, B>: StageSet<Provider>,
-    OfflineStages<E>: StageSet<Provider>,
+    OnlineStages<P, H, B>: StageSet<Provider, ProviderRO>,
+    OfflineStages<E>: StageSet<Provider, ProviderRO>,
 {
-    fn builder(self) -> StageSetBuilder<Provider> {
+    fn builder(self) -> StageSetBuilder<Provider, ProviderRO> {
         Self::add_offline_stages(
             self.online.builder(),
             self.evm_config,
@@ -229,28 +229,28 @@ where
     B: BodyDownloader + 'static,
 {
     /// Create a new builder using the given headers stage.
-    pub fn builder_with_headers<Provider>(
+    pub fn builder_with_headers<Provider, ProviderRO>(
         headers: HeaderStage<P, H>,
         body_downloader: B,
-    ) -> StageSetBuilder<Provider>
+    ) -> StageSetBuilder<Provider, ProviderRO>
     where
-        HeaderStage<P, H>: Stage<Provider>,
-        BodyStage<B>: Stage<Provider>,
+        HeaderStage<P, H>: Stage<Provider, ProviderRO>,
+        BodyStage<B>: Stage<Provider, ProviderRO>,
     {
         StageSetBuilder::default().add_stage(headers).add_stage(BodyStage::new(body_downloader))
     }
 
     /// Create a new builder using the given bodies stage.
-    pub fn builder_with_bodies<Provider>(
+    pub fn builder_with_bodies<Provider, ProviderRO>(
         bodies: BodyStage<B>,
         provider: P,
         tip: watch::Receiver<B256>,
         header_downloader: H,
         stages_config: StageConfig,
-    ) -> StageSetBuilder<Provider>
+    ) -> StageSetBuilder<Provider, ProviderRO>
     where
-        BodyStage<B>: Stage<Provider>,
-        HeaderStage<P, H>: Stage<Provider>,
+        BodyStage<B>: Stage<Provider, ProviderRO>,
+        HeaderStage<P, H>: Stage<Provider, ProviderRO>,
     {
         StageSetBuilder::default()
             .add_stage(HeaderStage::new(provider, header_downloader, tip, stages_config.etl))
@@ -258,17 +258,17 @@ where
     }
 }
 
-impl<Provider, P, H, B> StageSet<Provider> for OnlineStages<P, H, B>
+impl<Provider, P, H, B, ProviderRO> StageSet<Provider, ProviderRO> for OnlineStages<P, H, B>
 where
     P: HeaderSyncGapProvider + 'static,
     H: HeaderDownloader<Header = <B::Block as Block>::Header> + 'static,
     B: BodyDownloader + 'static,
-    HeaderStage<P, H>: Stage<Provider>,
-    BodyStage<B>: Stage<Provider>,
+    HeaderStage<P, H>: Stage<Provider, ProviderRO>,
+    BodyStage<B>: Stage<Provider, ProviderRO>,
     EraStage<<B::Block as Block>::Header, <B::Block as Block>::Body, EraImportSource>:
-        Stage<Provider>,
+        Stage<Provider, ProviderRO>,
 {
-    fn builder(self) -> StageSetBuilder<Provider> {
+    fn builder(self) -> StageSetBuilder<Provider, ProviderRO> {
         StageSetBuilder::default()
             .add_stage(EraStage::new(self.era_import_source, self.stages_config.etl.clone()))
             .add_stage(HeaderStage::new(
@@ -315,16 +315,16 @@ impl<E: ConfigureEvm> OfflineStages<E> {
     }
 }
 
-impl<E, Provider> StageSet<Provider> for OfflineStages<E>
+impl<E, Provider, ProviderRO> StageSet<Provider, ProviderRO> for OfflineStages<E>
 where
     E: ConfigureEvm,
-    ExecutionStages<E>: StageSet<Provider>,
-    PruneSenderRecoveryStage: Stage<Provider>,
-    HashingStages: StageSet<Provider>,
-    HistoryIndexingStages: StageSet<Provider>,
-    PruneStage: Stage<Provider>,
+    ExecutionStages<E>: StageSet<Provider, ProviderRO>,
+    PruneSenderRecoveryStage: Stage<Provider, ProviderRO>,
+    HashingStages: StageSet<Provider, ProviderRO>,
+    HistoryIndexingStages: StageSet<Provider, ProviderRO>,
+    PruneStage: Stage<Provider, ProviderRO>,
 {
-    fn builder(self) -> StageSetBuilder<Provider> {
+    fn builder(self) -> StageSetBuilder<Provider, ProviderRO> {
         ExecutionStages::new(self.evm_config, self.consensus, self.stages_config.clone())
             .builder()
             // If sender recovery prune mode is set, add the prune sender recovery stage.
@@ -368,13 +368,13 @@ impl<E: ConfigureEvm> ExecutionStages<E> {
     }
 }
 
-impl<E, Provider> StageSet<Provider> for ExecutionStages<E>
+impl<E, Provider, ProviderRO> StageSet<Provider, ProviderRO> for ExecutionStages<E>
 where
     E: ConfigureEvm + 'static,
-    SenderRecoveryStage: Stage<Provider>,
-    ExecutionStage<E>: Stage<Provider>,
+    SenderRecoveryStage: Stage<Provider, ProviderRO>,
+    ExecutionStage<E>: Stage<Provider, ProviderRO>,
 {
-    fn builder(self) -> StageSetBuilder<Provider> {
+    fn builder(self) -> StageSetBuilder<Provider, ProviderRO> {
         StageSetBuilder::default()
             .add_stage(SenderRecoveryStage::new(self.stages_config.sender_recovery))
             .add_stage(ExecutionStage::from_config(
@@ -394,13 +394,13 @@ pub struct HashingStages {
     stages_config: StageConfig,
 }
 
-impl<Provider> StageSet<Provider> for HashingStages
+impl<Provider, ProviderRO> StageSet<Provider, ProviderRO> for HashingStages
 where
-    MerkleStage: Stage<Provider>,
-    AccountHashingStage: Stage<Provider>,
-    StorageHashingStage: Stage<Provider>,
+    MerkleStage: Stage<Provider, ProviderRO>,
+    AccountHashingStage: Stage<Provider, ProviderRO>,
+    StorageHashingStage: Stage<Provider, ProviderRO>,
 {
-    fn builder(self) -> StageSetBuilder<Provider> {
+    fn builder(self) -> StageSetBuilder<Provider, ProviderRO> {
         StageSetBuilder::default()
             .add_stage(MerkleStage::default_unwind())
             .add_stage(AccountHashingStage::new(
@@ -428,13 +428,13 @@ pub struct HistoryIndexingStages {
     prune_modes: PruneModes,
 }
 
-impl<Provider> StageSet<Provider> for HistoryIndexingStages
+impl<Provider, ProviderRO> StageSet<Provider, ProviderRO> for HistoryIndexingStages
 where
-    TransactionLookupStage: Stage<Provider>,
-    IndexStorageHistoryStage: Stage<Provider>,
-    IndexAccountHistoryStage: Stage<Provider>,
+    TransactionLookupStage: Stage<Provider, ProviderRO>,
+    IndexStorageHistoryStage: Stage<Provider, ProviderRO>,
+    IndexAccountHistoryStage: Stage<Provider, ProviderRO>,
 {
-    fn builder(self) -> StageSetBuilder<Provider> {
+    fn builder(self) -> StageSetBuilder<Provider, ProviderRO> {
         StageSetBuilder::default()
             .add_stage(TransactionLookupStage::new(
                 self.stages_config.transaction_lookup,

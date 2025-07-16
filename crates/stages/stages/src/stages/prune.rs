@@ -10,6 +10,7 @@ use reth_prune::{
 use reth_stages_api::{
     ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
+use reth_storage_errors::ProviderResult;
 use tracing::info;
 
 /// The prune stage that runs the pruner with the provided prune modes.
@@ -36,7 +37,7 @@ impl PruneStage {
     }
 }
 
-impl<Provider> Stage<Provider> for PruneStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for PruneStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + PruneCheckpointReader
@@ -48,7 +49,12 @@ where
         StageId::Prune
     }
 
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         let mut pruner = PrunerBuilder::default()
             .segments(self.prune_modes.clone())
             .delete_limit(self.commit_threshold)
@@ -95,6 +101,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         // We cannot recover the data that was pruned in `execute`, so we just update the
@@ -125,7 +132,7 @@ impl PruneSenderRecoveryStage {
     }
 }
 
-impl<Provider> Stage<Provider> for PruneSenderRecoveryStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for PruneSenderRecoveryStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + PruneCheckpointReader
@@ -137,8 +144,13 @@ where
         StageId::PruneSenderRecovery
     }
 
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
-        let mut result = self.0.execute(provider, input)?;
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
+        let mut result = self.0.execute(provider, provider_ro, input)?;
 
         // Adjust the checkpoint to the highest pruned block number of the Sender Recovery segment
         if !result.done {
@@ -157,9 +169,10 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
-        self.0.unwind(provider, input)
+        self.0.unwind(provider, provider_ro, input)
     }
 }
 

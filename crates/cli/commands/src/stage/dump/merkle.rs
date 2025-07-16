@@ -93,10 +93,35 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
 
     // Unwind hashes all the way to FROM
 
-    StorageHashingStage::default().unwind(&provider, unwind).unwrap();
-    AccountHashingStage::default().unwind(&provider, unwind).unwrap();
+    StorageHashingStage::default()
+        .unwind(
+            &provider,
+            Box::new({
+                let provider_factory = db_tool.provider_factory.clone();
+                move || provider_factory.database_provider_ro()
+            }),
+            unwind,
+        )
+        .unwrap();
+    AccountHashingStage::default()
+        .unwind(
+            &provider,
+            Box::new({
+                let provider_factory = db_tool.provider_factory.clone();
+                move || provider_factory.database_provider_ro()
+            }),
+            unwind,
+        )
+        .unwrap();
 
-    MerkleStage::default_unwind().unwind(&provider, unwind)?;
+    MerkleStage::default_unwind().unwind(
+        &provider,
+        Box::new({
+            let provider_factory = db_tool.provider_factory.clone();
+            move || provider_factory.database_provider_ro()
+        }),
+        unwind,
+    )?;
 
     // Bring Plainstate to TO (hashing stage execution requires it)
     let mut exec_stage = ExecutionStage::new(
@@ -114,6 +139,10 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
 
     exec_stage.unwind(
         &provider,
+        Box::new({
+            let provider_factory = db_tool.provider_factory.clone();
+            move || provider_factory.database_provider_ro()
+        }),
         UnwindInput {
             unwind_to: to,
             checkpoint: StageCheckpoint::new(tip_block_number),
@@ -127,14 +156,28 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
         commit_threshold: u64::MAX,
         etl_config: EtlConfig::default(),
     }
-    .execute(&provider, execute_input)
+    .execute(
+        &provider,
+        Box::new({
+            let provider_factory = db_tool.provider_factory.clone();
+            move || provider_factory.database_provider_ro()
+        }),
+        execute_input,
+    )
     .unwrap();
     StorageHashingStage {
         clean_threshold: u64::MAX,
         commit_threshold: u64::MAX,
         etl_config: EtlConfig::default(),
     }
-    .execute(&provider, execute_input)
+    .execute(
+        &provider,
+        Box::new({
+            let provider_factory = db_tool.provider_factory.clone();
+            move || provider_factory.database_provider_ro()
+        }),
+        execute_input,
+    )
     .unwrap();
 
     let unwind_inner_tx = provider.into_tx();
@@ -170,8 +213,18 @@ where
             target: Some(to),
             checkpoint: Some(StageCheckpoint::new(from)),
         };
-        if stage.execute(&provider, input)?.done {
-            break
+        if stage
+            .execute(
+                &provider,
+                Box::new({
+                    let provider_factory = output_provider_factory.clone();
+                    move || provider_factory.database_provider_ro()
+                }),
+                input,
+            )?
+            .done
+        {
+            break;
         }
     }
 

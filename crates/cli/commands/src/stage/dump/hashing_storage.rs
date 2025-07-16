@@ -51,6 +51,10 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
 
     exec_stage.unwind(
         &provider,
+        Box::new({
+            let provider_factory = db_tool.provider_factory.clone();
+            move || provider_factory.database_provider_ro()
+        }),
         UnwindInput {
             unwind_to: from,
             checkpoint: StageCheckpoint::new(tip_block_number),
@@ -87,8 +91,18 @@ fn dry_run<N: ProviderNodeTypes>(
             target: Some(to),
             checkpoint: Some(StageCheckpoint::new(from)),
         };
-        if stage.execute(&provider, input)?.done {
-            break
+        if stage
+            .execute(
+                &provider,
+                Box::new({
+                    let provider_factory = output_provider_factory.clone();
+                    move || provider_factory.database_provider_ro()
+                }),
+                input,
+            )?
+            .done
+        {
+            break;
         }
     }
 

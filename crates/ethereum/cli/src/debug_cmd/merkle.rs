@@ -174,20 +174,38 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
 
             let mut account_hashing_done = false;
             while !account_hashing_done {
-                let output = account_hashing_stage
-                    .execute(&provider_rw, ExecInput { target: Some(block_number), checkpoint })?;
+                let output = account_hashing_stage.execute(
+                    &provider_rw,
+                    Box::new({
+                        let provider_factory = provider_factory.clone();
+                        move || provider_factory.database_provider_ro()
+                    }),
+                    ExecInput { target: Some(block_number), checkpoint },
+                )?;
                 account_hashing_done = output.done;
             }
 
             let mut storage_hashing_done = false;
             while !storage_hashing_done {
-                let output = storage_hashing_stage
-                    .execute(&provider_rw, ExecInput { target: Some(block_number), checkpoint })?;
+                let output = storage_hashing_stage.execute(
+                    &provider_rw,
+                    Box::new({
+                        let provider_factory = provider_factory.clone();
+                        move || provider_factory.database_provider_ro()
+                    }),
+                    ExecInput { target: Some(block_number), checkpoint },
+                )?;
                 storage_hashing_done = output.done;
             }
 
-            let incremental_result = merkle_stage
-                .execute(&provider_rw, ExecInput { target: Some(block_number), checkpoint });
+            let incremental_result = merkle_stage.execute(
+                &provider_rw,
+                Box::new({
+                    let provider_factory = provider_factory.clone();
+                    move || provider_factory.database_provider_ro()
+                }),
+                ExecInput { target: Some(block_number), checkpoint },
+            );
 
             if incremental_result.is_ok() {
                 debug!(target: "reth::cli", block_number, "Successfully computed incremental root");
@@ -209,7 +227,14 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
             let clean_input = ExecInput { target: Some(sealed_block.number), checkpoint: None };
             loop {
                 let clean_result = merkle_stage
-                    .execute(&provider_rw, clean_input)
+                    .execute(
+                        &provider_rw,
+                        Box::new({
+                            let provider_factory = provider_factory.clone();
+                            move || provider_factory.database_provider_ro()
+                        }),
+                        clean_input,
+                    )
                     .map_err(|e| eyre::eyre!("Clean state root calculation failed: {}", e))?;
                 if clean_result.done {
                     break;

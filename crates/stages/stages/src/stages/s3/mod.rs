@@ -13,6 +13,7 @@ use reth_stages_api::{
     ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
+use reth_storage_errors::ProviderResult;
 use std::{
     path::PathBuf,
     task::{ready, Context, Poll},
@@ -36,7 +37,7 @@ pub struct S3Stage {
     fetch_rx: Option<UnboundedReceiver<Result<S3DownloaderResponse, DownloaderError>>>,
 }
 
-impl<Provider> Stage<Provider> for S3Stage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for S3Stage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + StaticFileProviderFactory
@@ -87,7 +88,12 @@ where
         }
     }
 
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError>
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError>
     where
         Provider: DBProvider<Tx: DbTxMut>
             + StaticFileProviderFactory
@@ -119,6 +125,7 @@ where
     fn unwind(
         &mut self,
         _provider: &Provider,
+        _provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         // TODO
