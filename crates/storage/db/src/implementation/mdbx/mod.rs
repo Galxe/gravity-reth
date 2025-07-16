@@ -31,8 +31,8 @@ use std::{
 use tx::Tx;
 
 pub mod cursor;
-pub mod parallel_ro_tx;
-use parallel_ro_tx::ParallelROTx;
+pub mod parallel_tx;
+use parallel_tx::ParallelTxRO;
 pub mod tx;
 
 mod utils;
@@ -181,11 +181,11 @@ pub struct DatabaseEnv {
 }
 
 impl Database for DatabaseEnv {
-    type TX = ParallelROTx;
+    type TX = ParallelTxRO;
     type TXMut = tx::Tx<RW>;
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
-        ParallelROTx::try_new(self.inner.clone(), self.metrics.clone())
+        ParallelTxRO::try_new(self.inner.clone(), self.metrics.clone())
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {

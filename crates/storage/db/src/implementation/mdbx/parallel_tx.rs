@@ -13,7 +13,7 @@ use std::sync::{
 
 ///
 #[derive(Debug)]
-pub struct ParallelROTx {
+pub struct ParallelTxRO {
     is_tx_busy: AtomicBool,
     pub(super) tx: Tx<RO>, // FIXME: Make it private.
     env: Environment,
@@ -29,7 +29,7 @@ struct MutState {
     idle_txs: Vec<Tx<RO>>,
 }
 
-impl ParallelROTx {
+impl ParallelTxRO {
     pub(super) fn try_new(
         env: Environment,
         metrics: Option<Arc<DatabaseEnvMetrics>>,
@@ -137,7 +137,7 @@ impl ParallelROTx {
     }
 }
 
-impl DbTx for ParallelROTx {
+impl DbTx for ParallelTxRO {
     type Cursor<T: Table> = Cursor<RO, T>;
     type DupCursor<T: DupSort> = Cursor<RO, T>;
 
