@@ -319,6 +319,7 @@ where
             }
             function getAllActiveValidatorInfos() external view returns (ValidatorInfo[] memory validatorInfos);
         }
+        // 可能得转成json然后转bytes然后发给sdk 然后sdk来反序列化
         let call = getAllActiveValidatorInfosCall {};
         let input: Bytes = call.abi_encode().into();
         let result = self.eth_call(
@@ -373,11 +374,15 @@ where
             
             gravity_validators.push(gravity_validator);
         }
+
+        let json_validators = serde_json::to_string(&gravity_validators).unwrap();
+        let bcs_validators = bcs::to_bytes(&json_validators).unwrap();
+        bcs_validators.into()
         
         // Serialize to BCS format (gravity-aptos standard)
-        bcs::to_bytes(&gravity_validators)
-            .expect("Failed to serialize validator set")
-            .into()
+        // bcs::to_bytes(&gravity_validators)
+        //     .expect("Failed to serialize validator set")
+        //     .into()
     }
 
     pub(crate) fn fetch_config_bytes(
