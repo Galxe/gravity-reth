@@ -7,7 +7,8 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::{
     config_storage::{OnChainConfig, OnChainConfigResType},
-    events::contract_event::GravityEvent,
+    events::contract_event::GravityEvent, on_chain_config::validator_config::ValidatorConfig,
+    on_chain_config::validator_info::ValidatorInfo as GravityValidatorInfo,
 };
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
@@ -358,7 +359,7 @@ where
                 .unwrap_or_default();
             
             // Create validator config
-            let config = GravityAptosValidatorConfig::new(
+            let config = ValidatorConfig::new(
                 consensus_public_key,
                 validator_network_addresses,
                 fullnode_network_addresses,
@@ -366,7 +367,7 @@ where
             );
             
             // Create gravity-aptos validator info
-            let gravity_validator = GravityAptosValidatorInfo::new(
+            let gravity_validator = GravityValidatorInfo::new(
                 GravityAptosAccountAddress::from(solidity_validator.operator), // Use operator as account address
                 solidity_validator.votingPower.to::<u64>(), // Convert U256 to u64
                 config,
