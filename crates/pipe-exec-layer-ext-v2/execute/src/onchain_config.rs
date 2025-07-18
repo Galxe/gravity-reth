@@ -9,6 +9,7 @@ use gravity_api_types::{
     config_storage::{OnChainConfig, OnChainConfigResType},
     events::contract_event::GravityEvent, on_chain_config::validator_config::ValidatorConfig,
     on_chain_config::validator_info::ValidatorInfo as GravityValidatorInfo,
+    on_chain_config::validator_set::ValidatorSet as GravityValidatorSet,
 };
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
@@ -24,132 +25,51 @@ use tokio::runtime::Runtime;
 use bcs;
 use serde::{Deserialize, Serialize};
 
-/// Gravity-aptos compatible AccountAddress (32 bytes)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GravityAptosAccountAddress([u8; 32]);
+// Solidity struct definitions for validator set
+sol! {
+    enum ValidatorStatus {
+        PENDING_ACTIVE, // 0
+        ACTIVE, // 1
+        PENDING_INACTIVE, // 2
+        INACTIVE // 3
+    }
 
-impl GravityAptosAccountAddress {
-    pub const LENGTH: usize = 32;
-    
-    pub fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    // Commission structure
+    struct Commission {
+        uint64 rate; // the commission rate charged to delegators(10000 is 100%)
+        uint64 maxRate; // maximum commission rate which validator can ever charge
+        uint64 maxChangeRate; // maximum daily increase of the validator commission
     }
-    
-    pub fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-    
-    pub fn to_hex(&self) -> String {
-        format!("0x{}", hex::encode(self.0))
-    }
-}
 
-impl From<Address> for GravityAptosAccountAddress {
-    fn from(address: Address) -> Self {
-        let mut bytes = [0u8; 32];
-        bytes[12..].copy_from_slice(address.as_slice());
-        Self(bytes)
+    /// Complete validator information (merged from multiple contracts)
+    struct ValidatorInfo {
+        // Basic information (from ValidatorManager)
+        bytes consensusPublicKey;
+        address payable feeAddress; // Fee receiving address
+        bytes voteAddress; // BLS voting address
+        Commission commission;
+        string moniker;
+        uint256 createdTime;
+        bool registered;
+        address stakeCreditAddress;
+        ValidatorStatus status;
+        uint256 votingPower; // Changed from uint64 to uint256 to prevent overflow
+        uint256 validatorIndex;
+        uint256 lastEpochActive;
+        uint256 updateTime; // Last update time
+        address operator;
     }
-}
 
-/// Gravity-aptos compatible BLS12381 public key
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bls12381PublicKey([u8; 48]);
-
-impl Bls12381PublicKey {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() != 48 {
-            return Err("BLS12381 public key must be 48 bytes".to_string());
-        }
-        
-        let mut key_bytes = [0u8; 48];
-        key_bytes.copy_from_slice(bytes);
-        Ok(Self(key_bytes))
+    struct ValidatorSet {
+        uint8 consensusScheme; // Consensus scheme (0 for BFT)
+        ValidatorInfo[] activeValidators; // Active validators for the current epoch
+        ValidatorInfo[] pendingInactive; // Pending validators to leave in next epoch (still active)
+        ValidatorInfo[] pendingActive; // Pending validators to join in next epoch
+        uint256 totalVotingPower; // Current total voting power
+        uint256 totalJoiningPower; // Total voting power waiting to join in the next epoch
     }
-    
-    pub fn to_bytes(&self) -> [u8; 48] {
-        self.0
-    }
-    
-    pub fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-}
 
-impl serde::Serialize for Bls12381PublicKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_bytes(&self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Bls12381PublicKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let bytes = <Vec<u8>>::deserialize(deserializer)?;
-        if bytes.len() != 48 {
-            return Err(serde::de::Error::custom("BLS12381 public key must be 48 bytes"));
-        }
-        let mut key_bytes = [0u8; 48];
-        key_bytes.copy_from_slice(&bytes);
-        Ok(Self(key_bytes))
-    }
-}
-
-/// Gravity-aptos compatible ValidatorConfig
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GravityAptosValidatorConfig {
-    pub consensus_public_key: Bls12381PublicKey,
-    /// This is a bcs serialized `Vec<NetworkAddress>`
-    pub validator_network_addresses: Vec<u8>,
-    /// This is a bcs serialized `Vec<NetworkAddress>`
-    pub fullnode_network_addresses: Vec<u8>,
-    pub validator_index: u64,
-}
-
-impl GravityAptosValidatorConfig {
-    pub fn new(
-        consensus_public_key: Bls12381PublicKey,
-        validator_network_addresses: Vec<u8>,
-        fullnode_network_addresses: Vec<u8>,
-        validator_index: u64,
-    ) -> Self {
-        Self {
-            consensus_public_key,
-            validator_network_addresses,
-            fullnode_network_addresses,
-            validator_index,
-        }
-    }
-}
-
-/// Gravity-aptos compatible ValidatorInfo
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GravityAptosValidatorInfo {
-    /// The validator's account address
-    pub account_address: GravityAptosAccountAddress,
-    /// Voting power of this validator
-    pub consensus_voting_power: u64,
-    /// Validator config
-    pub config: GravityAptosValidatorConfig,
-}
-
-impl GravityAptosValidatorInfo {
-    pub fn new(
-        account_address: GravityAptosAccountAddress,
-        consensus_voting_power: u64,
-        config: GravityAptosValidatorConfig,
-    ) -> Self {
-        Self {
-            account_address,
-            consensus_voting_power,
-            config,
-        }
-    }
+    function getValidatorSet() external view returns (ValidatorSet memory);
 }
 
 const GRAVITY_FRAMEWORK_ADDRESS: Address = address!("00000000000000000000000000000000000000ff");
@@ -284,106 +204,50 @@ where
     }
 
     pub(crate) fn fetch_validator_set(&self, block_number: u64) -> Bytes {
-        sol! {
-            enum ValidatorStatus {
-                PENDING_ACTIVE, // 0
-                ACTIVE, // 1
-                PENDING_INACTIVE, // 2
-                INACTIVE // 3
-        
-            }
-        
-            // Commission structure
-            struct Commission {
-                uint64 rate; // the commission rate charged to delegators(10000 is 100%)
-                uint64 maxRate; // maximum commission rate which validator can ever charge
-                uint64 maxChangeRate; // maximum daily increase of the validator commission
-            }
-        
-            /// Complete validator information (merged from multiple contracts)
-            struct ValidatorInfo {
-                // Basic information (from ValidatorManager)
-                bytes consensusPublicKey;
-                address payable feeAddress; // Fee receiving address
-                bytes voteAddress; // BLS voting address
-                Commission commission;
-                string moniker;
-                uint256 createdTime;
-                bool registered;
-                address stakeCreditAddress;
-                ValidatorStatus status;
-                uint256 votingPower; // Changed from uint64 to uint256 to prevent overflow
-                uint256 validatorIndex;
-                uint256 lastEpochActive;
-                uint256 updateTime; // Last update time
-                address operator;
-            }
-            function getAllActiveValidatorInfos() external view returns (ValidatorInfo[] memory validatorInfos);
-        }
-        // 可能得转成json然后转bytes然后发给sdk 然后sdk来反序列化
-        let call = getAllActiveValidatorInfosCall {};
+        let call = getValidatorSetCall {};
         let input: Bytes = call.abi_encode().into();
-        let result = self.eth_call(
-            SYSTEM_CALLER,
-            VALIDATOR_MANAGER_ADDR,
-            input,
-            block_number,
-        );
         
-        // Decode the Solidity validator infos
-        let solidity_validators = getAllActiveValidatorInfosCall::abi_decode_returns(&result, false)
-            .expect("Failed to decode getAllActiveValidatorInfos return value")
-            .validatorInfos;
+        let result = self.eth_call(SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR, input, block_number);
         
-        // Convert Solidity validators to gravity-aptos format
-        let mut gravity_validators = Vec::new();
-        
-        for solidity_validator in solidity_validators {
-            // Only process ACTIVE validators (ACTIVE = 1)
-            let status_value: u8 = solidity_validator.status.into();
-            if status_value != 1 {
-                continue;
-            }
-            
-            // Convert consensus public key
-            let consensus_public_key = Bls12381PublicKey::from_bytes(&solidity_validator.consensusPublicKey)
-                .unwrap_or_else(|_| {
-                    // Fallback to a default key if parsing fails
-                    Bls12381PublicKey::from_bytes(&[0u8; 48]).unwrap()
-                });
-            
-            // Create empty network addresses (placeholder)
-            let validator_network_addresses = bcs::to_bytes(&Vec::<String>::new())
-                .unwrap_or_default();
-            let fullnode_network_addresses = bcs::to_bytes(&Vec::<String>::new())
-                .unwrap_or_default();
-            
-            // Create validator config
-            let config = ValidatorConfig::new(
-                consensus_public_key,
-                validator_network_addresses,
-                fullnode_network_addresses,
-                solidity_validator.validatorIndex.to::<u64>(),
-            );
-            
-            // Create gravity-aptos validator info
-            let gravity_validator = GravityValidatorInfo::new(
-                GravityAptosAccountAddress::from(solidity_validator.operator), // Use operator as account address
-                solidity_validator.votingPower.to::<u64>(), // Convert U256 to u64
-                config,
-            );
-            
-            gravity_validators.push(gravity_validator);
-        }
+        // Decode the Solidity validator set
+        let solidity_validator_set = getValidatorSetCall::abi_decode_returns(&result, false)
+            .expect("Failed to decode getValidatorSet return value");
 
-        let json_validators = serde_json::to_string(&gravity_validators).unwrap();
-        let bcs_validators = bcs::to_bytes(&json_validators).unwrap();
-        bcs_validators.into()
+        // Convert Solidity validator infos to Gravity API validator infos
+        let convert_validator_info = |solidity_info: &ValidatorInfo| -> GravityValidatorInfo {
+            GravityValidatorInfo::new(
+                gravity_api_types::u256_define::AccountAddress::from_bytes(&solidity_info.feeAddress.to_vec()),
+                solidity_info.votingPower.to::<u64>(),
+                ValidatorConfig::new(
+                    solidity_info.consensusPublicKey.clone().into(),
+                    solidity_info.voteAddress.clone().into(),
+                    vec![], // fullnode_network_addresses - empty for now
+                    solidity_info.validatorIndex.to::<u64>(),
+                ),
+            )
+        };
+
+        // Convert to Gravity validator set and serialize to BCS format
+        let gravity_validator_set = GravityValidatorSet {
+            active_validators: solidity_validator_set._0.activeValidators
+                .iter()
+                .map(convert_validator_info)
+                .collect(),
+            pending_inactive: solidity_validator_set._0.pendingInactive
+                .iter()
+                .map(convert_validator_info)
+                .collect(),
+            pending_active: solidity_validator_set._0.pendingActive
+                .iter()
+                .map(convert_validator_info)
+                .collect(),
+            total_voting_power: solidity_validator_set._0.totalVotingPower.to::<u128>(),
+            total_joining_power: solidity_validator_set._0.totalJoiningPower.to::<u128>(),
+        };
         
-        // Serialize to BCS format (gravity-aptos standard)
-        // bcs::to_bytes(&gravity_validators)
-        //     .expect("Failed to serialize validator set")
-        //     .into()
+        bcs::to_bytes(&gravity_validator_set)
+            .expect("Failed to serialize validator set")
+            .into()
     }
 
     pub(crate) fn fetch_config_bytes(
