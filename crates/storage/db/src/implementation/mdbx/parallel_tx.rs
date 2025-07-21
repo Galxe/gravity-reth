@@ -174,6 +174,6 @@ impl DbTx for ParallelTxRO {
     }
 
     fn disable_long_read_transaction_safety(&mut self) {
-        // Do nothing.
+        self.tx.disable_long_read_transaction_safety();
     }
 }

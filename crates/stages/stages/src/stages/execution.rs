@@ -914,7 +914,16 @@ mod tests {
             let mut execution_stage = stage();
             provider.set_prune_modes(mode.clone().unwrap_or_default());
 
-            let output = execution_stage.execute(&provider, input).unwrap();
+            let output = execution_stage
+                .execute(
+                    &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
+                    input,
+                )
+                .unwrap();
             provider.commit().unwrap();
 
             assert_matches!(output, ExecOutput {
@@ -977,6 +986,10 @@ mod tests {
             let _result = stage
                 .unwind(
                     &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
                     UnwindInput { checkpoint: output.checkpoint, unwind_to: 0, bad_block: None },
                 )
                 .unwrap();
@@ -1029,7 +1042,6 @@ mod tests {
         provider.commit().unwrap();
 
         // execute
-        let mut provider = factory.database_provider_rw().unwrap();
 
         // If there is a pruning configuration, then it's forced to use the database.
         // This way we test both cases.
@@ -1048,9 +1060,19 @@ mod tests {
 
             // Test Execution
             let mut execution_stage = stage();
+            let mut provider = factory.database_provider_rw().unwrap();
             provider.set_prune_modes(mode.clone().unwrap_or_default());
 
-            let result = execution_stage.execute(&provider, input).unwrap();
+            let result = execution_stage
+                .execute(
+                    &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
+                    input,
+                )
+                .unwrap();
             provider.commit().unwrap();
 
             // Test Unwind
@@ -1061,6 +1083,10 @@ mod tests {
             let result = stage
                 .unwind(
                     &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
                     UnwindInput { checkpoint: result.checkpoint, unwind_to: 0, bad_block: None },
                 )
                 .unwrap();
@@ -1089,6 +1115,7 @@ mod tests {
             assert!(matches!(provider.basic_account(&miner_acc), Ok(None)));
 
             assert!(matches!(provider.receipt(0), Ok(None)));
+            provider.commit().unwrap();
         }
     }
 
@@ -1164,7 +1191,16 @@ mod tests {
         // execute
         let provider = test_db.factory.database_provider_rw().unwrap();
         let mut execution_stage = stage();
-        let _ = execution_stage.execute(&provider, input).unwrap();
+        let _ = execution_stage
+            .execute(
+                &provider,
+                Box::new({
+                    let factory = test_db.factory.clone();
+                    move || factory.database_provider_ro()
+                }),
+                input,
+            )
+            .unwrap();
         provider.commit().unwrap();
 
         // assert unwind stage

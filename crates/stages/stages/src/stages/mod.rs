@@ -173,7 +173,16 @@ mod tests {
                 ExExManagerHandle::empty(),
             );
 
-            execution_stage.execute(&provider, input).unwrap();
+            execution_stage
+                .execute(
+                    &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
+                    input,
+                )
+                .unwrap();
             assert_eq!(
                 provider.receipts_by_block(1.into()).unwrap().unwrap().len(),
                 expect_num_receipts
@@ -197,9 +206,27 @@ mod tests {
 
             if prune_modes.account_history == Some(PruneMode::Full) {
                 // Full is not supported
-                assert!(acc_indexing_stage.execute(&provider, input).is_err());
+                assert!(acc_indexing_stage
+                    .execute(
+                        &provider,
+                        Box::new({
+                            let factory = factory.clone();
+                            move || factory.database_provider_ro()
+                        }),
+                        input
+                    )
+                    .is_err());
             } else {
-                acc_indexing_stage.execute(&provider, input).unwrap();
+                acc_indexing_stage
+                    .execute(
+                        &provider,
+                        Box::new({
+                            let factory = factory.clone();
+                            move || factory.database_provider_ro()
+                        }),
+                        input,
+                    )
+                    .unwrap();
                 let mut account_history: Cursor<RW, AccountsHistory> =
                     provider.tx_ref().cursor_read::<tables::AccountsHistory>().unwrap();
                 assert_eq!(account_history.walk(None).unwrap().count(), expect_num_acc_changesets);
@@ -213,9 +240,27 @@ mod tests {
 
             if prune_modes.storage_history == Some(PruneMode::Full) {
                 // Full is not supported
-                assert!(acc_indexing_stage.execute(&provider, input).is_err());
+                assert!(acc_indexing_stage
+                    .execute(
+                        &provider,
+                        Box::new({
+                            let factory = factory.clone();
+                            move || factory.database_provider_ro()
+                        }),
+                        input
+                    )
+                    .is_err());
             } else {
-                storage_indexing_stage.execute(&provider, input).unwrap();
+                storage_indexing_stage
+                    .execute(
+                        &provider,
+                        Box::new({
+                            let factory = factory.clone();
+                            move || factory.database_provider_ro()
+                        }),
+                        input,
+                    )
+                    .unwrap();
 
                 let mut storage_history =
                     provider.tx_ref().cursor_read::<tables::StoragesHistory>().unwrap();

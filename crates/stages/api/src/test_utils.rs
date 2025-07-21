@@ -1,5 +1,7 @@
 #![allow(missing_docs)]
 
+use reth_errors::ProviderResult;
+
 use crate::{ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput, UnwindOutput};
 use std::{
     collections::VecDeque,
@@ -68,12 +70,17 @@ impl TestStage {
     }
 }
 
-impl<Provider> Stage<Provider> for TestStage {
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for TestStage {
     fn id(&self) -> StageId {
         self.id
     }
 
-    fn execute(&mut self, _: &Provider, _input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        _: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         self.exec_outputs
             .pop_front()
             .unwrap_or_else(|| panic!("Test stage {} executed too many times.", self.id))
@@ -85,7 +92,12 @@ impl<Provider> Stage<Provider> for TestStage {
         Ok(())
     }
 
-    fn unwind(&mut self, _: &Provider, _input: UnwindInput) -> Result<UnwindOutput, StageError> {
+    fn unwind(
+        &mut self,
+        _: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _input: UnwindInput,
+    ) -> Result<UnwindOutput, StageError> {
         self.unwind_outputs
             .pop_front()
             .unwrap_or_else(|| panic!("Test stage {} unwound too many times.", self.id))
