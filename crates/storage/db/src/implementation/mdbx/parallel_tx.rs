@@ -11,7 +11,7 @@ use std::sync::{
     Arc, Condvar, Mutex,
 };
 
-///
+/// A set of read-only transactions that can be used to read data from the database in parallel.
 #[derive(Debug)]
 pub struct ParallelTxRO {
     is_tx_busy: AtomicBool,
@@ -132,7 +132,7 @@ impl ParallelTxRO {
     }
 
     /// Returns a raw pointer to the MDBX environment.
-    pub fn env(&self) -> &Environment {
+    pub const fn env(&self) -> &Environment {
         &self.env
     }
 }

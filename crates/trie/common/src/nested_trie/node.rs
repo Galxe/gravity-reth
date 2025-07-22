@@ -107,7 +107,7 @@ impl Clone for Node {
                     }
                     _ => {}
                 }
-                Self::ShortNode { key: key.clone(), value: value.clone(), flags: flags.clone() }
+                Self::ShortNode { key: *key, value: value.clone(), flags: flags.clone() }
             }
             Self::ValueNode(value) => Self::ValueNode(value.clone()),
             Self::HashNode(rlp) => Self::HashNode(rlp.clone()),

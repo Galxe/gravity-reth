@@ -41,6 +41,9 @@ pub type PipelineFut<N> = Pin<Box<dyn Future<Output = PipelineWithResult<N>> + S
 /// The pipeline type itself with the result of [`Pipeline::run_as_fut`]
 pub type PipelineWithResult<N> = (Pipeline<N>, Result<ControlFlow, PipelineError>);
 
+type DatabaseProviderRW<N> = <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW;
+type DatabaseProviderRO<N> = <ProviderFactory<N> as DatabaseProviderFactory>::Provider;
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A staged sync pipeline.
 ///
@@ -67,12 +70,7 @@ pub struct Pipeline<N: ProviderNodeTypes> {
     /// Provider factory.
     provider_factory: ProviderFactory<N>,
     /// All configured stages in the order they will be executed.
-    stages: Vec<
-        BoxedStage<
-            <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW,
-            <ProviderFactory<N> as DatabaseProviderFactory>::Provider,
-        >,
-    >,
+    stages: Vec<BoxedStage<DatabaseProviderRW<N>, DatabaseProviderRO<N>>>,
     /// The maximum block number to sync to.
     max_block: Option<BlockNumber>,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
@@ -98,10 +96,7 @@ pub struct Pipeline<N: ProviderNodeTypes> {
 
 impl<N: ProviderNodeTypes> Pipeline<N> {
     /// Construct a pipeline using a [`PipelineBuilder`].
-    pub fn builder() -> PipelineBuilder<
-        <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW,
-        <ProviderFactory<N> as DatabaseProviderFactory>::Provider,
-    > {
+    pub fn builder() -> PipelineBuilder<DatabaseProviderRW<N>, DatabaseProviderRO<N>> {
         PipelineBuilder::default()
     }
 
@@ -128,10 +123,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     pub fn stage(
         &mut self,
         idx: usize,
-    ) -> &mut dyn Stage<
-        <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW,
-        <ProviderFactory<N> as DatabaseProviderFactory>::Provider,
-    > {
+    ) -> &mut dyn Stage<DatabaseProviderRW<N>, DatabaseProviderRO<N>> {
         &mut self.stages[idx]
     }
 }

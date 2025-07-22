@@ -2313,12 +2313,12 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
         let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
         for path in &input.removed_nodes {
-            if account_trie_cursor.seek_exact(path.clone().into())?.is_some() {
+            if account_trie_cursor.seek_exact((*path).into())?.is_some() {
                 account_trie_cursor.delete_current()?;
             }
         }
         for (path, node) in &input.account_nodes {
-            account_trie_cursor.upsert(path.clone().into(), &node.clone().into())?;
+            account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
             num_updated += 1;
         }
 
@@ -2330,9 +2330,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                 }
             } else {
                 for path in &storage_trie_update.removed_nodes {
-                    let path = StoredNibblesSubKey(path.clone());
+                    let path = StoredNibblesSubKey(*path);
                     if let Some(entry) =
-                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
+                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, (*path).into())?
                     {
                         if entry.path == path {
                             storage_trie_cursor.delete_current()?;
@@ -2340,11 +2340,11 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                     }
                 }
                 for (path, node) in &storage_trie_update.storage_nodes {
-                    let path = StoredNibblesSubKey(path.clone());
+                    let path = StoredNibblesSubKey(*path);
                     if let Some(entry) =
-                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
+                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, (*path).into())?
                     {
-                        if entry.path == path.clone() {
+                        if entry.path == path {
                             storage_trie_cursor.delete_current()?;
                         }
                     }
