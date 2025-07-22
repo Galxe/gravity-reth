@@ -175,13 +175,14 @@ pub mod test_utils {
         }
     }
 
-    impl EthCall for MockEthCall {
-        async fn call(
+    // Simple mock implementation for testing
+    impl MockEthCall {
+        pub async fn call(
             &self,
             request: TransactionRequest,
             block_id: Option<BlockId>,
-            overrides: EvmOverrides,
-        ) -> Result<Bytes, Self::Error> {
+            _overrides: EvmOverrides,
+        ) -> Result<Bytes, String> {
             let from = request.from.unwrap_or_default();
             let to = match request.to {
                 Some(TxKind::Call(addr)) => addr,
