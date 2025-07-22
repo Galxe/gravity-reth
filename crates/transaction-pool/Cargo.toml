@@ -96,6 +96,7 @@ serde = [
     "reth-chain-state/serde",
     "dashmap/serde",
     "reth-revm/serde",
+    "reth-storage-api/serde",
 ]
 test-utils = [
     "rand",

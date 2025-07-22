@@ -62,7 +62,7 @@ impl Default for StorageHashingStage {
     }
 }
 
-impl<Provider> Stage<Provider> for StorageHashingStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for StorageHashingStage
 where
     Provider: DBProvider<Tx: DbTxMut> + StorageReader + HashingWriter + StatsReader,
 {
@@ -72,7 +72,12 @@ where
     }
 
     /// Execute the stage.
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         let tx = provider.tx_ref();
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
@@ -164,6 +169,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_progress, _) =

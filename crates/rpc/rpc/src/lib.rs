@@ -31,6 +31,7 @@ use hyper as _;
 use jsonwebtoken as _;
 use pin_project as _;
 use tower as _;
+
 mod admin;
 mod debug;
 mod engine;
@@ -48,7 +49,7 @@ mod web3;
 pub use admin::AdminApi;
 pub use debug::DebugApi;
 pub use engine::{EngineApi, EngineEthApi};
-pub use eth::{EthApi, EthApiBuilder, EthBundle, EthFilter, EthPubSub};
+pub use eth::{helpers::SyncListener, EthApi, EthApiBuilder, EthBundle, EthFilter, EthPubSub};
 pub use miner::MinerApi;
 pub use net::NetApi;
 pub use otterscan::OtterscanApi;

@@ -20,6 +20,7 @@ use reth_stages_api::{
     StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
+use reth_storage_errors::ProviderResult;
 use std::{fmt::Debug, ops::Range, sync::mpsc};
 use thiserror::Error;
 use tracing::*;
@@ -58,7 +59,7 @@ impl Default for SenderRecoveryStage {
     }
 }
 
-impl<Provider> Stage<Provider> for SenderRecoveryStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for SenderRecoveryStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + BlockReader
@@ -75,7 +76,12 @@ where
     /// [`BlockBodyIndices`][reth_db_api::tables::BlockBodyIndices],
     /// collect transactions within that range, recover signer for each transaction and store
     /// entries in the [`TransactionSenders`][reth_db_api::tables::TransactionSenders] table.
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
         }
@@ -123,6 +129,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (_, unwind_to, _) = input.unwind_block_range_with_threshold(self.commit_threshold);
@@ -599,7 +606,7 @@ mod tests {
         ///
         /// 1. If there are any entries in the [`tables::TransactionSenders`] table above a given
         ///    block number.
-        /// 2. If the is no requested block entry in the bodies table, but
+        /// 2. If there is no requested block entry in the bodies table, but
         ///    [`tables::TransactionSenders`] is not empty.
         fn ensure_no_senders_by_block(&self, block: BlockNumber) -> Result<(), TestRunnerError> {
             let body_result = self

@@ -88,13 +88,13 @@ use crate::{
     TransactionValidator,
 };
 
-use alloy_eips::{eip7594::BlobTransactionSidecarVariant, Typed2718};
 use alloy_primitives::{Address, TxHash, B256};
 use best::BestTransactions;
-use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
+
+use alloy_eips::{eip7594::BlobTransactionSidecarVariant, Typed2718};
 use reth_primitives_traits::Recovered;
 use rustc_hash::FxHashMap;
 use std::{
@@ -108,6 +108,7 @@ use tracing::{debug, info, trace, warn};
 mod events;
 pub use best::{BestTransactionFilter, BestTransactionsWithPrioritizedSenders};
 pub use blob::{blob_tx_priority, fee_delta, BlobOrd, BlobTransactions};
+use dashmap::DashMap;
 pub use events::{FullTransactionEvent, NewTransactionEvent, TransactionEvent};
 pub use listener::{AllTransactionsEvents, TransactionEvents, TransactionListenerKind};
 pub use parked::{BasefeeOrd, ParkedOrd, ParkedPool, QueuedOrd};
@@ -466,6 +467,21 @@ where
         let changed_senders = self.changed_senders(accounts.into_iter());
         let UpdateOutcome { promoted, discarded } =
             self.pool.write().update_accounts(changed_senders);
+
+        // Notify about promoted pending transactions (similar to notify_on_new_state)
+        if !promoted.is_empty() {
+            self.pending_transaction_listener.lock().retain_mut(|listener| {
+                let promoted_hashes = promoted.iter().filter_map(|tx| {
+                    if listener.kind.is_propagate_only() && !tx.propagate {
+                        None
+                    } else {
+                        Some(*tx.hash())
+                    }
+                });
+                listener.send_all(promoted_hashes)
+            });
+        }
+
         let mut listener = self.event_listener.write();
 
         for tx in &promoted {
@@ -522,7 +538,6 @@ where
                     origin,
                     authority_ids: authorities.map(|auths| self.get_sender_ids(auths)),
                 };
-                let tx = Arc::new(tx);
                 let added = pool.add_transaction(tx, balance, state_nonce, bytecode_hash)?;
                 let hash = *added.hash();
                 // transaction was successfully inserted into the pool
@@ -584,7 +599,7 @@ where
 
     /// Task responsible for receiving transactions and processing them in batches.
     pub async fn batch_add_transactions_task(self: Arc<Self>) {
-        info!("Batch insert task started with batch time {}", get_batch_insert_time());
+        tracing::info!("Batch insert task started with batch time {}", get_batch_insert_time());
         let sleep_duration = Duration::from_millis(get_batch_insert_time());
         let mut duration = Duration::from_millis(0);
         loop {
@@ -1077,7 +1092,7 @@ where
             .collect()
     }
 
-    /// Returns all pending transactions filted by [`TransactionOrigin`]
+    /// Returns all pending transactions filtered by [`TransactionOrigin`]
     pub fn get_pending_transactions_by_origin(
         &self,
         origin: TransactionOrigin,
@@ -1388,11 +1403,13 @@ impl<T: PoolTransaction> OnNewCanonicalStateOutcome<T> {
 mod tests {
     use crate::{
         blobstore::{BlobStore, InMemoryBlobStore},
+        identifier::SenderId,
         test_utils::{MockTransaction, TestPoolBuilder},
         validate::ValidTransaction,
         BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionValidationOutcome, U256,
     };
     use alloy_eips::{eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant};
+    use alloy_primitives::Address;
     use std::{fs, path::PathBuf, time::Instant};
 
     #[test]
@@ -1526,5 +1543,29 @@ mod tests {
 
         // Assert that the pool's blob store matches the expected blob store.
         assert_eq!(*test_pool.blob_store(), blob_store);
+    }
+
+    #[test]
+    fn test_auths_stored_in_identifiers() {
+        // Create a test pool with default configuration.
+        let test_pool = &TestPoolBuilder::default().with_config(Default::default()).pool;
+
+        let auth = Address::new([1; 20]);
+        let tx = MockTransaction::eip7702();
+
+        test_pool.add_transactions(
+            TransactionOrigin::Local,
+            [TransactionValidationOutcome::Valid {
+                balance: U256::from(1_000),
+                state_nonce: 0,
+                bytecode_hash: None,
+                transaction: ValidTransaction::Valid(tx),
+                propagate: true,
+                authorities: Some(vec![auth]),
+            }],
+        );
+
+        let identifiers = test_pool.identifiers.read();
+        assert_eq!(identifiers.sender_id(&auth), Some(SenderId::from(1)));
     }
 }

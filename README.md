@@ -28,7 +28,7 @@ Huge thanks to [Paradigm](https://github.com/paradigmxyz) for their great work o
 ![](./assets/reth-prod.png)
 
 **[Install](https://paradigmxyz.github.io/reth/installation/installation.html)**
-| [User Book](https://reth.rs)
+| [User Docs](https://reth.rs)
 | [Developer Docs](./docs)
 | [Crate Docs](https://reth.rs/docs)
 
@@ -79,7 +79,7 @@ If you had a database produced by alpha versions of Reth, you need to drop it wi
 
 ## For Users
 
-See the [Reth Book](https://paradigmxyz.github.io/reth) for instructions on how to install and run Reth.
+See the [Reth documentation](https://paradigmxyz.github.io/reth) for instructions on how to install and run Reth.
 
 ## For Developers
 
@@ -109,7 +109,7 @@ When updating this, also update:
 
 The Minimum Supported Rust Version (MSRV) of this project is [1.86.0](https://blog.rust-lang.org/2025/04/03/Rust-1.86.0/).
 
-See the book for detailed instructions on how to [build from source](https://paradigmxyz.github.io/reth/installation/source.html).
+See the docs for detailed instructions on how to [build from source](https://paradigmxyz.github.io/reth/installation/source).
 
 To fully test Reth, you will need to have [Geth installed](https://geth.ethereum.org/docs/getting-started/installing-geth), but it is possible to run a subset of tests without Geth.
 
@@ -138,7 +138,7 @@ Using `cargo test` to run tests may work fine, but this is not tested and does n
 
 ## Getting Help
 
-If you have any questions, first see if the answer to your question can be found in the [book][book].
+If you have any questions, first see if the answer to your question can be found in the [docs][book].
 
 If the answer is not there:
 

@@ -30,7 +30,7 @@ use reth_primitives_traits::{
     GotExpected, SealedBlock,
 };
 use reth_revm::{database::StateProviderDatabase, DatabaseRef};
-use reth_storage_api::{StateProviderFactory, StateProviderOptions, PERSIST_BLOCK_CACHE};
+use reth_storage_api::{StateProviderFactory, PERSIST_BLOCK_CACHE};
 use reth_tasks::TaskSpawner;
 use std::{
     marker::PhantomData,
@@ -63,6 +63,57 @@ impl<Client, Tx> EthTransactionValidator<Client, Tx> {
     pub fn client(&self) -> &Client {
         &self.inner.client
     }
+
+    /// Returns the tracks activated forks relevant for transaction validation
+    pub fn fork_tracker(&self) -> &ForkTracker {
+        &self.inner.fork_tracker
+    }
+
+    /// Returns if there are EIP-2718 type transactions
+    pub fn eip2718(&self) -> bool {
+        self.inner.eip2718
+    }
+
+    /// Returns if there are EIP-1559 type transactions
+    pub fn eip1559(&self) -> bool {
+        self.inner.eip1559
+    }
+
+    /// Returns if there are EIP-4844 blob transactions
+    pub fn eip4844(&self) -> bool {
+        self.inner.eip4844
+    }
+
+    /// Returns if there are EIP-7702 type transactions
+    pub fn eip7702(&self) -> bool {
+        self.inner.eip7702
+    }
+
+    /// Returns the current tx fee cap limit in wei locally submitted into the pool
+    pub fn tx_fee_cap(&self) -> &Option<u128> {
+        &self.inner.tx_fee_cap
+    }
+
+    /// Returns the minimum priority fee to enforce for acceptance into the pool
+    pub fn minimum_priority_fee(&self) -> &Option<u128> {
+        &self.inner.minimum_priority_fee
+    }
+
+    /// Returns the setup and parameters needed for validating KZG proofs.
+    pub fn kzg_settings(&self) -> &EnvKzgSettings {
+        &self.inner.kzg_settings
+    }
+
+    /// Returns the config to handle [`TransactionOrigin::Local`](TransactionOrigin) transactions..
+    pub fn local_transactions_config(&self) -> &LocalTransactionConfig {
+        &self.inner.local_transactions_config
+    }
+
+    /// Returns the maximum size in bytes a single transaction can have in order to be accepted into
+    /// the pool.
+    pub fn max_tx_input_bytes(&self) -> usize {
+        self.inner.max_tx_input_bytes
+    }
 }
 
 impl<Client, Tx> EthTransactionValidator<Client, Tx>
@@ -70,6 +121,11 @@ where
     Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
     Tx: EthPoolTransaction,
 {
+    /// Returns the current max gas limit
+    pub fn block_gas_limit(&self) -> u64 {
+        self.inner.max_gas_limit()
+    }
+
     /// Validates a single transaction.
     ///
     /// See also [`TransactionValidator::validate_transaction`]
@@ -78,7 +134,7 @@ where
         origin: TransactionOrigin,
         transaction: Tx,
     ) -> TransactionValidationOutcome<Tx> {
-        self.inner.validate_one(origin, transaction)
+        self.inner.validate_one_with_provider(origin, transaction, &mut None)
     }
 
     /// Validates a single transaction with the provided state provider.
@@ -94,31 +150,6 @@ where
         state: &mut Option<BlockViewProvider>,
     ) -> TransactionValidationOutcome<Tx> {
         self.inner.validate_one_with_provider(origin, transaction, state)
-    }
-
-    /// Validates all given transactions.
-    ///
-    /// Returns all outcomes for the given transactions in the same order.
-    ///
-    /// See also [`Self::validate_one`]
-    pub fn validate_all(
-        &self,
-        transactions: Vec<(TransactionOrigin, Tx)>,
-    ) -> Vec<TransactionValidationOutcome<Tx>> {
-        self.inner.validate_batch(transactions)
-    }
-
-    /// Validates all given transactions with origin.
-    ///
-    /// Returns all outcomes for the given transactions in the same order.
-    ///
-    /// See also [`Self::validate_one`]
-    pub fn validate_all_with_origin(
-        &self,
-        origin: TransactionOrigin,
-        transactions: impl IntoIterator<Item = Tx> + Send,
-    ) -> Vec<TransactionValidationOutcome<Tx>> {
-        self.inner.validate_batch_with_origin(origin, transactions)
     }
 }
 
@@ -141,7 +172,7 @@ where
         &self,
         transactions: Vec<(TransactionOrigin, Self::Transaction)>,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.validate_all(transactions)
+        self.inner.validate_batch(transactions)
     }
 
     async fn validate_transactions_with_origin(
@@ -149,7 +180,7 @@ where
         origin: TransactionOrigin,
         transactions: impl IntoIterator<Item = Self::Transaction> + Send,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.validate_all_with_origin(origin, transactions)
+        self.inner.validate_batch_with_origin(origin, transactions)
     }
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
@@ -241,10 +272,7 @@ where
                 // stateless checks passed, pass transaction down stateful validation pipeline
                 // If we don't have a state provider yet, fetch the latest state
                 if maybe_state.is_none() {
-                    match self
-                        .client
-                        .latest_with_opts(StateProviderOptions::default().with_raw_db())
-                    {
+                    match self.client.latest() {
                         Ok(state) => {
                             let state_with_cache = BlockViewProvider::new(
                                 StateProviderDatabase::new(state),
@@ -288,7 +316,7 @@ where
                     return Err(TransactionValidationOutcome::Invalid(
                         transaction,
                         InvalidTransactionError::Eip2930Disabled.into(),
-                    ))
+                    ));
                 }
             }
             EIP1559_TX_TYPE_ID => {
@@ -297,7 +325,7 @@ where
                     return Err(TransactionValidationOutcome::Invalid(
                         transaction,
                         InvalidTransactionError::Eip1559Disabled.into(),
-                    ))
+                    ));
                 }
             }
             EIP4844_TX_TYPE_ID => {
@@ -306,7 +334,7 @@ where
                     return Err(TransactionValidationOutcome::Invalid(
                         transaction,
                         InvalidTransactionError::Eip4844Disabled.into(),
-                    ))
+                    ));
                 }
             }
             EIP7702_TX_TYPE_ID => {
@@ -315,7 +343,7 @@ where
                     return Err(TransactionValidationOutcome::Invalid(
                         transaction,
                         InvalidTransactionError::Eip7702Disabled.into(),
-                    ))
+                    ));
                 }
             }
 
@@ -327,19 +355,28 @@ where
             }
         };
 
+        // Reject transactions with a nonce equal to U64::max according to EIP-2681
+        let tx_nonce = transaction.nonce();
+        if tx_nonce == u64::MAX {
+            return Err(TransactionValidationOutcome::Invalid(
+                transaction,
+                InvalidPoolTransactionError::Eip2681,
+            ));
+        }
+
         // Reject transactions over defined size to prevent DOS attacks
         let tx_input_len = transaction.input().len();
         if tx_input_len > self.max_tx_input_bytes {
             return Err(TransactionValidationOutcome::Invalid(
                 transaction,
                 InvalidPoolTransactionError::OversizedData(tx_input_len, self.max_tx_input_bytes),
-            ))
+            ));
         }
 
         // Check whether the init code size has been exceeded.
         if self.fork_tracker.is_shanghai_activated() {
             if let Err(err) = transaction.ensure_max_init_code_size(MAX_INIT_CODE_BYTE_SIZE) {
-                return Err(TransactionValidationOutcome::Invalid(transaction, err))
+                return Err(TransactionValidationOutcome::Invalid(transaction, err));
             }
         }
 
@@ -353,7 +390,7 @@ where
                     transaction_gas_limit,
                     block_gas_limit,
                 ),
-            ))
+            ));
         }
 
         // Ensure max_priority_fee_per_gas (if EIP1559) is less than max_fee_per_gas if any.
@@ -361,7 +398,7 @@ where
             return Err(TransactionValidationOutcome::Invalid(
                 transaction,
                 InvalidTransactionError::TipAboveFeeCap.into(),
-            ))
+            ));
         }
 
         // determine whether the transaction should be treated as local
@@ -384,7 +421,7 @@ where
                                 max_tx_fee_wei,
                                 tx_fee_cap_wei,
                             },
-                        ))
+                        ));
                     }
                 }
             }
@@ -399,7 +436,7 @@ where
             return Err(TransactionValidationOutcome::Invalid(
                 transaction,
                 InvalidPoolTransactionError::Underpriced,
-            ))
+            ));
         }
 
         // Checks for chainid
@@ -408,7 +445,7 @@ where
                 return Err(TransactionValidationOutcome::Invalid(
                     transaction,
                     InvalidTransactionError::ChainIdMismatch.into(),
-                ))
+                ));
             }
         }
 
@@ -418,19 +455,19 @@ where
                 return Err(TransactionValidationOutcome::Invalid(
                     transaction,
                     InvalidTransactionError::TxTypeNotSupported.into(),
-                ))
+                ));
             }
 
             if transaction.authorization_list().is_none_or(|l| l.is_empty()) {
                 return Err(TransactionValidationOutcome::Invalid(
                     transaction,
                     Eip7702PoolTransactionError::MissingEip7702AuthorizationList.into(),
-                ))
+                ));
             }
         }
 
         if let Err(err) = ensure_intrinsic_gas(&transaction, &self.fork_tracker) {
-            return Err(TransactionValidationOutcome::Invalid(transaction, err))
+            return Err(TransactionValidationOutcome::Invalid(transaction, err));
         }
 
         // light blob tx pre-checks
@@ -440,7 +477,7 @@ where
                 return Err(TransactionValidationOutcome::Invalid(
                     transaction,
                     InvalidTransactionError::TxTypeNotSupported.into(),
-                ))
+                ));
             }
 
             let blob_count =
@@ -452,7 +489,7 @@ where
                     InvalidPoolTransactionError::Eip4844(
                         Eip4844PoolTransactionError::NoEip4844Blobs,
                     ),
-                ))
+                ));
             }
 
             let max_blob_count = self.fork_tracker.max_blob_count();
@@ -465,7 +502,7 @@ where
                             permitted: max_blob_count,
                         },
                     ),
-                ))
+                ));
             }
         }
 
@@ -476,7 +513,7 @@ where
             return Err(TransactionValidationOutcome::Invalid(
                 transaction,
                 InvalidTransactionError::GasLimitTooHigh.into(),
-            ))
+            ));
         }
 
         Ok(transaction)
@@ -522,7 +559,7 @@ where
                 return TransactionValidationOutcome::Invalid(
                     transaction,
                     InvalidTransactionError::SignerAccountHasBytecode.into(),
-                )
+                );
             }
         }
 
@@ -534,7 +571,7 @@ where
                 transaction,
                 InvalidTransactionError::NonceNotConsistent { tx: tx_nonce, state: account.nonce }
                     .into(),
-            )
+            );
         }
 
         let cost = transaction.cost();
@@ -548,7 +585,7 @@ where
                     GotExpected { got: account.balance, expected }.into(),
                 )
                 .into(),
-            )
+            );
         }
 
         let mut maybe_blob_sidecar = None;
@@ -562,7 +599,7 @@ where
                     return TransactionValidationOutcome::Invalid(
                         transaction,
                         InvalidTransactionError::TxTypeNotSupported.into(),
-                    )
+                    );
                 }
                 EthBlobTransactionSidecar::Missing => {
                     // This can happen for re-injected blob transactions (on re-org), since the blob
@@ -577,7 +614,7 @@ where
                             InvalidPoolTransactionError::Eip4844(
                                 Eip4844PoolTransactionError::MissingEip4844BlobSidecar,
                             ),
-                        )
+                        );
                     }
                 }
                 EthBlobTransactionSidecar::Present(sidecar) => {
@@ -590,7 +627,7 @@ where
                                 InvalidPoolTransactionError::Eip4844(
                                     Eip4844PoolTransactionError::UnexpectedEip4844SidecarAfterOsaka,
                                 ),
-                            )
+                            );
                         }
                     } else if sidecar.is_eip7594() {
                         return TransactionValidationOutcome::Invalid(
@@ -598,7 +635,7 @@ where
                             InvalidPoolTransactionError::Eip4844(
                                 Eip4844PoolTransactionError::UnexpectedEip7594SidecarBeforeOsaka,
                             ),
-                        )
+                        );
                     }
 
                     // validate the blob
@@ -608,7 +645,7 @@ where
                             InvalidPoolTransactionError::Eip4844(
                                 Eip4844PoolTransactionError::InvalidEip4844Blob(err),
                             ),
-                        )
+                        );
                     }
                     // Record the duration of successful blob validation as histogram
                     self.validation_metrics.blob_validation_duration.record(now.elapsed());
@@ -637,16 +674,6 @@ where
             },
             authorities,
         }
-    }
-
-    /// Validates a single transaction.
-    fn validate_one(
-        &self,
-        origin: TransactionOrigin,
-        transaction: Tx,
-    ) -> TransactionValidationOutcome<Tx> {
-        let mut provider = None;
-        self.validate_one_with_provider(origin, transaction, &mut provider)
     }
 
     /// Validates all given transactions.
@@ -697,7 +724,7 @@ where
         {
             self.fork_tracker
                 .max_blob_count
-                .store(blob_params.max_blob_count, std::sync::atomic::Ordering::Relaxed);
+                .store(blob_params.max_blobs_per_tx, std::sync::atomic::Ordering::Relaxed);
         }
 
         self.block_gas_limit.store(new_tip_block.gas_limit(), std::sync::atomic::Ordering::Relaxed);
@@ -752,12 +779,13 @@ pub struct EthTransactionValidatorBuilder<Client> {
 impl<Client> EthTransactionValidatorBuilder<Client> {
     /// Creates a new builder for the given client
     ///
-    /// By default this assumes the network is on the `Cancun` hardfork and the following
+    /// By default this assumes the network is on the `Prague` hardfork and the following
     /// transactions are allowed:
     ///  - Legacy
     ///  - EIP-2718
     ///  - EIP-1559
     ///  - EIP-4844
+    ///  - EIP-7702
     pub fn new(client: Client) -> Self {
         Self {
             block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M.into(),
@@ -787,7 +815,7 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
             osaka: false,
 
             // max blob count is prague by default
-            max_blob_count: BlobParams::prague().max_blob_count,
+            max_blob_count: BlobParams::prague().max_blobs_per_tx,
         }
     }
 
@@ -911,7 +939,7 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
             .chain_spec()
             .blob_params_at_timestamp(timestamp)
             .unwrap_or_else(BlobParams::cancun)
-            .max_blob_count;
+            .max_blobs_per_tx;
         self
     }
 
@@ -961,11 +989,10 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
             ..
         } = self;
 
-        // TODO: use osaka max blob count once <https://github.com/alloy-rs/alloy/pull/2427> is released
         let max_blob_count = if prague {
-            BlobParams::prague().max_blob_count
+            BlobParams::prague().max_blobs_per_tx
         } else {
-            BlobParams::cancun().max_blob_count
+            BlobParams::cancun().max_blobs_per_tx
         };
 
         let fork_tracker = ForkTracker {
@@ -975,6 +1002,9 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
             osaka: AtomicBool::new(osaka),
             max_blob_count: AtomicU64::new(max_blob_count),
         };
+
+        // Ensure the kzg setup is loaded right away.
+        let _kzg_settings = kzg_settings.get();
 
         let inner = EthTransactionValidatorInner {
             client,
@@ -1051,7 +1081,7 @@ pub struct ForkTracker {
     pub prague: AtomicBool,
     /// Tracks if osaka is activated at the block's timestamp.
     pub osaka: AtomicBool,
-    /// Tracks max blob count at the block's timestamp.
+    /// Tracks max blob count per transaction at the block's timestamp.
     pub max_blob_count: AtomicU64,
 }
 
@@ -1076,7 +1106,7 @@ impl ForkTracker {
         self.osaka.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Returns the max blob count.
+    /// Returns the max allowed blob count per transaction.
     pub fn max_blob_count(&self) -> u64 {
         self.max_blob_count.load(std::sync::atomic::Ordering::Relaxed)
     }

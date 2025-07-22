@@ -512,6 +512,13 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                     response,
                 })
             }
+            PeerRequest::GetReceipts69 { request, response } => {
+                self.delegate_eth_request(IncomingEthRequest::GetReceipts69 {
+                    peer_id,
+                    request,
+                    response,
+                })
+            }
             PeerRequest::GetPooledTransactions { request, response } => {
                 self.notify_tx_manager(NetworkTransactionEvent::GetPooledTransactions {
                     peer_id,
@@ -825,8 +832,7 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                     "Session disconnected"
                 );
 
-                let mut reason = None;
-                if let Some(ref err) = error {
+                let reason = if let Some(ref err) = error {
                     // If the connection was closed due to an error, we report
                     // the peer
                     self.swarm.state_mut().peers_mut().on_active_session_dropped(
@@ -834,11 +840,12 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                         &peer_id,
                         err,
                     );
-                    reason = err.as_disconnected();
+                    err.as_disconnected()
                 } else {
                     // Gracefully disconnected
                     self.swarm.state_mut().peers_mut().on_active_session_gracefully_closed(peer_id);
-                }
+                    None
+                };
                 self.metrics.closed_sessions.increment(1);
                 self.update_active_connection_metrics();
 

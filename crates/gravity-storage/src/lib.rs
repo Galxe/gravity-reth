@@ -5,7 +5,7 @@ pub mod block_view_storage;
 
 use alloy_primitives::B256;
 use reth_evm::ParallelDatabase;
-use reth_provider::{ProviderResult, StateProviderOptions};
+use reth_provider::ProviderResult;
 use reth_trie::{
     updates::{TrieUpdates, TrieUpdatesV2},
     HashedPostState,
@@ -17,7 +17,7 @@ pub trait GravityStorage: Send + Sync + 'static {
     type StateView: ParallelDatabase;
 
     /// get state view for execute
-    fn get_state_view(&self, opts: StateProviderOptions) -> ProviderResult<Self::StateView>;
+    fn get_state_view(&self) -> ProviderResult<Self::StateView>;
 
     /// calculate state root
     fn state_root(

@@ -158,7 +158,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
     /// Returns an iterator over all transactions in the pool
     pub(crate) fn all(
         &self,
-    ) -> impl Iterator<Item = Arc<ValidPoolTransaction<T::Transaction>>> + '_ {
+    ) -> impl ExactSizeIterator<Item = Arc<ValidPoolTransaction<T::Transaction>>> + '_ {
         self.by_id.values().map(|tx| tx.transaction.clone())
     }
 
@@ -292,11 +292,11 @@ impl<T: TransactionOrdering> PendingPool<T> {
         tx: Arc<ValidPoolTransaction<T::Transaction>>,
         base_fee: u64,
     ) {
-        // assert!(
-        //     !self.contains(tx.id()),
-        //     "transaction already included {:?}",
-        //     self.get(tx.id()).unwrap().transaction
-        // );
+        debug_assert!(
+            !self.contains(tx.id()),
+            "transaction already included {:?}",
+            self.get(tx.id()).unwrap().transaction
+        );
 
         // keep track of size
         self.size_of += tx.size();

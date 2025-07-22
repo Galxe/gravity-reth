@@ -121,7 +121,7 @@ impl<R: Rng> MockTransactionSimulator<R> {
                     .tx(on_chain_nonce, &mut self.rng)
                     .with_gas_price(self.base_fee);
                 let valid_tx = self.validator.validated(tx);
-                let valid_tx = std::sync::Arc::new(valid_tx);
+                let valid_tx = valid_tx;
                 let res =
                     pool.add_transaction(valid_tx, on_chain_balance, on_chain_nonce, None).unwrap();
 

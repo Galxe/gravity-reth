@@ -508,12 +508,11 @@ impl PersistBlockCache {
             self.account_trie.remove(path);
         });
         input.account_nodes.par_iter().for_each(|(path, node)| {
-            self.account_trie
-                .insert(path.clone(), ValueWithTip::new(node.clone().reset(), block_number));
+            self.account_trie.insert(*path, ValueWithTip::new(node.clone().reset(), block_number));
         });
 
         let write_slot = |data: &DashMap<Nibbles, ValueWithTip<Node>>, kv: (&Nibbles, &Node)| {
-            data.insert(kv.0.clone(), ValueWithTip::new(kv.1.clone().reset(), block_number));
+            data.insert(*kv.0, ValueWithTip::new(kv.1.clone().reset(), block_number));
         };
         input.storage_tries.par_iter().for_each(|(hashed_address, storage_trie_update)| {
             if storage_trie_update.is_deleted {

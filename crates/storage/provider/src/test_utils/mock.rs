@@ -2,8 +2,8 @@ use crate::{
     traits::{BlockSource, ReceiptProvider},
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BlockReaderIdExt,
     ChainSpecProvider, ChangeSetReader, EthStorage, HeaderProvider, ReceiptProviderIdExt,
-    StateProvider, StateProviderBox, StateProviderFactory, StateProviderOptions, StateReader,
-    StateRootProvider, TransactionVariant, TransactionsProvider,
+    StateProvider, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
+    TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::{constants::EMPTY_ROOT_HASH, transaction::TransactionMeta, Header};
 use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumberOrTag};
@@ -29,9 +29,9 @@ use reth_primitives_traits::{
 use reth_prune_types::PruneModes;
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
-    BlockBodyIndicesProvider, DBProvider, DatabaseProviderFactory, HashedPostStateProvider,
-    NodePrimitivesProvider, StageCheckpointReader, StateCommitmentProvider, StateProofProvider,
-    StorageRootProvider,
+    BlockBodyIndicesProvider, BytecodeReader, DBProvider, DatabaseProviderFactory,
+    HashedPostStateProvider, NodePrimitivesProvider, StageCheckpointReader,
+    StateCommitmentProvider, StateProofProvider, StorageRootProvider,
 };
 use reth_storage_errors::provider::{ConsistentViewError, ProviderError, ProviderResult};
 use reth_trie::{
@@ -669,11 +669,7 @@ impl<ChainSpec: EthChainSpec + Send + Sync + 'static> BlockReader
         }
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<SealedBlock<Self::Block>>> {
-        Ok(None)
-    }
-
-    fn pending_block_with_senders(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
         Ok(None)
     }
 
@@ -880,7 +876,13 @@ where
         let lock = self.accounts.lock();
         Ok(lock.get(&account).and_then(|account| account.storage.get(&storage_key)).copied())
     }
+}
 
+impl<T, ChainSpec> BytecodeReader for MockEthProvider<T, ChainSpec>
+where
+    T: NodePrimitives,
+    ChainSpec: Send + Sync,
+{
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
         let lock = self.accounts.lock();
         Ok(lock.values().find_map(|account| {
@@ -897,7 +899,7 @@ where
 impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StateProviderFactory
     for MockEthProvider<T, ChainSpec>
 {
-    fn latest_with_opts(&self, _opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
+    fn latest(&self) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -921,7 +923,9 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StatePr
 
                 self.history_by_block_hash(hash)
             }
-            BlockNumberOrTag::Earliest => self.history_by_block_number(0),
+            BlockNumberOrTag::Earliest => {
+                self.history_by_block_number(self.earliest_block_number()?)
+            }
             BlockNumberOrTag::Pending => self.pending(),
             BlockNumberOrTag::Number(num) => self.history_by_block_number(num),
         }
@@ -931,19 +935,11 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StatePr
         Ok(Box::new(self.clone()))
     }
 
-    fn history_by_block_hash_with_opts(
-        &self,
-        _block: BlockHash,
-        _opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
-    fn state_by_block_hash_with_opts(
-        &self,
-        _block: BlockHash,
-        _opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox> {
+    fn state_by_block_hash(&self, _block: BlockHash) -> ProviderResult<StateProviderBox> {
         Ok(Box::new(self.clone()))
     }
 
@@ -951,11 +947,7 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> StatePr
         Ok(Box::new(self.clone()))
     }
 
-    fn pending_state_by_hash_with_opts(
-        &self,
-        _block_hash: B256,
-        _opts: StateProviderOptions,
-    ) -> ProviderResult<Option<StateProviderBox>> {
+    fn pending_state_by_hash(&self, _block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
         Ok(Some(Box::new(self.clone())))
     }
 }

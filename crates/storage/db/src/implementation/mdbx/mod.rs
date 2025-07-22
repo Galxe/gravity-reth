@@ -31,6 +31,8 @@ use std::{
 use tx::Tx;
 
 pub mod cursor;
+pub mod parallel_tx;
+use parallel_tx::ParallelTxRO;
 pub mod tx;
 
 mod utils;
@@ -179,15 +181,11 @@ pub struct DatabaseEnv {
 }
 
 impl Database for DatabaseEnv {
-    type TX = tx::Tx<RO>;
+    type TX = ParallelTxRO;
     type TXMut = tx::Tx<RW>;
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
-        Tx::new_with_metrics(
-            self.inner.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?,
-            self.metrics.clone(),
-        )
-        .map_err(|e| DatabaseError::InitTx(e.into()))
+        ParallelTxRO::try_new(self.inner.clone(), self.metrics.clone())
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
@@ -212,12 +210,10 @@ impl DatabaseMetrics for DatabaseEnv {
         let _ = self
             .view(|tx| {
                 for table in Tables::ALL.iter().map(Tables::name) {
-                    let table_db = tx.inner.open_db(Some(table)).wrap_err("Could not open db.")?;
+                    let table_db = tx.open_db(Some(table)).wrap_err("Could not open db.")?;
 
-                    let stats = tx
-                        .inner
-                        .db_stat(&table_db)
-                        .wrap_err(format!("Could not find table: {table}"))?;
+                    let stats =
+                        tx.db_stat(&table_db).wrap_err(format!("Could not find table: {table}"))?;
 
                     let page_size = stats.page_size() as usize;
                     let leaf_pages = stats.leaf_pages();
@@ -1247,6 +1243,34 @@ mod tests {
                     .expect("element should exist.")
                     .expect("should be able to retrieve it.")
             );
+        }
+    }
+
+    #[test]
+    fn db_walk_dup_with_not_existing_key() {
+        let env = create_test_db(DatabaseEnvKind::RW);
+        let key = Address::from_str("0xa2c122be93b0074270ebee7f6b7292c7deb45047")
+            .expect(ERROR_ETH_ADDRESS);
+
+        // PUT (0,0)
+        let value00 = StorageEntry::default();
+        env.update(|tx| tx.put::<PlainStorageState>(key, value00).expect(ERROR_PUT)).unwrap();
+
+        // PUT (2,2)
+        let value22 = StorageEntry { key: B256::with_last_byte(2), value: U256::from(2) };
+        env.update(|tx| tx.put::<PlainStorageState>(key, value22).expect(ERROR_PUT)).unwrap();
+
+        // PUT (1,1)
+        let value11 = StorageEntry { key: B256::with_last_byte(1), value: U256::from(1) };
+        env.update(|tx| tx.put::<PlainStorageState>(key, value11).expect(ERROR_PUT)).unwrap();
+
+        // Try to walk_dup with not existing key should immediately return None
+        {
+            let tx = env.tx().expect(ERROR_INIT_TX);
+            let mut cursor = tx.cursor_dup_read::<PlainStorageState>().unwrap();
+            let not_existing_key = Address::ZERO;
+            let mut walker = cursor.walk_dup(Some(not_existing_key), None).unwrap();
+            assert_eq!(walker.next(), None);
         }
     }
 

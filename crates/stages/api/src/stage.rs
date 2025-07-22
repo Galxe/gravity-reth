@@ -1,8 +1,7 @@
 use crate::{error::StageError, StageCheckpoint, StageId};
 use alloy_primitives::{BlockNumber, TxNumber};
-use reth_provider::{
-    BlockReader, ProviderError, ProviderResult, StateProviderBox, StateProviderOptions,
-};
+use reth_errors::ProviderResult;
+use reth_provider::{BlockReader, ProviderError};
 use std::{
     cmp::{max, min},
     future::{poll_fn, Future},
@@ -167,6 +166,11 @@ pub struct ExecOutput {
 }
 
 impl ExecOutput {
+    /// Mark the stage as not done, checkpointing at the given place.
+    pub const fn in_progress(checkpoint: StageCheckpoint) -> Self {
+        Self { checkpoint, done: false }
+    }
+
     /// Mark the stage as done, checkpointing at the given place.
     pub const fn done(checkpoint: StageCheckpoint) -> Self {
         Self { checkpoint, done: true }
@@ -178,12 +182,6 @@ impl ExecOutput {
 pub struct UnwindOutput {
     /// The checkpoint at which the stage has unwound to.
     pub checkpoint: StageCheckpoint,
-}
-
-/// A factory for creating latest block state provider.
-pub trait LatestStateProviderFactory {
-    /// Create state provider for latest block
-    fn latest(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox>;
 }
 
 /// A stage is a segmented part of the syncing process of the node.
@@ -198,7 +196,7 @@ pub trait LatestStateProviderFactory {
 ///
 /// Stages receive [`DBProvider`](reth_provider::DBProvider).
 #[auto_impl::auto_impl(Box)]
-pub trait Stage<Provider>: Send + Sync {
+pub trait Stage<Provider, ProviderRO>: Send + Sync {
     /// Get the ID of the stage.
     ///
     /// Stage IDs must be unique.
@@ -239,17 +237,12 @@ pub trait Stage<Provider>: Send + Sync {
     /// Execute the stage.
     /// It is expected that the stage will write all necessary data to the database
     /// upon invoking this method.
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError>;
-
-    /// Execute the stage.
-    fn execute_v2(
+    fn execute(
         &mut self,
         provider: &Provider,
-        _factory: &dyn LatestStateProviderFactory,
+        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: ExecInput,
-    ) -> Result<ExecOutput, StageError> {
-        self.execute(provider, input)
-    }
+    ) -> Result<ExecOutput, StageError>;
 
     /// Post execution commit hook.
     ///
@@ -264,6 +257,7 @@ pub trait Stage<Provider>: Send + Sync {
     fn unwind(
         &mut self,
         provider: &Provider,
+        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError>;
 
@@ -278,7 +272,7 @@ pub trait Stage<Provider>: Send + Sync {
 }
 
 /// [Stage] trait extension.
-pub trait StageExt<Provider>: Stage<Provider> {
+pub trait StageExt<Provider, ProviderRO>: Stage<Provider, ProviderRO> {
     /// Utility extension for the `Stage` trait that invokes `Stage::poll_execute_ready`
     /// with [`poll_fn`] context. For more information see [`Stage::poll_execute_ready`].
     fn execute_ready(
@@ -289,4 +283,7 @@ pub trait StageExt<Provider>: Stage<Provider> {
     }
 }
 
-impl<Provider, S: Stage<Provider>> StageExt<Provider> for S {}
+impl<Provider, ProviderRO, S: Stage<Provider, ProviderRO> + ?Sized> StageExt<Provider, ProviderRO>
+    for S
+{
+}

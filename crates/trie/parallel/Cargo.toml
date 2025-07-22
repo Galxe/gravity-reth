@@ -48,7 +48,6 @@ reth-provider = { workspace = true, features = ["test-utils"] }
 reth-trie = { workspace = true, features = ["test-utils"] }
 
 # misc
-rand_08.workspace = true
 rand.workspace = true
 rayon.workspace = true
 criterion.workspace = true

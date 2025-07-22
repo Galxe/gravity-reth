@@ -107,7 +107,7 @@ impl Clone for Node {
                     }
                     _ => {}
                 }
-                Self::ShortNode { key: key.clone(), value: value.clone(), flags: flags.clone() }
+                Self::ShortNode { key: *key, value: value.clone(), flags: flags.clone() }
             }
             Self::ValueNode(value) => Self::ValueNode(value.clone()),
             Self::HashNode(rlp) => Self::HashNode(rlp.clone()),
@@ -216,7 +216,7 @@ impl From<Node> for StoredNode {
             Node::ShortNode { key, value, .. } => {
                 buf.push(NodeType::ShortNode as u8);
                 buf.push(key.len() as u8);
-                buf.extend_from_slice(&key);
+                buf.extend(key.to_vec());
                 match *value {
                     Node::HashNode(rlp) => {
                         // extension node
@@ -254,7 +254,7 @@ impl From<StoredNode> for Node {
     fn from(value: StoredNode) -> Self {
         let mut i = 0;
         let version = value[i];
-        assert!(version == 0, "Unresolved Node version");
+        assert_eq!(version, 0, "Unresolved Node version");
         i += 1;
         let node_type = NodeType::from_u8(value[i]);
         i += 1;
@@ -279,8 +279,7 @@ impl From<StoredNode> for Node {
                 // ShortNode
                 let key_len = value[i] as usize;
                 i += 1;
-                let mut key = Nibbles::new();
-                key.extend_from_slice_unchecked(&value[i..i + key_len]);
+                let key = Nibbles::from_nibbles_unchecked(&value[i..i + key_len]);
                 i += key_len;
                 let next_node_type = NodeType::from_u8(value[i]);
                 i += 1;

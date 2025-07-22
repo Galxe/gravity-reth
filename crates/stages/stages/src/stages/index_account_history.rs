@@ -7,6 +7,7 @@ use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment};
 use reth_stages_api::{
     ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
+use reth_storage_errors::ProviderResult;
 use std::fmt::Debug;
 use tracing::info;
 
@@ -41,7 +42,7 @@ impl Default for IndexAccountHistoryStage {
     }
 }
 
-impl<Provider> Stage<Provider> for IndexAccountHistoryStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for IndexAccountHistoryStage
 where
     Provider:
         DBProvider<Tx: DbTxMut> + HistoryWriter + PruneCheckpointReader + PruneCheckpointWriter,
@@ -55,6 +56,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         mut input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if let Some((target_prunable_block, prune_mode)) = self
@@ -128,6 +130,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_progress, _) =
@@ -219,7 +222,16 @@ mod tests {
         };
         let mut stage = IndexAccountHistoryStage::default();
         let provider = db.factory.database_provider_rw().unwrap();
-        let out = stage.execute(&provider, input).unwrap();
+        let out = stage
+            .execute(
+                &provider,
+                Box::new({
+                    let factory = db.factory.clone();
+                    move || factory.database_provider_ro()
+                }),
+                input,
+            )
+            .unwrap();
         assert_eq!(out, ExecOutput { checkpoint: StageCheckpoint::new(run_to), done: true });
         provider.commit().unwrap();
     }
@@ -232,7 +244,16 @@ mod tests {
         };
         let mut stage = IndexAccountHistoryStage::default();
         let provider = db.factory.database_provider_rw().unwrap();
-        let out = stage.unwind(&provider, input).unwrap();
+        let out = stage
+            .unwind(
+                &provider,
+                Box::new({
+                    let factory = db.factory.clone();
+                    move || factory.database_provider_ro()
+                }),
+                input,
+            )
+            .unwrap();
         assert_eq!(out, UnwindOutput { checkpoint: StageCheckpoint::new(unwind_to) });
         provider.commit().unwrap();
     }
@@ -479,7 +500,16 @@ mod tests {
             ..Default::default()
         };
         let provider = db.factory.database_provider_rw().unwrap();
-        let out = stage.execute(&provider, input).unwrap();
+        let out = stage
+            .execute(
+                &provider,
+                Box::new({
+                    let factory = db.factory.clone();
+                    move || factory.database_provider_ro()
+                }),
+                input,
+            )
+            .unwrap();
         assert_eq!(out, ExecOutput { checkpoint: StageCheckpoint::new(20000), done: true });
         provider.commit().unwrap();
 

@@ -1007,8 +1007,8 @@ mod tests {
     use reth_ethereum_primitives::{EthPrimitives, Receipt};
     use reth_primitives_traits::{Account, Bytecode};
     use reth_storage_api::{
-        AccountReader, BlockHashReader, HashedPostStateProvider, StateProofProvider, StateProvider,
-        StateRootProvider, StorageRootProvider,
+        AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider,
+        StateProofProvider, StateProvider, StateRootProvider, StorageRootProvider,
     };
     use reth_trie::{
         AccountProof, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
@@ -1056,7 +1056,9 @@ mod tests {
         ) -> ProviderResult<Option<StorageValue>> {
             Ok(None)
         }
+    }
 
+    impl BytecodeReader for MockStateProvider {
         fn bytecode_by_hash(&self, _code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
             Ok(None)
         }

@@ -24,7 +24,7 @@ use reth_stages_api::{
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_errors::provider::ProviderError;
+use reth_storage_errors::{provider::ProviderError, ProviderResult};
 use std::task::{ready, Context, Poll};
 
 use tokio::sync::watch;
@@ -185,7 +185,7 @@ where
     }
 }
 
-impl<Provider, P, D> Stage<Provider> for HeaderStage<P, D>
+impl<Provider, ProviderRO, P, D> Stage<Provider, ProviderRO> for HeaderStage<P, D>
 where
     Provider: DBProvider<Tx: DbTxMut> + StaticFileProviderFactory,
     P: HeaderSyncGapProvider<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>,
@@ -214,7 +214,6 @@ where
         let target = SyncTarget::Tip(*self.tip.borrow());
         let gap = HeaderSyncGap { local_head, target };
         let tip = gap.target.tip();
-        self.sync_gap = Some(gap.clone());
 
         // Nothing to sync
         if gap.is_closed() {
@@ -225,6 +224,7 @@ where
                 "Target block already reached"
             );
             self.is_etl_ready = true;
+            self.sync_gap = Some(gap);
             return Poll::Ready(Ok(()))
         }
 
@@ -232,7 +232,10 @@ where
         let local_head_number = gap.local_head.number();
 
         // let the downloader know what to sync
-        self.downloader.update_sync_gap(gap.local_head, gap.target);
+        if self.sync_gap != Some(gap.clone()) {
+            self.sync_gap = Some(gap.clone());
+            self.downloader.update_sync_gap(gap.local_head, gap.target);
+        }
 
         // We only want to stop once we have all the headers on ETL filespace (disk).
         loop {
@@ -263,23 +266,32 @@ where
                 }
                 Some(Err(HeadersDownloaderError::DetachedHead { local_head, header, error })) => {
                     error!(target: "sync::stages::headers", %error, "Cannot attach header to head");
+                    self.sync_gap = None;
                     return Poll::Ready(Err(StageError::DetachedHead {
                         local_head: Box::new(local_head.block_with_parent()),
                         header: Box::new(header.block_with_parent()),
                         error,
                     }))
                 }
-                None => return Poll::Ready(Err(StageError::ChannelClosed)),
+                None => {
+                    self.sync_gap = None;
+                    return Poll::Ready(Err(StageError::ChannelClosed))
+                }
             }
         }
     }
 
     /// Download the headers in reverse order (falling block numbers)
     /// starting from the tip of the chain
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         let current_checkpoint = input.checkpoint();
 
-        if self.sync_gap.as_ref().ok_or(StageError::MissingSyncGap)?.is_closed() {
+        if self.sync_gap.take().ok_or(StageError::MissingSyncGap)?.is_closed() {
             self.is_etl_ready = false;
             return Ok(ExecOutput::done(current_checkpoint))
         }
@@ -323,6 +335,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         self.sync_gap.take();

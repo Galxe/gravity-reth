@@ -50,7 +50,7 @@ where
                 return Ok(value);
             }
         }
-        let path = StoredNibblesSubKey(path.clone());
+        let path = StoredNibblesSubKey(*path);
         Ok(self
             .cursor
             .seek_by_key_subkey(self.hashed_address, path.clone())?
@@ -81,7 +81,7 @@ where
                 return Ok(value);
             }
         }
-        Ok(self.0.seek_exact(StoredNibbles(path.clone()))?.map(|(_, value)| value.into()))
+        Ok(self.0.seek_exact(StoredNibbles(*path))?.map(|(_, value)| value.into()))
     }
 }
 
@@ -205,7 +205,7 @@ where
                                 if let Some(storage) = storage {
                                     for (hashed_slot, value) in storage.storage {
                                         let nibbles = Nibbles::unpack(hashed_slot);
-                                        let index = nibbles[0] as usize;
+                                        let index = nibbles.get_unchecked(0) as usize;
                                         let value = if value.is_zero() {
                                             None
                                         } else {
@@ -319,7 +319,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{keccak256, map::HashMap, Address, U256};
     use alloy_rlp::encode_fixed_size;
-    use rand_08::Rng;
+    use rand::Rng;
     use reth_primitives_traits::Account;
     use reth_provider::{
         test_utils::create_test_provider_factory, DatabaseProviderFactory, TrieWriterV2,
@@ -418,7 +418,7 @@ mod tests {
                     storage.into_iter().map(|(k, v)| (keccak256(k), encode_fixed_size(&v)))
                 {
                     let nibbles = Nibbles::unpack(hashed_slot);
-                    let index = nibbles[0] as usize;
+                    let index = nibbles.get_unchecked(0) as usize;
                     batches[index]
                         .push((nibbles, is_insert.then_some(Node::ValueNode(value.to_vec()))));
                 }
@@ -451,7 +451,7 @@ mod tests {
                 StorageTrieUpdatesV2::deleted()
             };
             let nibbles = Nibbles::unpack(hashed_address);
-            let index = nibbles[0] as usize;
+            let index = nibbles.get_unchecked(0) as usize;
             batches[index].push((nibbles, is_insert.then_some(Node::ValueNode(rlp_account))));
             assert!(trie_updates
                 .storage_tries
@@ -472,19 +472,19 @@ mod tests {
     }
 
     fn random_state() -> HashMap<Address, (Account, HashMap<B256, U256>)> {
-        let mut rng = rand_08::thread_rng();
+        let mut rng = rand::rng();
         (0..100)
             .map(|_| {
                 let address = Address::random();
                 let account =
-                    Account { balance: U256::from(rng.gen::<u64>()), ..Default::default() };
+                    Account { balance: U256::from(rng.random::<u64>()), ..Default::default() };
                 let mut storage = HashMap::<B256, U256>::default();
-                let has_storage = rng.gen_bool(0.7);
+                let has_storage = rng.random_bool(0.7);
                 if has_storage {
                     for _ in 0..100 {
                         storage.insert(
-                            B256::from(U256::from(rng.gen::<u64>())),
-                            U256::from(rng.gen::<u64>()),
+                            B256::from(U256::from(rng.random::<u64>())),
+                            U256::from(rng.random::<u64>()),
                         );
                     }
                 }

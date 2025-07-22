@@ -22,8 +22,7 @@ use reth_storage_errors::provider::ProviderResult;
 #[derive(Clone, Debug)]
 pub struct ConsistentDbView<Factory> {
     factory: Factory,
-    /// tip for block hash and number
-    pub tip: Option<(B256, u64)>,
+    tip: Option<(B256, u64)>,
 }
 
 impl<Factory> ConsistentDbView<Factory>
@@ -40,14 +39,6 @@ where
     pub fn new_with_latest_tip(provider: Factory) -> ProviderResult<Self> {
         let provider_ro = provider.database_provider_ro()?;
         let last_num = provider_ro.last_block_number()?;
-        let tip = provider_ro.sealed_header(last_num)?.map(|h| (h.hash(), last_num));
-        Ok(Self::new(provider, tip))
-    }
-
-    /// Creates new consistent database view with best tip.
-    pub fn new_with_best_tip(provider: Factory) -> ProviderResult<Self> {
-        let provider_ro = provider.database_provider_ro()?;
-        let last_num = provider_ro.best_block_number()?;
         let tip = provider_ro.sealed_header(last_num)?.map(|h| (h.hash(), last_num));
         Ok(Self::new(provider, tip))
     }

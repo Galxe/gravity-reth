@@ -1,5 +1,3 @@
-use std::num::NonZero;
-
 use super::{
     AccountReader, BlockHashReader, BlockIdReader, StateProofProvider, StateRootProvider,
     StorageRootProvider,
@@ -9,7 +7,6 @@ use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{Address, BlockHash, BlockNumber, StorageKey, StorageValue, B256, U256};
 use auto_impl::auto_impl;
-use once_cell::sync::Lazy;
 use reth_execution_types::ExecutionOutcome;
 use reth_primitives_traits::Bytecode;
 use reth_storage_errors::provider::ProviderResult;
@@ -37,6 +34,7 @@ pub type StateProviderBox = Box<dyn StateProvider>;
 pub trait StateProvider:
     BlockHashReader
     + AccountReader
+    + BytecodeReader
     + StateRootProvider
     + StorageRootProvider
     + StateProofProvider
@@ -50,9 +48,6 @@ pub trait StateProvider:
         account: Address,
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>>;
-
-    /// Get account code by its hash
-    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>>;
 
     /// Get account code by its address.
     ///
@@ -97,6 +92,10 @@ pub trait StateProvider:
     }
 }
 
+/// Minimal requirements to read a full account, for example, to validate its new transactions
+pub trait AccountInfoReader: AccountReader + BytecodeReader {}
+impl<T: AccountReader + BytecodeReader> AccountInfoReader for T {}
+
 /// Trait implemented for database providers that can provide the [`reth_trie_db::StateCommitment`]
 /// type.
 #[cfg(feature = "db-api")]
@@ -113,6 +112,13 @@ pub trait HashedPostStateProvider: Send + Sync {
     fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState;
 }
 
+/// Trait for reading bytecode associated with a given code hash.
+#[auto_impl(&, Arc, Box)]
+pub trait BytecodeReader: Send + Sync {
+    /// Get account code by its hash
+    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>>;
+}
+
 /// Trait implemented for database providers that can be converted into a historical state provider.
 pub trait TryIntoHistoricalStateProvider {
     /// Returns a historical [`StateProvider`] indexed by the given historic block number.
@@ -120,41 +126,6 @@ pub trait TryIntoHistoricalStateProvider {
         self,
         block_number: BlockNumber,
     ) -> ProviderResult<StateProviderBox>;
-}
-
-/// Options for database provider
-#[derive(Debug, Clone)]
-pub struct StateProviderOptions {
-    /// number of thread to parallel
-    pub parallel: NonZero<usize>,
-    /// return database directly
-    pub raw_db: bool,
-}
-
-/// General options for state providers.
-pub static STATE_PROVIDER_OPTS: Lazy<StateProviderOptions> = Lazy::new(|| StateProviderOptions {
-    parallel: NonZero::new(
-        std::env::var("STATE_PROVIDER_OPTS_PARALLEL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8),
-    )
-    .unwrap(),
-    raw_db: false,
-});
-
-impl Default for StateProviderOptions {
-    fn default() -> Self {
-        Self { parallel: NonZero::new(1).unwrap(), raw_db: false }
-    }
-}
-
-impl StateProviderOptions {
-    /// return database directly
-    pub const fn with_raw_db(mut self) -> Self {
-        self.raw_db = true;
-        self
-    }
 }
 
 /// Light wrapper that returns `StateProvider` implementations that correspond to the given
@@ -183,12 +154,7 @@ impl StateProviderOptions {
 #[auto_impl(&, Arc, Box)]
 pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Storage provider for latest block.
-    fn latest(&self) -> ProviderResult<StateProviderBox> {
-        self.latest_with_opts(StateProviderOptions::default())
-    }
-
-    /// See `latest`
-    fn latest_with_opts(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox>;
+    fn latest(&self) -> ProviderResult<StateProviderBox>;
 
     /// Returns a [`StateProvider`] indexed by the given [`BlockId`].
     ///
@@ -218,30 +184,12 @@ pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Returns a historical [`StateProvider`] indexed by the given block hash.
     ///
     /// Note: this only looks at historical blocks, not pending blocks.
-    fn history_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox> {
-        self.history_by_block_hash_with_opts(block, StateProviderOptions::default())
-    }
-
-    /// See `history_by_block_hash`
-    fn history_by_block_hash_with_opts(
-        &self,
-        block: BlockHash,
-        opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox>;
+    fn history_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox>;
 
     /// Returns _any_ [StateProvider] with matching block hash.
     ///
     /// This will return a [StateProvider] for either a historical or pending block.
-    fn state_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox> {
-        self.state_by_block_hash_with_opts(block, StateProviderOptions::default())
-    }
-
-    /// See `state_by_block_hash`
-    fn state_by_block_hash_with_opts(
-        &self,
-        block: BlockHash,
-        opts: StateProviderOptions,
-    ) -> ProviderResult<StateProviderBox>;
+    fn state_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox>;
 
     /// Storage provider for pending state.
     ///
@@ -254,14 +202,5 @@ pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Represents the state at the block that extends the canonical chain.
     ///
     /// If the block couldn't be found, returns `None`.
-    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
-        self.pending_state_by_hash_with_opts(block_hash, StateProviderOptions::default())
-    }
-
-    /// See `pending_state_by_hash`
-    fn pending_state_by_hash_with_opts(
-        &self,
-        block_hash: B256,
-        opts: StateProviderOptions,
-    ) -> ProviderResult<Option<StateProviderBox>>;
+    fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>>;
 }

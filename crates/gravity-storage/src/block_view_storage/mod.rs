@@ -2,8 +2,7 @@ use crate::GravityStorage;
 use alloy_primitives::{Address, B256, U256};
 use reth_provider::{
     BlockNumReader, BlockReader, DatabaseProviderFactory, HeaderProvider, PersistBlockCache,
-    ProviderError, ProviderResult, StateCommitmentProvider, StateProviderBox, StateProviderOptions,
-    PERSIST_BLOCK_CACHE,
+    ProviderError, ProviderResult, StateCommitmentProvider, StateProviderBox, PERSIST_BLOCK_CACHE,
 };
 use reth_revm::{
     bytecode::Bytecode, database::StateProviderDatabase, primitives::BLOCK_HASH_HISTORY,
@@ -53,8 +52,8 @@ where
 {
     type StateView = BlockViewProvider;
 
-    fn get_state_view(&self, opts: StateProviderOptions) -> ProviderResult<Self::StateView> {
-        let state = self.client.latest_with_opts(opts.with_raw_db())?;
+    fn get_state_view(&self) -> ProviderResult<Self::StateView> {
+        let state = self.client.latest()?;
         Ok(BlockViewProvider::new(StateProviderDatabase::new(state), Some(self.cache.clone())))
     }
 

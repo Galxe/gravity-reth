@@ -1,4 +1,4 @@
-use crate::stages::MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD;
+use crate::stages::MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD;
 use alloy_consensus::{BlockHeader, Header};
 use alloy_primitives::BlockNumber;
 use num_traits::Zero;
@@ -13,16 +13,16 @@ use reth_provider::{
     providers::{StaticFileProvider, StaticFileWriter},
     BlockHashReader, BlockReader, DBProvider, ExecutionOutcome, HeaderProvider,
     LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateCommitmentProvider,
-    StateProvider, StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation,
-    TransactionVariant, STATE_PROVIDER_OPTS,
+    StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation, TransactionVariant,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
     BlockErrorKind, CheckpointBlockRange, EntitiesCheckpoint, ExecInput, ExecOutput,
-    ExecutionCheckpoint, ExecutionStageThresholds, LatestStateProviderFactory, Stage,
-    StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
+    ExecutionCheckpoint, ExecutionStageThresholds, Stage, StageCheckpoint, StageError, StageId,
+    UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
+use reth_storage_errors::ProviderResult;
 use std::{
     cmp::Ordering,
     ops::RangeInclusive,
@@ -72,7 +72,6 @@ where
     evm_config: E,
     /// The consensus instance for validating blocks.
     consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
-    /// The consensu
     /// The commit thresholds of the execution stage.
     thresholds: ExecutionStageThresholds,
     /// The highest threshold (in number of blocks) for switching between incremental
@@ -120,7 +119,7 @@ where
 
     /// Create an execution stage with the provided executor.
     ///
-    /// The commit threshold will be set to [`MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD`].
+    /// The commit threshold will be set to [`MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD`].
     pub fn new_with_executor(
         evm_config: E,
         consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
@@ -129,7 +128,7 @@ where
             evm_config,
             consensus,
             ExecutionStageThresholds::default(),
-            MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD,
+            MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD,
             ExExManagerHandle::empty(),
         )
     }
@@ -251,7 +250,7 @@ where
     }
 }
 
-impl<E, Provider> Stage<Provider> for ExecutionStage<E>
+impl<E, Provider, ProviderRO> Stage<Provider, ProviderRO> for ExecutionStage<E>
 where
     E: ConfigureEvm,
     Provider: DBProvider
@@ -263,6 +262,7 @@ where
         + BlockHashReader
         + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
         + StateCommitmentProvider,
+    ProviderRO: DBProvider + BlockHashReader + StateCommitmentProvider,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -280,128 +280,12 @@ where
     }
 
     /// Execute the stage
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
-        self.execute_inner(provider, None, input)
-    }
-
-    fn execute_v2(
+    fn execute(
         &mut self,
         provider: &Provider,
-        factory: &dyn LatestStateProviderFactory,
+        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
-        self.execute_inner(provider, Some(factory), input)
-    }
-
-    fn post_execute_commit(&mut self) -> Result<(), StageError> {
-        let Some(chain) = self.post_execute_commit_input.take() else { return Ok(()) };
-
-        // NOTE: We can ignore the error here, since an error means that the channel is closed,
-        // which means the manager has died, which then in turn means the node is shutting down.
-        let _ = self.exex_manager_handle.send(
-            ExExNotificationSource::Pipeline,
-            ExExNotification::ChainCommitted { new: Arc::new(chain) },
-        );
-
-        Ok(())
-    }
-
-    /// Unwind the stage.
-    fn unwind(
-        &mut self,
-        provider: &Provider,
-        input: UnwindInput,
-    ) -> Result<UnwindOutput, StageError> {
-        let (range, unwind_to, _) =
-            input.unwind_block_range_with_threshold(self.thresholds.max_blocks.unwrap_or(u64::MAX));
-        if range.is_empty() {
-            return Ok(UnwindOutput {
-                checkpoint: input.checkpoint.with_block_number(input.unwind_to),
-            })
-        }
-
-        self.ensure_consistency(provider, input.checkpoint.block_number, Some(unwind_to))?;
-
-        // Unwind account and storage changesets, as well as receipts.
-        //
-        // This also updates `PlainStorageState` and `PlainAccountState`.
-        let bundle_state_with_receipts =
-            provider.take_state_above(unwind_to, StorageLocation::Both)?;
-
-        // Prepare the input for post unwind commit hook, where an `ExExNotification` will be sent.
-        if self.exex_manager_handle.has_exexs() {
-            // Get the blocks for the unwound range.
-            let blocks = provider.recovered_block_range(range.clone())?;
-            let previous_input = self.post_unwind_commit_input.replace(Chain::new(
-                blocks,
-                bundle_state_with_receipts,
-                None,
-            ));
-
-            debug_assert!(
-                previous_input.is_none(),
-                "Previous post unwind commit input wasn't processed"
-            );
-            if let Some(previous_input) = previous_input {
-                tracing::debug!(target: "sync::stages::execution", ?previous_input, "Previous post unwind commit input wasn't processed");
-            }
-        }
-
-        // Update the checkpoint.
-        let mut stage_checkpoint = input.checkpoint.execution_stage_checkpoint();
-        if let Some(stage_checkpoint) = stage_checkpoint.as_mut() {
-            for block_number in range {
-                stage_checkpoint.progress.processed -= provider
-                    .block_by_number(block_number)?
-                    .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?
-                    .header()
-                    .gas_used();
-            }
-        }
-        let checkpoint = if let Some(stage_checkpoint) = stage_checkpoint {
-            StageCheckpoint::new(unwind_to).with_execution_stage_checkpoint(stage_checkpoint)
-        } else {
-            StageCheckpoint::new(unwind_to)
-        };
-
-        Ok(UnwindOutput { checkpoint })
-    }
-
-    fn post_unwind_commit(&mut self) -> Result<(), StageError> {
-        let Some(chain) = self.post_unwind_commit_input.take() else { return Ok(()) };
-
-        // NOTE: We can ignore the error here, since an error means that the channel is closed,
-        // which means the manager has died, which then in turn means the node is shutting down.
-        let _ = self.exex_manager_handle.send(
-            ExExNotificationSource::Pipeline,
-            ExExNotification::ChainReverted { old: Arc::new(chain) },
-        );
-
-        Ok(())
-    }
-}
-
-impl<E> ExecutionStage<E>
-where
-    E: ConfigureEvm,
-{
-    fn execute_inner<Provider>(
-        &mut self,
-        provider: &Provider,
-        factory: Option<&dyn LatestStateProviderFactory>,
-        input: ExecInput,
-    ) -> Result<ExecOutput, StageError>
-    where
-        Provider: DBProvider
-            + BlockReader<
-                Block = <E::Primitives as NodePrimitives>::Block,
-                Header = <E::Primitives as NodePrimitives>::BlockHeader,
-            > + StaticFileProviderFactory
-            + StatsReader
-            + BlockHashReader
-            + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
-            + StateCommitmentProvider,
-    {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
         }
@@ -412,12 +296,9 @@ where
 
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
-        let db: Box<dyn StateProvider> = if let Some(factory) = factory {
-            Box::new(factory.latest(STATE_PROVIDER_OPTS.clone())?)
-        } else {
-            Box::new(LatestStateProviderRef::new(provider))
-        };
-        let mut executor = self.evm_config.parallel_executor(StateProviderDatabase(db));
+        let provider_ro = provider_ro()?;
+        let db = StateProviderDatabase(LatestStateProviderRef::new(&provider_ro));
+        let mut executor = self.evm_config.parallel_executor(db);
 
         // Progress tracking
         let mut stage_progress = start_block;
@@ -522,7 +403,7 @@ where
         let write_preparation_duration = time.elapsed();
 
         // log the gas per second for the range we just executed
-        info!(
+        debug!(
             target: "sync::stages::execution",
             start = start_block,
             end = stage_progress,
@@ -593,6 +474,94 @@ where
                 .with_execution_stage_checkpoint(stage_checkpoint),
             done,
         })
+    }
+
+    fn post_execute_commit(&mut self) -> Result<(), StageError> {
+        let Some(chain) = self.post_execute_commit_input.take() else { return Ok(()) };
+
+        // NOTE: We can ignore the error here, since an error means that the channel is closed,
+        // which means the manager has died, which then in turn means the node is shutting down.
+        let _ = self.exex_manager_handle.send(
+            ExExNotificationSource::Pipeline,
+            ExExNotification::ChainCommitted { new: Arc::new(chain) },
+        );
+
+        Ok(())
+    }
+
+    /// Unwind the stage.
+    fn unwind(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: UnwindInput,
+    ) -> Result<UnwindOutput, StageError> {
+        let (range, unwind_to, _) =
+            input.unwind_block_range_with_threshold(self.thresholds.max_blocks.unwrap_or(u64::MAX));
+        if range.is_empty() {
+            return Ok(UnwindOutput {
+                checkpoint: input.checkpoint.with_block_number(input.unwind_to),
+            })
+        }
+
+        self.ensure_consistency(provider, input.checkpoint.block_number, Some(unwind_to))?;
+
+        // Unwind account and storage changesets, as well as receipts.
+        //
+        // This also updates `PlainStorageState` and `PlainAccountState`.
+        let bundle_state_with_receipts =
+            provider.take_state_above(unwind_to, StorageLocation::Both)?;
+
+        // Prepare the input for post unwind commit hook, where an `ExExNotification` will be sent.
+        if self.exex_manager_handle.has_exexs() {
+            // Get the blocks for the unwound range.
+            let blocks = provider.recovered_block_range(range.clone())?;
+            let previous_input = self.post_unwind_commit_input.replace(Chain::new(
+                blocks,
+                bundle_state_with_receipts,
+                None,
+            ));
+
+            debug_assert!(
+                previous_input.is_none(),
+                "Previous post unwind commit input wasn't processed"
+            );
+            if let Some(previous_input) = previous_input {
+                tracing::debug!(target: "sync::stages::execution", ?previous_input, "Previous post unwind commit input wasn't processed");
+            }
+        }
+
+        // Update the checkpoint.
+        let mut stage_checkpoint = input.checkpoint.execution_stage_checkpoint();
+        if let Some(stage_checkpoint) = stage_checkpoint.as_mut() {
+            for block_number in range {
+                stage_checkpoint.progress.processed -= provider
+                    .block_by_number(block_number)?
+                    .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?
+                    .header()
+                    .gas_used();
+            }
+        }
+        let checkpoint = if let Some(stage_checkpoint) = stage_checkpoint {
+            StageCheckpoint::new(unwind_to).with_execution_stage_checkpoint(stage_checkpoint)
+        } else {
+            StageCheckpoint::new(unwind_to)
+        };
+
+        Ok(UnwindOutput { checkpoint })
+    }
+
+    fn post_unwind_commit(&mut self) -> Result<(), StageError> {
+        let Some(chain) = self.post_unwind_commit_input.take() else { return Ok(()) };
+
+        // NOTE: We can ignore the error here, since an error means that the channel is closed,
+        // which means the manager has died, which then in turn means the node is shutting down.
+        let _ = self.exex_manager_handle.send(
+            ExExNotificationSource::Pipeline,
+            ExExNotification::ChainReverted { old: Arc::new(chain) },
+        );
+
+        Ok(())
     }
 }
 
@@ -691,7 +660,7 @@ fn calculate_gas_used_from_headers<N: NodePrimitives>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::TestStageDB;
+    use crate::{stages::MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD, test_utils::TestStageDB};
     use alloy_primitives::{address, hex_literal::hex, keccak256, Address, B256, U256};
     use alloy_rlp::Decodable;
     use assert_matches::assert_matches;
@@ -728,7 +697,7 @@ mod tests {
                 max_cumulative_gas: None,
                 max_duration: None,
             },
-            MERKLE_STAGE_DEFAULT_CLEAN_THRESHOLD,
+            MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD,
             ExExManagerHandle::empty(),
         )
     }
@@ -945,7 +914,16 @@ mod tests {
             let mut execution_stage = stage();
             provider.set_prune_modes(mode.clone().unwrap_or_default());
 
-            let output = execution_stage.execute(&provider, input).unwrap();
+            let output = execution_stage
+                .execute(
+                    &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
+                    input,
+                )
+                .unwrap();
             provider.commit().unwrap();
 
             assert_matches!(output, ExecOutput {
@@ -1008,6 +986,10 @@ mod tests {
             let _result = stage
                 .unwind(
                     &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
                     UnwindInput { checkpoint: output.checkpoint, unwind_to: 0, bad_block: None },
                 )
                 .unwrap();
@@ -1060,7 +1042,6 @@ mod tests {
         provider.commit().unwrap();
 
         // execute
-        let mut provider = factory.database_provider_rw().unwrap();
 
         // If there is a pruning configuration, then it's forced to use the database.
         // This way we test both cases.
@@ -1079,9 +1060,19 @@ mod tests {
 
             // Test Execution
             let mut execution_stage = stage();
+            let mut provider = factory.database_provider_rw().unwrap();
             provider.set_prune_modes(mode.clone().unwrap_or_default());
 
-            let result = execution_stage.execute(&provider, input).unwrap();
+            let result = execution_stage
+                .execute(
+                    &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
+                    input,
+                )
+                .unwrap();
             provider.commit().unwrap();
 
             // Test Unwind
@@ -1092,6 +1083,10 @@ mod tests {
             let result = stage
                 .unwind(
                     &provider,
+                    Box::new({
+                        let factory = factory.clone();
+                        move || factory.database_provider_ro()
+                    }),
                     UnwindInput { checkpoint: result.checkpoint, unwind_to: 0, bad_block: None },
                 )
                 .unwrap();
@@ -1120,6 +1115,7 @@ mod tests {
             assert!(matches!(provider.basic_account(&miner_acc), Ok(None)));
 
             assert!(matches!(provider.receipt(0), Ok(None)));
+            provider.commit().unwrap();
         }
     }
 
@@ -1195,7 +1191,16 @@ mod tests {
         // execute
         let provider = test_db.factory.database_provider_rw().unwrap();
         let mut execution_stage = stage();
-        let _ = execution_stage.execute(&provider, input).unwrap();
+        let _ = execution_stage
+            .execute(
+                &provider,
+                Box::new({
+                    let factory = test_db.factory.clone();
+                    move || factory.database_provider_ro()
+                }),
+                input,
+            )
+            .unwrap();
         provider.commit().unwrap();
 
         // assert unwind stage

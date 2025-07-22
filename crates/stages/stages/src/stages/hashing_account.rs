@@ -132,7 +132,7 @@ impl Default for AccountHashingStage {
     }
 }
 
-impl<Provider> Stage<Provider> for AccountHashingStage
+impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for AccountHashingStage
 where
     Provider: DBProvider<Tx: DbTxMut> + HashingWriter + AccountExtReader + StatsReader,
 {
@@ -142,7 +142,12 @@ where
     }
 
     /// Execute the stage.
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
+    fn execute(
+        &mut self,
+        provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
         }
@@ -232,6 +237,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
+        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_progress, _) =

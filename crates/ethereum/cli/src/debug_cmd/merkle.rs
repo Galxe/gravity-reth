@@ -18,7 +18,7 @@ use reth_network_api::NetworkInfo;
 use reth_network_p2p::full_block::FullBlockClient;
 use reth_node_api::{BlockTy, NodePrimitives};
 use reth_node_core::{args::NetworkArgs, utils::get_single_header};
-use reth_node_ethereum::{consensus::EthBeaconConsensus, EthExecutorProvider};
+use reth_node_ethereum::{consensus::EthBeaconConsensus, EthEvmConfig};
 use reth_provider::{
     providers::ProviderNodeTypes, BlockNumReader, BlockWriter, ChainSpecProvider,
     DatabaseProviderFactory, LatestStateProviderRef, OriginalValuesKnown, ProviderFactory,
@@ -109,7 +109,7 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
             )
             .await?;
 
-        let executor_provider = EthExecutorProvider::ethereum(provider_factory.chain_spec());
+        let executor_provider = EthEvmConfig::ethereum(provider_factory.chain_spec());
 
         // Initialize the fetch client
         info!(target: "reth::cli", target_block_number = self.to, "Downloading tip of block range");
@@ -174,20 +174,38 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
 
             let mut account_hashing_done = false;
             while !account_hashing_done {
-                let output = account_hashing_stage
-                    .execute(&provider_rw, ExecInput { target: Some(block_number), checkpoint })?;
+                let output = account_hashing_stage.execute(
+                    &provider_rw,
+                    Box::new({
+                        let provider_factory = provider_factory.clone();
+                        move || provider_factory.database_provider_ro()
+                    }),
+                    ExecInput { target: Some(block_number), checkpoint },
+                )?;
                 account_hashing_done = output.done;
             }
 
             let mut storage_hashing_done = false;
             while !storage_hashing_done {
-                let output = storage_hashing_stage
-                    .execute(&provider_rw, ExecInput { target: Some(block_number), checkpoint })?;
+                let output = storage_hashing_stage.execute(
+                    &provider_rw,
+                    Box::new({
+                        let provider_factory = provider_factory.clone();
+                        move || provider_factory.database_provider_ro()
+                    }),
+                    ExecInput { target: Some(block_number), checkpoint },
+                )?;
                 storage_hashing_done = output.done;
             }
 
-            let incremental_result = merkle_stage
-                .execute(&provider_rw, ExecInput { target: Some(block_number), checkpoint });
+            let incremental_result = merkle_stage.execute(
+                &provider_rw,
+                Box::new({
+                    let provider_factory = provider_factory.clone();
+                    move || provider_factory.database_provider_ro()
+                }),
+                ExecInput { target: Some(block_number), checkpoint },
+            );
 
             if incremental_result.is_ok() {
                 debug!(target: "reth::cli", block_number, "Successfully computed incremental root");
@@ -209,7 +227,14 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
             let clean_input = ExecInput { target: Some(sealed_block.number), checkpoint: None };
             loop {
                 let clean_result = merkle_stage
-                    .execute(&provider_rw, clean_input)
+                    .execute(
+                        &provider_rw,
+                        Box::new({
+                            let provider_factory = provider_factory.clone();
+                            move || provider_factory.database_provider_ro()
+                        }),
+                        clean_input,
+                    )
                     .map_err(|e| eyre::eyre!("Clean state root calculation failed: {}", e))?;
                 if clean_result.done {
                     break;

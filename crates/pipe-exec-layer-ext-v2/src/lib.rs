@@ -27,9 +27,7 @@ use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
 };
-use reth_provider::{
-    OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE, STATE_PROVIDER_OPTS,
-};
+use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
 use std::{
     any::Any,
     collections::BTreeMap,
@@ -461,7 +459,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let block_id = block.id();
         let parent_id = block.parent_id();
         let block_number = block.number();
-        let state = self.storage.get_state_view(STATE_PROVIDER_OPTS.clone()).unwrap();
+        let state = self.storage.get_state_view().unwrap();
 
         let (block, txs_info) = match block {
             ReceivedBlock::OrderedBlock(ordered_block) => {
