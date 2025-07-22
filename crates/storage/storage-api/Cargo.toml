@@ -82,6 +82,8 @@ serde = [
     "alloy-primitives/serde",
     "alloy-consensus/serde",
     "alloy-rpc-types-engine/serde",
+    "dashmap/serde",
+    "revm-bytecode/serde",
 ]
 
 serde-bincode-compat = [
