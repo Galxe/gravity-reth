@@ -728,7 +728,14 @@ where
         let notify = buffer.event.clone();
         drop(buffer);
         notify.notified().await;
-        self.add_txn_res.remove(&hash).unwrap().1
+        let res = self.add_txn_res.remove(&hash);
+        if let Some(res) = res {
+            res.1
+        } else if self.pool.read().contains(&hash) {
+            Ok(hash)
+        } else {
+            Err(PoolError::new(hash, PoolErrorKind::DiscardedOnInsert))
+        }
     }
 
     /// Adds all transactions in the iterator to the pool, returning a list of results.
