@@ -331,10 +331,10 @@ the experimental setup, end-to-end performance results, scalability analysis, an
   - **CPU:** 16 vCPUs, 2.3 GHz
   - **Memory:** 32 GB
   - **Disk:** 1 TB SSD (200 MB/s max throughput, 30,000 max IOPS)
-- **Benchmark Tool:** We used a custom, high-performance transaction generator, `txgen`, to create sustained transaction
-  loads for two primary workloads:
+- **Benchmark Tool:** We used a custom, high-performance transaction generator, `gravity_bench`, to create sustained
+  transaction loads for two primary workloads:
   - **Reproducibility:** The benchmark suite and instructions are open-source and available at
-    [`https://github.com/Galxe/txgen/`](https://github.com/Galxe/txgen)
+    [`https://github.com/Galxe/gravity_bench`](https://github.com/Galxe/gravity_bench)
     - **ERC20 Transfers:** A simple, high-throughput workload.
     - **Uniswap V2 Swaps:** A more complex workload with higher gas costs, execution complexity and different pattern of
       state contention.
