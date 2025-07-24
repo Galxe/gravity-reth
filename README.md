@@ -1,16 +1,43 @@
-# Gravity reth
+# Gravity Reth: The Fastest Open-Source EVM Execution Client
 
-This is a fork of [reth](https://github.com/paradigmxyz/reth) with some performance optimizations.
-We aim to contribute to the Reth project with the shared goal of making the open-source EVM faster. Ideally, we will upstream our optimizations to Reth, retaining only those changes that are highly specific to Gravity and not broadly applicable.
+For EVM-based ecosystems, the execution client is a critical component of the system stack, often representing a
+significant performance bottleneck that limits on-chain throughput and raises transaction costs. While modern clients
+like Reth have made substantial strides in performance, their architectures are **not** primarily optimized for
+high-performance Layer 1s and Layer 2 roll-ups, which target **sub-second finality and massive scalability**, require a
+fundamental rethinking of client design to overcome bottlenecks in transaction execution, state commitment, and
+expensive I/O.
 
-Gravity reth demonstrates significant performance improvements over vanilla reth through multiple optimizations. Our benchmarks show **2.5x-6x+ performance improvement** compared to native Reth 1.4.8, depending on the workload, e.g. the number of accounts and contract complexity.
-Please refer to [this document](./docs/benchmark/gravity-reth-063025.md) to learn more about our recent performance optimization benchmarks.
+We introduce Gravity Reth, an open-source, performance-engineered fork of Reth, designed to push the upper bounds of EVM
+execution speed. Through a suite of architectural innovations—including Grevm, a DAG-based optimistic parallel EVM; a
+**fully parallelized merklization** framework, a **high-performance caching** layer, an **optimized mempool,** and **a
+pipelined execution architecture**—Gravity Reth achieves state-of-the-art performance.
 
 ![](./assets/erc20-transfer-test.png)
 _ERC20 Transfer Performance Comparison Across Different Account Scales_
 
+In an ERC20 transfers benchmark across 100,000 accounts, Gravity Reth sustains ~**41,000 transactions per second (TPS)**, equivalent to ~**1.5 Gigagas/s**. This represents a greater than **4x performance boost** over the baseline `Reth 1.4.8` client.
+
+Our primary contributions are:
+
+1. **Grevm 2.1:** A hybrid parallel EVM that integrates a Data Dependency Directed Acyclic Graph (DAG) with
+   Block-STM-style optimistic execution. This design minimizes redundant computations in high-contention workloads and
+   achieves near-optimal parallelism in low-contention scenarios.
+2. **Parallel Merklization:** A complete redesign of the state root calculation process. We replace Reth's sequential,
+   bottom-up MPT generation with a 16-way, top-down parallel framework that delivers a 3-10x performance increase.
+3. **Gravity Cache:** A concurrent, LRU-based caching layer built with `DashMap` that provides an efficient "latest
+   view" of the state, drastically reducing I/O pressure and resolving performance degradation associated with managing
+   numerous in-memory blocks in high-frequency environments.
+4. **Optimized Memory Pool:** A two-tier data structure and batch processing mechanism for highly concurrent transaction
+   insertion and management.
+5. **Pipeline Architecture:** A four-stage asynchronous pipeline (Execution, Merklization, Verification, Commit) that
+   decouples execution stages, allowing Gravity Reth to effectively overlap computation and I/O and fully leverage
+   multi-core processors to service rapid block production from high-throughput consensus engines.
+
+We believe Gravity Reth represents the fastest open-source EVM execution client to date, the state-of-the-art choice for EVM chains, including Layer 1s and Layer 2 roll-ups. Our work is fundamentally open-source. We have already upstream all memory pool optimizations to the main Reth repository and are committed to continue this effort, making EVM ecosystem faster and more scalable.
+
 Related links:
 
+-   [Gravity Reth Technical Report](https://docs.gravity.xyz/research/greth)
 -   [About Gravity Chain Architecture](https://docs.gravity.xyz/research/litepaper)
 -   [Grevm2 Technical Report](https://docs.gravity.xyz/research/grevm2)
 
