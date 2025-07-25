@@ -9,15 +9,13 @@ use reth_db_api::{
 use reth_primitives_traits::{GotExpected, SealedHeader};
 use reth_provider::{
     DBProvider, HeaderProvider, ProviderError, StageCheckpointReader, StageCheckpointWriter,
-    StatsReader, TrieWriter,
+    StatsReader, TrieWriter, TrieWriterV2, EXECUTION_MERKLE_CHANNEL,
 };
 use reth_stages_api::{
-    BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
-    StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
+    BlockErrorKind, BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput,
+    MerkleCheckpoint, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
-use reth_storage_errors::ProviderResult;
-use reth_trie::{IntermediateStateRootState, StateRoot, StateRootProgress, StoredSubNode};
-use reth_trie_db::DatabaseStateRoot;
+use reth_trie_parallel::nested_hash::NestedStateRoot;
 use std::fmt::Debug;
 use tracing::*;
 
@@ -157,10 +155,12 @@ impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for MerkleStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + TrieWriter
+        + TrieWriterV2
         + StatsReader
         + HeaderProvider
         + StageCheckpointReader
         + StageCheckpointWriter,
+    ProviderRO: DBProvider,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -176,22 +176,13 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
-        let (threshold, incremental_threshold) = match self {
-            Self::Unwind => {
-                info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
-                return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
-            }
-            Self::Execution { rebuild_threshold, incremental_threshold } => {
-                (*rebuild_threshold, *incremental_threshold)
-            }
-            #[cfg(any(test, feature = "test-utils"))]
-            Self::Both { rebuild_threshold, incremental_threshold } => {
-                (*rebuild_threshold, *incremental_threshold)
-            }
-        };
+        if let Self::Unwind = self {
+            info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
+            return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
+        }
 
         let range = input.next_block_range();
         let (from_block, to_block) = range.clone().into_inner();
@@ -202,111 +193,20 @@ where
             .ok_or_else(|| ProviderError::HeaderNotFound(to_block.into()))?;
         let target_block_root = target_block.state_root();
 
-        let mut checkpoint = self.get_execution_checkpoint(provider)?;
         let (trie_root, entities_checkpoint) = if range.is_empty() {
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
-        } else if to_block - from_block > threshold || from_block == 1 {
-            // if there are more blocks than threshold it is faster to rebuild the trie
-            let mut entities_checkpoint = if let Some(checkpoint) =
-                checkpoint.as_ref().filter(|c| c.target_block == to_block)
-            {
-                debug!(
-                    target: "sync::stages::merkle::exec",
-                    current = ?current_block_number,
-                    target = ?to_block,
-                    last_account_key = ?checkpoint.last_account_key,
-                    "Continuing inner merkle checkpoint"
-                );
-
-                input.checkpoint().entities_stage_checkpoint()
-            } else {
-                debug!(
-                    target: "sync::stages::merkle::exec",
-                    current = ?current_block_number,
-                    target = ?to_block,
-                    previous_checkpoint = ?checkpoint,
-                    "Rebuilding trie"
-                );
-                // Reset the checkpoint and clear trie tables
-                checkpoint = None;
-                self.save_execution_checkpoint(provider, None)?;
-                provider.tx_ref().clear::<tables::AccountsTrie>()?;
-                provider.tx_ref().clear::<tables::StoragesTrie>()?;
-
-                None
-            }
-            .unwrap_or(EntitiesCheckpoint {
-                processed: 0,
-                total: (provider.count_entries::<tables::HashedAccounts>()? +
-                    provider.count_entries::<tables::HashedStorages>()?)
-                    as u64,
-            });
-
-            let tx = provider.tx_ref();
-            let progress = StateRoot::from_tx(tx)
-                .with_intermediate_state(checkpoint.map(IntermediateStateRootState::from))
-                .root_with_progress()
-                .map_err(|e| {
-                    error!(target: "sync::stages::merkle", %e, ?current_block_number, ?to_block, "State root with progress failed! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
-                    StageError::Fatal(Box::new(e))
-                })?;
-            match progress {
-                StateRootProgress::Progress(state, hashed_entries_walked, updates) => {
-                    provider.write_trie_updates(&updates)?;
-
-                    let checkpoint = MerkleCheckpoint::new(
-                        to_block,
-                        state.last_account_key,
-                        state.walker_stack.into_iter().map(StoredSubNode::from).collect(),
-                        state.hash_builder.into(),
-                    );
-                    self.save_execution_checkpoint(provider, Some(checkpoint))?;
-
-                    entities_checkpoint.processed += hashed_entries_walked as u64;
-
-                    return Ok(ExecOutput {
-                        checkpoint: input
-                            .checkpoint()
-                            .with_entities_stage_checkpoint(entities_checkpoint),
-                        done: false,
-                    })
-                }
-                StateRootProgress::Complete(root, hashed_entries_walked, updates) => {
-                    provider.write_trie_updates(&updates)?;
-
-                    entities_checkpoint.processed += hashed_entries_walked as u64;
-
-                    (root, entities_checkpoint)
-                }
-            }
         } else {
             debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
-            let mut final_root = None;
-            for start_block in range.step_by(incremental_threshold as usize) {
-                let chunk_to = std::cmp::min(start_block + incremental_threshold, to_block);
-                let chunk_range = start_block..=chunk_to;
-                debug!(
-                    target: "sync::stages::merkle::exec",
-                    current = ?current_block_number,
-                    target = ?to_block,
-                    incremental_threshold,
-                    chunk_range = ?chunk_range,
-                    "Processing chunk"
-                );
-                let (root, updates) =
-                StateRoot::incremental_root_with_updates(provider.tx_ref(), chunk_range)
-                    .map_err(|e| {
-                        error!(target: "sync::stages::merkle", %e, ?current_block_number, ?to_block, "Incremental state root failed! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
-                        StageError::Fatal(Box::new(e))
-                    })?;
-                provider.write_trie_updates(&updates)?;
-                final_root = Some(root);
-            }
-
-            // if we had no final root, we must have not looped above, which should not be possible
-            let final_root = final_root.ok_or(StageError::Fatal(
-                "Incremental merkle hashing did not produce a final root".into(),
-            ))?;
+            // Use optimized nested hash algorithm for state root calculation
+            let nested_state_root = NestedStateRoot::new(
+                || provider_ro().map(|db| db.into_tx()),
+                None, // No cache for history sync
+            );
+            // Read the hashed state from database for the specified range
+            let hashed_state = EXECUTION_MERKLE_CHANNEL.consume(from_block);
+            let (final_root, trie_updates_v2, _compatible_updates) =
+                nested_state_root.calculate(&hashed_state, false)?;
+            provider.write_trie_updatesv2(&trie_updates_v2)?;
 
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
                 provider.count_entries::<tables::HashedStorages>()?)
@@ -339,7 +239,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let tx = provider.tx_ref();
@@ -357,8 +257,8 @@ where
             });
 
         if input.unwind_to == 0 {
-            tx.clear::<tables::AccountsTrie>()?;
-            tx.clear::<tables::StoragesTrie>()?;
+            tx.clear::<tables::AccountsTrieV2>()?;
+            tx.clear::<tables::StoragesTrieV2>()?;
 
             entities_checkpoint.processed = 0;
 
@@ -372,8 +272,14 @@ where
         if range.is_empty() {
             info!(target: "sync::stages::merkle::unwind", "Nothing to unwind");
         } else {
-            let (block_root, updates) = StateRoot::incremental_root_with_updates(tx, range)
-                .map_err(|e| StageError::Fatal(Box::new(e)))?;
+            // Use optimized nested hash algorithm for state root calculation
+            // TODO(gaoxin): `read_hashed_state` returns wrong `HashedPostState`, so merkle state is
+            // unwond incorrectly
+            let nested_state_root =
+                NestedStateRoot::new(|| provider_ro().map(|db| db.into_tx()), None);
+            let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
+            let (block_root, trie_updates_v2, _compatible_updates) =
+                nested_state_root.calculate(&hashed_state, false)?;
 
             // Validate the calculated state root
             let target = provider
@@ -383,7 +289,7 @@ where
             validate_state_root(block_root, SealedHeader::seal_slow(target), input.unwind_to)?;
 
             // Validation passed, apply unwind changes to the database.
-            provider.write_trie_updates(&updates)?;
+            provider.write_trie_updatesv2(&trie_updates_v2)?;
 
             // TODO(alexey): update entities checkpoint
         }

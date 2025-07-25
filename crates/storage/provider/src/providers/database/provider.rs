@@ -2307,7 +2307,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 }
 
 impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvider<TX, N> {
-    fn write(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
+    fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
         let mut num_updated = 0;
         let tx = self.tx_ref();
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;

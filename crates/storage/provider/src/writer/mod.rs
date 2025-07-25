@@ -187,7 +187,7 @@ where
             self.database().write_trie_updates(
                 trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
             )?;
-            let _ = self.database().write(triev2.as_ref())?;
+            let _ = self.database().write_trie_updatesv2(triev2.as_ref())?;
             PERSIST_BLOCK_CACHE.persist_tip(block_number);
         }
 

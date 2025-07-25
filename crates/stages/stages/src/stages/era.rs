@@ -13,9 +13,11 @@ use reth_provider::{
     BlockReader, BlockWriter, DBProvider, HeaderProvider, StageCheckpointWriter,
     StaticFileProviderFactory, StaticFileWriter,
 };
-use reth_stages_api::{ExecInput, ExecOutput, Stage, StageError, UnwindInput, UnwindOutput};
+use reth_stages_api::{
+    BoxedConcurrentProvider, ExecInput, ExecOutput, Stage, StageError, UnwindInput, UnwindOutput,
+};
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_errors::{ProviderError, ProviderResult};
+use reth_storage_errors::ProviderError;
 use std::{
     fmt::{Debug, Formatter},
     iter,
@@ -171,7 +173,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         let height = if let Some(era) = self.item.take() {
@@ -227,7 +229,7 @@ where
     fn unwind(
         &mut self,
         _provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         Ok(UnwindOutput { checkpoint: input.checkpoint.with_block_number(input.unwind_to) })

@@ -10,7 +10,7 @@ use metrics_derive::Metrics;
 use once_cell::sync::Lazy;
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use reth_primitives_traits::Account;
-use reth_trie_common::{nested_trie::Node, updates::TrieUpdatesV2, Nibbles};
+use reth_trie_common::{nested_trie::Node, updates::TrieUpdatesV2, HashedPostState, Nibbles};
 use revm_bytecode::Bytecode;
 use revm_database::{states::StorageSlot, BundleAccount, OriginalValuesKnown};
 use std::{
@@ -572,3 +572,29 @@ impl PersistBlockCache {
         });
     }
 }
+
+/// Stage Data channel that from execution to merkle stage
+#[derive(Clone, Debug, Default)]
+pub struct ExecutionMerkleChannel {
+    data: Arc<Mutex<Option<(u64, HashedPostState)>>>,
+}
+
+impl ExecutionMerkleChannel {
+    /// send data to merkle stage
+    pub fn send(&self, block_number: u64, hashed_state: HashedPostState) {
+        let mut data = self.data.lock().unwrap();
+        assert!(data.is_none());
+        *data = Some((block_number, hashed_state));
+    }
+
+    /// consume data in merkle stage
+    pub fn consume(&self, block_number: u64) -> HashedPostState {
+        let data = self.data.lock().unwrap().take().unwrap();
+        assert_eq!(data.0, block_number);
+        data.1
+    }
+}
+
+/// Single instance of `ExecutionMerkleChannel`
+pub static EXECUTION_MERKLE_CHANNEL: Lazy<ExecutionMerkleChannel> =
+    Lazy::new(ExecutionMerkleChannel::default);

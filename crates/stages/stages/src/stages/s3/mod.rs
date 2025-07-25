@@ -10,10 +10,10 @@ use reth_provider::{
     DBProvider, StageCheckpointReader, StageCheckpointWriter, StaticFileProviderFactory,
 };
 use reth_stages_api::{
-    ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
+    BoxedConcurrentProvider, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
+    UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_errors::ProviderResult;
 use std::{
     path::PathBuf,
     task::{ready, Context, Poll},
@@ -91,7 +91,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError>
     where
@@ -125,7 +125,7 @@ where
     fn unwind(
         &mut self,
         _provider: &Provider,
-        _provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         // TODO

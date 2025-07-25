@@ -8,9 +8,9 @@ use reth_prune::{
     PruneMode, PruneModes, PruneSegment, PrunerBuilder, SegmentOutput, SegmentOutputCheckpoint,
 };
 use reth_stages_api::{
-    ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
+    BoxedConcurrentProvider, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
+    UnwindInput, UnwindOutput,
 };
-use reth_storage_errors::ProviderResult;
 use tracing::info;
 
 /// The prune stage that runs the pruner with the provided prune modes.
@@ -52,7 +52,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         let mut pruner = PrunerBuilder::default()
@@ -101,7 +101,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         // We cannot recover the data that was pruned in `execute`, so we just update the
@@ -147,7 +147,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         let mut result = self.0.execute(provider, provider_ro, input)?;
@@ -169,7 +169,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         self.0.unwind(provider, provider_ro, input)

@@ -24,9 +24,10 @@ use reth_stages_api::{
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_errors::{provider::ProviderError, ProviderResult};
+use reth_storage_errors::provider::ProviderError;
 use std::task::{ready, Context, Poll};
 
+use reth_stages_api::BoxedConcurrentProvider;
 use tokio::sync::watch;
 use tracing::*;
 
@@ -286,7 +287,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         let current_checkpoint = input.checkpoint();
@@ -335,7 +336,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         self.sync_gap.take();
