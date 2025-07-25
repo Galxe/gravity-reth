@@ -444,6 +444,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             ordered_block.transactions,
             ordered_block.senders,
             evm_env.block_env.basefee,
+            block.gas_limit,
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
 
@@ -546,8 +547,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         txs: Vec<TransactionSigned>,
         senders: Vec<Address>,
         base_fee_per_gas: u64,
+        gas_limit: u64,
     ) -> (Vec<TransactionSigned>, Vec<Address>, Vec<TxInfo>) {
-        let invalid_idxs = filter_invalid_txs(db, &txs, &senders, base_fee_per_gas);
+        let invalid_idxs = filter_invalid_txs(db, &txs, &senders, base_fee_per_gas, gas_limit);
         if invalid_idxs.is_empty() {
             let mut txs_info = Vec::with_capacity(txs.len());
             for (tx, sender) in txs.iter().zip(senders.iter()) {
@@ -598,6 +600,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
     txs: &[TransactionSigned],
     senders: &[Address],
     base_fee_per_gas: u64,
+    gas_limit: u64,
 ) -> HashSet<usize> {
     let mut sender_idx: HashMap<&Address, Vec<usize>> = HashMap::default();
     for (i, sender) in senders.iter().enumerate() {
@@ -633,7 +636,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
         true
     };
 
-    sender_idx
+    let mut invalid_tx_idxs = sender_idx
         .into_par_iter()
         .flat_map(|(sender, idxs)| {
             if let Some(mut account) = db.basic_ref(*sender).unwrap() {
@@ -650,7 +653,24 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
                 idxs
             }
         })
-        .collect::<HashSet<_>>()
+        .collect::<HashSet<_>>();
+
+    let mut accumulated_gas_limit = 0;
+    let mut gas_limit_exceeded_tx_idxs = HashSet::new();
+    for (idx, tx) in txs.iter().enumerate() {
+        if invalid_tx_idxs.contains(&idx) {
+            continue;
+        }
+
+        let next_gas_limit = accumulated_gas_limit + tx.gas_limit();
+        if next_gas_limit > gas_limit {
+            gas_limit_exceeded_tx_idxs.insert(idx);
+        } else {
+            accumulated_gas_limit = next_gas_limit;
+        }
+    }
+    invalid_tx_idxs.extend(gas_limit_exceeded_tx_idxs);
+    invalid_tx_idxs
 }
 
 /// Called by Coordinator
