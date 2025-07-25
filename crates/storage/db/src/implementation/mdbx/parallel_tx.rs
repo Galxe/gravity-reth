@@ -78,7 +78,7 @@ impl ParallelTxRO {
             }
             Err(e) => {
                 self.inner.lock().unwrap().num_txs -= 1;
-                return Err(e);
+                Err(e)
             }
         }
     }
@@ -116,16 +116,14 @@ impl ParallelTxRO {
                     self.tx_held_count.fetch_add(1, Ordering::AcqRel);
                     return f(FIRST_TX_INDEX, &self.tx);
                 }
+            } else if num_txs < self.max_txs {
+                // Create a new tx and add it to the inner txs
+                self.create_aux_tx(inner)?
             } else {
-                if num_txs < self.max_txs {
-                    // Create a new tx and add it to the inner txs
-                    self.create_aux_tx(inner)?
-                } else {
-                    // Use the first tx.
-                    drop(inner);
-                    self.tx_held_count.fetch_add(1, Ordering::AcqRel);
-                    return f(FIRST_TX_INDEX, &self.tx);
-                }
+                // Use the first tx.
+                drop(inner);
+                self.tx_held_count.fetch_add(1, Ordering::AcqRel);
+                return f(FIRST_TX_INDEX, &self.tx);
             }
         };
 

@@ -1,5 +1,7 @@
 //! Cursor wrapper for libmdbx-sys.
 
+#![allow(clippy::type_complexity)]
+
 use super::utils::*;
 use crate::{
     metrics::{DatabaseEnvMetrics, Operation},
