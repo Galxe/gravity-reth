@@ -9,6 +9,9 @@ use std::{
     task::{Context, Poll},
 };
 
+/// Support to create concurrent reader
+pub type BoxedConcurrentProvider<P> = Box<dyn Fn() -> ProviderResult<P> + Send + Sync>;
+
 /// Stage execution input, see [`Stage::execute`].
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct ExecInput {
@@ -240,7 +243,7 @@ pub trait Stage<Provider, ProviderRO>: Send + Sync {
     fn execute(
         &mut self,
         provider: &Provider,
-        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError>;
 
@@ -257,7 +260,7 @@ pub trait Stage<Provider, ProviderRO>: Send + Sync {
     fn unwind(
         &mut self,
         provider: &Provider,
-        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError>;
 

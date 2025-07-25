@@ -144,5 +144,5 @@ pub trait StorageTrieWriter: Send + Sync {
 /// Trie writer for nested trie
 pub trait TrieWriterV2 {
     /// Write trie updates for nested trie
-    fn write(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError>;
+    fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError>;
 }

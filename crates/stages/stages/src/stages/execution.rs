@@ -14,15 +14,16 @@ use reth_provider::{
     BlockHashReader, BlockReader, DBProvider, ExecutionOutcome, HeaderProvider,
     LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateCommitmentProvider,
     StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation, TransactionVariant,
+    EXECUTION_MERKLE_CHANNEL,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
-    BlockErrorKind, CheckpointBlockRange, EntitiesCheckpoint, ExecInput, ExecOutput,
-    ExecutionCheckpoint, ExecutionStageThresholds, Stage, StageCheckpoint, StageError, StageId,
-    UnwindInput, UnwindOutput,
+    BlockErrorKind, BoxedConcurrentProvider, CheckpointBlockRange, EntitiesCheckpoint, ExecInput,
+    ExecOutput, ExecutionCheckpoint, ExecutionStageThresholds, Stage, StageCheckpoint, StageError,
+    StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_errors::ProviderResult;
+use reth_trie::{HashedPostState, KeccakKeyHasher};
 use std::{
     cmp::Ordering,
     ops::RangeInclusive,
@@ -283,7 +284,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
@@ -457,6 +458,9 @@ where
 
         // write output
         provider.write_state(&state, OriginalValuesKnown::Yes, StorageLocation::StaticFiles)?;
+        let hashed_state =
+            HashedPostState::from_bundle_state::<KeccakKeyHasher>(&state.bundle.state);
+        EXECUTION_MERKLE_CHANNEL.send(start_block, hashed_state);
 
         let db_write_duration = time.elapsed();
         debug!(
@@ -493,7 +497,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_to, _) =

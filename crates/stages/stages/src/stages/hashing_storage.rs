@@ -12,8 +12,8 @@ use reth_etl::Collector;
 use reth_primitives_traits::StorageEntry;
 use reth_provider::{DBProvider, HashingWriter, StatsReader, StorageReader};
 use reth_stages_api::{
-    EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
-    StorageHashingCheckpoint, UnwindInput, UnwindOutput,
+    BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
+    StageError, StageId, StorageHashingCheckpoint, UnwindInput, UnwindOutput,
 };
 use reth_storage_errors::provider::ProviderResult;
 use std::{
@@ -75,7 +75,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         let tx = provider.tx_ref();
@@ -169,7 +169,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_progress, _) =

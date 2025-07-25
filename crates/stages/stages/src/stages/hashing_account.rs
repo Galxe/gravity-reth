@@ -11,8 +11,8 @@ use reth_etl::Collector;
 use reth_primitives_traits::Account;
 use reth_provider::{AccountExtReader, DBProvider, HashingWriter, StatsReader};
 use reth_stages_api::{
-    AccountHashingCheckpoint, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
-    StageError, StageId, UnwindInput, UnwindOutput,
+    AccountHashingCheckpoint, BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput,
+    Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_storage_errors::provider::ProviderResult;
 use std::{
@@ -145,7 +145,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
@@ -237,7 +237,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_progress, _) =

@@ -1,7 +1,7 @@
 use reth_stages_api::{
-    ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
+    BoxedConcurrentProvider, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
+    UnwindInput, UnwindOutput,
 };
-use reth_storage_errors::ProviderResult;
 
 /// The finish stage.
 ///
@@ -19,7 +19,7 @@ impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for FinishStage {
     fn execute(
         &mut self,
         _provider: &Provider,
-        _provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         Ok(ExecOutput { checkpoint: StageCheckpoint::new(input.target()), done: true })
@@ -28,7 +28,7 @@ impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for FinishStage {
     fn unwind(
         &mut self,
         _provider: &Provider,
-        _provider_ro: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         Ok(UnwindOutput { checkpoint: StageCheckpoint::new(input.unwind_to) })

@@ -340,7 +340,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             self.make_canonical(ExecutedBlockWithTrieUpdates::new(
                 Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
                 Arc::new(execution_outcome),
-                Default::default(),
+                Arc::new(hashed_state),
                 ExecutedTrieUpdates::empty(),
                 Arc::new(trie_updates),
             ))

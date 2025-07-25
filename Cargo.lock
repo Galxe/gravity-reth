@@ -10323,6 +10323,7 @@ dependencies = [
  "reth-tracing",
  "reth-trie",
  "reth-trie-db",
+ "reth-trie-parallel",
  "serde",
  "tempfile",
  "thiserror 2.0.12",

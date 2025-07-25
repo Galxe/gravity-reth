@@ -11,8 +11,8 @@ use reth_provider::{
     StaticFileProviderFactory, StatsReader, StorageLocation,
 };
 use reth_stages_api::{
-    EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
-    UnwindInput, UnwindOutput,
+    BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
+    StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_errors::provider::ProviderResult;
@@ -189,7 +189,7 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
@@ -230,7 +230,7 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         self.buffer.take();
