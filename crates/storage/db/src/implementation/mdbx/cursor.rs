@@ -1,5 +1,7 @@
 //! Cursor wrapper for libmdbx-sys.
 
+#![allow(clippy::type_complexity)]
+
 use super::utils::*;
 use crate::{
     metrics::{DatabaseEnvMetrics, Operation},
@@ -15,7 +17,10 @@ use reth_db_api::{
 };
 use reth_libmdbx::{Error as MDBXError, TransactionKind, WriteFlags, RO, RW};
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, DatabaseWriteOperation};
-use std::{borrow::Cow, collections::Bound, marker::PhantomData, ops::RangeBounds, sync::Arc};
+use std::{
+    borrow::Cow, collections::Bound, fmt, fmt::Debug, marker::PhantomData, ops::RangeBounds,
+    sync::Arc,
+};
 
 /// Read only Cursor.
 pub type CursorRO<T> = Cursor<RO, T>;
@@ -23,7 +28,6 @@ pub type CursorRO<T> = Cursor<RO, T>;
 pub type CursorRW<T> = Cursor<RW, T>;
 
 /// Cursor wrapper to access KV items.
-#[derive(Debug)]
 pub struct Cursor<K: TransactionKind, T: Table> {
     /// Inner `libmdbx` cursor.
     pub(crate) inner: reth_libmdbx::Cursor<K>,
@@ -33,6 +37,18 @@ pub struct Cursor<K: TransactionKind, T: Table> {
     metrics: Option<Arc<DatabaseEnvMetrics>>,
     /// Phantom data to enforce encoding/decoding.
     _dbi: PhantomData<T>,
+    /// Function to be called when the cursor is dropped.
+    drop_fn: Option<Box<dyn Fn(&mut Self) + Send + Sync + 'static>>,
+}
+
+impl<K: TransactionKind, T: Table> Debug for Cursor<K, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(format!("Cursor<{}>", T::NAME).as_str())
+            .field("inner", &self.inner)
+            .field("buf", &self.buf)
+            .field("metrics", &self.metrics)
+            .finish()
+    }
 }
 
 impl<K: TransactionKind, T: Table> Cursor<K, T> {
@@ -40,7 +56,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         inner: reth_libmdbx::Cursor<K>,
         metrics: Option<Arc<DatabaseEnvMetrics>>,
     ) -> Self {
-        Self { inner, buf: Vec::new(), metrics, _dbi: PhantomData }
+        Self { inner, buf: Vec::new(), metrics, _dbi: PhantomData, drop_fn: None }
     }
 
     /// If `self.metrics` is `Some(...)`, record a metric with the provided operation and value
@@ -57,6 +73,18 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
             metrics.record_operation(T::NAME, operation, value_size, || f(self))
         } else {
             f(self)
+        }
+    }
+
+    pub(crate) fn with_drop_fn(&mut self, drop_fn: Box<dyn Fn(&mut Self) + Send + Sync + 'static>) {
+        self.drop_fn = Some(drop_fn);
+    }
+}
+
+impl<K: TransactionKind, T: Table> Drop for Cursor<K, T> {
+    fn drop(&mut self) {
+        if let Some(drop_fn) = self.drop_fn.take() {
+            drop_fn(self);
         }
     }
 }
