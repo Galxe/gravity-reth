@@ -801,3 +801,240 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
         storage,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::TxLegacy;
+    use alloy_primitives::{Address, Signature, U256};
+    use reth_ethereum_primitives::{Transaction, TransactionSigned};
+    use reth_revm::state::{AccountInfo, Bytecode};
+    use revm::{
+        primitives::{StorageKey, StorageValue},
+        DatabaseRef,
+    };
+    use std::collections::HashMap;
+
+    // Mock database for testing
+    struct MockDatabase {
+        accounts: HashMap<Address, AccountInfo>,
+    }
+
+    impl MockDatabase {
+        fn new() -> Self {
+            Self { accounts: HashMap::new() }
+        }
+
+        fn insert_account(&mut self, address: Address, account: AccountInfo) {
+            self.accounts.insert(address, account);
+        }
+    }
+
+    impl DatabaseRef for MockDatabase {
+        type Error = std::convert::Infallible;
+
+        fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            Ok(self.accounts.get(&address).cloned())
+        }
+
+        fn code_by_hash_ref(&self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
+            unreachable!()
+        }
+
+        fn storage_ref(
+            &self,
+            _address: Address,
+            _index: StorageKey,
+        ) -> Result<StorageValue, Self::Error> {
+            unreachable!()
+        }
+
+        fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
+            unreachable!()
+        }
+    }
+
+    fn create_test_transaction(nonce: u64, gas_limit: u64, gas_price: u128) -> TransactionSigned {
+        TransactionSigned::new_unhashed(
+            Transaction::Legacy(TxLegacy { nonce, gas_price, gas_limit, ..Default::default() }),
+            Signature::test_signature(),
+        )
+    }
+
+    #[test]
+    fn test_filter_invalid_txs_empty_input() {
+        let db = MockDatabase::new();
+        let txs = vec![];
+        let senders = vec![];
+        let base_fee_per_gas = 20_000_000_000u64; // 20 gwei
+        let gas_limit = 30_000_000u64; // 30M gas
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
+        assert!(invalid_idxs.is_empty());
+    }
+
+    #[test]
+    fn test_filter_invalid_txs_account_not_exists() {
+        let db = MockDatabase::new();
+        let sender = Address::random();
+
+        // create a transaction, but the account does not exist
+        let tx = create_test_transaction(0, 21_000, 25_000_000_000);
+        let txs = vec![tx];
+        let senders = vec![sender];
+        let base_fee_per_gas = 20_000_000_000u64;
+        let gas_limit = 30_000_000u64;
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
+        assert_eq!(invalid_idxs.len(), 1);
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    #[test]
+    fn test_filter_invalid_txs_nonce_mismatch() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+
+        // the account exists, but the nonce does not match
+        let account = AccountInfo {
+            balance: U256::from(1_000_000_000_000_000_000u64), // 1 ETH
+            nonce: 5,                                          // 账户 nonce 是 5
+            code_hash: B256::default(),
+            code: None,
+        };
+        db.insert_account(sender, account);
+
+        // the transaction nonce is 0, but the account nonce is 5
+        let tx = create_test_transaction(0, 21_000, 25_000_000_000);
+        let txs = vec![tx];
+        let senders = vec![sender];
+        let base_fee_per_gas = 20_000_000_000u64;
+        let gas_limit = 30_000_000u64;
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
+        assert_eq!(invalid_idxs.len(), 1);
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    #[test]
+    fn test_filter_invalid_txs_insufficient_balance() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+
+        // the account has insufficient balance
+        let account = AccountInfo {
+            balance: U256::from(1_000_000_000u64), // 1 Gwei
+            nonce: 0,
+            code_hash: B256::default(),
+            code: None,
+        };
+        db.insert_account(sender, account);
+
+        // fee = gas_price * gas_limit + value = 25_000_000_000 * 21_000 + 0 =
+        // 525_000_000_000_000
+        let tx = create_test_transaction(0, 21_000, 25_000_000_000);
+        let txs = vec![tx];
+        let senders = vec![sender];
+        let base_fee_per_gas = 20_000_000_000u64;
+        let gas_limit = 30_000_000u64;
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
+        assert_eq!(invalid_idxs.len(), 1);
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    #[test]
+    fn test_filter_invalid_txs_gas_limit_exceeded() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+
+        // the account has enough balance
+        let account = AccountInfo {
+            balance: U256::from(1_000_000_000_000_000_000u64), // 1 ETH
+            nonce: 0,
+            code_hash: B256::default(),
+            code: None,
+        };
+        db.insert_account(sender, account);
+
+        // create multiple transactions, the cumulative gas limit exceeds the block limit
+        let tx1 = create_test_transaction(0, 20_000_000, 25_000_000_000); // 20M gas
+        let tx2 = create_test_transaction(1, 20_000_000, 25_000_000_000); // 20M gas
+        let txs = vec![tx1, tx2];
+        let senders = vec![sender, sender];
+        let base_fee_per_gas = 20_000_000_000u64;
+        let gas_limit = 30_000_000u64; // 30M gas limit
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
+        assert_eq!(invalid_idxs.len(), 1);
+        assert!(invalid_idxs.contains(&1));
+    }
+
+    #[test]
+    fn test_filter_invalid_txs_valid_transactions() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+
+        // 账户有足够余额
+        let account = AccountInfo {
+            balance: U256::from(1_000_000_000_000_000_000u64), // 1 ETH
+            nonce: 0,
+            code_hash: B256::default(),
+            code: None,
+        };
+        db.insert_account(sender, account);
+
+        // create valid transactions
+        let tx1 = create_test_transaction(0, 21_000, 25_000_000_000);
+        let tx2 = create_test_transaction(1, 21_000, 25_000_000_000);
+        let txs = vec![tx1, tx2];
+        let senders = vec![sender, sender];
+        let base_fee_per_gas = 20_000_000_000u64;
+        let gas_limit = 30_000_000u64;
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
+        assert!(invalid_idxs.is_empty());
+    }
+
+    #[test]
+    fn test_filter_invalid_txs_mixed_scenarios() {
+        let mut db = MockDatabase::new();
+        let sender1 = Address::random();
+        let sender2 = Address::random();
+
+        // the first account: valid
+        let account1 = AccountInfo {
+            balance: U256::from(1_000_000_000u64), // 1 Gwei
+            nonce: 0,
+            code_hash: B256::default(),
+            code: None,
+        };
+        db.insert_account(sender1, account1);
+
+        // the second account: nonce does not match
+        let account2 = AccountInfo {
+            balance: U256::from(1_000_000_000u64), // 1 Gwei
+            nonce: 5,
+            code_hash: B256::default(),
+            code: None,
+        };
+        db.insert_account(sender2, account2);
+
+        // create mixed scenarios transactions
+        let tx1 = create_test_transaction(0, 21_000, 25); // valid
+        let tx2 = create_test_transaction(5, 30_000_000, 25); // gas limit exceeds
+        let tx3 = create_test_transaction(0, 21_000, 25); // nonce does not match
+        let tx4 = create_test_transaction(1, 21_000, 25_000_000); // insufficient balance
+        let tx5 = create_test_transaction(1, 21_000, 25); // valid
+        let txs = vec![tx1, tx2, tx3, tx4, tx5];
+        let senders = vec![sender1, sender2, sender2, sender1, sender1];
+        let base_fee_per_gas = 20_000_000_000u64;
+        let gas_limit = 30_000_000u64;
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
+        assert_eq!(invalid_idxs.len(), 3, "invalid_idxs: {:?}", invalid_idxs);
+        assert!(invalid_idxs.contains(&1));
+        assert!(invalid_idxs.contains(&2));
+        assert!(invalid_idxs.contains(&3));
+    }
+}
