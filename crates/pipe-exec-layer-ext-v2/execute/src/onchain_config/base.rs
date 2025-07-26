@@ -1,7 +1,7 @@
 use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequest};
-use alloy_sol_types::SolCall;
+
 use alloy_primitives::TxKind;
 use gravity_api_types::config_storage::{OnChainConfig, OnChainConfigResType};
 use reth_rpc_eth_api::helpers::EthCall;

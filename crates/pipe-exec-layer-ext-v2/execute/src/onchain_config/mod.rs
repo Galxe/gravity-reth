@@ -3,6 +3,7 @@ pub mod consensus_config;
 pub mod epoch;
 pub mod validator_set;
 pub mod metadata_txn;
+pub mod types;
 
 #[cfg(test)]
 pub mod test_framework;
@@ -16,6 +17,7 @@ pub use consensus_config::ConsensusConfigFetcher;
 pub use epoch::EpochFetcher;
 pub use validator_set::ValidatorSetFetcher;
 pub use metadata_txn::{MetadataTxnResult, transact_metadata_contract_call};
+pub use types::{ValidatorStatus, Commission, ValidatorInfo, ValidatorSet, convert_account, convert_validator_info};
 
 // Common addresses and constants
 use alloy_primitives::{address, Address};

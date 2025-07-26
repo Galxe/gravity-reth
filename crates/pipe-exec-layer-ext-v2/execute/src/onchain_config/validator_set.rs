@@ -1,86 +1,14 @@
 use super::base::{ConfigFetcher, OnchainConfigFetcher};
 use super::{SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR};
-use alloy_primitives::{Address, Bytes, U256};
-use alloy_sol_macro::sol;
+use super::types::{getValidatorSetCall, convert_validator_info};
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolCall;
 use gravity_api_types::{
-    on_chain_config::validator_config::ValidatorConfig,
-    on_chain_config::validator_info::ValidatorInfo as GravityValidatorInfo,
     on_chain_config::validator_set::ValidatorSet as GravityValidatorSet,
 };
 use reth_rpc_eth_api::helpers::EthCall;
 
 // BCS for serialization
-
-// Solidity struct definitions for validator set
-sol! {
-    enum ValidatorStatus {
-        PENDING_ACTIVE, // 0
-        ACTIVE, // 1
-        PENDING_INACTIVE, // 2
-        INACTIVE // 3
-    }
-
-    // Commission structure
-    struct Commission {
-        uint64 rate; // the commission rate charged to delegators(10000 is 100%)
-        uint64 maxRate; // maximum commission rate which validator can ever charge
-        uint64 maxChangeRate; // maximum daily increase of the validator commission
-    }
-
-    /// Complete validator information (merged from multiple contracts)
-    struct ValidatorInfo {
-        // Basic information (from ValidatorManager)
-        bytes consensusPublicKey;
-        Commission commission;
-        string moniker;
-        bool registered;
-        address stakeCreditAddress;
-        ValidatorStatus status;
-        uint256 votingPower; // Changed from uint64 to uint256 to prevent overflow
-        uint256 validatorIndex;
-        uint256 updateTime;
-        address operator;
-        bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
-        bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
-    }
-
-    struct ValidatorSet {
-        ValidatorInfo[] activeValidators; // Active validators for the current epoch
-        ValidatorInfo[] pendingInactive; // Pending validators to leave in next epoch (still active)
-        ValidatorInfo[] pendingActive; // Pending validators to join in next epoch
-        uint256 totalVotingPower; // Current total voting power
-        uint256 totalJoiningPower; // Total voting power waiting to join in the next epoch
-    }
-
-    function getValidatorSet() external view returns (ValidatorSet memory);
-}
-
-pub fn convert_account(acc: &Address) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    bytes[12..].copy_from_slice(acc.as_slice());
-    // ExternalAccountAddress::new(bytes)
-    bytes
-}
-
-/// Convert Solidity ValidatorInfo to Gravity API ValidatorInfo
-pub fn convert_validator_info(solidity_info: &ValidatorInfo) -> GravityValidatorInfo {
-    // Convert Address to AccountAddress (20 bytes -> AccountAddress)
-    let account_address = gravity_api_types::u256_define::AccountAddress::from_bytes(
-        &convert_account(&solidity_info.operator)
-    );
-
-    GravityValidatorInfo::new(
-        account_address,
-        solidity_info.votingPower.to::<u64>(),
-        ValidatorConfig::new(
-            solidity_info.consensusPublicKey.clone().into(),
-            solidity_info.validatorNetworkAddresses.clone().into(),
-            solidity_info.fullnodeNetworkAddresses.clone().into(),
-            solidity_info.validatorIndex.to::<u64>(),
-        ),
-    )
-}
 
 /// Fetcher for validator set information
 pub struct ValidatorSetFetcher<'a, EthApi> {
