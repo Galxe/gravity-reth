@@ -63,6 +63,25 @@ pub fn convert_account(acc: &Address) -> [u8; 32] {
     bytes
 }
 
+/// Convert Solidity ValidatorInfo to Gravity API ValidatorInfo
+pub fn convert_validator_info(solidity_info: &ValidatorInfo) -> GravityValidatorInfo {
+    // Convert Address to AccountAddress (20 bytes -> AccountAddress)
+    let account_address = gravity_api_types::u256_define::AccountAddress::from_bytes(
+        &convert_account(&solidity_info.operator)
+    );
+
+    GravityValidatorInfo::new(
+        account_address,
+        solidity_info.votingPower.to::<u64>(),
+        ValidatorConfig::new(
+            solidity_info.consensusPublicKey.clone().into(),
+            solidity_info.validatorNetworkAddresses.clone().into(),
+            solidity_info.fullnodeNetworkAddresses.clone().into(),
+            solidity_info.validatorIndex.to::<u64>(),
+        ),
+    )
+}
+
 /// Fetcher for validator set information
 pub struct ValidatorSetFetcher<'a, EthApi> {
     base_fetcher: &'a OnchainConfigFetcher<EthApi>,
@@ -74,25 +93,6 @@ where
 {
     pub fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
         Self { base_fetcher }
-    }
-
-    /// Convert Solidity ValidatorInfo to Gravity API ValidatorInfo
-    fn convert_validator_info(solidity_info: &ValidatorInfo) -> GravityValidatorInfo {
-        // Convert Address to AccountAddress (20 bytes -> AccountAddress)
-        let account_address = gravity_api_types::u256_define::AccountAddress::from_bytes(
-            &convert_account(&solidity_info.operator)
-        );
-
-        GravityValidatorInfo::new(
-            account_address,
-            solidity_info.votingPower.to::<u64>(),
-            ValidatorConfig::new(
-                solidity_info.consensusPublicKey.clone().into(),
-                solidity_info.validatorNetworkAddresses.clone().into(),
-                solidity_info.fullnodeNetworkAddresses.clone().into(),
-                solidity_info.validatorIndex.to::<u64>(),
-            ),
-        )
     }
 }
 
@@ -119,15 +119,15 @@ where
         let gravity_validator_set = GravityValidatorSet {
             active_validators: solidity_validator_set._0.activeValidators
                 .iter()
-                .map(Self::convert_validator_info)
+                .map(convert_validator_info)
                 .collect(),
             pending_inactive: solidity_validator_set._0.pendingInactive
                 .iter()
-                .map(Self::convert_validator_info)
+                .map(convert_validator_info)
                 .collect(),
             pending_active: solidity_validator_set._0.pendingActive
                 .iter()
-                .map(Self::convert_validator_info)
+                .map(convert_validator_info)
                 .collect(),
             total_voting_power: solidity_validator_set._0.totalVotingPower.to::<u128>(),
             total_joining_power: solidity_validator_set._0.totalJoiningPower.to::<u128>(),
