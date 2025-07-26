@@ -1,10 +1,17 @@
+use super::{BLOCK_MODULE_ADDRESS, GRAVITY_FRAMEWORK_ADDRESS};
 use crate::{ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
+use alloy_primitives::Address;
 use alloy_primitives::{Bytes, PrimitiveSignature, TxKind, U256};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
+use gravity_api_types::{
+    on_chain_config::validator_config::ValidatorConfig,
+    on_chain_config::validator_info::ValidatorInfo as GravityValidatorInfo,
+    on_chain_config::validator_set::ValidatorSet as GravityValidatorSet,
+};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
@@ -12,12 +19,81 @@ use reth_primitives::Receipt;
 use revm::db::BundleState;
 use revm_primitives::{EvmState, ExecutionResult};
 use std::fmt::Debug;
-use super::{GRAVITY_FRAMEWORK_ADDRESS, BLOCK_MODULE_ADDRESS};
-use alloy_primitives::Address;
 
 sol! {
-    event NewEpoch(uint64 indexed epoch, bytes validators);
-    function blockPrologue(uint64 _timestamp_microseconds) external onlyVm whenInitialized;
+    enum ValidatorStatus {
+        PENDING_ACTIVE, // 0
+        ACTIVE, // 1
+        PENDING_INACTIVE, // 2
+        INACTIVE // 3
+    }
+
+    // Commission structure
+    struct Commission {
+        uint64 rate; // the commission rate charged to delegators(10000 is 100%)
+        uint64 maxRate; // maximum commission rate which validator can ever charge
+        uint64 maxChangeRate; // maximum daily increase of the validator commission
+    }
+
+    /// Complete validator information (merged from multiple contracts)
+    struct ValidatorInfo {
+        // Basic information (from ValidatorManager)
+        bytes consensusPublicKey;
+        Commission commission;
+        string moniker;
+        bool registered;
+        address stakeCreditAddress;
+        ValidatorStatus status;
+        uint256 votingPower; // Changed from uint64 to uint256 to prevent overflow
+        uint256 validatorIndex;
+        uint256 updateTime;
+        address operator;
+        bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+        bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+    }
+
+    struct ValidatorSet {
+        ValidatorInfo[] activeValidators; // Active validators for the current epoch
+        ValidatorInfo[] pendingInactive; // Pending validators to leave in next epoch (still active)
+        ValidatorInfo[] pendingActive; // Pending validators to join in next epoch
+        uint256 totalVotingPower; // Current total voting power
+        uint256 totalJoiningPower; // Total voting power waiting to join in the next epoch
+    }
+
+    // event NewEpoch(uint64 indexed epoch, bytes validators);
+    event AllValidatorsUpdated(uint256 indexed newEpoch, ValidatorSet validatorSet);
+
+    // function blockPrologue(uint64 _timestamp_microseconds) external onlyVm whenInitialized;
+    function blockPrologue(
+        address proposer,
+        uint64[] calldata failedProposerIndices,
+        uint256 timestampMicros
+    );
+}
+
+pub fn convert_account(acc: &Address) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[12..].copy_from_slice(acc.as_slice());
+    // ExternalAccountAddress::new(bytes)
+    bytes
+}
+
+fn convert_validator_info(solidity_info: &ValidatorInfo) -> GravityValidatorInfo {
+    // Convert Address to AccountAddress (20 bytes -> AccountAddress)
+    let account_address = gravity_api_types::u256_define::AccountAddress::from_bytes(
+        &convert_account(&solidity_info.operator),
+    );
+
+    GravityValidatorInfo::new(
+        account_address,
+        solidity_info.votingPower.to::<u64>(),
+        ValidatorConfig::new(
+            solidity_info.consensusPublicKey.clone().into(),
+            solidity_info.validatorNetworkAddresses.clone().into(),
+            solidity_info.fullnodeNetworkAddresses.clone().into(),
+            solidity_info.validatorIndex.to::<u64>(),
+        ),
+    )
 }
 
 /// Result of a metadata transaction execution
@@ -30,8 +106,36 @@ impl MetadataTxnResult {
     /// Check if the transaction emitted a NewEpoch event
     pub fn emit_new_epoch(&self) -> Option<(u64, Bytes)> {
         for log in self.result.logs() {
-            match NewEpoch::decode_log(log, false) {
-                Ok(event) => return Some((event.epoch, event.validators.clone().into())),
+            match AllValidatorsUpdated::decode_log(log, false) {
+                Ok(event) => {
+                    let solidity_validator_set = &event.validatorSet;
+                    // Convert to Gravity validator set
+                    let gravity_validator_set = GravityValidatorSet {
+                        active_validators: solidity_validator_set
+                            .activeValidators
+                            .iter()
+                            .map(convert_validator_info)
+                            .collect(),
+                        pending_inactive: solidity_validator_set
+                            .pendingInactive
+                            .iter()
+                            .map(convert_validator_info)
+                            .collect(),
+                        pending_active: solidity_validator_set
+                            .pendingActive
+                            .iter()
+                            .map(convert_validator_info)
+                            .collect(),
+                        total_voting_power: solidity_validator_set.totalVotingPower.to::<u128>(),
+                        total_joining_power: solidity_validator_set.totalJoiningPower.to::<u128>(),
+                    };
+
+                    // Serialize to BCS format (gravity-aptos standard)
+                    let validator_bytes = bcs::to_bytes(&gravity_validator_set)
+                        .expect("Failed to serialize validator set")
+                        .into();
+                    return Some((event.newEpoch.to::<u64>(), validator_bytes));
+                }
                 Err(_) => continue,
             }
         }
@@ -93,10 +197,7 @@ impl MetadataTxnResult {
     }
 
     /// Insert this metadata transaction into an existing executed block result
-    pub fn insert_to_executed_ordered_block_result(
-        self,
-        result: &mut ExecuteOrderedBlockResult,
-    ) {
+    pub fn insert_to_executed_ordered_block_result(self, result: &mut ExecuteOrderedBlockResult) {
         result.execution_output.receipts.insert(
             0,
             Receipt {
@@ -132,7 +233,11 @@ pub fn transact_metadata_contract_call(
     evm: &mut impl Evm<Error: Debug>,
     timestamp_us: u64,
 ) -> (MetadataTxnResult, EvmState) {
-    let call = blockPrologueCall { _timestamp_microseconds: timestamp_us };
+    let call = blockPrologueCall {
+        proposer: GRAVITY_FRAMEWORK_ADDRESS,
+        failedProposerIndices: vec![],
+        timestampMicros: U256::from(timestamp_us),
+    };
     let input: Bytes = call.abi_encode().into();
     let mut result = evm
         .transact_system_call(GRAVITY_FRAMEWORK_ADDRESS, BLOCK_MODULE_ADDRESS, input.clone())
@@ -159,7 +264,7 @@ mod tests {
     //     let event_signature = NewEpoch::SIGNATURE_HASH;
     //     let encoded_epoch = alloy_primitives::U256::from(epoch);
     //     let validators_bytes = Bytes::from(validators.to_vec());
-        
+
     //     RevmLog {
     //         address: AlloyAddress::from([1u8; 20]),
     //         data: LogData::new(
@@ -173,7 +278,7 @@ mod tests {
     // fn test_emit_new_epoch_detection() {
     //     // Create a fake execution result with NewEpoch event
     //     let test_log = create_test_log_with_new_epoch(42, b"test_validators");
-        
+
     //     let execution_result = ExecutionResult::Success {
     //         reason: revm_primitives::SuccessReason::Stop,
     //         gas_used: 21000,
@@ -189,7 +294,7 @@ mod tests {
 
     //     let new_epoch_data = metadata_result.emit_new_epoch();
     //     assert!(new_epoch_data.is_some());
-        
+
     //     let (epoch, validators) = new_epoch_data.unwrap();
     //     assert_eq!(epoch, 42);
     //     assert_eq!(validators.as_ref(), b"test_validators");
@@ -219,9 +324,9 @@ mod tests {
     // fn test_new_system_call_txn() {
     //     let contract_addr = AlloyAddress::from([5u8; 20]);
     //     let input_data = Bytes::from(vec![1, 2, 3, 4]);
-        
+
     //     let txn = new_system_call_txn(contract_addr, input_data.clone());
-        
+
     //     // Verify transaction properties
     //     match txn.into_transaction() {
     //         Transaction::Legacy(ref legacy) => {
@@ -242,9 +347,9 @@ mod tests {
     //     let timestamp = 1234567890u64;
     //     let call = blockPrologueCall { _timestamp_microseconds: timestamp };
     //     let encoded = call.abi_encode();
-        
+
     //     // Verify the encoding is not empty and contains the function selector
     //     assert!(!encoded.is_empty());
     //     assert!(encoded.len() >= 4); // At least function selector
     // }
-} 
+}
