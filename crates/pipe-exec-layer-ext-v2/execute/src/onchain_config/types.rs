@@ -1,8 +1,9 @@
 //! Common Solidity type definitions for onchain config modules
 //! This module contains shared sol! macro definitions to avoid duplication
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_macro::sol;
+use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
 
 sol! {
     enum ValidatorStatus {
@@ -66,7 +67,9 @@ pub fn convert_account(acc: &Address) -> [u8; 32] {
 }
 
 /// Convert Solidity ValidatorInfo to Gravity API ValidatorInfo
-pub fn convert_validator_info(solidity_info: &ValidatorInfo) -> gravity_api_types::on_chain_config::validator_info::ValidatorInfo {
+pub fn convert_validator_info(
+    solidity_info: &ValidatorInfo,
+) -> gravity_api_types::on_chain_config::validator_info::ValidatorInfo {
     use gravity_api_types::{
         on_chain_config::validator_config::ValidatorConfig,
         on_chain_config::validator_info::ValidatorInfo as GravityValidatorInfo,
@@ -74,7 +77,7 @@ pub fn convert_validator_info(solidity_info: &ValidatorInfo) -> gravity_api_type
 
     // Convert Address to AccountAddress (20 bytes -> AccountAddress)
     let account_address = gravity_api_types::u256_define::AccountAddress::from_bytes(
-        &convert_account(&solidity_info.operator)
+        &convert_account(&solidity_info.operator),
     );
 
     GravityValidatorInfo::new(
@@ -87,4 +90,29 @@ pub fn convert_validator_info(solidity_info: &ValidatorInfo) -> gravity_api_type
             solidity_info.validatorIndex.to::<u64>(),
         ),
     )
-} 
+}
+
+pub fn convert_validator_set_to_bcs(solidity_validator_set: &ValidatorSet) -> Bytes {
+    let gravity_validator_set = GravityValidatorSet {
+        active_validators: solidity_validator_set
+            .activeValidators
+            .iter()
+            .map(convert_validator_info)
+            .collect(),
+        pending_inactive: solidity_validator_set
+            .pendingInactive
+            .iter()
+            .map(convert_validator_info)
+            .collect(),
+        pending_active: solidity_validator_set
+            .pendingActive
+            .iter()
+            .map(convert_validator_info)
+            .collect(),
+        total_voting_power: solidity_validator_set.totalVotingPower.to::<u128>(),
+        total_joining_power: solidity_validator_set.totalJoiningPower.to::<u128>(),
+    };
+
+    // Serialize to BCS format (gravity-aptos standard)
+    bcs::to_bytes(&gravity_validator_set).expect("Failed to serialize validator set").into()
+}

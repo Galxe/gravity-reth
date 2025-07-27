@@ -1,4 +1,7 @@
-use super::{BLOCK_MODULE_ADDRESS, GRAVITY_FRAMEWORK_ADDRESS, types::{AllValidatorsUpdated, blockPrologueCall, convert_validator_info}};
+use super::{
+    types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated},
+    BLOCK_MODULE_ADDRESS, GRAVITY_FRAMEWORK_ADDRESS,
+};
 use crate::{ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
@@ -6,9 +9,7 @@ use alloy_primitives::Address;
 use alloy_primitives::{Bytes, PrimitiveSignature, TxKind, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
-use gravity_api_types::{
-    on_chain_config::validator_set::ValidatorSet as GravityValidatorSet,
-};
+use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
@@ -16,8 +17,6 @@ use reth_primitives::Receipt;
 use revm::db::BundleState;
 use revm_primitives::{EvmState, ExecutionResult};
 use std::fmt::Debug;
-
-
 
 /// Result of a metadata transaction execution
 pub struct MetadataTxnResult {
@@ -33,30 +32,7 @@ impl MetadataTxnResult {
                 Ok(event) => {
                     let solidity_validator_set = &event.validatorSet;
                     // Convert to Gravity validator set
-                    let gravity_validator_set = GravityValidatorSet {
-                        active_validators: solidity_validator_set
-                            .activeValidators
-                            .iter()
-                            .map(convert_validator_info)
-                            .collect(),
-                        pending_inactive: solidity_validator_set
-                            .pendingInactive
-                            .iter()
-                            .map(convert_validator_info)
-                            .collect(),
-                        pending_active: solidity_validator_set
-                            .pendingActive
-                            .iter()
-                            .map(convert_validator_info)
-                            .collect(),
-                        total_voting_power: solidity_validator_set.totalVotingPower.to::<u128>(),
-                        total_joining_power: solidity_validator_set.totalJoiningPower.to::<u128>(),
-                    };
-
-                    // Serialize to BCS format (gravity-aptos standard)
-                    let validator_bytes = bcs::to_bytes(&gravity_validator_set)
-                        .expect("Failed to serialize validator set")
-                        .into();
+                    let validator_bytes = convert_validator_set_to_bcs(solidity_validator_set);
                     return Some((event.newEpoch.to::<u64>(), validator_bytes));
                 }
                 Err(_) => continue,

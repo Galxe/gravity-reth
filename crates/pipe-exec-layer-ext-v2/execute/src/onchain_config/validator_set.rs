@@ -1,11 +1,8 @@
 use super::base::{ConfigFetcher, OnchainConfigFetcher};
 use super::{SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR};
-use super::types::{getValidatorSetCall, convert_validator_info};
+use super::types::{getValidatorSetCall, convert_validator_set_to_bcs};
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolCall;
-use gravity_api_types::{
-    on_chain_config::validator_set::ValidatorSet as GravityValidatorSet,
-};
 use reth_rpc_eth_api::helpers::EthCall;
 
 // BCS for serialization
@@ -38,33 +35,12 @@ where
             input,
             block_number,
         );
-        
+
         // Decode the Solidity validator set
         let solidity_validator_set = getValidatorSetCall::abi_decode_returns(&result, false)
             .expect("Failed to decode getValidatorSet return value");
 
-        // Convert to Gravity validator set
-        let gravity_validator_set = GravityValidatorSet {
-            active_validators: solidity_validator_set._0.activeValidators
-                .iter()
-                .map(convert_validator_info)
-                .collect(),
-            pending_inactive: solidity_validator_set._0.pendingInactive
-                .iter()
-                .map(convert_validator_info)
-                .collect(),
-            pending_active: solidity_validator_set._0.pendingActive
-                .iter()
-                .map(convert_validator_info)
-                .collect(),
-            total_voting_power: solidity_validator_set._0.totalVotingPower.to::<u128>(),
-            total_joining_power: solidity_validator_set._0.totalJoiningPower.to::<u128>(),
-        };
-        
-        // Serialize to BCS format (gravity-aptos standard)
-        bcs::to_bytes(&gravity_validator_set)
-            .expect("Failed to serialize validator set")
-            .into()
+        convert_validator_set_to_bcs(&solidity_validator_set._0)
     }
 
     fn contract_address() -> Address {
