@@ -38,8 +38,7 @@ reth-revm.workspace = true
 reth-stages-api.workspace = true
 reth-static-file-types.workspace = true
 reth-trie = { workspace = true, features = ["metrics"] }
-reth-trie-db = { workspace = true, features = ["metrics"] }
-reth-trie-parallel.workspace = true
+reth-trie-parallel = { workspace = true, optional = true }
 
 reth-testing-utils = { workspace = true, optional = true }
 
@@ -99,6 +98,8 @@ tempfile.workspace = true
 criterion = { workspace = true, features = ["async_tokio"] }
 
 [features]
+default = ["reth-trie-parallel"]
+reth-trie-parallel = ["dep:reth-trie-parallel"]
 test-utils = [
     "dep:reth-chainspec",
     "reth-network-p2p/test-utils",
@@ -115,8 +116,8 @@ test-utils = [
     "reth-revm/test-utils",
     "reth-codecs/test-utils",
     "reth-db-api/test-utils",
-    "reth-trie-db/test-utils",
     "reth-trie/test-utils",
+    "reth-trie-parallel/test-utils",
     "reth-prune-types/test-utils",
     "dep:reth-ethereum-primitives",
     "reth-ethereum-primitives?/test-utils",
