@@ -38,7 +38,7 @@ Reth. Our primary contributions are:
    numerous in-memory blocks in high-frequency environments.
 4. **Optimized Memory Pool:** A two-tier data structure and batch processing mechanism for highly concurrent transaction
    insertion and management.
-5. **Pipeline Architecture:** A four-stage asynchronous pipeline (Execution, Merklization, Verification, Commit) that
+5. **Pipeline Architecture:** A five-stage asynchronous pipeline (Execution, Merklization, Verification, Commit) that
    decouples execution stages, allowing Gravity Reth to effectively overlap computation and I/O and fully leverage
    multi-core processors to service rapid block production from high-throughput consensus engines.
 
@@ -70,11 +70,11 @@ transactions (e.g., ERC20 and raw transfers).
 This hybrid approach yields significant performance benefits across a wide spectrum of workloads. Key achievements of
 Grevm 2.1 include:
 
-- **Robustness in High-Contention Scenarios:** In workloads with high dependency, Grevm avoids the 20-30% performance
-  penalty observed in pure optimistic models, maintaining performance near that of sequential execution while using up
-  to **95% less** CPU.
-- **Superior Hybrid Workload Throughput:** For mixed workloads with a 30% contention ratio, Grevm delivers a **5.5x**
-  throughput increase over its predecessor, achieving 2.96 Gigagas/s by minimizing re-executions.
+-   **Robustness in High-Contention Scenarios:** In workloads with high dependency, Grevm avoids the 20-30% performance
+    penalty observed in pure optimistic models, maintaining performance near that of sequential execution while using up
+    to **95% less** CPU.
+-   **Superior Hybrid Workload Throughput:** For mixed workloads with a 30% contention ratio, Grevm delivers a **5.5x**
+    throughput increase over its predecessor, achieving 2.96 Gigagas/s by minimizing re-executions.
 
 A comprehensive analysis of the Grevm 2.1 architecture, including its lock-free DAG design and implementation, parallel
 state store, and detailed benchmark comparisons, is available in our previous
@@ -91,16 +91,16 @@ Reth’s MPT implementation is designed for storage compactness. It only persist
 Extension Nodes from raw data when needed. While this saves disk space, it incurs significant computational overhead
 during state access. The primary bottlenecks are:
 
-- **Bottom-up, Cursor-Dependent Construction:** Reth builds the trie from the bottom up, starting from leaf nodes and
-  moving towards the root. This process fundamentally relies on ordered database access via a `cursor` interface. This
-  dependency makes it difficult to leverage simple, high-performance Key-Value (KV) caches, as they cannot guarantee the
-  ordered iteration required by the algorithm.
-- **Redundant Node Processing:** The bottom-up traversal often results in accessing and processing numerous unmodified
-  intermediate nodes simply to reconstruct the path to a modified leaf.
-- **Limited Parallelism:** While Reth can parallelize Merklization _between_ different storage tries, it lacks the
-  ability to do so _within_ a single trie. The main Account Trie and the storage trie of a single "hot" contract, which
-  may be the target of thousands of transactions in a block, are both processed serially. This severely limits
-  performance in common, high-contention scenarios.
+-   **Bottom-up, Cursor-Dependent Construction:** Reth builds the trie from the bottom up, starting from leaf nodes and
+    moving towards the root. This process fundamentally relies on ordered database access via a `cursor` interface. This
+    dependency makes it difficult to leverage simple, high-performance Key-Value (KV) caches, as they cannot guarantee the
+    ordered iteration required by the algorithm.
+-   **Redundant Node Processing:** The bottom-up traversal often results in accessing and processing numerous unmodified
+    intermediate nodes simply to reconstruct the path to a modified leaf.
+-   **Limited Parallelism:** While Reth can parallelize Merklization _between_ different storage tries, it lacks the
+    ability to do so _within_ a single trie. The main Account Trie and the storage trie of a single "hot" contract, which
+    may be the target of thousands of transactions in a block, are both processed serially. This severely limits
+    performance in common, high-contention scenarios.
 
 To overcome these limitations, we re-engineered a new Merklization framework, inspired by the design of Geth.
 
@@ -118,14 +118,14 @@ Our approach systematically addresses each bottleneck:
    unlocks true intra-trie parallelism for both the Account Trie and individual storage tries. The challenge with
    parallelizing updates to a single trie lies in managing complex structural changes (node expansions/contractions)
    that can cause race conditions. Our design elegantly bypasses this problem:
-   - All pending updates (for accounts or storage slots) are first grouped based on the **first nibble (4 bits) of their
-     trie path**.
-   - This partitioning divides the entire set of modifications into 16 independent groups, each affecting a different
-     child node of the trie root.
-   - These 16 groups are then processed in parallel, with each thread working on a completely disjoint subtree, thus
-     eliminating any possibility of conflict.
-   - After all parallel tasks are complete, the system performs a final, atomic update to combine the new hashes from
-     the 16 child nodes into the final state root.
+    - All pending updates (for accounts or storage slots) are first grouped based on the **first nibble (4 bits) of their
+      trie path**.
+    - This partitioning divides the entire set of modifications into 16 independent groups, each affecting a different
+      child node of the trie root.
+    - These 16 groups are then processed in parallel, with each thread working on a completely disjoint subtree, thus
+      eliminating any possibility of conflict.
+    - After all parallel tasks are complete, the system performs a final, atomic update to combine the new hashes from
+      the 16 child nodes into the final state root.
 
 This architecture is summarized below:
 
@@ -179,12 +179,12 @@ To solve this, **Gravity Cache** (`cache.rs`) is a new framework built on two pr
 "latest view" and implementing an intelligent LRU cache to minimize I/O. Architecturally, it functions as a unified,
 concurrent caching layer directly over the database, not as an overlay of pending blocks.
 
-- **Efficient Latest View:** Implemented with `DashMap`, it provides a high-performance, concurrent cache for key data
-  types (Accounts, Storage, ByteCode, Trie nodes), eliminating the need to traverse pending blocks.
-- **Guaranteed Consistency:** Correctness is ensured by a simple but powerful rule. Each cached entry is tagged with its
-  `block_number`. The LRU eviction policy is forbidden from discarding any data whose `block_number` is newer than a
-  global `persist_block_number` marker (which tracks the last block flushed to disk). This elegantly prevents the cache
-  from ever dropping unpersisted state.
+-   **Efficient Latest View:** Implemented with `DashMap`, it provides a high-performance, concurrent cache for key data
+    types (Accounts, Storage, ByteCode, Trie nodes), eliminating the need to traverse pending blocks.
+-   **Guaranteed Consistency:** Correctness is ensured by a simple but powerful rule. Each cached entry is tagged with its
+    `block_number`. The LRU eviction policy is forbidden from discarding any data whose `block_number` is newer than a
+    global `persist_block_number` marker (which tracks the last block flushed to disk). This elegantly prevents the cache
+    from ever dropping unpersisted state.
 
 ![Gravity Reth Cache Arch](assets/compare_greth_reth_cache.png)
 
@@ -218,28 +218,28 @@ suffers from three major issues in high-throughput scenarios:
 Our solution replaces this with a two-level structure: **`HashMap<Address, BTreeMap<Nonce, Txn>>`**. This design
 provides immediate benefits:
 
-- Account lookups are reduced to **O(1)**.
-- The logarithmic complexity is confined to the per-account `BTreeMap` (O(logM)), which is near-constant time as M is
-  typically very small.
-- The memory layout is optimized, as each address is stored only once as a key in the `HashMap`.
+-   Account lookups are reduced to **O(1)**.
+-   The logarithmic complexity is confined to the per-account `BTreeMap` (O(logM)), which is near-constant time as M is
+    typically very small.
+-   The memory layout is optimized, as each address is stored only once as a key in the `HashMap`.
 
 **RPC Handling: Asynchronous Batch Processing**
 
 High-frequency `send_raw_transaction` calls create another bottleneck, causing:
 
-- **Redundant I/O:** Each transaction individually triggers database lookups for validation (nonce, balance), even for
-  the same account.
-- **Intense Lock Contention:** Each insertion requires a brief but frequent write lock, leading to severe lock queueing
-  under high concurrency.
-- **CPU Overhead:** Frequent locking and unlocking increases thread context switching and hurts CPU cache performance.
+-   **Redundant I/O:** Each transaction individually triggers database lookups for validation (nonce, balance), even for
+    the same account.
+-   **Intense Lock Contention:** Each insertion requires a brief but frequent write lock, leading to severe lock queueing
+    under high concurrency.
+-   **CPU Overhead:** Frequent locking and unlocking increases thread context switching and hurts CPU cache performance.
 
 To solve this, we implemented an **asynchronous batch processing queue**. This architecture decouples validation from
 insertion in a producer-consumer pattern.
 
-- **Batched Validation (Producer):** Incoming transactions are grouped by address in a short time window. This allows
-  the system to perform a single database lookup to validate multiple transactions from the same sender.
-- **Batched Insertion (Consumer):** A background thread periodically acquires a single write lock to insert an entire
-  batch of validated transactions, dramatically reducing lock contention and amortizing its cost over many transactions.
+-   **Batched Validation (Producer):** Incoming transactions are grouped by address in a short time window. This allows
+    the system to perform a single database lookup to validate multiple transactions from the same sender.
+-   **Batched Insertion (Consumer):** A background thread periodically acquires a single write lock to insert an entire
+    batch of validated transactions, dramatically reducing lock contention and amortizing its cost over many transactions.
 
 Because these optimizations are applicable to any EVM ecosystem using Reth, all of these foundational changes have been
 successfully contributed back to the main Reth repository. The table below summarizes some of these key contributions.
@@ -277,16 +277,16 @@ To meet this demand, we designed a multi-stage asynchronous pipeline. This desig
 
 ![Gravity Reth Pipeline Simplified](assets/pipe_simple.png)
 
-Our pipeline divides block processing into four distinct stages:
+Our pipeline divides block processing into five distinct stages:
 
-- **Transaction Execution:** Executes all transactions in a block using Grevm. It begins with the state provided by our
-  Gravity Cache and updates the cache in real-time with the results.
-- **Merklization:** Computes the `stateRoot` for the current block using the state changes from the Execution stage.
-- **Block Verification:** Calculates the `BLOCKHASH` and submits the execution results to the consensus layer for
-  confirmation.
-- **Commit:** Once consensus provides confirmation, this stage commits the verified block and its state to the canonical
-  chain.
-- **Persistence**: We reuse Reth's existing `EngineApiTreeHandler` for asynchronous, batched persistence to disk.
+-   **Transaction Execution:** Executes all transactions in a block using Grevm. It begins with the state provided by our
+    Gravity Cache and updates the cache in real-time with the results.
+-   **Merklization:** Computes the `stateRoot` for the current block using the state changes from the Execution stage.
+-   **Block Verification:** Calculates the `BLOCKHASH` and submits the execution results to the consensus layer for
+    confirmation.
+-   **Commit:** Once consensus provides confirmation, this stage commits the verified block and its state to the canonical
+    chain.
+-   **Persistence**: We reuse Reth's existing `EngineApiTreeHandler` for asynchronous, batched persistence to disk.
 
 ![Gravity Reth Pipeline Architecture](assets/pipe_mod2.png)
 
@@ -323,21 +323,21 @@ the experimental setup, end-to-end performance results, scalability analysis, an
 
 ### Experimental Setup
 
-- **System Environment:** All benchmarks were run in **Solo Mode**, which bypasses consensus and networking to isolate
-  the performance of the execution client itself. The baseline Reth client was also configured in a comparable test
-  mode.
-- **Hardware Configuration:**
-  - **Instance:** Google Cloud `c4-highcpu-16`
-  - **CPU:** 16 vCPUs, 2.3 GHz
-  - **Memory:** 32 GB
-  - **Disk:** 1 TB SSD (200 MB/s max throughput, 30,000 max IOPS)
-- **Benchmark Tool:** We used a custom, high-performance transaction generator, `gravity_bench`, to create sustained
-  transaction loads for two primary workloads:
-  - **Reproducibility:** The benchmark suite and instructions are open-source and available at
-    [`https://github.com/Galxe/gravity_bench`](https://github.com/Galxe/gravity_bench)
-    - **ERC20 Transfers:** A simple, high-throughput workload.
-    - **Uniswap V2 Swaps:** A more complex workload with higher gas costs, execution complexity and different pattern of
-      state contention.
+-   **System Environment:** All benchmarks were run in **Solo Mode**, which bypasses consensus and networking to isolate
+    the performance of the execution client itself. The baseline Reth client was also configured in a comparable test
+    mode.
+-   **Hardware Configuration:**
+    -   **Instance:** Google Cloud `c4-highcpu-16`
+    -   **CPU:** 16 vCPUs, 2.3 GHz
+    -   **Memory:** 32 GB
+    -   **Disk:** 1 TB SSD (200 MB/s max throughput, 30,000 max IOPS)
+-   **Benchmark Tool:** We used a custom, high-performance transaction generator, `gravity_bench`, to create sustained
+    transaction loads for two primary workloads:
+    -   **Reproducibility:** The benchmark suite and instructions are open-source and available at
+        [`https://github.com/Galxe/gravity_bench`](https://github.com/Galxe/gravity_bench)
+        -   **ERC20 Transfers:** A simple, high-throughput workload.
+        -   **Uniswap V2 Swaps:** A more complex workload with higher gas costs, execution complexity and different pattern of
+            state contention.
 
 ### End-to-End Performance: ERC20 Transfers
 
@@ -346,20 +346,20 @@ of 100,000 accounts.
 
 | Version                       | TPS  | Gigagas/s | Avg. Block Interval | Block Size | Mempool (Insert) | Execution (EVM) | Merklization |
 | ----------------------------- | ---- | --------- | ------------------- | ---------- | ---------------- | --------------- | ------------ |
-| Reth 1.4.8 (Baseline)         | 9.8k | ~0.2      | 0.66s               | ~6.4k txns | 55ms             | 140ms (118ms)   | 380ms        |
-| Reth: Pipeline & Mempool opt. | 20k  | ~0.42     | 0.2s                | ~4k txns   | 5ms              | 95ms (74ms)     | 240ms        |
-| Gravity Reth                  | 41k  | 1.5       | 0.15s               | ~6.2k txns | 10ms             | 52ms (32ms)     | 62ms         |
+| Reth 1.4.8 (Baseline)         | 9.8k | ~0.4      | 0.66s               | ~6.4k txns | 55ms             | 140ms (118ms)   | 380ms        |
+| Reth: Pipeline & Mempool opt. | 20k  | ~0.8      | 0.2s                | ~4k txns   | 5ms              | 95ms (74ms)     | 240ms        |
+| Gravity Reth                  | 41k  | ~1.6      | 0.15s               | ~6.2k txns | 10ms             | 52ms (32ms)     | 62ms         |
 
 _Table 5: Gravity Reth End-to-End Performance Comparison_
 
 We found that:
 
-- The fully-optimized Gravity Reth achieves **41,000 TPS**, a **4.18x improvement** over the baseline Reth.
-- The gains are attributable to the entire suite of optimizations. The **pipeline** and **mempool** changes immediately
-  **double** performance. **Grevm** and **parallel merklization** provide the remaining **2x** boost by drastically
-  reducing time spent on execution and merklization, respectively.
-- In the baseline, Merklization (380ms) is the clear bottleneck. In the final version, all stages are significantly
-  faster and more balanced, allowing for a much shorter block interval (0.15s).
+-   The fully-optimized Gravity Reth achieves **41,000 TPS**, a **4.18x improvement** over the baseline Reth.
+-   The gains are attributable to the entire suite of optimizations. The **pipeline** and **mempool** changes immediately
+    **double** performance. **Grevm** and **parallel merklization** provide the remaining **2x** boost by drastically
+    reducing time spent on execution and merklization, respectively.
+-   In the baseline, Merklization (380ms) is the clear bottleneck. In the final version, all stages are significantly
+    faster and more balanced, allowing for a much shorter block interval (0.15s).
 
 ### Scalability Analysis
 
@@ -379,11 +379,11 @@ _Table 6: TPS vs. Account Scale (ERC20 Transfers)_
 
 We found some key observations:
 
-- Gravity Reth's performance advantage grows significantly with state size. At the 1,000,000-account scale, the pipeline
-  provides a foundational 2x boost over the baseline, while Grevm and Parallel Merklization deliver an additional 3.3x
-  improvement, culminating in a total throughput **6.6 times greater** than Reth.
-- The performance degradation for Gravity Reth is graceful, indicating that the **Gravity Cache** is highly effective at
-  mitigating I/O latency by servicing requests for hot state from memory.
+-   Gravity Reth's performance advantage grows significantly with state size. At the 1,000,000-account scale, the pipeline
+    provides a foundational 2x boost over the baseline, while Grevm and Parallel Merklization deliver an additional 3.3x
+    improvement, culminating in a total throughput **6.6 times greater** than Reth.
+-   The performance degradation for Gravity Reth is graceful, indicating that the **Gravity Cache** is highly effective at
+    mitigating I/O latency by servicing requests for hot state from memory.
 
 To understand the cost drivers, we broke down the latency for each component in the fully-optimized Gravity Reth.
 
@@ -443,10 +443,10 @@ scaling the EVM.
 
 ## Authors
 
-- [https://github.com/AshinGau](https://github.com/AshinGau)
-- [https://github.com/ByteYue](https://github.com/ByteYue)
-- [https://github.com/keanji-x](https://github.com/keanji-x)
-- [https://github.com/Lchangliang](https://github.com/Lchangliang)
-- [https://github.com/nekomoto911](https://github.com/nekomoto911)
-- [https://github.com/Richard](https://github.com/Richard19960401)
-- [https://github.com/stumble](https://github.com/stumble)
+-   [https://github.com/AshinGau](https://github.com/AshinGau)
+-   [https://github.com/ByteYue](https://github.com/ByteYue)
+-   [https://github.com/keanji-x](https://github.com/keanji-x)
+-   [https://github.com/Lchangliang](https://github.com/Lchangliang)
+-   [https://github.com/nekomoto911](https://github.com/nekomoto911)
+-   [https://github.com/Richard](https://github.com/Richard19960401)
+-   [https://github.com/stumble](https://github.com/stumble)
