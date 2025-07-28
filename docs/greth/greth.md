@@ -38,7 +38,7 @@ Reth. Our primary contributions are:
    numerous in-memory blocks in high-frequency environments.
 4. **Optimized Memory Pool:** A two-tier data structure and batch processing mechanism for highly concurrent transaction
    insertion and management.
-5. **Pipeline Architecture:** A four-stage asynchronous pipeline (Execution, Merklization, Verification, Commit) that
+5. **Pipeline Architecture:** A five-stage asynchronous pipeline (Execution, Merklization, Verification, Commit) that
    decouples execution stages, allowing Gravity Reth to effectively overlap computation and I/O and fully leverage
    multi-core processors to service rapid block production from high-throughput consensus engines.
 
@@ -277,7 +277,7 @@ To meet this demand, we designed a multi-stage asynchronous pipeline. This desig
 
 ![Gravity Reth Pipeline Simplified](assets/pipe_simple.png)
 
-Our pipeline divides block processing into four distinct stages:
+Our pipeline divides block processing into five distinct stages:
 
 -   **Transaction Execution:** Executes all transactions in a block using Grevm. It begins with the state provided by our
     Gravity Cache and updates the cache in real-time with the results.
