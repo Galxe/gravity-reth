@@ -1,6 +1,6 @@
 use super::{
     types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated},
-    BLOCK_MODULE_ADDRESS, GRAVITY_FRAMEWORK_ADDRESS,
+    BLOCK_MODULE_ADDRESS, SYSTEM_CALLER,
 };
 use crate::{ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
@@ -9,7 +9,6 @@ use alloy_primitives::Address;
 use alloy_primitives::{Bytes, PrimitiveSignature, TxKind, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
-use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
@@ -77,7 +76,7 @@ impl MetadataTxnResult {
         let new_epoch = ordered_block.epoch + 1;
         ExecuteOrderedBlockResult {
             block,
-            senders: vec![GRAVITY_FRAMEWORK_ADDRESS],
+            senders: vec![SYSTEM_CALLER],
             execution_output: BlockExecutionOutput {
                 state,
                 receipts: vec![Receipt {
@@ -107,7 +106,7 @@ impl MetadataTxnResult {
             },
         );
         result.block.body.transactions.insert(0, self.txn);
-        result.senders.insert(0, GRAVITY_FRAMEWORK_ADDRESS);
+        result.senders.insert(0, SYSTEM_CALLER);
     }
 }
 
@@ -133,16 +132,16 @@ pub fn transact_metadata_contract_call(
     timestamp_us: u64,
 ) -> (MetadataTxnResult, EvmState) {
     let call = blockPrologueCall {
-        proposer: GRAVITY_FRAMEWORK_ADDRESS,
+        proposer: SYSTEM_CALLER,
         failedProposerIndices: vec![],
         timestampMicros: U256::from(timestamp_us),
     };
     let input: Bytes = call.abi_encode().into();
     let mut result = evm
-        .transact_system_call(GRAVITY_FRAMEWORK_ADDRESS, BLOCK_MODULE_ADDRESS, input.clone())
+        .transact_system_call(SYSTEM_CALLER, BLOCK_MODULE_ADDRESS, input.clone())
         .unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
-    result.state.remove(&GRAVITY_FRAMEWORK_ADDRESS);
+    result.state.remove(&SYSTEM_CALLER);
     result.state.remove(&evm.block().coinbase);
     (
         MetadataTxnResult {
