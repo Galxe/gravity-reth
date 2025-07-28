@@ -35,6 +35,7 @@ sol! {
         address operator;
         bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
         bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+        bytes aptosAddress; // [u8; 32]
     }
 
     struct ValidatorSet {
@@ -77,7 +78,7 @@ pub fn convert_validator_info(
 
     // Convert Address to AccountAddress (20 bytes -> AccountAddress)
     let account_address = gravity_api_types::u256_define::AccountAddress::from_bytes(
-        &convert_account(&solidity_info.operator),
+        &solidity_info.aptosAddress,
     );
 
     GravityValidatorInfo::new(
