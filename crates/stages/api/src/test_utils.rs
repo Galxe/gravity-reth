@@ -1,8 +1,9 @@
 #![allow(missing_docs)]
 
-use reth_errors::ProviderResult;
-
-use crate::{ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput, UnwindOutput};
+use crate::{
+    BoxedConcurrentProvider, ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput,
+    UnwindOutput,
+};
 use std::{
     collections::VecDeque,
     sync::{
@@ -78,7 +79,7 @@ impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for TestStage {
     fn execute(
         &mut self,
         _: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         _input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         self.exec_outputs
@@ -95,7 +96,7 @@ impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for TestStage {
     fn unwind(
         &mut self,
         _: &Provider,
-        _: Box<dyn Fn() -> ProviderResult<ProviderRO>>,
+        _: BoxedConcurrentProvider<ProviderRO>,
         _input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         self.unwind_outputs

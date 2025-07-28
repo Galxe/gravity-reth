@@ -1,6 +1,6 @@
 #![allow(clippy::type_complexity)]
 
-use std::{ops::RangeInclusive, sync::Mutex};
+use std::{collections::hash_map, ops::RangeInclusive, sync::Mutex};
 
 use alloy_primitives::{
     keccak256,
@@ -135,9 +135,9 @@ where
             for storage_entry in storage_changeset_cursor.walk_range(storage_range)? {
                 let (BlockNumberAddress((_, address)), entry) = storage_entry?;
                 let hashed_address = keccak256(address);
-                if !accounts.contains_key(&hashed_address) {
+                if let hash_map::Entry::Vacant(e) = accounts.entry(hashed_address) {
                     let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
-                    accounts.insert(hashed_address, account.map(|a| a.1));
+                    e.insert(account.map(|a| a.1));
                 }
                 let hashed_slot = keccak256(entry.key);
                 let slot_value = storage_cursor

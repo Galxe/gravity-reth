@@ -179,7 +179,7 @@ where
         provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
-        if let Self::Unwind = self {
+        if matches!(self, Self::Unwind) {
             info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
             return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
         }
