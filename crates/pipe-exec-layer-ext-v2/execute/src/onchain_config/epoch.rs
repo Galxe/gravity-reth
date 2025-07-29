@@ -6,7 +6,9 @@ use alloy_sol_types::SolCall;
 use reth_rpc_eth_api::helpers::EthCall;
 
 sol! {
-    function getCurrentEpochInfo() external view returns (uint256 epoch, uint256 lastTransitionTime, uint256 interval);
+    contract EpochManager {
+        function getCurrentEpochInfo() external view returns (uint256 epoch, uint256 lastTransitionTime, uint256 interval);
+    }
 }
 
 /// Fetcher for epoch information
@@ -36,7 +38,7 @@ where
 
         #[cfg(not(feature = "pipe_test"))]
         {
-            let call = getCurrentEpochInfoCall {};
+            let call = EpochManager::getCurrentEpochInfoCall {};
             let input: Bytes = call.abi_encode().into();
 
             // uint64 currentEpoch = uint64(IEpochManager(EPOCH_MANAGER_ADDR).currentEpoch());
@@ -47,7 +49,7 @@ where
                 block_number,
             );
 
-            let epoch_info = getCurrentEpochInfoCall::abi_decode_returns(&result, false)
+            let epoch_info = EpochManager::getCurrentEpochInfoCall::abi_decode_returns(&result, false)
                 .expect("Failed to decode getCurrentEpoch return value");
 
             // Convert epoch to bytes

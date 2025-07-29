@@ -49,14 +49,15 @@ sol! {
     // event NewEpoch(uint64 indexed epoch, bytes validators);
     event AllValidatorsUpdated(uint256 indexed newEpoch, ValidatorSet validatorSet);
 
-    // function blockPrologue(uint64 _timestamp_microseconds) external onlyVm whenInitialized;
-    function blockPrologue(
-        address proposer,
-        uint64[] calldata failedProposerIndices,
-        uint256 timestampMicros
-    );
-
     function getValidatorSet() external view returns (ValidatorSet memory);
+}
+
+sol! {
+        function blockPrologue(
+            address proposer,
+            uint64[] calldata failedProposerIndices,
+            uint256 timestampMicros
+        );
 }
 
 /// Helper function to convert Ethereum address to AccountAddress format
