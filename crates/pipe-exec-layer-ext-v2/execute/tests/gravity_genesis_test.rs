@@ -4,7 +4,12 @@ use std::fmt::Debug;
 use alloy_consensus::Header;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_macro::sol;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolEvent};
+use gravity_api_types::{
+    on_chain_config::validator_config::ValidatorConfig,
+    on_chain_config::validator_info::ValidatorInfo as GravityValidatorInfo,
+    on_chain_config::validator_set::ValidatorSet as GravityValidatorSet,
+};
 use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
@@ -19,18 +24,23 @@ use reth_tracing::{
 };
 use revm::{context::TxEnv, Database};
 
-const GRAVITY_FRAMEWORK_ADDRESS: Address = address!("00000000000000000000000000000000000000ff");
+const GRAVITY_FRAMEWORK_ADDRESS: Address = address!("0x0000000000000000000000000000000000000000");
 const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
 const BLOCK_MODULE_ADDRESS: Address = address!("00000000000000000000000000000000000000f1");
 const CONSENSUS_CONFIG_CONTRACT_ADDRESS: Address =
     address!("00000000000000000000000000000000000000f2");
 const VALIDATOR_SET_CONTRACT_ADDRESS: Address =
-    address!("00000000000000000000000000000000000000f3");
+    address!("0x0000000000000000000000000000000000002010");
+const EPOCH_MANAGER_ADDRESS: Address = address!("0x00000000000000000000000000000000000000f3");
+
+// sol! {
+//     contract EpochManager {
+//         function getCurrentEpochInfo() external view returns (uint64 epoch, uint64 lastTransitionTime, uint64 interval);
+//     }
+// }
 
 sol! {
-    contract Reconfiguration {
-        function getCurrentEpoch() external view returns (uint64);
-    }
+    function getCurrentEpochInfo() external view returns (uint64 epoch, uint64 lastTransitionTime, uint64 interval);
 }
 
 sol! {
@@ -42,11 +52,79 @@ sol! {
 }
 
 sol! {
-    contract ValidatorSetContract {
-        function setForNextEpoch(bytes calldata newConfig) external onlyAptosFramework;
-        function getCurrentConfig() external view returns (bytes memory);
-        function getPendingConfig() external view returns (bytes memory, bool);
+    contract ValidatorManager {
+        enum ValidatorStatus {
+            PENDING_ACTIVE, // 0
+            ACTIVE, // 1
+            PENDING_INACTIVE, // 2
+            INACTIVE // 3
+        }
+
+        // Commission structure
+        struct Commission {
+            uint64 rate; // the commission rate charged to delegators(10000 is 100%)
+            uint64 maxRate; // maximum commission rate which validator can ever charge
+            uint64 maxChangeRate; // maximum daily increase of the validator commission
+        }
+
+        /// Complete validator information (merged from multiple contracts)
+        struct ValidatorInfo {
+            // Basic information (from ValidatorManager)
+            bytes consensusPublicKey;
+            Commission commission;
+            string moniker;
+            bool registered;
+            address stakeCreditAddress;
+            ValidatorStatus status;
+            uint256 votingPower; // Changed from uint64 to uint256 to prevent overflow
+            uint256 validatorIndex;
+            uint256 updateTime;
+            address operator;
+            bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+            bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+            bytes aptosAddress; // [u8; 32]
+        }
+
+        struct ValidatorSet {
+            ValidatorInfo[] activeValidators; // Active validators for the current epoch
+            ValidatorInfo[] pendingInactive; // Pending validators to leave in next epoch (still active)
+            ValidatorInfo[] pendingActive; // Pending validators to join in next epoch
+            uint256 totalVotingPower; // Current total voting power
+            uint256 totalJoiningPower; // Total voting power waiting to join in the next epoch
+        }
+
+        function getValidatorSet() external returns (ValidatorSet memory);
+
+        event Log(string message, uint256 value);
     }
+}
+
+pub fn convert_account(acc: &Address) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[12..].copy_from_slice(acc.as_slice());
+    // ExternalAccountAddress::new(bytes)
+    bytes
+}
+
+/// Convert Solidity ValidatorInfo to Gravity API ValidatorInfo
+pub fn convert_validator_info(
+    solidity_info: &ValidatorManager::ValidatorInfo,
+) -> GravityValidatorInfo {
+    println!("solidity_info called");
+    // Convert Address to AccountAddress (20 bytes -> AccountAddress)
+    let account_address =
+        gravity_api_types::u256_define::AccountAddress::from_bytes(&solidity_info.aptosAddress);
+
+    GravityValidatorInfo::new(
+        account_address,
+        solidity_info.votingPower.to::<u64>(),
+        ValidatorConfig::new(
+            solidity_info.consensusPublicKey.clone().into(),
+            solidity_info.validatorNetworkAddresses.clone().into(),
+            solidity_info.fullnodeNetworkAddresses.clone().into(),
+            solidity_info.validatorIndex.to::<u64>(),
+        ),
+    )
 }
 
 fn new_system_call_txn(contract: Address, input: Bytes) -> TxEnv {
@@ -75,38 +153,53 @@ fn test_gravity_system_call<DB: Database<Error: Debug + Send + Sync + 'static>>(
     let mut evm = evm_config.evm_with_env(db, evm_env);
     let result = evm
         .transact_raw(new_system_call_txn(
-            RECONFIGURATION_ADDRESS,
-            Reconfiguration::getCurrentEpochCall {}.abi_encode().into(),
+            EPOCH_MANAGER_ADDRESS,
+            getCurrentEpochInfoCall {}.abi_encode().into(),
         ))
         .unwrap();
     let returns =
-        Reconfiguration::getCurrentEpochCall::abi_decode_returns(result.result.output().unwrap())
-            .unwrap();
-    assert_eq!(returns, 1);
+        getCurrentEpochInfoCall::abi_decode_returns(result.result.output().unwrap()).unwrap();
+    assert_eq!(returns.epoch, 1);
 
     let result = evm
         .transact_raw(new_system_call_txn(
             VALIDATOR_SET_CONTRACT_ADDRESS,
-            ValidatorSetContract::getCurrentConfigCall {}.abi_encode().into(),
+            ValidatorManager::getValidatorSetCall {}.abi_encode().into(),
         ))
         .unwrap();
-    let returns = ValidatorSetContract::getCurrentConfigCall::abi_decode_returns(
-        result.result.output().unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        returns,
-        Bytes::from([
-            0, 1, 45, 134, 180, 10, 29, 105, 44, 7, 73, 160, 160, 66, 110, 32, 33, 238, 36,
-            226, 67, 13, 160, 245, 187, 156, 42, 230, 197, 134, 191, 62, 10, 15, 1, 0, 0, 0, 0,
-            0, 0, 0, 48, 133, 29, 65, 147, 45, 134, 111, 95, 171, 237, 102, 115, 137, 142, 21,
-            71, 62, 106, 10, 220, 245, 3, 61, 44, 147, 129, 108, 107, 17, 92, 133, 173, 52, 81,
-            224, 186, 198, 29, 87, 13, 94, 217, 242, 62, 30, 127, 119, 196, 11, 1, 9, 2, 0,
-            127, 0, 0, 1, 5, 232, 7, 11, 1, 9, 2, 0, 127, 0, 0, 1, 5, 232, 7, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ])
-    );
+    let solidity_validator_set =
+        ValidatorManager::getValidatorSetCall::abi_decode_returns(result.result.output().unwrap())
+            .unwrap();
+    result.result.logs().iter().for_each(|log| {
+        if let Ok(parsed) = ValidatorManager::Log::decode_log(log) {
+            println!("txn event Log: {:?}, {:?}.", parsed.message, parsed.value);
+        }
+    });
+
+    // Convert to Gravity validator set
+    let gravity_validator_set = GravityValidatorSet {
+        active_validators: solidity_validator_set
+            ._0
+            .activeValidators
+            .iter()
+            .map(convert_validator_info)
+            .collect(),
+        pending_inactive: solidity_validator_set
+            ._0
+            .pendingInactive
+            .iter()
+            .map(convert_validator_info)
+            .collect(),
+        pending_active: solidity_validator_set
+            ._0
+            .pendingActive
+            .iter()
+            .map(convert_validator_info)
+            .collect(),
+        total_voting_power: solidity_validator_set._0.totalVotingPower.to::<u128>(),
+        total_joining_power: solidity_validator_set._0.totalJoiningPower.to::<u128>(),
+    };
+    println!("gravity_validator_set: {:?}", gravity_validator_set);
 }
 
 #[test]
