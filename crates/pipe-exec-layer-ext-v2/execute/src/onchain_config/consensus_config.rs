@@ -1,0 +1,52 @@
+use super::base::{ConfigFetcher, OnchainConfigFetcher};
+use super::{GRAVITY_FRAMEWORK_ADDRESS, CONSENSUS_CONFIG_CONTRACT_ADDRESS};
+use alloy_primitives::{Address, Bytes};
+use alloy_sol_macro::sol;
+use alloy_sol_types::SolCall;
+use reth_rpc_eth_api::helpers::EthCall;
+
+sol! {
+    function getCurrentConfig() external view returns (bytes memory);
+}
+
+/// Fetcher for consensus configuration
+pub struct ConsensusConfigFetcher<'a, EthApi> {
+    base_fetcher: &'a OnchainConfigFetcher<EthApi>,
+}
+
+impl<'a, EthApi> ConsensusConfigFetcher<'a, EthApi>
+where
+    EthApi: EthCall,
+{
+    pub fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
+        Self { base_fetcher }
+    }
+}
+
+impl<'a, EthApi> ConfigFetcher<EthApi> for ConsensusConfigFetcher<'a, EthApi>
+where
+    EthApi: EthCall,
+{
+    fn fetch(&self, block_number: u64) -> Bytes {
+        let call = getCurrentConfigCall {};
+        let input: Bytes = call.abi_encode().into();
+        
+        let result = self.base_fetcher.eth_call(
+            Self::caller_address(),
+            Self::contract_address(),
+            input,
+            block_number,
+        );
+        
+        getCurrentConfigCall::abi_decode_returns(&result)
+            .expect("Failed to decode getCurrentConfig return value")
+    }
+
+    fn contract_address() -> Address {
+        CONSENSUS_CONFIG_CONTRACT_ADDRESS
+    }
+
+    fn caller_address() -> Address {
+        GRAVITY_FRAMEWORK_ADDRESS
+    }
+}
