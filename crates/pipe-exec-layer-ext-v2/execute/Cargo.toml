@@ -44,9 +44,7 @@ metrics.workspace = true
 serde_json.workspace = true
 
 # crypto and serialization for gravity-aptos validator_info
-bls12_381 = "0.7"
 bcs = "0.1"
-hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]

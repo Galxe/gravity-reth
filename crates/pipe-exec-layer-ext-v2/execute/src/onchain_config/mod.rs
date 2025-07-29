@@ -5,12 +5,6 @@ pub mod validator_set;
 pub mod metadata_txn;
 pub mod types;
 
-#[cfg(test)]
-pub mod test_framework;
-
-#[cfg(test)]
-pub mod examples;
-
 // Re-export main types for convenience
 pub use base::{OnchainConfigFetcher, ConfigFetcher};
 pub use consensus_config::ConsensusConfigFetcher;
