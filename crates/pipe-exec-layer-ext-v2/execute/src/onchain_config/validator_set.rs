@@ -37,10 +37,10 @@ where
         );
 
         // Decode the Solidity validator set
-        let solidity_validator_set = getValidatorSetCall::abi_decode_returns(&result, false)
+        let solidity_validator_set = getValidatorSetCall::abi_decode_returns(&result)
             .expect("Failed to decode getValidatorSet return value");
 
-        convert_validator_set_to_bcs(&solidity_validator_set._0)
+        convert_validator_set_to_bcs(&solidity_validator_set)
     }
 
     fn contract_address() -> Address {

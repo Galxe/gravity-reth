@@ -987,11 +987,11 @@ checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?branch=onchain-config-dev#fe3f6f404ad8c417b7163649c8941180c6ea374c"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=0af964690c39d6456c8d127f90a8f40a3e714c0c#0af964690c39d6456c8d127f90a8f40a3e714c0c"
 dependencies = [
  "anyhow",
  "async-trait",
- "bcs",
+ "bcs 0.1.4",
  "bytes",
  "futures",
  "hex",
@@ -1538,6 +1538,16 @@ checksum = "89e25b6adfb930f02d1981565a6e5d9c547ac15a96606256d3b59040e5cd4ca3"
 name = "bcs"
 version = "0.1.4"
 source = "git+https://github.com/aptos-labs/bcs.git?rev=d31fab9d81748e2594be5cd5cdf845786a30562d#d31fab9d81748e2594be5cd5cdf845786a30562d"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "bcs"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85b6598a2f5d564fb7855dc6b06fd1c38cff5a72bd8b863a4d021938497b440a"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -9625,6 +9635,7 @@ dependencies = [
  "alloy-sol-macro",
  "alloy-sol-types",
  "api-types",
+ "bcs 0.1.6",
  "eyre",
  "gravity-primitives",
  "gravity-storage",
@@ -9659,6 +9670,7 @@ dependencies = [
  "reth-trie-parallel",
  "revm",
  "revm-primitives",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

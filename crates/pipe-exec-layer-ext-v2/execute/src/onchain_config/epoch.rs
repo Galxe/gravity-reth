@@ -49,7 +49,8 @@ where
                 block_number,
             );
 
-            let epoch_info = EpochManager::getCurrentEpochInfoCall::abi_decode_returns(&result, false)
+            let epoch_info = EpochManager::getCurrentEpochInfoCall::abi_decode_returns(&result);
+            let epoch_info = EpochManager::getCurrentEpochInfoCall::abi_decode_returns(&result)
                 .expect("Failed to decode getCurrentEpoch return value");
 
             // Convert epoch to bytes

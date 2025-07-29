@@ -5,16 +5,21 @@ use super::{
 use crate::{ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
-use alloy_primitives::Address;
-use alloy_primitives::{Bytes, PrimitiveSignature, TxKind, U256};
+use alloy_primitives::{Address, Signature};
+use alloy_primitives::{Bytes, TxKind, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
-use reth_evm::Evm;
+use reth_evm::{Evm, IntoTxEnv};
 use reth_execution_types::BlockExecutionOutput;
-use reth_primitives::Receipt;
-use revm::db::BundleState;
-use revm_primitives::{EvmState, ExecutionResult};
+use reth_primitives::{Receipt, Recovered};
+use reth_provider::BlockExecutionResult;
+use revm::{
+    context::TxEnv,
+    context_interface::result::{ExecutionResult, HaltReason},
+    database::BundleState,
+    state::EvmState,
+};
 use std::fmt::Debug;
 
 /// Result of a metadata transaction execution
@@ -27,7 +32,7 @@ impl MetadataTxnResult {
     /// Check if the transaction emitted a NewEpoch event
     pub fn emit_new_epoch(&self) -> Option<(u64, Bytes)> {
         for log in self.result.logs() {
-            match AllValidatorsUpdated::decode_log(log, false) {
+            match AllValidatorsUpdated::decode_log(log) {
                 Ok(event) => {
                     let solidity_validator_set = &event.validatorSet;
                     // Convert to Gravity validator set
@@ -79,14 +84,16 @@ impl MetadataTxnResult {
             senders: vec![SYSTEM_CALLER],
             execution_output: BlockExecutionOutput {
                 state,
-                receipts: vec![Receipt {
-                    tx_type,
-                    success: true,
-                    cumulative_gas_used: 0,
-                    logs: self.result.into_logs(),
-                }],
-                requests: Default::default(),
-                gas_used: 0,
+                result: BlockExecutionResult {
+                    receipts: vec![Receipt {
+                        tx_type,
+                        success: true,
+                        cumulative_gas_used: 0,
+                        logs: self.result.into_logs(),
+                    }],
+                    requests: Default::default(),
+                    gas_used: 0,
+                },
             },
             txs_info: vec![],
             gravity_events: vec![GravityEvent::NewEpoch(new_epoch, validators.clone().into())],
@@ -122,13 +129,13 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
             value: U256::ZERO,
             input,
         }),
-        PrimitiveSignature::test_signature(),
+        Signature::test_signature(),
     )
 }
 
 /// Execute a metadata contract call (blockPrologue)
 pub fn transact_metadata_contract_call(
-    evm: &mut impl Evm<Error: Debug>,
+    evm: &mut impl Evm<Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     timestamp_us: u64,
 ) -> (MetadataTxnResult, EvmState) {
     let call = blockPrologueCall {
@@ -137,17 +144,11 @@ pub fn transact_metadata_contract_call(
         timestampMicros: U256::from(timestamp_us),
     };
     let input: Bytes = call.abi_encode().into();
-    let mut result = evm
-        .transact_system_call(SYSTEM_CALLER, BLOCK_MODULE_ADDRESS, input.clone())
-        .unwrap();
+    let txn = new_system_call_txn(BLOCK_MODULE_ADDRESS, input.clone());
+    let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
+    let mut result = evm.transact_raw(tx_env).unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
     result.state.remove(&SYSTEM_CALLER);
-    result.state.remove(&evm.block().coinbase);
-    (
-        MetadataTxnResult {
-            result: result.result,
-            txn: new_system_call_txn(BLOCK_MODULE_ADDRESS, input),
-        },
-        result.state,
-    )
+    result.state.remove(&evm.block().beneficiary);
+    (MetadataTxnResult { result: result.result, txn }, result.state)
 }

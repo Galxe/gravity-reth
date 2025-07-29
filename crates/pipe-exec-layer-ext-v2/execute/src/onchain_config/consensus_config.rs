@@ -38,9 +38,8 @@ where
             block_number,
         );
         
-        getCurrentConfigCall::abi_decode_returns(&result, false)
+        getCurrentConfigCall::abi_decode_returns(&result)
             .expect("Failed to decode getCurrentConfig return value")
-            ._0
     }
 
     fn contract_address() -> Address {

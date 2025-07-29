@@ -179,25 +179,22 @@ fn test_gravity_system_call<DB: Database<Error: Debug + Send + Sync + 'static>>(
     // Convert to Gravity validator set
     let gravity_validator_set = GravityValidatorSet {
         active_validators: solidity_validator_set
-            ._0
             .activeValidators
             .iter()
             .map(convert_validator_info)
             .collect(),
         pending_inactive: solidity_validator_set
-            ._0
             .pendingInactive
             .iter()
             .map(convert_validator_info)
             .collect(),
         pending_active: solidity_validator_set
-            ._0
             .pendingActive
             .iter()
             .map(convert_validator_info)
             .collect(),
-        total_voting_power: solidity_validator_set._0.totalVotingPower.to::<u128>(),
-        total_joining_power: solidity_validator_set._0.totalJoiningPower.to::<u128>(),
+        total_voting_power: solidity_validator_set.totalVotingPower.to::<u128>(),
+        total_joining_power: solidity_validator_set.totalJoiningPower.to::<u128>(),
     };
     println!("gravity_validator_set: {:?}", gravity_validator_set);
 }
