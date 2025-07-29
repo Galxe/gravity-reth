@@ -2,7 +2,7 @@
 #[macro_use]
 mod channel;
 mod metrics;
-mod onchain_config;
+pub mod onchain_config;
 
 use channel::Channel;
 use gravity_api_types::{
