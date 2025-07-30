@@ -506,6 +506,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             let mut state = State::builder().with_database_ref(&state).with_bundle_update().build();
             let mut metadata_evm_env = evm_env.clone();
             // Since we create one legacy txn, we should skip the base fee check
+            // FIXME: This is a hack, we should find a more elegant way to do this
             metadata_evm_env.cfg_env.disable_base_fee = true;
             let mut evm = self.evm_config.evm_with_env(&mut state, metadata_evm_env);
             let (metadata_txn_result, state_changes) =
