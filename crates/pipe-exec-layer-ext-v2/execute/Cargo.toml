@@ -12,7 +12,7 @@ description = "pipeline execution layer extension"
 workspace = true
 
 [dependencies]
-gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "1329a2dad898ce2be3128f0b6c24f4ea7f5d23d6" }
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "0227dd5f835a088d58c9ed1ae51a3a561ca0661f" }
 reth-pipe-exec-layer-event-bus.workspace = true
 reth-primitives.workspace = true
 reth-primitives-traits.workspace = true

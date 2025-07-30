@@ -40,7 +40,7 @@ use reth_provider::{
 };
 
 use revm::{
-    context::Cfg, database::{states::bundle_state::BundleRetention, State}, state::AccountInfo, DatabaseCommit
+    database::{states::bundle_state::BundleRetention, State}, state::AccountInfo, DatabaseCommit
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
