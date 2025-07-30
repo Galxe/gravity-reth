@@ -40,9 +40,7 @@ use reth_provider::{
 };
 
 use revm::{
-    database::{states::bundle_state::BundleRetention, State},
-    state::AccountInfo,
-    DatabaseCommit,
+    context::Cfg, database::{states::bundle_state::BundleRetention, State}, state::AccountInfo, DatabaseCommit
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
@@ -506,7 +504,10 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let (metadata_txn_result, state_changes) = {
             let mut state = State::builder().with_database_ref(&state).with_bundle_update().build();
-            let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
+            let mut metadata_evm_env = evm_env.clone();
+            // Since we create one legacy txn, we should skip the base fee check
+            metadata_evm_env.cfg_env.disable_base_fee = true;
+            let mut evm = self.evm_config.evm_with_env(&mut state, metadata_evm_env);
             let (metadata_txn_result, state_changes) =
                 transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000);
             drop(evm);
