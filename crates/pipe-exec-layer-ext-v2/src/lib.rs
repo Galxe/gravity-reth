@@ -816,13 +816,14 @@ mod tests {
     use std::collections::HashMap;
 
     // Mock database for testing
+    #[derive(Debug, Default)]
     struct MockDatabase {
         accounts: HashMap<Address, AccountInfo>,
     }
 
     impl MockDatabase {
         fn new() -> Self {
-            Self { accounts: HashMap::new() }
+            Self::default()
         }
 
         fn insert_account(&mut self, address: Address, account: AccountInfo) {
