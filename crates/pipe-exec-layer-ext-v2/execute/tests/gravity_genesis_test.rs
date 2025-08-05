@@ -5,10 +5,9 @@ use alloy_consensus::Header;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
-use gravity_api_types::{
-    on_chain_config::validator_config::ValidatorConfig,
-    on_chain_config::validator_info::ValidatorInfo as GravityValidatorInfo,
-    on_chain_config::validator_set::ValidatorSet as GravityValidatorSet,
+use gravity_api_types::on_chain_config::{
+    validator_config::ValidatorConfig, validator_info::ValidatorInfo as GravityValidatorInfo,
+    validator_set::ValidatorSet as GravityValidatorSet,
 };
 use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
@@ -35,8 +34,8 @@ const EPOCH_MANAGER_ADDRESS: Address = address!("0x00000000000000000000000000000
 
 // sol! {
 //     contract EpochManager {
-//         function getCurrentEpochInfo() external view returns (uint64 epoch, uint64 lastTransitionTime, uint64 interval);
-//     }
+//         function getCurrentEpochInfo() external view returns (uint64 epoch, uint64
+// lastTransitionTime, uint64 interval);     }
 // }
 
 sol! {

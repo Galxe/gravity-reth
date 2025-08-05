@@ -1,6 +1,8 @@
-use super::base::{ConfigFetcher, OnchainConfigFetcher};
-use super::{SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR};
-use super::types::{getValidatorSetCall, convert_validator_set_to_bcs};
+use super::{
+    base::{ConfigFetcher, OnchainConfigFetcher},
+    types::{convert_validator_set_to_bcs, getValidatorSetCall},
+    SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR,
+};
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolCall;
 use reth_rpc_eth_api::helpers::EthCall;
@@ -28,7 +30,7 @@ where
     fn fetch(&self, block_number: u64) -> Bytes {
         let call = getValidatorSetCall {};
         let input: Bytes = call.abi_encode().into();
-        
+
         let result = self.base_fetcher.eth_call(
             Self::caller_address(),
             Self::contract_address(),

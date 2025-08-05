@@ -5,8 +5,7 @@ use super::{
 use crate::{ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
-use alloy_primitives::{Address, Signature};
-use alloy_primitives::{Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};

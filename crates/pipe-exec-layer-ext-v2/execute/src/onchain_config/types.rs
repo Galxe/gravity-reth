@@ -72,15 +72,13 @@ pub fn convert_account(acc: &Address) -> [u8; 32] {
 pub fn convert_validator_info(
     solidity_info: &ValidatorInfo,
 ) -> gravity_api_types::on_chain_config::validator_info::ValidatorInfo {
-    use gravity_api_types::{
-        on_chain_config::validator_config::ValidatorConfig,
-        on_chain_config::validator_info::ValidatorInfo as GravityValidatorInfo,
+    use gravity_api_types::on_chain_config::{
+        validator_config::ValidatorConfig, validator_info::ValidatorInfo as GravityValidatorInfo,
     };
 
     // Convert Address to AccountAddress (20 bytes -> AccountAddress)
-    let account_address = gravity_api_types::u256_define::AccountAddress::from_bytes(
-        &solidity_info.aptosAddress,
-    );
+    let account_address =
+        gravity_api_types::u256_define::AccountAddress::from_bytes(&solidity_info.aptosAddress);
 
     GravityValidatorInfo::new(
         account_address,

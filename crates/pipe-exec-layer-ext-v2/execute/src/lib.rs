@@ -37,7 +37,9 @@ use reth_primitives_traits::{
 };
 use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
 use revm::{
-    database::{states::bundle_state::BundleRetention, State}, state::AccountInfo, DatabaseCommit
+    database::{states::bundle_state::BundleRetention, State},
+    state::AccountInfo,
+    DatabaseCommit,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 

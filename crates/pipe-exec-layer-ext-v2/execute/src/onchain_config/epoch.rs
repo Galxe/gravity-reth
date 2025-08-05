@@ -1,5 +1,7 @@
-use super::base::{ConfigFetcher, OnchainConfigFetcher};
-use super::{EPOCH_MANAGER_ADDR, SYSTEM_CALLER};
+use super::{
+    base::{ConfigFetcher, OnchainConfigFetcher},
+    EPOCH_MANAGER_ADDR, SYSTEM_CALLER,
+};
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
