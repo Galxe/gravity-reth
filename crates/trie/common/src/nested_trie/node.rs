@@ -10,7 +10,7 @@ use nybbles::Nibbles;
 
 use crate::StoredNibblesSubKey;
 
-/// Cache hash value(RlpNode) of current Node to prevent duplicate caculations,
+/// Cache hash value(RlpNode) of current Node to prevent duplicate calculations,
 /// and the `dirty` indicates whether current Node has been updated.
 /// `NodeFlag` is not stored in database, and read as default when a Node is loaded
 #[derive(Default, Debug, Clone, PartialEq, Eq)]

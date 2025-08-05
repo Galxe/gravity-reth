@@ -464,7 +464,7 @@ mod tests {
             });
         }
 
-        // paralle insert
+        // parallel insert
         let mut trie_updates = TrieUpdatesV2::default();
         let mut batches: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let create_reader = || Ok(InmemoryAccountTrieReader(db.clone()));
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn nested_hash_calculate() {
         let state = random_state();
-        // test paralle root hash
+        // test parallel root hash
         let factory = create_test_provider_factory();
         let provider = || factory.database_provider_ro().map(|db| db.into_tx());
         let mut hashed_state = HashedPostState::default();

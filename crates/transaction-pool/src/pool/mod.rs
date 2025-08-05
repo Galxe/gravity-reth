@@ -482,13 +482,15 @@ where
             });
         }
 
-        let mut listener = self.event_listener.write();
+        {
+            let mut listener = self.event_listener.write();
 
-        for tx in &promoted {
-            listener.pending(tx.hash(), None);
-        }
-        for tx in &discarded {
-            listener.discarded(tx.hash());
+            for tx in &promoted {
+                listener.pending(tx.hash(), None);
+            }
+            for tx in &discarded {
+                listener.discarded(tx.hash());
+            }
         }
 
         // This deletes outdated blob txs from the blob store, based on the account's nonce. This is
@@ -755,14 +757,17 @@ where
                 .into_iter()
                 .map(|tx| self.add_transaction(&mut pool, origin, tx))
                 .collect::<Vec<_>>();
+
             // Enforce the pool size limits if at least one transaction was added successfully
             let discarded = if added.iter().any(Result::is_ok) {
                 pool.discard_worst()
             } else {
                 Default::default()
             };
+
             (added, discarded)
         };
+
         if !discarded.is_empty() {
             // Delete any blobs associated with discarded blob transactions
             self.delete_discarded_blobs(discarded.iter());

@@ -62,11 +62,11 @@ pub use alloy_evm::block::state_changes as state_change;
 
 /// Database abstraction for parallel execution.
 pub trait ParallelDatabase:
-    revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync
+    revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync + Debug
 {
 }
 impl<T> ParallelDatabase for T where
-    T: revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync
+    T: revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync + Debug
 {
 }
 

@@ -248,7 +248,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         let hashed_state =
             HashedPostState::from_bundle_state::<KeccakKeyHasher>(&execution_output.state.state);
-        self.metrics.cache_accout_state.record(write_start.elapsed());
+        self.metrics.cache_account_state.record(write_start.elapsed());
         let elapsed = start_time.elapsed();
         info!(target: "PipeExecService.process",
             block_number=?block_number,

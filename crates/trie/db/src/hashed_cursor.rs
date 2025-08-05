@@ -31,7 +31,7 @@ impl<TX: DbTx> HashedCursorFactory for DatabaseHashedCursorFactory<'_, TX> {
         DatabaseHashedStorageCursor<<TX as DbTx>::DupCursor<tables::HashedStorages>>;
 
     fn hashed_account_cursor(&self) -> Result<Self::AccountCursor, DatabaseError> {
-        Ok(DatabaseHashedAccountCursor::new(self.0.cursor_read::<tables::HashedAccounts>()?))
+        Ok(DatabaseHashedAccountCursor(self.0.cursor_read::<tables::HashedAccounts>()?))
     }
 
     fn hashed_storage_cursor(

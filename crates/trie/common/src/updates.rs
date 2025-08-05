@@ -11,7 +11,7 @@ use alloy_primitives::{
 /// The aggregation of nested trie updates
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct TrieUpdatesV2 {
-    /// Collection of updated intermedidate account nodes indexed by full path.
+    /// Collection of updated intermediate account nodes indexed by full path.
     pub account_nodes: HashMap<Nibbles, Node>,
     /// Collection of removed intermediate account nodes indexed by full path.
     pub removed_nodes: HashSet<Nibbles>,
@@ -151,6 +151,30 @@ impl TrieUpdates {
         TrieUpdatesSorted { removed_nodes: self.removed_nodes, account_nodes, storage_tries }
     }
 
+    /// Converts trie updates into [`TrieUpdatesSorted`], but keeping the maps allocated by
+    /// draining.
+    ///
+    /// This effectively clears all the fields in the [`TrieUpdatesSorted`].
+    ///
+    /// This allows us to reuse the allocated space. This allocates new space for the sorted
+    /// updates, like `into_sorted`.
+    pub fn drain_into_sorted(&mut self) -> TrieUpdatesSorted {
+        let mut account_nodes = self.account_nodes.drain().collect::<Vec<_>>();
+        account_nodes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let storage_tries = self
+            .storage_tries
+            .drain()
+            .map(|(hashed_address, updates)| (hashed_address, updates.into_sorted()))
+            .collect();
+
+        TrieUpdatesSorted {
+            removed_nodes: self.removed_nodes.clone(),
+            account_nodes,
+            storage_tries,
+        }
+    }
+
     /// Converts trie updates into [`TrieUpdatesSortedRef`].
     pub fn into_sorted_ref<'a>(&'a self) -> TrieUpdatesSortedRef<'a> {
         let mut account_nodes = self.account_nodes.iter().collect::<Vec<_>>();
@@ -165,6 +189,13 @@ impl TrieUpdates {
                 .map(|m| (*m.0, m.1.into_sorted_ref().clone()))
                 .collect(),
         }
+    }
+
+    /// Clears the nodes and storage trie maps in this `TrieUpdates`.
+    pub fn clear(&mut self) {
+        self.account_nodes.clear();
+        self.removed_nodes.clear();
+        self.storage_tries.clear();
     }
 }
 

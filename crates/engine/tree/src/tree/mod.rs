@@ -10,7 +10,7 @@ use crate::{
 use alloy_consensus::BlockHeader;
 use alloy_eips::{merge::EPOCH_SLOTS, BlockNumHash, NumHash};
 use alloy_evm::block::BlockExecutor;
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::{
     ForkchoiceState, PayloadStatus, PayloadStatusEnum, PayloadValidationError,
 };
@@ -50,6 +50,7 @@ use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
 use state::TreeState;
 use std::{
     borrow::Cow,
+    collections::HashMap,
     fmt::Debug,
     sync::{
         mpsc::{Receiver, RecvError, RecvTimeoutError, Sender},
@@ -65,8 +66,6 @@ use tracing::*;
 
 mod block_buffer;
 mod cached_state;
-#[cfg(test)]
-mod e2e_tests;
 pub mod error;
 mod instrumented_state;
 mod invalid_block_hook;
@@ -277,9 +276,8 @@ where
     evm_config: C,
     /// Precompile cache map.
     precompile_cache_map: PrecompileCacheMap<SpecFor<C>>,
-    /// Metrics for precompile cache, saved between block executions so we don't re-allocate for
-    /// every block.
-    precompile_cache_metrics: CachedPrecompileMetrics,
+    /// Metrics for precompile cache, stored per address to avoid re-allocation.
+    precompile_cache_metrics: HashMap<Address, CachedPrecompileMetrics>,
 }
 
 impl<N, P: Debug, T: PayloadTypes + Debug, V: Debug, C> std::fmt::Debug
@@ -374,7 +372,7 @@ where
             payload_processor,
             evm_config,
             precompile_cache_map,
-            precompile_cache_metrics: Default::default(),
+            precompile_cache_metrics: HashMap::new(),
         }
     }
 
@@ -619,6 +617,8 @@ where
         trace!(target: "engine::tree", "invoked new payload");
         self.metrics.engine.new_payload_messages.increment(1);
 
+        let validation_start = Instant::now();
+
         // Ensures that the given payload does not violate any consensus rules that concern the
         // block's layout, like:
         //    - missing or invalid base fee
@@ -665,6 +665,10 @@ where
                 return Ok(TreeOutcome::new(PayloadStatus::new(status, latest_valid_hash)))
             }
         };
+
+        self.metrics
+            .block_validation
+            .record_payload_validation(validation_start.elapsed().as_secs_f64());
 
         let num_hash = block.num_hash();
         let engine_event = BeaconConsensusEngineEvent::BlockReceived(num_hash);
@@ -2392,7 +2396,7 @@ where
             if use_state_root_task {
                 debug!(target: "engine::tree", block=?block_num_hash, "Using sparse trie state root algorithm");
                 match handle.state_root() {
-                    Ok(StateRootComputeOutcome { state_root, trie_updates, trie }) => {
+                    Ok(StateRootComputeOutcome { state_root, trie_updates }) => {
                         let elapsed = execution_finish.elapsed();
                         info!(target: "engine::tree", ?state_root, ?elapsed, "State root task finished");
                         // we double check the state root here for good measure
@@ -2406,9 +2410,6 @@ where
                                 "State root task returned incorrect state root"
                             );
                         }
-
-                        // hold on to the sparse trie for the next payload
-                        self.payload_processor.set_sparse_trie(trie);
                     }
                     Err(error) => {
                         debug!(target: "engine::tree", %error, "Background parallel state root computation failed");
@@ -2534,11 +2535,16 @@ where
 
         if !self.config.precompile_cache_disabled() {
             executor.evm_mut().precompiles_mut().map_precompiles(|address, precompile| {
+                let metrics = self
+                    .precompile_cache_metrics
+                    .entry(*address)
+                    .or_insert_with(|| CachedPrecompileMetrics::new_with_address(*address))
+                    .clone();
                 CachedPrecompile::wrap(
                     precompile,
                     self.precompile_cache_map.cache_for_address(*address),
                     *self.evm_config.evm_env(block.header()).spec_id(),
-                    Some(self.precompile_cache_metrics.clone()),
+                    Some(metrics),
                 )
             });
         }
@@ -2981,8 +2987,8 @@ pub enum BlockStatus {
 
 /// How a payload was inserted if it was valid.
 ///
-/// If the payload was valid, but has already been seen, [`InsertPayloadOk::AlreadySeen(_)`] is
-/// returned, otherwise [`InsertPayloadOk::Inserted(_)`] is returned.
+/// If the payload was valid, but has already been seen, [`InsertPayloadOk::AlreadySeen`] is
+/// returned, otherwise [`InsertPayloadOk::Inserted`] is returned.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InsertPayloadOk {
     /// The payload was valid, but we have already seen it.

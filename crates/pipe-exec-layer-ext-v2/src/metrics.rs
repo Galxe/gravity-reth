@@ -11,7 +11,7 @@ pub(crate) struct PipeExecLayerMetrics {
     /// How long it took for blocks to be executed
     pub(crate) execute_duration: Histogram,
     /// How long it took for cache account state
-    pub(crate) cache_accout_state: Histogram,
+    pub(crate) cache_account_state: Histogram,
     /// How long it took for blocks to be merklized
     pub(crate) merklize_duration: Histogram,
     /// How long it took for cache trie state

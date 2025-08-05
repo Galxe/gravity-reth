@@ -20,7 +20,7 @@ use std::{
 };
 
 const MAX_PERSISTENCE_GAP: u64 = 64;
-const CACHE_METRIS_INTERVAL: Duration = Duration::from_secs(15); // 15s
+const CACHE_METRICS_INTERVAL: Duration = Duration::from_secs(15); // 15s
 const CACHE_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5min
 const CACHE_SIZE_THRESHOLD: usize = 2_000_000;
 const CACHE_CONTRACTS_THRESHOLD: usize = 2_000;
@@ -34,7 +34,7 @@ struct CacheMetrics {
     trie_cache_hit_ratio: Gauge,
     /// Number of cached items
     cache_num_items: Gauge,
-    /// Lastest pre-merged block number
+    /// Latest pre-merged block number
     latest_merged_block_number: Gauge,
     /// Latest stored block number
     latest_persist_block_number: Gauge,
@@ -177,7 +177,7 @@ impl PersistBlockCache {
 
         let weak_inner = Arc::downgrade(&inner);
         let handle = thread::spawn(move || {
-            let interval = CACHE_METRIS_INTERVAL; // 15s
+            let interval = CACHE_METRICS_INTERVAL; // 15s
             let eviction_interval = CACHE_EVICTION_INTERVAL; // 5min
             let mut last_eviction_time = Instant::now();
             let mut last_eviction_contract = Instant::now();

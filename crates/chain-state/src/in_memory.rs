@@ -163,7 +163,7 @@ impl<N: NodePrimitives> CanonicalInMemoryStateInner<N> {
 }
 
 type PendingBlockAndReceipts<N> =
-    (SealedBlock<<N as NodePrimitives>::Block>, Vec<reth_primitives_traits::ReceiptTy<N>>);
+    (RecoveredBlock<<N as NodePrimitives>::Block>, Vec<reth_primitives_traits::ReceiptTy<N>>);
 
 /// This type is responsible for providing the blocks, receipts, and state for
 /// all canonical blocks not on disk yet and keeps track of the block range that
@@ -484,7 +484,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     pub fn pending_block_and_receipts(&self) -> Option<PendingBlockAndReceipts<N>> {
         self.pending_state().map(|block_state| {
             (
-                block_state.block_ref().recovered_block().sealed_block().clone(),
+                block_state.block_ref().recovered_block().clone(),
                 block_state.executed_block_receipts(),
             )
         })
@@ -1358,7 +1358,7 @@ mod tests {
         // Check the pending block and receipts
         assert_eq!(
             state.pending_block_and_receipts().unwrap(),
-            (block2.recovered_block().sealed_block().clone(), vec![])
+            (block2.recovered_block().clone(), vec![])
         );
     }
 

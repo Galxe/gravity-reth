@@ -96,7 +96,7 @@ where
 }
 
 /// Block view provider
-#[allow(missing_debug_implementations)]
+#[derive(Debug)]
 pub struct BlockViewProvider {
     db: StateProviderDatabase<StateProviderBox>,
     cache: Option<PersistBlockCache>,

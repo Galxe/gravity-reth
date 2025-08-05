@@ -32,9 +32,10 @@ reth-tasks.workspace = true
 reth-trie-db.workspace = true
 reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
-reth-trie.workspace = true
 reth-pipe-exec-layer-ext-v2.workspace = true
 gravity-primitives.workspace = true
+reth-trie-sparse-parallel = { workspace = true, features = ["std"] }
+reth-trie.workspace = true
 
 # alloy
 alloy-evm.workspace = true
@@ -73,7 +74,7 @@ reth-tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 # reth
-reth-evm-ethereum.workspace = true
+reth-evm-ethereum = { workspace = true, features = ["test-utils"] }
 reth-chain-state = { workspace = true, features = ["test-utils"] }
 reth-chainspec.workspace = true
 reth-db-common.workspace = true
@@ -141,3 +142,7 @@ test-utils = [
     "reth-node-ethereum/test-utils",
     "reth-evm-ethereum/test-utils",
 ]
+
+[[test]]
+name = "e2e_testsuite"
+path = "tests/e2e-testsuite/main.rs"

@@ -24,6 +24,7 @@ pub struct ParallelTxRO {
     env: Environment,
     metrics: Option<Arc<DatabaseEnvMetrics>>,
     max_txs: usize,
+    disable_long_read_transaction_safety: bool,
 }
 
 #[derive(Debug)]
@@ -59,6 +60,7 @@ impl ParallelTxRO {
             max_txs: 8,
             env,
             metrics,
+            disable_long_read_transaction_safety: false,
         })
     }
 
@@ -69,7 +71,10 @@ impl ParallelTxRO {
         inner.num_txs += 1;
         drop(inner);
         match create_tx(&self.env, self.metrics.clone()) {
-            Ok(tx) => {
+            Ok(mut tx) => {
+                if self.disable_long_read_transaction_safety {
+                    tx.disable_long_read_transaction_safety();
+                }
                 let tx = Arc::new(tx);
                 let tx_clone: Arc<Tx<RO>> = tx.clone();
                 let mut inner = self.inner.lock().unwrap();
@@ -232,7 +237,8 @@ impl DbTx for ParallelTxRO {
     }
 
     fn disable_long_read_transaction_safety(&mut self) {
-        // Do nothing.
+        self.tx.disable_long_read_transaction_safety();
+        self.disable_long_read_transaction_safety = true;
     }
 }
 

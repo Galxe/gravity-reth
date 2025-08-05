@@ -84,6 +84,7 @@ reth-trie = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-network-peers.workspace = true
 reth-tracing.workspace = true
+reth-trie-db.workspace = true
 
 alloy-primitives = { workspace = true, features = ["getrandom", "rand"] }
 alloy-rlp.workspace = true
@@ -116,8 +117,9 @@ test-utils = [
     "reth-revm/test-utils",
     "reth-codecs/test-utils",
     "reth-db-api/test-utils",
-    "reth-trie/test-utils",
+    "reth-trie-db/test-utils",
     "reth-trie-parallel/test-utils",
+    "reth-trie/test-utils",
     "reth-prune-types/test-utils",
     "dep:reth-ethereum-primitives",
     "reth-ethereum-primitives?/test-utils",

@@ -43,7 +43,9 @@ where
         + PruneCheckpointReader
         + PruneCheckpointWriter
         + BlockReader
-        + StaticFileProviderFactory<Primitives: NodePrimitives<SignedTx: Value, Receipt: Value>>,
+        + StaticFileProviderFactory<
+            Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
+        >,
 {
     fn id(&self) -> StageId {
         StageId::Prune
@@ -138,7 +140,9 @@ where
         + PruneCheckpointReader
         + PruneCheckpointWriter
         + BlockReader
-        + StaticFileProviderFactory<Primitives: NodePrimitives<SignedTx: Value, Receipt: Value>>,
+        + StaticFileProviderFactory<
+            Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
+        >,
 {
     fn id(&self) -> StageId {
         StageId::PruneSenderRecovery
