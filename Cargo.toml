@@ -35,6 +35,7 @@ reth-ethereum-payload-builder.workspace = true
 reth-primitives.workspace = true
 reth-cli-commands.workspace = true
 reth-pipe-exec-layer-ext-v2.workspace = true
+reth-pipe-exec-layer-event-bus.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
 gravity-storage.workspace = true

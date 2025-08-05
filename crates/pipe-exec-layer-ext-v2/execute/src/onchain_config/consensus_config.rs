@@ -3,9 +3,10 @@ use super::{
     CONSENSUS_CONFIG_CONTRACT_ADDRESS, GRAVITY_FRAMEWORK_ADDRESS,
 };
 use alloy_primitives::{Address, Bytes};
+use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
-use reth_rpc_eth_api::helpers::EthCall;
+use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 
 sol! {
     function getCurrentConfig() external view returns (bytes memory);
@@ -25,9 +26,10 @@ where
     }
 }
 
-impl<'a, EthApi> ConfigFetcher<EthApi> for ConsensusConfigFetcher<'a, EthApi>
+impl<'a, EthApi> ConfigFetcher for ConsensusConfigFetcher<'a, EthApi>
 where
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn fetch(&self, block_number: u64) -> Bytes {
         let call = getCurrentConfigCall {};

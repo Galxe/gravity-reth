@@ -4,8 +4,9 @@ use super::{
     SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR,
 };
 use alloy_primitives::{Address, Bytes};
+use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
-use reth_rpc_eth_api::helpers::EthCall;
+use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 
 // BCS for serialization
 
@@ -23,9 +24,10 @@ where
     }
 }
 
-impl<'a, EthApi> ConfigFetcher<EthApi> for ValidatorSetFetcher<'a, EthApi>
+impl<'a, EthApi> ConfigFetcher for ValidatorSetFetcher<'a, EthApi>
 where
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn fetch(&self, block_number: u64) -> Bytes {
         let call = getValidatorSetCall {};

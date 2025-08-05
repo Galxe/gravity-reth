@@ -4168,6 +4168,7 @@ dependencies = [
  "reth-node-core",
  "reth-node-ethereum",
  "reth-payload-builder",
+ "reth-pipe-exec-layer-event-bus",
  "reth-pipe-exec-layer-ext-v2",
  "reth-primitives",
  "reth-provider",

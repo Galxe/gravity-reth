@@ -4,14 +4,14 @@ use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequ
 
 use alloy_primitives::TxKind;
 use gravity_api_types::config_storage::{OnChainConfig, OnChainConfigResType};
-use reth_rpc_eth_api::helpers::EthCall;
+use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use std::{fmt::Debug, sync::OnceLock};
 use tokio::runtime::Runtime;
 
 static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 /// Base trait for all config fetchers
-pub trait ConfigFetcher<EthApi> {
+pub trait ConfigFetcher {
     /// Fetch configuration data for a specific block
     fn fetch(&self, block_number: u64) -> Bytes;
 
@@ -31,6 +31,7 @@ pub struct OnchainConfigFetcher<EthApi> {
 impl<EthApi> OnchainConfigFetcher<EthApi>
 where
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     pub fn new(eth_api: EthApi) -> Self {
         Self { eth_api }

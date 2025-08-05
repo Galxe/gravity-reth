@@ -3,9 +3,10 @@ use super::{
     EPOCH_MANAGER_ADDR, SYSTEM_CALLER,
 };
 use alloy_primitives::{Address, Bytes};
+use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
-use reth_rpc_eth_api::helpers::EthCall;
+use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 
 sol! {
     contract EpochManager {
@@ -27,9 +28,10 @@ where
     }
 }
 
-impl<'a, EthApi> ConfigFetcher<EthApi> for EpochFetcher<'a, EthApi>
+impl<'a, EthApi> ConfigFetcher for EpochFetcher<'a, EthApi>
 where
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn fetch(&self, block_number: u64) -> Bytes {
         #[cfg(feature = "pipe_test")]
@@ -51,7 +53,6 @@ where
                 block_number,
             );
 
-            let epoch_info = EpochManager::getCurrentEpochInfoCall::abi_decode_returns(&result);
             let epoch_info = EpochManager::getCurrentEpochInfoCall::abi_decode_returns(&result)
                 .expect("Failed to decode getCurrentEpoch return value");
 

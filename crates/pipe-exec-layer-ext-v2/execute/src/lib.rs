@@ -19,6 +19,7 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     Address, TxHash, B256, U256,
 };
+use alloy_rpc_types_eth::TransactionRequest;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
@@ -36,6 +37,7 @@ use reth_primitives_traits::{
     Block as _, RecoveredBlock,
 };
 use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
+use reth_rpc_eth_api::RpcTypes;
 use revm::{
     database::{states::bundle_state::BundleRetention, State},
     state::AccountInfo,
@@ -464,7 +466,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             state,
             ordered_block.transactions,
             ordered_block.senders,
-            evm_env.block_env.basefee,
+            base_fee,
             block.gas_limit,
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
@@ -481,6 +483,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         let block_id = ordered_block.id;
         let parent_id = ordered_block.parent_id;
         let block_number = ordered_block.number;
+        assert_eq!(block_number, parent_header.number + 1);
+        let epoch = ordered_block.epoch;
+
         let state = self.storage.get_state_view().unwrap();
 
         let evm_env = self
@@ -805,6 +810,7 @@ impl<Storage, EthApi> ConfigStorage for PipeExecLayerApi<Storage, EthApi>
 where
     Storage: Sync + Send + 'static,
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn fetch_config_bytes(
         &self,
@@ -882,6 +888,7 @@ pub fn new_pipe_exec_layer_api<Storage, EthApi>(
 where
     Storage: GravityStorage,
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (execution_result_tx, execution_result_rx) = tokio::sync::mpsc::unbounded_channel();
