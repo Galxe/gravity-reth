@@ -40,9 +40,9 @@ const MULTIPROOF_TARGETS_CHUNK_SIZE: usize = 10;
 #[derive(Default, Debug)]
 pub struct SparseTrieUpdate {
     /// The state update that was used to calculate the proof
-    pub(crate) state: HashedPostState,
+    pub state: HashedPostState,
     /// The calculated multiproof
-    pub(crate) multiproof: DecodedMultiProof,
+    pub multiproof: DecodedMultiProof,
 }
 
 impl SparseTrieUpdate {

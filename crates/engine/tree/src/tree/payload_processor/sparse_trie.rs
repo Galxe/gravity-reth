@@ -142,7 +142,7 @@ pub struct StateRootComputeOutcome {
 }
 
 /// Updates the sparse trie with the given proofs and state, and returns the elapsed time.
-pub(crate) fn update_sparse_trie<BPF, A, S>(
+pub fn update_sparse_trie<BPF, A, S>(
     trie: &mut SparseStateTrie<A, S>,
     SparseTrieUpdate { mut state, multiproof }: SparseTrieUpdate,
     blinded_provider_factory: &BPF,

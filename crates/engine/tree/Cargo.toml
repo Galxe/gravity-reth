@@ -146,3 +146,7 @@ test-utils = [
 [[test]]
 name = "e2e_testsuite"
 path = "tests/e2e-testsuite/main.rs"
+
+[[bench]]
+name = "root"
+harness = false

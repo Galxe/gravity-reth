@@ -199,7 +199,7 @@ pub struct ProofTaskTx<Tx> {
 
 impl<Tx> ProofTaskTx<Tx> {
     /// Initializes a [`ProofTaskTx`] using the given transaction anda[`ProofTaskCtx`].
-    const fn new(tx: Tx, task_ctx: ProofTaskCtx) -> Self {
+    pub const fn new(tx: Tx, task_ctx: ProofTaskCtx) -> Self {
         Self { tx, task_ctx }
     }
 }
@@ -208,7 +208,7 @@ impl<Tx> ProofTaskTx<Tx>
 where
     Tx: DbTx,
 {
-    fn create_factories(
+    pub fn create_factories(
         &self,
     ) -> (
         InMemoryTrieCursorFactory<'_, DatabaseTrieCursorFactory<'_, Tx>>,
@@ -426,6 +426,10 @@ impl ProofTaskCtx {
         prefix_sets: Arc<TriePrefixSetsMut>,
     ) -> Self {
         Self { nodes_sorted, state_sorted, prefix_sets }
+    }
+
+    pub fn prefix_sets(&self) -> Arc<TriePrefixSetsMut> {
+        self.prefix_sets.clone()
     }
 }
 
