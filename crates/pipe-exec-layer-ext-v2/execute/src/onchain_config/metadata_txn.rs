@@ -106,7 +106,10 @@ impl MetadataTxnResult {
     }
 
     /// Insert this metadata transaction into an existing executed block result
-    pub(crate) fn insert_to_executed_ordered_block_result(self, result: &mut ExecuteOrderedBlockResult) {
+    pub(crate) fn insert_to_executed_ordered_block_result(
+        self,
+        result: &mut ExecuteOrderedBlockResult,
+    ) {
         result.execution_output.receipts.insert(
             0,
             Receipt {
