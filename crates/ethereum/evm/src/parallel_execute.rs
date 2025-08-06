@@ -27,6 +27,7 @@ use revm::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
     state::{Account, AccountStatus, EvmState},
+    DatabaseCommit,
 };
 
 /// EVM executor using Grevm that executes blocks in parallel.
@@ -229,6 +230,15 @@ where
             .as_ref()
             .expect("state should be set before calling size_hint")
             .bundle_size_hint()
+    }
+
+    fn commit_changes(&mut self, changes: EvmState) {
+        // Load all accounts in the changes map to ensure they are cached before committing.
+        let state = self.state.as_mut().expect("state should be set before calling commit_changes");
+        for address in changes.keys() {
+            state.load_mut_cache_account(*address).unwrap();
+        }
+        state.commit(changes);
     }
 }
 

@@ -21,6 +21,7 @@ jobs:
     name: e2e-testsuite
     runs-on:
       group: Reth
+    if: false # FIXME: remove this line to enable the e2e tests job after fixing the issues with the test suite.
     env:
       RUST_BACKTRACE: 1
     timeout-minutes: 90

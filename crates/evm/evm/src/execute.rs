@@ -25,6 +25,8 @@ use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::{
     context::result::ExecutionResult,
     database::{states::bundle_state::BundleRetention, BundleState, State},
+    state::EvmState,
+    DatabaseCommit,
 };
 
 /// A type that knows how to execute a block. It is assumed to operate on a
@@ -133,6 +135,9 @@ pub trait Executor<DB: Database>: Sized {
     ///
     /// This is used to optimize DB commits depending on the size of the state.
     fn size_hint(&self) -> usize;
+
+    /// Commits the changes to the executor state.
+    fn commit_changes(&mut self, changes: EvmState);
 }
 
 /// Helper type for the output of executing a block.
@@ -550,6 +555,14 @@ where
     fn size_hint(&self) -> usize {
         self.db.bundle_state.size_hint()
     }
+
+    fn commit_changes(&mut self, changes: EvmState) {
+        // Load all accounts in the changes map to ensure they are cached before committing.
+        for address in changes.keys() {
+            self.db.load_cache_account(*address).unwrap();
+        }
+        self.db.commit(changes);
+    }
 }
 
 #[cfg(test)]
@@ -613,6 +626,10 @@ mod tests {
 
         fn size_hint(&self) -> usize {
             0
+        }
+
+        fn commit_changes(&mut self, _changes: EvmState) {
+            unreachable!()
         }
     }
 

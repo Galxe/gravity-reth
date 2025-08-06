@@ -6,7 +6,7 @@ use crate::{execute::Executor, Database, OnStateHook};
 pub use futures_util::future::Either;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
-use revm::database::BundleState;
+use revm::{database::BundleState, state::EvmState};
 
 impl<A, B, DB> Executor<DB> for Either<A, B>
 where
@@ -85,6 +85,13 @@ where
         match self {
             Self::Left(a) => a.size_hint(),
             Self::Right(b) => b.size_hint(),
+        }
+    }
+
+    fn commit_changes(&mut self, changes: EvmState) {
+        match self {
+            Self::Left(a) => a.commit_changes(changes),
+            Self::Right(b) => b.commit_changes(changes),
         }
     }
 }

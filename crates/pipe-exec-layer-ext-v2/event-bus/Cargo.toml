@@ -1,0 +1,19 @@
+[package]
+name = "reth-pipe-exec-layer-event-bus"
+version.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "event bus for pipeline execution layer extension"
+
+[lints]
+workspace = true
+
+[dependencies]
+reth-primitives.workspace = true
+reth-chain-state.workspace = true
+alloy-primitives.workspace = true
+once_cell.workspace = true
+tokio.workspace = true

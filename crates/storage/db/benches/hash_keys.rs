@@ -243,12 +243,11 @@ where
     T: Table,
 {
     db.view(|tx| {
-        let table_db = tx.inner.open_db(Some(T::NAME)).map_err(|_| "Could not open db.").unwrap();
+        let table_db = tx.open_db(Some(T::NAME)).map_err(|_| "Could not open db.").unwrap();
 
         println!(
             "{:?}\n",
-            tx.inner
-                .db_stat(&table_db)
+            tx.db_stat(&table_db)
                 .map_err(|_| format!("Could not find table: {}", T::NAME))
                 .map(|stats| {
                     let num_pages =

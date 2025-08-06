@@ -34,7 +34,10 @@ pub(crate) type StageRange = (ExecInput, UnwindInput);
 
 pub(crate) fn stage_unwind<
     S: Clone
-        + Stage<DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>>,
+        + Stage<
+            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>,
+            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TX, MockNodeTypesWithDB>,
+        >,
 >(
     stage: S,
     db: &TestStageDB,
@@ -50,7 +53,10 @@ pub(crate) fn stage_unwind<
 
             // Clear previous run
             stage
-            .unwind(&provider, unwind)
+            .unwind(&provider, Box::new({
+                let factory = db.factory.clone();
+                move || factory.provider()
+            }), unwind)
             .map_err(|e| {
                 format!(
                     "{e}\nMake sure your test database at `{}` isn't too old and incompatible with newer stage changes.",
@@ -67,21 +73,69 @@ pub(crate) fn stage_unwind<
 pub(crate) fn unwind_hashes<S>(stage: S, db: &TestStageDB, range: StageRange)
 where
     S: Clone
-        + Stage<DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>>,
+        + Stage<
+            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>,
+            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TX, MockNodeTypesWithDB>,
+        >,
 {
     let (input, unwind) = range;
 
     let mut stage = stage;
     let provider = db.factory.database_provider_rw().unwrap();
 
-    StorageHashingStage::default().unwind(&provider, unwind).unwrap();
-    AccountHashingStage::default().unwind(&provider, unwind).unwrap();
+    StorageHashingStage::default()
+        .unwind(
+            &provider,
+            Box::new({
+                let factory = db.factory.clone();
+                move || factory.provider()
+            }),
+            unwind,
+        )
+        .unwrap();
+    AccountHashingStage::default()
+        .unwind(
+            &provider,
+            Box::new({
+                let factory = db.factory.clone();
+                move || factory.provider()
+            }),
+            unwind,
+        )
+        .unwrap();
 
     // Clear previous run
-    stage.unwind(&provider, unwind).unwrap();
+    stage
+        .unwind(
+            &provider,
+            Box::new({
+                let factory = db.factory.clone();
+                move || factory.provider()
+            }),
+            unwind,
+        )
+        .unwrap();
 
-    AccountHashingStage::default().execute(&provider, input).unwrap();
-    StorageHashingStage::default().execute(&provider, input).unwrap();
+    AccountHashingStage::default()
+        .execute(
+            &provider,
+            Box::new({
+                let factory = db.factory.clone();
+                move || factory.provider()
+            }),
+            input,
+        )
+        .unwrap();
+    StorageHashingStage::default()
+        .execute(
+            &provider,
+            Box::new({
+                let factory = db.factory.clone();
+                move || factory.provider()
+            }),
+            input,
+        )
+        .unwrap();
 
     provider.commit().unwrap();
 }

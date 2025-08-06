@@ -398,7 +398,7 @@ mod tests {
                 }
             }
             for (path, node) in input.account_nodes.clone() {
-                account_trie.insert(path.clone(), node.into());
+                account_trie.insert(path, node.into());
                 num_update += 1;
             }
 
@@ -417,7 +417,7 @@ mod tests {
                     }
                     let storage = storage_trie.entry(*hashed_address).or_default();
                     for (path, node) in storage_trie_update.storage_nodes.clone() {
-                        storage.insert(path.clone(), node.into());
+                        storage.insert(path, node.into());
                         num_update += 1;
                     }
                 }

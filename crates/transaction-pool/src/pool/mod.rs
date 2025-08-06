@@ -1469,7 +1469,7 @@ mod tests {
             test_pool.add_transactions(TransactionOrigin::Local, txns.into_iter());
         }
         let elapsed = start.elapsed() / size;
-        println!("Elapsed time: {:?}", elapsed);
+        println!("Elapsed time: {elapsed:?}");
     }
 
     #[test]

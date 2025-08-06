@@ -12,11 +12,12 @@ description = "pipeline execution layer extension"
 workspace = true
 
 [dependencies]
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "36d301e23b466ff4c178c662a2e6c26182bcb705" }
+reth-pipe-exec-layer-event-bus.workspace = true
 reth-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-evm-ethereum.workspace = true
 reth-chainspec.workspace = true
-reth-revm.workspace = true
 reth-evm.workspace = true
 reth-execution-types.workspace = true
 reth-chain-state.workspace = true
@@ -24,11 +25,16 @@ reth-ethereum-primitives.workspace = true
 reth-trie.workspace = true
 reth-trie-parallel.workspace = true
 reth-provider.workspace = true
+reth-rpc-eth-api.workspace = true
+revm-primitives.workspace = true
 gravity-storage.workspace = true
 gravity-primitives.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-sol-macro.workspace = true
+alloy-sol-types.workspace = true
 tokio.workspace = true
 rayon.workspace = true
 
@@ -42,6 +48,10 @@ metrics.workspace = true
 serde_json.workspace = true
 once_cell.workspace = true
 
+# crypto and serialization for gravity-aptos validator_info
+bcs = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+
 [dev-dependencies]
 reth-engine-primitives.workspace = true
 reth-cli.workspace = true
@@ -51,6 +61,7 @@ reth-node-ethereum.workspace = true
 reth-node-builder.workspace = true
 reth-provider.workspace = true
 reth-ethereum-cli.workspace = true
+reth-revm.workspace = true
 reth-db.workspace = true
 reth-node-api.workspace = true
 reth-tracing.workspace = true
