@@ -10,12 +10,7 @@ use ffi::{MDBX_txn_flags_t, MDBX_TXN_RDONLY, MDBX_TXN_READWRITE};
 use indexmap::IndexSet;
 use parking_lot::{Mutex, MutexGuard};
 use std::{
-    ffi::{c_uint, c_void},
-    fmt::{self, Debug},
-    mem::size_of,
-    ptr, slice,
-    sync::{atomic::AtomicBool, mpsc::sync_channel, Arc},
-    time::Duration,
+    ffi::{c_uint, c_void}, fmt::{self, Debug}, mem::size_of, ptr, slice, sync::{atomic::AtomicBool, mpsc::sync_channel, Arc}, thread::sleep, time::Duration
 };
 
 #[cfg(feature = "read-tx-timeouts")]
@@ -112,6 +107,7 @@ where
     where
         F: FnOnce(*mut ffi::MDBX_txn) -> T,
     {
+        std::thread::sleep(std::time::Duration::from_millis(1));
         self.inner.txn_execute(f)
     }
 
