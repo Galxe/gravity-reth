@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use alloy_primitives::{Address, B256};
+use alloy_rpc_types_eth::TransactionRequest;
 use gravity_api_types::{
     config_storage::{ConfigStorage, OnChainConfig},
     events::contract_event::GravityEvent,
@@ -20,7 +21,7 @@ use reth_provider::{
     providers::BlockchainProvider, BlockHashReader, BlockNumReader, DatabaseProviderFactory,
     HeaderProvider,
 };
-use reth_rpc_eth_api::helpers::EthCall;
+use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
@@ -62,6 +63,7 @@ impl<Storage, EthApi> MockConsensus<Storage, EthApi>
 where
     Storage: GravityStorage,
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn new(pipeline_api: PipeExecLayerApi<Storage, EthApi>) -> Self {
         Self { pipeline_api }

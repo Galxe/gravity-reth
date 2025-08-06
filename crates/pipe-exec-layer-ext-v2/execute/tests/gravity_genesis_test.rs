@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use alloy_consensus::Header;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
@@ -9,12 +9,14 @@ use gravity_api_types::on_chain_config::{
     validator_config::ValidatorConfig, validator_info::ValidatorInfo as GravityValidatorInfo,
     validator_set::ValidatorSet as GravityValidatorSet,
 };
+use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
+use reth_db::DatabaseEnv;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
 use reth_evm::{ConfigureEvm, Evm};
 use reth_evm_ethereum::EthEvmConfig;
-use reth_node_builder::EngineNodeLauncher;
+use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_provider::{providers::BlockchainProvider, StateProviderFactory};
 use reth_revm::{database::StateProviderDatabase, State};
@@ -139,7 +141,7 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TxEnv {
     }
 }
 
-fn test_gravity_system_call<DB: Database<Error: Debug + Send + Sync + 'static>>(
+fn test_gravity_system_call<DB: Database<Error: Debug + Send + Sync + 'static> + Debug>(
     db: DB,
     evm_config: EthEvmConfig,
 ) {
@@ -233,24 +235,32 @@ fn test() {
         .run_command_until_exit(|ctx| {
             command.execute(
                 ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    let handle = builder
-                        .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
-                        .with_components(EthereumNode::components())
-                        .with_add_ons(EthereumAddOns::default())
-                        .launch_with_fn(|builder| {
-                            let launcher = EngineNodeLauncher::new(
-                                builder.task_executor().clone(),
-                                builder.config().datadir(),
-                                reth_engine_primitives::TreeConfig::default(),
-                            );
-                            builder.launch_with(launcher)
-                        })
-                        .await?;
-                    let db = StateProviderDatabase::new(handle.node.provider.latest().unwrap());
-                    test_gravity_system_call(db, EthEvmConfig::new(handle.node.chain_spec()));
-                    Ok(())
-                }),
+                FnLauncher::new::<EthereumChainSpecParser, _>(
+                    |builder: WithLaunchContext<
+                        NodeBuilder<
+                            Arc<DatabaseEnv>,
+                            <EthereumChainSpecParser as ChainSpecParser>::ChainSpec,
+                        >,
+                    >,
+                     _| async move {
+                        let handle = builder
+                            .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
+                            .with_components(EthereumNode::components())
+                            .with_add_ons(EthereumAddOns::default())
+                            .launch_with_fn(|builder| {
+                                let launcher = EngineNodeLauncher::new(
+                                    builder.task_executor().clone(),
+                                    builder.config().datadir(),
+                                    reth_engine_primitives::TreeConfig::default(),
+                                );
+                                builder.launch_with(launcher)
+                            })
+                            .await?;
+                        let db = StateProviderDatabase::new(handle.node.provider.latest().unwrap());
+                        test_gravity_system_call(db, EthEvmConfig::new(handle.node.chain_spec()));
+                        Ok(())
+                    },
+                ),
             )
         })
         .unwrap();
