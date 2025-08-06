@@ -1,6 +1,8 @@
 //! Common Solidity type definitions for onchain config modules
 //! This module contains shared sol! macro definitions to avoid duplication
 
+#![allow(missing_docs)]
+
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_macro::sol;
 use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
@@ -60,15 +62,15 @@ sol! {
         );
 }
 
-/// Helper function to convert Ethereum address to AccountAddress format
-/// Ethereum addresses are 20 bytes, need to pad to 32 bytes for AccountAddress
+/// Helper function to convert Ethereum address to `AccountAddress` format
+/// Ethereum addresses are 20 bytes, need to pad to 32 bytes for `AccountAddress`
 pub fn convert_account(acc: &Address) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     bytes[12..].copy_from_slice(acc.as_slice());
     bytes
 }
 
-/// Convert Solidity ValidatorInfo to Gravity API ValidatorInfo
+/// Convert Solidity `ValidatorInfo` to Gravity API `ValidatorInfo`
 pub fn convert_validator_info(
     solidity_info: &ValidatorInfo,
 ) -> gravity_api_types::on_chain_config::validator_info::ValidatorInfo {

@@ -48,8 +48,8 @@ pub enum PipeExecLayerEvent<N: NodePrimitives> {
 /// Event bus for the pipe execution layer.
 #[derive(Debug)]
 pub struct PipeExecLayerEventBus<N: NodePrimitives> {
-    /// Receive events from PipeExecService
+    /// Receive events from `PipeExecService`
     pub event_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>>>,
-    /// Receive discarded txs from PipeExecService
+    /// Receive discarded txs from `PipeExecService`
     pub discard_txs: tokio::sync::Mutex<Option<UnboundedReceiver<Vec<TxHash>>>>,
 }

@@ -1,3 +1,7 @@
+//! Onchain config extension for Gravity
+
+#![allow(missing_docs)]
+
 pub mod base;
 pub mod consensus_config;
 pub mod epoch;

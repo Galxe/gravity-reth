@@ -230,7 +230,7 @@ struct PersistenceWaiters {
 }
 
 impl PersistenceWaiters {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self { waiters: BTreeMap::new() }
     }
 
@@ -259,7 +259,7 @@ impl PersistenceWaiters {
     }
 
     fn largest(&self) -> Option<u64> {
-        self.waiters.keys().next_back().cloned()
+        self.waiters.keys().next_back().copied()
     }
 }
 
@@ -489,7 +489,7 @@ where
             match event_rx.recv_timeout(std::time::Duration::from_millis(
                 if self.persistence_waiters.is_empty() { 500 } else { 10 },
             )) {
-                Ok(event) => return Ok(Some(event)),
+                Ok(event) => Ok(Some(event)),
                 Err(err) => match err {
                     RecvTimeoutError::Timeout => Ok(None),
                     RecvTimeoutError::Disconnected => Err(RecvError),

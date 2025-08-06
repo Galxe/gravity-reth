@@ -1,3 +1,5 @@
+//! Fetcher for validator set information
+
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     types::{convert_validator_set_to_bcs, getValidatorSetCall},
@@ -11,6 +13,7 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 // BCS for serialization
 
 /// Fetcher for validator set information
+#[derive(Debug)]
 pub struct ValidatorSetFetcher<'a, EthApi> {
     base_fetcher: &'a OnchainConfigFetcher<EthApi>,
 }
@@ -19,7 +22,8 @@ impl<'a, EthApi> ValidatorSetFetcher<'a, EthApi>
 where
     EthApi: EthCall,
 {
-    pub fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
+    /// Create a new validator set fetcher
+    pub const fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
         Self { base_fetcher }
     }
 }

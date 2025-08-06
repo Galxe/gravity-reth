@@ -1,3 +1,5 @@
+//! Base trait and implementation for onchain config fetchers
+
 use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequest};
@@ -33,11 +35,12 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    pub fn new(eth_api: EthApi) -> Self {
+    /// Create a new onchain config fetcher
+    pub const fn new(eth_api: EthApi) -> Self {
         Self { eth_api }
     }
 
-    /// Execute an eth_call with retry logic
+    /// Execute an `eth_call` with retry logic
     pub fn eth_call(&self, from: Address, to: Address, input: Bytes, block_number: u64) -> Bytes {
         let rt_handle = ETH_CALL_RUNTIME
             .get_or_init(|| {
@@ -75,9 +78,7 @@ where
                                 "Failed to execute eth_call at {block_number}, retrying... (attempt {count}/{RETRY}): {err}"
                             );
                             count += 1;
-                            if count > RETRY {
-                                panic!("Failed to execute eth_call: {err}");
-                            }
+                            assert!(count <= RETRY, "Failed to execute eth_call: {err}");
                             tokio::time::sleep(std::time::Duration::from_millis(10 * count)).await;
                         }
                     }
@@ -137,29 +138,27 @@ where
 }
 
 #[cfg(test)]
-pub mod test_utils {
+mod tests {
     use super::*;
-    use alloy_primitives::{address, U256};
-    use alloy_sol_macro::sol;
     use alloy_sol_types::{SolCall, SolValue};
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
     };
 
-    /// Mock EthCall implementation for testing
+    /// Mock `EthCall` implementation for testing
     #[derive(Clone)]
-    pub struct MockEthCall {
-        pub responses: Arc<Mutex<HashMap<(Address, Address, Bytes, u64), Bytes>>>,
+    struct MockEthCall {
+        responses: Arc<Mutex<HashMap<(Address, Address, Bytes, u64), Bytes>>>,
     }
 
     impl MockEthCall {
-        pub fn new() -> Self {
+        fn new() -> Self {
             Self { responses: Arc::new(Mutex::new(HashMap::new())) }
         }
 
         /// Set a mock response for a specific call
-        pub fn set_response(
+        fn set_response(
             &self,
             from: Address,
             to: Address,
@@ -171,7 +170,7 @@ pub mod test_utils {
         }
 
         /// Helper to set response for a Solidity function call
-        pub fn set_sol_response<T, R>(
+        fn set_sol_response<T, R>(
             &self,
             from: Address,
             to: Address,
@@ -190,7 +189,7 @@ pub mod test_utils {
 
     // Simple mock implementation for testing
     impl MockEthCall {
-        pub async fn call(
+        async fn call(
             &self,
             request: TransactionRequest,
             block_id: Option<BlockId>,
@@ -216,19 +215,19 @@ pub mod test_utils {
     }
 
     /// Base test framework for config fetchers
-    pub struct ConfigFetcherTestFramework<T> {
-        pub mock_eth_call: MockEthCall,
-        pub fetcher: T,
-        pub block_number: u64,
+    struct ConfigFetcherTestFramework<T> {
+        mock_eth_call: MockEthCall,
+        fetcher: T,
+        block_number: u64,
     }
 
     impl<T> ConfigFetcherTestFramework<T> {
-        pub fn new(fetcher: T) -> Self {
+        fn new(fetcher: T) -> Self {
             Self { mock_eth_call: MockEthCall::new(), fetcher, block_number: 100 }
         }
 
         /// Set the block number for tests
-        pub fn with_block_number(mut self, block_number: u64) -> Self {
+        fn with_block_number(mut self, block_number: u64) -> Self {
             self.block_number = block_number;
             self
         }
@@ -248,11 +247,6 @@ pub mod test_utils {
             }
         };
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{test_utils::*, *};
 
     #[test]
     fn test_mock_eth_call_basic() {

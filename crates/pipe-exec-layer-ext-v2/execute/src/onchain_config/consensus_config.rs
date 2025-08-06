@@ -1,3 +1,5 @@
+//! Fetcher for consensus configuration
+
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     CONSENSUS_CONFIG_CONTRACT_ADDRESS, GRAVITY_FRAMEWORK_ADDRESS,
@@ -13,6 +15,7 @@ sol! {
 }
 
 /// Fetcher for consensus configuration
+#[derive(Debug)]
 pub struct ConsensusConfigFetcher<'a, EthApi> {
     base_fetcher: &'a OnchainConfigFetcher<EthApi>,
 }
@@ -21,7 +24,8 @@ impl<'a, EthApi> ConsensusConfigFetcher<'a, EthApi>
 where
     EthApi: EthCall,
 {
-    pub fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
+    /// Create a new consensus config fetcher
+    pub const fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
         Self { base_fetcher }
     }
 }

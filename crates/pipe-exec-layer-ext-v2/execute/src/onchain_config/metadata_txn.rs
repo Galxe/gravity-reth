@@ -1,3 +1,5 @@
+//! Metadata transaction execution
+
 use super::{
     types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated},
     BLOCK_MODULE_ADDRESS, SYSTEM_CALLER,
@@ -22,13 +24,16 @@ use revm::{
 use std::fmt::Debug;
 
 /// Result of a metadata transaction execution
+#[derive(Debug)]
 pub struct MetadataTxnResult {
+    /// Result of the metadata transaction execution
     pub result: ExecutionResult,
+    /// The metadata transaction
     pub txn: TransactionSigned,
 }
 
 impl MetadataTxnResult {
-    /// Check if the transaction emitted a NewEpoch event
+    /// Check if the transaction emitted a `NewEpoch` event
     pub fn emit_new_epoch(&self) -> Option<(u64, Bytes)> {
         for log in self.result.logs() {
             match AllValidatorsUpdated::decode_log(log) {
@@ -38,14 +43,14 @@ impl MetadataTxnResult {
                     let validator_bytes = convert_validator_set_to_bcs(solidity_validator_set);
                     return Some((event.newEpoch.to::<u64>(), validator_bytes));
                 }
-                Err(_) => continue,
+                Err(_) => {}
             }
         }
         None
     }
 
     /// Convert the metadata transaction result into a full executed block result
-    pub fn into_executed_ordered_block_result(
+    pub(crate) fn into_executed_ordered_block_result(
         self,
         ordered_block: &OrderedBlock,
         state: BundleState,
@@ -95,13 +100,13 @@ impl MetadataTxnResult {
                 },
             },
             txs_info: vec![],
-            gravity_events: vec![GravityEvent::NewEpoch(new_epoch, validators.clone().into())],
+            gravity_events: vec![GravityEvent::NewEpoch(new_epoch, validators.into())],
             epoch: new_epoch,
         }
     }
 
     /// Insert this metadata transaction into an existing executed block result
-    pub fn insert_to_executed_ordered_block_result(self, result: &mut ExecuteOrderedBlockResult) {
+    pub(crate) fn insert_to_executed_ordered_block_result(self, result: &mut ExecuteOrderedBlockResult) {
         result.execution_output.receipts.insert(
             0,
             Receipt {
@@ -143,7 +148,7 @@ pub fn transact_metadata_contract_call(
         timestampMicros: U256::from(timestamp_us),
     };
     let input: Bytes = call.abi_encode().into();
-    let txn = new_system_call_txn(BLOCK_MODULE_ADDRESS, input.clone());
+    let txn = new_system_call_txn(BLOCK_MODULE_ADDRESS, input);
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let mut result = evm.transact_raw(tx_env).unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);

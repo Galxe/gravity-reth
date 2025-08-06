@@ -1,3 +1,5 @@
+//! Fetcher for epoch information
+
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     EPOCH_MANAGER_ADDR, SYSTEM_CALLER,
@@ -15,6 +17,7 @@ sol! {
 }
 
 /// Fetcher for epoch information
+#[derive(Debug)]
 pub struct EpochFetcher<'a, EthApi> {
     base_fetcher: &'a OnchainConfigFetcher<EthApi>,
 }
@@ -23,7 +26,8 @@ impl<'a, EthApi> EpochFetcher<'a, EthApi>
 where
     EthApi: EthCall,
 {
-    pub fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
+    /// Create a new epoch fetcher
+    pub const fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
         Self { base_fetcher }
     }
 }
@@ -37,7 +41,7 @@ where
         #[cfg(feature = "pipe_test")]
         {
             // For testing, return epoch 0
-            return Bytes::from(0u64.to_le_bytes().to_vec());
+            Bytes::from(0u64.to_le_bytes().to_vec())
         }
 
         #[cfg(not(feature = "pipe_test"))]

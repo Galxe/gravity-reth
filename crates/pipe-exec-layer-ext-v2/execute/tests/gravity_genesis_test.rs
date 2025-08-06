@@ -1,4 +1,6 @@
 #![allow(missing_docs)]
+#![allow(dead_code)]
+
 use std::{fmt::Debug, sync::Arc};
 
 use alloy_consensus::Header;
@@ -107,7 +109,7 @@ pub fn convert_account(acc: &Address) -> [u8; 32] {
     bytes
 }
 
-/// Convert Solidity ValidatorInfo to Gravity API ValidatorInfo
+/// Convert Solidity `ValidatorInfo` to Gravity API `ValidatorInfo`
 pub fn convert_validator_info(
     solidity_info: &ValidatorManager::ValidatorInfo,
 ) -> GravityValidatorInfo {
@@ -197,7 +199,7 @@ fn test_gravity_system_call<DB: Database<Error: Debug + Send + Sync + 'static> +
         total_voting_power: solidity_validator_set.totalVotingPower.to::<u128>(),
         total_joining_power: solidity_validator_set.totalJoiningPower.to::<u128>(),
     };
-    println!("gravity_validator_set: {:?}", gravity_validator_set);
+    println!("gravity_validator_set: {gravity_validator_set:?}");
 }
 
 #[test]
@@ -214,7 +216,7 @@ fn test() {
         .with_stdout(LayerInfo::new(
             LogFormat::Terminal,
             LevelFilter::DEBUG.to_string(),
-            "".to_string(),
+            String::new(),
             Some("always".to_string()),
         ))
         .init();
