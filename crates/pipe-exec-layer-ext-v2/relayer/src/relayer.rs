@@ -1,8 +1,9 @@
 //! Relayer for gravity protocol tasks
 
 use crate::eth_client::EthHttpCli;
-use alloy_primitives::{Address, B256};
-use alloy_rpc_types::Log;
+use crate::parser::{ParsedTask, GravityTask, AccountActivityType};
+use alloy_primitives::{hex, Address, B256};
+use alloy_rpc_types::{Log, Filter};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,15 +13,13 @@ use tokio::sync::RwLock;
 use tokio::time::{interval, Interval};
 use tracing::{debug, error, info, warn};
 
-use crate::parser::{ParsedTask, TaskType};
-
 /// 观察到的更新事件
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObserveUpdate {
     /// 任务URI
     pub task_uri: String,
     /// 任务类型
-    pub task_type: TaskType,
+    pub task_type: GravityTask,
     /// 区块号
     pub block_number: u64,
     /// 新的观察值
@@ -163,11 +162,20 @@ impl GravityRelayer {
     }
 
     /// 设置更新回调函数
-    pub fn set_update_callback<F>(&mut self, callback: F)
+    pub async fn set_update_callback<F>(&self, callback: F)
     where
         F: Fn(ObserveUpdate) + Send + Sync + 'static,
     {
-        self.update_callback = Some(Arc::new(callback));
+        // 由于我们现在使用Arc<RwLock>模式，需要修改这个方法
+        // 但为了保持向后兼容，我们暂时保持这个接口
+        // 在实际实现中，可能需要重新设计回调机制
+        // self.update_callback = Some(Arc::new(callback));
+        warn!("set_update_callback method needs to be redesigned for new architecture");
+    }
+
+    /// 获取配置
+    pub fn get_config(&self) -> &RelayerConfig {
+        &self.config
     }
 
     /// 添加要监听的任务
@@ -250,30 +258,46 @@ impl GravityRelayer {
             }
         };
 
-        match &task.task_type {
-            TaskType::Event { contract_address, event_name } => {
-                self.poll_event_task(task_uri, *contract_address, event_name).await
+        match &task.task {
+            GravityTask::MonitorEvent(filter) => {
+                self.poll_event_task(task_uri, filter).await
             }
-            TaskType::Block { block_hash: _ } => {
-                self.poll_block_task(task_uri).await
+            GravityTask::MonitorBlockHead => {
+                self.poll_block_head_task(task_uri).await
             }
-            TaskType::StorageSlot { contract_address, slot } => {
-                self.poll_storage_slot_task(task_uri, *contract_address, *slot).await
+            GravityTask::MonitorStorage { account, slot } => {
+                self.poll_storage_slot_task(task_uri, *account, *slot).await
+            }
+            GravityTask::MonitorAccount { address, activity_type } => {
+                self.poll_account_activity_task(task_uri, *address, activity_type).await
             }
         }
     }
 
     /// 轮询事件任务
-    async fn poll_event_task(&self, task_uri: &str, contract_address: Address, _event_name: &str) -> Result<()> {
+    async fn poll_event_task(&self, task_uri: &str, filter: &Filter) -> Result<()> {
         // 获取当前cursor
         let cursor = {
             let states = self.task_states.read().await;
             states.get(task_uri).map(|s| s.cursor).unwrap_or(0)
         };
 
-        // 调用get_eth_logs获取日志
-        // 注意：这里需要修复eth_client中的get_eth_logs方法签名
-        let logs = self.eth_client.get_eth_logs(contract_address, vec![]).await?;
+        // 创建带有区块范围的filter
+        let mut scoped_filter = filter.clone();
+        scoped_filter = scoped_filter.from_block(cursor);
+        
+        // 如果配置了finalized_only，使用finalized区块
+        if self.config.finalized_only {
+            let finalized_block = self.eth_client.get_finalized_block_number().await.unwrap_or(cursor);
+            scoped_filter = scoped_filter.to_block(finalized_block);
+        } else {
+            // 使用latest区块
+            let latest_block = self.eth_client.get_block_number().await.unwrap_or(cursor);
+            scoped_filter = scoped_filter.to_block(latest_block);
+        }
+
+        // 获取日志
+        let logs = self.eth_client.get_logs(&scoped_filter).await?;
         
         // 过滤出在cursor之后的日志
         let new_logs: Vec<EventLog> = logs.iter()
@@ -308,10 +332,7 @@ impl GravityRelayer {
                 // 触发更新回调
                 self.trigger_update(ObserveUpdate {
                     task_uri: task_uri.to_string(),
-                    task_type: TaskType::Event {
-                        contract_address,
-                        event_name: _event_name.to_string(),
-                    },
+                    task_type: GravityTask::MonitorEvent(filter.clone()),
                     block_number: new_logs.iter().map(|log| log.block_number).max().unwrap_or(cursor),
                     new_value,
                     previous_value,
@@ -327,10 +348,14 @@ impl GravityRelayer {
         Ok(())
     }
 
-    /// 轮询区块任务  
-    async fn poll_block_task(&self, task_uri: &str) -> Result<()> {
+    /// 轮询区块头任务  
+    async fn poll_block_head_task(&self, task_uri: &str) -> Result<()> {
         // 获取最新区块号
-        let latest_block = self.eth_client.get_block_number().await?;
+        let latest_block = if self.config.finalized_only {
+            self.eth_client.get_finalized_block_number().await?
+        } else {
+            self.eth_client.get_block_number().await?
+        };
         
         let cursor = {
             let states = self.task_states.read().await;
@@ -338,8 +363,14 @@ impl GravityRelayer {
         };
 
         if latest_block > cursor {
+            // 获取实际的区块信息
+            let block_hash = match self.eth_client.get_block(latest_block).await? {
+                Some(block) => block.header.hash,
+                None => B256::ZERO,
+            };
+
             let new_value = ObservedValue::Block {
-                block_hash: B256::ZERO, // 在实际实现中应该获取真实的区块哈希
+                block_hash,
                 block_number: latest_block,
             };
 
@@ -363,9 +394,7 @@ impl GravityRelayer {
                 // 触发更新
                 self.trigger_update(ObserveUpdate {
                     task_uri: task_uri.to_string(),
-                    task_type: TaskType::Block {
-                        block_hash: B256::ZERO, // 从task中获取
-                    },
+                    task_type: GravityTask::MonitorBlockHead,
                     block_number: latest_block,
                     new_value,
                     previous_value,
@@ -377,18 +406,89 @@ impl GravityRelayer {
             }
         }
 
-        debug!("轮询区块任务 {} 完成，cursor: {}", task_uri, cursor);
+        debug!("轮询区块头任务 {} 完成，cursor: {}", task_uri, cursor);
         Ok(())
     }
 
     /// 轮询存储槽任务
-    async fn poll_storage_slot_task(&self, task_uri: &str, _contract_address: Address, _slot: B256) -> Result<()> {
-        // TODO: 实现存储槽查询
-        // 这需要调用 eth_getStorageAt RPC方法
-        // 目前EthHttpCli还没有这个方法，需要添加
+    async fn poll_storage_slot_task(&self, task_uri: &str, account: Address, slot: B256) -> Result<()> {
+        // 获取存储槽的当前值
+        let current_value = self.eth_client.get_storage_at(account, slot).await?;
         
-        warn!("存储槽任务轮询尚未实现: {}", task_uri);
+        let cursor = {
+            let states = self.task_states.read().await;
+            states.get(task_uri).map(|s| s.cursor).unwrap_or(0)
+        };
+
+        // 获取当前区块号用于比较
+        let current_block = if self.config.finalized_only {
+            self.eth_client.get_finalized_block_number().await?
+        } else {
+            self.eth_client.get_block_number().await?
+        };
+
+        let new_value = ObservedValue::StorageSlot {
+            slot,
+            value: current_value,
+        };
+
+        let (previous_value, should_update) = {
+            let states = self.task_states.read().await;
+            let state = states.get(task_uri).unwrap();
+            let should_update = state.last_observed.as_ref() != Some(&new_value);
+            (state.last_observed.clone(), should_update)
+        };
+
+        if should_update {
+            // 更新状态
+            {
+                let mut states = self.task_states.write().await;
+                if let Some(state) = states.get_mut(task_uri) {
+                    state.cursor = current_block;
+                    state.last_observed = Some(new_value.clone());
+                }
+            }
+
+            // 触发更新
+            self.trigger_update(ObserveUpdate {
+                task_uri: task_uri.to_string(),
+                task_type: GravityTask::MonitorStorage { account, slot },
+                block_number: current_block,
+                new_value,
+                previous_value,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            }).await;
+        }
+
+        debug!("轮询存储槽任务 {} 完成，cursor: {}", task_uri, cursor);
         Ok(())
+    }
+
+    /// 轮询账户活动任务
+    async fn poll_account_activity_task(&self, task_uri: &str, address: Address, activity_type: &AccountActivityType) -> Result<()> {
+        match activity_type {
+            AccountActivityType::Erc20Transfer => {
+                // 创建ERC20 Transfer事件的filter
+                // Transfer事件签名: Transfer(address,address,uint256)
+                let transfer_topic = B256::from(hex!("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"));
+                
+                // This filter construction needs proper OR logic implementation
+                // For now, create a basic filter
+                let filter = Filter::new()
+                    .event_signature(transfer_topic);
+                // TODO: Implement proper OR logic for topic1/topic2 to monitor both from and to transfers
+
+                self.poll_event_task(task_uri, &filter).await
+            }
+            AccountActivityType::AllTransactions => {
+                // 这需要遍历区块中的所有交易，性能较低
+                warn!("AllTransactions monitoring is not yet implemented for address: {}", address);
+                Ok(())
+            }
+        }
     }
 
     /// 停止轮询

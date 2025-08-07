@@ -4,6 +4,7 @@
 
 pub mod eth_client;
 pub mod relayer;
+pub mod manager;
 
 // parser模块位于crate根目录
 #[path = "../parser.rs"]
@@ -11,4 +12,6 @@ pub mod parser;
 
 // 重新导出主要类型
 pub use relayer::{GravityRelayer, RelayerConfig, ObserveUpdate, ObservedValue, RelayerStats};
-pub use parser::{UriParser, ParsedTask, TaskType};
+pub use parser::{UriParser, ParsedTask, GravityTask, AccountActivityType};
+pub use manager::{RelayerManager, ManagerStats};
+pub use eth_client::EthHttpCli;

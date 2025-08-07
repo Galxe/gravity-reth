@@ -1,7 +1,7 @@
 use alloy_network::Ethereum;
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
-use alloy_rpc_types::{Log, Filter};
+use alloy_rpc_types::{Filter, Log};
 use anyhow::{Context as AnyhowContext, Result};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
@@ -79,10 +79,7 @@ impl EthHttpCli {
 
     /// Create new TxnSender instance
     pub fn new(rpc_url: &str, chain_id: u64) -> Result<Self> {
-        debug!(
-            "Creating TxnSender for URL: {}, Chain ID: {}",
-            rpc_url, chain_id
-        );
+        debug!("Creating TxnSender for URL: {}, Chain ID: {}", rpc_url, chain_id);
         // Parse URL
 
         let url =
@@ -175,26 +172,80 @@ impl EthHttpCli {
     pub async fn get_balance(&self, address: &Address) -> Result<U256> {
         let start = Instant::now();
 
-        let result = self
-            .retry_with_backoff(|| async { self.inner[0].get_balance(*address).await })
-            .await;
+        let result =
+            self.retry_with_backoff(|| async { self.inner[0].get_balance(*address).await }).await;
 
         self.update_metrics(result.is_ok(), start.elapsed()).await;
 
         result.with_context(|| format!("Failed to get balance for address: {:?}", address))
     }
 
-    /// 获取合约事件日志
-    pub async fn get_eth_logs(&self, address: Address, _topic: Vec<B256>) -> Result<Vec<Log>> {
-        let _start = Instant::now();
+    /// 获取事件日志 - 支持完整的Filter对象
+    pub async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>> {
+        let start = Instant::now();
 
-        let filter = Filter::new().address(address);
-        // TODO: 实现topic过滤
-        // .topic(_topic)
-        match self.inner[0].get_logs(&filter).await {
-            Ok(logs) => Ok(logs),
-            Err(e) => Err(anyhow::anyhow!("Failed to get logs: {:?}", e)),
-        }
+        let result =
+            self.retry_with_backoff(|| async { self.inner[0].get_logs(filter).await }).await;
+
+        self.update_metrics(result.is_ok(), start.elapsed()).await;
+
+        result.with_context(|| "Failed to get logs with filter")
+    }
+
+    /// 获取存储槽的值
+    pub async fn get_storage_at(&self, address: Address, slot: B256) -> Result<B256> {
+        let start = Instant::now();
+
+        let result = self
+            .retry_with_backoff(|| async {
+                self.inner[0].get_storage_at(address, slot.into()).await
+            })
+            .await;
+
+        self.update_metrics(result.is_ok(), start.elapsed()).await;
+        result.map(|v| v.into()).with_context(|| {
+            format!("Failed to get storage at address: {:?}, slot: {:?}", address, slot)
+        })
+    }
+
+    /// 获取区块信息
+    pub async fn get_block(&self, block_number: u64) -> Result<Option<alloy_rpc_types::Block>> {
+        let start = Instant::now();
+
+        let result = self
+            .retry_with_backoff(|| async {
+                self.inner[0]
+                    .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Number(block_number))
+                    .await
+            })
+            .await;
+
+        self.update_metrics(result.is_ok(), start.elapsed()).await;
+
+        result.with_context(|| format!("Failed to get block: {}", block_number))
+    }
+
+    /// 获取finalized区块号
+    pub async fn get_finalized_block_number(&self) -> Result<u64> {
+        let start = Instant::now();
+
+        let result = self
+            .retry_with_backoff(|| async {
+                match self.inner[0]
+                    .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Finalized)
+                    .await?
+                {
+                    Some(block) => Ok(block.header.number),
+                    None => Err(alloy_transport::TransportError::UnsupportedFeature(
+                        "No finalized block found".into(),
+                    )),
+                }
+            })
+            .await;
+
+        self.update_metrics(result.is_ok(), start.elapsed()).await;
+
+        result.with_context(|| "Failed to get finalized block number")
     }
 
     /// Get current gas price
@@ -202,9 +253,8 @@ impl EthHttpCli {
     pub async fn get_gas_price(&self) -> Result<u128> {
         let start = Instant::now();
 
-        let result = self
-            .retry_with_backoff(|| async { self.inner[0].get_gas_price().await })
-            .await;
+        let result =
+            self.retry_with_backoff(|| async { self.inner[0].get_gas_price().await }).await;
 
         self.update_metrics(result.is_ok(), start.elapsed()).await;
 
@@ -218,9 +268,8 @@ impl EthHttpCli {
     pub async fn get_block_number(&self) -> Result<u64> {
         let start = Instant::now();
 
-        let result = self
-            .retry_with_backoff(|| async { self.inner[0].get_block_number().await })
-            .await;
+        let result =
+            self.retry_with_backoff(|| async { self.inner[0].get_block_number().await }).await;
 
         self.update_metrics(result.is_ok(), start.elapsed()).await;
 
