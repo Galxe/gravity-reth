@@ -107,7 +107,6 @@ where
     where
         F: FnOnce(*mut ffi::MDBX_txn) -> T,
     {
-        std::thread::sleep(std::time::Duration::from_millis(1));
         self.inner.txn_execute(f)
     }
 

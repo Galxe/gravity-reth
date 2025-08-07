@@ -8,7 +8,7 @@ use rand::Rng;
 use reth_engine_tree::tree::{multiproof::SparseTrieUpdate, sparse_trie::update_sparse_trie};
 use reth_primitives_traits::Account;
 use reth_provider::{
-    providers::ConsistentDbView, test_utils::create_test_provider_factory, StateWriter, TrieWriter,
+    providers::ConsistentDbView, test_utils::create_test_provider_factory, PersistBlockCache, StateWriter, TrieWriter
 };
 use reth_trie::{
     prefix_set::TriePrefixSetsMut, proof::ProofTrieNodeProviderFactory, updates::TrieUpdatesSorted,
@@ -20,6 +20,7 @@ use reth_trie_parallel::{
     nested_hash::NestedStateRoot, proof::ParallelProof, proof_task::{ProofTaskCtx, ProofTaskManager, ProofTaskTx}
 };
 use reth_trie_sparse::{SerialSparseTrie, SparseStateTrie};
+use reth_trie_sparse_parallel::ParallelSparseTrie;
 use tokio::runtime::Runtime;
 
 fn random_state(
@@ -48,11 +49,17 @@ fn random_state(
         .collect::<HashMap<_, _>>();
 
     let mut updated_state = HashMap::new();
+    let modify_slot = 1500;
     db_state.iter().for_each(|(address, (account, storage))| {
         if !storage.is_empty() {
             let mut new_storage = HashMap::<B256, U256>::default();
+            let mut i = 0;
             for (key, _) in storage {
                 new_storage.insert(*key, U256::random());
+                i += 1;
+                if i == modify_slot {
+                    break;
+                }
             }
             let mut new_account = account.clone();
             new_account.nonce += 1;
@@ -82,7 +89,7 @@ fn random_state(
 
 fn calculate_state_root(c: &mut Criterion) {
     let mut group = c.benchmark_group("calculate root from leaves");
-    group.sample_size(10);
+    group.sample_size(20);
 
     for size in [1_000, 5_000, 10_000, 100_000] {
         let (init_state, update_state) = random_state(size, 10);
@@ -123,16 +130,8 @@ fn calculate_state_root(c: &mut Criterion) {
         // keep the join handle around to make sure it does not return any errors
         // after we compute the state root
         let _ = rt.spawn_blocking(move || proof_task.run());
+        let cache = Some(PersistBlockCache::default());
 
-        let multi_proof = ParallelProof::new(
-            view.clone(),
-            Arc::new(TrieUpdatesSorted::default()),
-            Arc::new(HashedPostStateSorted::default()),
-            Arc::new(TriePrefixSetsMut::default()),
-            proof_task_handle.clone(),
-        )
-        .decoded_multiproof(targets.clone())
-        .unwrap();
         // encode_account_value(&new_db_state);
         // println!("targets {:?}\n update_state {:?}\nmultiproof {:?}", targets, update_state,
         // multi_proof); let mut trie = SparseStateTrie::<SerialSparseTrie,
@@ -148,6 +147,14 @@ fn calculate_state_root(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("sparse trie", size), |b| {
             b.iter_with_setup(
                 || {
+                    let multi_proof = ParallelProof::new(
+                        view.clone(),
+                        Arc::new(TrieUpdatesSorted::default()),
+                        Arc::new(HashedPostStateSorted::default()),
+                        Arc::new(TriePrefixSetsMut::default()),
+                        proof_task_handle.clone(),
+                    ).decoded_multiproof(targets.clone())
+                    .unwrap();      
                     let trie_update = SparseTrieUpdate {
                         state: update_state.clone(),
                         multiproof: multi_proof.clone(),
@@ -155,7 +162,7 @@ fn calculate_state_root(c: &mut Criterion) {
                     trie_update
                 },
                 |trie_update| {
-                    let mut trie = SparseStateTrie::<SerialSparseTrie, SerialSparseTrie>::default();
+                    let mut trie = SparseStateTrie::<ParallelSparseTrie, SerialSparseTrie>::default();
                     let _ = update_sparse_trie(&mut trie, trie_update, &blinded_provider_factory);
                     let (state_root, _) =
                         trie.root_with_updates(&blinded_provider_factory).unwrap();
@@ -168,7 +175,8 @@ fn calculate_state_root(c: &mut Criterion) {
             b.iter_with_setup(
                 || (),
                 |()| {
-                    let nested_hash = NestedStateRoot::new(provider_ro, None);
+                    // 1s
+                    let nested_hash = NestedStateRoot::new(provider_ro, cache.clone());
                     let (state_root, _, _) = nested_hash.calculate(&update_state, false).unwrap();
                 },
             )
