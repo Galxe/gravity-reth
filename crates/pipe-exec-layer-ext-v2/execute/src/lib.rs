@@ -317,6 +317,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         self.metrics.execute_duration.record(elapsed);
         self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
+        debug_assert_eq!(
+            execution_output.gas_used, block.gas_used,
+            "gas_used mismatch, block_number: {}",
+            block.number,
+        );
         self.execute_block_barrier
             .notify(
                 block_number,
@@ -503,6 +508,10 @@ impl<Storage: GravityStorage> Core<Storage> {
                 },
             )
             .unwrap();
+        debug!(target: "execute_ordered_block",
+            evm_env=?evm_env,
+            block_number=?block_number,
+        );
         let base_fee = evm_env.block_env.basefee;
 
         let (metadata_txn_result, state_changes) = {
@@ -558,7 +567,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             panic!("failed to execute block {block_id:?}: {err:?}")
         });
 
-        let (block, senders) = block.split();
+        let (mut block, senders) = block.split();
+        block.header.gas_used = outcome.gas_used;
         let mut result = ExecuteOrderedBlockResult {
             block,
             senders,
@@ -603,8 +613,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         block: &mut Block,
         execution_output: BlockExecutionOutput<Receipt>,
     ) -> ExecutionOutcome {
-        block.header.gas_used = execution_output.gas_used;
-
         // only determine cancun fields when active
         if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
             block.header.requests_hash = Some(execution_output.requests.requests_hash());
