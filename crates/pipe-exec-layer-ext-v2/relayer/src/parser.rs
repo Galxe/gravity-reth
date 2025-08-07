@@ -1,7 +1,7 @@
 //! URI parser for gravity protocol tasks
 
 use alloy_primitives::{Address, B256};
-use alloy_rpc_types::{Filter, Topic, BlockNumberOrTag};
+use alloy_rpc_types::{BlockNumberOrTag, Filter, Topic};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,15 +16,9 @@ pub enum GravityTask {
     /// 监控区块头任务
     MonitorBlockHead,
     /// 监控存储槽任务
-    MonitorStorage { 
-        account: Address, 
-        slot: B256 
-    },
+    MonitorStorage { account: Address, slot: B256 },
     /// 监控账户活动任务（抽象层）
-    MonitorAccount {
-        address: Address,
-        activity_type: AccountActivityType,
-    },
+    MonitorAccount { address: Address, activity_type: AccountActivityType },
 }
 
 /// 账户活动类型
@@ -36,14 +30,10 @@ pub enum AccountActivityType {
     AllTransactions,
 }
 
-/// 解析后的任务结构
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedTask {
-    /// 任务类型
     pub task: GravityTask,
-    /// 原始URI
     pub original_uri: String,
-    /// 链标识符（链ID或名称）
     pub chain_specifier: String,
 }
 
@@ -52,13 +42,12 @@ pub struct ParsedTask {
 pub struct UriParser;
 
 impl UriParser {
-    /// 创建新的URI解析器
     pub fn new() -> Self {
         Self
     }
 
     /// 解析gravity URI
-    /// 
+    ///
     /// 支持的新格式：
     /// - gravity://mainnet/block?strategy=head - 监控最新区块
     /// - gravity://mainnet/event?address=0x...&topic0=0x... - 监控事件
@@ -71,79 +60,54 @@ impl UriParser {
             return Err(anyhow!("Invalid scheme: expected 'gravity'"));
         }
 
-        // 获取链标识符（主机部分）
-        let chain_specifier = uri.host_str()
-            .ok_or_else(|| anyhow!("Missing chain specifier in URI"))?
-            .to_string();
+        let chain_specifier =
+            uri.host_str().ok_or_else(|| anyhow!("Missing chain specifier in URI"))?.to_string();
 
-        // 解析路径
         let path = uri.path();
         let params: HashMap<_, _> = uri.query_pairs().into_owned().collect();
 
         let task = match path {
-            "/event" => {
-                self.parse_event_task(&params)?
-            }
-            "/block" => {
-                self.parse_block_task(&params)?
-            }
-            "/storage" => {
-                self.parse_storage_task(&params)?
-            }
-            path if path.starts_with("/account/") => {
-                self.parse_account_task(path, &params)?
-            }
+            "/event" => self.parse_event_task(&params)?,
+            "/block" => self.parse_block_task(&params)?,
+            "/storage" => self.parse_storage_task(&params)?,
+            path if path.starts_with("/account/") => self.parse_account_task(path, &params)?,
             _ => return Err(anyhow!("Unsupported resource path: {}", path)),
         };
 
-        Ok(ParsedTask {
-            task,
-            original_uri: uri_str.to_string(),
-            chain_specifier,
-        })
+        Ok(ParsedTask { task, original_uri: uri_str.to_string(), chain_specifier })
     }
 
-    /// 解析事件监控任务
     fn parse_event_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
         let mut filter = Filter::new();
 
-        // 设置合约地址
         if let Some(address_str) = params.get("address") {
-            let address: Address = address_str.parse()
+            let address: Address = address_str
+                .parse()
                 .map_err(|e| anyhow!("Invalid address '{}': {}", address_str, e))?;
             filter = filter.address(address);
         }
 
-        // 设置topics
-        let mut topics = vec![];
-        for i in 0..4 {
-            let topic_key = format!("topic{}", i);
-            if let Some(topic_val_str) = params.get(&topic_key) {
-                // 支持用逗号分隔的 "OR" 条件
-                let values: Result<Vec<B256>, _> = topic_val_str
-                    .split(',')
-                    .map(|s| s.trim().parse())
-                    .collect();
-                
-                let values = values
-                    .map_err(|e| anyhow!("Invalid topic{} value '{}': {}", i, topic_val_str, e))?;
-                
-                topics.push(Topic::from(values));
-            }
-        }
+        let topics: Result<Vec<Topic>, _> = (0..4)
+            .filter_map(|i| {
+                let topic_key = format!("topic{}", i);
+                params.get(&topic_key).map(|topic_val_str| {
+                    topic_val_str
+                        .split(',')
+                        .map(|s| s.trim().parse::<B256>())
+                        .collect::<Result<Vec<B256>, _>>()
+                        .map(Topic::from)
+                        .map_err(|e| anyhow!("Invalid topic{} value '{}': {}", i, topic_val_str, e))
+                })
+            })
+            .collect();
 
-        if topics.len() > 0 {
-            filter = filter.event_signature(topics[0].clone());
-            if topics.len() > 1 {
-                filter = filter.topic1(topics[1].clone());
-            }
-            if topics.len() > 2 {
-                filter = filter.topic2(topics[2].clone());
-            }
-            if topics.len() > 3 {
-                filter = filter.topic3(topics[3].clone());
-            }
-        }
+        filter = topics?.into_iter().enumerate().fold(filter, |filter, (i, topic)| match i {
+            0 => filter.event_signature(topic),
+            1 => filter.topic1(topic),
+            2 => filter.topic2(topic),
+            3 => filter.topic3(topic),
+            _ => filter,
+        });
 
         // 可以添加更多的过滤条件，如fromBlock, toBlock等
         if let Some(from_block_str) = params.get("fromBlock") {
@@ -161,7 +125,6 @@ impl UriParser {
         Ok(GravityTask::MonitorEvent(filter))
     }
 
-    /// 解析区块监控任务
     fn parse_block_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
         match params.get("strategy").map(|s| s.as_str()) {
             Some("head") => Ok(GravityTask::MonitorBlockHead),
@@ -170,23 +133,28 @@ impl UriParser {
         }
     }
 
-    /// 解析存储槽监控任务
     fn parse_storage_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
-        let account_str = params.get("account")
+        let account_str = params
+            .get("account")
             .ok_or_else(|| anyhow!("Missing 'account' parameter for storage monitoring"))?;
-        let slot_str = params.get("slot")
+        let slot_str = params
+            .get("slot")
             .ok_or_else(|| anyhow!("Missing 'slot' parameter for storage monitoring"))?;
-        
-        let account: Address = account_str.parse()
+
+        let account: Address = account_str
+            .parse()
             .map_err(|e| anyhow!("Invalid account address '{}': {}", account_str, e))?;
-        let slot: B256 = slot_str.parse()
-            .map_err(|e| anyhow!("Invalid slot value '{}': {}", slot_str, e))?;
+        let slot: B256 =
+            slot_str.parse().map_err(|e| anyhow!("Invalid slot value '{}': {}", slot_str, e))?;
 
         Ok(GravityTask::MonitorStorage { account, slot })
     }
 
-    /// 解析账户活动监控任务
-    fn parse_account_task(&self, path: &str, params: &HashMap<String, String>) -> Result<GravityTask> {
+    fn parse_account_task(
+        &self,
+        path: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<GravityTask> {
         // 路径格式: /account/0x.../activity
         let path_parts: Vec<&str> = path.split('/').collect();
         if path_parts.len() != 4 || path_parts[1] != "account" || path_parts[3] != "activity" {
@@ -194,20 +162,22 @@ impl UriParser {
         }
 
         let address_str = path_parts[2];
-        let address: Address = address_str.parse()
+        let address: Address = address_str
+            .parse()
             .map_err(|e| anyhow!("Invalid account address '{}': {}", address_str, e))?;
 
         let activity_type = match params.get("type").map(|s| s.as_str()) {
             Some("erc20_transfer") => AccountActivityType::Erc20Transfer,
             Some("all_transactions") => AccountActivityType::AllTransactions,
-            Some(activity_type) => return Err(anyhow!("Unsupported activity type: {}", activity_type)),
-            None => return Err(anyhow!("Missing 'type' parameter for account activity monitoring")),
+            Some(activity_type) => {
+                return Err(anyhow!("Unsupported activity type: {}", activity_type))
+            }
+            None => {
+                return Err(anyhow!("Missing 'type' parameter for account activity monitoring"))
+            }
         };
 
-        Ok(GravityTask::MonitorAccount {
-            address,
-            activity_type,
-        })
+        Ok(GravityTask::MonitorAccount { address, activity_type })
     }
 
     /// 批量解析多个URI
@@ -228,14 +198,14 @@ mod tests {
     fn test_parse_block_head_uri() {
         let parser = UriParser::new();
         let uri = "gravity://mainnet/block?strategy=head";
-        
+
         let result = parser.parse(uri).unwrap();
-        
+
         assert_eq!(result.chain_specifier, "mainnet");
         assert_eq!(result.original_uri, uri);
-        
+
         match result.task {
-            GravityTask::MonitorBlockHead => {},
+            GravityTask::MonitorBlockHead => {}
             _ => panic!("Expected MonitorBlockHead task type"),
         }
     }
@@ -244,11 +214,11 @@ mod tests {
     fn test_parse_event_uri() {
         let parser = UriParser::new();
         let uri = "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-        
+
         let result = parser.parse(uri).unwrap();
-        
+
         assert_eq!(result.chain_specifier, "mainnet");
-        
+
         match result.task {
             GravityTask::MonitorEvent(filter) => {
                 // 验证filter包含正确的地址和topic
@@ -262,9 +232,9 @@ mod tests {
     fn test_parse_storage_uri() {
         let parser = UriParser::new();
         let uri = "gravity://mainnet/storage?account=0x123456789abcdef123456789abcdef1234567890&slot=0x0000000000000000000000000000000000000000000000000000000000000001";
-        
+
         let result = parser.parse(uri).unwrap();
-        
+
         match result.task {
             GravityTask::MonitorStorage { account, slot } => {
                 assert_eq!(
@@ -273,7 +243,10 @@ mod tests {
                 );
                 assert_eq!(
                     slot,
-                    B256::from_str("0x0000000000000000000000000000000000000000000000000000000000000001").unwrap()
+                    B256::from_str(
+                        "0x0000000000000000000000000000000000000000000000000000000000000001"
+                    )
+                    .unwrap()
                 );
             }
             _ => panic!("Expected MonitorStorage task type"),
@@ -284,9 +257,9 @@ mod tests {
     fn test_parse_account_activity_uri() {
         let parser = UriParser::new();
         let uri = "gravity://mainnet/account/0x123456789abcdef123456789abcdef1234567890/activity?type=erc20_transfer";
-        
+
         let result = parser.parse(uri).unwrap();
-        
+
         match result.task {
             GravityTask::MonitorAccount { address, activity_type } => {
                 assert_eq!(
@@ -303,9 +276,9 @@ mod tests {
     fn test_parse_event_with_multiple_topics() {
         let parser = UriParser::new();
         let uri = "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef&topic1=0x000000000000000000000000123456789abcdef123456789abcdef1234567890";
-        
+
         let result = parser.parse(uri).unwrap();
-        
+
         match result.task {
             GravityTask::MonitorEvent(_filter) => {
                 // 成功解析即通过测试
@@ -318,9 +291,9 @@ mod tests {
     fn test_parse_event_with_or_condition() {
         let parser = UriParser::new();
         let uri = "gravity://mainnet/event?topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef,0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
-        
+
         let result = parser.parse(uri).unwrap();
-        
+
         match result.task {
             GravityTask::MonitorEvent(_filter) => {
                 // 成功解析即通过测试
@@ -333,7 +306,7 @@ mod tests {
     fn test_parse_invalid_scheme() {
         let parser = UriParser::new();
         let uri = "http://mainnet/block?strategy=head";
-        
+
         let result = parser.parse(uri);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid scheme"));
@@ -343,7 +316,7 @@ mod tests {
     fn test_parse_missing_chain_specifier() {
         let parser = UriParser::new();
         let uri = "gravity:///block?strategy=head";
-        
+
         let result = parser.parse(uri);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Missing chain specifier"));
@@ -353,7 +326,7 @@ mod tests {
     fn test_parse_unsupported_resource() {
         let parser = UriParser::new();
         let uri = "gravity://mainnet/unknown";
-        
+
         let result = parser.parse(uri);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unsupported resource path"));
@@ -364,17 +337,18 @@ mod tests {
         let parser = UriParser::new();
         let uris = vec![
             "gravity://mainnet/block?strategy=head".to_string(),
-            "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
+            "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+                .to_string(),
         ];
-        
+
         let results = parser.parse_batch(&uris).unwrap();
         assert_eq!(results.len(), 2);
-        
+
         match &results[0].task {
             GravityTask::MonitorBlockHead => {}
             _ => panic!("Expected MonitorBlockHead task type"),
         }
-        
+
         match &results[1].task {
             GravityTask::MonitorEvent(_) => {}
             _ => panic!("Expected MonitorEvent task type"),

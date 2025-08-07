@@ -6,8 +6,6 @@ pub mod eth_client;
 pub mod relayer;
 pub mod manager;
 
-// parser模块位于crate根目录
-#[path = "../parser.rs"]
 pub mod parser;
 
 // 重新导出主要类型
