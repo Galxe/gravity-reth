@@ -9,7 +9,7 @@ pub struct Config {
     pub disable_pipe_execution: bool,
     /// Whether to disable the Grevm executor. default true.
     pub disable_grevm: bool,
-    /// The gas limit for pipe block. default 1_000_000_000.
+    /// The gas limit for pipe block. default `1_000_000_000`.
     pub pipe_block_gas_limit: u64,
 }
 

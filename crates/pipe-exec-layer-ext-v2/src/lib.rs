@@ -4,6 +4,7 @@ mod channel;
 mod metrics;
 
 use channel::Channel;
+use gravity_primitives::CONFIG;
 use metrics::PipeExecLayerMetrics;
 
 use alloy_consensus::{

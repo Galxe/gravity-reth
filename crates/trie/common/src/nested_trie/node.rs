@@ -242,7 +242,7 @@ impl From<Node> for StoredNode {
             }
             _ => unreachable!(),
         }
-        Bytes::from(buf.freeze())
+        Self::from(buf.freeze())
     }
 }
 
@@ -260,7 +260,7 @@ impl From<StoredNode> for Node {
                 for i in 0..16 {
                     if mask.is_bit_set(i) {
                         let s = 1 + 32 * cnt;
-                        children[i as usize] = Some(Box::new(Node::HashNode(RlpNode::word_rlp(
+                        children[i as usize] = Some(Box::new(Self::HashNode(RlpNode::word_rlp(
                             &B256::from_slice(&value[s..s + 32]),
                         ))));
                         cnt += 1;
@@ -270,7 +270,7 @@ impl From<StoredNode> for Node {
             }
             Some(NodeType::ExtensionNode) => {
                 // ShortNode
-                let next = Node::HashNode(RlpNode::word_rlp(&B256::from_slice(&value[1..33])));
+                let next = Self::HashNode(RlpNode::word_rlp(&B256::from_slice(&value[1..33])));
                 let odd = value[33];
                 let mut shared_nibbles = Nibbles::unpack(&value[34..]);
                 if odd == 1 {
@@ -294,7 +294,7 @@ impl From<StoredNode> for Node {
                 let value = value[2 + pack_len..].to_vec();
                 Self::ShortNode {
                     key: key_end,
-                    value: Box::new(Node::ValueNode(value)),
+                    value: Box::new(Self::ValueNode(value)),
                     flags: NodeFlag::new(None),
                 }
             }

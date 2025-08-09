@@ -513,13 +513,15 @@ impl PersistBlockCache {
             if storage_trie_update.is_deleted {
                 self.storage_trie.remove(hashed_address);
             } else {
-                let mut remove_storage_trie = false;
-                if let Some(storage) = self.storage_trie.get(hashed_address) {
-                    for path in &storage_trie_update.removed_nodes {
-                        storage.remove(path);
-                    }
-                    remove_storage_trie = storage.is_empty();
-                }
+                let remove_storage_trie =
+                    if let Some(storage) = self.storage_trie.get(hashed_address) {
+                        for path in &storage_trie_update.removed_nodes {
+                            storage.remove(path);
+                        }
+                        storage.is_empty()
+                    } else {
+                        false
+                    };
                 if remove_storage_trie {
                     self.storage_trie.remove(hashed_address);
                 }
