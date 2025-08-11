@@ -151,6 +151,7 @@ pub fn transact_metadata_contract_call(
     timestamp_us: u64,
     proposer: Option<Address>,
 ) -> (MetadataTxnResult, EvmState) {
+    info!("transact_metadata_contract_call timestamp_us: {:?}, proposer: {:?}", timestamp_us, proposer);
     let call = blockPrologueCall {
         proposer: proposer.unwrap_or(SYSTEM_CALLER),
         failedProposerIndices: vec![],
@@ -161,6 +162,7 @@ pub fn transact_metadata_contract_call(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let mut result = evm.transact_raw(tx_env).unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
+    info!("transact_metadata_contract_call result logs len: {:?}", result.result.logs().len());
     for log in result.result.logs() {
         match GlobalTimeUpdated::decode_log(log) {
             Ok(event) => {
