@@ -161,6 +161,16 @@ pub fn transact_metadata_contract_call(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let mut result = evm.transact_raw(tx_env).unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
+    for log in result.result.logs() {
+        match GlobalTimeUpdated::decode_log(log) {
+            Ok(event) => {
+                info!("GlobalTimeUpdated proposer: {:?}, oldTimestamp: {:?}, newTimestamp: {:?}", event.proposer, event.oldTimestamp, event.newTimestamp);
+            }
+            Err(_) => {
+                info!("GlobalTimeUpdated decode log error: {:?}", log);
+            }
+        };
+    }
     result.state.remove(&SYSTEM_CALLER);
     result.state.remove(&evm.block().beneficiary);
     (MetadataTxnResult { result: result.result, txn }, result.state)
