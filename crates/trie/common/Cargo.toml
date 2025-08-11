@@ -45,6 +45,8 @@ arbitrary = { workspace = true, features = ["derive"], optional = true }
 
 # misc
 rayon = { workspace = true, optional = true }
+parking_lot.workspace = true
+once_cell.workspace = true
 
 [dev-dependencies]
 reth-primitives-traits = { workspace = true, features = ["serde"] }
@@ -86,6 +88,7 @@ std = [
     "revm-database/std",
     "revm-state/std",
     "reth-storage-errors/std",
+    "once_cell/std",
 ]
 eip1186 = ["alloy-rpc-types-eth/serde", "dep:alloy-serde"]
 serde = [
@@ -100,6 +103,7 @@ serde = [
     "reth-codecs?/serde",
     "revm-database/serde",
     "revm-state/serde",
+    "parking_lot/serde",
 ]
 reth-codec = ["dep:reth-codecs", "dep:bytes", "bytes/std"]
 serde-bincode-compat = [

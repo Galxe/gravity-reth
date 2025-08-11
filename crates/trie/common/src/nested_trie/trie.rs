@@ -1,4 +1,6 @@
-use std::sync::Mutex;
+use once_cell::sync::OnceCell;
+
+use parking_lot::Mutex;
 
 use alloy_primitives::{
     map::{HashMap, HashSet},
@@ -243,47 +245,49 @@ where
             let root = self.root.take().unwrap();
             if let Node::FullNode { mut children, .. } = root {
                 let removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
-
-                std::thread::scope(|scope| -> ProviderResult<()> {
-                    let mut handles = Vec::new();
+                let abort = OnceCell::new();
+                rayon::scope(|scope| {
                     for (child, batch) in children.iter_mut().zip(batches.into_iter()) {
                         if batch.is_empty() {
                             continue;
                         }
-                        handles.push(scope.spawn(|| -> ProviderResult<()> {
-                            let prefix = batch[0].0.slice(0..1);
-                            let child_root = child.take().map(|n| *n);
-                            let reader = f()?;
-                            let mut child_trie = Self::new_with_root(reader, child_root);
-                            for (key, value) in batch {
-                                let child_root = child_trie.root.take();
-                                let result = if let Some(value) = value {
-                                    child_trie
-                                        .insert_inner(child_root, prefix, key.slice(1..), value)
-                                        .map(|(dirty, node)| (dirty, Some(node)))
-                                } else {
-                                    child_trie.delete_inner(child_root, prefix, key.slice(1..))
-                                };
-                                let (_, node) = result?;
-                                child_trie.root = node;
+                        scope.spawn(|_| {
+                            let wrap = || -> ProviderResult<()> {
+                                let prefix = batch[0].0.slice(0..1);
+                                let child_root = child.take().map(|n| *n);
+                                let reader = f()?;
+                                let mut child_trie = Self::new_with_root(reader, child_root);
+                                for (key, value) in batch {
+                                    let child_root = child_trie.root.take();
+                                    let result = if let Some(value) = value {
+                                        child_trie
+                                            .insert_inner(child_root, prefix, key.slice(1..), value)
+                                            .map(|(dirty, node)| (dirty, Some(node)))
+                                    } else {
+                                        child_trie.delete_inner(child_root, prefix, key.slice(1..))
+                                    };
+                                    let (_, node) = result?;
+                                    child_trie.root = node;
+                                }
+                                let _ = child_trie.hash();
+                                *child = child_trie.root.take().map(Box::new);
+                                if !child_trie.trie_output.removed_nodes.is_empty() {
+                                    removed_nodes
+                                        .lock()
+                                        .extend(child_trie.trie_output.removed_nodes);
+                                }
+                                Ok(())
+                            };
+                            if let Err(e) = wrap() {
+                                abort.get_or_init(|| e);
                             }
-                            let _ = child_trie.hash();
-                            *child = child_trie.root.take().map(Box::new);
-                            if !child_trie.trie_output.removed_nodes.is_empty() {
-                                removed_nodes
-                                    .lock()
-                                    .unwrap()
-                                    .extend(child_trie.trie_output.removed_nodes);
-                            }
-                            Ok(())
-                        }));
+                        });
                     }
-                    for handle in handles {
-                        handle.join().unwrap()?;
-                    }
-                    Ok(())
-                })?;
-                let mut removed_nodes = removed_nodes.into_inner().unwrap();
+                });
+                if let Some(abort) = abort.into_inner() {
+                    return Err(abort);
+                }
+                let mut removed_nodes = removed_nodes.into_inner();
                 // check the root node can be FullNode or other
                 let mut pos = -1;
                 for (i, child) in children.iter().enumerate() {
