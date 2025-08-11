@@ -90,6 +90,8 @@ pub struct OrderedBlock {
     pub transactions: Vec<TransactionSigned>,
     /// Senders of the transactions in the block
     pub senders: Vec<Address>,
+    /// The proposer address of the block
+    pub proposer: Option<Address>,
 }
 
 enum ReceivedBlock {
@@ -507,8 +509,11 @@ impl<Storage: GravityStorage> Core<Storage> {
             // FIXME: This is a hack, we should find a more elegant way to do this
             evm_env.cfg_env.disable_base_fee = true;
             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
-            let (metadata_txn_result, state_changes) =
-                transact_metadata_contract_call(&mut evm, ordered_block.timestamp * 1_000_000);
+            let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
+                &mut evm,
+                ordered_block.timestamp * 1_000_000,
+                ordered_block.proposer,
+            );
             drop(evm);
 
             if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {

@@ -144,9 +144,10 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
 pub fn transact_metadata_contract_call(
     evm: &mut impl Evm<Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     timestamp_us: u64,
+    proposer: Option<Address>,
 ) -> (MetadataTxnResult, EvmState) {
     let call = blockPrologueCall {
-        proposer: SYSTEM_CALLER,
+        proposer: proposer.unwrap_or(SYSTEM_CALLER),
         failedProposerIndices: vec![],
         timestampMicros: U256::from(timestamp_us),
     };
