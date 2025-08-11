@@ -32,6 +32,7 @@ pub struct MetadataTxnResult {
 
 sol! {
     event GlobalTimeUpdated(address indexed proposer, uint64 oldTimestamp, uint64 newTimestamp, bool isNilBlock);
+    event Log(string message);
 }
 
 impl MetadataTxnResult {
@@ -170,6 +171,14 @@ pub fn transact_metadata_contract_call(
             }
             Err(_) => {
                 info!("GlobalTimeUpdated decode log error: {:?}", log);
+            }
+        };
+        match Log::decode_log(log) {
+            Ok(event) => {
+                info!("Log message: {:?}", event.message);
+            }
+            Err(_) => {
+                info!("Log decode log error: {:?}", log);
             }
         };
     }
