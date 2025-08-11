@@ -6,10 +6,9 @@ use alloy_primitives::{hex, Address, B256};
 use alloy_rpc_types::{Filter, Log};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio::time::{interval, Interval};
 use tracing::{debug, error, info, warn};
 
@@ -28,19 +27,6 @@ pub struct ObserveUpdate {
     pub previous_value: Option<ObservedValue>,
     /// 更新时间戳
     pub timestamp: u64,
-}
-
-/// Relayer统计信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelayerStats {
-    /// 总任务数
-    pub total_tasks: usize,
-    /// 活跃任务数
-    pub active_tasks: usize,
-    /// 最旧的cursor
-    pub oldest_cursor: u64,
-    /// 最新的cursor
-    pub newest_cursor: u64,
 }
 
 /// 观察到的值
@@ -111,9 +97,39 @@ struct TaskState {
     /// 任务配置
     task: ParsedTask,
     /// 当前处理到的区块号（cursor）
-    cursor: u64,
+    cursor: Mutex<u64>,
     /// 上次观察到的值
-    last_observed: Option<ObservedValue>,
+    last_observed: Mutex<Option<ObservedValue>>,
+}
+
+impl TaskState {
+    fn new(task: ParsedTask, start_block: u64, last_observed: Option<ObservedValue>) -> Self {
+        Self { task, cursor: Mutex::new(start_block), last_observed: Mutex::new(last_observed) }
+    }
+
+    async fn get_cursor(&self) -> u64 {
+        *self.cursor.lock().await
+    }
+
+    async fn update_cursor(&self, cursor: u64) {
+        *self.cursor.lock().await = cursor;
+    }
+
+    async fn last_observed(&self) -> Option<ObservedValue> {
+        self.last_observed.lock().await.clone()
+    }
+
+    async fn should_update(&self, new_value: &ObservedValue) -> (bool, Option<ObservedValue>) {
+        if self.last_observed().await.as_ref() != Some(new_value) {
+            (true, self.last_observed().await)
+        } else {
+            (false, None)
+        }
+    }
+
+    async fn update_last_observed(&self, last_observed: ObservedValue) {
+        *self.last_observed.lock().await = Some(last_observed);
+    }
 }
 
 /// Gravity协议Relayer
@@ -123,7 +139,7 @@ pub struct GravityRelayer {
     /// 配置
     config: RelayerConfig,
     /// 任务状态映射
-    task_states: Arc<RwLock<HashMap<String, TaskState>>>,
+    task_state: TaskState,
     /// 轮询定时器 (暂未使用，为将来扩展保留)
     #[allow(dead_code)]
     poll_timer: Option<Interval>,
@@ -136,7 +152,7 @@ impl std::fmt::Debug for GravityRelayer {
         f.debug_struct("GravityRelayer")
             .field("eth_client", &self.eth_client)
             .field("config", &self.config)
-            .field("task_states", &"<task_states>")
+            .field("task_state", &"<task_state>")
             .field("poll_timer", &self.poll_timer.is_some())
             .field("update_callback", &self.update_callback.is_some())
             .finish()
@@ -145,15 +161,16 @@ impl std::fmt::Debug for GravityRelayer {
 
 impl GravityRelayer {
     /// 创建新的Relayer实例
-    pub fn new(rpc_url: &str, config: RelayerConfig) -> Self {
+    pub fn new(rpc_url: &str, config: RelayerConfig, task: ParsedTask) -> Self {
+        let start_block = config.start_block.unwrap_or_else(|| {
+            // 在实际实现中，这里应该获取最新的finalized区块号
+            // 暂时使用0作为默认值
+            0
+        });
+
+        let task_state = TaskState::new(task.clone(), start_block, None);
         let eth_client = Arc::new(EthHttpCli::new(rpc_url));
-        Self {
-            eth_client,
-            config,
-            task_states: Arc::new(RwLock::new(HashMap::new())),
-            poll_timer: None,
-            update_callback: None,
-        }
+        Self { eth_client, config, task_state, poll_timer: None, update_callback: None }
     }
 
     /// 设置更新回调函数
@@ -171,40 +188,6 @@ impl GravityRelayer {
     /// 获取配置
     pub fn get_config(&self) -> &RelayerConfig {
         &self.config
-    }
-
-    /// 添加要监听的任务
-    pub async fn add_task(&self, task: ParsedTask) -> Result<()> {
-        let start_block = self.config.start_block.unwrap_or_else(|| {
-            // 在实际实现中，这里应该获取最新的finalized区块号
-            // 暂时使用0作为默认值
-            0
-        });
-
-        let task_state = TaskState { task: task.clone(), cursor: start_block, last_observed: None };
-
-        let mut states = self.task_states.write().await;
-        states.insert(task.original_uri.clone(), task_state);
-
-        info!("添加任务: {}", task.original_uri);
-        Ok(())
-    }
-
-    /// 移除任务
-    pub async fn remove_task(&self, task_uri: &str) -> Result<()> {
-        let mut states = self.task_states.write().await;
-        if states.remove(task_uri).is_some() {
-            info!("移除任务: {}", task_uri);
-            Ok(())
-        } else {
-            Err(anyhow!("任务不存在: {}", task_uri))
-        }
-    }
-
-    /// 获取任务列表
-    pub async fn get_tasks(&self) -> Vec<String> {
-        let states = self.task_states.read().await;
-        states.keys().cloned().collect()
     }
 
     /// 开始轮询
@@ -225,31 +208,8 @@ impl GravityRelayer {
 
     /// 执行一次轮询
     pub async fn poll_once(&self) -> Result<()> {
-        let task_uris: Vec<String> = {
-            let states = self.task_states.read().await;
-            states.keys().cloned().collect()
-        };
-
-        for task_uri in task_uris {
-            if let Err(e) = self.poll_task(&task_uri).await {
-                error!("轮询任务 {} 失败: {}", task_uri, e);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// 轮询单个任务
-    async fn poll_task(&self, task_uri: &str) -> Result<()> {
-        let task = {
-            let states = self.task_states.read().await;
-            match states.get(task_uri) {
-                Some(state) => state.task.clone(),
-                None => return Err(anyhow!("任务不存在: {}", task_uri)),
-            }
-        };
-
-        match &task.task {
+        let task_uri = &self.task_state.task.original_uri;
+        match &self.task_state.task.task {
             GravityTask::MonitorEvent(filter) => self.poll_event_task(task_uri, filter).await,
             GravityTask::MonitorBlockHead => self.poll_block_head_task(task_uri).await,
             GravityTask::MonitorStorage { account, slot } => {
@@ -264,10 +224,7 @@ impl GravityRelayer {
     /// 轮询事件任务
     async fn poll_event_task(&self, task_uri: &str, filter: &Filter) -> Result<()> {
         // 获取当前cursor
-        let cursor = {
-            let states = self.task_states.read().await;
-            states.get(task_uri).map(|s| s.cursor).unwrap_or(0)
-        };
+        let cursor = self.task_state.get_cursor().await;
 
         // 创建带有区块范围的filter
         let mut scoped_filter = filter.clone();
@@ -298,49 +255,39 @@ impl GravityRelayer {
             .map(|log| log.into())
             .collect();
 
-        if !new_logs.is_empty() {
-            let new_value = ObservedValue::Events { logs: new_logs.clone() };
+        if new_logs.is_empty() {
+            let next_cursor = scoped_filter.get_to_block().unwrap();
+            self.task_state.update_cursor(next_cursor).await;
+            debug!("轮询事件任务 {} 完成，cursor: {}", task_uri, next_cursor);
+            return Ok(());
+        }
 
-            // 检查是否有变化
-            let (previous_value, should_update) = {
-                let states = self.task_states.read().await;
-                let state = states.get(task_uri).unwrap();
-                let should_update = state.last_observed.as_ref() != Some(&new_value);
-                (state.last_observed.clone(), should_update)
-            };
+        let new_value = ObservedValue::Events { logs: new_logs.clone() };
 
-            if should_update {
-                // 更新状态
-                {
-                    let mut states = self.task_states.write().await;
-                    if let Some(state) = states.get_mut(task_uri) {
-                        // 更新cursor到最新的区块号
-                        if let Some(latest_log) = new_logs.iter().max_by_key(|log| log.block_number)
-                        {
-                            state.cursor = latest_log.block_number;
-                        }
-                        state.last_observed = Some(new_value.clone());
-                    }
-                }
+        // 检查是否有变化
+        let (should_update, previous_value) = self.task_state.should_update(&new_value).await;
 
-                // 触发更新回调
-                self.trigger_update(ObserveUpdate {
-                    task_uri: task_uri.to_string(),
-                    task_type: GravityTask::MonitorEvent(filter.clone()),
-                    block_number: new_logs
-                        .iter()
-                        .map(|log| log.block_number)
-                        .max()
-                        .unwrap_or(cursor),
-                    new_value,
-                    previous_value,
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                })
-                .await;
+        if should_update {
+            // 更新状态
+            // 更新cursor到最新的区块号
+            if let Some(latest_log) = new_logs.iter().max_by_key(|log| log.block_number) {
+                self.task_state.update_cursor(latest_log.block_number).await;
             }
+            self.task_state.update_last_observed(new_value.clone()).await;
+
+            // 触发更新回调
+            self.trigger_update(ObserveUpdate {
+                task_uri: task_uri.to_string(),
+                task_type: GravityTask::MonitorEvent(filter.clone()),
+                block_number: new_logs.iter().map(|log| log.block_number).max().unwrap_or(cursor),
+                new_value,
+                previous_value,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            })
+            .await;
         }
 
         debug!("轮询事件任务 {} 完成，cursor: {}", task_uri, cursor);
@@ -356,10 +303,7 @@ impl GravityRelayer {
             self.eth_client.get_block_number().await?
         };
 
-        let cursor = {
-            let states = self.task_states.read().await;
-            states.get(task_uri).map(|s| s.cursor).unwrap_or(0)
-        };
+        let cursor = self.task_state.get_cursor().await;
 
         if latest_block > cursor {
             // 获取实际的区块信息
@@ -370,22 +314,11 @@ impl GravityRelayer {
 
             let new_value = ObservedValue::Block { block_hash, block_number: latest_block };
 
-            let (previous_value, should_update) = {
-                let states = self.task_states.read().await;
-                let state = states.get(task_uri).unwrap();
-                let should_update = state.last_observed.as_ref() != Some(&new_value);
-                (state.last_observed.clone(), should_update)
-            };
+            let (should_update, previous_value) = self.task_state.should_update(&new_value).await;
 
             if should_update {
-                // 更新状态
-                {
-                    let mut states = self.task_states.write().await;
-                    if let Some(state) = states.get_mut(task_uri) {
-                        state.cursor = latest_block;
-                        state.last_observed = Some(new_value.clone());
-                    }
-                }
+                self.task_state.update_cursor(latest_block).await;
+                self.task_state.update_last_observed(new_value.clone()).await;
 
                 // 触发更新
                 self.trigger_update(ObserveUpdate {
@@ -417,10 +350,7 @@ impl GravityRelayer {
         // 获取存储槽的当前值
         let current_value = self.eth_client.get_storage_at(account, slot).await?;
 
-        let cursor = {
-            let states = self.task_states.read().await;
-            states.get(task_uri).map(|s| s.cursor).unwrap_or(0)
-        };
+        let cursor = self.task_state.get_cursor().await;
 
         // 获取当前区块号用于比较
         let current_block = if self.config.finalized_only {
@@ -431,22 +361,12 @@ impl GravityRelayer {
 
         let new_value = ObservedValue::StorageSlot { slot, value: current_value };
 
-        let (previous_value, should_update) = {
-            let states = self.task_states.read().await;
-            let state = states.get(task_uri).unwrap();
-            let should_update = state.last_observed.as_ref() != Some(&new_value);
-            (state.last_observed.clone(), should_update)
-        };
+        let (should_update, previous_value) = self.task_state.should_update(&new_value).await;
 
         if should_update {
             // 更新状态
-            {
-                let mut states = self.task_states.write().await;
-                if let Some(state) = states.get_mut(task_uri) {
-                    state.cursor = current_block;
-                    state.last_observed = Some(new_value.clone());
-                }
-            }
+            self.task_state.update_cursor(current_block).await;
+            self.task_state.update_last_observed(new_value.clone()).await;
 
             // 触发更新
             self.trigger_update(ObserveUpdate {
@@ -503,40 +423,10 @@ impl GravityRelayer {
         // 目前start_polling是无限循环，需要添加停止信号
     }
 
-    /// 获取Relayer统计信息
-    pub async fn get_stats(&self) -> RelayerStats {
-        let states = self.task_states.read().await;
-        RelayerStats {
-            total_tasks: states.len(),
-            active_tasks: states.len(), // 目前所有任务都是活跃的
-            oldest_cursor: states.values().map(|s| s.cursor).min().unwrap_or(0),
-            newest_cursor: states.values().map(|s| s.cursor).max().unwrap_or(0),
-        }
-    }
-
     /// 触发更新回调
     async fn trigger_update(&self, update: ObserveUpdate) {
         if let Some(callback) = &self.update_callback {
             callback(update);
-        }
-    }
-
-    /// 获取任务状态
-    pub async fn get_task_state(&self, task_uri: &str) -> Option<(u64, Option<ObservedValue>)> {
-        let states = self.task_states.read().await;
-        states.get(task_uri).map(|state| (state.cursor, state.last_observed.clone()))
-    }
-
-    /// 手动设置任务cursor
-    pub async fn set_task_cursor(&self, task_uri: &str, cursor: u64) -> Result<()> {
-        let mut states = self.task_states.write().await;
-        match states.get_mut(task_uri) {
-            Some(state) => {
-                state.cursor = cursor;
-                info!("设置任务 {} cursor为: {}", task_uri, cursor);
-                Ok(())
-            }
-            None => Err(anyhow!("任务不存在: {}", task_uri)),
         }
     }
 }

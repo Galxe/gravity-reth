@@ -113,8 +113,7 @@ impl RelayerManager {
         info!("Adding URI: {} -> {:?}", uri, task);
 
         // 创建新的relayer实例
-        let relayer =
-            Arc::new(GravityRelayer::new(rpc_url, self.default_config.clone()));
+        let relayer = Arc::new(GravityRelayer::new(rpc_url, self.default_config.clone(), task));
 
         // 设置回调
         if let Some(callback) = self.update_callback.lock().await.clone() {
@@ -124,9 +123,6 @@ impl RelayerManager {
                 })
                 .await;
         }
-
-        // 添加任务到relayer
-        relayer.add_task(task).await?;
 
         // 创建停止信号通道
         let (stop_sender, mut stop_receiver) = mpsc::channel::<()>(1);
