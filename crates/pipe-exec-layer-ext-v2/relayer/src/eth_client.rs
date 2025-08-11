@@ -3,6 +3,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
 use anyhow::{Context as AnyhowContext, Result};
+use reqwest::ClientBuilder;
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,11 +41,9 @@ where
 /// Ethereum transaction sender, providing reliable communication with nodes
 #[derive(Clone, Debug)]
 pub struct EthHttpCli {
-    inner: Vec<Arc<RootProvider<Ethereum>>>,
-    chain_id: u64,
+    provider: RootProvider<Ethereum>,
     metrics: Arc<tokio::sync::Mutex<ProviderMetrics>>,
     retry_config: RetryConfig,
-    rpc: Arc<String>,
 }
 
 /// Retry configuration
@@ -72,66 +71,28 @@ impl Default for RetryConfig {
 }
 
 impl EthHttpCli {
-    /// 获取RPC URL
-    pub fn rpc(&self) -> Arc<String> {
-        self.rpc.clone()
-    }
-
     /// Create new TxnSender instance
-    pub fn new(rpc_url: &str, chain_id: u64) -> Result<Self> {
+    pub fn new(rpc_url: &str, chain_id: u64) -> Self {
         debug!("Creating TxnSender for URL: {}, Chain ID: {}", rpc_url, chain_id);
         // Parse URL
 
-        let url =
-            Url::parse(rpc_url).with_context(|| format!("Failed to parse RPC URL: {}", rpc_url))?;
-        let mut inner = Vec::new();
-        for _ in 0..1 {
-            // let client = reqwest::Client::builder()
-            //     // .pool_idle_timeout(Duration::from_secs(120))
-            //     // .pool_max_idle_per_host(2000)
-            //     // .connect_timeout(Duration::from_secs(10))
-            //     // .timeout(Duration::from_secs(5))
-            //     // .tcp_keepalive(Duration::from_secs(30))
-            //     // .tcp_nodelay(true)
-            //     // .http2_prior_knowledge()
-            //     // .http2_adaptive_window(true)
-            //     // .http2_keep_alive_timeout(Duration::from_secs(10))
-            //     // .no_gzip()
-            //     // .no_brotli()
-            //     // .no_deflate()
-            //     // .no_zstd()
-            //     .build()
-            //     .unwrap();
+        let url = Url::parse(rpc_url).unwrap();
+        let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
+        let client = client_builder.build().unwrap();
+        let provider: RootProvider<Ethereum> =
+            ProviderBuilder::default().connect_reqwest(client, url.clone());
 
-            let provider: RootProvider<Ethereum> =
-                ProviderBuilder::default().connect_http(url.clone());
-
-            inner.push(Arc::new(provider));
-        }
-
-        let txn_sender = Self {
-            rpc: Arc::new(rpc_url.to_string()),
-            inner,
-            chain_id,
+        Self {
+            provider,
             metrics: Arc::new(tokio::sync::Mutex::new(ProviderMetrics::default())),
             retry_config: RetryConfig::default(),
-        };
-
-        // Verify connection
-
-        debug!("TxnSender created successfully");
-        Ok(txn_sender)
-    }
-
-    /// 获取链ID
-    pub fn chain_id(&self) -> u64 {
-        self.chain_id
+        }
     }
 
     /// 获取地址的nonce
     pub async fn get_nonce(&self, address: Address) -> Result<u64> {
         tokio::time::timeout(Duration::from_secs(10), async {
-            let nonce = self.inner[0].get_transaction_count(address).await?;
+            let nonce = self.provider.get_transaction_count(address).await?;
             Ok(nonce)
         })
         .await?
@@ -144,7 +105,7 @@ impl EthHttpCli {
 
         let result = self
             .retry_with_backoff(|| async {
-                let _block_number = self.inner[0].get_block_number().await?;
+                let _block_number = self.provider.get_block_number().await?;
                 Ok(())
             })
             .await;
@@ -159,7 +120,7 @@ impl EthHttpCli {
         let start = Instant::now();
 
         let result = self
-            .retry_with_backoff(|| async { self.inner[0].get_transaction_count(address).await })
+            .retry_with_backoff(|| async { self.provider.get_transaction_count(address).await })
             .await;
 
         self.update_metrics(result.is_ok(), start.elapsed()).await;
@@ -173,7 +134,7 @@ impl EthHttpCli {
         let start = Instant::now();
 
         let result =
-            self.retry_with_backoff(|| async { self.inner[0].get_balance(*address).await }).await;
+            self.retry_with_backoff(|| async { self.provider.get_balance(*address).await }).await;
 
         self.update_metrics(result.is_ok(), start.elapsed()).await;
 
@@ -185,7 +146,7 @@ impl EthHttpCli {
         let start = Instant::now();
 
         let result =
-            self.retry_with_backoff(|| async { self.inner[0].get_logs(filter).await }).await;
+            self.retry_with_backoff(|| async { self.provider.get_logs(filter).await }).await;
 
         self.update_metrics(result.is_ok(), start.elapsed()).await;
 
@@ -198,7 +159,7 @@ impl EthHttpCli {
 
         let result = self
             .retry_with_backoff(|| async {
-                self.inner[0].get_storage_at(address, slot.into()).await
+                self.provider.get_storage_at(address, slot.into()).await
             })
             .await;
 
@@ -214,7 +175,7 @@ impl EthHttpCli {
 
         let result = self
             .retry_with_backoff(|| async {
-                self.inner[0]
+                self.provider
                     .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Number(block_number))
                     .await
             })
@@ -231,7 +192,8 @@ impl EthHttpCli {
 
         let result = self
             .retry_with_backoff(|| async {
-                match self.inner[0]
+                match self
+                    .provider
                     .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Finalized)
                     .await?
                 {
@@ -254,7 +216,7 @@ impl EthHttpCli {
         let start = Instant::now();
 
         let result =
-            self.retry_with_backoff(|| async { self.inner[0].get_gas_price().await }).await;
+            self.retry_with_backoff(|| async { self.provider.get_gas_price().await }).await;
 
         self.update_metrics(result.is_ok(), start.elapsed()).await;
 
@@ -269,7 +231,7 @@ impl EthHttpCli {
         let start = Instant::now();
 
         let result =
-            self.retry_with_backoff(|| async { self.inner[0].get_block_number().await }).await;
+            self.retry_with_backoff(|| async { self.provider.get_block_number().await }).await;
 
         self.update_metrics(result.is_ok(), start.elapsed()).await;
 

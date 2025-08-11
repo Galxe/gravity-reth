@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 reth-primitives.workspace = true
+reth-tracing.workspace = true
 alloy-primitives.workspace = true
 once_cell.workspace = true
 tokio.workspace = true
@@ -25,3 +26,4 @@ anyhow.workspace = true
 serde.workspace = true
 tracing.workspace = true
 url.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls"] }
