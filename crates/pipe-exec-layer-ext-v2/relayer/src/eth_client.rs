@@ -23,21 +23,6 @@ pub struct ProviderMetrics {
     /// 总延迟时间（毫秒）
     pub total_latency_ms: u64,
 }
-
-/// 未使用的反序列化函数
-#[allow(dead_code)]
-fn deserialize_hex_to_usize<'de, D>(deserializer: D) -> Result<usize, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: String = String::deserialize(deserializer)?;
-    if s.starts_with("0x") {
-        usize::from_str_radix(&s[2..], 16).map_err(serde::de::Error::custom)
-    } else {
-        s.parse::<usize>().map_err(serde::de::Error::custom)
-    }
-}
-
 /// Ethereum transaction sender, providing reliable communication with nodes
 #[derive(Clone, Debug)]
 pub struct EthHttpCli {
@@ -72,8 +57,8 @@ impl Default for RetryConfig {
 
 impl EthHttpCli {
     /// Create new TxnSender instance
-    pub fn new(rpc_url: &str, chain_id: u64) -> Self {
-        debug!("Creating TxnSender for URL: {}, Chain ID: {}", rpc_url, chain_id);
+    pub fn new(rpc_url: &str) -> Self {
+        debug!("Creating EthHttpCli for URL: {}", rpc_url);
         // Parse URL
 
         let url = Url::parse(rpc_url).unwrap();
@@ -89,7 +74,6 @@ impl EthHttpCli {
         }
     }
 
-    /// 获取地址的nonce
     pub async fn get_nonce(&self, address: Address) -> Result<u64> {
         tokio::time::timeout(Duration::from_secs(10), async {
             let nonce = self.provider.get_transaction_count(address).await?;
@@ -101,18 +85,7 @@ impl EthHttpCli {
     /// Verify network connection
     #[allow(unused)]
     async fn verify_connection(&self) -> Result<()> {
-        let start = Instant::now();
-
-        let result = self
-            .retry_with_backoff(|| async {
-                let _block_number = self.provider.get_block_number().await?;
-                Ok(())
-            })
-            .await;
-
-        self.update_metrics(result.is_ok(), start.elapsed()).await;
-
-        result.with_context(|| "Failed to verify connection to Ethereum node")
+        self.get_block_number().await.map(|_| ())
     }
 
     /// Get account transaction count (nonce)
@@ -153,7 +126,6 @@ impl EthHttpCli {
         result.with_context(|| "Failed to get logs with filter")
     }
 
-    /// 获取存储槽的值
     pub async fn get_storage_at(&self, address: Address, slot: B256) -> Result<B256> {
         let start = Instant::now();
 
@@ -169,7 +141,6 @@ impl EthHttpCli {
         })
     }
 
-    /// 获取区块信息
     pub async fn get_block(&self, block_number: u64) -> Result<Option<alloy_rpc_types::Block>> {
         let start = Instant::now();
 
@@ -186,7 +157,6 @@ impl EthHttpCli {
         result.with_context(|| format!("Failed to get block: {}", block_number))
     }
 
-    /// 获取finalized区块号
     pub async fn get_finalized_block_number(&self) -> Result<u64> {
         let start = Instant::now();
 
@@ -210,7 +180,6 @@ impl EthHttpCli {
         result.with_context(|| "Failed to get finalized block number")
     }
 
-    /// Get current gas price
     #[allow(unused)]
     pub async fn get_gas_price(&self) -> Result<u128> {
         let start = Instant::now();
@@ -225,7 +194,6 @@ impl EthHttpCli {
             .with_context(|| "Failed to get gas price")
     }
 
-    /// Get latest block number
     #[allow(unused)]
     pub async fn get_block_number(&self) -> Result<u64> {
         let start = Instant::now();
@@ -238,7 +206,6 @@ impl EthHttpCli {
         result.with_context(|| "Failed to get block number")
     }
 
-    /// Execute operation with retry mechanism
     async fn retry_with_backoff<F, Fut, T>(&self, mut operation: F) -> Result<T>
     where
         F: FnMut() -> Fut,
@@ -334,5 +301,71 @@ impl EthHttpCli {
         let mut metrics = self.metrics.lock().await;
         *metrics = ProviderMetrics::default();
         debug!("TxnSender metrics reset");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use reqwest::{Client, ClientBuilder, Proxy};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_logs() {
+        let url = reqwest::Url::parse("https://ethereum-holesky-rpc.publicnode.com").unwrap();
+        let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
+        let client = client_builder.build().unwrap();
+        let provider: RootProvider<Ethereum> =
+            ProviderBuilder::default().connect_reqwest(client, url);
+
+        let block_number = provider.get_block_number().await.unwrap();
+        println!("block_number: {}", block_number);
+
+        let finalized_block_number = provider
+            .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Finalized)
+            .await
+            .unwrap();
+        println!("finalized_block_number: {:?}", finalized_block_number);
+
+        let block = provider
+            .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Number(block_number))
+            .await
+            .unwrap();
+        println!("block: {:?}", block);
+
+        let filter = Filter::new().from_block(10000000).to_block(10000001);
+        let logs = provider.get_logs(&filter).await.unwrap();
+        println!("logs: {:?}", logs);
+    }
+
+    #[tokio::test]
+    async fn test_get_finalized_block_number() {
+        for var in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"] {
+            std::env::remove_var(var);
+        }
+        println!("http proxy: {}", env::var("http_proxy").unwrap_or_default());
+        println!("https proxy: {}", env::var("https_proxy").unwrap_or_default());
+        // let proxy = Proxy::all("http://127.0.0.1:20172").unwrap();
+        // let client = Client::builder().proxy(proxy).build().unwrap();
+
+        let url = reqwest::Url::parse("https://ethereum-holesky-rpc.publicnode.com").unwrap();
+        let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
+        let client = client_builder.build().unwrap();
+        let provider: RootProvider<Ethereum> =
+            ProviderBuilder::default().connect_reqwest(client, url);
+        let block_number = provider.get_block_number().await.unwrap();
+        println!("block_number: {}", block_number);
+
+        // let res = client
+        //     .post("https://ethereum-holesky-rpc.publicnode.com")
+        //     .header("Content-Type", "application/json")
+        //     .body(r#"{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}"#)
+        //     .send()
+        //     .await
+        //     .unwrap();
+
+        // println!("Response: {:?}", res);
     }
 }

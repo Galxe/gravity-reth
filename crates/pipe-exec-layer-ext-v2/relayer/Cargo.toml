@@ -16,7 +16,7 @@ reth-primitives.workspace = true
 reth-tracing.workspace = true
 alloy-primitives.workspace = true
 once_cell.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 alloy-network.workspace = true
 alloy-provider.workspace = true

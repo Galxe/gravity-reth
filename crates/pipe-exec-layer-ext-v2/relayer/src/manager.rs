@@ -2,11 +2,11 @@
 
 use crate::eth_client::EthHttpCli;
 use crate::parser::{ParsedTask, UriParser};
-use crate::relayer::{GravityRelayer, RelayerConfig, ObserveUpdate};
+use crate::relayer::{GravityRelayer, ObserveUpdate, RelayerConfig};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -23,8 +23,6 @@ struct RelayerInstance {
 
 /// Relayer管理器
 pub struct RelayerManager {
-    /// ETH客户端
-    eth_client: Arc<EthHttpCli>,
     /// URI解析器
     uri_parser: UriParser,
     /// 默认配置
@@ -39,9 +37,8 @@ pub struct RelayerManager {
 
 impl RelayerManager {
     /// 创建新的RelayerManager
-    pub fn new(eth_client: Arc<EthHttpCli>, default_config: RelayerConfig) -> Self {
+    pub fn new(default_config: RelayerConfig) -> Self {
         Self {
-            eth_client,
             uri_parser: UriParser::new(),
             default_config,
             relayers: Arc::new(RwLock::new(HashMap::new())),
@@ -78,7 +75,7 @@ impl RelayerManager {
         }
 
         info!("Stopping RelayerManager...");
-        
+
         // 停止所有relayer
         let uris: Vec<String> = {
             let relayers = self.relayers.read().await;
@@ -97,7 +94,7 @@ impl RelayerManager {
     }
 
     /// 添加URI监控
-    pub async fn add_uri(&self, uri: &str) -> Result<()> {
+    pub async fn add_uri(&self, uri: &str, rpc_url: &str) -> Result<()> {
         let is_running = self.is_running.read().await;
         if !*is_running {
             return Err(anyhow!("RelayerManager is not running"));
@@ -116,16 +113,16 @@ impl RelayerManager {
         info!("Adding URI: {} -> {:?}", uri, task);
 
         // 创建新的relayer实例
-        let relayer = Arc::new(GravityRelayer::new(
-            self.eth_client.clone(),
-            self.default_config.clone(),
-        ));
+        let relayer =
+            Arc::new(GravityRelayer::new(rpc_url, self.default_config.clone()));
 
         // 设置回调
         if let Some(callback) = self.update_callback.lock().await.clone() {
-            relayer.set_update_callback(move |update| {
-                callback(update);
-            }).await;
+            relayer
+                .set_update_callback(move |update| {
+                    callback(update);
+                })
+                .await;
         }
 
         // 添加任务到relayer
@@ -139,7 +136,7 @@ impl RelayerManager {
         let uri_clone = uri.to_string();
         let poll_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(relayer_clone.get_config().poll_interval);
-            
+
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -153,7 +150,7 @@ impl RelayerManager {
                     }
                 }
             }
-            
+
             info!("Polling stopped for URI: {}", uri_clone);
         });
 
@@ -174,7 +171,7 @@ impl RelayerManager {
     /// 移除URI监控
     pub async fn remove_uri(&self, uri: &str) -> Result<()> {
         let mut relayers = self.relayers.write().await;
-        
+
         match relayers.remove(uri) {
             Some(mut instance) => {
                 info!("Removing URI: {}", uri);
@@ -209,9 +206,9 @@ impl RelayerManager {
     /// 获取URI的状态
     pub async fn get_uri_status(&self, uri: &str) -> Option<bool> {
         let relayers = self.relayers.read().await;
-        relayers.get(uri).map(|instance| {
-            instance.poll_handle.as_ref().map_or(false, |h| !h.is_finished())
-        })
+        relayers
+            .get(uri)
+            .map(|instance| instance.poll_handle.as_ref().map_or(false, |h| !h.is_finished()))
     }
 
     /// 获取管理器统计信息
@@ -220,27 +217,19 @@ impl RelayerManager {
         let total_uris = relayers.len();
         let active_uris = relayers
             .values()
-            .filter(|instance| {
-                instance.poll_handle.as_ref().map_or(false, |h| !h.is_finished())
-            })
+            .filter(|instance| instance.poll_handle.as_ref().map_or(false, |h| !h.is_finished()))
             .count();
 
-        ManagerStats {
-            total_uris,
-            active_uris,
-            is_running: *self.is_running.read().await,
-        }
+        ManagerStats { total_uris, active_uris, is_running: *self.is_running.read().await }
     }
 
     /// 优雅关闭所有relayer
     pub async fn graceful_shutdown(&self, timeout_secs: u64) -> Result<()> {
         info!("Starting graceful shutdown with timeout: {}s", timeout_secs);
-        
+
         // 使用超时机制确保关闭不会无限期等待
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            self.stop(),
-        ).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), self.stop()).await
+        {
             Ok(result) => {
                 info!("Graceful shutdown completed");
                 result

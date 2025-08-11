@@ -5,7 +5,6 @@ use alloy_rpc_types::{BlockNumberOrTag, Filter, Topic};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::str::FromStr;
 use url::Url;
 
 /// 定义支持的任务类型枚举
@@ -193,6 +192,7 @@ impl UriParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_parse_block_head_uri() {
@@ -221,6 +221,7 @@ mod tests {
 
         match result.task {
             GravityTask::MonitorEvent(filter) => {
+                println!("filter: {:?}", filter);
                 // 验证filter包含正确的地址和topic
                 assert!(filter.has_topics());
             }
@@ -280,8 +281,11 @@ mod tests {
         let result = parser.parse(uri).unwrap();
 
         match result.task {
-            GravityTask::MonitorEvent(_filter) => {
+            GravityTask::MonitorEvent(filter) => {
                 // 成功解析即通过测试
+                println!("filter: {:?}", filter);
+                // 验证filter包含正确的地址和topic
+                assert!(filter.has_topics());
             }
             _ => panic!("Expected MonitorEvent task type"),
         }
