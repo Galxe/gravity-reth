@@ -756,16 +756,15 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
             return false;
         }
         let gas_spent = U256::from(tx.effective_gas_price(Some(base_fee_per_gas)))
-            .saturating_mul(U256::from(tx.gas_limit()))
-            .saturating_add(tx.value());
-        let total_spent = gas_spent + tx.value();
+            .saturating_mul(U256::from(tx.gas_limit()));
+        let total_spent = gas_spent.saturating_add(tx.value());
         if account.balance < total_spent {
             warn!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 balance=?account.balance,
                 gas_spent=?gas_spent,
-                value=?tx.value(),
+                transfer_value=?tx.value(),
                 "insufficient balance"
             );
             return false;
@@ -1016,6 +1015,24 @@ mod tests {
         )
     }
 
+    fn create_test_transaction_with_value(
+        nonce: u64,
+        gas_limit: u64,
+        gas_price: u128,
+        value: U256,
+    ) -> TransactionSigned {
+        TransactionSigned::new_unhashed(
+            Transaction::Legacy(TxLegacy {
+                nonce,
+                gas_price,
+                gas_limit,
+                value,
+                ..Default::default()
+            }),
+            Signature::test_signature(),
+        )
+    }
+
     #[test]
     fn test_filter_invalid_txs_empty_input() {
         let db = MockDatabase::new();
@@ -1087,15 +1104,18 @@ mod tests {
 
         // fee = gas_price * gas_limit + value = 25_000_000_000 * 21_000 + 0 =
         // 525_000_000_000_000
-        let tx = create_test_transaction(0, 21_000, 25_000_000_000);
-        let txs = vec![tx];
-        let senders = vec![sender];
-        let base_fee_per_gas = 20_000_000_000u64;
+        let tx1 = create_test_transaction(0, 21_000, 25_000_000_000);
+        let tx2 = create_test_transaction_with_value(0, 21_000, 1_000, U256::from(500_000_000u64));
+        let tx3 = create_test_transaction_with_value(0, 21_000, 1_000, U256::from(500_000_000u64));
+        let txs = vec![tx1, tx2, tx3];
+        let senders = vec![sender, sender, sender];
+        let base_fee_per_gas = 1_000;
         let gas_limit = 30_000_000u64;
 
         let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
-        assert_eq!(invalid_idxs.len(), 1);
+        assert_eq!(invalid_idxs.len(), 2);
         assert!(invalid_idxs.contains(&0));
+        assert!(invalid_idxs.contains(&2));
     }
 
     #[test]
