@@ -101,7 +101,7 @@ serde = [
     "revm-database/serde",
     "revm-state/serde",
 ]
-reth-codec = ["dep:reth-codecs", "dep:bytes"]
+reth-codec = ["dep:reth-codecs", "dep:bytes", "bytes/std"]
 serde-bincode-compat = [
     "serde",
     "reth-primitives-traits/serde-bincode-compat",

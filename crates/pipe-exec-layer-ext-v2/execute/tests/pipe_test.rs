@@ -145,7 +145,7 @@ async fn run_pipe(
     let nested_provider = || provider.database_provider_ro().map(|db| db.into_tx());
     let nested_hash = NestedStateRoot::new(nested_provider, None);
     let hashed_state = nested_hash.read_hashed_state(None).unwrap();
-    let (root_hash, trie_updates, _) = nested_hash.calculate(&hashed_state, false).unwrap();
+    let (root_hash, trie_updates) = nested_hash.calculate(&hashed_state).unwrap();
     let trie_write = provider.database_provider_rw().unwrap();
     trie_write.write_trie_updatesv2(&trie_updates).unwrap();
     UnifiedStorageWriter::commit_unwind(trie_write)?;

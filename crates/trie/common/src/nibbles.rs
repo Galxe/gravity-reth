@@ -74,20 +74,23 @@ impl reth_codecs::Compact for StoredNibblesSubKey {
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
-        assert!(self.0.len() <= 64);
-
-        // right-pad with zeros
-        buf.put_slice(&self.0.to_vec());
-        static ZERO: &[u8; 64] = &[0; 64];
-        buf.put_slice(&ZERO[self.0.len()..]);
-
-        buf.put_u8(self.0.len() as u8);
-        64 + 1
+        let pack = self.0.pack();
+        let encoded_len = self.len() + 1;
+        buf.put_u8(encoded_len as u8);
+        buf.put_slice(&pack);
+        pack.len() + 1
     }
 
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        let len = buf[64] as usize;
-        (Self(Nibbles::from_nibbles_unchecked(&buf[..len])), &buf[65..])
+        let encoded_len = buf[0];
+        let odd = encoded_len % 2 == 0;
+        let pack_len = (encoded_len / 2) as usize;
+        let mut nibbles = Nibbles::unpack(&buf[1..1 + pack_len]);
+        if odd {
+            nibbles.pop();
+        }
+
+        (Self(nibbles), &buf[pack_len + 1..])
     }
 }
 

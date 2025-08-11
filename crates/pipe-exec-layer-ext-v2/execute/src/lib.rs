@@ -48,13 +48,11 @@ use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use gravity_storage::GravityStorage;
 use onchain_config::{transact_metadata_contract_call, OnchainConfigFetcher};
 use reth_rpc_eth_api::helpers::EthCall;
+use reth_trie::{HashedPostState, KeccakKeyHasher};
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot, Mutex,
 };
-
-use gravity_primitives::CONFIG;
-use reth_trie::{HashedPostState, KeccakKeyHasher};
 use tracing::*;
 
 /// Metadata about an executed block
@@ -338,8 +336,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
-        let (state_root, trie_updates, compatible_trie_pudates) =
-            self.storage.state_root(&hashed_state, CONFIG.compatible_trie_output).unwrap();
+        let (state_root, trie_updates) = self.storage.state_root(&hashed_state).unwrap();
         let write_start = Instant::now();
         self.cache.write_trie_updates(&trie_updates, block_number);
         self.metrics.cache_trie_state.record(write_start.elapsed());
@@ -372,23 +369,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
 
         let gas_used = sealed_block.gas_used;
-        let executed_block = if let Some(compatible_trie_updates) = compatible_trie_pudates {
-            ExecutedBlockWithTrieUpdates::new(
-                Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
-                Arc::new(execution_outcome),
-                Arc::new(hashed_state),
-                ExecutedTrieUpdates::Present(Arc::new(compatible_trie_updates)),
-                Arc::new(trie_updates),
-            )
-        } else {
-            ExecutedBlockWithTrieUpdates::new(
-                Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
-                Arc::new(execution_outcome),
-                Arc::new(hashed_state),
-                ExecutedTrieUpdates::empty(),
-                Arc::new(trie_updates),
-            )
-        };
+        let executed_block = ExecutedBlockWithTrieUpdates::new(
+            Arc::new(RecoveredBlock::new_sealed(sealed_block, senders)),
+            Arc::new(execution_outcome),
+            Arc::new(hashed_state),
+            ExecutedTrieUpdates::empty(),
+            Arc::new(trie_updates),
+        );
         let execution_result =
             ExecutionResult { block_id, block_number, block_hash, txs_info, gravity_events };
 

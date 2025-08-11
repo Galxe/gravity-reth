@@ -10,9 +10,14 @@ use metrics_derive::Metrics;
 use once_cell::sync::Lazy;
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use reth_primitives_traits::Account;
-use reth_trie_common::{nested_trie::Node, updates::TrieUpdatesV2, HashedPostState, Nibbles};
+use reth_tracing::tracing::info;
+use reth_trie_common::{
+    nested_trie::{Node, StoredNode},
+    updates::TrieUpdatesV2,
+    Nibbles,
+};
 use revm_bytecode::Bytecode;
-use revm_database::{states::StorageSlot, BundleAccount, OriginalValuesKnown};
+use revm_database::{BundleAccount, OriginalValuesKnown};
 use std::{
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
@@ -119,8 +124,8 @@ pub struct PersistBlockCacheInner {
     accounts: DashMap<Address, ValueWithTip<Account>>,
     storage: DashMap<Address, DashMap<U256, ValueWithTip<U256>>>,
     contracts: DashMap<B256, ValueWithTip<Bytecode>>,
-    account_trie: DashMap<Nibbles, ValueWithTip<Node>>,
-    storage_trie: DashMap<B256, DashMap<Nibbles, ValueWithTip<Node>>>,
+    account_trie: DashMap<Nibbles, ValueWithTip<StoredNode>>,
+    storage_trie: DashMap<B256, DashMap<Nibbles, ValueWithTip<StoredNode>>>,
     merged_block_number: Mutex<Option<u64>>,
     persist_block_number: Mutex<Option<u64>>,
     metrics: CacheMetricsReporter,
@@ -198,6 +203,7 @@ impl PersistBlockCache {
                         let persist_height =
                             inner.persist_block_number.lock().unwrap().unwrap_or(0);
                         let mut max_height = 512;
+                        info!("Start to clean contrancts in cache");
                         while inner.contracts.len() > CACHE_CONTRACTS_THRESHOLD {
                             let eviction_height = persist_height.saturating_sub(max_height);
                             if eviction_height == 0 || eviction_height == persist_height {
@@ -206,6 +212,10 @@ impl PersistBlockCache {
                             inner.contracts.retain(|_, v| v.block_number > eviction_height);
                             max_height /= 2;
                         }
+                        info!(
+                            "Cleaned contracts in cache, current size: {}",
+                            inner.contracts.len()
+                        );
                         last_eviction_contract = Instant::now();
                     }
                     // check and eviction account and trie state
@@ -213,6 +223,7 @@ impl PersistBlockCache {
                         let persist_height =
                             inner.persist_block_number.lock().unwrap().unwrap_or(0);
                         if last_eviction_time.elapsed() >= eviction_interval && persist_height > 0 {
+                            info!("Start to clean states in cache");
                             overflow = true;
                             let eviction_height = if last_eviction_height == 0 {
                                 persist_height.saturating_sub(512).max(persist_height / 2)
@@ -234,6 +245,7 @@ impl PersistBlockCache {
                                 .metrics
                                 .eviction_block_number
                                 .store(eviction_height, Ordering::Relaxed);
+                            info!("Cleaned states in cache, eviction_height: {}", eviction_height);
                         }
                     } else if overflow {
                         overflow = false;
@@ -356,7 +368,7 @@ impl PersistBlockCache {
     pub fn trie_account(&self, nibbles: &Nibbles) -> Option<Node> {
         if let Some(value) = self.account_trie.get(nibbles) {
             self.metrics.trie_cache_hit_record.hit();
-            Some(value.value.clone())
+            Some(value.value.clone().into())
         } else {
             self.metrics.trie_cache_hit_record.not_hit();
             None
@@ -368,7 +380,7 @@ impl PersistBlockCache {
         if let Some(storage) = self.storage_trie.get(hash_address) {
             if let Some(value) = storage.get(nibbles) {
                 self.metrics.trie_cache_hit_record.hit();
-                Some(value.value.clone())
+                Some(value.value.clone().into())
             } else {
                 self.metrics.trie_cache_hit_record.not_hit();
                 None
@@ -384,13 +396,7 @@ impl PersistBlockCache {
         self.metrics.persist_block_number.store(block_number, Ordering::Relaxed);
         let mut guard = self.persist_block_number.lock().unwrap();
         if let Some(ref mut persist_block_number) = *guard {
-            assert_eq!(
-                block_number,
-                *persist_block_number + 1,
-                "Persist uncontinuous block, expect: {}, actual: {}",
-                *persist_block_number + 1,
-                block_number
-            );
+            assert!(block_number > *persist_block_number);
             *persist_block_number = block_number;
         } else {
             *guard = Some(block_number);
@@ -452,8 +458,11 @@ impl PersistBlockCache {
             if was_destroyed {
                 self.storage.remove(address);
             }
-            let write_slot = |kv: (U256, StorageSlot)| {
-                let (slot, slot_value) = kv;
+
+            // Append storage changes
+            // Note: Assumption is that revert is going to remove whole plain storage from
+            // database so we can check if plain state was wiped or not.
+            for (slot, slot_value) in account.storage.iter().map(|(k, v)| (*k, *v)) {
                 // If storage was destroyed that means that storage was wiped.
                 // In that case we need to check if present storage value is different then ZERO.
                 let destroyed_and_not_zero = was_destroyed && !slot_value.present_value.is_zero();
@@ -487,17 +496,6 @@ impl PersistBlockCache {
                         }
                     }
                 }
-            };
-
-            // Append storage changes
-            // Note: Assumption is that revert is going to remove whole plain storage from
-            // database so we can check if plain state was wiped or not.
-            if account.storage.len() > 256 {
-                account.storage.par_iter().map(|(k, v)| (*k, *v)).for_each(write_slot);
-            } else {
-                for kv in account.storage.iter().map(|(k, v)| (*k, *v)) {
-                    write_slot(kv);
-                }
             }
         })
     }
@@ -508,61 +506,48 @@ impl PersistBlockCache {
             self.account_trie.remove(path);
         });
         input.account_nodes.par_iter().for_each(|(path, node)| {
-            self.account_trie.insert(*path, ValueWithTip::new(node.clone().reset(), block_number));
+            self.account_trie.insert(*path, ValueWithTip::new(node.clone().into(), block_number));
         });
 
-        let write_slot = |data: &DashMap<Nibbles, ValueWithTip<Node>>, kv: (&Nibbles, &Node)| {
-            data.insert(*kv.0, ValueWithTip::new(kv.1.clone().reset(), block_number));
-        };
         input.storage_tries.par_iter().for_each(|(hashed_address, storage_trie_update)| {
             if storage_trie_update.is_deleted {
                 self.storage_trie.remove(hashed_address);
             } else {
-                if let Some(storage) = self.storage_trie.get(hashed_address) {
-                    if storage_trie_update.removed_nodes.len() > 256 {
-                        storage_trie_update.removed_nodes.par_iter().for_each(|path| {
-                            storage.remove(path);
-                        });
-                    } else {
+                let remove_storage_trie =
+                    if let Some(storage) = self.storage_trie.get(hashed_address) {
                         for path in &storage_trie_update.removed_nodes {
                             storage.remove(path);
                         }
-                    }
+                        storage.is_empty()
+                    } else {
+                        false
+                    };
+                if remove_storage_trie {
+                    self.storage_trie.remove(hashed_address);
                 }
 
                 if let Some(storage) = self.storage_trie.get(hashed_address) {
-                    if storage_trie_update.storage_nodes.len() > 256 {
-                        storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
-                            write_slot(storage.value(), kv);
-                        });
-                    } else {
-                        for kv in &storage_trie_update.storage_nodes {
-                            write_slot(storage.value(), kv);
-                        }
+                    for (nibbles, node) in &storage_trie_update.storage_nodes {
+                        storage
+                            .insert(*nibbles, ValueWithTip::new(node.clone().into(), block_number));
                     }
                 } else {
                     match self.storage_trie.entry(*hashed_address) {
                         dashmap::Entry::Occupied(entry) => {
-                            if storage_trie_update.storage_nodes.len() > 256 {
-                                storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
-                                    write_slot(entry.get(), kv);
-                                });
-                            } else {
-                                for kv in &storage_trie_update.storage_nodes {
-                                    write_slot(entry.get(), kv);
-                                }
+                            for (nibbles, node) in &storage_trie_update.storage_nodes {
+                                entry.get().insert(
+                                    *nibbles,
+                                    ValueWithTip::new(node.clone().into(), block_number),
+                                );
                             }
                         }
                         dashmap::Entry::Vacant(entry) => {
                             let data = DashMap::new();
-                            if storage_trie_update.storage_nodes.len() > 256 {
-                                storage_trie_update.storage_nodes.par_iter().for_each(|kv| {
-                                    write_slot(&data, kv);
-                                });
-                            } else {
-                                for kv in &storage_trie_update.storage_nodes {
-                                    write_slot(&data, kv);
-                                }
+                            for (nibbles, node) in &storage_trie_update.storage_nodes {
+                                data.insert(
+                                    *nibbles,
+                                    ValueWithTip::new(node.clone().into(), block_number),
+                                );
                             }
                             entry.insert(data);
                         }
@@ -572,29 +557,3 @@ impl PersistBlockCache {
         });
     }
 }
-
-/// Stage Data channel that from execution to merkle stage
-#[derive(Clone, Debug, Default)]
-pub struct ExecutionMerkleChannel {
-    data: Arc<Mutex<Option<(u64, HashedPostState)>>>,
-}
-
-impl ExecutionMerkleChannel {
-    /// send data to merkle stage
-    pub fn send(&self, block_number: u64, hashed_state: HashedPostState) {
-        let mut data = self.data.lock().unwrap();
-        assert!(data.is_none());
-        *data = Some((block_number, hashed_state));
-    }
-
-    /// consume data in merkle stage
-    pub fn consume(&self, block_number: u64) -> HashedPostState {
-        let data = self.data.lock().unwrap().take().unwrap();
-        assert_eq!(data.0, block_number);
-        data.1
-    }
-}
-
-/// Single instance of `ExecutionMerkleChannel`
-pub static EXECUTION_MERKLE_CHANNEL: Lazy<ExecutionMerkleChannel> =
-    Lazy::new(ExecutionMerkleChannel::default);

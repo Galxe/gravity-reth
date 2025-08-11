@@ -4,7 +4,7 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     B256,
 };
-use alloy_trie::{BranchNodeCompact, EMPTY_ROOT_HASH};
+use alloy_trie::EMPTY_ROOT_HASH;
 use nybbles::Nibbles;
 use reth_storage_errors::{db::DatabaseError, ProviderResult};
 
@@ -32,22 +32,6 @@ impl TrieOutput {
     }
 }
 
-/// Compatible for origin `BranchNodeCompact` trie
-#[derive(Default, Debug, Clone)]
-pub struct CompatibleTrieOutput {
-    /// Collection of removed intermediate nodes indexed by full path.
-    pub removed_nodes: HashSet<Nibbles>,
-    /// Collection of updated nodes indexed by full path.
-    pub update_nodes: HashMap<Nibbles, BranchNodeCompact>,
-}
-
-impl CompatibleTrieOutput {
-    /// Empty trie output
-    pub fn is_empty(&self) -> bool {
-        self.removed_nodes.is_empty() && self.update_nodes.is_empty()
-    }
-}
-
 /// Nested trie
 #[derive(Debug)]
 pub struct Trie<R>
@@ -58,7 +42,6 @@ where
     reader: R,
     trie_output: TrieOutput,
     parallel: bool,
-    compatible: Option<CompatibleTrieOutput>,
 }
 
 impl<R> Trie<R>
@@ -66,33 +49,21 @@ where
     R: TrieReader,
 {
     /// Create a nested trie
-    pub fn new(mut reader: R, parallel: bool, compatible: bool) -> Result<Self, DatabaseError> {
+    pub fn new(mut reader: R, parallel: bool) -> Result<Self, DatabaseError> {
         let root = reader.read(&Nibbles::new())?;
-        Ok(Self {
-            root,
-            reader,
-            trie_output: Default::default(),
-            parallel,
-            compatible: compatible.then_some(Default::default()),
-        })
+        Ok(Self { root, reader, trie_output: Default::default(), parallel })
     }
 
-    fn new_with_root(reader: R, root: Option<Node>, compatible: bool) -> Self {
-        Self {
-            root,
-            reader,
-            trie_output: Default::default(),
-            parallel: false,
-            compatible: compatible.then_some(Default::default()),
-        }
+    fn new_with_root(reader: R, root: Option<Node>) -> Self {
+        Self { root, reader, trie_output: Default::default(), parallel: false }
     }
 
     /// Take the trie output
-    pub fn take_output(mut self) -> (TrieOutput, Option<CompatibleTrieOutput>) {
+    pub fn take_output(mut self) -> TrieOutput {
         if let Some(root) = self.root.take() {
             self.take_output_inner(root, Nibbles::new());
         }
-        (self.trie_output, self.compatible)
+        self.trie_output
     }
 
     fn take_output_inner(&mut self, node: Node, prefix: Nibbles) {
@@ -102,9 +73,6 @@ where
         // convert child to hash node
         match node {
             Node::FullNode { children, flags } => {
-                if let Some(compatible) = &mut self.compatible {
-                    compatible.update_nodes.insert(prefix, Node::convert_node_compact(&children));
-                }
                 let mut convert: [Option<Box<Node>>; 17] = Default::default();
                 for (nibble, child) in children.into_iter().enumerate() {
                     if let Some(child) = child {
@@ -275,7 +243,6 @@ where
             let root = self.root.take().unwrap();
             if let Node::FullNode { mut children, .. } = root {
                 let removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
-                let compatible_removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
 
                 std::thread::scope(|scope| -> ProviderResult<()> {
                     let mut handles = Vec::new();
@@ -287,8 +254,7 @@ where
                             let prefix = batch[0].0.slice(0..1);
                             let child_root = child.take().map(|n| *n);
                             let reader = f()?;
-                            let mut child_trie =
-                                Self::new_with_root(reader, child_root, self.compatible.is_some());
+                            let mut child_trie = Self::new_with_root(reader, child_root);
                             for (key, value) in batch {
                                 let child_root = child_trie.root.take();
                                 let result = if let Some(value) = value {
@@ -309,12 +275,6 @@ where
                                     .unwrap()
                                     .extend(child_trie.trie_output.removed_nodes);
                             }
-                            if let Some(compatible) = child_trie.compatible {
-                                compatible_removed_nodes
-                                    .lock()
-                                    .unwrap()
-                                    .extend(compatible.removed_nodes);
-                            }
                             Ok(())
                         }));
                     }
@@ -324,7 +284,6 @@ where
                     Ok(())
                 })?;
                 let mut removed_nodes = removed_nodes.into_inner().unwrap();
-                let mut compatible_removed_nodes = compatible_removed_nodes.into_inner().unwrap();
                 // check the root node can be FullNode or other
                 let mut pos = -1;
                 for (i, child) in children.iter().enumerate() {
@@ -349,7 +308,6 @@ where
                         let mut new_key = nibble_path;
                         new_key.extend(&cn_key);
                         removed_nodes.insert(nibble_path);
-                        compatible_removed_nodes.insert(nibble_path);
                         Node::ShortNode {
                             key: new_key,
                             value: cn_value,
@@ -368,20 +326,12 @@ where
                 } else if pos == -1 {
                     self.root = None;
                     removed_nodes.insert(Nibbles::new());
-                    compatible_removed_nodes.insert(Nibbles::new());
                 }
 
                 if self.trie_output.removed_nodes.is_empty() {
                     self.trie_output.removed_nodes = removed_nodes;
                 } else {
                     self.trie_output.removed_nodes.extend(removed_nodes);
-                }
-                if let Some(compatible) = &mut self.compatible {
-                    if compatible.removed_nodes.is_empty() {
-                        compatible.removed_nodes = compatible_removed_nodes;
-                    } else {
-                        compatible.removed_nodes.extend(compatible_removed_nodes);
-                    }
                 }
                 return Ok(());
             }
@@ -460,9 +410,6 @@ where
                     }
                     // pos can't be -2
                     if pos >= 0 {
-                        if let Some(compatible) = &mut self.compatible {
-                            compatible.removed_nodes.insert(prefix);
-                        }
                         let mut single_child = *children[pos as usize].take().unwrap();
                         if pos != 16 {
                             // If the remaining entry is a short node, it replaces

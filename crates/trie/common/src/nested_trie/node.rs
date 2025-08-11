@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use alloy_primitives::{keccak256, B256};
+use alloy_primitives::{keccak256, Bytes, B256};
 use alloy_rlp::{length_of_length, BufMut, Encodable, Header, EMPTY_STRING_CODE};
 use alloy_trie::{
     nodes::{encode_path_leaf, RlpNode},
     BranchNodeCompact, TrieMask,
 };
+use bytes::BytesMut;
 use nybbles::Nibbles;
 
 use crate::StoredNibblesSubKey;
@@ -119,19 +120,17 @@ impl Clone for Node {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 enum NodeType {
-    FullNode = 0,
-    ShortNode = 1,
-    ValueNode = 2,
-    HashNode = 3,
+    BranchNode = 0,
+    ExtensionNode = 1,
+    LeafNode = 2,
 }
 
 impl NodeType {
     const fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Some(Self::FullNode),
-            1 => Some(Self::ShortNode),
-            2 => Some(Self::ValueNode),
-            3 => Some(Self::HashNode),
+            0 => Some(Self::BranchNode),
+            1 => Some(Self::ExtensionNode),
+            2 => Some(Self::LeafNode),
             _ => None,
         }
     }
@@ -144,7 +143,7 @@ impl NodeType {
 /// accurate. Just like `StorageEntry`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "test-utils", derive(arbitrary::Arbitrary))]
 pub struct StorageNodeEntry {
     /// dup-key for storage slot
     pub path: StoredNibblesSubKey,
@@ -176,8 +175,15 @@ impl reth_codecs::Compact for StorageNodeEntry {
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (path, buf) = StoredNibblesSubKey::from_compact(buf, 33);
-        let (node, buf) = StoredNode::from_compact(buf, len - 33);
+        let encoded_len = buf[0];
+        let odd = encoded_len % 2 == 0;
+        let pack_len = (encoded_len / 2) as usize;
+        let mut nibbles = Nibbles::unpack(&buf[1..1 + pack_len]);
+        if odd {
+            nibbles.pop();
+        }
+        let path = StoredNibblesSubKey(nibbles);
+        let (node, buf) = StoredNode::from_compact(&buf[pack_len + 1..], len - pack_len - 1);
         let this = Self { path, node };
         (this, buf)
     }
@@ -186,131 +192,111 @@ impl reth_codecs::Compact for StorageNodeEntry {
 /// The `Node` structure is nested, and using `derive(serde)` for serialization
 /// would result in data that is not compact enough for our needs.
 /// Therefore, we implement a custom serialization method for `Node` and store
-/// the serialized data directly as a `Vec<u8>`.
-/// To ensure forward compatibility with future changes to the `Node` structure,
-/// a `version` field is included to indicate the serialization format version.
-pub type StoredNode = Vec<u8>;
+/// the serialized data directly as a `Bytes`.
+pub type StoredNode = Bytes;
 
 impl From<Node> for StoredNode {
     fn from(node: Node) -> Self {
-        let mut buf = Self::with_capacity(1024);
-        // version
-        buf.push(0u8);
+        let mut buf = BytesMut::with_capacity(256);
         match node {
             Node::FullNode { children, .. } => {
-                buf.push(NodeType::FullNode as u8);
-                for child in children {
+                buf.put_u8(NodeType::BranchNode as u8);
+                let mut mask = TrieMask::default();
+                for (i, child) in children.into_iter().enumerate() {
                     if let Some(child) = child {
-                        buf.push(1u8);
+                        mask.set_bit(i as u8);
                         if let Node::HashNode(rlp) = *child {
-                            buf.push(rlp.len() as u8);
-                            buf.extend_from_slice(&rlp);
+                            buf.extend_from_slice(&rlp[1..]);
                         } else {
-                            unreachable!("Only nested HashNode can be serialized!");
+                            unreachable!("Only nested HashNode can be serialized in FullNode!");
                         }
-                    } else {
-                        buf.push(0u8);
                     }
                 }
+                buf.put_u16_le(mask.get());
             }
             Node::ShortNode { key, value, .. } => {
-                buf.push(NodeType::ShortNode as u8);
-                buf.push(key.len() as u8);
-                buf.extend(key.to_vec());
                 match *value {
                     Node::HashNode(rlp) => {
                         // extension node
-                        buf.push(NodeType::HashNode as u8);
-                        buf.push(rlp.len() as u8);
-                        buf.extend_from_slice(&rlp);
+                        buf.put_u8(NodeType::ExtensionNode as u8);
+                        buf.extend_from_slice(&rlp[1..]);
+                        buf.put_u8((key.len() % 2) as u8);
+                        buf.extend(key.pack());
                     }
                     Node::ValueNode(value) => {
                         // leaf node
-                        buf.push(NodeType::ValueNode as u8);
-                        buf.push(value.len() as u8);
-                        buf.extend_from_slice(&value);
+                        buf.put_u8(NodeType::LeafNode as u8);
+                        let pack = key.pack();
+                        let pack_len = pack.len() as u8;
+                        let encoded_len = pack_len << 1 | (key.len() as u8 % 2);
+                        buf.put_u8(encoded_len);
+                        buf.extend(pack);
+                        buf.extend(value);
                     }
                     _ => {
-                        unreachable!("Only nested HashNode/ValueNode can be serialized!");
+                        unreachable!(
+                            "Only nested HashNode/ValueNode can be serialized in ShortNode!"
+                        );
                     }
                 }
             }
-            Node::ValueNode(value) => {
-                buf.push(NodeType::ValueNode as u8);
-                buf.push(value.len() as u8);
-                buf.extend_from_slice(&value);
-            }
-            Node::HashNode(rlp_node) => {
-                buf.push(NodeType::HashNode as u8);
-                buf.push(rlp_node.len() as u8);
-                buf.extend_from_slice(&rlp_node);
-            }
+            _ => unreachable!(),
         }
-        buf
+        Self::from(buf.freeze())
     }
 }
 
 impl From<StoredNode> for Node {
     fn from(value: StoredNode) -> Self {
-        let mut i = 0;
-        let version = value[i];
-        assert_eq!(version, 0, "Unresolved Node version");
-        i += 1;
-        let node_type = NodeType::from_u8(value[i]);
-        i += 1;
+        let value = value.as_ref();
+        let node_type = NodeType::from_u8(value[0]);
         match node_type {
-            Some(NodeType::FullNode) => {
+            Some(NodeType::BranchNode) => {
                 // FullNode
                 let mut children: [Option<Box<Self>>; 17] = Default::default();
-                for child in &mut children {
-                    let marker = value[i];
-                    i += 1;
-                    if marker == 1 {
-                        let len = value[i] as usize;
-                        i += 1;
-                        let rlp = RlpNode::from_raw(&value[i..i + len]).unwrap();
-                        i += len;
-                        *child = Some(Box::new(Self::HashNode(rlp)));
+                let mask =
+                    TrieMask::new(u16::from_le_bytes(value[value.len() - 2..].try_into().unwrap()));
+                let mut cnt = 0;
+                for i in 0..16 {
+                    if mask.is_bit_set(i) {
+                        let s = 1 + 32 * cnt;
+                        children[i as usize] = Some(Box::new(Self::HashNode(RlpNode::word_rlp(
+                            &B256::from_slice(&value[s..s + 32]),
+                        ))));
+                        cnt += 1;
                     }
                 }
                 Self::FullNode { children, flags: NodeFlag::new(None) }
             }
-            Some(NodeType::ShortNode) => {
+            Some(NodeType::ExtensionNode) => {
                 // ShortNode
-                let key_len = value[i] as usize;
-                i += 1;
-                let key = Nibbles::from_nibbles_unchecked(&value[i..i + key_len]);
-                i += key_len;
-                let next_node_type = NodeType::from_u8(value[i]);
-                i += 1;
-                let next_node = match next_node_type {
-                    Some(NodeType::HashNode) => {
-                        // extension node
-                        let rlp_len = value[i] as usize;
-                        i += 1;
-                        Self::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
-                    }
-                    Some(NodeType::ValueNode) => {
-                        // leaf node
-                        let val_len = value[i] as usize;
-                        i += 1;
-                        Self::ValueNode(value[i..i + val_len].to_vec())
-                    }
-                    _ => unreachable!(),
-                };
-                Self::ShortNode { key, value: Box::new(next_node), flags: NodeFlag::new(None) }
+                let next = Self::HashNode(RlpNode::word_rlp(&B256::from_slice(&value[1..33])));
+                let odd = value[33];
+                let mut shared_nibbles = Nibbles::unpack(&value[34..]);
+                if odd == 1 {
+                    shared_nibbles.pop();
+                }
+                Self::ShortNode {
+                    key: shared_nibbles,
+                    value: Box::new(next),
+                    flags: NodeFlag::new(None),
+                }
             }
-            Some(NodeType::ValueNode) => {
+            Some(NodeType::LeafNode) => {
                 // ValueNode
-                let val_len = value[i] as usize;
-                i += 1;
-                Self::ValueNode(value[i..i + val_len].to_vec())
-            }
-            Some(NodeType::HashNode) => {
-                // HashNode
-                let rlp_len = value[i] as usize;
-                i += 1;
-                Self::HashNode(RlpNode::from_raw(&value[i..i + rlp_len]).unwrap())
+                let encoded_len = value[1];
+                let odd = encoded_len & 1u8;
+                let pack_len = (encoded_len >> 1) as usize;
+                let mut key_end = Nibbles::unpack(&value[2..2 + pack_len]);
+                if odd == 1 {
+                    key_end.pop();
+                }
+                let value = value[2 + pack_len..].to_vec();
+                Self::ShortNode {
+                    key: key_end,
+                    value: Box::new(Self::ValueNode(value)),
+                    flags: NodeFlag::new(None),
+                }
             }
             _ => {
                 unreachable!("Unexpected Node type: {:?}", node_type);
@@ -506,4 +492,28 @@ fn leaf_node_rlp_length(key_end: &Nibbles, value: &[u8]) -> usize {
         encoded_key_len += length_of_length(encoded_key_len);
     }
     encoded_key_len + Encodable::length(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use reth_codecs::Compact;
+
+    use super::*;
+
+    #[test]
+    fn test_storage_entry_compact() {
+        let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C, 0x0D, 0x00]);
+        let subkey = StoredNibblesSubKey(nibbles.clone());
+        let node = Node::ShortNode {
+            key: nibbles,
+            value: Box::new(Node::ValueNode(vec![1u8, 3, 5])),
+            flags: Default::default(),
+        };
+        let storage_entry = StorageNodeEntry::new(subkey, node);
+        let mut buf = BytesMut::with_capacity(256);
+        let encode_len = storage_entry.to_compact(&mut buf);
+        let (decode_entry, buf) = StorageNodeEntry::from_compact(&buf, encode_len);
+        assert_eq!(buf.len(), 0);
+        assert_eq!(storage_entry, decode_entry);
+    }
 }

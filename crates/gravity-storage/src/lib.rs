@@ -6,10 +6,7 @@ pub mod block_view_storage;
 use alloy_primitives::B256;
 use reth_evm::ParallelDatabase;
 use reth_provider::ProviderResult;
-use reth_trie::{
-    updates::{TrieUpdates, TrieUpdatesV2},
-    HashedPostState,
-};
+use reth_trie::{updates::TrieUpdatesV2, HashedPostState};
 
 /// Gravity storage for pipeline execution
 pub trait GravityStorage: Send + Sync + 'static {
@@ -20,11 +17,7 @@ pub trait GravityStorage: Send + Sync + 'static {
     fn get_state_view(&self) -> ProviderResult<Self::StateView>;
 
     /// calculate state root
-    fn state_root(
-        &self,
-        hashed_state: &HashedPostState,
-        compatible: bool,
-    ) -> ProviderResult<(B256, TrieUpdatesV2, Option<TrieUpdates>)>;
+    fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieUpdatesV2)>;
 
     /// Insert the mapping from `block_number` to `block_id`
     fn insert_block_id(&self, block_number: u64, block_id: B256);

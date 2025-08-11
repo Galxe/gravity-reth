@@ -20,11 +20,10 @@ use reth_provider::{PersistBlockCache, ProviderResult};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     nested_trie::{Node, Trie, TrieReader},
-    updates::StorageTrieUpdates,
     HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles,
     StoredNibblesSubKey, EMPTY_ROOT_HASH,
 };
-use reth_trie_common::updates::{TrieUpdates, TrieUpdatesV2};
+use reth_trie_common::updates::TrieUpdatesV2;
 
 /// Storage trie node reader
 #[allow(missing_debug_implementations)]
@@ -176,10 +175,8 @@ where
     pub fn calculate(
         &self,
         hashed_state: &HashedPostState,
-        compatible: bool,
-    ) -> ProviderResult<(B256, TrieUpdatesV2, Option<TrieUpdates>)> {
+    ) -> ProviderResult<(B256, TrieUpdatesV2)> {
         let trie_update = Mutex::new(TrieUpdatesV2::default());
-        let compatible_trie_update = compatible.then_some(Mutex::new(TrieUpdates::default()));
         let updated_account_nodes: [Mutex<Vec<(Nibbles, Option<Node>)>>; 16] = Default::default();
         let mut partitioned_accounts: [Vec<(&B256, &Option<Account>)>; 16] = Default::default();
         let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
@@ -208,13 +205,6 @@ where
                                 .unwrap()
                                 .storage_tries
                                 .insert(hashed_address, StorageTrieUpdatesV2::deleted());
-                            if let Some(compatible) = compatible_trie_update.as_ref() {
-                                compatible
-                                    .lock()
-                                    .unwrap()
-                                    .storage_tries
-                                    .insert(hashed_address, StorageTrieUpdates::deleted());
-                            }
                         };
                         if let Some(account) = account {
                             let storage = hashed_storages.get(&hashed_address).cloned();
@@ -246,7 +236,7 @@ where
                             // only make the large storage trie parallel
                             let parallel =
                                 storage.as_ref().map(|s| s.storage.len() > 256).unwrap_or(false);
-                            let mut storage_trie = Trie::new(trie_reader, parallel, compatible)?;
+                            let mut storage_trie = Trie::new(trie_reader, parallel)?;
                             if let Some(storage) = storage {
                                 for (hashed_slot, value) in storage.storage {
                                     let nibbles = Nibbles::unpack(hashed_slot);
@@ -265,7 +255,7 @@ where
                             updated_account_nodes
                                 .push((path, Some(Node::ValueNode(alloy_rlp::encode(account)))));
 
-                            let (trie_output, compatible_output) = storage_trie.take_output();
+                            let trie_output = storage_trie.take_output();
                             if !trie_output.is_empty() {
                                 assert!(trie_update
                                     .lock()
@@ -280,24 +270,6 @@ where
                                         }
                                     )
                                     .is_none());
-                            }
-                            if let Some(compatible) = compatible_trie_update.as_ref() {
-                                let compatible_output = compatible_output.unwrap();
-                                if !compatible_output.is_empty() {
-                                    assert!(compatible
-                                        .lock()
-                                        .unwrap()
-                                        .storage_tries
-                                        .insert(
-                                            hashed_address,
-                                            StorageTrieUpdates {
-                                                is_deleted: false,
-                                                storage_nodes: compatible_output.update_nodes,
-                                                removed_nodes: compatible_output.removed_nodes,
-                                            }
-                                        )
-                                        .is_none());
-                                }
                             }
                         } else {
                             updated_account_nodes.push((path, None));
@@ -315,27 +287,20 @@ where
 
         let updated_account_nodes = updated_account_nodes.map(|u| u.into_inner().unwrap());
         let mut trie_update = trie_update.into_inner().unwrap();
-        let mut compatible_trie_update = compatible_trie_update.map(|c| c.into_inner().unwrap());
         let create_reader = || {
             let cursor = (self.provider)()?.cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
         };
         let cursor = (self.provider)()?.cursor_read::<tables::AccountsTrieV2>()?;
-        let mut account_trie =
-            Trie::new(AccountTrieReader(cursor, self.cache.clone()), true, compatible)?;
+        let mut account_trie = Trie::new(AccountTrieReader(cursor, self.cache.clone()), true)?;
         account_trie.parallel_update(updated_account_nodes, create_reader)?;
 
         let root_hash = account_trie.hash();
-        let (output, compatible_output) = account_trie.take_output();
+        let output = account_trie.take_output();
         trie_update.account_nodes = output.update_nodes;
         trie_update.removed_nodes = output.removed_nodes;
-        if let Some(compatible) = &mut compatible_trie_update {
-            let compatible_output = compatible_output.unwrap();
-            compatible.account_nodes = compatible_output.update_nodes;
-            compatible.removed_nodes = compatible_output.removed_nodes;
-        }
 
-        Ok((root_hash, trie_update, compatible_trie_update))
+        Ok((root_hash, trie_update))
     }
 }
 
@@ -347,7 +312,7 @@ mod tests {
     };
 
     use super::*;
-    use alloy_primitives::{keccak256, map::HashMap, Address, U256};
+    use alloy_primitives::{keccak256, map::HashMap, Address, Bytes, U256};
     use alloy_rlp::encode_fixed_size;
     use rand::Rng;
     use reth_primitives_traits::Account;
@@ -361,8 +326,8 @@ mod tests {
 
     #[derive(Default)]
     struct InmemoryTrieDB {
-        account_trie: Arc<Mutex<HashMap<Nibbles, Vec<u8>>>>,
-        storage_trie: Arc<Mutex<HashMap<B256, HashMap<Nibbles, Vec<u8>>>>>,
+        account_trie: Arc<Mutex<HashMap<Nibbles, Bytes>>>,
+        storage_trie: Arc<Mutex<HashMap<B256, HashMap<Nibbles, Bytes>>>>,
     }
     struct InmemoryAccountTrieReader(Arc<InmemoryTrieDB>);
     struct InmemoryStorageTrieReader(Arc<InmemoryTrieDB>, B256);
@@ -408,17 +373,24 @@ mod tests {
                         num_update += destruct_account.len();
                     }
                 } else {
+                    let mut remove_storage = false;
                     if let Some(storage) = storage_trie.get_mut(hashed_address) {
                         for path in &storage_trie_update.removed_nodes {
                             if storage.remove(path).is_some() {
                                 num_update += 1;
                             }
                         }
+                        remove_storage = storage.is_empty();
                     }
-                    let storage = storage_trie.entry(*hashed_address).or_default();
-                    for (path, node) in storage_trie_update.storage_nodes.clone() {
-                        storage.insert(path, node.into());
-                        num_update += 1;
+                    if remove_storage {
+                        storage_trie.remove(hashed_address);
+                    }
+                    if !storage_trie_update.storage_nodes.is_empty() {
+                        let storage = storage_trie.entry(*hashed_address).or_default();
+                        for (path, node) in storage_trie_update.storage_nodes.clone() {
+                            storage.insert(path, node.into());
+                            num_update += 1;
+                        }
                     }
                 }
             }
@@ -434,7 +406,6 @@ mod tests {
     ) -> (B256, TrieUpdatesV2) {
         let (tx, rx) = mpsc::channel();
         let num_task = state.len();
-        let is_compatible = false;
         for (address, (account, storage)) in state {
             let db = db.clone();
             let tx = tx.clone();
@@ -442,7 +413,7 @@ mod tests {
                 let hashed_address = keccak256(address);
                 let create_reader = || Ok(InmemoryStorageTrieReader(db.clone(), hashed_address));
                 let storage_reader = InmemoryStorageTrieReader(db.clone(), hashed_address);
-                let mut storage_trie = Trie::new(storage_reader, true, is_compatible).unwrap();
+                let mut storage_trie = Trie::new(storage_reader, true).unwrap();
                 let mut batches: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
                 for (hashed_slot, value) in
                     storage.into_iter().map(|(k, v)| (keccak256(k), encode_fixed_size(&v)))
@@ -469,16 +440,12 @@ mod tests {
         let mut batches: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
         let create_reader = || Ok(InmemoryAccountTrieReader(db.clone()));
         for _ in 0..num_task {
-            let (hashed_address, rlp_account, (trie_output, _)) =
+            let (hashed_address, rlp_account, trie_output) =
                 rx.recv().expect("Failed to receive storage trie");
-            let storage_trie_update = if is_insert {
-                StorageTrieUpdatesV2 {
-                    is_deleted: false,
-                    storage_nodes: trie_output.update_nodes,
-                    removed_nodes: trie_output.removed_nodes,
-                }
-            } else {
-                StorageTrieUpdatesV2::deleted()
+            let storage_trie_update = StorageTrieUpdatesV2 {
+                is_deleted: false,
+                storage_nodes: trie_output.update_nodes,
+                removed_nodes: trie_output.removed_nodes,
             };
             let nibbles = Nibbles::unpack(hashed_address);
             let index = nibbles.get_unchecked(0) as usize;
@@ -489,13 +456,13 @@ mod tests {
                 .is_none());
         }
         let account_reader = InmemoryAccountTrieReader(db.clone());
-        let mut account_trie = Trie::new(account_reader, true, is_compatible).unwrap();
+        let mut account_trie = Trie::new(account_reader, true).unwrap();
 
         // parallel update
         account_trie.parallel_update(batches, create_reader).unwrap();
 
         let root_hash = account_trie.hash();
-        let (output, _) = account_trie.take_output();
+        let output = account_trie.take_output();
         trie_updates.account_nodes = output.update_nodes;
         trie_updates.removed_nodes = output.removed_nodes;
         (root_hash, trie_updates)
@@ -597,7 +564,7 @@ mod tests {
         }
 
         let (parallel_root_hash, ..) =
-            NestedStateRoot::new(provider, None).calculate(&hashed_state, true).unwrap();
+            NestedStateRoot::new(provider, None).calculate(&hashed_state).unwrap();
         assert_eq!(parallel_root_hash, test_utils::state_root(state))
     }
 }

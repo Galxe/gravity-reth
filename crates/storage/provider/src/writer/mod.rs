@@ -1,7 +1,7 @@
 use crate::{
     providers::{StaticFileProvider, StaticFileWriter as SfWriter},
     BlockExecutionWriter, BlockWriter, HistoryWriter, StateWriter, StaticFileProviderFactory,
-    StorageLocation, TrieWriter, TrieWriterV2, PERSIST_BLOCK_CACHE,
+    StorageLocation, TrieWriter, TrieWriterV2,
 };
 use alloy_consensus::BlockHeader;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
@@ -167,7 +167,6 @@ where
             triev2,
         } in blocks
         {
-            let block_number = recovered_block.number();
             let block_hash = recovered_block.hash();
 
             #[cfg(not(feature = "pipe_test"))]
@@ -188,7 +187,6 @@ where
                 trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
             )?;
             let _ = self.database().write_trie_updatesv2(triev2.as_ref())?;
-            PERSIST_BLOCK_CACHE.persist_tip(block_number);
         }
 
         // update history indices

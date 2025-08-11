@@ -8,6 +8,7 @@ use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader,
     ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory,
+    PERSIST_BLOCK_CACHE,
 };
 use reth_prune::{PrunerError, PrunerOutput, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender};
@@ -151,12 +152,13 @@ where
         });
 
         let num_blocks = blocks.len();
-        if last_block_hash_num.is_some() {
+        if let Some(last_block_hn) = &last_block_hash_num {
             let provider_rw = self.provider.database_provider_rw()?;
             let static_file_provider = self.provider.static_file_provider();
 
             UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(blocks)?;
             UnifiedStorageWriter::commit(provider_rw)?;
+            PERSIST_BLOCK_CACHE.persist_tip(last_block_hn.number);
         }
         let elapsed = start_time.elapsed();
         self.metrics.save_blocks_duration_seconds.record(elapsed);

@@ -329,7 +329,7 @@ where
     }
     let hashed_state = HashedPostState { accounts, storages };
     let nested_hash = NestedStateRoot::new(provider, None);
-    let (root_hash, trie_updates, _) = nested_hash.calculate(&hashed_state, false)?;
+    let (root_hash, trie_updates) = nested_hash.calculate(&hashed_state)?;
 
     writer.write_trie_updatesv2(&trie_updates)?;
     info!(target: "reth::cli",
