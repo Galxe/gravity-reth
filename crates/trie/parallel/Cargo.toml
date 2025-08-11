@@ -35,6 +35,8 @@ thiserror.workspace = true
 derive_more.workspace = true
 rayon.workspace = true
 itertools.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 # `metrics` feature
