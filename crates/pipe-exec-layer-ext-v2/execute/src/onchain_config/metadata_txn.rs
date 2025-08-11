@@ -162,7 +162,6 @@ pub fn transact_metadata_contract_call(
     let txn = new_system_call_txn(BLOCK_ADDR, input.clone());
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let mut result = evm.transact_raw(tx_env).unwrap();
-    assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
     info!("transact_metadata_contract_call result logs len: {:?}", result.result.logs().len());
     for log in result.result.logs() {
         match GlobalTimeUpdated::decode_log(log) {
@@ -182,6 +181,7 @@ pub fn transact_metadata_contract_call(
             }
         };
     }
+    assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
     result.state.remove(&SYSTEM_CALLER);
     result.state.remove(&evm.block().beneficiary);
     (MetadataTxnResult { result: result.result, txn }, result.state)
