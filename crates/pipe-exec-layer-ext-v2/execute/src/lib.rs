@@ -539,6 +539,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             id=?block_id,
             parent_id=?parent_id,
             number=?block_number,
+            num_txs=?block.transaction_count(),
             "ready to execute block"
         );
 
@@ -719,8 +720,27 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
     base_fee_per_gas: u64,
     gas_limit: u64,
 ) -> HashSet<usize> {
+    let mut gas_limit_exceeded_tx_idx = txs.len();
+    let mut tx_gas_limit_sum = 0;
+    for (idx, tx) in txs.iter().enumerate() {
+        let tx_gas_limit = tx.gas_limit();
+        if tx_gas_limit_sum + tx_gas_limit > gas_limit {
+            warn!(target: "filter_invalid_txs",
+                tx_hash=?txs[idx].hash(),
+                sender=?senders[idx],
+                block_gas_limit=?gas_limit,
+                "gas limit exceeded, truncated to {}",
+                idx,
+            );
+            gas_limit_exceeded_tx_idx = idx;
+            break;
+        } else {
+            tx_gas_limit_sum += tx_gas_limit;
+        }
+    }
+
     let mut sender_idx: HashMap<&Address, Vec<usize>> = HashMap::default();
-    for (i, sender) in senders.iter().enumerate() {
+    for (i, sender) in senders[..gas_limit_exceeded_tx_idx].iter().enumerate() {
         sender_idx.entry(sender).or_default().push(i);
     }
 
@@ -738,17 +758,19 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
         let gas_spent = U256::from(tx.effective_gas_price(Some(base_fee_per_gas)))
             .saturating_mul(U256::from(tx.gas_limit()))
             .saturating_add(tx.value());
-        if account.balance < gas_spent {
+        let total_spent = gas_spent + tx.value();
+        if account.balance < total_spent {
             warn!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 balance=?account.balance,
                 gas_spent=?gas_spent,
+                value=?tx.value(),
                 "insufficient balance"
             );
             return false;
         }
-        account.balance -= gas_spent;
+        account.balance -= total_spent;
         account.nonce += 1;
         true
     };
@@ -771,22 +793,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
             }
         })
         .collect::<HashSet<_>>();
-
-    let mut accumulated_gas_limit = 0;
-    let mut gas_limit_exceeded_tx_idxs = HashSet::new();
-    for (idx, tx) in txs.iter().enumerate() {
-        if invalid_tx_idxs.contains(&idx) {
-            continue;
-        }
-
-        let next_gas_limit = accumulated_gas_limit + tx.gas_limit();
-        if next_gas_limit > gas_limit {
-            gas_limit_exceeded_tx_idxs.insert(idx);
-        } else {
-            accumulated_gas_limit = next_gas_limit;
-        }
-    }
-    invalid_tx_idxs.extend(gas_limit_exceeded_tx_idxs);
+    invalid_tx_idxs.extend(gas_limit_exceeded_tx_idx..txs.len());
     invalid_tx_idxs
 }
 
@@ -1149,8 +1156,8 @@ mod tests {
         let mut db = MockDatabase::new();
         let sender1 = Address::random();
         let sender2 = Address::random();
+        let sender3 = Address::random();
 
-        // the first account: valid
         let account1 = AccountInfo {
             balance: U256::from(1_000_000_000u64), // 1 Gwei
             nonce: 0,
@@ -1159,7 +1166,6 @@ mod tests {
         };
         db.insert_account(sender1, account1);
 
-        // the second account: nonce does not match
         let account2 = AccountInfo {
             balance: U256::from(1_000_000_000u64), // 1 Gwei
             nonce: 5,
@@ -1168,21 +1174,33 @@ mod tests {
         };
         db.insert_account(sender2, account2);
 
+        let account3 = AccountInfo {
+            balance: U256::from(1_000_000_000u64), // 1 Gwei
+            nonce: 0,
+            code_hash: B256::default(),
+            code: None,
+        };
+        db.insert_account(sender3, account3);
+
         // create mixed scenarios transactions
-        let tx1 = create_test_transaction(0, 21_000, 25); // valid
-        let tx2 = create_test_transaction(5, 30_000_000, 25); // gas limit exceeds
-        let tx3 = create_test_transaction(0, 21_000, 25); // nonce does not match
-        let tx4 = create_test_transaction(1, 21_000, 25_000_000); // insufficient balance
-        let tx5 = create_test_transaction(1, 21_000, 25); // valid
-        let txs = vec![tx1, tx2, tx3, tx4, tx5];
-        let senders = vec![sender1, sender2, sender2, sender1, sender1];
+        let tx1 = create_test_transaction(0, 21_000, 25); // sender1: valid
+        let tx2 = create_test_transaction(0, 21_000, 25); // sender1: nonce does not match
+        let tx3 = create_test_transaction(1, 21_000, 25_000_000); // sender1: insufficient balance
+        let tx4 = create_test_transaction(5, 21_000, 25); // sender2: valid
+        let tx5 = create_test_transaction(2, 21_000, 25); // sender1: nonce does not match
+        let tx6 = create_test_transaction(6, 30_000_000, 25); // sender2: gas limit exceeds
+        let tx7 = create_test_transaction(0, 21000, 25); // sender3: truncated
+        let txs = vec![tx1, tx2, tx3, tx4, tx5, tx6, tx7];
+        let senders = vec![sender1, sender1, sender1, sender2, sender2, sender2, sender3];
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64;
 
         let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit);
-        assert_eq!(invalid_idxs.len(), 3, "invalid_idxs: {invalid_idxs:?}");
+        assert_eq!(invalid_idxs.len(), 5, "invalid_idxs: {invalid_idxs:?}");
         assert!(invalid_idxs.contains(&1));
         assert!(invalid_idxs.contains(&2));
-        assert!(invalid_idxs.contains(&3));
+        assert!(invalid_idxs.contains(&4));
+        assert!(invalid_idxs.contains(&5));
+        assert!(invalid_idxs.contains(&6));
     }
 }
