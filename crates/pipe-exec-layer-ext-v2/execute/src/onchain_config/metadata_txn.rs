@@ -7,6 +7,7 @@ use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMME
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::{Address, Signature};
 use alloy_primitives::{Bytes, TxKind, U256};
+use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
@@ -21,6 +22,7 @@ use revm::{
     state::EvmState,
 };
 use std::fmt::Debug;
+use tracing::info;
 
 /// Result of a metadata transaction execution
 pub struct MetadataTxnResult {
@@ -28,10 +30,20 @@ pub struct MetadataTxnResult {
     pub txn: TransactionSigned,
 }
 
+sol! {
+    event GlobalTimeUpdated(address indexed proposer, uint64 oldTimestamp, uint64 newTimestamp, bool isNilBlock);
+}
+
 impl MetadataTxnResult {
     /// Check if the transaction emitted a NewEpoch event
     pub fn emit_new_epoch(&self) -> Option<(u64, Bytes)> {
         for log in self.result.logs() {
+            match GlobalTimeUpdated::decode_log(log) {
+                Ok(event) => {
+                    info!("GlobalTimeUpdated proposer: {:?}, oldTimestamp: {:?}, newTimestamp: {:?}", event.proposer, event.oldTimestamp, event.newTimestamp);
+                }
+                Err(_) => {}
+            };
             match AllValidatorsUpdated::decode_log(log) {
                 Ok(event) => {
                     let solidity_validator_set = &event.validatorSet;
@@ -39,8 +51,8 @@ impl MetadataTxnResult {
                     let validator_bytes = convert_validator_set_to_bcs(solidity_validator_set);
                     return Some((event.newEpoch.to::<u64>(), validator_bytes));
                 }
-                Err(_) => continue,
-            }
+                Err(_) => {}
+            };
         }
         None
     }
