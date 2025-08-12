@@ -2,9 +2,9 @@
 
 use super::{
     types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated},
-    BLOCK_MODULE_ADDRESS, SYSTEM_CALLER,
+    SYSTEM_CALLER,
 };
-use crate::{ExecuteOrderedBlockResult, OrderedBlock};
+use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
@@ -144,14 +144,15 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
 pub fn transact_metadata_contract_call(
     evm: &mut impl Evm<Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     timestamp_us: u64,
+    proposer: Option<Address>,
 ) -> (MetadataTxnResult, EvmState) {
     let call = blockPrologueCall {
-        proposer: SYSTEM_CALLER,
+        proposer: proposer.unwrap_or(SYSTEM_CALLER),
         failedProposerIndices: vec![],
         timestampMicros: U256::from(timestamp_us),
     };
     let input: Bytes = call.abi_encode().into();
-    let txn = new_system_call_txn(BLOCK_MODULE_ADDRESS, input);
+    let txn = new_system_call_txn(BLOCK_ADDR, input);
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let mut result = evm.transact_raw(tx_env).unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
