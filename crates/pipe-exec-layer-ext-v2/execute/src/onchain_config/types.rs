@@ -4,6 +4,7 @@
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_macro::sol;
 use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
+use tracing::info;
 
 sol! {
     enum ValidatorStatus {
@@ -114,6 +115,7 @@ pub fn convert_validator_set_to_bcs(solidity_validator_set: &ValidatorSet) -> By
         total_voting_power: solidity_validator_set.totalVotingPower.to::<u128>(),
         total_joining_power: solidity_validator_set.totalJoiningPower.to::<u128>(),
     };
+    info!("convert_validator_set_to_bcs gravity_validator_set: {:?}", gravity_validator_set);
 
     // Serialize to BCS format (gravity-aptos standard)
     bcs::to_bytes(&gravity_validator_set).expect("Failed to serialize validator set").into()
