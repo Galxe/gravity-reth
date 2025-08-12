@@ -14,10 +14,10 @@ static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 pub trait ConfigFetcher<EthApi> {
     /// Fetch configuration data for a specific block
     fn fetch(&self, block_number: u64) -> Bytes;
-    
+
     /// Get the contract address for this fetcher
     fn contract_address() -> Address;
-    
+
     /// Get the caller address for this fetcher
     fn caller_address() -> Address;
 }
@@ -111,8 +111,7 @@ where
         block_number: u64,
     ) -> OnChainConfigResType {
         use crate::onchain_config::{
-            consensus_config::ConsensusConfigFetcher,
-            epoch::EpochFetcher,
+            consensus_config::ConsensusConfigFetcher, epoch::EpochFetcher,
             validator_set::ValidatorSetFetcher,
         };
 
@@ -120,17 +119,17 @@ where
             OnChainConfig::ConsensusConfig => {
                 let fetcher = ConsensusConfigFetcher::new(self);
                 fetcher.fetch(block_number).0.into()
-            },
+            }
             OnChainConfig::Epoch => {
                 let fetcher = EpochFetcher::new(self);
                 let epoch_bytes = fetcher.fetch(block_number);
                 // Convert bytes back to u64 for the epoch
                 u64::from_le_bytes(epoch_bytes.as_ref().try_into().unwrap_or([0; 8])).into()
-            },
+            }
             OnChainConfig::ValidatorSet => {
                 let fetcher = ValidatorSetFetcher::new(self);
                 fetcher.fetch(block_number).0.into()
-            },
+            }
             _ => todo!("Implement fetching for other config types"),
         }
     }
@@ -153,19 +152,30 @@ pub mod test_utils {
 
     impl MockEthCall {
         pub fn new() -> Self {
-            Self {
-                responses: Arc::new(Mutex::new(HashMap::new())),
-            }
+            Self { responses: Arc::new(Mutex::new(HashMap::new())) }
         }
 
         /// Set a mock response for a specific call
-        pub fn set_response(&self, from: Address, to: Address, input: Bytes, block_number: u64, response: Bytes) {
+        pub fn set_response(
+            &self,
+            from: Address,
+            to: Address,
+            input: Bytes,
+            block_number: u64,
+            response: Bytes,
+        ) {
             self.responses.lock().unwrap().insert((from, to, input, block_number), response);
         }
 
         /// Helper to set response for a Solidity function call
-        pub fn set_sol_response<T, R>(&self, from: Address, to: Address, call: T, block_number: u64, response: R)
-        where
+        pub fn set_sol_response<T, R>(
+            &self,
+            from: Address,
+            to: Address,
+            call: T,
+            block_number: u64,
+            response: R,
+        ) where
             T: SolCall,
             R: SolValue,
         {
@@ -211,11 +221,7 @@ pub mod test_utils {
 
     impl<T> ConfigFetcherTestFramework<T> {
         pub fn new(fetcher: T) -> Self {
-            Self {
-                mock_eth_call: MockEthCall::new(),
-                fetcher,
-                block_number: 100,
-            }
+            Self { mock_eth_call: MockEthCall::new(), fetcher, block_number: 100 }
         }
 
         /// Set the block number for tests
@@ -231,7 +237,8 @@ pub mod test_utils {
         ($test_name:ident, $fetcher_type:ty, $setup:expr, $validation:expr) => {
             #[tokio::test]
             async fn $test_name() {
-                let framework = ConfigFetcherTestFramework::new(<$fetcher_type>::new(&MockEthCall::new()));
+                let framework =
+                    ConfigFetcherTestFramework::new(<$fetcher_type>::new(&MockEthCall::new()));
                 $setup(&framework);
                 let result = framework.fetcher.fetch(framework.block_number);
                 $validation(result);
@@ -251,7 +258,7 @@ mod tests {
         let test_address = Address::from([1u8; 20]);
         let test_input = Bytes::from(vec![1, 2, 3]);
         let test_response = Bytes::from(vec![4, 5, 6]);
-        
+
         mock.set_response(
             Address::ZERO,
             test_address,
@@ -263,18 +270,21 @@ mod tests {
         // Create runtime for async test
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let result = mock.call(
-                TransactionRequest {
-                    from: Some(Address::ZERO),
-                    to: Some(TxKind::Call(test_address)),
-                    input: TransactionInput::new(test_input),
-                    ..Default::default()
-                },
-                Some(BlockId::Number(100.into())),
-                EvmOverrides::new(None, None),
-            ).await.unwrap();
-            
+            let result = mock
+                .call(
+                    TransactionRequest {
+                        from: Some(Address::ZERO),
+                        to: Some(TxKind::Call(test_address)),
+                        input: TransactionInput::new(test_input),
+                        ..Default::default()
+                    },
+                    Some(BlockId::Number(100.into())),
+                    EvmOverrides::new(None, None),
+                )
+                .await
+                .unwrap();
+
             assert_eq!(result, test_response);
         });
     }
-} 
+}

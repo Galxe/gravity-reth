@@ -1,5 +1,5 @@
 use super::base::{ConfigFetcher, OnchainConfigFetcher};
-use super::{GRAVITY_FRAMEWORK_ADDRESS, CONSENSUS_CONFIG_CONTRACT_ADDRESS};
+use super::{CONSENSUS_CONFIG_CONTRACT_ADDRESS, GRAVITY_FRAMEWORK_ADDRESS};
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
@@ -30,14 +30,14 @@ where
     fn fetch(&self, block_number: u64) -> Bytes {
         let call = getCurrentConfigCall {};
         let input: Bytes = call.abi_encode().into();
-        
+
         let result = self.base_fetcher.eth_call(
             Self::caller_address(),
             Self::contract_address(),
             input,
             block_number,
         );
-        
+
         getCurrentConfigCall::abi_decode_returns(&result)
             .expect("Failed to decode getCurrentConfig return value")
     }

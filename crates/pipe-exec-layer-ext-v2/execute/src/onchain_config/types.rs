@@ -78,9 +78,8 @@ pub fn convert_validator_info(
     };
 
     // Convert Address to AccountAddress (20 bytes -> AccountAddress)
-    let account_address = gravity_api_types::u256_define::AccountAddress::from_bytes(
-        &solidity_info.aptosAddress,
-    );
+    let account_address =
+        gravity_api_types::u256_define::AccountAddress::from_bytes(&solidity_info.aptosAddress);
 
     GravityValidatorInfo::new(
         account_address,
