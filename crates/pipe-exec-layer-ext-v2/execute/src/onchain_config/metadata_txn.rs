@@ -22,7 +22,6 @@ use revm::{
     state::EvmState,
 };
 use std::fmt::Debug;
-use tracing::info;
 
 /// Result of a metadata transaction execution
 pub struct MetadataTxnResult {
@@ -30,21 +29,10 @@ pub struct MetadataTxnResult {
     pub txn: TransactionSigned,
 }
 
-sol! {
-    event GlobalTimeUpdated(address indexed proposer, uint64 oldTimestamp, uint64 newTimestamp, bool isNilBlock);
-    event Log(string message);
-}
-
 impl MetadataTxnResult {
     /// Check if the transaction emitted a NewEpoch event
     pub fn emit_new_epoch(&self) -> Option<(u64, Bytes)> {
         for log in self.result.logs() {
-            match GlobalTimeUpdated::decode_log(log) {
-                Ok(event) => {
-                    info!("GlobalTimeUpdated proposer: {:?}, oldTimestamp: {:?}, newTimestamp: {:?}", event.proposer, event.oldTimestamp, event.newTimestamp);
-                }
-                Err(_) => {}
-            };
             match AllValidatorsUpdated::decode_log(log) {
                 Ok(event) => {
                     let solidity_validator_set = &event.validatorSet;
@@ -52,8 +40,8 @@ impl MetadataTxnResult {
                     let validator_bytes = convert_validator_set_to_bcs(solidity_validator_set);
                     return Some((event.newEpoch.to::<u64>(), validator_bytes));
                 }
-                Err(_) => {}
-            };
+                Err(_) => continue,
+            }
         }
         None
     }
@@ -152,7 +140,6 @@ pub fn transact_metadata_contract_call(
     timestamp_us: u64,
     proposer: Option<Address>,
 ) -> (MetadataTxnResult, EvmState) {
-    info!("transact_metadata_contract_call timestamp_us: {:?}, proposer: {:?}", timestamp_us, proposer);
     let call = blockPrologueCall {
         proposer: proposer.unwrap_or(SYSTEM_CALLER),
         failedProposerIndices: vec![],
@@ -162,25 +149,6 @@ pub fn transact_metadata_contract_call(
     let txn = new_system_call_txn(BLOCK_ADDR, input.clone());
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let mut result = evm.transact_raw(tx_env).unwrap();
-    info!("transact_metadata_contract_call result logs len: {:?}", result.result.logs().len());
-    for log in result.result.logs() {
-        match GlobalTimeUpdated::decode_log(log) {
-            Ok(event) => {
-                info!("GlobalTimeUpdated proposer: {:?}, oldTimestamp: {:?}, newTimestamp: {:?}", event.proposer, event.oldTimestamp, event.newTimestamp);
-            }
-            Err(_) => {
-                info!("GlobalTimeUpdated decode log error: {:?}", log);
-            }
-        };
-        match Log::decode_log(log) {
-            Ok(event) => {
-                info!("Log message: {:?}", event.message);
-            }
-            Err(_) => {
-                info!("Log decode log error: {:?}", log);
-            }
-        };
-    }
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
     result.state.remove(&SYSTEM_CALLER);
     result.state.remove(&evm.block().beneficiary);
