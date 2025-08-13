@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObserveState {
@@ -109,7 +109,7 @@ impl GravityRelayer {
         Self { eth_client, task_state }
     }
 
-    pub async fn poll_once(&self) -> Result<()> {
+    pub async fn poll_once(&self) -> Result<ObserveState> {
         let task_uri = &self.task_state.task.original_uri;
         match &self.task_state.task.task {
             GravityTask::MonitorEvent(filter) => self.poll_event_task(task_uri, filter).await,
@@ -123,8 +123,9 @@ impl GravityRelayer {
         }
     }
 
-    async fn poll_event_task(&self, task_uri: &str, filter: &Filter) -> Result<()> {
+    async fn poll_event_task(&self, task_uri: &str, filter: &Filter) -> Result<ObserveState> {
         let cursor = self.task_state.get_cursor().await;
+        let previous_value = self.task_state.last_observed().await;
 
         let mut scoped_filter = filter.clone();
         scoped_filter = scoped_filter.from_block(cursor);
@@ -144,43 +145,45 @@ impl GravityRelayer {
             let next_cursor = scoped_filter.get_to_block().unwrap();
             self.task_state.update_cursor(next_cursor).await;
             debug!("轮询事件任务 {} 完成，cursor: {}", task_uri, next_cursor);
-            return Ok(());
+            return Ok((*previous_value).clone());
         }
 
         let observed_value = ObservedValue::Events { logs: new_logs.clone() };
 
         let should_update = self.task_state.should_update(&observed_value).await;
 
-        if should_update {
+        let return_value = if should_update {
             let new_cursor =
                 new_logs.iter().max_by_key(|log| log.block_number).unwrap().block_number;
             self.task_state.update_cursor(new_cursor).await;
+            let new_value = ObserveState {
+                block_number: new_cursor,
+                observed_value: observed_value.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                version: previous_value.version + 1,
+            };
 
-            let previous_value = self.task_state.last_observed().await;
-            self.task_state
-                .update_last_observed(ObserveState {
-                    block_number: new_cursor,
-                    observed_value: observed_value.clone(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                    version: previous_value.version + 1,
-                })
-                .await;
-        }
+            self.task_state.update_last_observed(new_value.clone()).await;
+            new_value
+        } else {
+            (*previous_value).clone()
+        };
 
         debug!("轮询事件任务 {} 完成，cursor: {}", task_uri, cursor);
-        Ok(())
+        Ok(return_value)
     }
 
     /// 轮询区块头任务  
-    async fn poll_block_head_task(&self, task_uri: &str) -> Result<()> {
+    async fn poll_block_head_task(&self, task_uri: &str) -> Result<ObserveState> {
         let latest_block = self.eth_client.get_finalized_block_number().await?;
 
         let cursor = self.task_state.get_cursor().await;
+        let previous_value = self.task_state.last_observed().await;
 
-        if latest_block > cursor {
+        let return_value = if latest_block > cursor {
             let block_hash = match self.eth_client.get_block(latest_block).await? {
                 Some(block) => block.header.hash,
                 None => B256::ZERO,
@@ -192,24 +195,27 @@ impl GravityRelayer {
 
             if should_update {
                 self.task_state.update_cursor(latest_block).await;
-                let previous_value = self.task_state.last_observed().await;
+                let new_value = ObserveState {
+                    block_number: latest_block,
+                    observed_value: observed_value.clone(),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                    version: previous_value.version + 1,
+                };
 
-                self.task_state
-                    .update_last_observed(ObserveState {
-                        block_number: latest_block,
-                        observed_value: observed_value.clone(),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                        version: previous_value.version + 1,
-                    })
-                    .await;
+                self.task_state.update_last_observed(new_value.clone()).await;
+                new_value
+            } else {
+                (*previous_value).clone()
             }
-        }
+        } else {
+            (*previous_value).clone()
+        };
 
         debug!("轮询区块头任务 {} 完成，cursor: {}", task_uri, cursor);
-        Ok(())
+        Ok(return_value)
     }
 
     /// 轮询存储槽任务
@@ -218,7 +224,7 @@ impl GravityRelayer {
         task_uri: &str,
         account: Address,
         slot: B256,
-    ) -> Result<()> {
+    ) -> Result<ObserveState> {
         let current_value = self.eth_client.get_storage_at(account, slot).await?;
 
         let cursor = self.task_state.get_cursor().await;
@@ -229,24 +235,26 @@ impl GravityRelayer {
 
         let should_update = self.task_state.should_update(&observed_value).await;
 
-        if should_update {
-            self.task_state.update_cursor(current_block).await;
-            let previous_value = self.task_state.last_observed().await;
-            self.task_state
-                .update_last_observed(ObserveState {
-                    block_number: current_block,
-                    observed_value: observed_value.clone(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                    version: previous_value.version + 1,
-                })
-                .await;
-        }
+        let previous_value = self.task_state.last_observed().await;
 
+        let return_value = if should_update {
+            self.task_state.update_cursor(current_block).await;
+            let new_value = ObserveState {
+                block_number: current_block,
+                observed_value: observed_value.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                version: previous_value.version + 1,
+            };
+            self.task_state.update_last_observed(new_value.clone()).await;
+            new_value
+        } else {
+            (*previous_value).clone()
+        };
         debug!("轮询存储槽任务 {} 完成，cursor: {}", task_uri, cursor);
-        Ok(())
+        Ok(return_value)
     }
 
     /// 轮询账户活动任务
@@ -255,7 +263,7 @@ impl GravityRelayer {
         task_uri: &str,
         address: Address,
         activity_type: &AccountActivityType,
-    ) -> Result<()> {
+    ) -> Result<ObserveState> {
         match activity_type {
             AccountActivityType::Erc20Transfer => {
                 // 创建ERC20 Transfer事件的filter
@@ -274,7 +282,12 @@ impl GravityRelayer {
             AccountActivityType::AllTransactions => {
                 // 这需要遍历区块中的所有交易，性能较低
                 warn!("AllTransactions monitoring is not yet implemented for address: {}", address);
-                Ok(())
+                Ok(ObserveState {
+                    block_number: 0,
+                    observed_value: ObservedValue::None,
+                    timestamp: 0,
+                    version: 0,
+                })
             }
         }
     }

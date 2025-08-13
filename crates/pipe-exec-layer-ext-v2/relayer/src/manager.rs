@@ -23,12 +23,7 @@ impl RelayerManager {
         }
     }
 
-    pub async fn add_uri(
-        &self,
-        uri: &str,
-        rpc_url: &str,
-        last_state: ObserveState
-    ) -> Result<()> {
+    pub async fn add_uri(&self, uri: &str, rpc_url: &str, last_state: ObserveState) -> Result<()> {
         let is_running = self.is_running.read().await;
         if !*is_running {
             return Err(anyhow!("RelayerManager is not running"));
@@ -53,11 +48,10 @@ impl RelayerManager {
         Ok(())
     }
 
-    pub async fn poll_url(&self, url: &str) -> Result<()> {
+    pub async fn poll_url(&self, url: &str) -> Result<ObserveState> {
         let relayers = { self.relayers.read().await };
         let relayer = relayers.get(url).ok_or(anyhow!("URI {} not found", url))?;
-        relayer.poll_once().await?;
-        Ok(())
+        relayer.poll_once().await
     }
 }
 

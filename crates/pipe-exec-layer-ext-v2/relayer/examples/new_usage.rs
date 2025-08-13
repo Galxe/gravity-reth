@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     for uri in &uris {
         match manager.poll_url(uri).await {
-            Ok(()) => info!("Successfully polled URI: {}", uri),
+            Ok(state) => info!("Successfully polled URI: {} -> {:?}", uri, state),
             Err(e) => info!("Failed to poll URI {}: {}", uri, e),
         }
     }
