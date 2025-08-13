@@ -1,12 +1,10 @@
 //! Example showing the new RelayerManager usage with the refactored design
 
 use reth_pipe_exec_layer_relayer::{
-    EthHttpCli, RelayerManager, RelayerConfig, ObserveUpdate, UriParser
+    ObserveState, ObservedValue, RelayerManager, UriParser
 };
 use reth_tracing::{LayerInfo, LogFormat, RethTracer, Tracer};
 use tracing::level_filters::LevelFilter;
-use std::env;
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
@@ -27,25 +25,9 @@ async fn main() -> anyhow::Result<()> {
     // 1. Create ETH client
     let rpc_url = "https://ethereum-holesky-rpc.publicnode.com";
     
-    // 2. Configure relayer
-    let config = RelayerConfig {
-        poll_interval: Duration::from_secs(12),
-        start_block: Some(4318399),
-        block_range: 100,
-        finalized_only: false,
-    };
-    
     // 3. Create RelayerManager
-    let manager = RelayerManager::new(config);
-    
-    // 4. Set global update callback
-    manager.set_update_callback(|update: ObserveUpdate| {
-        info!("Global update received: {:?}", update);
-    }).await;
-    
-    // 5. Start the manager
-    manager.start().await?;
-    
+    let manager = RelayerManager::new();
+
     // 6. Add multiple URIs - each will get its own relayer instance
     let uris = vec![
         // Monitor latest block on mainnet
@@ -63,23 +45,28 @@ async fn main() -> anyhow::Result<()> {
     
     // Add each URI (creates separate relayer for each)
     for uri in &uris {
-        match manager.add_uri(uri, rpc_url).await {
+        let last_state = ObserveState {
+            block_number: 4330800,
+            observed_value: ObservedValue::None,
+            timestamp: 0,
+            version: 0,
+        };
+        match manager.add_uri(uri, rpc_url, last_state).await {
             Ok(()) => info!("Successfully added URI: {}", uri),
             Err(e) => info!("Failed to add URI {}: {}", uri, e),
         }
     }
-    
-    // 7. Check manager stats
-    let stats = manager.get_stats().await;
-    info!("Manager stats: {:?}", stats);
-    
+
+    for uri in &uris {
+        match manager.poll_url(uri).await {
+            Ok(()) => info!("Successfully polled URI: {}", uri),
+            Err(e) => info!("Failed to poll URI {}: {}", uri, e),
+        }
+    }
+
     // 8. Let it run for a while
     info!("Relayers are running. Press Ctrl+C to stop...");
     tokio::time::sleep(Duration::from_secs(60)).await;
-    
-    // 9. Graceful shutdown
-    info!("Initiating graceful shutdown...");
-    manager.graceful_shutdown(30).await?;
     
     info!("Shutdown complete!");
     Ok(())

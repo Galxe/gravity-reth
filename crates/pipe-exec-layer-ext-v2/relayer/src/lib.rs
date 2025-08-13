@@ -9,7 +9,7 @@ pub mod manager;
 pub mod parser;
 
 // 重新导出主要类型
-pub use relayer::{GravityRelayer, RelayerConfig, ObserveUpdate, ObservedValue};
+pub use relayer::{GravityRelayer, ObserveState, ObservedValue};
 pub use parser::{UriParser, ParsedTask, GravityTask, AccountActivityType};
 pub use manager::{RelayerManager, ManagerStats};
 pub use eth_client::EthHttpCli;
