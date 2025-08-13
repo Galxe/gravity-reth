@@ -5,9 +5,9 @@ use std::sync::LazyLock;
 /// Configuration options for the Gravity Reth.
 #[derive(Debug)]
 pub struct Config {
-    /// Whether to use pipe execution. default true.
+    /// Whether to disable pipe execution. default false.
     pub disable_pipe_execution: bool,
-    /// Whether to disable the Grevm executor. default true.
+    /// Whether to disable the Grevm executor. default false.
     pub disable_grevm: bool,
     /// The gas limit for pipe block. default `1_000_000_000`.
     pub pipe_block_gas_limit: u64,
