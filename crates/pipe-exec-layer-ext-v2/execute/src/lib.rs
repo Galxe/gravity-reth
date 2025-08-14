@@ -20,6 +20,7 @@ use alloy_primitives::{
     Address, TxHash, B256, U256,
 };
 use alloy_rpc_types_eth::TransactionRequest;
+use gravity_primitives::CONFIG;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
@@ -233,8 +234,6 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
     }
 }
 
-const BLOCK_GAS_LIMIT_1G: u64 = 1_000_000_000;
-
 #[derive(Debug)]
 struct ExecuteOrderedBlockResult {
     /// Block without roots and block hash
@@ -425,7 +424,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,
-                gas_limit: BLOCK_GAS_LIMIT_1G,
+                gas_limit: CONFIG.pipe_block_gas_limit,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
                 nonce: BEACON_NONCE.into(),
                 ..Default::default()
@@ -491,7 +490,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                     timestamp: ordered_block.timestamp,
                     suggested_fee_recipient: ordered_block.coinbase,
                     prev_randao: ordered_block.prev_randao,
-                    gas_limit: BLOCK_GAS_LIMIT_1G,
+                    gas_limit: CONFIG.pipe_block_gas_limit,
                     parent_beacon_block_root: Some(ordered_block.parent_id),
                     withdrawals: Some(ordered_block.withdrawals.clone()),
                 },
@@ -552,7 +551,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Apply metadata transaction result to executor state
         executor.commit_changes(state_changes);
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
-            serde_json::to_writer(
+            serde_json::to_writer_pretty(
                 std::io::BufWriter::new(std::fs::File::create(format!("{block_id}.json")).unwrap()),
                 &block,
             )
