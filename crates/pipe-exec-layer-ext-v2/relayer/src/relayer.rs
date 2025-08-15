@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 /// Represents the current state of observation for a gravity task
-/// 
+///
 /// This struct tracks the block number, observed value, timestamp, and version
 /// of the last observed state for monitoring purposes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,10 +58,10 @@ pub struct EventLog {
 
 impl From<&Log> for EventLog {
     /// Converts an Alloy Log to an EventLog
-    /// 
+    ///
     /// # Arguments
     /// * `log` - The Alloy Log to convert
-    /// 
+    ///
     /// # Returns
     /// * `EventLog` - The converted event log
     fn from(log: &Log) -> Self {
@@ -86,12 +86,12 @@ struct TaskState {
 
 impl TaskState {
     /// Creates a new TaskState instance
-    /// 
+    ///
     /// # Arguments
     /// * `task` - The parsed task to manage
     /// * `start_block` - The block number to start monitoring from
     /// * `last_observed` - The last observed state
-    /// 
+    ///
     /// # Returns
     /// * `TaskState` - The new task state instance
     fn new(task: ParsedTask, start_block: u64, last_observed: Arc<ObserveState>) -> Self {
@@ -99,7 +99,7 @@ impl TaskState {
     }
 
     /// Gets the current cursor position
-    /// 
+    ///
     /// # Returns
     /// * `u64` - The current block number cursor
     async fn get_cursor(&self) -> u64 {
@@ -107,7 +107,7 @@ impl TaskState {
     }
 
     /// Updates the cursor position
-    /// 
+    ///
     /// # Arguments
     /// * `cursor` - The new cursor position
     async fn update_cursor(&self, cursor: u64) {
@@ -115,7 +115,7 @@ impl TaskState {
     }
 
     /// Gets the last observed state
-    /// 
+    ///
     /// # Returns
     /// * `Arc<ObserveState>` - The last observed state
     async fn last_observed(&self) -> Arc<ObserveState> {
@@ -123,10 +123,10 @@ impl TaskState {
     }
 
     /// Checks if the observed value should trigger an update
-    /// 
+    ///
     /// # Arguments
     /// * `observed_value` - The newly observed value to compare
-    /// 
+    ///
     /// # Returns
     /// * `bool` - True if the value has changed and should trigger an update
     async fn should_update(&self, observed_value: &ObservedValue) -> bool {
@@ -134,7 +134,7 @@ impl TaskState {
     }
 
     /// Updates the last observed state
-    /// 
+    ///
     /// # Arguments
     /// * `last_observed` - The new observed state
     async fn update_last_observed(&self, last_observed: ObserveState) {
@@ -143,7 +143,7 @@ impl TaskState {
 }
 
 /// Main relayer for gravity protocol tasks
-/// 
+///
 /// This struct handles the monitoring and polling of various blockchain events,
 /// blocks, and storage slots based on parsed gravity tasks.
 pub struct GravityRelayer {
@@ -164,12 +164,12 @@ impl std::fmt::Debug for GravityRelayer {
 
 impl GravityRelayer {
     /// Creates a new GravityRelayer instance
-    /// 
+    ///
     /// # Arguments
     /// * `rpc_url` - The RPC endpoint URL for blockchain communication
     /// * `task` - The parsed task to monitor
     /// * `last_state` - The last observed state to start from
-    /// 
+    ///
     /// # Returns
     /// * `GravityRelayer` - The new relayer instance
     pub fn new(rpc_url: &str, task: ParsedTask, last_state: ObserveState) -> Self {
@@ -181,12 +181,12 @@ impl GravityRelayer {
     }
 
     /// Polls the current task once for updates
-    /// 
+    ///
     /// This method delegates to specific polling methods based on the task type.
-    /// 
+    ///
     /// # Returns
     /// * `Result<ObserveState>` - The current observed state or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if polling fails for any reason
     pub async fn poll_once(&self) -> Result<ObserveState> {
@@ -204,11 +204,11 @@ impl GravityRelayer {
     }
 
     /// Polls for event logs based on the provided filter
-    /// 
+    ///
     /// # Arguments
     /// * `task_uri` - The URI being monitored (for logging)
     /// * `filter` - The event filter to apply
-    /// 
+    ///
     /// # Returns
     /// * `Result<ObserveState>` - The observed state with new events or error
     async fn poll_event_task(&self, task_uri: &str, filter: &Filter) -> Result<ObserveState> {
@@ -265,10 +265,10 @@ impl GravityRelayer {
     }
 
     /// Polls for the latest block head
-    /// 
+    ///
     /// # Arguments
     /// * `task_uri` - The URI being monitored (for logging)
-    /// 
+    ///
     /// # Returns
     /// * `Result<ObserveState>` - The observed state with new block or error
     async fn poll_block_head_task(&self, task_uri: &str) -> Result<ObserveState> {
@@ -313,12 +313,12 @@ impl GravityRelayer {
     }
 
     /// Polls for storage slot value changes
-    /// 
+    ///
     /// # Arguments
     /// * `task_uri` - The URI being monitored (for logging)
     /// * `account` - The contract address to monitor
     /// * `slot` - The storage slot to monitor
-    /// 
+    ///
     /// # Returns
     /// * `Result<ObserveState>` - The observed state with storage value or error
     async fn poll_storage_slot_task(
@@ -360,12 +360,12 @@ impl GravityRelayer {
     }
 
     /// Polls for account activity based on the specified activity type
-    /// 
+    ///
     /// # Arguments
     /// * `task_uri` - The URI being monitored (for logging)
     /// * `address` - The account address to monitor
     /// * `activity_type` - The type of activity to monitor
-    /// 
+    ///
     /// # Returns
     /// * `Result<ObserveState>` - The observed state with account activity or error
     async fn poll_account_activity_task(
@@ -409,9 +409,7 @@ mod tests {
     use alloy_rpc_types::Filter;
     use reth_primitives::Log;
 
-    use crate::{
-        EthHttpCli, GravityRelayer, ObserveState, ObservedValue, UriParser,
-    };
+    use crate::{EthHttpCli, GravityRelayer, ObserveState, ObservedValue, UriParser};
     use alloy_sol_macro::sol;
     use alloy_sol_types::SolEvent;
 
@@ -428,12 +426,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_parsed_and_run() {
-        let uri = "gravity://31337/event?address=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512&topic0=0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624";
+        let uri = std::env::var("TEST_URI").unwrap();
+        let rpc_url = std::env::var("RPC_URL").unwrap();
+        // let uri = "gravity://31337/event?address=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512&topic0=0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624";
         let parser = UriParser::new();
-        let task = parser.parse(uri).unwrap();
+        let task = parser.parse(&uri).unwrap();
         println!("task: {:?}", task);
         let relayer = GravityRelayer::new(
-            "http://localhost:8848",
+            &rpc_url,
             task,
             ObserveState {
                 block_number: 10,
@@ -469,7 +469,8 @@ mod tests {
     #[tokio::test]
     async fn test_direct() {
         // Create mock eth client - this needs actual test implementation
-        let eth_client = EthHttpCli::new("http://localhost:8848");
+        let rpc_url = std::env::var("RPC_URL").unwrap();
+        let eth_client = EthHttpCli::new(&rpc_url);
         let filter = Filter::new()
             .address(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"))
             .event_signature(B256::from(hex!(
