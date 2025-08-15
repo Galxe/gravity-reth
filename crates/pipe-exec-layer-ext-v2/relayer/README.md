@@ -1,135 +1,283 @@
 # Gravity Protocol Relayer
 
-这是一个用于Gravity协议的URI解析器和区块链事件中继器。
+A URI parser and blockchain event relayer for the Gravity protocol.
 
-## 功能特性
+## Features
 
-### URI解析器 (UriParser)
-支持解析以下格式的Gravity URI：
-- `gravity://chain/l1/eth/block/0x1234` - 监听特定区块
-- `gravity://chain/l1/eth/0x123456/event/Epoch_Change` - 监听合约事件
-- `gravity://chain/l1/eth/0x123456/storage_slot/0x12345` - 监听存储槽变化
+### URI Parser (UriParser)
+Supports parsing Gravity URIs in the following formats:
+- `gravity://mainnet/block?strategy=head` - Monitor latest block
+- `gravity://mainnet/event?address=0x...&topic0=0x...` - Monitor contract events
+- `gravity://mainnet/storage?account=0x...&slot=0x...` - Monitor storage slot changes
+- `gravity://mainnet/account/0x.../activity?type=erc20_transfer` - Monitor account activity
 
-### 中继器 (GravityRelayer)
-- 周期性轮询以太坊节点
-- 维护处理进度游标(cursor)
-- 检测数据变化并生成更新事件
-- 支持finalized区块过滤
-- 可配置轮询间隔和区块范围
+### Relayer (GravityRelayer)
+- Periodically polls Ethereum nodes
+- Maintains processing cursor state
+- Detects data changes and generates update events
+- Supports finalized block filtering
+- Configurable polling intervals and block ranges
 
-## 基本使用
+### Relayer Manager (RelayerManager)
+- Manages multiple relayers for different URIs
+- Centralized lifecycle management
+- Supports multiple RPC endpoints
+- Provides unified interface for adding and polling URIs
+
+## Basic Usage
 
 ```rust
 use reth_pipe_exec_layer_relayer::{
-    EthHttpCli, GravityRelayer, RelayerConfig, UriParser, ObserveUpdate
+    RelayerManager, UriParser, ObserveState, ObservedValue
 };
-use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. 创建URI解析器
+    // 1. Create URI parser
     let parser = UriParser::new();
     
-    // 2. 解析任务URI
-    let task = parser.parse("gravity://chain/l1/eth/0x123456789abcdef123456789abcdef1234567890/event/Epoch_Change")?;
+    // 2. Parse task URI
+    let task = parser.parse("gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")?;
     
-    // 3. 创建ETH客户端
-    let eth_client = Arc::new(EthHttpCli::new("https://rpc.ankr.com/eth", 1)?);
+    // 3. Create RelayerManager
+    let manager = RelayerManager::new();
     
-    // 4. 配置Relayer
-    let config = RelayerConfig {
-        poll_interval: Duration::from_secs(12),
-        start_block: Some(19000000),
-        block_range: 100,
-        finalized_only: true,
+    // 4. Define initial state
+    let last_state = ObserveState {
+        block_number: 19000000,
+        observed_value: ObservedValue::None,
+        timestamp: 0,
+        version: 0,
     };
     
-    // 5. 创建Relayer
-    let mut relayer = GravityRelayer::new(eth_client, config);
+    // 5. Add URI to manager
+    manager.add_uri(&task.original_uri, "https://rpc.ankr.com/eth", last_state).await?;
     
-    // 6. 设置更新回调
-    relayer.set_update_callback(|update: ObserveUpdate| {
-        println!("检测到更新: {:?}", update);
-    });
-    
-    // 7. 添加任务
-    relayer.add_task(task).await?;
-    
-    // 8. 开始轮询
-    relayer.start_polling().await?;
+    // 6. Poll for updates
+    let current_state = manager.poll_uri(&task.original_uri).await?;
+    println!("Current state: {:?}", current_state);
     
     Ok(())
 }
 ```
 
-## 数据结构
+## Data Structures
 
 ### ParsedTask
 ```rust
 pub struct ParsedTask {
-    pub task_type: TaskType,
+    /// The parsed gravity task to be executed
+    pub task: GravityTask,
+    /// The original URI string that was parsed
     pub original_uri: String,
-    pub network: String,
-    pub chain: String,
+    /// The chain identifier (e.g., "mainnet", "testnet")
+    pub chain_specifier: String,
 }
 ```
 
-### TaskType
+### GravityTask
 ```rust
-pub enum TaskType {
-    Block { block_hash: B256 },
-    Event { contract_address: Address, event_name: String },
-    StorageSlot { contract_address: Address, slot: B256 },
+pub enum GravityTask {
+    /// Monitor event task, contains a Filter object that can be directly used with Alloy
+    MonitorEvent(Filter),
+    /// Monitor block head task
+    MonitorBlockHead,
+    /// Monitor storage slot task
+    MonitorStorage { account: Address, slot: B256 },
+    /// Monitor account activity task (abstract layer)
+    MonitorAccount { address: Address, activity_type: AccountActivityType },
 }
 ```
 
-### ObserveUpdate
+### ObserveState
 ```rust
-pub struct ObserveUpdate {
-    pub task_uri: String,
-    pub task_type: TaskType,
+pub struct ObserveState {
+    /// The block number at which the observation was made
     pub block_number: u64,
-    pub new_value: ObservedValue,
-    pub previous_value: Option<ObservedValue>,
+    /// The actual observed value (block, events, storage slot, or none)
+    pub observed_value: ObservedValue,
+    /// Chain timestamp to ensure consistency
     pub timestamp: u64,
+    /// OnChain version for tracking changes
+    pub version: u64,
 }
 ```
 
 ### ObservedValue
 ```rust
 pub enum ObservedValue {
+    /// Observed block information
     Block { block_hash: B256, block_number: u64 },
+    /// Observed event logs
     Events { logs: Vec<EventLog> },
+    /// Observed storage slot value
     StorageSlot { slot: B256, value: B256 },
+    /// No observation made
+    None,
 }
 ```
 
-## 配置选项
-
-### RelayerConfig
-- `poll_interval`: 轮询间隔（默认12秒）
-- `start_block`: 起始区块号（可选）
-- `block_range`: 每次查询的区块范围（默认100）
-- `finalized_only`: 是否只处理finalized区块（默认true）
-
-## 运行示例
-
-```bash
-cargo run --example basic_usage
+### EventLog
+```rust
+pub struct EventLog {
+    /// Contract address that emitted the event
+    pub address: Address,
+    /// Event topics (indexed parameters)
+    pub topics: Vec<B256>,
+    /// Event data (non-indexed parameters)
+    pub data: Vec<u8>,
+    /// Block number where the event occurred
+    pub block_number: u64,
+    /// Transaction hash that triggered the event
+    pub transaction_hash: B256,
+    /// Log index within the transaction
+    pub log_index: u64,
+}
 ```
 
-## 注意事项
+## URI Format Examples
 
-1. 确保提供有效的以太坊RPC端点
-2. 存储槽监听功能需要RPC支持`eth_getStorageAt`方法
-3. 建议在生产环境中使用较长的轮询间隔以避免过多RPC调用
-4. 回调函数应该快速执行，避免阻塞轮询循环
+### Block Monitoring
+```rust
+// Monitor latest block
+"gravity://mainnet/block?strategy=head"
+```
+
+### Event Monitoring
+```rust
+// Monitor specific contract events
+"gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+// Monitor events with multiple topics
+"gravity://mainnet/event?address=0x...&topic0=0x...&topic1=0x..."
+
+// Monitor events with OR conditions
+"gravity://mainnet/event?topic0=0x...,0x..."
+```
+
+### Storage Monitoring
+```rust
+// Monitor storage slot changes
+"gravity://mainnet/storage?account=0x123456789abcdef123456789abcdef1234567890&slot=0x0000000000000000000000000000000000000000000000000000000000000001"
+```
+
+### Account Activity Monitoring
+```rust
+// Monitor ERC20 transfers for specific address
+"gravity://mainnet/account/0x123456789abcdef123456789abcdef1234567890/activity?type=erc20_transfer"
+
+// Monitor all transactions for specific address
+"gravity://mainnet/account/0x123456789abcdef123456789abcdef1234567890/activity?type=all_transactions"
+```
+
+## Advanced Usage
+
+### Multiple URI Management
+```rust
+use reth_pipe_exec_layer_relayer::{RelayerManager, ObserveState, ObservedValue};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let manager = RelayerManager::new();
+    
+    let uris = vec![
+        "gravity://mainnet/block?strategy=head",
+        "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "gravity://mainnet/storage?account=0x123456789abcdef123456789abcdef1234567890&slot=0x0",
+    ];
+    
+    let initial_state = ObserveState {
+        block_number: 19000000,
+        observed_value: ObservedValue::None,
+        timestamp: 0,
+        version: 0,
+    };
+    
+    // Add multiple URIs
+    for uri in &uris {
+        manager.add_uri(uri, "https://rpc.ankr.com/eth", initial_state.clone()).await?;
+    }
+    
+    // Poll all URIs
+    for uri in &uris {
+        match manager.poll_uri(uri).await {
+            Ok(state) => println!("URI {}: {:?}", uri, state),
+            Err(e) => println!("Error polling {}: {}", uri, e),
+        }
+    }
+    
+    Ok(())
+}
+```
+
+### Batch URI Parsing
+```rust
+use reth_pipe_exec_layer_relayer::UriParser;
+
+let parser = UriParser::new();
+let uris = vec![
+    "gravity://mainnet/block?strategy=head".to_string(),
+    "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
+];
+
+let tasks = parser.parse_batch(&uris)?;
+for task in tasks {
+    println!("Parsed task: {:?}", task);
+}
+```
+
+## Error Handling
+
+The library uses `anyhow::Result` for error handling. Common error scenarios include:
+
+- Invalid URI format
+- Unsupported chain specifiers
+- Missing required parameters
+- Invalid Ethereum addresses or topics
+- RPC connection failures
+- Network timeouts
+
+## Performance Considerations
+
+1. **RPC Rate Limiting**: The library includes built-in retry logic with exponential backoff
+2. **Finalized Blocks**: By default, only finalized blocks are processed to ensure consistency
+3. **Cursor Management**: Efficient cursor tracking prevents reprocessing of already seen data
+4. **Batch Operations**: Support for batch URI parsing and management
+
+## Dependencies
+
+- `alloy-primitives`: Ethereum primitives and types
+- `alloy-rpc-types`: RPC types and filters
+- `tokio`: Async runtime
+- `anyhow`: Error handling
+- `tracing`: Logging and debugging
+- `serde`: Serialization/deserialization
+
+## Running Examples
+
+```bash
+# Run the basic usage example
+cargo run --example new_usage
+
+# Run tests
+cargo test
+
+# Generate documentation
+cargo doc --open
+```
+
+## Notes
+
+1. Ensure you provide valid Ethereum RPC endpoints
+2. Storage slot monitoring requires RPC support for `eth_getStorageAt` method
+3. Consider using longer polling intervals in production to avoid excessive RPC calls
+4. The library automatically handles retries and backoff for failed requests
+5. All operations are async and should be run in a Tokio runtime
 
 ## TODO
 
-- [ ] 实现存储槽查询功能
-- [ ] 添加RPC错误重试机制
-- [ ] 支持WebSocket连接以实现实时更新
-- [ ] 添加更多的事件过滤选项
-- [ ] 实现持久化存储cursor状态
+- [ ] Add WebSocket support for real-time updates
+- [ ] Support for more event filtering options
+- [ ] Add metrics and monitoring capabilities
+- [ ] Implement connection pooling for multiple RPC endpoints

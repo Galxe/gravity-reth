@@ -4,23 +4,22 @@ use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
 use anyhow::{Context as AnyhowContext, Result};
 use reqwest::ClientBuilder;
-use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, warn};
 use url::Url;
 
-/// Provider性能指标
+/// Provider performance metrics
 #[derive(Debug, Default, Clone)]
 pub struct ProviderMetrics {
-    /// 发送的请求数
+    /// Number of requests sent
     pub requests_sent: u64,
-    /// 成功的请求数
+    /// Number of successful requests
     pub requests_succeeded: u64,
-    /// 失败的请求数
+    /// Number of failed requests
     pub requests_failed: u64,
-    /// 总延迟时间（毫秒）
+    /// Total latency time (milliseconds)
     pub total_latency_ms: u64,
 }
 /// Ethereum transaction sender, providing reliable communication with nodes
@@ -34,13 +33,13 @@ pub struct EthHttpCli {
 /// Retry configuration
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
-    /// 最大重试次数
+    /// Maximum number of retries
     pub max_retries: usize,
-    /// 基础延迟时间
+    /// Base delay time
     pub base_delay: Duration,
-    /// 最大延迟时间
+    /// Maximum delay time
     pub max_delay: Duration,
-    /// 退避倍数
+    /// Backoff multiplier
     pub backoff_multiplier: f64,
 }
 
@@ -56,7 +55,13 @@ impl Default for RetryConfig {
 }
 
 impl EthHttpCli {
-    /// Create new TxnSender instance
+    /// Creates a new EthHttpCli instance
+    /// 
+    /// # Arguments
+    /// * `rpc_url` - The RPC endpoint URL for blockchain communication
+    /// 
+    /// # Returns
+    /// * `EthHttpCli` - A new Ethereum HTTP client instance
     pub fn new(rpc_url: &str) -> Self {
         debug!("Creating EthHttpCli for URL: {}", rpc_url);
         // Parse URL
@@ -74,6 +79,16 @@ impl EthHttpCli {
         }
     }
 
+    /// Gets the nonce (transaction count) for a given address
+    /// 
+    /// # Arguments
+    /// * `address` - The Ethereum address to get the nonce for
+    /// 
+    /// # Returns
+    /// * `Result<u64>` - The nonce value or error
+    /// 
+    /// # Errors
+    /// * Returns an error if the request times out or fails
     pub async fn get_nonce(&self, address: Address) -> Result<u64> {
         tokio::time::timeout(Duration::from_secs(10), async {
             let nonce = self.provider.get_transaction_count(address).await?;
@@ -114,7 +129,7 @@ impl EthHttpCli {
         result.with_context(|| format!("Failed to get balance for address: {:?}", address))
     }
 
-    /// 获取事件日志 - 支持完整的Filter对象
+    /// Get event logs - supports complete Filter object
     pub async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>> {
         let start = Instant::now();
 
@@ -126,6 +141,17 @@ impl EthHttpCli {
         result.with_context(|| "Failed to get logs with filter")
     }
 
+    /// Gets the storage value at a specific slot for a given address
+    /// 
+    /// # Arguments
+    /// * `address` - The contract address to query
+    /// * `slot` - The storage slot to read from
+    /// 
+    /// # Returns
+    /// * `Result<B256>` - The storage value or error
+    /// 
+    /// # Errors
+    /// * Returns an error if the storage query fails
     pub async fn get_storage_at(&self, address: Address, slot: B256) -> Result<B256> {
         let start = Instant::now();
 
@@ -141,6 +167,16 @@ impl EthHttpCli {
         })
     }
 
+    /// Gets a block by its number
+    /// 
+    /// # Arguments
+    /// * `block_number` - The block number to retrieve
+    /// 
+    /// # Returns
+    /// * `Result<Option<alloy_rpc_types::Block>>` - The block data or None if not found
+    /// 
+    /// # Errors
+    /// * Returns an error if the block query fails
     pub async fn get_block(&self, block_number: u64) -> Result<Option<alloy_rpc_types::Block>> {
         let start = Instant::now();
 
@@ -157,6 +193,13 @@ impl EthHttpCli {
         result.with_context(|| format!("Failed to get block: {}", block_number))
     }
 
+    /// Gets the latest finalized block number
+    /// 
+    /// # Returns
+    /// * `Result<u64>` - The finalized block number or error
+    /// 
+    /// # Errors
+    /// * Returns an error if no finalized block is found or the query fails
     pub async fn get_finalized_block_number(&self) -> Result<u64> {
         let start = Instant::now();
 
@@ -180,6 +223,13 @@ impl EthHttpCli {
         result.with_context(|| "Failed to get finalized block number")
     }
 
+    /// Gets the current gas price
+    /// 
+    /// # Returns
+    /// * `Result<u128>` - The gas price in wei or error
+    /// 
+    /// # Errors
+    /// * Returns an error if the gas price query fails
     #[allow(unused)]
     pub async fn get_gas_price(&self) -> Result<u128> {
         let start = Instant::now();
@@ -194,6 +244,13 @@ impl EthHttpCli {
             .with_context(|| "Failed to get gas price")
     }
 
+    /// Gets the latest block number
+    /// 
+    /// # Returns
+    /// * `Result<u64>` - The latest block number or error
+    /// 
+    /// # Errors
+    /// * Returns an error if the block number query fails
     #[allow(unused)]
     pub async fn get_block_number(&self) -> Result<u64> {
         let start = Instant::now();
@@ -206,6 +263,16 @@ impl EthHttpCli {
         result.with_context(|| "Failed to get block number")
     }
 
+    /// Retries an operation with exponential backoff
+    /// 
+    /// # Arguments
+    /// * `operation` - The async operation to retry
+    /// 
+    /// # Returns
+    /// * `Result<T>` - The result of the operation or error after all retries
+    /// 
+    /// # Errors
+    /// * Returns an error if all retry attempts fail
     async fn retry_with_backoff<F, Fut, T>(&self, mut operation: F) -> Result<T>
     where
         F: FnMut() -> Fut,
@@ -251,7 +318,11 @@ impl EthHttpCli {
         ))
     }
 
-    /// Update performance metrics
+    /// Updates performance metrics with the result of an operation
+    /// 
+    /// # Arguments
+    /// * `success` - Whether the operation was successful
+    /// * `latency` - The duration of the operation
     async fn update_metrics(&self, success: bool, latency: Duration) {
         let mut metrics = self.metrics.lock().await;
         metrics.requests_sent += 1;
@@ -267,13 +338,19 @@ impl EthHttpCli {
         metrics.total_latency_ms += latency_ms;
     }
 
-    /// Get a copy of performance metrics
+    /// Gets a copy of the current performance metrics
+    /// 
+    /// # Returns
+    /// * `ProviderMetrics` - A copy of the current metrics
     #[allow(unused)]
     pub async fn get_metrics(&self) -> ProviderMetrics {
         self.metrics.lock().await.clone()
     }
 
-    /// Get average latency (milliseconds)
+    /// Gets the average latency in milliseconds
+    /// 
+    /// # Returns
+    /// * `f64` - The average latency in milliseconds, or 0.0 if no requests have been made
     #[allow(unused)]
     pub async fn get_average_latency_ms(&self) -> f64 {
         let metrics = self.metrics.lock().await;
@@ -284,7 +361,10 @@ impl EthHttpCli {
         }
     }
 
-    /// Get success rate
+    /// Gets the success rate as a percentage
+    /// 
+    /// # Returns
+    /// * `f64` - The success rate as a decimal (0.0 to 1.0), or 0.0 if no requests have been made
     #[allow(unused)]
     pub async fn get_success_rate(&self) -> f64 {
         let metrics = self.metrics.lock().await;
@@ -295,77 +375,11 @@ impl EthHttpCli {
         }
     }
 
-    /// Reset metrics
+    /// Resets all performance metrics to their default values
     #[allow(unused)]
     pub async fn reset_metrics(&self) {
         let mut metrics = self.metrics.lock().await;
         *metrics = ProviderMetrics::default();
         debug!("TxnSender metrics reset");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::env;
-
-    use reqwest::{Client, ClientBuilder, Proxy};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_get_logs() {
-        let url = reqwest::Url::parse("https://ethereum-holesky-rpc.publicnode.com").unwrap();
-        let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
-        let client = client_builder.build().unwrap();
-        let provider: RootProvider<Ethereum> =
-            ProviderBuilder::default().connect_reqwest(client, url);
-
-        let block_number = provider.get_block_number().await.unwrap();
-        println!("block_number: {}", block_number);
-
-        let finalized_block_number = provider
-            .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Finalized)
-            .await
-            .unwrap();
-        println!("finalized_block_number: {:?}", finalized_block_number);
-
-        let block = provider
-            .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Number(block_number))
-            .await
-            .unwrap();
-        println!("block: {:?}", block);
-
-        let filter = Filter::new().from_block(10000000).to_block(10000001);
-        let logs = provider.get_logs(&filter).await.unwrap();
-        println!("logs: {:?}", logs);
-    }
-
-    #[tokio::test]
-    async fn test_get_finalized_block_number() {
-        for var in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"] {
-            std::env::remove_var(var);
-        }
-        println!("http proxy: {}", env::var("http_proxy").unwrap_or_default());
-        println!("https proxy: {}", env::var("https_proxy").unwrap_or_default());
-        // let proxy = Proxy::all("http://127.0.0.1:20172").unwrap();
-        // let client = Client::builder().proxy(proxy).build().unwrap();
-
-        let url = reqwest::Url::parse("https://ethereum-holesky-rpc.publicnode.com").unwrap();
-        let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
-        let client = client_builder.build().unwrap();
-        let provider: RootProvider<Ethereum> =
-            ProviderBuilder::default().connect_reqwest(client, url);
-        let block_number = provider.get_block_number().await.unwrap();
-        println!("block_number: {}", block_number);
-
-        // let res = client
-        //     .post("https://ethereum-holesky-rpc.publicnode.com")
-        //     .header("Content-Type", "application/json")
-        //     .body(r#"{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}"#)
-        //     .send()
-        //     .await
-        //     .unwrap();
-
-        // println!("Response: {:?}", res);
     }
 }

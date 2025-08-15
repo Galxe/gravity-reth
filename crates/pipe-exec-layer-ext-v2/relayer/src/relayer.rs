@@ -10,35 +10,60 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
+/// Represents the current state of observation for a gravity task
+/// 
+/// This struct tracks the block number, observed value, timestamp, and version
+/// of the last observed state for monitoring purposes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObserveState {
+    /// The block number at which the observation was made
     pub block_number: u64,
+    /// The actual observed value (block, events, storage slot, or none)
     pub observed_value: ObservedValue,
-    // 链上的timestamp 不然不一样
+    /// Chain timestamp to ensure consistency
     pub timestamp: u64,
-    /// OnChain version
+    /// OnChain version for tracking changes
     pub version: u64,
 }
 
+/// Represents different types of observed values from blockchain monitoring
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObservedValue {
+    /// Observed block information
     Block { block_hash: B256, block_number: u64 },
+    /// Observed event logs
     Events { logs: Vec<EventLog> },
+    /// Observed storage slot value
     StorageSlot { slot: B256, value: B256 },
+    /// No observation made
     None,
 }
 
+/// Represents a blockchain event log with all relevant metadata
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventLog {
+    /// Contract address that emitted the event
     pub address: Address,
+    /// Event topics (indexed parameters)
     pub topics: Vec<B256>,
+    /// Event data (non-indexed parameters)
     pub data: Vec<u8>,
+    /// Block number where the event occurred
     pub block_number: u64,
+    /// Transaction hash that triggered the event
     pub transaction_hash: B256,
+    /// Log index within the transaction
     pub log_index: u64,
 }
 
 impl From<&Log> for EventLog {
+    /// Converts an Alloy Log to an EventLog
+    /// 
+    /// # Arguments
+    /// * `log` - The Alloy Log to convert
+    /// 
+    /// # Returns
+    /// * `EventLog` - The converted event log
     fn from(log: &Log) -> Self {
         Self {
             address: log.address(),
@@ -51,6 +76,7 @@ impl From<&Log> for EventLog {
     }
 }
 
+/// Internal state for managing a gravity task
 #[derive(Debug)]
 struct TaskState {
     task: ParsedTask,
@@ -59,36 +85,71 @@ struct TaskState {
 }
 
 impl TaskState {
+    /// Creates a new TaskState instance
+    /// 
+    /// # Arguments
+    /// * `task` - The parsed task to manage
+    /// * `start_block` - The block number to start monitoring from
+    /// * `last_observed` - The last observed state
+    /// 
+    /// # Returns
+    /// * `TaskState` - The new task state instance
     fn new(task: ParsedTask, start_block: u64, last_observed: Arc<ObserveState>) -> Self {
         Self { task, cursor: Mutex::new(start_block), last_observed: Mutex::new(last_observed) }
     }
 
+    /// Gets the current cursor position
+    /// 
+    /// # Returns
+    /// * `u64` - The current block number cursor
     async fn get_cursor(&self) -> u64 {
         *self.cursor.lock().await
     }
 
+    /// Updates the cursor position
+    /// 
+    /// # Arguments
+    /// * `cursor` - The new cursor position
     async fn update_cursor(&self, cursor: u64) {
         *self.cursor.lock().await = cursor;
     }
 
+    /// Gets the last observed state
+    /// 
+    /// # Returns
+    /// * `Arc<ObserveState>` - The last observed state
     async fn last_observed(&self) -> Arc<ObserveState> {
         self.last_observed.lock().await.clone()
     }
 
+    /// Checks if the observed value should trigger an update
+    /// 
+    /// # Arguments
+    /// * `observed_value` - The newly observed value to compare
+    /// 
+    /// # Returns
+    /// * `bool` - True if the value has changed and should trigger an update
     async fn should_update(&self, observed_value: &ObservedValue) -> bool {
         self.last_observed().await.observed_value != *observed_value
     }
 
+    /// Updates the last observed state
+    /// 
+    /// # Arguments
+    /// * `last_observed` - The new observed state
     async fn update_last_observed(&self, last_observed: ObserveState) {
         *self.last_observed.lock().await = Arc::new(last_observed);
     }
 }
 
-/// GravityRelayer
+/// Main relayer for gravity protocol tasks
+/// 
+/// This struct handles the monitoring and polling of various blockchain events,
+/// blocks, and storage slots based on parsed gravity tasks.
 pub struct GravityRelayer {
-    /// ETH客户端
+    /// Ethereum client for blockchain communication
     eth_client: Arc<EthHttpCli>,
-    /// 任务状态映射
+    /// Internal task state management
     task_state: TaskState,
 }
 
@@ -102,6 +163,15 @@ impl std::fmt::Debug for GravityRelayer {
 }
 
 impl GravityRelayer {
+    /// Creates a new GravityRelayer instance
+    /// 
+    /// # Arguments
+    /// * `rpc_url` - The RPC endpoint URL for blockchain communication
+    /// * `task` - The parsed task to monitor
+    /// * `last_state` - The last observed state to start from
+    /// 
+    /// # Returns
+    /// * `GravityRelayer` - The new relayer instance
     pub fn new(rpc_url: &str, task: ParsedTask, last_state: ObserveState) -> Self {
         let start_block = last_state.block_number;
 
@@ -110,6 +180,15 @@ impl GravityRelayer {
         Self { eth_client, task_state }
     }
 
+    /// Polls the current task once for updates
+    /// 
+    /// This method delegates to specific polling methods based on the task type.
+    /// 
+    /// # Returns
+    /// * `Result<ObserveState>` - The current observed state or error
+    /// 
+    /// # Errors
+    /// * Returns an error if polling fails for any reason
     pub async fn poll_once(&self) -> Result<ObserveState> {
         let task_uri = &self.task_state.task.original_uri;
         match &self.task_state.task.task {
@@ -124,6 +203,14 @@ impl GravityRelayer {
         }
     }
 
+    /// Polls for event logs based on the provided filter
+    /// 
+    /// # Arguments
+    /// * `task_uri` - The URI being monitored (for logging)
+    /// * `filter` - The event filter to apply
+    /// 
+    /// # Returns
+    /// * `Result<ObserveState>` - The observed state with new events or error
     async fn poll_event_task(&self, task_uri: &str, filter: &Filter) -> Result<ObserveState> {
         let cursor = self.task_state.get_cursor().await;
         let previous_value = self.task_state.last_observed().await;
@@ -145,7 +232,7 @@ impl GravityRelayer {
         if new_logs.is_empty() {
             let next_cursor = scoped_filter.get_to_block().unwrap();
             self.task_state.update_cursor(next_cursor).await;
-            debug!("轮询事件任务 {} 完成，cursor: {}", task_uri, next_cursor);
+            debug!("Polling event task {} completed, cursor: {}", task_uri, next_cursor);
             return Ok((*previous_value).clone());
         }
 
@@ -173,11 +260,17 @@ impl GravityRelayer {
             (*previous_value).clone()
         };
 
-        debug!("轮询事件任务 {} 完成，cursor: {}", task_uri, cursor);
+        debug!("Polling event task {} completed, cursor: {}", task_uri, cursor);
         Ok(return_value)
     }
 
-    /// 轮询区块头任务  
+    /// Polls for the latest block head
+    /// 
+    /// # Arguments
+    /// * `task_uri` - The URI being monitored (for logging)
+    /// 
+    /// # Returns
+    /// * `Result<ObserveState>` - The observed state with new block or error
     async fn poll_block_head_task(&self, task_uri: &str) -> Result<ObserveState> {
         let latest_block = self.eth_client.get_finalized_block_number().await?;
 
@@ -215,11 +308,19 @@ impl GravityRelayer {
             (*previous_value).clone()
         };
 
-        debug!("轮询区块头任务 {} 完成，cursor: {}", task_uri, cursor);
+        debug!("Polling block head task {} completed, cursor: {}", task_uri, cursor);
         Ok(return_value)
     }
 
-    /// 轮询存储槽任务
+    /// Polls for storage slot value changes
+    /// 
+    /// # Arguments
+    /// * `task_uri` - The URI being monitored (for logging)
+    /// * `account` - The contract address to monitor
+    /// * `slot` - The storage slot to monitor
+    /// 
+    /// # Returns
+    /// * `Result<ObserveState>` - The observed state with storage value or error
     async fn poll_storage_slot_task(
         &self,
         task_uri: &str,
@@ -254,11 +355,19 @@ impl GravityRelayer {
         } else {
             (*previous_value).clone()
         };
-        debug!("轮询存储槽任务 {} 完成，cursor: {}", task_uri, cursor);
+        debug!("Polling storage slot task {} completed, cursor: {}", task_uri, cursor);
         Ok(return_value)
     }
 
-    /// 轮询账户活动任务
+    /// Polls for account activity based on the specified activity type
+    /// 
+    /// # Arguments
+    /// * `task_uri` - The URI being monitored (for logging)
+    /// * `address` - The account address to monitor
+    /// * `activity_type` - The type of activity to monitor
+    /// 
+    /// # Returns
+    /// * `Result<ObserveState>` - The observed state with account activity or error
     async fn poll_account_activity_task(
         &self,
         task_uri: &str,
@@ -267,8 +376,8 @@ impl GravityRelayer {
     ) -> Result<ObserveState> {
         match activity_type {
             AccountActivityType::Erc20Transfer => {
-                // 创建ERC20 Transfer事件的filter
-                // Transfer事件签名: Transfer(address,address,uint256)
+                // Create ERC20 Transfer event filter
+                // Transfer event signature: Transfer(address,address,uint256)
                 let transfer_topic = B256::from(hex!(
                     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
                 ));
@@ -281,7 +390,7 @@ impl GravityRelayer {
                 self.poll_event_task(task_uri, &filter).await
             }
             AccountActivityType::AllTransactions => {
-                // 这需要遍历区块中的所有交易，性能较低
+                // This requires iterating through all transactions in blocks, which is performance intensive
                 warn!("AllTransactions monitoring is not yet implemented for address: {}", address);
                 Ok(ObserveState {
                     block_number: 0,
@@ -301,7 +410,7 @@ mod tests {
     use reth_primitives::Log;
 
     use crate::{
-        relayer::EventLog, EthHttpCli, GravityRelayer, ObserveState, ObservedValue, UriParser,
+        EthHttpCli, GravityRelayer, ObserveState, ObservedValue, UriParser,
     };
     use alloy_sol_macro::sol;
     use alloy_sol_types::SolEvent;
@@ -359,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_direct() {
-        // 创建mock eth客户端 - 这里需要实际的测试实现
+        // Create mock eth client - this needs actual test implementation
         let eth_client = EthHttpCli::new("http://localhost:8848");
         let filter = Filter::new()
             .address(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"))
@@ -382,20 +491,5 @@ mod tests {
                 from, to, amount, timestamp
             );
         }
-        // let relayer = GravityRelayer::new(eth_client, RelayerConfig::default());
-
-        // // 解析任务
-        // let parser = UriParser::new();
-        // let task = parser.parse("gravity://chain/l1/eth/0x123456789abcdef123456789abcdef1234567890/event/Epoch_Change").unwrap();
-
-        // // 添加任务
-        // relayer.add_task(task).await.unwrap();
-        // let tasks = relayer.get_tasks().await;
-        // assert_eq!(tasks.len(), 1);
-
-        // // 移除任务
-        // relayer.remove_task(&tasks[0]).await.unwrap();
-        // let tasks = relayer.get_tasks().await;
-        // assert_eq!(tasks.len(), 0);
     }
 }

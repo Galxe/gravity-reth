@@ -7,13 +7,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
+
+/// Manages multiple Gravity relayers and their lifecycle
+/// 
+/// This struct provides centralized management for multiple relayers,
+/// allowing addition, removal, and polling of URIs across different RPC endpoints.
+#[derive(Debug)]
 pub struct RelayerManager {
     uri_parser: UriParser,
     relayers: Arc<RwLock<HashMap<String, Arc<GravityRelayer>>>>,
 }
 
 impl RelayerManager {
-    /// 创建新的RelayerManager
+    /// Creates a new RelayerManager instance
+    /// 
+    /// Returns a new RelayerManager with an empty relayer map and a new URI parser.
     pub fn new() -> Self {
         Self {
             uri_parser: UriParser::new(),
@@ -21,6 +29,19 @@ impl RelayerManager {
         }
     }
 
+    /// Adds a new URI to be monitored by the relayer
+    /// 
+    /// # Arguments
+    /// * `uri` - The gravity protocol URI to monitor
+    /// * `rpc_url` - The RPC endpoint URL for the blockchain
+    /// * `last_state` - The last observed state to start monitoring from
+    /// 
+    /// # Returns
+    /// * `Result<()>` - Success or error if the URI cannot be added
+    /// 
+    /// # Errors
+    /// * Returns an error if the RPC URL is already being monitored
+    /// * Returns an error if the URI cannot be parsed
     pub async fn add_uri(&self, uri: &str, rpc_url: &str, last_state: ObserveState) -> Result<()> {
         {
             let relayers = self.relayers.read().await;
@@ -41,6 +62,16 @@ impl RelayerManager {
         Ok(())
     }
 
+    /// Polls a specific URI for updates
+    /// 
+    /// # Arguments
+    /// * `uri` - The URI to poll for updates
+    /// 
+    /// # Returns
+    /// * `Result<ObserveState>` - The current observed state or error
+    /// 
+    /// # Errors
+    /// * Returns an error if the URI is not found in the managed relayers
     pub async fn poll_uri(&self, uri: &str) -> Result<ObserveState> {
         let relayers = { self.relayers.read().await };
         let relayer = relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
@@ -48,41 +79,20 @@ impl RelayerManager {
     }
 }
 
-/// 管理器统计信息
+/// Statistics for the relayer manager
 #[derive(Debug, Clone)]
 pub struct ManagerStats {
-    /// 总URI数量
+    /// Total number of URIs being monitored
     pub total_uris: usize,
-    /// 活跃URI数量
+    /// Number of active URIs
     pub active_uris: usize,
 }
 
-/// 为了优雅退出，实现Drop trait
+/// Implements Drop trait for graceful shutdown
 impl Drop for RelayerManager {
     fn drop(&mut self) {
-        // 注意：Drop trait中不能使用异步代码
-        // 这里只是记录日志，实际的清理应该在graceful_shutdown中完成
+        // Note: Cannot use async code in Drop trait
+        // This is just for logging, actual cleanup should be done in graceful_shutdown
         debug!("RelayerManager is being dropped");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn test_manager_lifecycle() {
-        // 这里需要mock的EthHttpCli来进行测试
-        // let eth_client = Arc::new(EthHttpCli::new("http://localhost:8545", 1).unwrap());
-        // let config = RelayerConfig::default();
-        // let manager = RelayerManager::new(eth_client, config);
-
-        // // 测试启动和停止
-        // manager.start().await.unwrap();
-        // assert!(manager.get_stats().await.is_running);
-
-        // manager.stop().await.unwrap();
-        // assert!(!manager.get_stats().await.is_running);
     }
 }

@@ -7,51 +7,62 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use url::Url;
 
-/// 定义支持的任务类型枚举
+/// Defines supported task type enumeration
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GravityTask {
-    /// 监控事件任务，包含一个可直接用于Alloy的Filter对象
+    /// Monitor event task, contains a Filter object that can be directly used with Alloy
     MonitorEvent(Filter),
-    /// 监控区块头任务
+    /// Monitor block head task
     MonitorBlockHead,
-    /// 监控存储槽任务
+    /// Monitor storage slot task
     MonitorStorage { account: Address, slot: B256 },
-    /// 监控账户活动任务（抽象层）
+    /// Monitor account activity task (abstract layer)
     MonitorAccount { address: Address, activity_type: AccountActivityType },
 }
 
-/// 账户活动类型
+/// Account activity types
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountActivityType {
-    /// ERC20代币转账
+    /// ERC20 token transfer
     Erc20Transfer,
-    /// 所有交易
+    /// All transactions
     AllTransactions,
 }
 
+/// Represents a parsed gravity protocol task
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedTask {
+    /// The parsed gravity task to be executed
     pub task: GravityTask,
+    /// The original URI string that was parsed
     pub original_uri: String,
+    /// The chain identifier (e.g., "mainnet", "testnet")
     pub chain_specifier: String,
 }
 
-/// URI解析器
+/// URI parser for gravity protocol tasks
+/// 
+/// This struct provides functionality to parse gravity protocol URIs
+/// into structured task objects that can be executed by the relayer.
 #[derive(Debug, Default)]
 pub struct UriParser;
 
 impl UriParser {
+    /// Creates a new UriParser instance
+    /// 
+    /// # Returns
+    /// * `UriParser` - A new URI parser instance
     pub fn new() -> Self {
         Self
     }
 
-    /// 解析gravity URI
+    /// Parse gravity URI
     ///
-    /// 支持的新格式：
-    /// - gravity://mainnet/block?strategy=head - 监控最新区块
-    /// - gravity://mainnet/event?address=0x...&topic0=0x... - 监控事件
-    /// - gravity://mainnet/storage?account=0x...&slot=0x... - 监控存储槽
-    /// - gravity://mainnet/account/0x.../activity?type=erc20_transfer - 监控账户活动
+    /// Supported new formats:
+    /// - gravity://mainnet/block?strategy=head - Monitor latest block
+    /// - gravity://mainnet/event?address=0x...&topic0=0x... - Monitor events
+    /// - gravity://mainnet/storage?account=0x...&slot=0x... - Monitor storage slot
+    /// - gravity://mainnet/account/0x.../activity?type=erc20_transfer - Monitor account activity
     pub fn parse(&self, uri_str: &str) -> Result<ParsedTask> {
         let uri = Url::parse(uri_str)?;
 
@@ -76,6 +87,16 @@ impl UriParser {
         Ok(ParsedTask { task, original_uri: uri_str.to_string(), chain_specifier })
     }
 
+    /// Parses event monitoring task parameters
+    /// 
+    /// # Arguments
+    /// * `params` - Query parameters containing event filter configuration
+    /// 
+    /// # Returns
+    /// * `Result<GravityTask>` - The parsed event monitoring task or error
+    /// 
+    /// # Errors
+    /// * Returns an error if required parameters are missing or invalid
     fn parse_event_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
         let mut filter = Filter::new();
 
@@ -108,7 +129,7 @@ impl UriParser {
             _ => filter,
         });
 
-        // 可以添加更多的过滤条件，如fromBlock, toBlock等
+        // Can add more filter conditions, such as fromBlock, toBlock, etc.
         if let Some(from_block_str) = params.get("fromBlock") {
             if from_block_str == "latest" {
                 filter = filter.from_block(BlockNumberOrTag::Latest);
@@ -124,6 +145,16 @@ impl UriParser {
         Ok(GravityTask::MonitorEvent(filter))
     }
 
+    /// Parses block monitoring task parameters
+    /// 
+    /// # Arguments
+    /// * `params` - Query parameters containing block monitoring strategy
+    /// 
+    /// # Returns
+    /// * `Result<GravityTask>` - The parsed block monitoring task or error
+    /// 
+    /// # Errors
+    /// * Returns an error if the strategy parameter is missing or unsupported
     fn parse_block_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
         match params.get("strategy").map(|s| s.as_str()) {
             Some("head") => Ok(GravityTask::MonitorBlockHead),
@@ -132,6 +163,16 @@ impl UriParser {
         }
     }
 
+    /// Parses storage monitoring task parameters
+    /// 
+    /// # Arguments
+    /// * `params` - Query parameters containing account and slot information
+    /// 
+    /// # Returns
+    /// * `Result<GravityTask>` - The parsed storage monitoring task or error
+    /// 
+    /// # Errors
+    /// * Returns an error if account or slot parameters are missing or invalid
     fn parse_storage_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
         let account_str = params
             .get("account")
@@ -149,12 +190,23 @@ impl UriParser {
         Ok(GravityTask::MonitorStorage { account, slot })
     }
 
+    /// Parses account activity monitoring task parameters
+    /// 
+    /// # Arguments
+    /// * `path` - The URI path containing account address
+    /// * `params` - Query parameters containing activity type
+    /// 
+    /// # Returns
+    /// * `Result<GravityTask>` - The parsed account monitoring task or error
+    /// 
+    /// # Errors
+    /// * Returns an error if the path format is invalid or activity type is unsupported
     fn parse_account_task(
         &self,
         path: &str,
         params: &HashMap<String, String>,
     ) -> Result<GravityTask> {
-        // 路径格式: /account/0x.../activity
+        // Path format: /account/0x.../activity
         let path_parts: Vec<&str> = path.split('/').collect();
         if path_parts.len() != 4 || path_parts[1] != "account" || path_parts[3] != "activity" {
             return Err(anyhow!("Invalid account path format: {}", path));
@@ -179,7 +231,16 @@ impl UriParser {
         Ok(GravityTask::MonitorAccount { address, activity_type })
     }
 
-    /// 批量解析多个URI
+    /// Parse multiple URIs in batch
+    /// 
+    /// # Arguments
+    /// * `uris` - A slice of URI strings to parse
+    /// 
+    /// # Returns
+    /// * `Result<Vec<ParsedTask>>` - A vector of parsed tasks or error
+    /// 
+    /// # Errors
+    /// * Returns an error if any URI in the batch fails to parse
     pub fn parse_batch(&self, uris: &[String]) -> Result<Vec<ParsedTask>> {
         let mut tasks = Vec::new();
         for uri in uris {
@@ -222,7 +283,7 @@ mod tests {
         match result.task {
             GravityTask::MonitorEvent(filter) => {
                 println!("filter: {:?}", filter);
-                // 验证filter包含正确的地址和topic
+                // Verify filter contains correct address and topic
                 assert!(filter.has_topics());
             }
             _ => panic!("Expected MonitorEvent task type"),
@@ -282,9 +343,9 @@ mod tests {
 
         match result.task {
             GravityTask::MonitorEvent(filter) => {
-                // 成功解析即通过测试
+                // Test passes if parsing is successful
                 println!("filter: {:?}", filter);
-                // 验证filter包含正确的地址和topic
+                // Verify filter contains correct address and topic
                 assert!(filter.has_topics());
             }
             _ => panic!("Expected MonitorEvent task type"),
@@ -300,7 +361,7 @@ mod tests {
 
         match result.task {
             GravityTask::MonitorEvent(_filter) => {
-                // 成功解析即通过测试
+                // Test passes if parsing is successful
             }
             _ => panic!("Expected MonitorEvent task type"),
         }
