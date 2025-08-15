@@ -27,3 +27,7 @@ serde.workspace = true
 tracing.workspace = true
 url.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls"] }
+
+[dev-dependencies]
+alloy-sol-macro.workspace = true
+alloy-sol-types.workspace = true

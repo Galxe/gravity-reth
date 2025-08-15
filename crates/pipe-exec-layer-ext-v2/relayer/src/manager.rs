@@ -10,7 +10,6 @@ use tracing::{debug, info};
 pub struct RelayerManager {
     uri_parser: UriParser,
     relayers: Arc<RwLock<HashMap<String, Arc<GravityRelayer>>>>,
-    is_running: Arc<RwLock<bool>>,
 }
 
 impl RelayerManager {
@@ -19,16 +18,10 @@ impl RelayerManager {
         Self {
             uri_parser: UriParser::new(),
             relayers: Arc::new(RwLock::new(HashMap::new())),
-            is_running: Arc::new(RwLock::new(false)),
         }
     }
 
     pub async fn add_uri(&self, uri: &str, rpc_url: &str, last_state: ObserveState) -> Result<()> {
-        let is_running = self.is_running.read().await;
-        if !*is_running {
-            return Err(anyhow!("RelayerManager is not running"));
-        }
-
         {
             let relayers = self.relayers.read().await;
             if relayers.contains_key(rpc_url) {
@@ -42,15 +35,15 @@ impl RelayerManager {
         let relayer = GravityRelayer::new(rpc_url, task, last_state);
 
         let mut relayers = self.relayers.write().await;
-        relayers.insert(rpc_url.to_string(), Arc::new(relayer));
+        relayers.insert(uri.to_string(), Arc::new(relayer));
 
         info!("Successfully added URI: {}", uri);
         Ok(())
     }
 
-    pub async fn poll_url(&self, url: &str) -> Result<ObserveState> {
+    pub async fn poll_uri(&self, uri: &str) -> Result<ObserveState> {
         let relayers = { self.relayers.read().await };
-        let relayer = relayers.get(url).ok_or(anyhow!("URI {} not found", url))?;
+        let relayer = relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
         relayer.poll_once().await
     }
 }
@@ -62,8 +55,6 @@ pub struct ManagerStats {
     pub total_uris: usize,
     /// 活跃URI数量
     pub active_uris: usize,
-    /// 管理器是否在运行
-    pub is_running: bool,
 }
 
 /// 为了优雅退出，实现Drop trait

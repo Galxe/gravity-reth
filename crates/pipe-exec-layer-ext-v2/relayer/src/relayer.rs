@@ -14,6 +14,7 @@ use tracing::{debug, warn};
 pub struct ObserveState {
     pub block_number: u64,
     pub observed_value: ObservedValue,
+    // 链上的timestamp 不然不一样
     pub timestamp: u64,
     /// OnChain version
     pub version: u64,
@@ -295,11 +296,92 @@ impl GravityRelayer {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::{address, hex, Bytes, B256};
+    use alloy_rpc_types::Filter;
+    use reth_primitives::Log;
+
+    use crate::{
+        relayer::EventLog, EthHttpCli, GravityRelayer, ObserveState, ObservedValue, UriParser,
+    };
+    use alloy_sol_macro::sol;
+    use alloy_sol_types::SolEvent;
+
+    sol! {
+        contract USDC {
+            event USDCTransfer(
+                address indexed from,
+                address indexed to,
+                uint256 amount,
+                uint256 timestamp
+            );
+        }
+    }
 
     #[tokio::test]
-    async fn test_relayer_add_remove_task() {
+    async fn test_parsed_and_run() {
+        let uri = "gravity://31337/event?address=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512&topic0=0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624";
+        let parser = UriParser::new();
+        let task = parser.parse(uri).unwrap();
+        println!("task: {:?}", task);
+        let relayer = GravityRelayer::new(
+            "http://localhost:8848",
+            task,
+            ObserveState {
+                block_number: 10,
+                observed_value: ObservedValue::None,
+                timestamp: 0,
+                version: 0,
+            },
+        );
+        let state = relayer.poll_once().await.unwrap();
+        println!("state: {:?}", state);
+        match state.observed_value {
+            ObservedValue::Events { logs } => {
+                for log in logs {
+                    let decoded = USDC::USDCTransfer::decode_log(
+                        &Log::new(log.address, log.topics, Bytes::from(log.data)).unwrap(),
+                    )
+                    .unwrap();
+                    let data = decoded.data;
+                    let from = data.from;
+                    let to = data.to;
+                    let amount = data.amount;
+                    let timestamp = data.timestamp;
+                    println!(
+                        "from: {:?}, to: {:?}, amount: {:?}, timestamp: {:?}",
+                        from, to, amount, timestamp
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn test_direct() {
         // 创建mock eth客户端 - 这里需要实际的测试实现
-        // let eth_client = Arc::new(EthHttpCli::new("http://localhost:8545", 1).unwrap());
+        let eth_client = EthHttpCli::new("http://localhost:8848");
+        let filter = Filter::new()
+            .address(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"))
+            .event_signature(B256::from(hex!(
+                "0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624"
+            )))
+            .from_block(10)
+            .to_block(100);
+        let logs = eth_client.get_logs(&filter).await.unwrap();
+        println!("logs: {:?}", logs);
+        for log in logs {
+            let decoded = log.log_decode::<USDC::USDCTransfer>().unwrap();
+            let data = decoded.data();
+            let from = data.from;
+            let to = data.to;
+            let amount = data.amount;
+            let timestamp = data.timestamp;
+            println!(
+                "from: {:?}, to: {:?}, amount: {:?}, timestamp: {:?}",
+                from, to, amount, timestamp
+            );
+        }
         // let relayer = GravityRelayer::new(eth_client, RelayerConfig::default());
 
         // // 解析任务
