@@ -56,10 +56,10 @@ impl Default for RetryConfig {
 
 impl EthHttpCli {
     /// Creates a new EthHttpCli instance
-    /// 
+    ///
     /// # Arguments
     /// * `rpc_url` - The RPC endpoint URL for blockchain communication
-    /// 
+    ///
     /// # Returns
     /// * `EthHttpCli` - A new Ethereum HTTP client instance
     pub fn new(rpc_url: &str) -> Self {
@@ -80,13 +80,13 @@ impl EthHttpCli {
     }
 
     /// Gets the nonce (transaction count) for a given address
-    /// 
+    ///
     /// # Arguments
     /// * `address` - The Ethereum address to get the nonce for
-    /// 
+    ///
     /// # Returns
     /// * `Result<u64>` - The nonce value or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the request times out or fails
     pub async fn get_nonce(&self, address: Address) -> Result<u64> {
@@ -142,14 +142,14 @@ impl EthHttpCli {
     }
 
     /// Gets the storage value at a specific slot for a given address
-    /// 
+    ///
     /// # Arguments
     /// * `address` - The contract address to query
     /// * `slot` - The storage slot to read from
-    /// 
+    ///
     /// # Returns
     /// * `Result<B256>` - The storage value or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the storage query fails
     pub async fn get_storage_at(&self, address: Address, slot: B256) -> Result<B256> {
@@ -168,13 +168,13 @@ impl EthHttpCli {
     }
 
     /// Gets a block by its number
-    /// 
+    ///
     /// # Arguments
     /// * `block_number` - The block number to retrieve
-    /// 
+    ///
     /// # Returns
     /// * `Result<Option<alloy_rpc_types::Block>>` - The block data or None if not found
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the block query fails
     pub async fn get_block(&self, block_number: u64) -> Result<Option<alloy_rpc_types::Block>> {
@@ -194,10 +194,10 @@ impl EthHttpCli {
     }
 
     /// Gets the latest finalized block number
-    /// 
+    ///
     /// # Returns
     /// * `Result<u64>` - The finalized block number or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if no finalized block is found or the query fails
     pub async fn get_finalized_block_number(&self) -> Result<u64> {
@@ -224,10 +224,10 @@ impl EthHttpCli {
     }
 
     /// Gets the current gas price
-    /// 
+    ///
     /// # Returns
     /// * `Result<u128>` - The gas price in wei or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the gas price query fails
     #[allow(unused)]
@@ -245,10 +245,10 @@ impl EthHttpCli {
     }
 
     /// Gets the latest block number
-    /// 
+    ///
     /// # Returns
     /// * `Result<u64>` - The latest block number or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the block number query fails
     #[allow(unused)]
@@ -264,13 +264,13 @@ impl EthHttpCli {
     }
 
     /// Retries an operation with exponential backoff
-    /// 
+    ///
     /// # Arguments
     /// * `operation` - The async operation to retry
-    /// 
+    ///
     /// # Returns
     /// * `Result<T>` - The result of the operation or error after all retries
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if all retry attempts fail
     async fn retry_with_backoff<F, Fut, T>(&self, mut operation: F) -> Result<T>
@@ -319,7 +319,7 @@ impl EthHttpCli {
     }
 
     /// Updates performance metrics with the result of an operation
-    /// 
+    ///
     /// # Arguments
     /// * `success` - Whether the operation was successful
     /// * `latency` - The duration of the operation
@@ -339,7 +339,7 @@ impl EthHttpCli {
     }
 
     /// Gets a copy of the current performance metrics
-    /// 
+    ///
     /// # Returns
     /// * `ProviderMetrics` - A copy of the current metrics
     #[allow(unused)]
@@ -348,7 +348,7 @@ impl EthHttpCli {
     }
 
     /// Gets the average latency in milliseconds
-    /// 
+    ///
     /// # Returns
     /// * `f64` - The average latency in milliseconds, or 0.0 if no requests have been made
     #[allow(unused)]
@@ -362,7 +362,7 @@ impl EthHttpCli {
     }
 
     /// Gets the success rate as a percentage
-    /// 
+    ///
     /// # Returns
     /// * `f64` - The success rate as a decimal (0.0 to 1.0), or 0.0 if no requests have been made
     #[allow(unused)]

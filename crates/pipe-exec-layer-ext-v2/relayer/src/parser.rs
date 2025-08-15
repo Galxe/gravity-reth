@@ -41,7 +41,7 @@ pub struct ParsedTask {
 }
 
 /// URI parser for gravity protocol tasks
-/// 
+///
 /// This struct provides functionality to parse gravity protocol URIs
 /// into structured task objects that can be executed by the relayer.
 #[derive(Debug, Default)]
@@ -49,7 +49,7 @@ pub struct UriParser;
 
 impl UriParser {
     /// Creates a new UriParser instance
-    /// 
+    ///
     /// # Returns
     /// * `UriParser` - A new URI parser instance
     pub fn new() -> Self {
@@ -88,13 +88,13 @@ impl UriParser {
     }
 
     /// Parses event monitoring task parameters
-    /// 
+    ///
     /// # Arguments
     /// * `params` - Query parameters containing event filter configuration
-    /// 
+    ///
     /// # Returns
     /// * `Result<GravityTask>` - The parsed event monitoring task or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if required parameters are missing or invalid
     fn parse_event_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
@@ -146,13 +146,13 @@ impl UriParser {
     }
 
     /// Parses block monitoring task parameters
-    /// 
+    ///
     /// # Arguments
     /// * `params` - Query parameters containing block monitoring strategy
-    /// 
+    ///
     /// # Returns
     /// * `Result<GravityTask>` - The parsed block monitoring task or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the strategy parameter is missing or unsupported
     fn parse_block_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
@@ -164,13 +164,13 @@ impl UriParser {
     }
 
     /// Parses storage monitoring task parameters
-    /// 
+    ///
     /// # Arguments
     /// * `params` - Query parameters containing account and slot information
-    /// 
+    ///
     /// # Returns
     /// * `Result<GravityTask>` - The parsed storage monitoring task or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if account or slot parameters are missing or invalid
     fn parse_storage_task(&self, params: &HashMap<String, String>) -> Result<GravityTask> {
@@ -191,14 +191,14 @@ impl UriParser {
     }
 
     /// Parses account activity monitoring task parameters
-    /// 
+    ///
     /// # Arguments
     /// * `path` - The URI path containing account address
     /// * `params` - Query parameters containing activity type
-    /// 
+    ///
     /// # Returns
     /// * `Result<GravityTask>` - The parsed account monitoring task or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the path format is invalid or activity type is unsupported
     fn parse_account_task(
@@ -232,13 +232,13 @@ impl UriParser {
     }
 
     /// Parse multiple URIs in batch
-    /// 
+    ///
     /// # Arguments
     /// * `uris` - A slice of URI strings to parse
-    /// 
+    ///
     /// # Returns
     /// * `Result<Vec<ParsedTask>>` - A vector of parsed tasks or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if any URI in the batch fails to parse
     pub fn parse_batch(&self, uris: &[String]) -> Result<Vec<ParsedTask>> {

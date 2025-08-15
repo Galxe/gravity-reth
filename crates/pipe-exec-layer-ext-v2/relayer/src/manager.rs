@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 /// Manages multiple Gravity relayers and their lifecycle
-/// 
+///
 /// This struct provides centralized management for multiple relayers,
 /// allowing addition, removal, and polling of URIs across different RPC endpoints.
 #[derive(Debug)]
@@ -20,25 +20,22 @@ pub struct RelayerManager {
 
 impl RelayerManager {
     /// Creates a new RelayerManager instance
-    /// 
+    ///
     /// Returns a new RelayerManager with an empty relayer map and a new URI parser.
     pub fn new() -> Self {
-        Self {
-            uri_parser: UriParser::new(),
-            relayers: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self { uri_parser: UriParser::new(), relayers: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Adds a new URI to be monitored by the relayer
-    /// 
+    ///
     /// # Arguments
     /// * `uri` - The gravity protocol URI to monitor
     /// * `rpc_url` - The RPC endpoint URL for the blockchain
     /// * `last_state` - The last observed state to start monitoring from
-    /// 
+    ///
     /// # Returns
     /// * `Result<()>` - Success or error if the URI cannot be added
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the RPC URL is already being monitored
     /// * Returns an error if the URI cannot be parsed
@@ -63,18 +60,19 @@ impl RelayerManager {
     }
 
     /// Polls a specific URI for updates
-    /// 
+    ///
     /// # Arguments
     /// * `uri` - The URI to poll for updates
-    /// 
+    ///
     /// # Returns
     /// * `Result<ObserveState>` - The current observed state or error
-    /// 
+    ///
     /// # Errors
     /// * Returns an error if the URI is not found in the managed relayers
     pub async fn poll_uri(&self, uri: &str) -> Result<ObserveState> {
         let relayers = { self.relayers.read().await };
-        let relayer = relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
+        let relayer =
+            relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
         relayer.poll_once().await
     }
 }
