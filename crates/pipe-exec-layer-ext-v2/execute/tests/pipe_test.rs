@@ -198,7 +198,7 @@ fn test() {
     let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
         "reth",
         "--chain",
-        "mainnet",
+        "gravity.json",
         "--with-unused-ports",
         "--dev",
         "--datadir",
