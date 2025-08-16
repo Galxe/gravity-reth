@@ -114,7 +114,7 @@ where
     ) -> OnChainConfigResType {
         use crate::onchain_config::{
             consensus_config::ConsensusConfigFetcher, epoch::EpochFetcher,
-            validator_set::ValidatorSetFetcher,
+            observerd_jwk::ObservedJwkFetcher, validator_set::ValidatorSetFetcher,
         };
 
         match config_name {
@@ -130,6 +130,10 @@ where
             }
             OnChainConfig::ValidatorSet => {
                 let fetcher = ValidatorSetFetcher::new(self);
+                fetcher.fetch(block_number).0.into()
+            }
+            OnChainConfig::ObservedJWKs => {
+                let fetcher = ObservedJwkFetcher::new(self);
                 fetcher.fetch(block_number).0.into()
             }
             _ => todo!("Implement fetching for other config types"),

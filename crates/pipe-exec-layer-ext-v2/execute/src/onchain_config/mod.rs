@@ -8,6 +8,7 @@ pub mod epoch;
 pub mod metadata_txn;
 pub mod types;
 pub mod validator_set;
+pub mod observerd_jwk;
 
 // Re-export main types for convenience
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
