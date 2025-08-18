@@ -4163,6 +4163,7 @@ dependencies = [
  "async-trait",
  "metrics",
  "once_cell",
+ "reth-db-api",
  "reth-evm",
  "reth-metrics",
  "reth-payload-builder",
@@ -4220,7 +4221,7 @@ dependencies = [
 [[package]]
 name = "grevm"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/grevm?branch=reth-v1.6.0#45056c3b619687949b82478193912dd053605888"
+source = "git+https://github.com/Galxe/grevm?branch=reth-v1.6.0#bd0ba5565cdec7de59ab83f01dfbbab0dff985d9"
 dependencies = [
  "ahash",
  "alloy-evm",
@@ -10579,7 +10580,6 @@ dependencies = [
  "reth-prune-types",
  "reth-stages-types",
  "reth-storage-errors",
- "reth-tracing",
  "reth-trie-common",
  "reth-trie-db",
  "revm-bytecode",

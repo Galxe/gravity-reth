@@ -10,7 +10,6 @@ use metrics_derive::Metrics;
 use once_cell::sync::Lazy;
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use reth_primitives_traits::Account;
-use reth_tracing::tracing::info;
 use reth_trie_common::{
     nested_trie::{Node, StoredNode},
     updates::TrieUpdatesV2,
@@ -26,7 +25,6 @@ use std::{
 
 const MAX_PERSISTENCE_GAP: u64 = 64;
 const CACHE_METRICS_INTERVAL: Duration = Duration::from_secs(15); // 15s
-const CACHE_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5min
 const CACHE_SIZE_THRESHOLD: usize = 2_000_000;
 const CACHE_CONTRACTS_THRESHOLD: usize = 2_000;
 
@@ -183,11 +181,8 @@ impl PersistBlockCache {
         let weak_inner = Arc::downgrade(&inner);
         let handle = thread::spawn(move || {
             let interval = CACHE_METRICS_INTERVAL; // 15s
-            let eviction_interval = CACHE_EVICTION_INTERVAL; // 5min
-            let mut last_eviction_time = Instant::now();
-            let mut last_eviction_contract = Instant::now();
-            let mut last_eviction_height = 0;
-            let mut overflow = false;
+            let mut last_contract_eviction_height = 0;
+            let mut last_state_eviction_height = 0;
             loop {
                 thread::sleep(interval);
                 if let Some(inner) = weak_inner.upgrade() {
@@ -196,60 +191,40 @@ impl PersistBlockCache {
                     inner.metrics.cached_items.store(num_items as u64, Ordering::Release);
                     inner.metrics.report();
 
+                    // eviction
+                    let persist_height = inner.persist_block_number.lock().unwrap().unwrap_or(0);
                     // check and eviction contracts
-                    if inner.contracts.len() > CACHE_CONTRACTS_THRESHOLD &&
-                        last_eviction_contract.elapsed() >= eviction_interval
-                    {
-                        let persist_height =
-                            inner.persist_block_number.lock().unwrap().unwrap_or(0);
-                        let mut max_height = 512;
-                        info!("Start to clean contrancts in cache");
-                        while inner.contracts.len() > CACHE_CONTRACTS_THRESHOLD {
-                            let eviction_height = persist_height.saturating_sub(max_height);
-                            if eviction_height == 0 || eviction_height == persist_height {
-                                break;
-                            }
-                            inner.contracts.retain(|_, v| v.block_number > eviction_height);
-                            max_height /= 2;
-                        }
-                        info!(
-                            "Cleaned contracts in cache, current size: {}",
-                            inner.contracts.len()
-                        );
-                        last_eviction_contract = Instant::now();
+                    if inner.contracts.len() > CACHE_CONTRACTS_THRESHOLD {
+                        let eviction_height = if last_contract_eviction_height == 0 {
+                            persist_height.saturating_sub(512).max(persist_height / 2)
+                        } else {
+                            (persist_height + last_contract_eviction_height) / 2
+                        };
+                        inner.contracts.retain(|_, v| v.block_number > eviction_height);
+                        last_contract_eviction_height = eviction_height;
                     }
                     // check and eviction account and trie state
                     if num_items > CACHE_SIZE_THRESHOLD {
-                        let persist_height =
-                            inner.persist_block_number.lock().unwrap().unwrap_or(0);
-                        if last_eviction_time.elapsed() >= eviction_interval && persist_height > 0 {
-                            info!("Start to clean states in cache");
-                            overflow = true;
-                            let eviction_height = if last_eviction_height == 0 {
-                                persist_height.saturating_sub(512).max(persist_height / 2)
-                            } else {
-                                (persist_height + last_eviction_height) / 2
-                            };
-                            inner.accounts.retain(|_, v| v.block_number > eviction_height);
-                            inner.storage.iter().for_each(|s| {
-                                s.retain(|_, v| v.block_number > eviction_height);
-                            });
-                            inner.storage.retain(|_, s| !s.is_empty());
-                            inner.account_trie.retain(|_, v| v.block_number > eviction_height);
-                            inner.storage_trie.iter().for_each(|s| {
-                                s.retain(|_, v| v.block_number > eviction_height);
-                            });
-                            inner.storage_trie.retain(|_, s| !s.is_empty());
-                            last_eviction_height = eviction_height;
-                            inner
-                                .metrics
-                                .eviction_block_number
-                                .store(eviction_height, Ordering::Relaxed);
-                            info!("Cleaned states in cache, eviction_height: {}", eviction_height);
-                        }
-                    } else if overflow {
-                        overflow = false;
-                        last_eviction_time = Instant::now();
+                        let eviction_height = if last_state_eviction_height == 0 {
+                            persist_height.saturating_sub(512).max(persist_height / 2)
+                        } else {
+                            (persist_height + last_state_eviction_height) / 2
+                        };
+                        inner.accounts.retain(|_, v| v.block_number > eviction_height);
+                        inner.storage.iter().for_each(|s| {
+                            s.retain(|_, v| v.block_number > eviction_height);
+                        });
+                        inner.storage.retain(|_, s| !s.is_empty());
+                        inner.account_trie.retain(|_, v| v.block_number > eviction_height);
+                        inner.storage_trie.iter().for_each(|s| {
+                            s.retain(|_, v| v.block_number > eviction_height);
+                        });
+                        inner.storage_trie.retain(|_, s| !s.is_empty());
+                        last_state_eviction_height = eviction_height;
+                        inner
+                            .metrics
+                            .eviction_block_number
+                            .store(eviction_height, Ordering::Relaxed);
                     }
                     inner.metrics.metrics.eviction_duration.record(start.elapsed());
                 } else {
@@ -422,7 +397,7 @@ impl PersistBlockCache {
             let mut guard = self.merged_block_number.lock().unwrap();
             if let Some(ref mut merged_block_number) = *guard {
                 assert!(
-                    (block_number == *merged_block_number + 1),
+                    block_number == *merged_block_number + 1,
                     "Merged uncontinuous block, expect: {}, actual: {}",
                     *merged_block_number + 1,
                     block_number

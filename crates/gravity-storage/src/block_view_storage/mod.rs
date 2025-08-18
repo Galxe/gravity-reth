@@ -1,5 +1,6 @@
 use crate::GravityStorage;
 use alloy_primitives::{Address, B256, U256};
+use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx, Database};
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
     PersistBlockCache, ProviderError, ProviderResult, StateCommitmentProvider, StateProviderBox,
@@ -48,11 +49,13 @@ where
         + Sync
         + 'static,
 {
-    type StateView = BlockViewProvider;
+    type StateView = RawBlockViewProvider<<Client::DB as Database>::TX>;
 
     fn get_state_view(&self) -> ProviderResult<Self::StateView> {
-        let state = self.client.latest()?;
-        Ok(BlockViewProvider::new(StateProviderDatabase::new(state), Some(self.cache.clone())))
+        Ok(RawBlockViewProvider::new(
+            self.client.database_provider_ro()?.into_tx(),
+            Some(self.cache.clone()),
+        ))
     }
 
     fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieUpdatesV2)> {
@@ -85,6 +88,71 @@ where
                 break;
             }
         }
+    }
+}
+
+/// Raw Block view provider
+#[derive(Debug)]
+pub struct RawBlockViewProvider<Tx> {
+    tx: Tx,
+    cache: Option<PersistBlockCache>,
+}
+
+impl<Tx> RawBlockViewProvider<Tx> {
+    /// Create `RawBlockViewProvider`
+    pub const fn new(tx: Tx, cache: Option<PersistBlockCache>) -> Self {
+        Self { tx, cache }
+    }
+}
+
+impl<Tx: DbTx> DatabaseRef for RawBlockViewProvider<Tx> {
+    type Error = ProviderError;
+
+    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        if let Some(cache) = &self.cache {
+            let value = cache.basic_account(&address).map(Into::into);
+            if value.is_some() {
+                return Ok(value);
+            }
+        }
+        Ok(self.tx.get_by_encoded_key::<tables::PlainAccountState>(&address)?.map(Into::into))
+    }
+
+    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        if let Some(cache) = &self.cache {
+            if let Some(value) = cache.bytecode_by_hash(&code_hash) {
+                return Ok(value);
+            }
+        }
+        match self.tx.get_by_encoded_key::<tables::Bytecodes>(&code_hash)? {
+            Some(byte_code) => {
+                let byte_code: Bytecode = byte_code.0;
+                if let Some(cache) = &self.cache {
+                    cache.cache_byte_code(code_hash, byte_code.clone());
+                }
+                Ok(byte_code)
+            }
+            None => Ok(Default::default()),
+        }
+    }
+
+    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        if let Some(cache) = &self.cache {
+            if let Some(value) = cache.storage(&address, &index) {
+                return Ok(value);
+            }
+        }
+        let mut cursor = self.tx.cursor_dup_read::<tables::PlainStorageState>()?;
+        let storage_key = B256::new(index.to_be_bytes());
+        Ok(cursor
+            .seek_by_key_subkey(address, storage_key)?
+            .filter(|e| e.key == storage_key)
+            .map(|e| e.value)
+            .unwrap_or_default())
+    }
+
+    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
+        unimplemented!("not support block_hash_ref in BlockViewProvider")
     }
 }
 
