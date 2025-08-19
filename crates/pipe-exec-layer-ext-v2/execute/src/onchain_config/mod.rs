@@ -9,6 +9,7 @@ pub mod metadata_txn;
 pub mod types;
 pub mod validator_set;
 pub mod observerd_jwk;
+pub mod jwk_consensus_config;
 
 // Re-export main types for convenience
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
