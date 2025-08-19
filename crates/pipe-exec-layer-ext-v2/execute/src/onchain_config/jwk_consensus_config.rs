@@ -28,7 +28,11 @@ fn convert_into_bcs_active_providers(oidc_providers: Vec<OIDCProvider>) -> Bytes
             config_url: provider.configUrl.clone(),
         })
         .collect::<Vec<_>>();
-    bcs::to_bytes(&active_providers).expect("Failed to serialize OIDCProviders").into()
+    let jwk_consensus_config = gravity_api_types::on_chain_config::jwks::JWKConsensusConfig {
+        enabled: true,
+        oidc_providers: active_providers,
+    };
+    bcs::to_bytes(&jwk_consensus_config).expect("Failed to serialize JwkConsensusConfig").into()
 }
 
 /// Fetcher for consensus configuration
