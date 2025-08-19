@@ -10,6 +10,7 @@ use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
+use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::{Evm, IntoTxEnv};
 use reth_execution_types::BlockExecutionOutput;
@@ -20,6 +21,7 @@ use revm::{
     context_interface::result::{ExecutionResult, HaltReason},
     database::BundleState,
     state::EvmState,
+    Database,
 };
 use std::fmt::Debug;
 
@@ -52,7 +54,9 @@ impl MetadataTxnResult {
     /// Convert the metadata transaction result into a full executed block result
     pub(crate) fn into_executed_ordered_block_result(
         self,
+        chain_spec: &ChainSpec,
         ordered_block: &OrderedBlock,
+        base_fee: u64,
         state: BundleState,
         validators: Bytes,
     ) -> ExecuteOrderedBlockResult {
@@ -62,7 +66,7 @@ impl MetadataTxnResult {
                 beneficiary: ordered_block.coinbase,
                 timestamp: ordered_block.timestamp,
                 mix_hash: ordered_block.prev_randao,
-                base_fee_per_gas: Some(0),
+                base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
                 nonce: BEACON_NONCE.into(),
@@ -72,15 +76,21 @@ impl MetadataTxnResult {
         };
 
         // Shanghai fork fields
-        block.header.withdrawals_root = Some(EMPTY_WITHDRAWALS);
-        block.body.withdrawals = Some(Withdrawals::default());
+        if chain_spec.is_shanghai_active_at_timestamp(block.timestamp) {
+            block.header.withdrawals_root = Some(EMPTY_WITHDRAWALS);
+            block.body.withdrawals = Some(Withdrawals::default());
+        }
 
         // Cancun fork fields
-        // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
-        // execution?
-        block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
-        block.header.excess_blob_gas = Some(0);
-        block.header.blob_gas_used = Some(0);
+        if chain_spec.is_cancun_active_at_timestamp(block.timestamp) {
+            // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
+            // execution?
+            block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
+
+            // TODO(nekomoto): fill `excess_blob_gas` and `blob_gas_used` fields
+            block.header.excess_blob_gas = Some(0);
+            block.header.blob_gas_used = Some(0);
+        }
 
         let new_epoch = ordered_block.epoch + 1;
         ExecuteOrderedBlockResult {
@@ -125,24 +135,29 @@ impl MetadataTxnResult {
 }
 
 /// Create a new system call transaction
-fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
+fn new_system_call_txn(
+    contract: Address,
+    nonce: u64,
+    gas_price: u128,
+    input: Bytes,
+) -> TransactionSigned {
     TransactionSigned::new_unhashed(
         Transaction::Legacy(TxLegacy {
             chain_id: None,
-            nonce: 0,
-            gas_price: 0,
+            nonce,
+            gas_price,
             gas_limit: 30_000_000,
             to: TxKind::Call(contract),
             value: U256::ZERO,
             input,
         }),
-        Signature::test_signature(),
+        Signature::new(U256::ZERO, U256::ZERO, false),
     )
 }
 
 /// Execute a metadata contract call (blockPrologue)
 pub fn transact_metadata_contract_call(
-    evm: &mut impl Evm<Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
+    evm: &mut impl Evm<DB = impl Database, Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     timestamp_us: u64,
     proposer: Option<Address>,
 ) -> (MetadataTxnResult, EvmState) {
@@ -152,11 +167,22 @@ pub fn transact_metadata_contract_call(
         timestampMicros: U256::from(timestamp_us),
     };
     let input: Bytes = call.abi_encode().into();
-    let txn = new_system_call_txn(BLOCK_ADDR, input);
+    let system_call_account =
+        evm.db_mut().basic(SYSTEM_CALLER).unwrap().expect("SYSTEM_CALLER not exists");
+    let txn = new_system_call_txn(
+        BLOCK_ADDR,
+        system_call_account.nonce,
+        evm.block().basefee as u128,
+        input,
+    );
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let mut result = evm.transact_raw(tx_env).unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
-    result.state.remove(&SYSTEM_CALLER);
-    result.state.remove(&evm.block().beneficiary);
+    // Restore the balance of SYSTEM_CALLER
+    result.state.get_mut(&SYSTEM_CALLER).unwrap().info.balance = system_call_account.balance;
+    // Do not reward the beneficiary
+    if evm.block().beneficiary != SYSTEM_CALLER {
+        result.state.remove(&evm.block().beneficiary);
+    }
     (MetadataTxnResult { result: result.result, txn }, result.state)
 }
