@@ -25,6 +25,7 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
+use revm_primitives::address;
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -52,6 +53,7 @@ fn new_ordered_block(
         withdrawals: Default::default(),
         transactions: vec![],
         senders: vec![],
+        proposer: Some(address!("0x6e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f")),
     }
 }
 
@@ -151,6 +153,7 @@ async fn run_pipe(
     let latest_block_number = db_provider.best_block_number().unwrap();
     let latest_block_hash = db_provider.block_hash(latest_block_number).unwrap().unwrap();
     let latest_block_header = db_provider.header_by_number(latest_block_number).unwrap().unwrap();
+    println!("latest_block_header: {:?}", latest_block_header);
     let storage = BlockViewStorage::new(provider.clone());
 
     let (tx, rx) = tokio::sync::oneshot::channel();

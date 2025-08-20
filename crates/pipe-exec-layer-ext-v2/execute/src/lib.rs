@@ -432,6 +432,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             },
             body: BlockBody::default(),
         };
+        debug!(target: "create_block_for_executor",
+            header=?block.header,
+            "created block"
+        );
 
         if self.chain_spec.is_shanghai_active_at_timestamp(block.timestamp) {
             if ordered_block.withdrawals.is_empty() {
@@ -483,7 +487,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let state = self.storage.get_state_view().unwrap();
 
-        let mut evm_env = self
+        let evm_env = self
             .evm_config
             .next_evm_env(
                 parent_header,
@@ -505,9 +509,6 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let (metadata_txn_result, state_changes) = {
             let mut state = State::builder().with_database_ref(&state).with_bundle_update().build();
-            // Since we create one legacy txn, we should skip the base fee check
-            // FIXME: This is a hack, we should find a more elegant way to do this
-            evm_env.cfg_env.disable_base_fee = true;
             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
             let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
                 &mut evm,
@@ -529,7 +530,9 @@ impl<Storage: GravityStorage> Core<Storage> {
                 state.commit(state_changes);
                 state.merge_transitions(BundleRetention::Reverts);
                 return metadata_txn_result.into_executed_ordered_block_result(
+                    &self.chain_spec,
                     &ordered_block,
+                    base_fee,
                     state.take_bundle(),
                     validators,
                 );
