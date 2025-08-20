@@ -36,6 +36,7 @@ reth-primitives.workspace = true
 reth-cli-commands.workspace = true
 reth-pipe-exec-layer-ext-v2.workspace = true
 reth-pipe-exec-layer-event-bus.workspace = true
+reth-pipe-exec-layer-relayer.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
 gravity-storage.workspace = true
@@ -217,6 +218,7 @@ members = [
     "crates/tracing-otlp",
     "crates/pipe-exec-layer-ext-v2/execute",
     "crates/pipe-exec-layer-ext-v2/event-bus",
+    "crates/pipe-exec-layer-ext-v2/relayer",
 ]
 default-members = ["bin/reth"]
 exclude = ["docs/cli"]
@@ -498,6 +500,7 @@ reth-trie-db = { path = "crates/trie/db" }
 reth-trie-parallel = { path = "crates/trie/parallel" }
 reth-pipe-exec-layer-ext-v2 = { path = "crates/pipe-exec-layer-ext-v2/execute" }
 reth-pipe-exec-layer-event-bus = { path = "crates/pipe-exec-layer-ext-v2/event-bus" }
+reth-pipe-exec-layer-relayer = { path = "crates/pipe-exec-layer-ext-v2/relayer" }
 gravity-storage = { path = "crates/gravity-storage" }
 gravity-primitives = { path = "crates/gravity-primitives" }
 reth-trie-sparse = { path = "crates/trie/sparse", default-features = false }
