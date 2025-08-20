@@ -45,6 +45,8 @@ struct CacheMetrics {
     latest_eviction_block_number: Gauge,
     /// Eviction duration
     eviction_duration: Histogram,
+    /// Wait persist duration
+    wait_persist_duration: Histogram,
 }
 
 #[derive(Default)]
@@ -238,11 +240,38 @@ impl PersistBlockCache {
     }
 
     /// Wait if there's a large gap between executed block and persist block
-    pub fn wait_persist_gap(&self) {
+    ///
+    /// # Arguments
+    /// * `timeout_ms` - Optional timeout in milliseconds. If None, waits indefinitely.
+    pub fn wait_persist_gap(&self, timeout_ms: Option<u64>) {
         let (lock, cvar) = self.persist_wait.as_ref();
         let mut large_gap = lock.lock().unwrap();
+        let mut wait_duration = None;
+        let start_time = Instant::now();
+
         while *large_gap {
-            large_gap = cvar.wait(large_gap).unwrap();
+            if wait_duration.is_none() {
+                wait_duration = Some(start_time);
+            }
+            if let Some(timeout_ms) = timeout_ms {
+                let elapsed = start_time.elapsed();
+                let timeout_duration = Duration::from_millis(timeout_ms);
+                if elapsed >= timeout_duration {
+                    break;
+                }
+                let remaining = timeout_duration - elapsed;
+                let result = cvar.wait_timeout(large_gap, remaining).unwrap();
+                large_gap = result.0;
+                if result.1.timed_out() {
+                    break;
+                }
+            } else {
+                large_gap = cvar.wait(large_gap).unwrap();
+            }
+        }
+
+        if let Some(wait_duration) = wait_duration {
+            self.metrics.metrics.wait_persist_duration.record(wait_duration.elapsed());
         }
     }
 
