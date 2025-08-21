@@ -3,7 +3,7 @@
 mod channel;
 mod metrics;
 pub mod onchain_config;
-pub use reth_pipe_exec_layer_relayer::{RelayerManager};
+pub use reth_pipe_exec_layer_relayer::{RelayerManager, ObserveState, ObservedValue};
 
 use channel::Channel;
 use gravity_api_types::{
@@ -57,6 +57,10 @@ use tokio::sync::{
 };
 use tracing::*;
 
+use crate::onchain_config::observerd_jwk::constrct_observed_jwks_txns_envelope;
+
+// use crate::onchain_config::observerd_jwk::transact_observed_jwk_contract_call;
+
 /// Metadata about an executed block
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutedBlockMeta {
@@ -94,6 +98,8 @@ pub struct OrderedBlock {
     pub senders: Vec<Address>,
     /// The proposer address of the block
     pub proposer: Option<Address>,
+    /// Served for the jwk contract sent by system caller, it might be multiple jwks update
+    pub jwk_extra_data: Vec<Vec<u8>>,
 }
 
 enum ReceivedBlock {
@@ -470,6 +476,13 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.gas_limit,
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
+        let txs = if !ordered_block.jwk_extra_data.is_empty() {
+            let mut jwk_txns = constrct_observed_jwks_txns_envelope(ordered_block.jwk_extra_data);
+            jwk_txns.extend(txs);
+            jwk_txns
+        } else {
+            txs
+        };
 
         block.body.transactions = txs;
         (RecoveredBlock::new_unhashed(block, senders), txs_info)
@@ -516,6 +529,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 ordered_block.timestamp * 1_000_000,
                 ordered_block.proposer,
             );
+            // transact_observed_jwk_contract_call(&mut evm, vec![]);
             drop(evm);
 
             if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
@@ -574,6 +588,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             gravity_events: vec![],
             epoch,
         };
+        // TODO!(): correct the jwk txns
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
         result
     }

@@ -157,7 +157,7 @@ impl std::fmt::Debug for GravityRelayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GravityRelayer")
             .field("eth_client", &self.eth_client)
-            .field("task_state", &"<task_state>")
+            .field("task_state", &self.task_state)
             .finish()
     }
 }
@@ -221,6 +221,7 @@ impl GravityRelayer {
         let finalized_block = self.eth_client.get_finalized_block_number().await.unwrap();
         scoped_filter = scoped_filter.to_block(finalized_block);
 
+        debug!("Polling event task {} with filter: {:?}", task_uri, scoped_filter);
         let logs = self.eth_client.get_logs(&scoped_filter).await?;
 
         let new_logs: Vec<EventLog> = logs
@@ -232,7 +233,7 @@ impl GravityRelayer {
         if new_logs.is_empty() {
             let next_cursor = scoped_filter.get_to_block().unwrap();
             self.task_state.update_cursor(next_cursor).await;
-            debug!("Polling event task {} completed, cursor: {}", task_uri, next_cursor);
+            debug!("Polling event task {} with no new logs, cursor: {}", task_uri, next_cursor);
             return Ok((*previous_value).clone());
         }
 

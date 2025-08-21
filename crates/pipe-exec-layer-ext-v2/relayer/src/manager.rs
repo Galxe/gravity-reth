@@ -51,11 +51,10 @@ impl RelayerManager {
         info!("Adding URI: {} -> {:?}", uri, task);
 
         let relayer = GravityRelayer::new(rpc_url, task, last_state);
+        info!("Successfully added URI: {}, relayer: {:?}", uri, relayer);
 
         let mut relayers = self.relayers.write().await;
         relayers.insert(uri.to_string(), Arc::new(relayer));
-
-        info!("Successfully added URI: {}", uri);
         Ok(())
     }
 
