@@ -47,6 +47,7 @@ reth-metrics.workspace = true
 metrics.workspace = true
 serde_json.workspace = true
 once_cell.workspace = true
+reth-pipe-exec-layer-relayer.workspace = true
 
 # crypto and serialization for gravity-aptos validator_info
 bcs = "0.1"

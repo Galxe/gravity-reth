@@ -9772,6 +9772,7 @@ dependencies = [
  "reth-node-builder",
  "reth-node-ethereum",
  "reth-pipe-exec-layer-event-bus",
+ "reth-pipe-exec-layer-relayer",
  "reth-primitives",
  "reth-primitives-traits",
  "reth-provider",

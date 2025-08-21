@@ -3,6 +3,7 @@
 mod channel;
 mod metrics;
 pub mod onchain_config;
+pub use reth_pipe_exec_layer_relayer::{RelayerManager};
 
 use channel::Channel;
 use gravity_api_types::{
