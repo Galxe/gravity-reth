@@ -567,7 +567,7 @@ where
     ///
     /// This will block the current thread and process incoming messages.
     pub fn run(self) {
-        if gravity_primitives::CONFIG.disable_pipe_execution {
+        if get_gravity_config().disable_pipe_execution {
             self.run_inner();
         } else {
             self.pipe_run_inner();
@@ -3047,7 +3047,7 @@ where
 /// Block inclusion can be valid, accepted, or invalid. Invalid blocks are returned as an error
 /// variant.
 ///
-/// If we don't know the block's parent, we return `Disconnected`, as we can't claim that the block
+/// If we don't know the block's parent, we return `Disconnected`, as we can't claim that the block
 /// is valid or not.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockStatus {
@@ -3100,3 +3100,5 @@ impl PersistingKind {
         matches!(self, Self::PersistingDescendant)
     }
 }
+
+use gravity_primitives::get_gravity_config;

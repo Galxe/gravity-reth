@@ -26,6 +26,7 @@ reth-trie-db = { workspace = true, optional = true }
 revm-database.workspace = true
 revm-bytecode.workspace = true
 reth-ethereum-primitives.workspace = true
+gravity-primitives.workspace = true
 
 # ethereum
 alloy-eips.workspace = true

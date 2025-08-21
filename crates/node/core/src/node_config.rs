@@ -2,8 +2,8 @@
 
 use crate::{
     args::{
-        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, NetworkArgs, PayloadBuilderArgs,
-        PruningArgs, RpcServerArgs, TxPoolArgs,
+        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, GravityArgs, NetworkArgs,
+        PayloadBuilderArgs, PruningArgs, RpcServerArgs, TxPoolArgs,
     },
     dirs::{ChainPath, DataDirPath},
     utils::get_single_header,
@@ -154,6 +154,9 @@ pub struct NodeConfig<ChainSpec> {
 
     /// All ERA import related arguments with --era prefix
     pub era: EraArgs,
+
+    /// All gravity related arguments with --gravity prefix
+    pub gravity: GravityArgs,
 }
 
 impl NodeConfig<ChainSpec> {
@@ -184,6 +187,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             datadir: DatadirArgs::default(),
             engine: EngineArgs::default(),
             era: EraArgs::default(),
+            gravity: GravityArgs::default(),
         }
     }
 
@@ -490,6 +494,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             pruning: self.pruning,
             engine: self.engine,
             era: self.era,
+            gravity: self.gravity,
         }
     }
 
@@ -527,6 +532,7 @@ impl<ChainSpec> Clone for NodeConfig<ChainSpec> {
             datadir: self.datadir.clone(),
             engine: self.engine.clone(),
             era: self.era.clone(),
+            gravity: self.gravity.clone(),
         }
     }
 }

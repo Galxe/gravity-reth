@@ -27,7 +27,7 @@ use alloy_evm::{
 };
 use alloy_primitives::{Bytes, U256};
 use core::{convert::Infallible, fmt::Debug};
-use gravity_primitives::CONFIG;
+use gravity_primitives::get_gravity_config;
 use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
@@ -275,7 +275,7 @@ where
         db: DB,
     ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
     {
-        if CONFIG.disable_grevm {
+        if get_gravity_config().disable_grevm {
             Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
         } else {
             Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))

@@ -15,6 +15,7 @@ use futures_util::{
     future::{BoxFuture, Fuse, FusedFuture},
     FutureExt, Stream, StreamExt,
 };
+use gravity_primitives::get_gravity_config;
 use reth_chain_state::CanonStateNotification;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_execution_types::ChangedAccount;
@@ -177,7 +178,7 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
     // toggle for the first notification
     let mut first_event = true;
 
-    if !gravity_primitives::CONFIG.disable_pipe_execution {
+    if !get_gravity_config().disable_pipe_execution {
         let pool = pool.clone();
         tokio::spawn(async move {
             // Wait for PipeExecLayerExt to be available

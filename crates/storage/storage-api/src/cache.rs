@@ -5,6 +5,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use dashmap::DashMap;
+use gravity_primitives::get_gravity_config;
 use metrics::{Gauge, Histogram};
 use metrics_derive::Metrics;
 use once_cell::sync::Lazy;
@@ -23,9 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_PERSISTENCE_GAP: u64 = 64;
 const CACHE_METRICS_INTERVAL: Duration = Duration::from_secs(15); // 15s
-const CACHE_SIZE_THRESHOLD: usize = 2_000_000;
 const CACHE_CONTRACTS_THRESHOLD: usize = 2_000;
 
 #[derive(Metrics)]
@@ -185,6 +184,7 @@ impl PersistBlockCache {
             let interval = CACHE_METRICS_INTERVAL; // 15s
             let mut last_contract_eviction_height = 0;
             let mut last_state_eviction_height = 0;
+            let cache_capacity = get_gravity_config().cache_capacity as usize;
             loop {
                 thread::sleep(interval);
                 if let Some(inner) = weak_inner.upgrade() {
@@ -206,7 +206,7 @@ impl PersistBlockCache {
                         last_contract_eviction_height = eviction_height;
                     }
                     // check and eviction account and trie state
-                    if num_items > CACHE_SIZE_THRESHOLD {
+                    if num_items > cache_capacity {
                         let eviction_height = if last_state_eviction_height == 0 {
                             persist_height.saturating_sub(512).max(persist_height / 2)
                         } else {
@@ -408,7 +408,8 @@ impl PersistBlockCache {
         if let Some(merged_block_number) = *self.merged_block_number.lock().unwrap() {
             let (lock, cvar) = self.persist_wait.as_ref();
             let mut large_gap = lock.lock().unwrap();
-            *large_gap = merged_block_number - block_number >= MAX_PERSISTENCE_GAP;
+            *large_gap =
+                merged_block_number - block_number >= get_gravity_config().cache_max_persist_gap;
             cvar.notify_all();
         }
     }

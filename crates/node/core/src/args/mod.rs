@@ -60,6 +60,10 @@ pub use benchmark_args::BenchmarkArgs;
 mod engine;
 pub use engine::EngineArgs;
 
+/// GravityArgs for configuring gravity features
+mod gravity;
+pub use gravity::GravityArgs;
+
 /// `RessArgs` for configuring ress subprotocol.
 mod ress_args;
 pub use ress_args::RessArgs;

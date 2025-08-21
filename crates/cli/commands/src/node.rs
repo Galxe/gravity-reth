@@ -2,6 +2,7 @@
 
 use crate::launcher::Launcher;
 use clap::{value_parser, Args, Parser};
+use gravity_primitives::init_gravity_config;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_runner::CliContext;
@@ -10,8 +11,8 @@ use reth_db::init_db;
 use reth_node_builder::NodeBuilder;
 use reth_node_core::{
     args::{
-        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, EraArgs, NetworkArgs,
-        PayloadBuilderArgs, PruningArgs, RpcServerArgs, TxPoolArgs,
+        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, EraArgs, GravityArgs,
+        NetworkArgs, PayloadBuilderArgs, PruningArgs, RpcServerArgs, TxPoolArgs,
     },
     node_config::NodeConfig,
     version,
@@ -105,6 +106,10 @@ pub struct NodeCommand<C: ChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs
     #[command(flatten)]
     pub pruning: PruningArgs,
 
+    /// All gravity related arguments
+    #[command(flatten)]
+    pub gravity: GravityArgs,
+
     /// Engine cli arguments
     #[command(flatten, next_help_heading = "Engine")]
     pub engine: EngineArgs,
@@ -168,7 +173,13 @@ where
             ext,
             engine,
             era,
+            gravity,
         } = self;
+
+        // Initialize global gravity config
+        let gravity_config = gravity.to_config();
+        tracing::info!(target: "reth::cli", gravity_config = ?gravity_config, "Initializing global gravity config");
+        init_gravity_config(gravity_config);
 
         // set up node config
         let mut node_config = NodeConfig {
@@ -187,6 +198,7 @@ where
             pruning,
             engine,
             era,
+            gravity,
         };
 
         let data_dir = node_config.datadir();

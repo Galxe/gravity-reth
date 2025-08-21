@@ -11,25 +11,6 @@ use once_cell::sync::Lazy;
 use reth_revm::{db::PlainAccount, CacheState, TransitionState};
 use revm_primitives::{EnvWithHandlerCfg, TxEnv};
 
-#[derive(Debug)]
-pub(crate) struct DebugExtArgs {
-    pub disable_grevm: bool,
-    pub dump_path: String,
-    pub compare_with_seq_exec: bool,
-    pub with_hints: bool,
-    pub update_db_metrics: bool,
-    pub dump_block_number: Option<u64>,
-}
-
-pub(crate) static DEBUG_EXT: Lazy<DebugExtArgs> = Lazy::new(|| DebugExtArgs {
-    disable_grevm: std::env::var("EVM_DISABLE_GREVM").is_ok(),
-    dump_path: std::env::var("EVM_DUMP_PATH").unwrap_or("data/blocks".to_string()),
-    compare_with_seq_exec: std::env::var("EVM_COMPARE_WITH_SEQ_EXEC").is_ok(),
-    with_hints: std::env::var("GREVM_WITH_HINTS").is_ok(),
-    update_db_metrics: std::env::var("GREVM_UPDATE_DB_METRICS").is_ok(),
-    dump_block_number: std::env::var("EVM_DUMP_BLOCK_NUMBER").ok().map(|s| s.parse().unwrap()),
-});
-
 pub(crate) fn dump_block_env(
     env: &EnvWithHandlerCfg,
     txs: &[TxEnv],
