@@ -19,6 +19,7 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use revm::database::{states::bundle_state::BundleRetention, State};
 use revm::{context::TxEnv, context_interface::result::HaltReason, state::EvmState, Database};
 use revm_primitives::TxKind;
+use tracing::info;
 use std::fmt::Debug;
 
 sol! {
@@ -43,13 +44,15 @@ sol! {
     function upsertObservedJWKs(
         ProviderJWKs[] calldata providerJWKsArray
     ) external;
+
+    event ObservedJWKsUpdated(uint256 indexed epoch, ProviderJWKs[] jwks);
 }
 
 fn convert_into_api_jwk(jwk: JWK) -> JWKStruct {
     JWKStruct { type_name: "JWK".to_string(), data: jwk.data.into() }
 }
 
-fn convert_into_api_provider_jwks(
+pub fn convert_into_api_provider_jwks(
     provider_jwks: ProviderJWKs,
 ) -> gravity_api_types::on_chain_config::jwks::ProviderJWKs {
     gravity_api_types::on_chain_config::jwks::ProviderJWKs {
@@ -170,6 +173,7 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
 pub fn constrct_observed_jwks_txns_envelope(
     provider_jwks_array_bytes: Vec<Vec<u8>>,
 ) -> Vec<EthereumTxEnvelope<TxEip4844>> {
+    info!("provider_jwks_array_bytes length: {:?}", provider_jwks_array_bytes.len());
     let txns = provider_jwks_array_bytes
         .into_iter()
         .map(|provider_jwks_bytes| {

@@ -3,7 +3,8 @@
 mod channel;
 mod metrics;
 pub mod onchain_config;
-pub use reth_pipe_exec_layer_relayer::{RelayerManager, ObserveState, ObservedValue};
+use alloy_sol_types::SolEvent;
+pub use reth_pipe_exec_layer_relayer::{ObserveState, ObservedValue, RelayerManager};
 
 use channel::Channel;
 use gravity_api_types::{
@@ -57,7 +58,9 @@ use tokio::sync::{
 };
 use tracing::*;
 
-use crate::onchain_config::observerd_jwk::constrct_observed_jwks_txns_envelope;
+use crate::onchain_config::observerd_jwk::{
+    constrct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, ObservedJWKsUpdated,
+};
 
 // use crate::onchain_config::observerd_jwk::transact_observed_jwk_contract_call;
 
@@ -477,6 +480,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
         let txs = if !ordered_block.jwk_extra_data.is_empty() {
+            info!(target: "create_block_for_executor",
+                jwk_extra_data_length=?ordered_block.jwk_extra_data.len(),
+                block_number=?block.number,
+                "extend jwk txns"
+            );
             let mut jwk_txns = constrct_observed_jwks_txns_envelope(ordered_block.jwk_extra_data);
             jwk_txns.extend(txs);
             jwk_txns
@@ -577,15 +585,52 @@ impl<Storage: GravityStorage> Core<Storage> {
             .unwrap();
             panic!("failed to execute block {block_id:?}: {err:?}")
         });
+        info!(target: "execute_ordered_block",
+            id=?block_id,
+            parent_id=?parent_id,
+            number=?block_number,
+            "executed block done"
+        );
 
         let (mut block, senders) = block.split();
         block.header.gas_used = outcome.gas_used;
+        let mut gravity_events = vec![];
+        for receipt in &outcome.receipts {
+            for log in &receipt.logs {
+                if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
+                    info!(target: "execute_ordered_block",
+                        id=?block_id,
+                        parent_id=?parent_id,
+                        number=?block_number,
+                        "observed jwks updated"
+                    );
+                    let api_jwks = event
+                        .jwks
+                        .iter()
+                        .map(|jwk| convert_into_api_provider_jwks(jwk.clone()))
+                        .collect::<Vec<_>>();
+                    gravity_events.push(GravityEvent::ObservedJWKsUpdated(
+                        event.epoch.try_into().unwrap(),
+                        api_jwks,
+                    ));
+                }
+            }
+        }
+        if !gravity_events.is_empty() {
+            info!(target: "execute_ordered_block",
+                id=?block_id,
+                parent_id=?parent_id,
+                number=?block_number,
+                gravity_events=?gravity_events,
+                "gravity events"
+            );
+        }
         let mut result = ExecuteOrderedBlockResult {
             block,
             senders,
             execution_output: outcome,
             txs_info,
-            gravity_events: vec![],
+            gravity_events,
             epoch,
         };
         // TODO!(): correct the jwk txns
