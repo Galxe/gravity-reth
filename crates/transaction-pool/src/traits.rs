@@ -777,7 +777,7 @@ pub type BestTransactionsFor<Pool> = Box<
 /// Note: this iterator will always return the best transaction that it currently knows.
 /// There is no guarantee transactions will be returned sequentially in decreasing
 /// priority order.
-pub trait BestTransactions: Iterator + Send {
+pub trait BestTransactions: Iterator + Send + Sync {
     /// Mark the transaction as invalid.
     ///
     /// Implementers must ensure all subsequent transaction _don't_ depend on this transaction.
