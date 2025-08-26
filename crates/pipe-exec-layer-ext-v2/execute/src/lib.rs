@@ -58,9 +58,12 @@ use tokio::sync::{
 };
 use tracing::*;
 
-use crate::onchain_config::{observerd_jwk::{
-    constrct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, ObservedJWKsUpdated,
-}, SYSTEM_CALLER};
+use crate::onchain_config::{
+    observerd_jwk::{
+        constrct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, ObservedJWKsUpdated,
+    },
+    SYSTEM_CALLER,
+};
 
 // use crate::onchain_config::observerd_jwk::transact_observed_jwk_contract_call;
 
@@ -426,6 +429,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         ordered_block: OrderedBlock,
         base_fee: u64,
         state: &Storage::StateView,
+        mut jwk_txns: Vec<TransactionSigned>,
     ) -> (RecoveredBlock<Block>, Vec<TxInfo>) {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
         let mut block = Block {
@@ -479,13 +483,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.gas_limit,
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
-        let (txs, senders) = if !ordered_block.jwk_extra_data.is_empty() {
-            info!(target: "create_block_for_executor",
-                jwk_extra_data_length=?ordered_block.jwk_extra_data.len(),
-                block_number=?block.number,
-                "extend jwk txns"
-            );
-            let mut jwk_txns = constrct_observed_jwks_txns_envelope(ordered_block.jwk_extra_data);
+        let (txs, senders) = if !jwk_txns.is_empty() {
             let mut address = vec![SYSTEM_CALLER; jwk_txns.len()];
             address.extend(senders);
             jwk_txns.extend(txs);
@@ -566,7 +564,18 @@ impl<Storage: GravityStorage> Core<Storage> {
             (metadata_txn_result, state_changes)
         };
 
-        let (block, txs_info) = self.create_block_for_executor(ordered_block, base_fee, &state);
+        let jwk_txns = if !ordered_block.jwk_extra_data.is_empty() {
+            constrct_observed_jwks_txns_envelope(
+                &ordered_block.jwk_extra_data,
+                metadata_txn_result.txn.nonce(),
+                metadata_txn_result.txn.gas_price().expect("metadata txn gas price is not set"),
+            )
+        } else {
+            vec![]
+        };
+
+        let (block, txs_info) =
+            self.create_block_for_executor(ordered_block, base_fee, &state, jwk_txns);
 
         info!(target: "execute_ordered_block",
             id=?block_id,

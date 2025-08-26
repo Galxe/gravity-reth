@@ -155,12 +155,17 @@ where
 }
 
 /// Create a new system call transaction
-fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
+fn new_system_call_txn(
+    contract: Address,
+    nonce: u64,
+    gas_price: u128,
+    input: Bytes,
+) -> TransactionSigned {
     TransactionSigned::new_unhashed(
         Transaction::Legacy(TxLegacy {
             chain_id: None,
-            nonce: 0,
-            gas_price: 0,
+            nonce,
+            gas_price,
             gas_limit: 30_000_000,
             to: TxKind::Call(contract),
             value: U256::ZERO,
@@ -171,12 +176,16 @@ fn new_system_call_txn(contract: Address, input: Bytes) -> TransactionSigned {
 }
 
 pub fn constrct_observed_jwks_txns_envelope(
-    provider_jwks_array_bytes: Vec<Vec<u8>>,
+    provider_jwks_array_bytes: &Vec<Vec<u8>>,
+    system_caller_nonce: u64,
+    gas_price: u128,
 ) -> Vec<EthereumTxEnvelope<TxEip4844>> {
     info!("provider_jwks_array_bytes length: {:?}", provider_jwks_array_bytes.len());
+    let system_caller_nonce = system_caller_nonce + 1;
     let txns = provider_jwks_array_bytes
-        .into_iter()
-        .map(|provider_jwks_bytes| {
+        .iter()
+        .enumerate()
+        .map(|(index, provider_jwks_bytes)| {
             let provider_jwks = bcs::from_bytes::<
                 gravity_api_types::on_chain_config::jwks::ProviderJWKs,
             >(&provider_jwks_bytes)
@@ -185,8 +194,8 @@ pub fn constrct_observed_jwks_txns_envelope(
 
             let call = upsertObservedJWKsCall { providerJWKsArray: vec![provider_jwks] };
             let input: Bytes = call.abi_encode().into();
-            let txn = new_system_call_txn(JWK_MANAGER_ADDR, input);
-            txn
+            let current_nonce = system_caller_nonce + index as u64;
+            new_system_call_txn(JWK_MANAGER_ADDR, current_nonce, gas_price, input)
         })
         .collect();
     txns
