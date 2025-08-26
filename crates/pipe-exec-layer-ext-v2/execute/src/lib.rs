@@ -58,9 +58,9 @@ use tokio::sync::{
 };
 use tracing::*;
 
-use crate::onchain_config::observerd_jwk::{
+use crate::onchain_config::{observerd_jwk::{
     constrct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, ObservedJWKsUpdated,
-};
+}, SYSTEM_CALLER};
 
 // use crate::onchain_config::observerd_jwk::transact_observed_jwk_contract_call;
 
@@ -479,17 +479,19 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.gas_limit,
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
-        let txs = if !ordered_block.jwk_extra_data.is_empty() {
+        let (txs, senders) = if !ordered_block.jwk_extra_data.is_empty() {
             info!(target: "create_block_for_executor",
                 jwk_extra_data_length=?ordered_block.jwk_extra_data.len(),
                 block_number=?block.number,
                 "extend jwk txns"
             );
             let mut jwk_txns = constrct_observed_jwks_txns_envelope(ordered_block.jwk_extra_data);
+            let mut address = vec![SYSTEM_CALLER; jwk_txns.len()];
+            address.extend(senders);
             jwk_txns.extend(txs);
-            jwk_txns
+            (jwk_txns, address)
         } else {
-            txs
+            (txs, senders)
         };
 
         block.body.transactions = txs;
