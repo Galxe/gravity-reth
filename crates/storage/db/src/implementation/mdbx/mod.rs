@@ -101,6 +101,9 @@ pub struct DatabaseArguments {
     ///
     /// This flag affects only at environment opening but can't be changed after.
     exclusive: Option<bool>,
+    /// Sync mode for database commits. Controls the durability vs performance trade-off.
+    /// If [None], the default value (Durable) is used.
+    sync_mode: Option<SyncMode>,
 }
 
 impl Default for DatabaseArguments {
@@ -123,6 +126,7 @@ impl DatabaseArguments {
             log_level: None,
             max_read_transaction_duration: None,
             exclusive: None,
+            sync_mode: None,
         }
     }
 
@@ -168,6 +172,18 @@ impl DatabaseArguments {
     /// Set the mdbx exclusive flag.
     pub const fn with_exclusive(mut self, exclusive: Option<bool>) -> Self {
         self.exclusive = exclusive;
+        self
+    }
+
+    /// Set the sync mode for database commits.
+    pub const fn with_sync_mode(mut self, sync_mode: Option<SyncMode>) -> Self {
+        self.sync_mode = sync_mode;
+        self
+    }
+
+    /// Set the page size for database.
+    pub const fn with_page_size(mut self, page_size: Option<PageSize>) -> Self {
+        self.geometry.page_size = page_size;
         self
     }
 
@@ -306,7 +322,9 @@ impl DatabaseEnv {
             DatabaseEnvKind::RW => {
                 // enable writemap mode in RW mode
                 inner_env.write_map();
-                Mode::ReadWrite { sync_mode: SyncMode::Durable }
+                // Use configured sync mode or default to Durable
+                let sync_mode = args.sync_mode.unwrap_or(SyncMode::Durable);
+                Mode::ReadWrite { sync_mode }
             }
         };
 

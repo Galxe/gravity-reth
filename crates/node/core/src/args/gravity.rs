@@ -19,7 +19,7 @@ pub struct GravityArgs {
     pub pipe_block_gas_limit: u64,
 
     /// The max block height between merged and pesist block height.
-    #[arg(long = "gravity.cache.max_persist_gap", default_value_t = 64)]
+    #[arg(long = "gravity.cache.max-persist-gap", default_value_t = 64)]
     pub cache_max_persist_gap: u64,
 
     /// The max size of cached items
