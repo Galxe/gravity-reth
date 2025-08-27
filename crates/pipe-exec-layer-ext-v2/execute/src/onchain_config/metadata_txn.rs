@@ -10,6 +10,7 @@ use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
+use gravity_primitives::get_gravity_config;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
 use reth_evm::{Evm, IntoTxEnv};
@@ -61,6 +62,7 @@ impl MetadataTxnResult {
         validators: Bytes,
     ) -> ExecuteOrderedBlockResult {
         let tx_type = self.txn.tx_type();
+        let gas_used = self.result.gas_used();
         let mut block = Block {
             header: Header {
                 beneficiary: ordered_block.coinbase,
@@ -68,8 +70,10 @@ impl MetadataTxnResult {
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,
+                gas_limit: get_gravity_config().pipe_block_gas_limit,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
                 nonce: BEACON_NONCE.into(),
+                gas_used,
                 ..Default::default()
             },
             body: BlockBody { transactions: vec![self.txn], ..Default::default() },
@@ -102,11 +106,11 @@ impl MetadataTxnResult {
                     receipts: vec![Receipt {
                         tx_type,
                         success: true,
-                        cumulative_gas_used: 0,
+                        cumulative_gas_used: gas_used,
                         logs: self.result.into_logs(),
                     }],
                     requests: Default::default(),
-                    gas_used: 0,
+                    gas_used,
                 },
             },
             txs_info: vec![],
@@ -120,12 +124,18 @@ impl MetadataTxnResult {
         self,
         result: &mut ExecuteOrderedBlockResult,
     ) {
+        let gas_used = self.result.gas_used();
+        result.block.header.gas_used += gas_used;
+        result.execution_output.gas_used += gas_used;
+        result.execution_output.receipts.iter_mut().for_each(|receipt| {
+            receipt.cumulative_gas_used += gas_used;
+        });
         result.execution_output.receipts.insert(
             0,
             Receipt {
                 tx_type: self.txn.tx_type(),
                 success: true,
-                cumulative_gas_used: 0,
+                cumulative_gas_used: gas_used,
                 logs: self.result.into_logs(),
             },
         );
@@ -176,13 +186,7 @@ pub fn transact_metadata_contract_call(
         input,
     );
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
-    let mut result = evm.transact_raw(tx_env).unwrap();
+    let result = evm.transact_raw(tx_env).unwrap();
     assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
-    // Restore the balance of SYSTEM_CALLER
-    result.state.get_mut(&SYSTEM_CALLER).unwrap().info.balance = system_call_account.balance;
-    // Do not reward the beneficiary
-    if evm.block().beneficiary != SYSTEM_CALLER {
-        result.state.remove(&evm.block().beneficiary);
-    }
     (MetadataTxnResult { result: result.result, txn }, result.state)
 }

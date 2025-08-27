@@ -296,6 +296,16 @@ impl<Storage: GravityStorage> Core<Storage> {
                 self.execute_history_block(*recovered_block)
             }
         };
+        debug_assert!(
+            block.gas_limit() >= block.gas_used(),
+            "gas_limit({}) < gas_used({})",
+            block.gas_limit(),
+            block.gas_used()
+        );
+        debug_assert_eq!(
+            block.gas_used(),
+            execution_output.receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0)
+        );
         let write_start = Instant::now();
         self.cache.write_state_changes(
             block_number,
