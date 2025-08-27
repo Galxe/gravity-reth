@@ -180,7 +180,6 @@ pub fn constrct_observed_jwks_txns_envelope(
     system_caller_nonce: u64,
     gas_price: u128,
 ) -> Vec<EthereumTxEnvelope<TxEip4844>> {
-    info!("provider_jwks_array_bytes length: {:?}", provider_jwks_array_bytes.len());
     let system_caller_nonce = system_caller_nonce + 1;
     let txns = provider_jwks_array_bytes
         .iter()
@@ -200,58 +199,3 @@ pub fn constrct_observed_jwks_txns_envelope(
         .collect();
     txns
 }
-
-// fn constrct_observed_jwks_txns(provider_jwks_array_bytes: Vec<Vec<u8>>) -> Vec<TxEnv> {
-//     let txns = provider_jwks_array_bytes
-//         .into_iter()
-//         .map(|provider_jwks_bytes| {
-//             let all_provider_jwks = bcs::from_bytes::<
-//                 gravity_api_types::on_chain_config::jwks::AllProvidersJWKs,
-//             >(&provider_jwks_bytes)
-//             .expect("Failed to deserialize provider JWKS");
-
-//             let call = upsertObservedJWKsCall {
-//                 providerJWKsArray: all_provider_jwks
-//                     .entries
-//                     .into_iter()
-//                     .map(|provider_jwks| ProviderJWKs {
-//                         issuer: String::from_utf8(provider_jwks.issuer)
-//                             .expect("Failed to convert issuer to string"),
-//                         version: provider_jwks.version,
-//                         jwks: provider_jwks
-//                             .jwks
-//                             .into_iter()
-//                             .map(|jwk| JWK {
-//                                 variant: jwk.type_name.as_bytes()[0],
-//                                 data: jwk.data.into(),
-//                             })
-//                             .collect(),
-//                     })
-//                     .collect(),
-//             };
-//             let input: Bytes = call.abi_encode().into();
-//             let txn = new_system_call_txn(BLOCK_ADDR, input);
-//             Recovered::new_unchecked(txn, SYSTEM_CALLER).into_tx_env()
-//         })
-//         .collect();
-//     txns
-// }
-
-// /// Execute a observed jwk contract call (upsertObservedJWKs)
-// pub fn transact_observed_jwk_contract_call<'a, D: Database + 'a>(
-//     evm: &mut impl Evm<Error: Debug, Tx = TxEnv, HaltReason = HaltReason, DB = &'a mut State<D>>,
-//     provider_jwks_array_bytes: Vec<Vec<u8>>,
-// ) -> EvmState {
-//     let txns = constrct_observed_jwks_txns(provider_jwks_array_bytes);
-//     let mut results = vec![];
-//     for txn in txns {
-//         let result = evm.transact_raw(txn).unwrap();
-//         assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
-//         results.push(result.state);
-//     }
-//     evm.db_mut().merge_transitions(BundleRetention::Reverts);
-//     let state = evm.db_mut().take_bundle();
-//     state.state;
-//     // state.
-//     todo!()
-// }

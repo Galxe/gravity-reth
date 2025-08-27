@@ -65,7 +65,6 @@ use crate::onchain_config::{
     SYSTEM_CALLER,
 };
 
-// use crate::onchain_config::observerd_jwk::transact_observed_jwk_contract_call;
 
 /// Metadata about an executed block
 #[derive(Debug, Clone, Copy)]
@@ -537,7 +536,6 @@ impl<Storage: GravityStorage> Core<Storage> {
                 ordered_block.timestamp * 1_000_000,
                 ordered_block.proposer,
             );
-            // transact_observed_jwk_contract_call(&mut evm, vec![]);
             drop(evm);
 
             if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
@@ -644,7 +642,6 @@ impl<Storage: GravityStorage> Core<Storage> {
             gravity_events,
             epoch,
         };
-        // TODO!(): correct the jwk txns
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
         result
     }
