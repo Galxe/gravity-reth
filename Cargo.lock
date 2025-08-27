@@ -10444,6 +10444,8 @@ dependencies = [
  "reth-storage-errors",
  "reth-testing-utils",
  "reth-tracing",
+ "reth-trie",
+ "reth-trie-db",
  "reth-trie-parallel",
  "serde",
  "tempfile",
