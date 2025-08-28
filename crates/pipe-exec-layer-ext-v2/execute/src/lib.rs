@@ -65,7 +65,6 @@ use crate::onchain_config::{
     SYSTEM_CALLER,
 };
 
-
 /// Metadata about an executed block
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutedBlockMeta {
@@ -495,6 +494,40 @@ impl<Storage: GravityStorage> Core<Storage> {
         (RecoveredBlock::new_unhashed(block, senders), txs_info)
     }
 
+    /// Extract gravity events from execution receipts
+    fn extract_gravity_events_from_receipts(
+        &self,
+        receipts: &[Receipt],
+        block_id: BlockId,
+        parent_id: BlockId,
+        block_number: u64,
+    ) -> Vec<GravityEvent> {
+        let mut gravity_events = vec![];
+        // TODO(nekomoto): support DKG events later
+        for receipt in receipts {
+            for log in &receipt.logs {
+                if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
+                    info!(target: "execute_ordered_block",
+                        id=?block_id,
+                        parent_id=?parent_id,
+                        number=?block_number,
+                        "observed jwks updated"
+                    );
+                    let api_jwks = event
+                        .jwks
+                        .iter()
+                        .map(|jwk| convert_into_api_provider_jwks(jwk.clone()))
+                        .collect::<Vec<_>>();
+                    gravity_events.push(GravityEvent::ObservedJWKsUpdated(
+                        event.epoch.try_into().unwrap(),
+                        api_jwks,
+                    ));
+                }
+            }
+        }
+        gravity_events
+    }
+
     fn execute_ordered_block(
         &self,
         ordered_block: OrderedBlock,
@@ -603,43 +636,17 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let (mut block, senders) = block.split();
         block.header.gas_used = outcome.gas_used;
-        let mut gravity_events = vec![];
-        for receipt in &outcome.receipts {
-            for log in &receipt.logs {
-                if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
-                    info!(target: "execute_ordered_block",
-                        id=?block_id,
-                        parent_id=?parent_id,
-                        number=?block_number,
-                        "observed jwks updated"
-                    );
-                    let api_jwks = event
-                        .jwks
-                        .iter()
-                        .map(|jwk| convert_into_api_provider_jwks(jwk.clone()))
-                        .collect::<Vec<_>>();
-                    gravity_events.push(GravityEvent::ObservedJWKsUpdated(
-                        event.epoch.try_into().unwrap(),
-                        api_jwks,
-                    ));
-                }
-            }
-        }
-        if !gravity_events.is_empty() {
-            info!(target: "execute_ordered_block",
-                id=?block_id,
-                parent_id=?parent_id,
-                number=?block_number,
-                gravity_events=?gravity_events,
-                "gravity events"
-            );
-        }
         let mut result = ExecuteOrderedBlockResult {
             block,
             senders,
             execution_output: outcome,
             txs_info,
-            gravity_events,
+            gravity_events: self.extract_gravity_events_from_receipts(
+                &outcome.receipts,
+                block_id,
+                parent_id,
+                block_number,
+            ),
             epoch,
         };
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
