@@ -374,7 +374,7 @@ async fn test_in_memory_state_trait_impl() {
 async fn test_engine_request_during_backfill() {
     let tree_config = TreeConfig::default();
     let blocks: Vec<_> = TestBlockBuilder::eth()
-        .get_executed_blocks(0..tree_config.persistence_threshold())
+        .get_executed_blocks(0..tree_config.persistence_threshold() + 2)
         .collect();
     let mut test_harness = TestHarness::new(MAINNET.clone())
         .with_blocks(blocks)

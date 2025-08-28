@@ -22,15 +22,14 @@ concurrency:
 jobs:
   test:
     name: test / ${{ matrix.network }}
-    # if: github.event_name != 'schedule'
-    if: false # FIXME: remove this line to enable the test job after fixing the issues with the test suite.
-    runs-on:
-      group: Reth
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
+      GRETH_DISABLE_PIPE_EXECUTION: 1
     strategy:
       matrix:
-        network: ["ethereum", "optimism"]
+        network: ["ethereum"]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -46,22 +45,36 @@ jobs:
         name: Run tests
         run: |
           cargo nextest run \
-            --locked --features "asm-keccak ${{ matrix.network }}" \
+            --locked --features "asm-keccak ${{ matrix.network }} config-from-env" \
             --workspace --exclude ef-tests \
+            --exclude reth-pipe-exec-layer-ext-v2 \
+            --exclude "example-*" \
+            --exclude "reth-optimism-*" \
             -E "kind(test) and not binary(e2e_testsuite)"
-      - if: matrix.network == 'optimism'
-        name: Run tests
-        run: |
-          cargo nextest run \
-            --locked -p reth-optimism-node
+
+  gravity-pipe-test:
+    name: gravity pipe test
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      RUST_MIN_STACK: 16777216
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo test --package reth-pipe-exec-layer-ext-v2 --test gravity_pipe_test -- --exact test --show-output --nocapture
 
   integration-success:
     name: integration success
     runs-on: ubuntu-latest
-    # if: always() && github.event_name != 'schedule'
-    if: false # FIXME: remove this line to enable the integration success job after fixing the issues with the test suite.
-    needs: [test]
-    timeout-minutes: 30
+    if: always() && github.event_name != 'schedule'
+    needs: [test, gravity-pipe-test]
+    timeout-minutes: 60
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@release/v1

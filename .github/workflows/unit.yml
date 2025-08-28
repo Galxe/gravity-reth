@@ -18,29 +18,20 @@ concurrency:
 
 jobs:
   test:
-    if: false # FIXME: remove this line to enable the test job after fixing the issues with the test suite.
     name: test / ${{ matrix.type }} (${{ matrix.partition }}/${{ matrix.total_partitions }})
-    runs-on:
-      group: Reth
+    runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
+      GRETH_DISABLE_PIPE_EXECUTION: 1
     strategy:
       matrix:
         include:
           - type: ethereum
-            args: --features "asm-keccak ethereum" --locked
+            args: --features "asm-keccak ethereum config-from-env" --locked
             partition: 1
             total_partitions: 2
           - type: ethereum
-            args: --features "asm-keccak ethereum" --locked
-            partition: 2
-            total_partitions: 2
-          - type: optimism
-            args: --features "asm-keccak" --locked --exclude reth --exclude reth-bench --exclude "example-*" --exclude "reth-ethereum-*" --exclude "*-ethereum"
-            partition: 1
-            total_partitions: 2
-          - type: optimism
-            args: --features "asm-keccak" --locked --exclude reth --exclude reth-bench --exclude "example-*" --exclude "reth-ethereum-*" --exclude "*-ethereum"
+            args: --features "asm-keccak ethereum config-from-env" --locked
             partition: 2
             total_partitions: 2
     timeout-minutes: 30
@@ -61,6 +52,9 @@ jobs:
           cargo nextest run \
             ${{ matrix.args }} --workspace \
             --exclude ef-tests --no-tests=warn \
+            --exclude reth-pipe-exec-layer-ext-v2 \
+            --exclude "example-*" \
+            --exclude "reth-optimism-*" \
             --partition hash:${{ matrix.partition }}/2 \
             -E "!kind(test) and not binary(e2e_testsuite)"
 
@@ -112,9 +106,9 @@ jobs:
   unit-success:
     name: unit success
     runs-on: ubuntu-latest
-    # if: always()
-    if: false # FIXME: remove this line to enable the unit success job after fixing the issues with the test suite.
-    needs: [test, state, doc]
+    if: always()
+    #needs: [test, state, doc]
+    needs: [test]
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed

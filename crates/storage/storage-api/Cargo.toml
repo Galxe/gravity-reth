@@ -43,6 +43,7 @@ once_cell.workspace = true
 rayon.workspace = true
 
 [features]
+config-from-env = ["gravity-primitives/config-from-env"]
 default = ["std"]
 std = [
     "reth-chainspec/std",

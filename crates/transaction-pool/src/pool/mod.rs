@@ -1422,55 +1422,7 @@ mod tests {
     };
     use alloy_eips::{eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant};
     use alloy_primitives::Address;
-    use std::{fs, path::PathBuf, time::Instant};
-
-    #[test]
-    fn test_add_txn() {
-        // Define the maximum limit for blobs in the sub-pool.
-        let blob_limit = SubPoolLimit::new(usize::MAX, usize::MAX);
-        let test_pool = &TestPoolBuilder::default()
-            .with_config(PoolConfig {
-                blob_limit,
-                pending_limit: blob_limit,
-                queued_limit: blob_limit,
-                ..Default::default()
-            })
-            .pool;
-        let mut txns_vec = vec![];
-        let init_size = 10000000;
-        for _ in 0..init_size {
-            test_pool.add_transactions(
-                TransactionOrigin::Local,
-                vec![TransactionValidationOutcome::Valid {
-                    balance: U256::from(1_000),
-                    state_nonce: 0,
-                    transaction: ValidTransaction::Valid(MockTransaction::eip1559()),
-                    propagate: true,
-                    bytecode_hash: None,
-                    authorities: None,
-                }],
-            );
-        }
-        let size = 1000;
-        for _ in 0..size {
-            let txn = TransactionValidationOutcome::Valid {
-                balance: U256::from(1_000),
-                state_nonce: 0,
-                bytecode_hash: None,
-                transaction: ValidTransaction::Valid(MockTransaction::eip1559()),
-                propagate: true,
-                authorities: None,
-            };
-            txn.tx_hash();
-            txns_vec.push(vec![txn]);
-        }
-        let start = Instant::now();
-        for txns in txns_vec {
-            test_pool.add_transactions(TransactionOrigin::Local, txns.into_iter());
-        }
-        let elapsed = start.elapsed() / size;
-        println!("Elapsed time: {elapsed:?}");
-    }
+    use std::{fs, path::PathBuf};
 
     #[test]
     fn test_discard_blobs_on_blob_tx_eviction() {

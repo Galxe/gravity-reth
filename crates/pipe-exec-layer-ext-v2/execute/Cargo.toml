@@ -70,3 +70,4 @@ rand.workspace = true
 
 [features]
 pipe_test = ["reth-provider/pipe_test"]
+config-from-env = ["gravity-primitives/config-from-env"]

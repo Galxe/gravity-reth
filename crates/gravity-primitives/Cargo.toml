@@ -12,3 +12,6 @@ description = "Common types in gravity-reth."
 workspace = true
 
 [dependencies]
+
+[features]
+config-from-env = []
