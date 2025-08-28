@@ -1,7 +1,7 @@
 //! Example showing the new RelayerManager usage with the refactored design
 
 use reth_pipe_exec_layer_relayer::{
-    ObserveState, ObservedValue, RelayerManager, UriParser
+    RelayerManager, UriParser
 };
 use reth_tracing::{LayerInfo, LogFormat, RethTracer, Tracer};
 use tracing::level_filters::LevelFilter;
@@ -48,13 +48,7 @@ async fn main() -> anyhow::Result<()> {
     
     // Add each URI (creates separate relayer for each)
     for uri in &uris {
-        let last_state = ObserveState {
-            block_number: 100,
-            observed_value: ObservedValue::None,
-            timestamp: 0,
-            version: 0,
-        };
-        match manager.add_uri(uri, rpc_url, last_state).await {
+        match manager.add_uri(uri, rpc_url).await {
             Ok(()) => info!("Successfully added URI: {}", uri),
             Err(e) => info!("Failed to add URI {}: {}", uri, e),
         }

@@ -20,10 +20,6 @@ pub struct ObserveState {
     pub block_number: u64,
     /// The actual observed value (block, events, storage slot, or none)
     pub observed_value: ObservedValue,
-    /// Chain timestamp to ensure consistency
-    pub timestamp: u64,
-    /// OnChain version for tracking changes
-    pub version: u64,
 }
 
 /// Represents different types of observed values from blockchain monitoring
@@ -168,15 +164,16 @@ impl GravityRelayer {
     /// # Arguments
     /// * `rpc_url` - The RPC endpoint URL for blockchain communication
     /// * `task` - The parsed task to monitor
-    /// * `last_state` - The last observed state to start from
     ///
     /// # Returns
     /// * `GravityRelayer` - The new relayer instance
-    pub fn new(rpc_url: &str, task: ParsedTask, last_state: ObserveState) -> Self {
-        let start_block = last_state.block_number;
-
-        let task_state = TaskState::new(task.clone(), start_block, Arc::new(last_state));
+    pub async fn new(rpc_url: &str, task: ParsedTask) -> Self {
         let eth_client = Arc::new(EthHttpCli::new(rpc_url));
+        let start_block_number = eth_client.get_finalized_block_number().await.unwrap();
+        let last_observed =
+            ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
+
+        let task_state = TaskState::new(task.clone(), start_block_number, Arc::new(last_observed));
         Self { eth_client, task_state }
     }
 
@@ -245,15 +242,8 @@ impl GravityRelayer {
             let new_cursor =
                 new_logs.iter().max_by_key(|log| log.block_number).unwrap().block_number;
             self.task_state.update_cursor(new_cursor).await;
-            let new_value = ObserveState {
-                block_number: new_cursor,
-                observed_value: observed_value.clone(),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                version: previous_value.version + 1,
-            };
+            let new_value =
+                ObserveState { block_number: new_cursor, observed_value: observed_value.clone() };
 
             self.task_state.update_last_observed(new_value.clone()).await;
             new_value
@@ -293,11 +283,6 @@ impl GravityRelayer {
                 let new_value = ObserveState {
                     block_number: latest_block,
                     observed_value: observed_value.clone(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                    version: previous_value.version + 1,
                 };
 
                 self.task_state.update_last_observed(new_value.clone()).await;
@@ -345,11 +330,6 @@ impl GravityRelayer {
             let new_value = ObserveState {
                 block_number: current_block,
                 observed_value: observed_value.clone(),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                version: previous_value.version + 1,
             };
             self.task_state.update_last_observed(new_value.clone()).await;
             new_value
@@ -393,12 +373,7 @@ impl GravityRelayer {
             AccountActivityType::AllTransactions => {
                 // This requires iterating through all transactions in blocks, which is performance intensive
                 warn!("AllTransactions monitoring is not yet implemented for address: {}", address);
-                Ok(ObserveState {
-                    block_number: 0,
-                    observed_value: ObservedValue::None,
-                    timestamp: 0,
-                    version: 0,
-                })
+                Ok(ObserveState { block_number: 0, observed_value: ObservedValue::None })
             }
         }
     }
@@ -436,13 +411,8 @@ mod tests {
         let relayer = GravityRelayer::new(
             &rpc_url,
             task,
-            ObserveState {
-                block_number: 10,
-                observed_value: ObservedValue::None,
-                timestamp: 0,
-                version: 0,
-            },
-        );
+        )
+        .await;
         let state = relayer.poll_once().await.unwrap();
         println!("state: {:?}", state);
         match state.observed_value {
