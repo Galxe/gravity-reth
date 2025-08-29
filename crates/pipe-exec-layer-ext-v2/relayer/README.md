@@ -28,12 +28,23 @@ Supports parsing Gravity URIs in the following formats:
 
 ```rust
 use reth_pipe_exec_layer_relayer::{
-    RelayerManager, UriParser, ObserveState, ObservedValue
+    RelayerManager, UriParser
 };
-use std::time::Duration;
+use reth_tracing::{LayerInfo, LogFormat, RethTracer, Tracer};
+use tracing::level_filters::LevelFilter;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Initialize tracing
+    let tracer = RethTracer::new().with_stdout(LayerInfo::new(
+        LogFormat::Terminal,
+        LevelFilter::INFO.to_string(),
+        "trace".to_string(),
+        None,
+    ));
+    tracer.init().unwrap();
+
     // 1. Create URI parser
     let parser = UriParser::new();
     
@@ -43,20 +54,12 @@ async fn main() -> anyhow::Result<()> {
     // 3. Create RelayerManager
     let manager = RelayerManager::new();
     
-    // 4. Define initial state
-    let last_state = ObserveState {
-        block_number: 19000000,
-        observed_value: ObservedValue::None,
-        timestamp: 0,
-        version: 0,
-    };
+    // 4. Add URI to manager (no initial state required)
+    manager.add_uri(&task.original_uri, "https://rpc.ankr.com/eth").await?;
     
-    // 5. Add URI to manager
-    manager.add_uri(&task.original_uri, "https://rpc.ankr.com/eth", last_state).await?;
-    
-    // 6. Poll for updates
+    // 5. Poll for updates
     let current_state = manager.poll_uri(&task.original_uri).await?;
-    println!("Current state: {:?}", current_state);
+    info!("Current state: {:?}", current_state);
     
     Ok(())
 }
@@ -175,10 +178,22 @@ pub struct EventLog {
 
 ### Multiple URI Management
 ```rust
-use reth_pipe_exec_layer_relayer::{RelayerManager, ObserveState, ObservedValue};
+use reth_pipe_exec_layer_relayer::RelayerManager;
+use reth_tracing::{LayerInfo, LogFormat, RethTracer, Tracer};
+use tracing::level_filters::LevelFilter;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Initialize tracing
+    let tracer = RethTracer::new().with_stdout(LayerInfo::new(
+        LogFormat::Terminal,
+        LevelFilter::INFO.to_string(),
+        "trace".to_string(),
+        None,
+    ));
+    tracer.init().unwrap();
+
     let manager = RelayerManager::new();
     
     let uris = vec![
@@ -187,23 +202,19 @@ async fn main() -> anyhow::Result<()> {
         "gravity://mainnet/storage?account=0x123456789abcdef123456789abcdef1234567890&slot=0x0",
     ];
     
-    let initial_state = ObserveState {
-        block_number: 19000000,
-        observed_value: ObservedValue::None,
-        timestamp: 0,
-        version: 0,
-    };
-    
-    // Add multiple URIs
+    // Add multiple URIs (no initial state required)
     for uri in &uris {
-        manager.add_uri(uri, "https://rpc.ankr.com/eth", initial_state.clone()).await?;
+        match manager.add_uri(uri, "https://rpc.ankr.com/eth").await {
+            Ok(()) => info!("Successfully added URI: {}", uri),
+            Err(e) => info!("Failed to add URI {}: {}", uri, e),
+        }
     }
     
     // Poll all URIs
     for uri in &uris {
         match manager.poll_uri(uri).await {
-            Ok(state) => println!("URI {}: {:?}", uri, state),
-            Err(e) => println!("Error polling {}: {}", uri, e),
+            Ok(state) => info!("URI {}: {:?}", uri, state),
+            Err(e) => info!("Error polling {}: {}", uri, e),
         }
     }
     
@@ -214,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
 ### Batch URI Parsing
 ```rust
 use reth_pipe_exec_layer_relayer::UriParser;
+use tracing::info;
 
 let parser = UriParser::new();
 let uris = vec![
@@ -221,9 +233,16 @@ let uris = vec![
     "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
 ];
 
-let tasks = parser.parse_batch(&uris)?;
-for task in tasks {
-    println!("Parsed task: {:?}", task);
+for uri in uris {
+    match parser.parse(&uri) {
+        Ok(task) => {
+            info!("Parsed URI: {} -> Chain: {}, Task: {:?}", 
+                uri, task.chain_specifier, task.task);
+        }
+        Err(e) => {
+            info!("Failed to parse URI {}: {}", uri, e);
+        }
+    }
 }
 ```
 
@@ -253,6 +272,7 @@ The library uses `anyhow::Result` for error handling. Common error scenarios inc
 - `anyhow`: Error handling
 - `tracing`: Logging and debugging
 - `serde`: Serialization/deserialization
+- `reth-tracing`: Reth tracing utilities
 
 ## Running Examples
 
@@ -274,6 +294,7 @@ cargo doc --open
 3. Consider using longer polling intervals in production to avoid excessive RPC calls
 4. The library automatically handles retries and backoff for failed requests
 5. All operations are async and should be run in a Tokio runtime
+6. Tracing initialization is required for proper logging
 
 ## TODO
 

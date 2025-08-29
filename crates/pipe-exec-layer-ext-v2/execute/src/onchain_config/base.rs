@@ -114,7 +114,7 @@ where
     ) -> OnChainConfigResType {
         use crate::onchain_config::{
             consensus_config::ConsensusConfigFetcher, epoch::EpochFetcher,
-            jwk_consensus_config::JwkConsensusConfigFetcher, observerd_jwk::ObservedJwkFetcher,
+            jwk_consensus_config::JwkConsensusConfigFetcher, observed_jwk::ObservedJwkFetcher,
             validator_set::ValidatorSetFetcher,
         };
 

@@ -54,6 +54,7 @@ fn new_ordered_block(
         transactions: vec![],
         senders: vec![],
         proposer: Some(address!("0x6e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f")),
+        jwk_extra_data: vec![],
     }
 }
 

@@ -6,8 +6,7 @@ use super::{
 };
 use crate::onchain_config::{BLOCK_ADDR, SYSTEM_CALLER};
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
-use alloy_primitives::{Address, Bytes};
-use alloy_primitives::{Signature, U256};
+use alloy_primitives::{Address, Bytes, Signature, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
@@ -16,11 +15,16 @@ use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_evm::{Evm, IntoTxEnv};
 use reth_primitives::Recovered;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use revm::database::{states::bundle_state::BundleRetention, State};
-use revm::{context::TxEnv, context_interface::result::HaltReason, state::EvmState, Database};
+use revm::{
+    context::TxEnv,
+    context_interface::result::HaltReason,
+    database::{states::bundle_state::BundleRetention, State},
+    state::EvmState,
+    Database,
+};
 use revm_primitives::TxKind;
-use tracing::info;
 use std::fmt::Debug;
+use tracing::info;
 
 sol! {
     struct JWK {
@@ -175,7 +179,7 @@ fn new_system_call_txn(
     )
 }
 
-pub fn constrct_observed_jwks_txns_envelope(
+pub fn construct_observed_jwks_txns_envelope(
     provider_jwks_array_bytes: &Vec<Vec<u8>>,
     system_caller_nonce: u64,
     gas_price: u128,

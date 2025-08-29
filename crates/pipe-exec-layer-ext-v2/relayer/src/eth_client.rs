@@ -4,8 +4,7 @@ use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
 use anyhow::{Context as AnyhowContext, Result};
 use reqwest::ClientBuilder;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, warn};
 use url::Url;
@@ -67,17 +66,15 @@ impl EthHttpCli {
     /// * Returns an error if the URL cannot be parsed or client cannot be built
     pub fn new(rpc_url: &str) -> Result<Self> {
         debug!("Creating EthHttpCli for URL: {}", rpc_url);
-        
+
         // Parse URL with error handling
-        let url = Url::parse(rpc_url)
-            .with_context(|| format!("Failed to parse RPC URL: {}", rpc_url))?;
-        
+        let url =
+            Url::parse(rpc_url).with_context(|| format!("Failed to parse RPC URL: {}", rpc_url))?;
+
         // Build HTTP client with error handling
         let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
-        let client = client_builder
-            .build()
-            .with_context(|| "Failed to build HTTP client")?;
-        
+        let client = client_builder.build().with_context(|| "Failed to build HTTP client")?;
+
         let provider: RootProvider<Ethereum> =
             ProviderBuilder::default().connect_reqwest(client, url.clone());
 
@@ -302,8 +299,8 @@ impl EthHttpCli {
                     if attempt < self.retry_config.max_retries {
                         let delay = std::cmp::min(
                             Duration::from_millis(
-                                (self.retry_config.base_delay.as_millis() as f64
-                                    * self.retry_config.backoff_multiplier.powi(attempt as i32))
+                                (self.retry_config.base_delay.as_millis() as f64 *
+                                    self.retry_config.backoff_multiplier.powi(attempt as i32))
                                     as u64,
                             ),
                             self.retry_config.max_delay,

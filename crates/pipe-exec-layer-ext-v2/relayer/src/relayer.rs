@@ -1,7 +1,9 @@
 //! Relayer for gravity protocol tasks
 
-use crate::eth_client::EthHttpCli;
-use crate::parser::{AccountActivityType, GravityTask, ParsedTask};
+use crate::{
+    eth_client::EthHttpCli,
+    parser::{AccountActivityType, GravityTask, ParsedTask},
+};
 use alloy_primitives::{hex, Address, B256};
 use alloy_rpc_types::{Filter, Log};
 use anyhow::{anyhow, Result};
@@ -172,10 +174,10 @@ impl GravityRelayer {
     /// * Returns an error if unable to connect to the RPC endpoint or get finalized block
     pub async fn new(rpc_url: &str, task: ParsedTask) -> Result<Self> {
         let eth_client = Arc::new(EthHttpCli::new(rpc_url)?);
-        
+
         // Retry getting the finalized block number with exponential backoff
         let start_block_number = eth_client.get_finalized_block_number().await?;
-        
+
         let last_observed =
             ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
 
@@ -374,12 +376,12 @@ impl GravityRelayer {
                 // This filter construction needs proper OR logic implementation
                 // For now, create a basic filter
                 let filter = Filter::new().event_signature(transfer_topic);
-                // TODO: Implement proper OR logic for topic1/topic2 to monitor both from and to transfers
+                // TODO: Implement proper OR logic for topic1/topic2 to monitor both from and to
 
                 self.poll_event_task(task_uri, &filter).await
             }
             AccountActivityType::AllTransactions => {
-                // This requires iterating through all transactions in blocks, which is performance intensive
+                // Requiring iterating through all transactions in blocks, which is performance intensive
                 warn!("AllTransactions monitoring is not yet implemented for address: {}", address);
                 Ok(ObserveState { block_number: 0, observed_value: ObservedValue::None })
             }
@@ -414,21 +416,17 @@ mod tests {
             .expect("TEST_URI environment variable must be set for this test");
         let rpc_url = std::env::var("RPC_URL")
             .expect("RPC_URL environment variable must be set for this test");
-        
+
         // let uri = "gravity://31337/event?address=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512&topic0=0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624";
         let parser = UriParser::new();
-        let task = parser.parse(&uri)
-            .expect("Failed to parse test URI");
+        let task = parser.parse(&uri).expect("Failed to parse test URI");
         println!("task: {:?}", task);
-        
-        let relayer = GravityRelayer::new(&rpc_url, task)
-            .await
-            .expect("Failed to create relayer");
-            
-        let state = relayer.poll_once().await
-            .expect("Failed to poll relayer");
+
+        let relayer = GravityRelayer::new(&rpc_url, task).await.expect("Failed to create relayer");
+
+        let state = relayer.poll_once().await.expect("Failed to poll relayer");
         println!("state: {:?}", state);
-        
+
         match state.observed_value {
             ObservedValue::Events { logs } => {
                 for log in logs {
@@ -436,7 +434,7 @@ mod tests {
                         .expect("Failed to create log object");
                     let decoded = USDC::USDCTransfer::decode_log(&log_obj)
                         .expect("Failed to decode USDC transfer event");
-                    
+
                     let data = decoded.data;
                     let from = data.from;
                     let to = data.to;
@@ -457,9 +455,8 @@ mod tests {
         // Create mock eth client - this needs actual test implementation
         let rpc_url = std::env::var("RPC_URL")
             .expect("RPC_URL environment variable must be set for this test");
-        let eth_client = EthHttpCli::new(&rpc_url)
-            .expect("Failed to create ETH client");
-            
+        let eth_client = EthHttpCli::new(&rpc_url).expect("Failed to create ETH client");
+
         let filter = Filter::new()
             .address(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"))
             .event_signature(B256::from(hex!(
@@ -467,14 +464,12 @@ mod tests {
             )))
             .from_block(10)
             .to_block(100);
-            
-        let logs = eth_client.get_logs(&filter).await
-            .expect("Failed to get logs");
+
+        let logs = eth_client.get_logs(&filter).await.expect("Failed to get logs");
         println!("logs: {:?}", logs);
-        
+
         for log in logs {
-            let decoded = log.log_decode::<USDC::USDCTransfer>()
-                .expect("Failed to decode log");
+            let decoded = log.log_decode::<USDC::USDCTransfer>().expect("Failed to decode log");
             let data = decoded.data();
             let from = data.from;
             let to = data.to;

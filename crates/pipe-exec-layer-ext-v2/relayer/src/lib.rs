@@ -1,6 +1,7 @@
 //! Gravity Protocol Relayer
 //!
-//! This crate provides functionality for parsing Gravity protocol URIs and relaying blockchain events.
+//! This crate provides functionality for parsing Gravity protocol URIs and relaying blockchain
+//! events.
 
 pub mod eth_client;
 pub mod manager;

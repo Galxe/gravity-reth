@@ -59,8 +59,8 @@ use tokio::sync::{
 use tracing::*;
 
 use crate::onchain_config::{
-    observerd_jwk::{
-        constrct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, ObservedJWKsUpdated,
+    observed_jwk::{
+        construct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, ObservedJWKsUpdated,
     },
     SYSTEM_CALLER,
 };
@@ -592,7 +592,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         };
 
         let jwk_txns = if !ordered_block.jwk_extra_data.is_empty() {
-            constrct_observed_jwks_txns_envelope(
+            construct_observed_jwks_txns_envelope(
                 &ordered_block.jwk_extra_data,
                 metadata_txn_result.txn.nonce(),
                 metadata_txn_result.txn.gas_price().expect("metadata txn gas price is not set"),

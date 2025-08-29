@@ -1,10 +1,11 @@
 //! Relayer Manager for lifecycle management
 
-use crate::parser::UriParser;
-use crate::relayer::{GravityRelayer, ObserveState};
+use crate::{
+    parser::UriParser,
+    relayer::{GravityRelayer, ObserveState},
+};
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
