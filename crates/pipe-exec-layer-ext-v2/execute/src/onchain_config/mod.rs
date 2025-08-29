@@ -5,7 +5,9 @@
 pub mod base;
 pub mod consensus_config;
 pub mod epoch;
+pub mod jwk_consensus_config;
 pub mod metadata_txn;
+pub mod observed_jwk;
 pub mod types;
 pub mod validator_set;
 

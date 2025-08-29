@@ -3,6 +3,8 @@
 mod channel;
 mod metrics;
 pub mod onchain_config;
+use alloy_sol_types::SolEvent;
+pub use reth_pipe_exec_layer_relayer::{ObserveState, ObservedValue, RelayerManager};
 
 use channel::Channel;
 use gravity_api_types::{
@@ -56,6 +58,13 @@ use tokio::sync::{
 };
 use tracing::*;
 
+use crate::onchain_config::{
+    observed_jwk::{
+        construct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, ObservedJWKsUpdated,
+    },
+    SYSTEM_CALLER,
+};
+
 /// Metadata about an executed block
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutedBlockMeta {
@@ -93,6 +102,8 @@ pub struct OrderedBlock {
     pub senders: Vec<Address>,
     /// The proposer address of the block
     pub proposer: Option<Address>,
+    /// Served for the jwk contract sent by system caller, it might be multiple jwks update
+    pub jwk_extra_data: Vec<Vec<u8>>,
 }
 
 enum ReceivedBlock {
@@ -426,6 +437,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         ordered_block: OrderedBlock,
         base_fee: u64,
         state: &Storage::StateView,
+        mut jwk_txns: Vec<TransactionSigned>,
     ) -> (RecoveredBlock<Block>, Vec<TxInfo>) {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
         let mut block = Block {
@@ -479,9 +491,47 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.gas_limit,
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
+        let (txs, senders) = if !jwk_txns.is_empty() {
+            let mut address = vec![SYSTEM_CALLER; jwk_txns.len()];
+            address.extend(senders);
+            jwk_txns.extend(txs);
+            (jwk_txns, address)
+        } else {
+            (txs, senders)
+        };
 
         block.body.transactions = txs;
         (RecoveredBlock::new_unhashed(block, senders), txs_info)
+    }
+
+    /// Extract gravity events from execution receipts
+    fn extract_gravity_events_from_receipts(
+        &self,
+        receipts: &[Receipt],
+        block_number: u64,
+    ) -> Vec<GravityEvent> {
+        let mut gravity_events = vec![];
+        // TODO(nekomoto): support DKG events later
+        for receipt in receipts {
+            for log in &receipt.logs {
+                if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
+                    info!(target: "execute_ordered_block",
+                        number=?block_number,
+                        "observed jwks updated"
+                    );
+                    let api_jwks = event
+                        .jwks
+                        .iter()
+                        .map(|jwk| convert_into_api_provider_jwks(jwk.clone()))
+                        .collect::<Vec<_>>();
+                    gravity_events.push(GravityEvent::ObservedJWKsUpdated(
+                        event.epoch.try_into().unwrap(),
+                        api_jwks,
+                    ));
+                }
+            }
+        }
+        gravity_events
     }
 
     fn execute_ordered_block(
@@ -551,7 +601,18 @@ impl<Storage: GravityStorage> Core<Storage> {
             (metadata_txn_result, state_changes)
         };
 
-        let (block, txs_info) = self.create_block_for_executor(ordered_block, base_fee, &state);
+        let jwk_txns = if !ordered_block.jwk_extra_data.is_empty() {
+            construct_observed_jwks_txns_envelope(
+                &ordered_block.jwk_extra_data,
+                metadata_txn_result.txn.nonce(),
+                metadata_txn_result.txn.gas_price().expect("metadata txn gas price is not set"),
+            )
+        } else {
+            vec![]
+        };
+
+        let (block, txs_info) =
+            self.create_block_for_executor(ordered_block, base_fee, &state, jwk_txns);
 
         info!(target: "execute_ordered_block",
             id=?block_id,
@@ -572,15 +633,23 @@ impl<Storage: GravityStorage> Core<Storage> {
             .unwrap();
             panic!("failed to execute block {block_id:?}: {err:?}")
         });
+        info!(target: "execute_ordered_block",
+            id=?block_id,
+            parent_id=?parent_id,
+            number=?block_number,
+            "executed block done"
+        );
 
         let (mut block, senders) = block.split();
         block.header.gas_used = outcome.gas_used;
+        let gravity_events =
+            self.extract_gravity_events_from_receipts(&outcome.receipts, block_number);
         let mut result = ExecuteOrderedBlockResult {
             block,
             senders,
             execution_output: outcome,
             txs_info,
-            gravity_events: vec![],
+            gravity_events,
             epoch,
         };
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);

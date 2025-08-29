@@ -4208,6 +4208,7 @@ dependencies = [
  "reth-payload-builder",
  "reth-pipe-exec-layer-event-bus",
  "reth-pipe-exec-layer-ext-v2",
+ "reth-pipe-exec-layer-relayer",
  "reth-primitives",
  "reth-provider",
  "reth-rpc",
@@ -9771,6 +9772,7 @@ dependencies = [
  "reth-node-builder",
  "reth-node-ethereum",
  "reth-pipe-exec-layer-event-bus",
+ "reth-pipe-exec-layer-relayer",
  "reth-primitives",
  "reth-primitives-traits",
  "reth-provider",
@@ -9785,6 +9787,28 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "reth-pipe-exec-layer-relayer"
+version = "1.6.0"
+dependencies = [
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types",
+ "alloy-sol-macro",
+ "alloy-sol-types",
+ "alloy-transport",
+ "anyhow",
+ "once_cell",
+ "reqwest",
+ "reth-primitives",
+ "reth-tracing",
+ "serde",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

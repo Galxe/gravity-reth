@@ -1,0 +1,33 @@
+[package]
+name = "reth-pipe-exec-layer-relayer"
+version.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "replayer for pipeline execution layer extension"
+
+[lints]
+workspace = true
+
+[dependencies]
+reth-primitives.workspace = true
+reth-tracing.workspace = true
+alloy-primitives.workspace = true
+once_cell.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+alloy-network.workspace = true
+alloy-provider.workspace = true
+alloy-rpc-types.workspace = true
+alloy-transport.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tracing.workspace = true
+url.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls"] }
+
+[dev-dependencies]
+alloy-sol-macro.workspace = true
+alloy-sol-types.workspace = true
