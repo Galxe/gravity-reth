@@ -61,22 +61,31 @@ impl EthHttpCli {
     /// * `rpc_url` - The RPC endpoint URL for blockchain communication
     ///
     /// # Returns
-    /// * `EthHttpCli` - A new Ethereum HTTP client instance
-    pub fn new(rpc_url: &str) -> Self {
+    /// * `Result<EthHttpCli>` - A new Ethereum HTTP client instance or error
+    ///
+    /// # Errors
+    /// * Returns an error if the URL cannot be parsed or client cannot be built
+    pub fn new(rpc_url: &str) -> Result<Self> {
         debug!("Creating EthHttpCli for URL: {}", rpc_url);
-        // Parse URL
-
-        let url = Url::parse(rpc_url).unwrap();
+        
+        // Parse URL with error handling
+        let url = Url::parse(rpc_url)
+            .with_context(|| format!("Failed to parse RPC URL: {}", rpc_url))?;
+        
+        // Build HTTP client with error handling
         let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
-        let client = client_builder.build().unwrap();
+        let client = client_builder
+            .build()
+            .with_context(|| "Failed to build HTTP client")?;
+        
         let provider: RootProvider<Ethereum> =
             ProviderBuilder::default().connect_reqwest(client, url.clone());
 
-        Self {
+        Ok(Self {
             provider,
             metrics: Arc::new(tokio::sync::Mutex::new(ProviderMetrics::default())),
             retry_config: RetryConfig::default(),
-        }
+        })
     }
 
     /// Gets the nonce (transaction count) for a given address

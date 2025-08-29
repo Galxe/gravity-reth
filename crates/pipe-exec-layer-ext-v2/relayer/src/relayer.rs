@@ -166,15 +166,21 @@ impl GravityRelayer {
     /// * `task` - The parsed task to monitor
     ///
     /// # Returns
-    /// * `GravityRelayer` - The new relayer instance
-    pub async fn new(rpc_url: &str, task: ParsedTask) -> Self {
-        let eth_client = Arc::new(EthHttpCli::new(rpc_url));
-        let start_block_number = eth_client.get_finalized_block_number().await.unwrap();
+    /// * `Result<GravityRelayer>` - The new relayer instance or error
+    ///
+    /// # Errors
+    /// * Returns an error if unable to connect to the RPC endpoint or get finalized block
+    pub async fn new(rpc_url: &str, task: ParsedTask) -> Result<Self> {
+        let eth_client = Arc::new(EthHttpCli::new(rpc_url)?);
+        
+        // Retry getting the finalized block number with exponential backoff
+        let start_block_number = eth_client.get_finalized_block_number().await?;
+        
         let last_observed =
             ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
 
         let task_state = TaskState::new(task.clone(), start_block_number, Arc::new(last_observed));
-        Self { eth_client, task_state }
+        Ok(Self { eth_client, task_state })
     }
 
     /// Polls the current task once for updates
@@ -215,7 +221,8 @@ impl GravityRelayer {
         let mut scoped_filter = filter.clone();
         scoped_filter = scoped_filter.from_block(cursor);
 
-        let finalized_block = self.eth_client.get_finalized_block_number().await.unwrap();
+        // Get finalized block with retry logic
+        let finalized_block = self.eth_client.get_finalized_block_number().await?;
         scoped_filter = scoped_filter.to_block(finalized_block);
 
         debug!("Polling event task {} with filter: {:?}", task_uri, scoped_filter);
@@ -228,7 +235,8 @@ impl GravityRelayer {
             .collect();
 
         if new_logs.is_empty() {
-            let next_cursor = scoped_filter.get_to_block().unwrap();
+            // Use finalized_block as the next cursor if no to_block is specified
+            let next_cursor = scoped_filter.get_to_block().unwrap_or(finalized_block);
             self.task_state.update_cursor(next_cursor).await;
             debug!("Polling event task {} with no new logs, cursor: {}", task_uri, next_cursor);
             return Ok((*previous_value).clone());
@@ -385,7 +393,7 @@ mod tests {
     use alloy_rpc_types::Filter;
     use reth_primitives::Log;
 
-    use crate::{EthHttpCli, GravityRelayer, ObserveState, ObservedValue, UriParser};
+    use crate::{EthHttpCli, GravityRelayer, ObservedValue, UriParser};
     use alloy_sol_macro::sol;
     use alloy_sol_types::SolEvent;
 
@@ -402,26 +410,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_parsed_and_run() {
-        let uri = std::env::var("TEST_URI").unwrap();
-        let rpc_url = std::env::var("RPC_URL").unwrap();
+        let uri = std::env::var("TEST_URI")
+            .expect("TEST_URI environment variable must be set for this test");
+        let rpc_url = std::env::var("RPC_URL")
+            .expect("RPC_URL environment variable must be set for this test");
+        
         // let uri = "gravity://31337/event?address=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512&topic0=0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624";
         let parser = UriParser::new();
-        let task = parser.parse(&uri).unwrap();
+        let task = parser.parse(&uri)
+            .expect("Failed to parse test URI");
         println!("task: {:?}", task);
-        let relayer = GravityRelayer::new(
-            &rpc_url,
-            task,
-        )
-        .await;
-        let state = relayer.poll_once().await.unwrap();
+        
+        let relayer = GravityRelayer::new(&rpc_url, task)
+            .await
+            .expect("Failed to create relayer");
+            
+        let state = relayer.poll_once().await
+            .expect("Failed to poll relayer");
         println!("state: {:?}", state);
+        
         match state.observed_value {
             ObservedValue::Events { logs } => {
                 for log in logs {
-                    let decoded = USDC::USDCTransfer::decode_log(
-                        &Log::new(log.address, log.topics, Bytes::from(log.data)).unwrap(),
-                    )
-                    .unwrap();
+                    let log_obj = Log::new(log.address, log.topics, Bytes::from(log.data))
+                        .expect("Failed to create log object");
+                    let decoded = USDC::USDCTransfer::decode_log(&log_obj)
+                        .expect("Failed to decode USDC transfer event");
+                    
                     let data = decoded.data;
                     let from = data.from;
                     let to = data.to;
@@ -440,8 +455,11 @@ mod tests {
     #[tokio::test]
     async fn test_direct() {
         // Create mock eth client - this needs actual test implementation
-        let rpc_url = std::env::var("RPC_URL").unwrap();
-        let eth_client = EthHttpCli::new(&rpc_url);
+        let rpc_url = std::env::var("RPC_URL")
+            .expect("RPC_URL environment variable must be set for this test");
+        let eth_client = EthHttpCli::new(&rpc_url)
+            .expect("Failed to create ETH client");
+            
         let filter = Filter::new()
             .address(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"))
             .event_signature(B256::from(hex!(
@@ -449,10 +467,14 @@ mod tests {
             )))
             .from_block(10)
             .to_block(100);
-        let logs = eth_client.get_logs(&filter).await.unwrap();
+            
+        let logs = eth_client.get_logs(&filter).await
+            .expect("Failed to get logs");
         println!("logs: {:?}", logs);
+        
         for log in logs {
-            let decoded = log.log_decode::<USDC::USDCTransfer>().unwrap();
+            let decoded = log.log_decode::<USDC::USDCTransfer>()
+                .expect("Failed to decode log");
             let data = decoded.data();
             let from = data.from;
             let to = data.to;

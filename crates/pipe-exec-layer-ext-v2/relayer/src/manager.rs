@@ -39,6 +39,7 @@ impl RelayerManager {
     /// # Errors
     /// * Returns an error if the RPC URL is already being monitored
     /// * Returns an error if the URI cannot be parsed
+    /// * Returns an error if the relayer cannot be created
     pub async fn add_uri(&self, uri: &str, rpc_url: &str) -> Result<()> {
         {
             let relayers = self.relayers.read().await;
@@ -50,7 +51,7 @@ impl RelayerManager {
         let task = self.uri_parser.parse(uri)?;
         info!("Adding URI: {} -> {:?}", uri, task);
 
-        let relayer = GravityRelayer::new(rpc_url, task).await;
+        let relayer = GravityRelayer::new(rpc_url, task).await?;
         info!("Successfully added URI: {}, relayer: {:?}", uri, relayer);
 
         let mut relayers = self.relayers.write().await;

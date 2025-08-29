@@ -498,8 +498,6 @@ impl<Storage: GravityStorage> Core<Storage> {
     fn extract_gravity_events_from_receipts(
         &self,
         receipts: &[Receipt],
-        block_id: BlockId,
-        parent_id: BlockId,
         block_number: u64,
     ) -> Vec<GravityEvent> {
         let mut gravity_events = vec![];
@@ -508,8 +506,6 @@ impl<Storage: GravityStorage> Core<Storage> {
             for log in &receipt.logs {
                 if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
                     info!(target: "execute_ordered_block",
-                        id=?block_id,
-                        parent_id=?parent_id,
                         number=?block_number,
                         "observed jwks updated"
                     );
@@ -636,17 +632,14 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let (mut block, senders) = block.split();
         block.header.gas_used = outcome.gas_used;
+        let gravity_events =
+            self.extract_gravity_events_from_receipts(&outcome.receipts, block_number);
         let mut result = ExecuteOrderedBlockResult {
             block,
             senders,
             execution_output: outcome,
             txs_info,
-            gravity_events: self.extract_gravity_events_from_receipts(
-                &outcome.receipts,
-                block_id,
-                parent_id,
-                block_number,
-            ),
+            gravity_events,
             epoch,
         };
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
