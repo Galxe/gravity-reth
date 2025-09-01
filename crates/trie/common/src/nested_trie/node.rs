@@ -201,25 +201,26 @@ impl From<Node> for StoredNode {
         match node {
             Node::FullNode { children, .. } => {
                 buf.put_u8(NodeType::BranchNode as u8);
-                let mut mask = TrieMask::default();
+                let mut mask = [u8::MAX; 16];
                 for (i, child) in children.into_iter().enumerate() {
                     if let Some(child) = child {
-                        mask.set_bit(i as u8);
                         if let Node::HashNode(rlp) = *child {
-                            buf.extend_from_slice(&rlp[1..]);
+                            mask[i] = rlp.len() as u8;
+                            buf.extend_from_slice(&rlp);
                         } else {
                             unreachable!("Only nested HashNode can be serialized in FullNode!");
                         }
                     }
                 }
-                buf.put_u16_le(mask.get());
+                buf.extend(mask);
             }
             Node::ShortNode { key, value, .. } => {
                 match *value {
                     Node::HashNode(rlp) => {
                         // extension node
                         buf.put_u8(NodeType::ExtensionNode as u8);
-                        buf.extend_from_slice(&rlp[1..]);
+                        buf.put_u8(rlp.len() as u8);
+                        buf.extend_from_slice(&rlp);
                         buf.put_u8((key.len() % 2) as u8);
                         buf.extend(key.pack());
                     }
@@ -254,25 +255,24 @@ impl From<StoredNode> for Node {
             Some(NodeType::BranchNode) => {
                 // FullNode
                 let mut children: [Option<Box<Self>>; 17] = Default::default();
-                let mask =
-                    TrieMask::new(u16::from_le_bytes(value[value.len() - 2..].try_into().unwrap()));
-                let mut cnt = 0;
+                let mask: [u8; 16] = value[value.len() - 16..].try_into().unwrap();
+                let mut start = 1;
                 for i in 0..16 {
-                    if mask.is_bit_set(i) {
-                        let s = 1 + 32 * cnt;
-                        children[i as usize] = Some(Box::new(Self::HashNode(RlpNode::word_rlp(
-                            &B256::from_slice(&value[s..s + 32]),
-                        ))));
-                        cnt += 1;
+                    if mask[i] != u8::MAX {
+                        let end = start + mask[i] as usize;
+                        let rlp = RlpNode::from_raw(&value[start..end]).unwrap();
+                        children[i] = Some(Box::new(Self::HashNode(rlp)));
+                        start = end;
                     }
                 }
                 Self::FullNode { children, flags: NodeFlag::new(None) }
             }
             Some(NodeType::ExtensionNode) => {
                 // ShortNode
-                let next = Self::HashNode(RlpNode::word_rlp(&B256::from_slice(&value[1..33])));
-                let odd = value[33];
-                let mut shared_nibbles = Nibbles::unpack(&value[34..]);
+                let rlp_len = value[1] as usize;
+                let next = Self::HashNode(RlpNode::from_raw(&value[2..rlp_len + 2]).unwrap());
+                let odd = value[rlp_len + 2];
+                let mut shared_nibbles = Nibbles::unpack(&value[rlp_len + 3..]);
                 if odd == 1 {
                     shared_nibbles.pop();
                 }

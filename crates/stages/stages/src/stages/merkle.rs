@@ -8,8 +8,8 @@ use reth_db_api::{
 };
 use reth_primitives_traits::{GotExpected, SealedHeader};
 use reth_provider::{
-    DBProvider, HeaderProvider, PersistBlockCache, ProviderError, StageCheckpointReader,
-    StageCheckpointWriter, StatsReader, TrieWriter, TrieWriterV2, PERSIST_BLOCK_CACHE,
+    DBProvider, HeaderProvider, ProviderError, StageCheckpointReader, StageCheckpointWriter,
+    StatsReader, TrieWriter, TrieWriterV2,
 };
 use reth_stages_api::{
     BlockErrorKind, BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput,
@@ -197,16 +197,13 @@ where
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
         } else {
             debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
-            let cache: PersistBlockCache = PERSIST_BLOCK_CACHE.clone();
             // Use optimized nested hash algorithm for state root calculation
             let nested_state_root =
-                NestedStateRoot::new(|| provider_ro().map(|db| db.into_tx()), Some(cache.clone()));
+                NestedStateRoot::new(|| provider_ro().map(|db| db.into_tx()), None);
             // Read the hashed state from database for the specified range
             let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
             let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
-            cache.write_trie_updates(&trie_updates_v2, to_block);
             provider.write_trie_updatesv2(&trie_updates_v2)?;
-            cache.persist_tip(to_block);
 
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
                 provider.count_entries::<tables::HashedStorages>()?)
