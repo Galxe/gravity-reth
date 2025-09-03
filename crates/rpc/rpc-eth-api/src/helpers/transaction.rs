@@ -8,7 +8,7 @@ use crate::{
     RpcTransaction,
 };
 use alloy_consensus::{
-    transaction::{SignerRecoverable, TransactionMeta},
+    transaction::{Recovered, SignerRecoverable, TransactionMeta},
     BlockHeader, Transaction,
 };
 use alloy_dyn_abi::TypedData;
@@ -533,9 +533,9 @@ pub trait LoadTransaction: SpawnBlocking + FullEthApiTypes + RpcNodeCoreExt {
                             // Note: we assume this transaction is valid, because it's mined (or
                             // part of pending block) and already. We don't need to
                             // check for pre EIP-2 because this transaction could be pre-EIP-2.
-                            let transaction = tx
-                                .try_into_recovered_unchecked()
-                                .map_err(|_| EthApiError::InvalidTransactionSignature)?;
+                            // FIXME: Hardcoded for meta txns with empty signature
+                            let signer = tx.recover_signer_unchecked().unwrap_or(Address::ZERO);
+                            let transaction = Recovered::new_unchecked(tx, signer);
 
                             let tx = TransactionSource::Block {
                                 transaction,

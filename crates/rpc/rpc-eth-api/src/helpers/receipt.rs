@@ -2,7 +2,11 @@
 //! loads receipt data w.r.t. network.
 
 use crate::{EthApiTypes, RpcNodeCoreExt, RpcReceipt};
-use alloy_consensus::{transaction::TransactionMeta, TxReceipt};
+use alloy_consensus::{
+    transaction::{Recovered, TransactionMeta},
+    TxReceipt,
+};
+use alloy_primitives::Address;
 use futures::Future;
 use reth_primitives_traits::SignerRecoverable;
 use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcConvert};
@@ -55,10 +59,10 @@ pub trait LoadReceipt:
             Ok(self
                 .tx_resp_builder()
                 .convert_receipts(vec![ConvertReceiptInput {
+                    // FIXME: Hardcoded for meta txns with empty signature
                     tx: tx
-                        .try_into_recovered_unchecked()
-                        .map_err(Self::Error::from_eth_err)?
-                        .as_recovered_ref(),
+                        .try_to_recovered_ref_unchecked()
+                        .unwrap_or_else(|_| Recovered::new_unchecked(&tx, Address::ZERO)),
                     gas_used: receipt.cumulative_gas_used() - gas_used,
                     receipt: Cow::Owned(receipt),
                     next_log_index,
