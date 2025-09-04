@@ -124,8 +124,10 @@ where
             for account_entry in account_changeset_cursor.walk_range(range.clone())? {
                 let (_, AccountBeforeTx { address, .. }) = account_entry?;
                 let hashed_address = keccak256(address);
-                let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
-                accounts.insert(hashed_address, account.map(|a| a.1));
+                if let hash_map::Entry::Vacant(e) = accounts.entry(hashed_address) {
+                    let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
+                    e.insert(account.map(|a| a.1));
+                }
             }
 
             // Walk storage changeset and insert storage prefixes as well as account prefixes if

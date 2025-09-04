@@ -381,7 +381,8 @@ impl GravityRelayer {
                 self.poll_event_task(task_uri, &filter).await
             }
             AccountActivityType::AllTransactions => {
-                // Requiring iterating through all transactions in blocks, which is performance intensive
+                // Requiring iterating through all transactions in blocks, which is performance
+                // intensive
                 warn!("AllTransactions monitoring is not yet implemented for address: {}", address);
                 Ok(ObserveState { block_number: 0, observed_value: ObservedValue::None })
             }
@@ -417,7 +418,8 @@ mod tests {
         let rpc_url = std::env::var("RPC_URL")
             .expect("RPC_URL environment variable must be set for this test");
 
-        // let uri = "gravity://31337/event?address=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512&topic0=0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624";
+        // let uri = "gravity://31337/event?address=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512&
+        // topic0=0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624";
         let parser = UriParser::new();
         let task = parser.parse(&uri).expect("Failed to parse test URI");
         println!("task: {:?}", task);
