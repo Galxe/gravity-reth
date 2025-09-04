@@ -225,7 +225,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// the pipeline (for example the `Finish` stage). Or [`ControlFlow::Unwind`] of the stage
     /// that caused the unwind.
     pub async fn run_loop(&mut self) -> Result<ControlFlow, PipelineError> {
-        if let Some(max_block) = self.max_block.clone() {
+        if let Some(max_block) = self.max_block {
             let mut current_max_block = self
                 .provider_factory
                 .get_stage_checkpoint(StageId::Finish)?
