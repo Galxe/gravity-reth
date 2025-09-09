@@ -6,7 +6,8 @@ use crate::{
 };
 use alloy_primitives::{hex, Address, B256};
 use alloy_rpc_types::{Filter, Log};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -37,6 +38,15 @@ pub enum ObservedValue {
     None,
 }
 
+enum EventDataType {
+    Raw,
+    StakeRegisterValidatorEvent,
+    StakeEvent,
+    ValidatorExitEvent,
+    UnstakeEvent,
+}
+
+
 /// Represents a blockchain event log with all relevant metadata
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventLog {
@@ -52,6 +62,8 @@ pub struct EventLog {
     pub transaction_hash: B256,
     /// Log index within the transaction
     pub log_index: u64,
+    /// Event data type
+    pub data_type: u8,
 }
 
 impl From<&Log> for EventLog {
@@ -63,14 +75,78 @@ impl From<&Log> for EventLog {
     /// # Returns
     /// * `EventLog` - The converted event log
     fn from(log: &Log) -> Self {
-        Self {
+        let mut event_log = Self {
             address: log.address(),
             topics: log.topics().to_vec(),
             data: log.data().data.to_vec(),
             block_number: log.block_number.unwrap_or_default(),
             transaction_hash: log.transaction_hash.unwrap_or_default(),
             log_index: log.log_index.unwrap_or_default(),
+            data_type: 0,
+        };
+        
+        // Automatically determine and set the event data type
+        event_log.update_data_type();
+        event_log
+    }
+}
+
+// Event signatures for different event types
+// These are the actual event signatures computed using cast keccak
+static STAKE_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
+    B256::from(hex!("0c33b5594b34696b188a9d046cd4fbcced13ddf31b53b14c743dd372cccb351d"))
+});
+
+static STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
+    B256::from(hex!("0ec5d8dce97053b60b9b9fef928273ba383f91873462e5331ef5221e6316caa0"))
+});
+
+static VALIDATOR_EXIT_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
+    B256::from(hex!("a4a94b53fed5fffcd95125139b0969c7e6cbc67e5ac5d498d0cfcf1306264aae"))
+});
+
+static UNSTAKE_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
+    B256::from(hex!("b03330b6fa0b1d5e72f1f57e0641dc39e0062c41ac969b2a073ab420460f25f0"))
+});
+
+impl EventLog {
+    /// Determines the event data type based on the event signature (first topic)
+    ///
+    /// # Returns
+    /// * `EventDataType` - The detected event data type
+    pub fn determine_event_data_type(&self) -> EventDataType {
+        // First check if we have topics (event signature)
+        if self.topics.is_empty() {
+            return EventDataType::Raw;
         }
+
+        // Get the event signature from the first topic
+        let event_signature = self.topics[0];
+
+        // Match based on event signature using cached values
+        if event_signature == *STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
+            EventDataType::StakeRegisterValidatorEvent
+        } else if event_signature == *STAKE_EVENT_SIGNATURE {
+            EventDataType::StakeEvent
+        } else if event_signature == *VALIDATOR_EXIT_EVENT_SIGNATURE {
+            EventDataType::ValidatorExitEvent
+        } else if event_signature == *UNSTAKE_EVENT_SIGNATURE {
+            EventDataType::UnstakeEvent
+        } else {
+            EventDataType::Raw
+        }
+    }
+
+    /// Updates the data_type field based on the determined event type
+    pub fn update_data_type(&mut self) {
+        let event_type = self.determine_event_data_type();
+        self.data_type = match event_type {
+            EventDataType::Raw => 0,
+            EventDataType::StakeRegisterValidatorEvent => 1,
+            EventDataType::StakeEvent => 2,
+            EventDataType::ValidatorExitEvent => 3,
+            EventDataType::UnstakeEvent => 4,
+        };
     }
 }
 
