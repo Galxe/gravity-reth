@@ -177,10 +177,12 @@ impl EventLog {
             // 解析log然后输出日志
             let log = alloy_primitives::Log::new(self.address, self.topics.clone(), self.data.clone().into()).unwrap();
             let detail = StakeRegisterValidatorEvent::decode_log(&log).unwrap();
-            info!("user: {:?}", detail.user);
-            info!("amount: {:?}", detail.amount);
-            info!("params: {:?}", detail.params);
-            info!("data: {:?}", self.data);
+            info!(target: "relayer",
+                user=?detail.user,
+                amount=?detail.amount,
+                params=?detail.params,
+                data=?self.data,
+            );
             EventDataType::StakeRegisterValidatorEvent
         } else if event_signature == *STAKE_EVENT_SIGNATURE {
             EventDataType::StakeEvent
@@ -328,6 +330,12 @@ impl GravityRelayer {
         let last_observed =
             ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
 
+        info!(target: "relayer",
+            rpc_url=?rpc_url,
+            start_block_number=?start_block_number,
+            task=?task,
+            "relayer created"
+        );
         let task_state = TaskState::new(task.clone(), start_block_number, Arc::new(last_observed));
         Ok(Self { eth_client, task_state })
     }
@@ -374,7 +382,11 @@ impl GravityRelayer {
         let finalized_block = self.eth_client.get_finalized_block_number().await?;
         scoped_filter = scoped_filter.to_block(finalized_block);
 
-        debug!("Polling event task {} with filter: {:?}", task_uri, scoped_filter);
+        debug!(target: "relayer",
+            task_uri=?task_uri,
+            scoped_filter=?scoped_filter,
+            "polling event task"
+        );
         let logs = self.eth_client.get_logs(&scoped_filter).await?;
 
         let new_logs: Vec<EventLog> = logs
@@ -387,7 +399,11 @@ impl GravityRelayer {
             // Use finalized_block as the next cursor if no to_block is specified
             let next_cursor = scoped_filter.get_to_block().unwrap_or(finalized_block);
             self.task_state.update_cursor(next_cursor).await;
-            debug!("Polling event task {} with no new logs, cursor: {}", task_uri, next_cursor);
+            debug!(target: "relayer",
+                task_uri=?task_uri,
+                next_cursor=?next_cursor,
+                "polling event task with no new logs"
+            );
             return Ok((*previous_value).clone());
         }
 
@@ -408,7 +424,12 @@ impl GravityRelayer {
             (*previous_value).clone()
         };
 
-        debug!("Polling event task {} completed, cursor: {}", task_uri, cursor);
+        debug!(target: "relayer",
+            task_uri=?task_uri,
+            cursor=?cursor,
+            should_update=?should_update,
+            "polling event task completed"
+        );
         Ok(return_value)
     }
 
@@ -451,7 +472,11 @@ impl GravityRelayer {
             (*previous_value).clone()
         };
 
-        debug!("Polling block head task {} completed, cursor: {}", task_uri, cursor);
+        debug!(target: "relayer",
+            task_uri=?task_uri,
+            cursor=?cursor,
+            "polling block head task completed"
+        );
         Ok(return_value)
     }
 
@@ -493,7 +518,11 @@ impl GravityRelayer {
         } else {
             (*previous_value).clone()
         };
-        debug!("Polling storage slot task {} completed, cursor: {}", task_uri, cursor);
+        debug!(target: "relayer",
+            task_uri=?task_uri,
+            cursor=?cursor,
+            "polling storage slot task completed"
+        );
         Ok(return_value)
     }
 
