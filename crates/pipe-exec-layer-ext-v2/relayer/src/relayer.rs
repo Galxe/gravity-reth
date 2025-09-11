@@ -5,14 +5,16 @@ use crate::{
     parser::{AccountActivityType, GravityTask, ParsedTask},
 };
 use alloy_primitives::{hex, Address, B256};
-use alloy_rpc_types::{Filter, Log};
+use alloy_rpc_types::Filter;
+use alloy_rpc_types::Log;
 use alloy_sol_macro::sol;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use alloy_sol_types::SolEvent;
+use tracing::{debug, info, warn};
 
 sol! {
     // Commission structure
@@ -36,29 +38,29 @@ sol! {
         bytes aptosAddress; // Aptos validator address
     }
 
-    struct StakeRegisterValidatorEvent {
-        address user;
-        uint256 amount;
-        bytes params;
-    }
+    event StakeRegisterValidatorEvent(
+        address user,
+        uint256 amount,
+        bytes params
+    );
 
-    struct StakeEvent {
-        address user;
-        uint256 amount;
-        address targetValidator;
-    }
+    event StakeEvent(
+        address user,
+        uint256 amount,
+        address targetValidator
+    );
 
-    struct ValidatorExitEvent {
-        address user;
-        uint256 amount;
-        address targetValidator;
-    }
+    event ValidatorExitEvent(
+        address user,
+        uint256 amount,
+        address targetValidator
+    );
 
-    struct UnstakeEvent {
-        address user;
-        uint256 amount;
-        address targetValidator;
-    }
+    event UnstakeEvent(
+        address user,
+        uint256 amount,
+        address targetValidator
+    );
 }
 /// Represents the current state of observation for a gravity task
 ///
@@ -172,6 +174,13 @@ impl EventLog {
 
         // Match based on event signature using cached values
         if event_signature == *STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
+            // 解析log然后输出日志
+            let log = alloy_primitives::Log::new(self.address, self.topics.clone(), self.data.clone().into()).unwrap();
+            let detail = StakeRegisterValidatorEvent::decode_log(&log).unwrap();
+            info!("user: {:?}", detail.user);
+            info!("amount: {:?}", detail.amount);
+            info!("params: {:?}", detail.params);
+            info!("data: {:?}", self.data);
             EventDataType::StakeRegisterValidatorEvent
         } else if event_signature == *STAKE_EVENT_SIGNATURE {
             EventDataType::StakeEvent
