@@ -6,6 +6,7 @@ use crate::{
 };
 use alloy_primitives::{hex, Address, B256};
 use alloy_rpc_types::{Filter, Log};
+use alloy_sol_macro::sol;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,52 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
+sol! {
+    // Commission structure
+    struct Commission {
+        uint64 rate; // the commission rate charged to delegators(10000 is 100%)
+        uint64 maxRate; // maximum commission rate which validator can ever charge
+        uint64 maxChangeRate; // maximum daily increase of the validator commission
+    }
+
+    struct ValidatorRegistrationParams {
+        bytes consensusPublicKey;
+        bytes blsProof; // BLS proof
+        Commission commission; // Changed from uint64 commissionRate to Commission struct
+        string moniker;
+        address initialOperator;
+        address initialVoter;
+        address initialBeneficiary; // Passed directly to StakeCredit
+        // Network addresses for Aptos compatibility
+        bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+        bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+        bytes aptosAddress; // Aptos validator address
+    }
+
+    struct StakeRegisterValidatorEvent {
+        address user;
+        uint256 amount;
+        bytes params;
+    }
+
+    struct StakeEvent {
+        address user;
+        uint256 amount;
+        address targetValidator;
+    }
+
+    struct ValidatorExitEvent {
+        address user;
+        uint256 amount;
+        address targetValidator;
+    }
+
+    struct UnstakeEvent {
+        address user;
+        uint256 amount;
+        address targetValidator;
+    }
+}
 /// Represents the current state of observation for a gravity task
 ///
 /// This struct tracks the block number, observed value, timestamp, and version
@@ -98,7 +145,7 @@ static STAKE_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
 });
 
 static STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("0ec5d8dce97053b60b9b9fef928273ba383f91873462e5331ef5221e6316caa0"))
+    B256::from(hex!("7a3bb58a384c3c04d23e4caa02a7f396c50a0be40b70c3be03817f0a8a1d1d87"))
 });
 
 static VALIDATOR_EXIT_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
