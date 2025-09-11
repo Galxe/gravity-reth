@@ -298,8 +298,23 @@ impl GravityRelayer {
     pub async fn new(rpc_url: &str, task: ParsedTask) -> Result<Self> {
         let eth_client = Arc::new(EthHttpCli::new(rpc_url)?);
 
-        // Retry getting the finalized block number with exponential backoff
-        let start_block_number = eth_client.get_finalized_block_number().await?;
+        // Get the starting block number from the task filter or use finalized block as default
+        let start_block_number = match &task.task {
+            GravityTask::MonitorEvent(filter) => {
+                filter.block_option
+                    .get_from_block()
+                    .and_then(|block| block.as_number())
+                    .unwrap_or(0)
+            }
+            _ => 0
+        };
+
+        // If no specific start block is set, use the current finalized block
+        let start_block_number = if start_block_number == 0 {
+            eth_client.get_finalized_block_number().await?
+        } else {
+            start_block_number
+        };
 
         let last_observed =
             ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
