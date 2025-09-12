@@ -4,7 +4,7 @@ use crate::{
     eth_client::EthHttpCli,
     parser::{AccountActivityType, GravityTask, ParsedTask},
 };
-use alloy_primitives::{hex, Address, B256};
+use alloy_primitives::{hex, Address, B256, U256, utils::{format_ether, parse_units}};
 use alloy_rpc_types::Filter;
 use alloy_rpc_types::Log;
 use alloy_sol_macro::sol;
@@ -41,25 +41,29 @@ sol! {
     event StakeRegisterValidatorEvent(
         address user,
         uint256 amount,
-        bytes params
+        bytes params,
+        uint64 blockNumber
     );
 
     event StakeEvent(
         address user,
         uint256 amount,
-        address targetValidator
+        address targetValidator,
+        uint64 blockNumber
     );
 
     event ValidatorExitEvent(
         address user,
         uint256 amount,
-        address targetValidator
+        address targetValidator,
+        uint64 blockNumber
     );
 
     event UnstakeEvent(
         address user,
         uint256 amount,
-        address targetValidator
+        address targetValidator,
+        uint64 blockNumber
     );
 }
 /// Represents the current state of observation for a gravity task
@@ -143,19 +147,19 @@ impl From<&Log> for EventLog {
 // Event signatures for different event types
 // These are the actual event signatures computed using cast keccak
 static STAKE_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("0c33b5594b34696b188a9d046cd4fbcced13ddf31b53b14c743dd372cccb351d"))
+    B256::from(hex!("0x503456520561683b10fa81bb1b54faf6c26d29e8d59ba37f8ee17b4d5c078c15"))
 });
 
 static STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("7a3bb58a384c3c04d23e4caa02a7f396c50a0be40b70c3be03817f0a8a1d1d87"))
+    B256::from(hex!("0x96d625dbe2bd7f604bbc20261e604894b8d1eb533d114ed5bd209b081943f349"))
 });
 
 static VALIDATOR_EXIT_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("a4a94b53fed5fffcd95125139b0969c7e6cbc67e5ac5d498d0cfcf1306264aae"))
+    B256::from(hex!("0xf64981602df47b488b7cebefda206d676c2eacb502f2f80f6e410b50fd58c95a"))
 });
 
 static UNSTAKE_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("b03330b6fa0b1d5e72f1f57e0641dc39e0062c41ac969b2a073ab420460f25f0"))
+    B256::from(hex!("0x3022824c52c19461defa926bc5e85cfde994c24628b49e4015b265da696f24f5"))
 });
 
 impl EventLog {
@@ -177,10 +181,12 @@ impl EventLog {
             // 解析log然后输出日志
             let log = alloy_primitives::Log::new(self.address, self.topics.clone(), self.data.clone().into()).unwrap();
             let detail = StakeRegisterValidatorEvent::decode_log(&log).unwrap();
+            
             info!(target: "relayer",
                 user=?detail.user,
-                amount=?detail.amount,
+                amount_wei=?detail.amount,
                 params=?detail.params,
+                block_number=?detail.blockNumber,
                 data=?self.data,
             );
             EventDataType::StakeRegisterValidatorEvent

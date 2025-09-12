@@ -53,7 +53,7 @@ sol! {
 }
 
 fn convert_into_api_jwk(jwk: JWK) -> JWKStruct {
-    JWKStruct { type_name: "JWK".to_string(), data: jwk.data.into() }
+    JWKStruct { type_name: jwk.variant.to_string(), data: jwk.data.into() }
 }
 
 pub fn convert_into_api_provider_jwks(
