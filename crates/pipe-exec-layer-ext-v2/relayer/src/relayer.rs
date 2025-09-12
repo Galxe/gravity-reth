@@ -42,28 +42,28 @@ sol! {
         address user,
         uint256 amount,
         bytes params,
-        uint64 blockNumber
+        uint256 blockNumber
     );
 
     event StakeEvent(
         address user,
         uint256 amount,
         address targetValidator,
-        uint64 blockNumber
+        uint256 blockNumber
     );
 
     event ValidatorExitEvent(
         address user,
         uint256 amount,
         address targetValidator,
-        uint64 blockNumber
+        uint256 blockNumber
     );
 
     event UnstakeEvent(
         address user,
         uint256 amount,
         address targetValidator,
-        uint64 blockNumber
+        uint256 blockNumber
     );
 }
 /// Represents the current state of observation for a gravity task
