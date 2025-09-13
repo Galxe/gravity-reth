@@ -4,7 +4,6 @@ use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     GRAVITY_FRAMEWORK_ADDRESS, JWK_MANAGER_ADDR,
 };
-use crate::onchain_config::{BLOCK_ADDR, SYSTEM_CALLER};
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Address, Bytes, Signature, U256};
 use alloy_rpc_types_eth::TransactionRequest;
@@ -12,21 +11,20 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
-use reth_evm::{Evm, IntoTxEnv};
-use reth_primitives::Recovered;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use revm::{
-    context::TxEnv,
-    context_interface::result::HaltReason,
-    database::{states::bundle_state::BundleRetention, State},
-    state::EvmState,
-    Database,
-};
 use revm_primitives::TxKind;
 use std::fmt::Debug;
-use tracing::info;
 
 sol! {
+    // 0 => Raw,
+    // 1 => StakeRegisterValidatorEvent,
+    // 2 => StakeEvent,
+    // 3 => ValidatorExitEvent,
+    // 4 => UnstakeEvent,
+    struct UnsupportedJWK {
+        bytes id;
+        bytes payload;
+    }
     struct JWK {
         uint8 variant; // 0: RSA_JWK, 1: UnsupportedJWK
         bytes data; // Encoded JWK data
@@ -53,7 +51,13 @@ sol! {
 }
 
 fn convert_into_api_jwk(jwk: JWK) -> JWKStruct {
-    JWKStruct { type_name: jwk.variant.to_string(), data: jwk.data.into() }
+    if jwk.variant == 0 {
+        // Note: Gravity relayer does not fetch RSA JWKs directly. RSA JWKs are fetched in Aptos code
+        JWKStruct { type_name: "0x1::jwks::RSA_JWK".to_string(), data: jwk.data.into() }
+    } else {
+        // All data fetched by gravity relayer is contained within UnsupportedJWK in the data field
+        JWKStruct { type_name: "0x1::jwks::UnsupportedJWK".to_string(), data: jwk.data.into() }
+    }
 }
 
 pub fn convert_into_api_provider_jwks(
@@ -80,7 +84,14 @@ fn convert_into_sol_provider_jwks(
         jwks: provider_jwks
             .jwks
             .into_iter()
-            .map(|jwk| JWK { variant: jwk.type_name.as_bytes()[0], data: jwk.data.into() })
+            .map(|jwk| {
+                let variant = match jwk.type_name.as_str() {
+                    "0x1::jwks::RSA_JWK" => 0,
+                    "0x1::jwks::UnsupportedJWK" => 1,
+                    _ => panic!("Unsupported JWK type: {}", jwk.type_name),
+                };
+                JWK { variant, data: jwk.data.into() }
+            })
             .collect(),
     }
 }
