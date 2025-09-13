@@ -12,6 +12,7 @@ description = "replayer for pipeline execution layer extension"
 workspace = true
 
 [dependencies]
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", branch = "dev-0909-jwk" }
 reth-primitives.workspace = true
 reth-tracing.workspace = true
 alloy-primitives.workspace = true
@@ -29,6 +30,8 @@ url.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls"] }
 alloy-sol-macro.workspace = true
 alloy-sol-types.workspace = true
+
+serde_json.workspace = true
 
 [dev-dependencies]
 alloy-sol-macro.workspace = true

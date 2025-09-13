@@ -4,38 +4,27 @@ use crate::{
     eth_client::EthHttpCli,
     parser::{AccountActivityType, GravityTask, ParsedTask},
 };
-use alloy_primitives::{hex, Address, B256, U256, utils::{format_ether, parse_units}};
+use alloy_primitives::{
+    hex,
+    utils::{format_ether, parse_units},
+    Address, B256, U256,
+};
 use alloy_rpc_types::Filter;
 use alloy_rpc_types::Log;
 use alloy_sol_macro::sol;
+use alloy_sol_types::SolEvent;
 use anyhow::Result;
+use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use alloy_sol_types::SolEvent;
 use tracing::{debug, info, warn};
 
 sol! {
-    // Commission structure
-    struct Commission {
-        uint64 rate; // the commission rate charged to delegators(10000 is 100%)
-        uint64 maxRate; // maximum commission rate which validator can ever charge
-        uint64 maxChangeRate; // maximum daily increase of the validator commission
-    }
-
-    struct ValidatorRegistrationParams {
-        bytes consensusPublicKey;
-        bytes blsProof; // BLS proof
-        Commission commission; // Changed from uint64 commissionRate to Commission struct
-        string moniker;
-        address initialOperator;
-        address initialVoter;
-        address initialBeneficiary; // Passed directly to StakeCredit
-        // Network addresses for Aptos compatibility
-        bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
-        bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
-        bytes aptosAddress; // Aptos validator address
+    struct UnsupportedJWK {
+        bytes id;
+        bytes payload;
     }
 
     event StakeRegisterValidatorEvent(
@@ -99,7 +88,6 @@ enum EventDataType {
     UnstakeEvent,
 }
 
-
 /// Represents a blockchain event log with all relevant metadata
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventLog {
@@ -137,7 +125,7 @@ impl From<&Log> for EventLog {
             log_index: log.log_index.unwrap_or_default(),
             data_type: 0,
         };
-        
+
         // Automatically determine and set the event data type
         event_log.update_data_type();
         event_log
@@ -179,9 +167,14 @@ impl EventLog {
         // Match based on event signature using cached values
         if event_signature == *STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
             // 解析log然后输出日志
-            let log = alloy_primitives::Log::new(self.address, self.topics.clone(), self.data.clone().into()).unwrap();
+            let log = alloy_primitives::Log::new(
+                self.address,
+                self.topics.clone(),
+                self.data.clone().into(),
+            )
+            .unwrap();
             let detail = StakeRegisterValidatorEvent::decode_log(&log).unwrap();
-            
+
             info!(target: "relayer",
                 user=?detail.user,
                 amount_wei=?detail.amount,
@@ -211,6 +204,12 @@ impl EventLog {
             EventDataType::ValidatorExitEvent => 3,
             EventDataType::UnstakeEvent => 4,
         };
+    }
+}
+
+impl Into<JWKStruct> for &EventLog {
+    fn into(self) -> JWKStruct {
+        JWKStruct { type_name: self.data_type.to_string(), data: self.data.clone() }
     }
 }
 
@@ -317,13 +316,12 @@ impl GravityRelayer {
 
         // Get the starting block number from the task filter or use finalized block as default
         let start_block_number = match &task.task {
-            GravityTask::MonitorEvent(filter) => {
-                filter.block_option
-                    .get_from_block()
-                    .and_then(|block| block.as_number())
-                    .unwrap_or(0)
-            }
-            _ => 0
+            GravityTask::MonitorEvent(filter) => filter
+                .block_option
+                .get_from_block()
+                .and_then(|block| block.as_number())
+                .unwrap_or(0),
+            _ => 0,
         };
 
         // If no specific start block is set, use the current finalized block
@@ -367,6 +365,21 @@ impl GravityRelayer {
                 self.poll_account_activity_task(task_uri, *address, activity_type).await
             }
         }
+    }
+
+    pub async fn convert_specific_observed_value(
+        observed_state: ObserveState,
+    ) -> Result<Vec<JWKStruct>> {
+        let jwk = match observed_state.observed_value {
+            ObservedValue::Events { logs } => logs.iter().map(|log| log.into()).collect(),
+            _ => {
+                vec![JWKStruct {
+                    type_name: "0".to_string(),
+                    data: serde_json::to_vec(&observed_state).expect("failed to serialize state"),
+                }]
+            }
+        };
+        Ok(jwk)
     }
 
     /// Polls for event logs based on the provided filter

@@ -87,8 +87,7 @@ fn convert_into_sol_provider_jwks(
             .map(|jwk| {
                 let variant = match jwk.type_name.as_str() {
                     "0x1::jwks::RSA_JWK" => 0,
-                    "0x1::jwks::UnsupportedJWK" => 1,
-                    _ => panic!("Unsupported JWK type: {}", jwk.type_name),
+                    _ => 1,
                 };
                 JWK { variant, data: jwk.data.into() }
             })
