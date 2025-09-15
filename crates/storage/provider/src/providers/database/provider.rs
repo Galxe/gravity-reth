@@ -2312,14 +2312,28 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
         let tx = self.tx_ref();
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
         let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
-        for path in &input.removed_nodes {
-            if account_trie_cursor.seek_exact((*path).into())?.is_some() {
-                account_trie_cursor.delete_current()?;
-            }
-        }
-        for (path, node) in &input.account_nodes {
-            account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
+
+        let mut account_updates = input
+            .removed_nodes
+            .iter()
+            .filter_map(|n| (!input.account_nodes.contains_key(n)).then_some((n, None)))
+            .collect::<Vec<_>>();
+        account_updates.extend(input.account_nodes.iter().map(|(p, n)| (p, Some(n))));
+        // Sort trie node updates.
+        account_updates.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (path, node) in account_updates {
+            let path = StoredNibbles(*path);
             num_updated += 1;
+            match node {
+                Some(node) => {
+                    account_trie_cursor.upsert(path, &node.clone().into())?;
+                }
+                None => {
+                    if account_trie_cursor.seek_exact(path)?.is_some() {
+                        account_trie_cursor.delete_current()?;
+                    }
+                }
+            }
         }
 
         for (hashed_address, storage_trie_update) in &input.storage_tries {
@@ -2329,28 +2343,29 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                     storage_trie_cursor.delete_current_duplicates()?;
                 }
             } else {
-                for path in &storage_trie_update.removed_nodes {
-                    let path = StoredNibblesSubKey(*path);
-                    if let Some(entry) =
-                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, (*path).into())?
-                    {
-                        if entry.path == path {
-                            storage_trie_cursor.delete_current()?;
-                        }
-                    }
-                }
-                for (path, node) in &storage_trie_update.storage_nodes {
-                    let path = StoredNibblesSubKey(*path);
-                    if let Some(entry) =
-                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, (*path).into())?
-                    {
-                        if entry.path == path {
-                            storage_trie_cursor.delete_current()?;
-                        }
-                    }
-                    storage_trie_cursor
-                        .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
+                let mut storage_updates = storage_trie_update
+                    .removed_nodes
+                    .iter()
+                    .filter_map(|n| {
+                        (!storage_trie_update.storage_nodes.contains_key(n)).then_some((n, None))
+                    })
+                    .collect::<Vec<_>>();
+                storage_updates
+                    .extend(storage_trie_update.storage_nodes.iter().map(|(p, n)| (p, Some(n))));
+                for (path, node) in storage_updates {
                     num_updated += 1;
+                    let path = StoredNibblesSubKey(*path);
+                    if let Some(entry) =
+                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
+                    {
+                        if entry.path == path {
+                            storage_trie_cursor.delete_current()?;
+                        }
+                    }
+                    if let Some(node) = node {
+                        storage_trie_cursor
+                            .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
+                    }
                 }
             }
         }

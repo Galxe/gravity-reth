@@ -157,7 +157,11 @@ where
             let static_file_provider = self.provider.static_file_provider();
 
             UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(blocks)?;
+            let start_time = Instant::now();
             UnifiedStorageWriter::commit(provider_rw)?;
+            self.metrics
+                .persist_commit_duration_seconds
+                .record(start_time.elapsed().as_secs_f64() / num_blocks as f64);
             PERSIST_BLOCK_CACHE.persist_tip(last_block_hn.number);
         }
         let elapsed = start_time.elapsed();

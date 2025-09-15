@@ -19,6 +19,8 @@ pub(crate) struct PersistenceMetrics {
     pub(crate) remove_blocks_above_duration_seconds: Histogram,
     /// How long it took for blocks to be saved
     pub(crate) save_blocks_duration_seconds: Histogram,
+    /// How long it took for commit
+    pub(crate) persist_commit_duration_seconds: Histogram,
     /// How long it took to save each block
     pub(crate) save_duration_per_block_seconds: Histogram,
     /// How long it took for blocks to be pruned
