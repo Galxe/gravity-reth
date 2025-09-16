@@ -12,7 +12,7 @@ use alloy_primitives::{
 use alloy_rpc_types::Filter;
 use alloy_rpc_types::Log;
 use alloy_sol_macro::sol;
-use alloy_sol_types::SolEvent;
+use alloy_sol_types::{SolEvent, SolValue};
 use anyhow::Result;
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use once_cell::sync::Lazy;
@@ -209,7 +209,15 @@ impl EventLog {
 
 impl Into<JWKStruct> for &EventLog {
     fn into(self) -> JWKStruct {
-        JWKStruct { type_name: self.data_type.to_string(), data: self.data.clone() }
+        let unsupported_jwk = UnsupportedJWK {
+            id: self.data_type.to_string().into_bytes().into(),
+            payload: self.data.clone().into(),
+        };
+        debug!(target: "relayer", "generate unsupported_jwk: {:?}", unsupported_jwk.abi_encode());
+        JWKStruct {
+            type_name: "0x1::jwks::UnsupportedJWK".to_string(),
+            data: unsupported_jwk.abi_encode().into(),
+        }
     }
 }
 
