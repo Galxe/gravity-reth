@@ -14,6 +14,7 @@ use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use revm_primitives::{keccak256, TxKind};
 use std::fmt::Debug;
+use tracing::debug;
 
 // 全局常量：事件类型的keccak256哈希值
 const EVENT_TYPE_1_HASH: [u8; 32] = [
@@ -37,11 +38,7 @@ const EVENT_TYPE_4_HASH: [u8; 32] = [
 const DEFAULT_VALIDATOR_PARAMS: ValidatorRegistrationParams = ValidatorRegistrationParams {
     consensusPublicKey: Bytes::new(),
     blsProof: Bytes::new(),
-    commission: Commission {
-        rate: 0,
-        maxRate: 0,
-        maxChangeRate: 0,
-    },
+    commission: Commission { rate: 0, maxRate: 0, maxChangeRate: 0 },
     moniker: String::new(),
     initialOperator: Address::ZERO,
     initialBeneficiary: Address::ZERO,
@@ -193,23 +190,59 @@ fn convert_into_sol_provider_jwks(
     }
 }
 
+fn construct_params_string(crosschain_params: &CrossChainParams) -> String {
+    format!(
+        "CrossChainParams {{\n  id: {:?},\n  validatorParams: ValidatorRegistrationParams {{\n    consensusPublicKey: {:?},\n    blsProof: {:?},\n    commission: Commission {{ rate: {}, maxRate: {}, maxChangeRate: {} }},\n    moniker: {:?},\n    initialOperator: {:?},\n    initialBeneficiary: {:?},\n    validatorNetworkAddresses: {:?},\n    fullnodeNetworkAddresses: {:?},\n    aptosAddress: {:?}\n  }},\n  targetValidator: {:?},\n  shares: {:?},\n  blockNumber: {:?},\n  issuer: {:?}\n}}",
+        crosschain_params.id,
+        crosschain_params.validatorParams.consensusPublicKey,
+        crosschain_params.validatorParams.blsProof,
+        crosschain_params.validatorParams.commission.rate,
+        crosschain_params.validatorParams.commission.maxRate,
+        crosschain_params.validatorParams.commission.maxChangeRate,
+        crosschain_params.validatorParams.moniker,
+        crosschain_params.validatorParams.initialOperator,
+        crosschain_params.validatorParams.initialBeneficiary,
+        crosschain_params.validatorParams.validatorNetworkAddresses,
+        crosschain_params.validatorParams.fullnodeNetworkAddresses,
+        crosschain_params.validatorParams.aptosAddress,
+        crosschain_params.targetValidator,
+        crosschain_params.shares,
+        crosschain_params.blockNumber,
+        crosschain_params.issuer
+    )
+}
+
+fn print_crosschain_params(crosschain_params: &CrossChainParams) {
+    let params_string = construct_params_string(crosschain_params);
+    debug!(
+        target: "gravity-relayer",
+        "CrossChainParams created:\n{}",
+        params_string
+    );
+}
+
 fn convert_into_sol_crosschain_params(jwks: &Vec<JWK>, issuer: String) -> Vec<CrossChainParams> {
     jwks.iter()
         .filter(|jwk| jwk.variant == 1)
-        .map(|jwk| process_unsupported_jwk(jwk, &issuer))
+        .map(|jwk| {
+            let crosschain_params = process_unsupported_jwk(jwk, &issuer);
+            print_crosschain_params(&crosschain_params);
+            crosschain_params
+        })
         .collect()
 }
 
 fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
     let unsupported_jwk = UnsupportedJWK::abi_decode(&jwk.data).unwrap();
     let id_hash = keccak256(&unsupported_jwk.id);
-    
+
     match id_hash {
         hash if hash == EVENT_TYPE_1_HASH => {
             // StakeRegisterValidatorEvent
-            let event = StakeRegisterValidatorEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            let event =
+                StakeRegisterValidatorEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
             let validator_params = ValidatorRegistrationParams::abi_decode(&event.2).unwrap();
-            
+
             CrossChainParams {
                 id: unsupported_jwk.id,
                 validatorParams: validator_params,
@@ -222,7 +255,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
         hash if hash == EVENT_TYPE_2_HASH => {
             // StakeEvent
             let event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            
+
             CrossChainParams {
                 id: unsupported_jwk.id,
                 validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
@@ -235,7 +268,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
         hash if hash == EVENT_TYPE_3_HASH => {
             // ValidatorExitEvent
             let event = ValidatorExitEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            
+
             CrossChainParams {
                 id: unsupported_jwk.id,
                 validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
@@ -248,7 +281,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
         hash if hash == EVENT_TYPE_4_HASH => {
             // UnstakeEvent
             let event = UnstakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            
+
             CrossChainParams {
                 id: unsupported_jwk.id,
                 validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
