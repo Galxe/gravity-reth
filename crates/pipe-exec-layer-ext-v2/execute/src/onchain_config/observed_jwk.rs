@@ -13,8 +13,42 @@ use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use revm_primitives::{keccak256, TxKind};
-use tracing::info;
 use std::fmt::Debug;
+
+// 全局常量：事件类型的keccak256哈希值
+const EVENT_TYPE_1_HASH: [u8; 32] = [
+    0xc8, 0x9e, 0xfd, 0xaa, 0x54, 0xc0, 0xf2, 0x0c, 0x7a, 0xdf, 0x61, 0x28, 0x82, 0xdf, 0x09, 0x50,
+    0xf5, 0xa9, 0x51, 0x63, 0x7e, 0x03, 0x07, 0xcd, 0xcb, 0x4c, 0x67, 0x2f, 0x29, 0x8b, 0x8b, 0xc6,
+];
+const EVENT_TYPE_2_HASH: [u8; 32] = [
+    0xad, 0x7c, 0x5b, 0xef, 0x02, 0x78, 0x16, 0xa8, 0x00, 0xda, 0x17, 0x36, 0x44, 0x4f, 0xb5, 0x8a,
+    0x80, 0x7e, 0xf4, 0xc9, 0x60, 0x3b, 0x78, 0x48, 0x67, 0x3f, 0x7e, 0x3a, 0x68, 0xeb, 0x14, 0xa5,
+];
+const EVENT_TYPE_3_HASH: [u8; 32] = [
+    0x2a, 0x80, 0xe1, 0xef, 0x1d, 0x78, 0x42, 0xf2, 0x7f, 0x2e, 0x6b, 0xe0, 0x97, 0x2b, 0xb7, 0x08,
+    0xb9, 0xa1, 0x35, 0xc3, 0x88, 0x60, 0xdb, 0xe7, 0x3c, 0x27, 0xc3, 0x48, 0x6c, 0x34, 0xf4, 0xde,
+];
+const EVENT_TYPE_4_HASH: [u8; 32] = [
+    0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
+    0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
+];
+
+// 全局常量：默认的ValidatorRegistrationParams
+const DEFAULT_VALIDATOR_PARAMS: ValidatorRegistrationParams = ValidatorRegistrationParams {
+    consensusPublicKey: Bytes::new(),
+    blsProof: Bytes::new(),
+    commission: Commission {
+        rate: 0,
+        maxRate: 0,
+        maxChangeRate: 0,
+    },
+    moniker: String::new(),
+    initialOperator: Address::ZERO,
+    initialBeneficiary: Address::ZERO,
+    validatorNetworkAddresses: Bytes::new(),
+    fullnodeNetworkAddresses: Bytes::new(),
+    aptosAddress: Bytes::new(),
+};
 
 sol! {
     event StakeRegisterValidatorEvent(
@@ -65,7 +99,7 @@ sol! {
         bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
         bytes aptosAddress; // Aptos validator address
     }
-    
+
     struct CrossChainParams {
         // 1 => StakeRegisterValidatorEvent
         // 2 => DelegationEvent
@@ -107,7 +141,8 @@ sol! {
     function getObservedJWKs() external view returns (AllProvidersJWKs memory);
 
     function upsertObservedJWKs(
-        ProviderJWKs[] calldata providerJWKsArray
+        ProviderJWKs[] calldata providerJWKsArray,
+        CrossChainParams[] calldata crossChainParamsArray
     ) external;
 
     event ObservedJWKsUpdated(uint256 indexed epoch, ProviderJWKs[] jwks);
@@ -158,109 +193,73 @@ fn convert_into_sol_provider_jwks(
     }
 }
 
-fn convert_into_sol_crosschain_params(jwks: Vec<JWK>, issuer: String) -> Vec<CrossChainParams> {
-    jwks.iter().filter(|jwk| jwk.variant == 1).map(|jwk| {
-        // 反序列化拿到unsupportedjwk
-        let unsupported_jwk = UnsupportedJWK::abi_decode(&jwk.data).unwrap();
-        let id_keccak256 = keccak256(&unsupported_jwk.id);
-        let bytes1_keccak256 = keccak256(b"1");
-        let bytes2_keccak256 = keccak256(b"2");
-        let bytes3_keccak256 = keccak256(b"3");
-        let bytes4_keccak256 = keccak256(b"4");
-        if id_keccak256 == bytes1_keccak256 {
-            // 1
-            let stake_register_validator_event = StakeRegisterValidatorEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            let validator_registration_params = ValidatorRegistrationParams::abi_decode(&stake_register_validator_event.2).unwrap();
+fn convert_into_sol_crosschain_params(jwks: &Vec<JWK>, issuer: String) -> Vec<CrossChainParams> {
+    jwks.iter()
+        .filter(|jwk| jwk.variant == 1)
+        .map(|jwk| process_unsupported_jwk(jwk, &issuer))
+        .collect()
+}
+
+fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
+    let unsupported_jwk = UnsupportedJWK::abi_decode(&jwk.data).unwrap();
+    let id_hash = keccak256(&unsupported_jwk.id);
+    
+    match id_hash {
+        hash if hash == EVENT_TYPE_1_HASH => {
+            // StakeRegisterValidatorEvent
+            let event = StakeRegisterValidatorEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            let validator_params = ValidatorRegistrationParams::abi_decode(&event.2).unwrap();
+            
             CrossChainParams {
                 id: unsupported_jwk.id,
-                validatorParams: validator_registration_params,
-                targetValidator: stake_register_validator_event.0,
-                shares: stake_register_validator_event.1,
-                blockNumber: stake_register_validator_event.3,
-                issuer: issuer.clone(),
+                validatorParams: validator_params,
+                targetValidator: event.0,
+                shares: event.1,
+                blockNumber: event.3,
+                issuer: issuer.to_string(),
             }
-        } else if id_keccak256 == bytes2_keccak256 {
-            // 2
-            // 反序列化拿到StakeEvent
-            let stake_event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            CrossChainParams {
-                id: unsupported_jwk.id,
-                validatorParams: ValidatorRegistrationParams {
-                    consensusPublicKey: Bytes::new(),
-                    blsProof: Bytes::new(),
-                    commission: Commission {
-                        rate: 0,
-                        maxRate: 0,
-                        maxChangeRate: 0,
-                    },
-                    moniker: String::new(),
-                    initialOperator: Address::ZERO,
-                    initialBeneficiary: Address::ZERO,
-                    validatorNetworkAddresses: Bytes::new(),
-                    fullnodeNetworkAddresses: Bytes::new(),
-                    aptosAddress: Bytes::new(),
-                },
-                targetValidator: stake_event.0,
-                shares: U256::from(0),
-                blockNumber: stake_event.3,
-                issuer: issuer.clone(),
-            }
-        } else if id_keccak256 == bytes3_keccak256 {
-            // 3
-            // ValidatorExitEvent
-            let validator_exit_event = ValidatorExitEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            CrossChainParams {
-                id: unsupported_jwk.id,
-                validatorParams: ValidatorRegistrationParams {
-                    consensusPublicKey: Bytes::new(),
-                    blsProof: Bytes::new(),
-                    commission: Commission {
-                        rate: 0,
-                        maxRate: 0,
-                        maxChangeRate: 0,
-                    },
-                    moniker: String::new(),
-                    initialOperator: Address::ZERO,
-                    initialBeneficiary: Address::ZERO,
-                    validatorNetworkAddresses: Bytes::new(),
-                    fullnodeNetworkAddresses: Bytes::new(),
-                    aptosAddress: Bytes::new(),
-                },
-                targetValidator: validator_exit_event.0,
-                shares: U256::from(0),
-                blockNumber: validator_exit_event.3,
-                issuer: issuer.clone(),
-            }
-        } else if id_keccak256 == bytes4_keccak256 {
-            // 4
-            // UnstakeEvent
-            let validator_exit_event = UnstakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            CrossChainParams {
-                id: unsupported_jwk.id,
-                validatorParams: ValidatorRegistrationParams {
-                    consensusPublicKey: Bytes::new(),
-                    blsProof: Bytes::new(),
-                    commission: Commission {
-                        rate: 0,
-                        maxRate: 0,
-                        maxChangeRate: 0,
-                    },
-                    moniker: String::new(),
-                    initialOperator: Address::ZERO,
-                    initialBeneficiary: Address::ZERO,
-                    validatorNetworkAddresses: Bytes::new(),
-                    fullnodeNetworkAddresses: Bytes::new(),
-                    aptosAddress: Bytes::new(),
-                },
-                targetValidator: validator_exit_event.0,
-                shares: validator_exit_event.1,
-                blockNumber: validator_exit_event.3,
-                issuer: issuer.clone(),
-            }
-        } else {
-            panic!("Unsupported event type");
         }
-    }).collect()
+        hash if hash == EVENT_TYPE_2_HASH => {
+            // StakeEvent
+            let event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            
+            CrossChainParams {
+                id: unsupported_jwk.id,
+                validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
+                targetValidator: event.0,
+                shares: U256::from(0),
+                blockNumber: event.3,
+                issuer: issuer.to_string(),
+            }
+        }
+        hash if hash == EVENT_TYPE_3_HASH => {
+            // ValidatorExitEvent
+            let event = ValidatorExitEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            
+            CrossChainParams {
+                id: unsupported_jwk.id,
+                validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
+                targetValidator: event.0,
+                shares: U256::from(0),
+                blockNumber: event.3,
+                issuer: issuer.to_string(),
+            }
+        }
+        hash if hash == EVENT_TYPE_4_HASH => {
+            // UnstakeEvent
+            let event = UnstakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            
+            CrossChainParams {
+                id: unsupported_jwk.id,
+                validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
+                targetValidator: event.0,
+                shares: event.1,
+                blockNumber: event.3,
+                issuer: issuer.to_string(),
+            }
+        }
+        _ => panic!("Unsupported event type: {:?}", id_hash),
+    }
 }
 
 fn convert_into_api_all_providers_jwks(
@@ -372,8 +371,15 @@ pub fn construct_observed_jwks_txns_envelope(
             >(&provider_jwks_bytes)
             .expect("Failed to deserialize provider JWKS");
             let provider_jwks = convert_into_sol_provider_jwks(provider_jwks);
+            let cross_chain_params = convert_into_sol_crosschain_params(
+                &provider_jwks.jwks,
+                provider_jwks.issuer.clone(),
+            );
 
-            let call = upsertObservedJWKsCall { providerJWKsArray: vec![provider_jwks] };
+            let call = upsertObservedJWKsCall {
+                providerJWKsArray: vec![provider_jwks],
+                crossChainParamsArray: cross_chain_params,
+            };
             let input: Bytes = call.abi_encode().into();
             let current_nonce = system_caller_nonce + index as u64;
             new_system_call_txn(JWK_MANAGER_ADDR, current_nonce, gas_price, input)
