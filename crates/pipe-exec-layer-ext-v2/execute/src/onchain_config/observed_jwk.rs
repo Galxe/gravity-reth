@@ -8,14 +8,77 @@ use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Address, Bytes, Signature, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolEvent, SolType};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use revm_primitives::TxKind;
+use revm_primitives::{keccak256, TxKind};
+use tracing::info;
 use std::fmt::Debug;
 
 sol! {
+    event StakeRegisterValidatorEvent(
+        address user,
+        uint256 amount,
+        bytes params,
+        uint256 blockNumber
+    );
+
+    event StakeEvent(
+        address user,
+        uint256 amount,
+        address targetValidator,
+        uint256 blockNumber
+    );
+
+    event ValidatorExitEvent(
+        address user,
+        uint256 amount,
+        address targetValidator,
+        uint256 blockNumber
+    );
+
+    event UnstakeEvent(
+        address user,
+        uint256 amount,
+        address targetValidator,
+        uint256 blockNumber
+    );
+}
+
+sol! {
+    // Commission structure
+    struct Commission {
+        uint64 rate; // the commission rate charged to delegators(10000 is 100%)
+        uint64 maxRate; // maximum commission rate which validator can ever charge
+        uint64 maxChangeRate; // maximum daily increase of the validator commission
+    }
+    struct ValidatorRegistrationParams {
+        bytes consensusPublicKey;
+        bytes blsProof; // BLS proof
+        Commission commission; // Changed from uint64 commissionRate to Commission struct
+        string moniker;
+        address initialOperator;
+        address initialBeneficiary; // Passed directly to StakeCredit
+        // Network addresses for Aptos compatibility
+        bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+        bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
+        bytes aptosAddress; // Aptos validator address
+    }
+    
+    struct CrossChainParams {
+        // 1 => StakeRegisterValidatorEvent
+        // 2 => DelegationEvent
+        // 3 => LeaveValidatorSetEvent
+        // 4 => UndelegationEvent
+        bytes id;
+        ValidatorRegistrationParams validatorParams;
+        address targetValidator;
+        uint256 shares;
+        uint256 blockNumber;
+        string issuer;
+    }
+
     // 0 => Raw,
     // 1 => StakeRegisterValidatorEvent,
     // 2 => StakeEvent,
@@ -93,6 +156,111 @@ fn convert_into_sol_provider_jwks(
             })
             .collect(),
     }
+}
+
+fn convert_into_sol_crosschain_params(jwks: Vec<JWK>, issuer: String) -> Vec<CrossChainParams> {
+    jwks.iter().filter(|jwk| jwk.variant == 1).map(|jwk| {
+        // 反序列化拿到unsupportedjwk
+        let unsupported_jwk = UnsupportedJWK::abi_decode(&jwk.data).unwrap();
+        let id_keccak256 = keccak256(&unsupported_jwk.id);
+        let bytes1_keccak256 = keccak256(b"1");
+        let bytes2_keccak256 = keccak256(b"2");
+        let bytes3_keccak256 = keccak256(b"3");
+        let bytes4_keccak256 = keccak256(b"4");
+        if id_keccak256 == bytes1_keccak256 {
+            // 1
+            let stake_register_validator_event = StakeRegisterValidatorEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            let validator_registration_params = ValidatorRegistrationParams::abi_decode(&stake_register_validator_event.2).unwrap();
+            CrossChainParams {
+                id: unsupported_jwk.id,
+                validatorParams: validator_registration_params,
+                targetValidator: stake_register_validator_event.0,
+                shares: stake_register_validator_event.1,
+                blockNumber: stake_register_validator_event.3,
+                issuer: issuer.clone(),
+            }
+        } else if id_keccak256 == bytes2_keccak256 {
+            // 2
+            // 反序列化拿到StakeEvent
+            let stake_event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            CrossChainParams {
+                id: unsupported_jwk.id,
+                validatorParams: ValidatorRegistrationParams {
+                    consensusPublicKey: Bytes::new(),
+                    blsProof: Bytes::new(),
+                    commission: Commission {
+                        rate: 0,
+                        maxRate: 0,
+                        maxChangeRate: 0,
+                    },
+                    moniker: String::new(),
+                    initialOperator: Address::ZERO,
+                    initialBeneficiary: Address::ZERO,
+                    validatorNetworkAddresses: Bytes::new(),
+                    fullnodeNetworkAddresses: Bytes::new(),
+                    aptosAddress: Bytes::new(),
+                },
+                targetValidator: stake_event.0,
+                shares: U256::from(0),
+                blockNumber: stake_event.3,
+                issuer: issuer.clone(),
+            }
+        } else if id_keccak256 == bytes3_keccak256 {
+            // 3
+            // ValidatorExitEvent
+            let validator_exit_event = ValidatorExitEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            CrossChainParams {
+                id: unsupported_jwk.id,
+                validatorParams: ValidatorRegistrationParams {
+                    consensusPublicKey: Bytes::new(),
+                    blsProof: Bytes::new(),
+                    commission: Commission {
+                        rate: 0,
+                        maxRate: 0,
+                        maxChangeRate: 0,
+                    },
+                    moniker: String::new(),
+                    initialOperator: Address::ZERO,
+                    initialBeneficiary: Address::ZERO,
+                    validatorNetworkAddresses: Bytes::new(),
+                    fullnodeNetworkAddresses: Bytes::new(),
+                    aptosAddress: Bytes::new(),
+                },
+                targetValidator: validator_exit_event.0,
+                shares: U256::from(0),
+                blockNumber: validator_exit_event.3,
+                issuer: issuer.clone(),
+            }
+        } else if id_keccak256 == bytes4_keccak256 {
+            // 4
+            // UnstakeEvent
+            let validator_exit_event = UnstakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            CrossChainParams {
+                id: unsupported_jwk.id,
+                validatorParams: ValidatorRegistrationParams {
+                    consensusPublicKey: Bytes::new(),
+                    blsProof: Bytes::new(),
+                    commission: Commission {
+                        rate: 0,
+                        maxRate: 0,
+                        maxChangeRate: 0,
+                    },
+                    moniker: String::new(),
+                    initialOperator: Address::ZERO,
+                    initialBeneficiary: Address::ZERO,
+                    validatorNetworkAddresses: Bytes::new(),
+                    fullnodeNetworkAddresses: Bytes::new(),
+                    aptosAddress: Bytes::new(),
+                },
+                targetValidator: validator_exit_event.0,
+                shares: validator_exit_event.1,
+                blockNumber: validator_exit_event.3,
+                issuer: issuer.clone(),
+            }
+        } else {
+            panic!("Unsupported event type");
+        }
+    }).collect()
 }
 
 fn convert_into_api_all_providers_jwks(
