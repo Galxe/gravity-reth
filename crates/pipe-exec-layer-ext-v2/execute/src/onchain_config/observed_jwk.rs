@@ -16,7 +16,6 @@ use revm_primitives::{keccak256, TxKind};
 use std::fmt::Debug;
 use tracing::debug;
 
-// 全局常量：事件类型的keccak256哈希值
 const EVENT_TYPE_1_HASH: [u8; 32] = [
     0xc8, 0x9e, 0xfd, 0xaa, 0x54, 0xc0, 0xf2, 0x0c, 0x7a, 0xdf, 0x61, 0x28, 0x82, 0xdf, 0x09, 0x50,
     0xf5, 0xa9, 0x51, 0x63, 0x7e, 0x03, 0x07, 0xcd, 0xcb, 0x4c, 0x67, 0x2f, 0x29, 0x8b, 0x8b, 0xc6,
@@ -34,7 +33,6 @@ const EVENT_TYPE_4_HASH: [u8; 32] = [
     0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
 ];
 
-// 全局常量：默认的ValidatorRegistrationParams
 const DEFAULT_VALIDATOR_PARAMS: ValidatorRegistrationParams = ValidatorRegistrationParams {
     consensusPublicKey: Bytes::new(),
     blsProof: Bytes::new(),
@@ -190,45 +188,10 @@ fn convert_into_sol_provider_jwks(
     }
 }
 
-fn construct_params_string(crosschain_params: &CrossChainParams) -> String {
-    format!(
-        "CrossChainParams {{\n  id: {:?},\n  validatorParams: ValidatorRegistrationParams {{\n    consensusPublicKey: {:?},\n    blsProof: {:?},\n    commission: Commission {{ rate: {}, maxRate: {}, maxChangeRate: {} }},\n    moniker: {:?},\n    initialOperator: {:?},\n    initialBeneficiary: {:?},\n    validatorNetworkAddresses: {:?},\n    fullnodeNetworkAddresses: {:?},\n    aptosAddress: {:?}\n  }},\n  targetValidator: {:?},\n  shares: {:?},\n  blockNumber: {:?},\n  issuer: {:?}\n}}",
-        crosschain_params.id,
-        crosschain_params.validatorParams.consensusPublicKey,
-        crosschain_params.validatorParams.blsProof,
-        crosschain_params.validatorParams.commission.rate,
-        crosschain_params.validatorParams.commission.maxRate,
-        crosschain_params.validatorParams.commission.maxChangeRate,
-        crosschain_params.validatorParams.moniker,
-        crosschain_params.validatorParams.initialOperator,
-        crosschain_params.validatorParams.initialBeneficiary,
-        crosschain_params.validatorParams.validatorNetworkAddresses,
-        crosschain_params.validatorParams.fullnodeNetworkAddresses,
-        crosschain_params.validatorParams.aptosAddress,
-        crosschain_params.targetValidator,
-        crosschain_params.shares,
-        crosschain_params.blockNumber,
-        crosschain_params.issuer
-    )
-}
-
-fn print_crosschain_params(crosschain_params: &CrossChainParams) {
-    let params_string = construct_params_string(crosschain_params);
-    debug!(
-        target: "gravity-relayer",
-        "CrossChainParams created:\n{}",
-        params_string
-    );
-}
-
-fn convert_into_sol_crosschain_params(jwks: &Vec<JWK>, issuer: String) -> Vec<CrossChainParams> {
+fn convert_into_sol_crosschain_params(jwks: &Vec<JWK>, issuer: &str) -> Vec<CrossChainParams> {
     jwks.iter()
         .filter(|jwk| jwk.variant == 1)
-        .map(|jwk| {
-            let crosschain_params = process_unsupported_jwk(jwk, &issuer);
-            print_crosschain_params(&crosschain_params);
-            crosschain_params
-        })
+        .map(|jwk| process_unsupported_jwk(jwk, &issuer))
         .collect()
 }
 
@@ -406,7 +369,7 @@ pub fn construct_observed_jwks_txns_envelope(
             let provider_jwks = convert_into_sol_provider_jwks(provider_jwks);
             let cross_chain_params = convert_into_sol_crosschain_params(
                 &provider_jwks.jwks,
-                provider_jwks.issuer.clone(),
+                provider_jwks.issuer.as_str(),
             );
 
             let call = upsertObservedJWKsCall {

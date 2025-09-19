@@ -166,22 +166,6 @@ impl EventLog {
 
         // Match based on event signature using cached values
         if event_signature == *STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
-            // 解析log然后输出日志
-            let log = alloy_primitives::Log::new(
-                self.address,
-                self.topics.clone(),
-                self.data.clone().into(),
-            )
-            .unwrap();
-            let detail = StakeRegisterValidatorEvent::decode_log(&log).unwrap();
-
-            info!(target: "relayer",
-                user=?detail.user,
-                amount_wei=?detail.amount,
-                params=?detail.params,
-                block_number=?detail.blockNumber,
-                data=?self.data,
-            );
             EventDataType::StakeRegisterValidatorEvent
         } else if event_signature == *STAKE_EVENT_SIGNATURE {
             EventDataType::StakeEvent
