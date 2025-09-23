@@ -71,11 +71,24 @@ pub struct ObserveState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObservedValue {
     /// Observed block information
-    Block { block_hash: B256, block_number: u64 },
+    Block { 
+        /// Hash of the observed block
+        block_hash: B256, 
+        /// Number of the observed block
+        block_number: u64 
+    },
     /// Observed event logs
-    Events { logs: Vec<EventLog> },
+    Events { 
+        /// Collection of event logs that were observed
+        logs: Vec<EventLog> 
+    },
     /// Observed storage slot value
-    StorageSlot { slot: B256, value: B256 },
+    StorageSlot { 
+        /// Storage slot that was observed
+        slot: B256, 
+        /// Value stored in the slot
+        value: B256 
+    },
     /// No observation made
     None,
 }
@@ -103,7 +116,7 @@ pub struct EventLog {
     pub transaction_hash: B256,
     /// Log index within the transaction
     pub log_index: u64,
-    /// Event data type
+    /// Event data type identifier for categorizing events
     pub data_type: u8,
 }
 
@@ -359,6 +372,16 @@ impl GravityRelayer {
         }
     }
 
+    /// Converts an observed state into JWK structures for Gravity protocol
+    ///
+    /// # Arguments
+    /// * `observed_state` - The observed state to convert
+    ///
+    /// # Returns
+    /// * `Result<Vec<JWKStruct>>` - A vector of JWK structures or error
+    ///
+    /// # Errors
+    /// * Returns an error if serialization fails
     pub async fn convert_specific_observed_value(
         observed_state: ObserveState,
     ) -> Result<Vec<JWKStruct>> {

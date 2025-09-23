@@ -299,8 +299,8 @@ impl EthHttpCli {
                     if attempt < self.retry_config.max_retries {
                         let delay = std::cmp::min(
                             Duration::from_millis(
-                                (self.retry_config.base_delay.as_millis() as f64 *
-                                    self.retry_config.backoff_multiplier.powi(attempt as i32))
+                                (self.retry_config.base_delay.as_millis() as f64
+                                    * self.retry_config.backoff_multiplier.powi(attempt as i32))
                                     as u64,
                             ),
                             self.retry_config.max_delay,
