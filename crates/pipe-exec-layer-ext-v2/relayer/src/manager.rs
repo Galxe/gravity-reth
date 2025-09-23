@@ -5,6 +5,7 @@ use crate::{
     relayer::{GravityRelayer, ObserveState},
 };
 use anyhow::{anyhow, Result};
+use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -60,6 +61,13 @@ impl RelayerManager {
         Ok(())
     }
 
+    async fn poll_once(&self, uri: &str) -> Result<ObserveState> {
+        let relayers = { self.relayers.read().await };
+        let relayer =
+            relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
+        relayer.poll_once().await
+    }
+
     /// Polls a specific URI for updates
     ///
     /// # Arguments
@@ -70,11 +78,13 @@ impl RelayerManager {
     ///
     /// # Errors
     /// * Returns an error if the URI is not found in the managed relayers
-    pub async fn poll_uri(&self, uri: &str) -> Result<ObserveState> {
+    pub async fn poll_uri(&self, uri: &str) -> Result<Vec<JWKStruct>> {
         let relayers = { self.relayers.read().await };
         let relayer =
             relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
-        relayer.poll_once().await
+        let observed_state = relayer.poll_once().await?;
+        let jwk_struct = GravityRelayer::convert_specific_observed_value(observed_state).await?;
+        Ok(jwk_struct)
     }
 }
 

@@ -157,6 +157,14 @@ pub struct EventLog {
 
 // Monitor events with OR conditions
 "gravity://mainnet/event?topic0=0x...,0x..."
+
+// Monitor events from a specific block number
+"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=1500"
+
+// Monitor events from block tags
+"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=latest"
+"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=finalized"
+"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=earliest"
 ```
 
 ### Storage Monitoring
@@ -173,6 +181,29 @@ pub struct EventLog {
 // Monitor all transactions for specific address
 "gravity://mainnet/account/0x123456789abcdef123456789abcdef1234567890/activity?type=all_transactions"
 ```
+
+## Event Filter Parameters
+
+### fromBlock Parameter
+The `fromBlock` parameter allows you to specify the starting block for event monitoring:
+
+```rust
+// Start from a specific block number
+"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=1500"
+
+// Start from block tags
+"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=latest"     // Latest block
+"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=finalized" // Finalized block
+"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=earliest"  // Genesis block
+```
+
+**Supported fromBlock values:**
+- **Block number**: Any positive integer (e.g., `1500`, `1000000`)
+- **latest**: Start from the latest block
+- **finalized**: Start from the latest finalized block (recommended for production)
+- **earliest**: Start from the genesis block (block 0)
+
+**Note**: If `fromBlock` is not specified, the relayer will start monitoring from the current finalized block by default.
 
 ## Advanced Usage
 

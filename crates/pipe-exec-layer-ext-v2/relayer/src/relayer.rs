@@ -4,14 +4,87 @@ use crate::{
     eth_client::EthHttpCli,
     parser::{AccountActivityType, GravityTask, ParsedTask},
 };
-use alloy_primitives::{hex, Address, B256};
-use alloy_rpc_types::{Filter, Log};
-use anyhow::{anyhow, Result};
+use alloy_primitives::{
+    hex,
+    utils::{format_ether, parse_units},
+    Address, B256, U256,
+};
+use alloy_rpc_types::Filter;
+use alloy_rpc_types::Log;
+use alloy_sol_macro::sol;
+use alloy_sol_types::{SolEvent, SolValue};
+use anyhow::Result;
+use gravity_api_types::on_chain_config::jwks::JWKStruct;
+// Event signatures for different event types
+// These are the keccak256 hashes of the event signatures computed from the sol! macro events below
+// They are used to identify and filter specific events from Ethereum logs
+
+/// Event signature hash for `StakeRegisterValidatorEvent(address,uint256,bytes,uint256)`
+/// Computed from: event StakeRegisterValidatorEvent(address user, uint256 amount, bytes params, uint256 blockNumber);
+pub const STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE: [u8; 32] = [
+    0xc8, 0x9e, 0xfd, 0xaa, 0x54, 0xc0, 0xf2, 0x0c, 0x7a, 0xdf, 0x61, 0x28, 0x82, 0xdf, 0x09, 0x50,
+    0xf5, 0xa9, 0x51, 0x63, 0x7e, 0x03, 0x07, 0xcd, 0xcb, 0x4c, 0x67, 0x2f, 0x29, 0x8b, 0x8b, 0xc6,
+];
+
+/// Event signature hash for `StakeEvent(address,uint256,address,uint256)`
+/// Computed from: event StakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const STAKE_EVENT_SIGNATURE: [u8; 32] = [
+    0xad, 0x7c, 0x5b, 0xef, 0x02, 0x78, 0x16, 0xa8, 0x00, 0xda, 0x17, 0x36, 0x44, 0x4f, 0xb5, 0x8a,
+    0x80, 0x7e, 0xf4, 0xc9, 0x60, 0x3b, 0x78, 0x48, 0x67, 0x3f, 0x7e, 0x3a, 0x68, 0xeb, 0x14, 0xa5,
+];
+
+/// Event signature hash for `ValidatorExitEvent(address,uint256,address,uint256)`
+/// Computed from: event ValidatorExitEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const VALIDATOR_EXIT_EVENT_SIGNATURE: [u8; 32] = [
+    0x2a, 0x80, 0xe1, 0xef, 0x1d, 0x78, 0x42, 0xf2, 0x7f, 0x2e, 0x6b, 0xe0, 0x97, 0x2b, 0xb7, 0x08,
+    0xb9, 0xa1, 0x35, 0xc3, 0x88, 0x60, 0xdb, 0xe7, 0x3c, 0x27, 0xc3, 0x48, 0x6c, 0x34, 0xf4, 0xde,
+];
+
+/// Event signature hash for `UnstakeEvent(address,uint256,address,uint256)`
+/// Computed from: event UnstakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const UNSTAKE_EVENT_SIGNATURE: [u8; 32] = [
+    0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
+    0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
+];
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
+sol! {
+    struct UnsupportedJWK {
+        bytes id;
+        bytes payload;
+    }
+
+    event StakeRegisterValidatorEvent(
+        address user,
+        uint256 amount,
+        bytes params,
+        uint256 blockNumber
+    );
+
+    event StakeEvent(
+        address user,
+        uint256 amount,
+        address targetValidator,
+        uint256 blockNumber
+    );
+
+    event ValidatorExitEvent(
+        address user,
+        uint256 amount,
+        address targetValidator,
+        uint256 blockNumber
+    );
+
+    event UnstakeEvent(
+        address user,
+        uint256 amount,
+        address targetValidator,
+        uint256 blockNumber
+    );
+}
 /// Represents the current state of observation for a gravity task
 ///
 /// This struct tracks the block number, observed value, timestamp, and version
@@ -28,13 +101,34 @@ pub struct ObserveState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObservedValue {
     /// Observed block information
-    Block { block_hash: B256, block_number: u64 },
+    Block {
+        /// Hash of the observed block
+        block_hash: B256,
+        /// Number of the observed block
+        block_number: u64,
+    },
     /// Observed event logs
-    Events { logs: Vec<EventLog> },
+    Events {
+        /// Collection of event logs that were observed
+        logs: Vec<EventLog>,
+    },
     /// Observed storage slot value
-    StorageSlot { slot: B256, value: B256 },
+    StorageSlot {
+        /// Storage slot that was observed
+        slot: B256,
+        /// Value stored in the slot
+        value: B256,
+    },
     /// No observation made
     None,
+}
+
+enum EventDataType {
+    Raw,
+    StakeRegisterValidatorEvent,
+    StakeEvent,
+    ValidatorExitEvent,
+    UnstakeEvent,
 }
 
 /// Represents a blockchain event log with all relevant metadata
@@ -52,6 +146,8 @@ pub struct EventLog {
     pub transaction_hash: B256,
     /// Log index within the transaction
     pub log_index: u64,
+    /// Event data type identifier for categorizing events
+    pub data_type: u8,
 }
 
 impl From<&Log> for EventLog {
@@ -63,13 +159,73 @@ impl From<&Log> for EventLog {
     /// # Returns
     /// * `EventLog` - The converted event log
     fn from(log: &Log) -> Self {
-        Self {
+        let mut event_log = Self {
             address: log.address(),
             topics: log.topics().to_vec(),
             data: log.data().data.to_vec(),
             block_number: log.block_number.unwrap_or_default(),
             transaction_hash: log.transaction_hash.unwrap_or_default(),
             log_index: log.log_index.unwrap_or_default(),
+            data_type: 0,
+        };
+
+        // Automatically determine and set the event data type
+        event_log.update_data_type();
+        event_log
+    }
+}
+
+impl EventLog {
+    /// Determines the event data type based on the event signature (first topic)
+    ///
+    /// # Returns
+    /// * `EventDataType` - The detected event data type
+    pub fn determine_event_data_type(&self) -> EventDataType {
+        // First check if we have topics (event signature)
+        if self.topics.is_empty() {
+            return EventDataType::Raw;
+        }
+
+        // Get the event signature from the first topic
+        let event_signature = self.topics[0];
+
+        // Match based on event signature using cached values
+        if event_signature == STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
+            EventDataType::StakeRegisterValidatorEvent
+        } else if event_signature == STAKE_EVENT_SIGNATURE {
+            EventDataType::StakeEvent
+        } else if event_signature == VALIDATOR_EXIT_EVENT_SIGNATURE {
+            EventDataType::ValidatorExitEvent
+        } else if event_signature == UNSTAKE_EVENT_SIGNATURE {
+            EventDataType::UnstakeEvent
+        } else {
+            EventDataType::Raw
+        }
+    }
+
+    /// Updates the data_type field based on the determined event type
+    pub fn update_data_type(&mut self) {
+        let event_type = self.determine_event_data_type();
+        self.data_type = match event_type {
+            EventDataType::Raw => 0,
+            EventDataType::StakeRegisterValidatorEvent => 1,
+            EventDataType::StakeEvent => 2,
+            EventDataType::ValidatorExitEvent => 3,
+            EventDataType::UnstakeEvent => 4,
+        };
+    }
+}
+
+impl Into<JWKStruct> for &EventLog {
+    fn into(self) -> JWKStruct {
+        let unsupported_jwk = UnsupportedJWK {
+            id: self.data_type.to_string().into_bytes().into(),
+            payload: self.data.clone().into(),
+        };
+        debug!(target: "relayer", "generate unsupported_jwk: {:?}", unsupported_jwk.abi_encode());
+        JWKStruct {
+            type_name: "0x1::jwks::UnsupportedJWK".to_string(),
+            data: unsupported_jwk.abi_encode().into(),
         }
     }
 }
@@ -175,12 +331,32 @@ impl GravityRelayer {
     pub async fn new(rpc_url: &str, task: ParsedTask) -> Result<Self> {
         let eth_client = Arc::new(EthHttpCli::new(rpc_url)?);
 
-        // Retry getting the finalized block number with exponential backoff
-        let start_block_number = eth_client.get_finalized_block_number().await?;
+        // Get the starting block number from the task filter or use finalized block as default
+        let start_block_number = match &task.task {
+            GravityTask::MonitorEvent(filter) => filter
+                .block_option
+                .get_from_block()
+                .and_then(|block| block.as_number())
+                .unwrap_or(0),
+            _ => 0,
+        };
+
+        // If no specific start block is set, use the current finalized block
+        let start_block_number = if start_block_number == 0 {
+            eth_client.get_finalized_block_number().await?
+        } else {
+            start_block_number
+        };
 
         let last_observed =
             ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
 
+        info!(target: "relayer",
+            rpc_url=?rpc_url,
+            start_block_number=?start_block_number,
+            task=?task,
+            "relayer created"
+        );
         let task_state = TaskState::new(task.clone(), start_block_number, Arc::new(last_observed));
         Ok(Self { eth_client, task_state })
     }
@@ -208,6 +384,31 @@ impl GravityRelayer {
         }
     }
 
+    /// Converts an observed state into JWK structures for Gravity protocol
+    ///
+    /// # Arguments
+    /// * `observed_state` - The observed state to convert
+    ///
+    /// # Returns
+    /// * `Result<Vec<JWKStruct>>` - A vector of JWK structures or error
+    ///
+    /// # Errors
+    /// * Returns an error if serialization fails
+    pub async fn convert_specific_observed_value(
+        observed_state: ObserveState,
+    ) -> Result<Vec<JWKStruct>> {
+        let jwk = match observed_state.observed_value {
+            ObservedValue::Events { logs } => logs.iter().map(|log| log.into()).collect(),
+            _ => {
+                vec![JWKStruct {
+                    type_name: "0".to_string(),
+                    data: serde_json::to_vec(&observed_state).expect("failed to serialize state"),
+                }]
+            }
+        };
+        Ok(jwk)
+    }
+
     /// Polls for event logs based on the provided filter
     ///
     /// # Arguments
@@ -227,7 +428,11 @@ impl GravityRelayer {
         let finalized_block = self.eth_client.get_finalized_block_number().await?;
         scoped_filter = scoped_filter.to_block(finalized_block);
 
-        debug!("Polling event task {} with filter: {:?}", task_uri, scoped_filter);
+        debug!(target: "relayer",
+            task_uri=?task_uri,
+            scoped_filter=?scoped_filter,
+            "polling event task"
+        );
         let logs = self.eth_client.get_logs(&scoped_filter).await?;
 
         let new_logs: Vec<EventLog> = logs
@@ -240,7 +445,11 @@ impl GravityRelayer {
             // Use finalized_block as the next cursor if no to_block is specified
             let next_cursor = scoped_filter.get_to_block().unwrap_or(finalized_block);
             self.task_state.update_cursor(next_cursor).await;
-            debug!("Polling event task {} with no new logs, cursor: {}", task_uri, next_cursor);
+            debug!(target: "relayer",
+                task_uri=?task_uri,
+                next_cursor=?next_cursor,
+                "polling event task with no new logs"
+            );
             return Ok((*previous_value).clone());
         }
 
@@ -261,7 +470,12 @@ impl GravityRelayer {
             (*previous_value).clone()
         };
 
-        debug!("Polling event task {} completed, cursor: {}", task_uri, cursor);
+        debug!(target: "relayer",
+            task_uri=?task_uri,
+            cursor=?cursor,
+            should_update=?should_update,
+            "polling event task completed"
+        );
         Ok(return_value)
     }
 
@@ -304,7 +518,11 @@ impl GravityRelayer {
             (*previous_value).clone()
         };
 
-        debug!("Polling block head task {} completed, cursor: {}", task_uri, cursor);
+        debug!(target: "relayer",
+            task_uri=?task_uri,
+            cursor=?cursor,
+            "polling block head task completed"
+        );
         Ok(return_value)
     }
 
@@ -346,7 +564,11 @@ impl GravityRelayer {
         } else {
             (*previous_value).clone()
         };
-        debug!("Polling storage slot task {} completed, cursor: {}", task_uri, cursor);
+        debug!(target: "relayer",
+            task_uri=?task_uri,
+            cursor=?cursor,
+            "polling storage slot task completed"
+        );
         Ok(return_value)
     }
 

@@ -15,6 +15,7 @@ sol! {
         string name; // Provider name, e.g., "https://accounts.google.com"
         string configUrl; // OpenID configuration URL
         bool active; // Whether the provider is active
+        uint64 onchainBlockNumber; // Onchain block number
     }
     function getActiveProviders() external view returns (OIDCProvider[] memory);
 }
@@ -26,6 +27,7 @@ fn convert_into_bcs_active_providers(oidc_providers: Vec<OIDCProvider>) -> Bytes
         .map(|provider| gravity_api_types::on_chain_config::jwks::OIDCProvider {
             name: provider.name.clone(),
             config_url: provider.configUrl.clone(),
+            onchain_block_number: Some(provider.onchainBlockNumber),
         })
         .collect::<Vec<_>>();
     let jwk_consensus_config = gravity_api_types::on_chain_config::jwks::JWKConsensusConfig {

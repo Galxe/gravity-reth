@@ -12,7 +12,7 @@ description = "pipeline execution layer extension"
 workspace = true
 
 [dependencies]
-gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", tag = "gravity-v1.0.0" }
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "a224b0c788d82b68cdc435d593c930c166b5ddcb" }
 reth-pipe-exec-layer-event-bus.workspace = true
 reth-primitives.workspace = true
 reth-primitives-traits.workspace = true
@@ -51,7 +51,7 @@ reth-pipe-exec-layer-relayer.workspace = true
 
 # crypto and serialization for gravity-aptos validator_info
 bcs = "0.1"
-serde = { version = "1.0", features = ["derive"] }
+serde.workspace = true
 
 [dev-dependencies]
 reth-engine-primitives.workspace = true

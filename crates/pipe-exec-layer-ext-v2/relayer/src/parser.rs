@@ -15,9 +15,19 @@ pub enum GravityTask {
     /// Monitor block head task
     MonitorBlockHead,
     /// Monitor storage slot task
-    MonitorStorage { account: Address, slot: B256 },
+    MonitorStorage {
+        /// Account address to monitor storage for
+        account: Address,
+        /// Storage slot to monitor
+        slot: B256,
+    },
     /// Monitor account activity task (abstract layer)
-    MonitorAccount { address: Address, activity_type: AccountActivityType },
+    MonitorAccount {
+        /// Address of the account to monitor
+        address: Address,
+        /// Type of activity to monitor for this account
+        activity_type: AccountActivityType,
+    },
 }
 
 /// Account activity types
@@ -223,7 +233,9 @@ impl UriParser {
             Some(activity_type) => {
                 return Err(anyhow!("Unsupported activity type: {}", activity_type))
             }
-            None => return Err(anyhow!("Missing 'type' parameter for account activity monitoring")),
+            None => {
+                return Err(anyhow!("Missing 'type' parameter for account activity monitoring"))
+            }
         };
 
         Ok(GravityTask::MonitorAccount { address, activity_type })
