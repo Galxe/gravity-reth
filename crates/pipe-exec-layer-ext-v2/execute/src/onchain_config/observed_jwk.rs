@@ -11,27 +11,19 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent, SolType};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
+use reth_pipe_exec_layer_relayer::{
+    STAKE_EVENT_SIGNATURE, STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE, UNSTAKE_EVENT_SIGNATURE,
+    VALIDATOR_EXIT_EVENT_SIGNATURE,
+};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use revm_primitives::{keccak256, TxKind};
 use std::fmt::Debug;
-use tracing::debug;
 
-const EVENT_TYPE_1_HASH: [u8; 32] = [
-    0xc8, 0x9e, 0xfd, 0xaa, 0x54, 0xc0, 0xf2, 0x0c, 0x7a, 0xdf, 0x61, 0x28, 0x82, 0xdf, 0x09, 0x50,
-    0xf5, 0xa9, 0x51, 0x63, 0x7e, 0x03, 0x07, 0xcd, 0xcb, 0x4c, 0x67, 0x2f, 0x29, 0x8b, 0x8b, 0xc6,
-];
-const EVENT_TYPE_2_HASH: [u8; 32] = [
-    0xad, 0x7c, 0x5b, 0xef, 0x02, 0x78, 0x16, 0xa8, 0x00, 0xda, 0x17, 0x36, 0x44, 0x4f, 0xb5, 0x8a,
-    0x80, 0x7e, 0xf4, 0xc9, 0x60, 0x3b, 0x78, 0x48, 0x67, 0x3f, 0x7e, 0x3a, 0x68, 0xeb, 0x14, 0xa5,
-];
-const EVENT_TYPE_3_HASH: [u8; 32] = [
-    0x2a, 0x80, 0xe1, 0xef, 0x1d, 0x78, 0x42, 0xf2, 0x7f, 0x2e, 0x6b, 0xe0, 0x97, 0x2b, 0xb7, 0x08,
-    0xb9, 0xa1, 0x35, 0xc3, 0x88, 0x60, 0xdb, 0xe7, 0x3c, 0x27, 0xc3, 0x48, 0x6c, 0x34, 0xf4, 0xde,
-];
-const EVENT_TYPE_4_HASH: [u8; 32] = [
-    0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
-    0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
-];
+// Use imported constants from relayer crate
+const STAKE_REGISTER_VALIDATOR_EVENT_HASH: [u8; 32] = STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE;
+const DELEGATION_EVENT_HASH: [u8; 32] = STAKE_EVENT_SIGNATURE;
+const LEAVE_VALIDATOR_SET_EVENT_HASH: [u8; 32] = VALIDATOR_EXIT_EVENT_SIGNATURE;
+const UNDELEGATION_EVENT_HASH: [u8; 32] = UNSTAKE_EVENT_SIGNATURE;
 
 const DEFAULT_VALIDATOR_PARAMS: ValidatorRegistrationParams = ValidatorRegistrationParams {
     consensusPublicKey: Bytes::new(),
@@ -200,7 +192,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
     let id_hash = keccak256(&unsupported_jwk.id);
 
     match id_hash {
-        hash if hash == EVENT_TYPE_1_HASH => {
+        hash if hash == STAKE_REGISTER_VALIDATOR_EVENT_HASH => {
             // StakeRegisterValidatorEvent
             let event =
                 StakeRegisterValidatorEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
@@ -215,7 +207,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 issuer: issuer.to_string(),
             }
         }
-        hash if hash == EVENT_TYPE_2_HASH => {
+        hash if hash == DELEGATION_EVENT_HASH => {
             // StakeEvent
             let event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
 
@@ -228,7 +220,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 issuer: issuer.to_string(),
             }
         }
-        hash if hash == EVENT_TYPE_3_HASH => {
+        hash if hash == LEAVE_VALIDATOR_SET_EVENT_HASH => {
             // ValidatorExitEvent
             let event = ValidatorExitEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
 
@@ -241,7 +233,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 issuer: issuer.to_string(),
             }
         }
-        hash if hash == EVENT_TYPE_4_HASH => {
+        hash if hash == UNDELEGATION_EVENT_HASH => {
             // UnstakeEvent
             let event = UnstakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
 

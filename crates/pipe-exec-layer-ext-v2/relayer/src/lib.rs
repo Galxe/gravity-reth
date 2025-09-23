@@ -16,4 +16,8 @@ pub mod parser;
 pub use eth_client::EthHttpCli;
 pub use manager::{ManagerStats, RelayerManager};
 pub use parser::{AccountActivityType, GravityTask, ParsedTask, UriParser};
-pub use relayer::{GravityRelayer, ObserveState, ObservedValue};
+pub use relayer::{
+    GravityRelayer, ObserveState, ObservedValue, STAKE_EVENT_SIGNATURE,
+    STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE, UNSTAKE_EVENT_SIGNATURE,
+    VALIDATOR_EXIT_EVENT_SIGNATURE,
+};

@@ -15,7 +15,37 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::{SolEvent, SolValue};
 use anyhow::Result;
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
-use once_cell::sync::Lazy;
+// Event signatures for different event types
+// These are the keccak256 hashes of the event signatures computed from the sol! macro events below
+// They are used to identify and filter specific events from Ethereum logs
+
+/// Event signature hash for `StakeRegisterValidatorEvent(address,uint256,bytes,uint256)`
+/// Computed from: event StakeRegisterValidatorEvent(address user, uint256 amount, bytes params, uint256 blockNumber);
+pub const STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE: [u8; 32] = [
+    0xc8, 0x9e, 0xfd, 0xaa, 0x54, 0xc0, 0xf2, 0x0c, 0x7a, 0xdf, 0x61, 0x28, 0x82, 0xdf, 0x09, 0x50,
+    0xf5, 0xa9, 0x51, 0x63, 0x7e, 0x03, 0x07, 0xcd, 0xcb, 0x4c, 0x67, 0x2f, 0x29, 0x8b, 0x8b, 0xc6,
+];
+
+/// Event signature hash for `StakeEvent(address,uint256,address,uint256)`
+/// Computed from: event StakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const STAKE_EVENT_SIGNATURE: [u8; 32] = [
+    0xad, 0x7c, 0x5b, 0xef, 0x02, 0x78, 0x16, 0xa8, 0x00, 0xda, 0x17, 0x36, 0x44, 0x4f, 0xb5, 0x8a,
+    0x80, 0x7e, 0xf4, 0xc9, 0x60, 0x3b, 0x78, 0x48, 0x67, 0x3f, 0x7e, 0x3a, 0x68, 0xeb, 0x14, 0xa5,
+];
+
+/// Event signature hash for `ValidatorExitEvent(address,uint256,address,uint256)`
+/// Computed from: event ValidatorExitEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const VALIDATOR_EXIT_EVENT_SIGNATURE: [u8; 32] = [
+    0x2a, 0x80, 0xe1, 0xef, 0x1d, 0x78, 0x42, 0xf2, 0x7f, 0x2e, 0x6b, 0xe0, 0x97, 0x2b, 0xb7, 0x08,
+    0xb9, 0xa1, 0x35, 0xc3, 0x88, 0x60, 0xdb, 0xe7, 0x3c, 0x27, 0xc3, 0x48, 0x6c, 0x34, 0xf4, 0xde,
+];
+
+/// Event signature hash for `UnstakeEvent(address,uint256,address,uint256)`
+/// Computed from: event UnstakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const UNSTAKE_EVENT_SIGNATURE: [u8; 32] = [
+    0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
+    0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
+];
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -71,23 +101,23 @@ pub struct ObserveState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObservedValue {
     /// Observed block information
-    Block { 
+    Block {
         /// Hash of the observed block
-        block_hash: B256, 
+        block_hash: B256,
         /// Number of the observed block
-        block_number: u64 
+        block_number: u64,
     },
     /// Observed event logs
-    Events { 
+    Events {
         /// Collection of event logs that were observed
-        logs: Vec<EventLog> 
+        logs: Vec<EventLog>,
     },
     /// Observed storage slot value
-    StorageSlot { 
+    StorageSlot {
         /// Storage slot that was observed
-        slot: B256, 
+        slot: B256,
         /// Value stored in the slot
-        value: B256 
+        value: B256,
     },
     /// No observation made
     None,
@@ -145,24 +175,6 @@ impl From<&Log> for EventLog {
     }
 }
 
-// Event signatures for different event types
-// These are the actual event signatures computed using cast keccak
-static STAKE_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("0x503456520561683b10fa81bb1b54faf6c26d29e8d59ba37f8ee17b4d5c078c15"))
-});
-
-static STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("0x96d625dbe2bd7f604bbc20261e604894b8d1eb533d114ed5bd209b081943f349"))
-});
-
-static VALIDATOR_EXIT_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("0xf64981602df47b488b7cebefda206d676c2eacb502f2f80f6e410b50fd58c95a"))
-});
-
-static UNSTAKE_EVENT_SIGNATURE: Lazy<B256> = Lazy::new(|| {
-    B256::from(hex!("0x3022824c52c19461defa926bc5e85cfde994c24628b49e4015b265da696f24f5"))
-});
-
 impl EventLog {
     /// Determines the event data type based on the event signature (first topic)
     ///
@@ -178,13 +190,13 @@ impl EventLog {
         let event_signature = self.topics[0];
 
         // Match based on event signature using cached values
-        if event_signature == *STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
+        if event_signature == STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
             EventDataType::StakeRegisterValidatorEvent
-        } else if event_signature == *STAKE_EVENT_SIGNATURE {
+        } else if event_signature == STAKE_EVENT_SIGNATURE {
             EventDataType::StakeEvent
-        } else if event_signature == *VALIDATOR_EXIT_EVENT_SIGNATURE {
+        } else if event_signature == VALIDATOR_EXIT_EVENT_SIGNATURE {
             EventDataType::ValidatorExitEvent
-        } else if event_signature == *UNSTAKE_EVENT_SIGNATURE {
+        } else if event_signature == UNSTAKE_EVENT_SIGNATURE {
             EventDataType::UnstakeEvent
         } else {
             EventDataType::Raw
