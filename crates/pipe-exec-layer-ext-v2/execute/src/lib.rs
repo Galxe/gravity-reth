@@ -101,7 +101,7 @@ pub struct OrderedBlock {
     /// Senders of the transactions in the block
     pub senders: Vec<Address>,
     /// The proposer address of the block
-    pub proposer: Option<Address>,
+    pub proposer: Option<[u8; 32]>,
     /// Served for the jwk contract sent by system caller, it might be multiple jwks update
     pub jwk_extra_data: Vec<Vec<u8>>,
 }
