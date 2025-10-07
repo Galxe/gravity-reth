@@ -60,7 +60,7 @@ use tracing::*;
 
 use crate::onchain_config::{
     observed_jwk::{
-        construct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, ObservedJWKsUpdated,
+        construct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, DKGStartEvent, ObservedJWKsUpdated
     },
     SYSTEM_CALLER,
 };
@@ -527,6 +527,37 @@ impl<Storage: GravityStorage> Core<Storage> {
                     gravity_events.push(GravityEvent::ObservedJWKsUpdated(
                         event.epoch.try_into().unwrap(),
                         api_jwks,
+                    ));
+                }
+                if let Ok(event) = DKGStartEvent::decode_log(&log) {
+                    info!(target: "execute_ordered_block",
+                        number=?block_number,
+                        "dkg start"
+                    );
+                    gravity_events.push(GravityEvent::DKG(
+                        gravity_api_types::on_chain_config::dkg::DKGStartEvent {
+                            session_metadata: gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
+                                dealer_epoch: event.metadata.dealer_epoch,
+                                // randomness_config: event.metadata.randomness_config,
+                                dealer_validator_set: event.metadata.dealer_validator_set
+                                    .iter()
+                                    .map(|validator| gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
+                                        addr: gravity_api_types::account::ExternalAccountAddress::from(validator.addr.as_slice()),
+                                        pk_bytes: validator.pk_bytes.to_vec(),
+                                        voting_power: validator.voting_power,
+                                    })
+                                    .collect(),
+                                target_validator_set: event.metadata.target_validator_set
+                                    .iter()
+                                    .map(|validator| gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
+                                        addr: gravity_api_types::account::ExternalAccountAddress::from(validator.addr.as_slice()),
+                                        pk_bytes: validator.pk_bytes.to_vec(),
+                                        voting_power: validator.voting_power,
+                                    })
+                                    .collect(),
+                            },
+                            start_time_us: event.start_time_us.try_into().unwrap(),
+                        },
                     ));
                 }
             }
