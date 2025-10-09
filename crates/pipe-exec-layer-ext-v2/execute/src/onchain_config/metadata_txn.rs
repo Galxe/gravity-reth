@@ -169,10 +169,10 @@ fn new_system_call_txn(
 pub fn transact_metadata_contract_call(
     evm: &mut impl Evm<DB = impl Database, Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     timestamp_us: u64,
-    proposer: Option<Address>,
+    proposer: Option<[u8; 32]>,
 ) -> (MetadataTxnResult, EvmState) {
     let call = blockPrologueCall {
-        proposer: proposer.unwrap_or(SYSTEM_CALLER),
+        proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
         failedProposerIndices: vec![],
         timestampMicros: U256::from(timestamp_us),
     };

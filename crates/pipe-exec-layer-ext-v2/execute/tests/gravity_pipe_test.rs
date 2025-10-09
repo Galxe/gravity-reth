@@ -25,7 +25,7 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
-use revm_primitives::address;
+use revm_primitives::{address, hex};
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -53,7 +53,10 @@ fn new_ordered_block(
         withdrawals: Default::default(),
         transactions: vec![],
         senders: vec![],
-        proposer: Some(address!("0x6e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f")),
+        proposer: Some(hex::decode("2d86b40a1d692c0749a0a0426e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f")
+            .unwrap()
+            .try_into()
+            .unwrap()),
         jwk_extra_data: vec![],
     }
 }

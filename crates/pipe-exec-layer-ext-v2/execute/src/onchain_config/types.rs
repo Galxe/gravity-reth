@@ -3,9 +3,17 @@
 
 #![allow(missing_docs)]
 
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_macro::sol;
 use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
+
+// Wei to Ether conversion constant (10^18)
+const WEI_PER_ETHER: U256 = U256::from_limbs([1000000000000000000, 0, 0, 0]);
+
+/// Convert voting power from wei to ether
+fn wei_to_ether(wei: U256) -> U256 {
+    wei / WEI_PER_ETHER
+}
 
 sol! {
     enum ValidatorStatus {
@@ -56,7 +64,7 @@ sol! {
 
 sol! {
         function blockPrologue(
-            address proposer,
+            bytes proposer,
             uint64[] calldata failedProposerIndices,
             uint256 timestampMicros
         );
@@ -82,9 +90,12 @@ pub fn convert_validator_info(
     let account_address =
         gravity_api_types::u256_define::AccountAddress::from_bytes(&solidity_info.aptosAddress);
 
+    // Convert voting power from wei to ether
+    let power_ether = wei_to_ether(solidity_info.votingPower);
+
     GravityValidatorInfo::new(
         account_address,
-        solidity_info.votingPower.to::<u64>(),
+        power_ether.to::<u64>(),
         ValidatorConfig::new(
             solidity_info.consensusPublicKey.clone().into(),
             solidity_info.validatorNetworkAddresses.clone().into(),
@@ -111,8 +122,8 @@ pub fn convert_validator_set_to_bcs(solidity_validator_set: &ValidatorSet) -> By
             .iter()
             .map(convert_validator_info)
             .collect(),
-        total_voting_power: solidity_validator_set.totalVotingPower.to::<u128>(),
-        total_joining_power: solidity_validator_set.totalJoiningPower.to::<u128>(),
+        total_voting_power: wei_to_ether(solidity_validator_set.totalVotingPower).to::<u128>(),
+        total_joining_power: wei_to_ether(solidity_validator_set.totalJoiningPower).to::<u128>(),
     };
 
     // Serialize to BCS format (gravity-aptos standard)
