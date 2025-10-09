@@ -2,7 +2,7 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    RECONFIGURATION_WITH_DKG_ADDR, SYSTEM_CALLER,
+    RECONFIGURATION_WITH_DKG_ADDR, SYSTEM_CALLER, DKG_ADDR
 };
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
@@ -111,11 +111,11 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .iter()
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                addr: gravity_api_types::account::ExternalAccountAddress::from(
-                                    validator.addr.as_slice(),
+                                addr: gravity_api_types::account::ExternalAccountAddress::new(
+                                    validator.addr.as_slice().try_into().unwrap(),
                                 ),
-                                pk_bytes: validator.pk_bytes.to_vec(),
-                                voting_power: validator.voting_power,
+                                pk_bytes: validator.pkBytes.to_vec(),
+                                voting_power: validator.votingPower,
                             }
                         })
                         .collect(),
@@ -126,11 +126,11 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .iter()
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                addr: gravity_api_types::account::ExternalAccountAddress::from(
-                                    validator.addr.as_slice(),
+                                addr: gravity_api_types::account::ExternalAccountAddress::new(
+                                    validator.addr.as_slice().try_into().unwrap(),
                                 ),
-                                pk_bytes: validator.pk_bytes.to_vec(),
-                                voting_power: validator.voting_power,
+                                pk_bytes: validator.pkBytes.to_vec(),
+                                voting_power: validator.votingPower,
                             }
                         })
                         .collect(),
@@ -152,11 +152,11 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .iter()
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                addr: gravity_api_types::account::ExternalAccountAddress::from(
-                                    validator.addr.as_slice(),
+                                addr: gravity_api_types::account::ExternalAccountAddress::new(
+                                    validator.addr.as_slice().try_into().unwrap(),
                                 ),
-                                pk_bytes: validator.pk_bytes.to_vec(),
-                                voting_power: validator.voting_power,
+                                pk_bytes: validator.pkBytes.to_vec(),
+                                voting_power: validator.votingPower,
                             }
                         })
                         .collect(),
@@ -167,11 +167,11 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .iter()
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                addr: gravity_api_types::account::ExternalAccountAddress::from(
-                                    validator.addr.as_slice(),
+                                addr: gravity_api_types::account::ExternalAccountAddress::new(
+                                    validator.addr.as_slice().try_into().unwrap(),
                                 ),
-                                pk_bytes: validator.pk_bytes.to_vec(),
-                                voting_power: validator.voting_power,
+                                pk_bytes: validator.pkBytes.to_vec(),
+                                voting_power: validator.votingPower,
                             }
                         })
                         .collect(),

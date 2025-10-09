@@ -143,7 +143,7 @@ where
             }
             OnChainConfig::DKGState => {
                 let fetcher = DKGStateFetcher::new(self);
-                fetcher.fetch(block_number).into()
+                fetcher.fetch(block_number).0.into()
             }
             _ => todo!("Implement fetching for other config types"),
         }

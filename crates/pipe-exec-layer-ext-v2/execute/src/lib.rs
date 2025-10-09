@@ -537,26 +537,26 @@ impl<Storage: GravityStorage> Core<Storage> {
                     gravity_events.push(GravityEvent::DKG(
                         gravity_api_types::on_chain_config::dkg::DKGStartEvent {
                             session_metadata: gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
-                                dealer_epoch: event.metadata.dealer_epoch,
+                                dealer_epoch: event.metadata.dealerEpoch,
                                 // randomness_config: event.metadata.randomness_config,
-                                dealer_validator_set: event.metadata.dealer_validator_set
+                                dealer_validator_set: event.metadata.dealerValidatorSet
                                     .iter()
                                     .map(|validator| gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                         addr: gravity_api_types::account::ExternalAccountAddress::from(validator.addr.as_slice()),
-                                        pk_bytes: validator.pk_bytes.to_vec(),
-                                        voting_power: validator.voting_power,
+                                        pk_bytes: validator.pkBytes.to_vec(),
+                                        voting_power: validator.votingPower,
                                     })
                                     .collect(),
-                                target_validator_set: event.metadata.target_validator_set
+                                target_validator_set: event.metadata.targetValidatorSet
                                     .iter()
                                     .map(|validator| gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                         addr: gravity_api_types::account::ExternalAccountAddress::from(validator.addr.as_slice()),
-                                        pk_bytes: validator.pk_bytes.to_vec(),
-                                        voting_power: validator.voting_power,
+                                        pk_bytes: validator.pkBytes.to_vec(),
+                                        voting_power: validator.votingPower,
                                     })
                                     .collect(),
                             },
-                            start_time_us: event.start_time_us.try_into().unwrap(),
+                            start_time_us: event.startTimeUs.try_into().unwrap(),
                         },
                     ));
                 }
@@ -637,7 +637,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 &ordered_block.jwk_extra_data,
                 metadata_txn_result.txn.nonce(),
                 metadata_txn_result.txn.gas_price().expect("metadata txn gas price is not set"),
-            )
+            ).unwrap()
         } else {
             vec![]
         };
