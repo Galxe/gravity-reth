@@ -113,7 +113,7 @@ where
         block_number: u64,
     ) -> OnChainConfigResType {
         use crate::onchain_config::{
-            consensus_config::ConsensusConfigFetcher, epoch::EpochFetcher,
+            consensus_config::ConsensusConfigFetcher, dkg_state::DKGStateFetcher, epoch::EpochFetcher,
             jwk_consensus_config::JwkConsensusConfigFetcher, observed_jwk::ObservedJwkFetcher,
             validator_set::ValidatorSetFetcher,
         };
@@ -140,6 +140,10 @@ where
             OnChainConfig::JWKConsensusConfig => {
                 let fetcher = JwkConsensusConfigFetcher::new(self);
                 fetcher.fetch(block_number).0.into()
+            }
+            OnChainConfig::DKGState => {
+                let fetcher = DKGStateFetcher::new(self);
+                fetcher.fetch(block_number).into()
             }
             _ => todo!("Implement fetching for other config types"),
         }

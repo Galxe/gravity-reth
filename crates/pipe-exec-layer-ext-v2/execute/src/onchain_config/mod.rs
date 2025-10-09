@@ -4,6 +4,7 @@
 
 pub mod base;
 pub mod consensus_config;
+pub mod dkg_state;
 pub mod epoch;
 pub mod jwk_consensus_config;
 pub mod metadata_txn;
@@ -14,6 +15,7 @@ pub mod validator_set;
 // Re-export main types for convenience
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
 pub use consensus_config::ConsensusConfigFetcher;
+pub use dkg_state::DKGStateFetcher;
 pub use epoch::EpochFetcher;
 pub use metadata_txn::{transact_metadata_contract_call, MetadataTxnResult};
 pub use types::{
@@ -54,5 +56,6 @@ pub const STAKE_CREDIT_ADDR: Address = address!("0000000000000000000000000000000
 pub const GOV_TOKEN_ADDR: Address = address!("000000000000000000000000000000000000201D");
 pub const GOVERNOR_ADDR: Address = address!("000000000000000000000000000000000000201E");
 pub const TIMELOCK_ADDR: Address = address!("000000000000000000000000000000000000201F");
+pub const DKG_ADDR: Address = address!("0000000000000000000000000000000000002021");
 pub const RECONFIGURATION_WITH_DKG_ADDR: Address = address!("0000000000000000000000000000000000002022");
 pub const SYSTEM_CONTRACT_ADDRESS: Address = address!("0000000000000000000000000000000000002000");
