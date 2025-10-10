@@ -34,11 +34,10 @@ pub const STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE: [u8; 32] = [
 
 /// Event signature hash for `StakeEvent(address,uint256,address,uint256)`
 /// Computed from: event StakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
-pub const STAKE_EVENT_SIGNATURE: [u8; 32] = [
-    0xad, 0x7c, 0x5b, 0xef, 0x02, 0x78, 0x16, 0xa8, 0x00, 0xda, 0x17, 0x36, 0x44, 0x4f, 0xb5, 0x8a,
-    0x80, 0x7e, 0xf4, 0xc9, 0x60, 0x3b, 0x78, 0x48, 0x67, 0x3f, 0x7e, 0x3a, 0x68, 0xeb, 0x14, 0xa5,
+pub const DELEGATION_EVENT_SIGNATURE: [u8; 32] = [
+    0x50, 0x34, 0x56, 0x52, 0x05, 0x61, 0x68, 0x3b, 0x10, 0xfa, 0x81, 0xbb, 0x1b, 0x54, 0xfa, 0xf6,
+    0xc2, 0x6d, 0x29, 0xe8, 0xd5, 0x9b, 0xa3, 0x7f, 0x8e, 0xe1, 0x7b, 0x4d, 0x5c, 0x07, 0x8c, 0x15,
 ];
-
 /// Event signature hash for `ValidatorExitEvent(address,uint256,address,uint256)`
 /// Computed from: event ValidatorExitEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
 pub const VALIDATOR_EXIT_EVENT_SIGNATURE: [u8; 32] = [
@@ -48,7 +47,7 @@ pub const VALIDATOR_EXIT_EVENT_SIGNATURE: [u8; 32] = [
 
 /// Event signature hash for `UnstakeEvent(address,uint256,address,uint256)`
 /// Computed from: event UnstakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
-pub const UNSTAKE_EVENT_SIGNATURE: [u8; 32] = [
+pub const UNDELEGATION_EVENT_SIGNATURE: [u8; 32] = [
     0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
     0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
 ];
@@ -194,11 +193,11 @@ impl EventLog {
         // Match based on event signature using cached values
         if event_signature == STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
             EventDataType::StakeRegisterValidatorEvent
-        } else if event_signature == STAKE_EVENT_SIGNATURE {
+        } else if event_signature == DELEGATION_EVENT_SIGNATURE {
             EventDataType::StakeEvent
         } else if event_signature == VALIDATOR_EXIT_EVENT_SIGNATURE {
             EventDataType::ValidatorExitEvent
-        } else if event_signature == UNSTAKE_EVENT_SIGNATURE {
+        } else if event_signature == UNDELEGATION_EVENT_SIGNATURE {
             EventDataType::UnstakeEvent
         } else {
             EventDataType::Raw

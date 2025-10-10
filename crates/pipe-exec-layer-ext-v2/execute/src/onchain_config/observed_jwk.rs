@@ -12,7 +12,7 @@ use alloy_sol_types::{SolCall, SolEvent, SolType};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_pipe_exec_layer_relayer::{
-    STAKE_EVENT_SIGNATURE, STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE, UNSTAKE_EVENT_SIGNATURE,
+    DELEGATION_EVENT_SIGNATURE, STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE, UNDELEGATION_EVENT_SIGNATURE,
     VALIDATOR_EXIT_EVENT_SIGNATURE,
 };
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
@@ -21,9 +21,9 @@ use std::fmt::Debug;
 
 // Use imported constants from relayer crate
 const STAKE_REGISTER_VALIDATOR_EVENT_HASH: [u8; 32] = STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE;
-const DELEGATION_EVENT_HASH: [u8; 32] = STAKE_EVENT_SIGNATURE;
+const DELEGATION_EVENT_HASH: [u8; 32] = DELEGATION_EVENT_SIGNATURE;
 const LEAVE_VALIDATOR_SET_EVENT_HASH: [u8; 32] = VALIDATOR_EXIT_EVENT_SIGNATURE;
-const UNDELEGATION_EVENT_HASH: [u8; 32] = UNSTAKE_EVENT_SIGNATURE;
+const UNDELEGATION_EVENT_HASH: [u8; 32] = UNDELEGATION_EVENT_SIGNATURE;
 
 const DEFAULT_VALIDATOR_PARAMS: ValidatorRegistrationParams = ValidatorRegistrationParams {
     consensusPublicKey: Bytes::new(),
