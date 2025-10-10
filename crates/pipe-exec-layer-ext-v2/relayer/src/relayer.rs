@@ -15,6 +15,12 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::{SolEvent, SolValue};
 use anyhow::Result;
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
+use anyhow::anyhow;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, warn};
+
 // Event signatures for different event types
 // These are the keccak256 hashes of the event signatures computed from the sol! macro events below
 // They are used to identify and filter specific events from Ethereum logs
@@ -46,10 +52,6 @@ pub const UNSTAKE_EVENT_SIGNATURE: [u8; 32] = [
     0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
     0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
 ];
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
 
 sol! {
     struct UnsupportedJWK {
@@ -372,7 +374,7 @@ impl GravityRelayer {
     /// * Returns an error if polling fails for any reason
     pub async fn poll_once(&self) -> Result<ObserveState> {
         let task_uri = &self.task_state.task.original_uri;
-        match &self.task_state.task.task {
+        let state = match &self.task_state.task.task {
             GravityTask::MonitorEvent(filter) => self.poll_event_task(task_uri, filter).await,
             GravityTask::MonitorBlockHead => self.poll_block_head_task(task_uri).await,
             GravityTask::MonitorStorage { account, slot } => {
@@ -380,6 +382,20 @@ impl GravityRelayer {
             }
             GravityTask::MonitorAccount { address, activity_type } => {
                 self.poll_account_activity_task(task_uri, *address, activity_type).await
+            }
+        };
+        match state {
+            Ok(state) => match state.observed_value {
+                ObservedValue::None => {
+                    Err(anyhow!("Fetched none"))
+                }
+                _ => {
+                    Ok(state)
+                }
+            },
+            Err(e) => {
+                error!("Error polling task {}: {}", task_uri, e);
+                Err(e)
             }
         }
     }
