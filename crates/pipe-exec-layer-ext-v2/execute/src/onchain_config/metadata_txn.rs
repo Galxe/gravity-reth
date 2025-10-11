@@ -1,7 +1,7 @@
 //! Metadata transaction execution
 
 use super::{
-    types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated},
+    types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated, blockPrologueExtCall},
     SYSTEM_CALLER,
 };
 use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
