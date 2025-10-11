@@ -233,9 +233,7 @@ impl UriParser {
             Some(activity_type) => {
                 return Err(anyhow!("Unsupported activity type: {}", activity_type))
             }
-            None => {
-                return Err(anyhow!("Missing 'type' parameter for account activity monitoring"))
-            }
+            None => return Err(anyhow!("Missing 'type' parameter for account activity monitoring")),
         };
 
         Ok(GravityTask::MonitorAccount { address, activity_type })

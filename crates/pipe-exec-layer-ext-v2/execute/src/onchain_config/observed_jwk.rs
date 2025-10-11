@@ -79,7 +79,7 @@ sol! {
 
 fn convert_into_api_jwk(jwk: JWK) -> JWKStruct {
     if jwk.variant == 0 {
-        // Note: Gravity relayer does not fetch RSA JWKs directly. RSA JWKs are fetched in Aptos code
+        // Note: Gravity relayer does not fetch RSA JWKs directly. RSA JWKs are fetched in Aptos
         JWKStruct { type_name: "0x1::jwks::RSA_JWK".to_string(), data: jwk.data.into() }
     } else {
         // All data fetched by gravity relayer is contained within UnsupportedJWK in the data field

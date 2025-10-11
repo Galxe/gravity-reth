@@ -9,27 +9,23 @@ use alloy_primitives::{
     utils::{format_ether, parse_units},
     Address, B256, U256,
 };
-use alloy_rpc_types::Filter;
-use alloy_rpc_types::Log;
+use alloy_rpc_types::{Filter, Log};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolEvent, SolValue};
-use anyhow::anyhow;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-/// Event signature hash for `StakeEvent(address,uint256,address,uint256)`
-/// Computed from: event StakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+/// event StakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
 pub const DELEGATION_EVENT_SIGNATURE: [u8; 32] = [
     0x50, 0x34, 0x56, 0x52, 0x05, 0x61, 0x68, 0x3b, 0x10, 0xfa, 0x81, 0xbb, 0x1b, 0x54, 0xfa, 0xf6,
     0xc2, 0x6d, 0x29, 0xe8, 0xd5, 0x9b, 0xa3, 0x7f, 0x8e, 0xe1, 0x7b, 0x4d, 0x5c, 0x07, 0x8c, 0x15,
 ];
 
-/// Event signature hash for `UnstakeEvent(address,uint256,address,uint256)`
-/// Computed from: event UnstakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+/// event UnstakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
 pub const UNDELEGATION_EVENT_SIGNATURE: [u8; 32] = [
     0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
     0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
