@@ -13,8 +13,8 @@ use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use revm_primitives::TxKind;
-use tracing::info;
 use std::fmt::Debug;
+use tracing::info;
 
 sol! {
     event StakeEvent(
@@ -131,7 +131,8 @@ fn convert_into_sol_crosschain_params(jwks: &Vec<JWK>, issuer: &str) -> Vec<Cros
 
 fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
     let unsupported_jwk = UnsupportedJWK::abi_decode(&jwk.data).unwrap();
-    let id_string = String::from_utf8(unsupported_jwk.id.to_vec()).expect("Failed to convert id bytes to string");
+    let id_string = String::from_utf8(unsupported_jwk.id.to_vec())
+        .expect("Failed to convert id bytes to string");
     let data_type: u8 = id_string.parse().expect("Failed to parse data_type from string");
 
     match data_type {

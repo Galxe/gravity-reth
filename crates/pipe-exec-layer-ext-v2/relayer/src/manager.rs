@@ -2,7 +2,8 @@
 
 use crate::{
     parser::UriParser,
-    relayer::{GravityRelayer, ObserveState}, ObservedValue,
+    relayer::{GravityRelayer, ObserveState},
+    ObservedValue,
 };
 use anyhow::{anyhow, Result};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
@@ -66,15 +67,9 @@ impl RelayerManager {
         let relayer =
             relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
         match relayer.poll_once().await {
-            Ok(observed_state) => {
-                match observed_state.observed_value {
-                    ObservedValue::None => {
-                        Err(anyhow!("Fetched none"))
-                    }
-                    _ => {
-                        Ok(observed_state)
-                    }
-                }
+            Ok(observed_state) => match observed_state.observed_value {
+                ObservedValue::None => Err(anyhow!("Fetched none")),
+                _ => Ok(observed_state),
             },
             Err(e) => {
                 error!("Error polling URI {}: {}", uri, e);
