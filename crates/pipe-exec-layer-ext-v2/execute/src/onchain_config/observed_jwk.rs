@@ -246,7 +246,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 issuer: issuer.to_string(),
             }
         }
-        _ => panic!("Unsupported event type: {:?}", id_hash),
+        _ => panic!("Unsupported event type: {:?}, id: {:?}", id_hash, unsupported_jwk.id),
     }
 }
 
