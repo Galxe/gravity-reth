@@ -189,10 +189,11 @@ fn convert_into_sol_crosschain_params(jwks: &Vec<JWK>, issuer: &str) -> Vec<Cros
 
 fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
     let unsupported_jwk = UnsupportedJWK::abi_decode(&jwk.data).unwrap();
-    let id_hash = keccak256(&unsupported_jwk.id);
+    let id_string = String::from_utf8(unsupported_jwk.id.to_vec()).expect("Failed to convert id bytes to string");
+    let data_type: u8 = id_string.parse().expect("Failed to parse data_type from string");
 
-    match id_hash {
-        hash if hash == STAKE_REGISTER_VALIDATOR_EVENT_HASH => {
+    match data_type {
+        hash if hash == 1 => {
             // StakeRegisterValidatorEvent
             let event =
                 StakeRegisterValidatorEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
@@ -207,7 +208,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 issuer: issuer.to_string(),
             }
         }
-        hash if hash == DELEGATION_EVENT_HASH => {
+        hash if hash == 2 => {
             // StakeEvent
             let event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
 
@@ -220,7 +221,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 issuer: issuer.to_string(),
             }
         }
-        hash if hash == LEAVE_VALIDATOR_SET_EVENT_HASH => {
+        hash if hash == 3 => {
             // ValidatorExitEvent
             let event = ValidatorExitEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
 
@@ -233,7 +234,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 issuer: issuer.to_string(),
             }
         }
-        hash if hash == UNDELEGATION_EVENT_HASH => {
+        hash if hash == 4 => {
             // UnstakeEvent
             let event = UnstakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
 
@@ -246,7 +247,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 issuer: issuer.to_string(),
             }
         }
-        _ => panic!("Unsupported event type: {:?}, id: {:?}", id_hash, unsupported_jwk.id),
+        _ => panic!("Unsupported event type: {:?}, id: {:?}", data_type, unsupported_jwk.id),
     }
 }
 
