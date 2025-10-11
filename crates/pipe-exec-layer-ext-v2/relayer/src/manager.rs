@@ -3,12 +3,13 @@
 use crate::{
     parser::UriParser,
     relayer::{GravityRelayer, ObserveState},
+    ObservedValue,
 };
 use anyhow::{anyhow, Result};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Manages multiple Gravity relayers and their lifecycle
 ///
@@ -65,7 +66,16 @@ impl RelayerManager {
         let relayers = { self.relayers.read().await };
         let relayer =
             relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
-        relayer.poll_once().await
+        match relayer.poll_once().await {
+            Ok(observed_state) => match observed_state.observed_value {
+                ObservedValue::None => Err(anyhow!("Fetched none")),
+                _ => Ok(observed_state),
+            },
+            Err(e) => {
+                error!("Error polling URI {}: {}", uri, e);
+                Err(e)
+            }
+        }
     }
 
     /// Polls a specific URI for updates

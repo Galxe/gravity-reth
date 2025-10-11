@@ -9,47 +9,27 @@ use alloy_primitives::{
     utils::{format_ether, parse_units},
     Address, B256, U256,
 };
-use alloy_rpc_types::Filter;
-use alloy_rpc_types::Log;
+use alloy_rpc_types::{Filter, Log};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolEvent, SolValue};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
-// Event signatures for different event types
-// These are the keccak256 hashes of the event signatures computed from the sol! macro events below
-// They are used to identify and filter specific events from Ethereum logs
-
-/// Event signature hash for `StakeRegisterValidatorEvent(address,uint256,bytes,uint256)`
-/// Computed from: event StakeRegisterValidatorEvent(address user, uint256 amount, bytes params, uint256 blockNumber);
-pub const STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE: [u8; 32] = [
-    0xc8, 0x9e, 0xfd, 0xaa, 0x54, 0xc0, 0xf2, 0x0c, 0x7a, 0xdf, 0x61, 0x28, 0x82, 0xdf, 0x09, 0x50,
-    0xf5, 0xa9, 0x51, 0x63, 0x7e, 0x03, 0x07, 0xcd, 0xcb, 0x4c, 0x67, 0x2f, 0x29, 0x8b, 0x8b, 0xc6,
-];
-
-/// Event signature hash for `StakeEvent(address,uint256,address,uint256)`
-/// Computed from: event StakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
-pub const STAKE_EVENT_SIGNATURE: [u8; 32] = [
-    0xad, 0x7c, 0x5b, 0xef, 0x02, 0x78, 0x16, 0xa8, 0x00, 0xda, 0x17, 0x36, 0x44, 0x4f, 0xb5, 0x8a,
-    0x80, 0x7e, 0xf4, 0xc9, 0x60, 0x3b, 0x78, 0x48, 0x67, 0x3f, 0x7e, 0x3a, 0x68, 0xeb, 0x14, 0xa5,
-];
-
-/// Event signature hash for `ValidatorExitEvent(address,uint256,address,uint256)`
-/// Computed from: event ValidatorExitEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
-pub const VALIDATOR_EXIT_EVENT_SIGNATURE: [u8; 32] = [
-    0x2a, 0x80, 0xe1, 0xef, 0x1d, 0x78, 0x42, 0xf2, 0x7f, 0x2e, 0x6b, 0xe0, 0x97, 0x2b, 0xb7, 0x08,
-    0xb9, 0xa1, 0x35, 0xc3, 0x88, 0x60, 0xdb, 0xe7, 0x3c, 0x27, 0xc3, 0x48, 0x6c, 0x34, 0xf4, 0xde,
-];
-
-/// Event signature hash for `UnstakeEvent(address,uint256,address,uint256)`
-/// Computed from: event UnstakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
-pub const UNSTAKE_EVENT_SIGNATURE: [u8; 32] = [
-    0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
-    0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
-];
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+
+/// event StakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const DELEGATION_EVENT_SIGNATURE: [u8; 32] = [
+    0x50, 0x34, 0x56, 0x52, 0x05, 0x61, 0x68, 0x3b, 0x10, 0xfa, 0x81, 0xbb, 0x1b, 0x54, 0xfa, 0xf6,
+    0xc2, 0x6d, 0x29, 0xe8, 0xd5, 0x9b, 0xa3, 0x7f, 0x8e, 0xe1, 0x7b, 0x4d, 0x5c, 0x07, 0x8c, 0x15,
+];
+
+/// event UnstakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const UNDELEGATION_EVENT_SIGNATURE: [u8; 32] = [
+    0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
+    0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
+];
 
 sol! {
     struct UnsupportedJWK {
@@ -57,21 +37,7 @@ sol! {
         bytes payload;
     }
 
-    event StakeRegisterValidatorEvent(
-        address user,
-        uint256 amount,
-        bytes params,
-        uint256 blockNumber
-    );
-
     event StakeEvent(
-        address user,
-        uint256 amount,
-        address targetValidator,
-        uint256 blockNumber
-    );
-
-    event ValidatorExitEvent(
         address user,
         uint256 amount,
         address targetValidator,
@@ -125,9 +91,7 @@ pub enum ObservedValue {
 
 enum EventDataType {
     Raw,
-    StakeRegisterValidatorEvent,
     StakeEvent,
-    ValidatorExitEvent,
     UnstakeEvent,
 }
 
@@ -190,13 +154,25 @@ impl EventLog {
         let event_signature = self.topics[0];
 
         // Match based on event signature using cached values
-        if event_signature == STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
-            EventDataType::StakeRegisterValidatorEvent
-        } else if event_signature == STAKE_EVENT_SIGNATURE {
+        if event_signature == DELEGATION_EVENT_SIGNATURE {
+            let stake_event = StakeEvent::abi_decode_data(&self.data).unwrap();
+            info!(target: "relayer stake event",
+                user=?stake_event.0,
+                amount=?stake_event.1,
+                target_validator=?stake_event.2,
+                block_number=?stake_event.3,
+                "relayer stake event created"
+            );
             EventDataType::StakeEvent
-        } else if event_signature == VALIDATOR_EXIT_EVENT_SIGNATURE {
-            EventDataType::ValidatorExitEvent
-        } else if event_signature == UNSTAKE_EVENT_SIGNATURE {
+        } else if event_signature == UNDELEGATION_EVENT_SIGNATURE {
+            let stake_event = UnstakeEvent::abi_decode_data(&self.data).unwrap();
+            info!(target: "relayer unstake event",
+                user=?stake_event.0,
+                amount=?stake_event.1,
+                target_validator=?stake_event.2,
+                block_number=?stake_event.3,
+                "relayer unstake event created"
+            );
             EventDataType::UnstakeEvent
         } else {
             EventDataType::Raw
@@ -208,9 +184,7 @@ impl EventLog {
         let event_type = self.determine_event_data_type();
         self.data_type = match event_type {
             EventDataType::Raw => 0,
-            EventDataType::StakeRegisterValidatorEvent => 1,
             EventDataType::StakeEvent => 2,
-            EventDataType::ValidatorExitEvent => 3,
             EventDataType::UnstakeEvent => 4,
         };
     }
@@ -372,7 +346,7 @@ impl GravityRelayer {
     /// * Returns an error if polling fails for any reason
     pub async fn poll_once(&self) -> Result<ObserveState> {
         let task_uri = &self.task_state.task.original_uri;
-        match &self.task_state.task.task {
+        let state = match &self.task_state.task.task {
             GravityTask::MonitorEvent(filter) => self.poll_event_task(task_uri, filter).await,
             GravityTask::MonitorBlockHead => self.poll_block_head_task(task_uri).await,
             GravityTask::MonitorStorage { account, slot } => {
@@ -380,6 +354,16 @@ impl GravityRelayer {
             }
             GravityTask::MonitorAccount { address, activity_type } => {
                 self.poll_account_activity_task(task_uri, *address, activity_type).await
+            }
+        };
+        match state {
+            Ok(state) => match state.observed_value {
+                ObservedValue::None => Err(anyhow!("Fetched none")),
+                _ => Ok(state),
+            },
+            Err(e) => {
+                error!("Error polling task {}: {}", task_uri, e);
+                Err(e)
             }
         }
     }

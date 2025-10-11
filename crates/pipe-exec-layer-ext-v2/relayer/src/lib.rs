@@ -17,7 +17,6 @@ pub use eth_client::EthHttpCli;
 pub use manager::{ManagerStats, RelayerManager};
 pub use parser::{AccountActivityType, GravityTask, ParsedTask, UriParser};
 pub use relayer::{
-    GravityRelayer, ObserveState, ObservedValue, STAKE_EVENT_SIGNATURE,
-    STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE, UNSTAKE_EVENT_SIGNATURE,
-    VALIDATOR_EXIT_EVENT_SIGNATURE,
+    GravityRelayer, ObserveState, ObservedValue, DELEGATION_EVENT_SIGNATURE,
+    UNDELEGATION_EVENT_SIGNATURE,
 };

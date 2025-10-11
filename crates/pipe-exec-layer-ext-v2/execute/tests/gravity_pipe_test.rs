@@ -53,10 +53,12 @@ fn new_ordered_block(
         withdrawals: Default::default(),
         transactions: vec![],
         senders: vec![],
-        proposer: Some(hex::decode("2d86b40a1d692c0749a0a0426e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f")
-            .unwrap()
-            .try_into()
-            .unwrap()),
+        proposer: Some(
+            hex::decode("2d86b40a1d692c0749a0a0426e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        ),
         jwk_extra_data: vec![],
     }
 }
