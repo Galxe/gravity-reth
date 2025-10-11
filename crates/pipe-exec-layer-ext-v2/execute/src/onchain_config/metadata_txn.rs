@@ -171,7 +171,7 @@ pub fn transact_metadata_contract_call(
     timestamp_us: u64,
     proposer: Option<[u8; 32]>,
 ) -> (MetadataTxnResult, EvmState) {
-    let call = blockPrologueCall {
+    let call = blockPrologueExtCall {
         proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
         failedProposerIndices: vec![],
         timestampMicros: U256::from(timestamp_us),
