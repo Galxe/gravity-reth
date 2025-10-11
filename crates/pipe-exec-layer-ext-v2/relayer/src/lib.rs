@@ -18,6 +18,5 @@ pub use manager::{ManagerStats, RelayerManager};
 pub use parser::{AccountActivityType, GravityTask, ParsedTask, UriParser};
 pub use relayer::{
     GravityRelayer, ObserveState, ObservedValue, DELEGATION_EVENT_SIGNATURE,
-    STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE, UNDELEGATION_EVENT_SIGNATURE,
-    VALIDATOR_EXIT_EVENT_SIGNATURE,
+    UNDELEGATION_EVENT_SIGNATURE,
 };

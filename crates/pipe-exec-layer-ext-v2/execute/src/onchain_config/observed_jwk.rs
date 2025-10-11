@@ -11,49 +11,13 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent, SolType};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
-use reth_pipe_exec_layer_relayer::{
-    DELEGATION_EVENT_SIGNATURE, STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE, UNDELEGATION_EVENT_SIGNATURE,
-    VALIDATOR_EXIT_EVENT_SIGNATURE,
-};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use revm_primitives::{keccak256, TxKind};
+use revm_primitives::TxKind;
 use tracing::info;
 use std::fmt::Debug;
 
-// Use imported constants from relayer crate
-const STAKE_REGISTER_VALIDATOR_EVENT_HASH: [u8; 32] = STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE;
-const DELEGATION_EVENT_HASH: [u8; 32] = DELEGATION_EVENT_SIGNATURE;
-const LEAVE_VALIDATOR_SET_EVENT_HASH: [u8; 32] = VALIDATOR_EXIT_EVENT_SIGNATURE;
-const UNDELEGATION_EVENT_HASH: [u8; 32] = UNDELEGATION_EVENT_SIGNATURE;
-
-const DEFAULT_VALIDATOR_PARAMS: ValidatorRegistrationParams = ValidatorRegistrationParams {
-    consensusPublicKey: Bytes::new(),
-    blsProof: Bytes::new(),
-    commission: Commission { rate: 0, maxRate: 0, maxChangeRate: 0 },
-    moniker: String::new(),
-    initialOperator: Address::ZERO,
-    initialBeneficiary: Address::ZERO,
-    validatorNetworkAddresses: Bytes::new(),
-    fullnodeNetworkAddresses: Bytes::new(),
-    aptosAddress: Bytes::new(),
-};
-
 sol! {
-    event StakeRegisterValidatorEvent(
-        address user,
-        uint256 amount,
-        bytes params,
-        uint256 blockNumber
-    );
-
     event StakeEvent(
-        address user,
-        uint256 amount,
-        address targetValidator,
-        uint256 blockNumber
-    );
-
-    event ValidatorExitEvent(
         address user,
         uint256 amount,
         address targetValidator,
@@ -69,32 +33,11 @@ sol! {
 }
 
 sol! {
-    // Commission structure
-    struct Commission {
-        uint64 rate; // the commission rate charged to delegators(10000 is 100%)
-        uint64 maxRate; // maximum commission rate which validator can ever charge
-        uint64 maxChangeRate; // maximum daily increase of the validator commission
-    }
-    struct ValidatorRegistrationParams {
-        bytes consensusPublicKey;
-        bytes blsProof; // BLS proof
-        Commission commission; // Changed from uint64 commissionRate to Commission struct
-        string moniker;
-        address initialOperator;
-        address initialBeneficiary; // Passed directly to StakeCredit
-        // Network addresses for Aptos compatibility
-        bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
-        bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
-        bytes aptosAddress; // Aptos validator address
-    }
-
     struct CrossChainParams {
-        // 1 => StakeRegisterValidatorEvent
         // 2 => DelegationEvent
-        // 3 => LeaveValidatorSetEvent
         // 4 => UndelegationEvent
         bytes id;
-        ValidatorRegistrationParams validatorParams;
+        address sender;
         address targetValidator;
         uint256 shares;
         uint256 blockNumber;
@@ -102,9 +45,7 @@ sol! {
     }
 
     // 0 => Raw,
-    // 1 => StakeRegisterValidatorEvent,
     // 2 => StakeEvent,
-    // 3 => ValidatorExitEvent,
     // 4 => UnstakeEvent,
     struct UnsupportedJWK {
         bytes id;
@@ -194,21 +135,6 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
     let data_type: u8 = id_string.parse().expect("Failed to parse data_type from string");
 
     match data_type {
-        hash if hash == 1 => {
-            // StakeRegisterValidatorEvent
-            let event =
-                StakeRegisterValidatorEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            let validator_params = ValidatorRegistrationParams::abi_decode(&event.2).unwrap();
-
-            CrossChainParams {
-                id: unsupported_jwk.id,
-                validatorParams: validator_params,
-                targetValidator: event.0,
-                shares: event.1,
-                blockNumber: event.3,
-                issuer: issuer.to_string(),
-            }
-        }
         hash if hash == 2 => {
             // StakeEvent
             let event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
@@ -222,22 +148,9 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
             );
             CrossChainParams {
                 id: unsupported_jwk.id,
-                validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
-                targetValidator: event.0,
-                shares: U256::from(0),
-                blockNumber: event.3,
-                issuer: issuer.to_string(),
-            }
-        }
-        hash if hash == 3 => {
-            // ValidatorExitEvent
-            let event = ValidatorExitEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-
-            CrossChainParams {
-                id: unsupported_jwk.id,
-                validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
-                targetValidator: event.0,
-                shares: U256::from(0),
+                sender: event.0,
+                targetValidator: event.2,
+                shares: event.1,
                 blockNumber: event.3,
                 issuer: issuer.to_string(),
             }
@@ -248,8 +161,8 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
 
             CrossChainParams {
                 id: unsupported_jwk.id,
-                validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
-                targetValidator: event.0,
+                sender: event.0,
+                targetValidator: event.2,
                 shares: event.1,
                 blockNumber: event.3,
                 issuer: issuer.to_string(),
