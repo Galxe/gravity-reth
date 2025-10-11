@@ -194,6 +194,14 @@ impl EventLog {
         if event_signature == STAKE_REGISTER_VALIDATOR_EVENT_SIGNATURE {
             EventDataType::StakeRegisterValidatorEvent
         } else if event_signature == DELEGATION_EVENT_SIGNATURE {
+            let stake_event = StakeEvent::abi_decode_data(&self.data).unwrap();
+            info!(target: "relayer stake event",
+                user=?stake_event.0,
+                amount=?stake_event.1,
+                target_validator=?stake_event.2,
+                block_number=?stake_event.3,
+                "relayer stake event created"
+            );
             EventDataType::StakeEvent
         } else if event_signature == VALIDATOR_EXIT_EVENT_SIGNATURE {
             EventDataType::ValidatorExitEvent

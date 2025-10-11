@@ -17,6 +17,7 @@ use reth_pipe_exec_layer_relayer::{
 };
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use revm_primitives::{keccak256, TxKind};
+use tracing::info;
 use std::fmt::Debug;
 
 // Use imported constants from relayer crate
@@ -212,6 +213,13 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
             // StakeEvent
             let event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
 
+            info!(target: "observed_jwk stake event",
+                user=?event.0,
+                amount=?event.1,
+                target_validator=?event.2,
+                block_number=?event.3,
+                "observed_jwk stake event created"
+            );
             CrossChainParams {
                 id: unsupported_jwk.id,
                 validatorParams: DEFAULT_VALIDATOR_PARAMS.clone(),
