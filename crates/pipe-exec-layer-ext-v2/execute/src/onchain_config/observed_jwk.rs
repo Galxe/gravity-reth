@@ -17,36 +17,27 @@ use std::fmt::Debug;
 use tracing::info;
 
 sol! {
-    event StakeEvent(
+    event DepositGravityEvent(
         address user,
         uint256 amount,
-        address targetValidator,
-        uint256 blockNumber
-    );
-
-    event UnstakeEvent(
-        address user,
-        uint256 amount,
-        address targetValidator,
+        address targetAddress,
         uint256 blockNumber
     );
 }
 
 sol! {
     struct CrossChainParams {
-        // 2 => DelegationEvent
-        // 4 => UndelegationEvent
+        // 1 => CrossChainDepositEvent
         bytes id;
         address sender;
-        address targetValidator;
-        uint256 shares;
+        address targetAddress;
+        uint256 amount;
         uint256 blockNumber;
         string issuer;
     }
 
     // 0 => Raw,
-    // 2 => StakeEvent,
-    // 4 => UnstakeEvent,
+    // 1 => CrossChainDepositEvent
     struct UnsupportedJWK {
         bytes id;
         bytes payload;
@@ -136,35 +127,22 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
     let data_type: u8 = id_string.parse().expect("Failed to parse data_type from string");
 
     match data_type {
-        hash if hash == 2 => {
-            // StakeEvent
-            let event = StakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
+        hash if hash == 1 => {
+            // DepositGravityEvent
+            let event = DepositGravityEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
 
             info!(target: "observed_jwk stake event",
                 user=?event.0,
                 amount=?event.1,
-                target_validator=?event.2,
+                target_address=?event.2,
                 block_number=?event.3,
                 "observed_jwk stake event created"
             );
             CrossChainParams {
                 id: unsupported_jwk.id,
                 sender: event.0,
-                targetValidator: event.2,
-                shares: event.1,
-                blockNumber: event.3,
-                issuer: issuer.to_string(),
-            }
-        }
-        hash if hash == 4 => {
-            // UnstakeEvent
-            let event = UnstakeEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-
-            CrossChainParams {
-                id: unsupported_jwk.id,
-                sender: event.0,
-                targetValidator: event.2,
-                shares: event.1,
+                targetAddress: event.2,
+                amount: event.1,
                 blockNumber: event.3,
                 issuer: issuer.to_string(),
             }

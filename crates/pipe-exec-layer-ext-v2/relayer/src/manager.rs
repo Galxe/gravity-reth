@@ -1,15 +1,11 @@
 //! Relayer Manager for lifecycle management
 
-use crate::{
-    parser::UriParser,
-    relayer::{GravityRelayer, ObserveState},
-    ObservedValue,
-};
+use crate::{parser::UriParser, relayer::GravityRelayer};
 use anyhow::{anyhow, Result};
-use gravity_api_types::on_chain_config::jwks::JWKStruct;
+use gravity_api_types::relayer::PollResult;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 /// Manages multiple Gravity relayers and their lifecycle
 ///
@@ -62,39 +58,29 @@ impl RelayerManager {
         Ok(())
     }
 
-    async fn poll_once(&self, uri: &str) -> Result<ObserveState> {
-        let relayers = { self.relayers.read().await };
-        let relayer =
-            relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
-        match relayer.poll_once().await {
-            Ok(observed_state) => match observed_state.observed_value {
-                ObservedValue::None => Err(anyhow!("Fetched none")),
-                _ => Ok(observed_state),
-            },
-            Err(e) => {
-                error!("Error polling URI {}: {}", uri, e);
-                Err(e)
-            }
-        }
-    }
-
     /// Polls a specific URI for updates
     ///
     /// # Arguments
     /// * `uri` - The URI to poll for updates
     ///
     /// # Returns
-    /// * `Result<ObserveState>` - The current observed state or error
+    /// * `Result<PollResult>` - The poll result containing JWK structures and max block number
     ///
     /// # Errors
     /// * Returns an error if the URI is not found in the managed relayers
-    pub async fn poll_uri(&self, uri: &str) -> Result<Vec<JWKStruct>> {
+    pub async fn poll_uri(&self, uri: &str) -> Result<PollResult> {
         let relayers = { self.relayers.read().await };
         let relayer =
             relayers.get(uri).ok_or(anyhow!("URI {} not found, relayers: {:?}", uri, relayers))?;
-        let observed_state = relayer.poll_once().await?;
-        let jwk_struct = GravityRelayer::convert_specific_observed_value(observed_state).await?;
-        Ok(jwk_struct)
+        let poll_result = relayer.poll_once().await?;
+        let jwk_struct =
+            GravityRelayer::convert_specific_observed_value(poll_result.observed_state.clone())
+                .await?;
+        Ok(PollResult {
+            jwk_structs: jwk_struct,
+            max_block_number: poll_result.max_queried_block,
+            updated: poll_result.updated,
+        })
     }
 }
 
