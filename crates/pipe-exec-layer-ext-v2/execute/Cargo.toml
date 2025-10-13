@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 
-gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "1a72f70" }
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "51143a9" }
 reth-pipe-exec-layer-event-bus.workspace = true
 reth-primitives.workspace = true
 reth-primitives-traits.workspace = true
