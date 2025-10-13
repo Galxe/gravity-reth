@@ -80,15 +80,35 @@ sol! {
         uint128 value;
     }
 
-    struct Config {
+    // Configuration variant enum
+    enum ConfigVariant {
+        V1,     // Basic configuration
+        V2      // Configuration with fast path
+    }
+
+    // Basic configuration struct
+    struct ConfigV1 {
+        FixedPoint64 secrecyThreshold;
+        FixedPoint64 reconstructionThreshold;
+    }
+
+    // Configuration with fast path struct
+    struct ConfigV2 {
         FixedPoint64 secrecyThreshold;
         FixedPoint64 reconstructionThreshold;
         FixedPoint64 fastPathSecrecyThreshold;
     }
 
+    // Main configuration struct
+    struct RandomnessConfigData {
+        ConfigVariant variant;
+        ConfigV1 configV1;
+        ConfigV2 configV2;
+    }
+
     // Struct for randomness configuration
     struct RandomnessConfig {
-        Config config;
+        RandomnessConfigData config;
     }
 
     // Struct for validator consensus information
@@ -101,7 +121,7 @@ sol! {
     // DKG session metadata - can be considered as the public input of DKG
     struct DKGSessionMetadata {
         uint64 dealerEpoch;
-        // RandomnessConfig randomnessConfig;
+        RandomnessConfig randomnessConfig;
         ValidatorConsensusInfo[] dealerValidatorSet;
         ValidatorConsensusInfo[] targetValidatorSet;
     }
