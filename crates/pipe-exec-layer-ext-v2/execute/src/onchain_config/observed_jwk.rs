@@ -108,7 +108,7 @@ sol! {
 
     // Struct for validator consensus information
     struct ValidatorConsensusInfo {
-        address addr;
+        bytes aptos_address;
         bytes pkBytes;
         uint64 votingPower;
     }

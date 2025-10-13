@@ -547,7 +547,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                                 dealer_validator_set: event.metadata.dealerValidatorSet
                                     .iter()
                                     .map(|validator| gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                        addr: gravity_api_types::account::ExternalAccountAddress::new(validator.addr.as_slice().try_into().unwrap()),
+                                        addr: gravity_api_types::account::ExternalAccountAddress::new(validator.aptos_address.to_vec().try_into().unwrap()),
                                         pk_bytes: validator.pkBytes.to_vec(),
                                         voting_power: validator.votingPower,
                                     })
@@ -555,7 +555,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                                 target_validator_set: event.metadata.targetValidatorSet
                                     .iter()
                                     .map(|validator| gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                        addr: gravity_api_types::account::ExternalAccountAddress::new(validator.addr.as_slice().try_into().unwrap()),
+                                        addr: gravity_api_types::account::ExternalAccountAddress::new(validator.aptos_address.to_vec().try_into().unwrap()),
                                         pk_bytes: validator.pkBytes.to_vec(),
                                         voting_power: validator.votingPower,
                                     })

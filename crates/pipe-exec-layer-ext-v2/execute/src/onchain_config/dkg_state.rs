@@ -112,7 +112,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                 addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.addr.as_slice().try_into().unwrap(),
+                                    validator.aptos_address.to_vec().try_into().unwrap(),
                                 ),
                                 pk_bytes: validator.pkBytes.to_vec(),
                                 voting_power: validator.votingPower,
@@ -127,7 +127,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                 addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.addr.as_slice().try_into().unwrap(),
+                                    validator.aptos_address.to_vec().try_into().unwrap(),
                                 ),
                                 pk_bytes: validator.pkBytes.to_vec(),
                                 voting_power: validator.votingPower,
@@ -153,7 +153,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                 addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.addr.as_slice().try_into().unwrap(),
+                                    validator.aptos_address.to_vec().try_into().unwrap(),
                                 ),
                                 pk_bytes: validator.pkBytes.to_vec(),
                                 voting_power: validator.votingPower,
@@ -168,7 +168,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                 addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.addr.as_slice().try_into().unwrap(),
+                                    validator.aptos_address.to_vec().try_into().unwrap(),
                                 ),
                                 pk_bytes: validator.pkBytes.to_vec(),
                                 voting_power: validator.votingPower,
