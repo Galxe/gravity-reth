@@ -510,11 +510,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         receipts: &[Receipt],
         block_number: u64,
     ) -> Vec<GravityEvent> {
-        info!(target: "extract_gravity_events_from_receipts",
-            number=?block_number,
-            receipts_len=?receipts.len(),
-            "extract gravity events from receipts"
-        );
         let mut gravity_events = vec![];
         // TODO(nekomoto): support DKG events later
         for receipt in receipts {
@@ -673,6 +668,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             id=?block_id,
             parent_id=?parent_id,
             number=?block_number,
+            receipts_len=?outcome.receipts.len(),
             "executed block done"
         );
 
