@@ -12,9 +12,39 @@ use gravity_api_types::on_chain_config::dkg::DKGState as GravityDKGState;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 
 sol! {
+    struct FixedPoint64 {
+        uint128 value;
+    }
+
+    // Configuration variant enum
+    enum ConfigVariant {
+        V1,     // Basic configuration
+        V2      // Configuration with fast path
+    }
+
+    // Basic configuration struct
+    struct ConfigV1 {
+        FixedPoint64 secrecyThreshold;
+        FixedPoint64 reconstructionThreshold;
+    }
+
+    // Configuration with fast path struct
+    struct ConfigV2 {
+        FixedPoint64 secrecyThreshold;
+        FixedPoint64 reconstructionThreshold;
+        FixedPoint64 fastPathSecrecyThreshold;
+    }
+
+    // Main configuration struct
+    struct RandomnessConfigData {
+        ConfigVariant variant;
+        ConfigV1 configV1;
+        ConfigV2 configV2;
+    }
+
     // Struct for validator consensus information
     struct ValidatorConsensusInfo {
-        address addr;
+        bytes aptos_address;
         bytes pkBytes;
         uint64 votingPower;
     }
@@ -22,7 +52,7 @@ sol! {
     // DKG session metadata - can be considered as the public input of DKG
     struct DKGSessionMetadata {
         uint64 dealerEpoch;
-        // RandomnessConfig randomnessConfig;
+        RandomnessConfigData randomnessConfig;
         ValidatorConsensusInfo[] dealerValidatorSet;
         ValidatorConsensusInfo[] targetValidatorSet;
     }
