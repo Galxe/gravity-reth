@@ -628,7 +628,10 @@ impl<Storage: GravityStorage> Core<Storage> {
                     validators,
                 );
             }
-
+            info!(target: "execute_ordered_block",
+                metadata_txn_result=?metadata_txn_result,
+                "metadata transaction result"
+            );
             (metadata_txn_result, state_changes)
         };
 
