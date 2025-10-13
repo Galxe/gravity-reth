@@ -106,11 +106,6 @@ sol! {
         ConfigV2 configV2;
     }
 
-    // Struct for randomness configuration
-    struct RandomnessConfig {
-        RandomnessConfigData config;
-    }
-
     // Struct for validator consensus information
     struct ValidatorConsensusInfo {
         address addr;
@@ -121,7 +116,7 @@ sol! {
     // DKG session metadata - can be considered as the public input of DKG
     struct DKGSessionMetadata {
         uint64 dealerEpoch;
-        RandomnessConfig randomnessConfig;
+        RandomnessConfigData randomnessConfig;
         ValidatorConsensusInfo[] dealerValidatorSet;
         ValidatorConsensusInfo[] targetValidatorSet;
     }
