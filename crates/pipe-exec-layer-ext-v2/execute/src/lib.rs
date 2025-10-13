@@ -683,6 +683,16 @@ impl<Storage: GravityStorage> Core<Storage> {
             epoch,
         };
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
+         let gravity_events = self.extract_gravity_events_from_receipts(
+            &result.execution_output.receipts,
+            result.block.number,
+        );
+        result.gravity_events.extend(gravity_events);
+        info!(target: "execute_ordered_block",
+            number=?result.block.number,
+            gravity_events_len=?gravity_events.len(),
+            "insert gravity events to executed ordered block result"
+        );
         result
     }
 
