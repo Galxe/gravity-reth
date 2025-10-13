@@ -513,6 +513,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         let mut gravity_events = vec![];
         // TODO(nekomoto): support DKG events later
         for receipt in receipts {
+            info!(target: "execute_ordered_block",
+                number=?block_number,
+                logs_len=?receipt.logs.len(),
+                "extract gravity events from receipt"
+            );
             for log in &receipt.logs {
                 if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
                     info!(target: "execute_ordered_block",
@@ -686,14 +691,14 @@ impl<Storage: GravityStorage> Core<Storage> {
             epoch,
         };
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
+        info!(target: "execute_ordered_block",
+            number=?result.block.number,
+            receipts_len=?result.execution_output.receipts.len(),
+            "insert metadata transaction result to executed ordered block result"
+        );
         let gravity_events = self.extract_gravity_events_from_receipts(
             &result.execution_output.receipts,
             result.block.number,
-        );
-        info!(target: "execute_ordered_block",
-            number=?result.block.number,
-            gravity_events_len=?gravity_events.len(),
-            "insert gravity events to executed ordered block result"
         );
         result.gravity_events.extend(gravity_events);
         result
