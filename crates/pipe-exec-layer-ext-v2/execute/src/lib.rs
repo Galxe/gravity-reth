@@ -674,14 +674,12 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let (mut block, senders) = block.split();
         block.header.gas_used = outcome.gas_used;
-        let gravity_events =
-            self.extract_gravity_events_from_receipts(&outcome.receipts, block_number);
         let mut result = ExecuteOrderedBlockResult {
             block,
             senders,
             execution_output: outcome,
             txs_info,
-            gravity_events,
+            gravity_events: vec![],
             epoch,
         };
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);

@@ -139,6 +139,16 @@ impl MetadataTxnResult {
                 logs: self.result.into_logs(),
             },
         );
+        let gravity_events = self.extract_gravity_events_from_receipts(
+            &result.execution_output.receipts,
+            result.block.number,
+        );
+        result.gravity_events.extend(gravity_events);
+        info!(target: "insert_to_executed_ordered_block_result",
+            number=?result.block.number,
+            gravity_events_len=?gravity_events.len(),
+            "insert gravity events to executed ordered block result"
+        );
         result.block.body.transactions.insert(0, self.txn);
         result.senders.insert(0, SYSTEM_CALLER);
     }
