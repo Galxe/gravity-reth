@@ -12,7 +12,7 @@ description = "replayer for pipeline execution layer extension"
 workspace = true
 
 [dependencies]
-gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "ad0908f45d2a8ddef946ced9ca264315cd7b7e5a" }
+gravity-api-types.workspace = true
 reth-primitives.workspace = true
 reth-tracing.workspace = true
 alloy-primitives.workspace = true
