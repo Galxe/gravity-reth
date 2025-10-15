@@ -256,6 +256,7 @@ fn process_data_by_detection(data_bytes: &[u8], nonce: u64, gas_price: u128) -> 
     if let Ok(dkg_transcript) = bcs::from_bytes::<
         gravity_api_types::on_chain_config::dkg::DKGTranscript,
     >(data_bytes) {
+        info!("lightman1015: process dkg transcript");
         // TODO: 实现 DKG transcript 的处理逻辑
         let call = finishWithDkgResultCall { 
             address: dkg_transcript.metadata.author.bytes().into(),
