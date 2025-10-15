@@ -72,7 +72,6 @@ sol! {
 
 sol! {
     function finishWithDkgResult(
-        bytes calldata address,
         bytes calldata dkg_result
     ) external;
 
@@ -259,7 +258,6 @@ fn process_data_by_detection(data_bytes: &[u8], nonce: u64, gas_price: u128) -> 
         info!("lightman1015: process dkg transcript");
         // TODO: 实现 DKG transcript 的处理逻辑
         let call = finishWithDkgResultCall { 
-            address: dkg_transcript.metadata.author.bytes().into(),
             dkg_result: dkg_transcript.transcript_bytes.into(),
          };
         let input: Bytes = call.abi_encode().into();
