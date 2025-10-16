@@ -142,6 +142,7 @@ where
                 fetcher.fetch(block_number).0.into()
             }
             OnChainConfig::DKGState => {
+                info!("lightman1015: fetch dkg state");
                 let fetcher = DKGStateFetcher::new(self);
                 fetcher.fetch(block_number).0.into()
             }
