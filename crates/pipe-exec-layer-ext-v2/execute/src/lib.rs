@@ -641,7 +641,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         };
 
         let jwk_txns = if !ordered_block.jwk_extra_data.is_empty() {
-            info!("lightman1015: construct observed jwks txns envelope jwk_extra_data_len={}", ordered_block.jwk_extra_data.len());
+            info!("lightman1015: construct observed jwks txns envelope block_number={} jwk_extra_data_len={}", block_number, ordered_block.jwk_extra_data.len());
             construct_observed_jwks_txns_envelope(
                 &ordered_block.jwk_extra_data,
                 metadata_txn_result.txn.nonce(),
