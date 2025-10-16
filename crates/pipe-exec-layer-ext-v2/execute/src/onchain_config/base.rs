@@ -11,6 +11,7 @@ use std::{fmt::Debug, sync::OnceLock};
 use tokio::runtime::Runtime;
 
 static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+use tracing::*;
 
 /// Base trait for all config fetchers
 pub trait ConfigFetcher {
