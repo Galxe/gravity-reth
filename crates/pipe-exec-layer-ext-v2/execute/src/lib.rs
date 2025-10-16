@@ -713,7 +713,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             receipts_len=?result.execution_output.receipts.len(),
             "insert metadata transaction result to executed ordered block result"
         );
-        let (gravity_events, epoch_change_result) = self.extract_gravity_events_from_receipts(
+        let (mut gravity_events, epoch_change_result) = self.extract_gravity_events_from_receipts(
             &result.execution_output.receipts,
             result.block.number,
         );
