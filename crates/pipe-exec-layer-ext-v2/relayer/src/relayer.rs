@@ -4,11 +4,7 @@ use crate::{
     eth_client::EthHttpCli,
     parser::{AccountActivityType, GravityTask, ParsedTask},
 };
-use alloy_primitives::{
-    hex,
-    utils::{format_ether, parse_units},
-    Address, B256, U256,
-};
+use alloy_primitives::{Address, B256};
 use alloy_rpc_types::{Filter, Log};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolEvent, SolValue};
@@ -17,18 +13,12 @@ use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
-/// event StakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
-pub const DELEGATION_EVENT_SIGNATURE: [u8; 32] = [
-    0x50, 0x34, 0x56, 0x52, 0x05, 0x61, 0x68, 0x3b, 0x10, 0xfa, 0x81, 0xbb, 0x1b, 0x54, 0xfa, 0xf6,
-    0xc2, 0x6d, 0x29, 0xe8, 0xd5, 0x9b, 0xa3, 0x7f, 0x8e, 0xe1, 0x7b, 0x4d, 0x5c, 0x07, 0x8c, 0x15,
-];
-
-/// event UnstakeEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
-pub const UNDELEGATION_EVENT_SIGNATURE: [u8; 32] = [
-    0x13, 0x60, 0x0b, 0x29, 0x41, 0x91, 0xfc, 0x92, 0x92, 0x4b, 0xb3, 0xce, 0x4b, 0x96, 0x9c, 0x1e,
-    0x7e, 0x2b, 0xab, 0x8f, 0x4c, 0x93, 0xc3, 0xfc, 0x6d, 0x0a, 0x51, 0x73, 0x3d, 0xf3, 0xc0, 0x60,
+/// event DepositGravityEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+pub const DEPOSIT_GRAVITY_EVENT_SIGNATURE: [u8; 32] = [
+    0xd5, 0x3b, 0xfb, 0x63, 0x0c, 0x04, 0x65, 0x4c, 0x6d, 0x1d, 0xa5, 0x02, 0x0f, 0x14, 0x67, 0x4f,
+    0x19, 0x0f, 0x92, 0xc2, 0x57, 0xc9, 0x2d, 0x9b, 0x15, 0xd8, 0xec, 0xb4, 0x05, 0x05, 0x7c, 0x14,
 ];
 
 sol! {
@@ -37,30 +27,33 @@ sol! {
         bytes payload;
     }
 
-    event StakeEvent(
+    event DepositGravityEvent(
         address user,
         uint256 amount,
-        address targetValidator,
-        uint256 blockNumber
-    );
-
-    event UnstakeEvent(
-        address user,
-        uint256 amount,
-        address targetValidator,
+        address targetAddress,
         uint256 blockNumber
     );
 }
 /// Represents the current state of observation for a gravity task
 ///
-/// This struct tracks the block number, observed value, timestamp, and version
-/// of the last observed state for monitoring purposes.
+/// This struct tracks the block number and observed value of the last observed state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObserveState {
     /// The block number at which the observation was made
     pub block_number: u64,
     /// The actual observed value (block, events, storage slot, or none)
     pub observed_value: ObservedValue,
+}
+
+/// Result of a polling operation, containing the observed state and the maximum block queried
+#[derive(Debug, Clone)]
+pub struct PollResult {
+    /// The observed state from this poll
+    pub observed_state: ObserveState,
+    /// The maximum block number that was actually queried in this poll
+    pub max_queried_block: u64,
+    /// Whether the observed state was updated
+    pub updated: bool,
 }
 
 /// Represents different types of observed values from blockchain monitoring
@@ -89,10 +82,13 @@ pub enum ObservedValue {
     None,
 }
 
-enum EventDataType {
+/// Represents different types of event data that can be processed
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventDataType {
+    /// Raw event data without specific parsing
     Raw,
-    StakeEvent,
-    UnstakeEvent,
+    /// Deposit gravity event with structured data
+    DepositGravityEvent,
 }
 
 /// Represents a blockchain event log with all relevant metadata
@@ -154,8 +150,8 @@ impl EventLog {
         let event_signature = self.topics[0];
 
         // Match based on event signature using cached values
-        if event_signature == DELEGATION_EVENT_SIGNATURE {
-            let stake_event = StakeEvent::abi_decode_data(&self.data).unwrap();
+        if event_signature == DEPOSIT_GRAVITY_EVENT_SIGNATURE {
+            let stake_event = DepositGravityEvent::abi_decode_data(&self.data).unwrap();
             info!(target: "relayer stake event",
                 user=?stake_event.0,
                 amount=?stake_event.1,
@@ -163,17 +159,7 @@ impl EventLog {
                 block_number=?stake_event.3,
                 "relayer stake event created"
             );
-            EventDataType::StakeEvent
-        } else if event_signature == UNDELEGATION_EVENT_SIGNATURE {
-            let stake_event = UnstakeEvent::abi_decode_data(&self.data).unwrap();
-            info!(target: "relayer unstake event",
-                user=?stake_event.0,
-                amount=?stake_event.1,
-                target_validator=?stake_event.2,
-                block_number=?stake_event.3,
-                "relayer unstake event created"
-            );
-            EventDataType::UnstakeEvent
+            EventDataType::DepositGravityEvent
         } else {
             EventDataType::Raw
         }
@@ -184,8 +170,7 @@ impl EventLog {
         let event_type = self.determine_event_data_type();
         self.data_type = match event_type {
             EventDataType::Raw => 0,
-            EventDataType::StakeEvent => 2,
-            EventDataType::UnstakeEvent => 4,
+            EventDataType::DepositGravityEvent => 1,
         };
     }
 }
@@ -291,6 +276,21 @@ impl std::fmt::Debug for GravityRelayer {
 }
 
 impl GravityRelayer {
+    /// Maximum number of blocks to poll in one request to avoid overwhelming the system
+    const MAX_BLOCKS_PER_POLL: u64 = 100;
+
+    /// Calculates the appropriate block range for polling based on cursor and finalized block
+    ///
+    /// # Arguments
+    /// * `cursor` - The current cursor position
+    /// * `finalized_block` - The latest finalized block number
+    ///
+    /// # Returns
+    /// * `u64` - The calculated to_block for polling
+    fn calculate_poll_block_range(cursor: u64, finalized_block: u64) -> u64 {
+        std::cmp::min(cursor + Self::MAX_BLOCKS_PER_POLL, finalized_block)
+    }
+
     /// Creates a new GravityRelayer instance
     ///
     /// # Arguments
@@ -340,11 +340,11 @@ impl GravityRelayer {
     /// This method delegates to specific polling methods based on the task type.
     ///
     /// # Returns
-    /// * `Result<ObserveState>` - The current observed state or error
+    /// * `Result<PollResult>` - The poll result containing observed state and max queried block
     ///
     /// # Errors
     /// * Returns an error if polling fails for any reason
-    pub async fn poll_once(&self) -> Result<ObserveState> {
+    pub async fn poll_once(&self) -> Result<PollResult> {
         let task_uri = &self.task_state.task.original_uri;
         let state = match &self.task_state.task.task {
             GravityTask::MonitorEvent(filter) => self.poll_event_task(task_uri, filter).await,
@@ -357,9 +357,9 @@ impl GravityRelayer {
             }
         };
         match state {
-            Ok(state) => match state.observed_value {
+            Ok(poll_result) => match poll_result.observed_state.observed_value {
                 ObservedValue::None => Err(anyhow!("Fetched none")),
-                _ => Ok(state),
+                _ => Ok(poll_result),
             },
             Err(e) => {
                 error!("Error polling task {}: {}", task_uri, e);
@@ -400,8 +400,8 @@ impl GravityRelayer {
     /// * `filter` - The event filter to apply
     ///
     /// # Returns
-    /// * `Result<ObserveState>` - The observed state with new events or error
-    async fn poll_event_task(&self, task_uri: &str, filter: &Filter) -> Result<ObserveState> {
+    /// * `Result<PollResult>` - The poll result with observed state and max queried block
+    async fn poll_event_task(&self, task_uri: &str, filter: &Filter) -> Result<PollResult> {
         let cursor = self.task_state.get_cursor().await;
         let previous_value = self.task_state.last_observed().await;
 
@@ -410,7 +410,10 @@ impl GravityRelayer {
 
         // Get finalized block with retry logic
         let finalized_block = self.eth_client.get_finalized_block_number().await?;
-        scoped_filter = scoped_filter.to_block(finalized_block);
+
+        // Calculate the appropriate block range for polling
+        let to_block = Self::calculate_poll_block_range(cursor, finalized_block);
+        scoped_filter = scoped_filter.to_block(to_block);
 
         debug!(target: "relayer",
             task_uri=?task_uri,
@@ -426,15 +429,20 @@ impl GravityRelayer {
             .collect();
 
         if new_logs.is_empty() {
-            // Use finalized_block as the next cursor if no to_block is specified
-            let next_cursor = scoped_filter.get_to_block().unwrap_or(finalized_block);
+            // Update cursor to the to_block we actually queried
+            let next_cursor = to_block;
             self.task_state.update_cursor(next_cursor).await;
             debug!(target: "relayer",
                 task_uri=?task_uri,
                 next_cursor=?next_cursor,
                 "polling event task with no new logs"
             );
-            return Ok((*previous_value).clone());
+            // Return previous value with max_queried_block
+            return Ok(PollResult {
+                observed_state: (*previous_value).clone(),
+                max_queried_block: to_block,
+                updated: false,
+            });
         }
 
         let observed_value = ObservedValue::Events { logs: new_logs.clone() };
@@ -442,16 +450,22 @@ impl GravityRelayer {
         let should_update = self.task_state.should_update(&observed_value).await;
 
         let return_value = if should_update {
-            let new_cursor =
-                new_logs.iter().max_by_key(|log| log.block_number).unwrap().block_number;
+            // Update cursor to the to_block we actually queried, not just the max log block
+            let new_cursor = to_block;
             self.task_state.update_cursor(new_cursor).await;
             let new_value =
                 ObserveState { block_number: new_cursor, observed_value: observed_value.clone() };
 
             self.task_state.update_last_observed(new_value.clone()).await;
-            new_value
+            PollResult { observed_state: new_value, max_queried_block: to_block, updated: true }
         } else {
-            (*previous_value).clone()
+            // Even if no update, we should still advance the cursor to avoid getting stuck
+            self.task_state.update_cursor(to_block).await;
+            PollResult {
+                observed_state: (*previous_value).clone(),
+                max_queried_block: to_block,
+                updated: false,
+            }
         };
 
         debug!(target: "relayer",
@@ -469,37 +483,48 @@ impl GravityRelayer {
     /// * `task_uri` - The URI being monitored (for logging)
     ///
     /// # Returns
-    /// * `Result<ObserveState>` - The observed state with new block or error
-    async fn poll_block_head_task(&self, task_uri: &str) -> Result<ObserveState> {
-        let latest_block = self.eth_client.get_finalized_block_number().await?;
+    /// * `Result<PollResult>` - The poll result with observed state and max queried block
+    async fn poll_block_head_task(&self, task_uri: &str) -> Result<PollResult> {
+        let finalized_block = self.eth_client.get_finalized_block_number().await?;
 
         let cursor = self.task_state.get_cursor().await;
         let previous_value = self.task_state.last_observed().await;
 
-        let return_value = if latest_block > cursor {
-            let block_hash = match self.eth_client.get_block(latest_block).await? {
+        // For block head polling, we only need to check the latest finalized block
+        let to_block = Self::calculate_poll_block_range(cursor, finalized_block);
+
+        let return_value = if to_block > cursor {
+            let block_hash = match self.eth_client.get_block(to_block).await? {
                 Some(block) => block.header.hash,
                 None => B256::ZERO,
             };
 
-            let observed_value = ObservedValue::Block { block_hash, block_number: latest_block };
+            let observed_value = ObservedValue::Block { block_hash, block_number: to_block };
 
             let should_update = self.task_state.should_update(&observed_value).await;
 
             if should_update {
-                self.task_state.update_cursor(latest_block).await;
-                let new_value = ObserveState {
-                    block_number: latest_block,
-                    observed_value: observed_value.clone(),
-                };
+                self.task_state.update_cursor(to_block).await;
+                let new_value =
+                    ObserveState { block_number: to_block, observed_value: observed_value.clone() };
 
                 self.task_state.update_last_observed(new_value.clone()).await;
-                new_value
+                PollResult { observed_state: new_value, max_queried_block: to_block, updated: true }
             } else {
-                (*previous_value).clone()
+                // Even if no update, we should still advance the cursor to avoid getting stuck
+                self.task_state.update_cursor(to_block).await;
+                PollResult {
+                    observed_state: (*previous_value).clone(),
+                    max_queried_block: to_block,
+                    updated: false,
+                }
             }
         } else {
-            (*previous_value).clone()
+            PollResult {
+                observed_state: (*previous_value).clone(),
+                max_queried_block: to_block,
+                updated: false,
+            }
         };
 
         debug!(target: "relayer",
@@ -518,35 +543,39 @@ impl GravityRelayer {
     /// * `slot` - The storage slot to monitor
     ///
     /// # Returns
-    /// * `Result<ObserveState>` - The observed state with storage value or error
+    /// * `Result<PollResult>` - The poll result with observed state and max queried block
     async fn poll_storage_slot_task(
         &self,
         task_uri: &str,
         account: Address,
         slot: B256,
-    ) -> Result<ObserveState> {
-        let current_value = self.eth_client.get_storage_at(account, slot).await?;
-
+    ) -> Result<PollResult> {
         let cursor = self.task_state.get_cursor().await;
+        let finalized_block = self.eth_client.get_finalized_block_number().await?;
 
-        let current_block = self.eth_client.get_finalized_block_number().await?;
+        // For storage slot polling, we only need to check the latest finalized block
+        let to_block = Self::calculate_poll_block_range(cursor, finalized_block);
 
+        let current_value = self.eth_client.get_storage_at(account, slot).await?;
         let observed_value = ObservedValue::StorageSlot { slot, value: current_value };
 
         let should_update = self.task_state.should_update(&observed_value).await;
-
         let previous_value = self.task_state.last_observed().await;
 
         let return_value = if should_update {
-            self.task_state.update_cursor(current_block).await;
-            let new_value = ObserveState {
-                block_number: current_block,
-                observed_value: observed_value.clone(),
-            };
+            self.task_state.update_cursor(to_block).await;
+            let new_value =
+                ObserveState { block_number: to_block, observed_value: observed_value.clone() };
             self.task_state.update_last_observed(new_value.clone()).await;
-            new_value
+            PollResult { observed_state: new_value, max_queried_block: to_block, updated: true }
         } else {
-            (*previous_value).clone()
+            // Even if no update, we should still advance the cursor to avoid getting stuck
+            self.task_state.update_cursor(to_block).await;
+            PollResult {
+                observed_state: (*previous_value).clone(),
+                max_queried_block: to_block,
+                updated: false,
+            }
         };
         debug!(target: "relayer",
             task_uri=?task_uri,
@@ -564,35 +593,15 @@ impl GravityRelayer {
     /// * `activity_type` - The type of activity to monitor
     ///
     /// # Returns
-    /// * `Result<ObserveState>` - The observed state with account activity or error
+    /// * `Result<PollResult>` - The poll result with observed state and max queried block
     async fn poll_account_activity_task(
         &self,
-        task_uri: &str,
-        address: Address,
-        activity_type: &AccountActivityType,
-    ) -> Result<ObserveState> {
-        match activity_type {
-            AccountActivityType::Erc20Transfer => {
-                // Create ERC20 Transfer event filter
-                // Transfer event signature: Transfer(address,address,uint256)
-                let transfer_topic = B256::from(hex!(
-                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-                ));
-
-                // This filter construction needs proper OR logic implementation
-                // For now, create a basic filter
-                let filter = Filter::new().event_signature(transfer_topic);
-                // TODO: Implement proper OR logic for topic1/topic2 to monitor both from and to
-
-                self.poll_event_task(task_uri, &filter).await
-            }
-            AccountActivityType::AllTransactions => {
-                // Requiring iterating through all transactions in blocks, which is performance
-                // intensive
-                warn!("AllTransactions monitoring is not yet implemented for address: {}", address);
-                Ok(ObserveState { block_number: 0, observed_value: ObservedValue::None })
-            }
-        }
+        _task_uri: &str,
+        _address: Address,
+        _activity_type: &AccountActivityType,
+    ) -> Result<PollResult> {
+        // TODO: Implement account activity monitoring
+        unimplemented!()
     }
 }
 
@@ -635,7 +644,7 @@ mod tests {
         let state = relayer.poll_once().await.expect("Failed to poll relayer");
         println!("state: {:?}", state);
 
-        match state.observed_value {
+        match state.observed_state.observed_value {
             ObservedValue::Events { logs } => {
                 for log in logs {
                     let log_obj = Log::new(log.address, log.topics, Bytes::from(log.data))
