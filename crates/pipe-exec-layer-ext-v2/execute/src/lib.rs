@@ -19,7 +19,7 @@ use alloy_consensus::{
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::{
     map::{HashMap, HashSet},
-    Address, TxHash, B256, U256,
+    Address, Bytes, TxHash, B256, U256,
 };
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_primitives::get_gravity_config;
@@ -27,6 +27,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
+use reth_primitives::Recovered;
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes, ParallelDatabase};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
@@ -62,6 +63,7 @@ use crate::onchain_config::{
     observed_jwk::{
         construct_observed_jwks_txns_envelope, convert_into_api_provider_jwks, DKGStartEvent, ObservedJWKsUpdated
     },
+    metadata_txn::MetadataTxnResult,
     SYSTEM_CALLER,
 };
 
@@ -505,13 +507,15 @@ impl<Storage: GravityStorage> Core<Storage> {
     }
 
     /// Extract gravity events from execution receipts
+    /// Returns (gravity_events, epoch_change_result) where epoch_change_result is Some((new_epoch, validators)) if epoch changed
     fn extract_gravity_events_from_receipts(
         &self,
         receipts: &[Receipt],
         block_number: u64,
-    ) -> Vec<GravityEvent> {
+    ) -> (Vec<GravityEvent>, Option<(u64, Bytes)>) {
         let mut gravity_events = vec![];
-        // TODO(nekomoto): support DKG events later
+        let mut epoch_change_result = None;
+        
         for receipt in receipts {
             info!(target: "execute_ordered_block",
                 number=?block_number,
@@ -519,6 +523,18 @@ impl<Storage: GravityStorage> Core<Storage> {
                 "extract gravity events from receipt"
             );
             for log in &receipt.logs {
+                // Check for AllValidatorsUpdated event (epoch change)
+                if let Ok(event) = crate::onchain_config::types::AllValidatorsUpdated::decode_log(log) {
+                    info!(target: "execute_ordered_block",
+                        number=?block_number,
+                        new_epoch=?event.newEpoch,
+                        "detected epoch change from AllValidatorsUpdated event"
+                    );
+                    let solidity_validator_set = &event.validatorSet;
+                    let validator_bytes = crate::onchain_config::types::convert_validator_set_to_bcs(solidity_validator_set);
+                    epoch_change_result = Some((event.newEpoch.to::<u64>(), validator_bytes));
+                }
+                
                 if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
                     info!(target: "execute_ordered_block",
                         number=?block_number,
@@ -567,7 +583,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 }
             }
         }
-        gravity_events
+        (gravity_events, epoch_change_result)
     }
 
     fn execute_ordered_block(
@@ -697,10 +713,27 @@ impl<Storage: GravityStorage> Core<Storage> {
             receipts_len=?result.execution_output.receipts.len(),
             "insert metadata transaction result to executed ordered block result"
         );
-        let gravity_events = self.extract_gravity_events_from_receipts(
+        let (gravity_events, epoch_change_result) = self.extract_gravity_events_from_receipts(
             &result.execution_output.receipts,
             result.block.number,
         );
+        
+        // Check if any transaction (including JWK transactions) triggered a new epoch
+        if let Some((new_epoch, validators)) = epoch_change_result {
+            // New epoch triggered, advance epoch and discard the block.
+            assert_eq!(new_epoch, epoch + 1);
+            info!(target: "execute_ordered_block",
+                id=?block_id,
+                parent_id=?parent_id,
+                number=?block_number,
+                new_epoch=?new_epoch,
+                "emit new epoch from transaction execution, discard the block"
+            );
+            // Add NewEpoch event to gravity_events
+            gravity_events.push(GravityEvent::NewEpoch(new_epoch, validators.into()));
+            result.epoch = new_epoch;
+        }
+        
         result.gravity_events.extend(gravity_events);
         result
     }
