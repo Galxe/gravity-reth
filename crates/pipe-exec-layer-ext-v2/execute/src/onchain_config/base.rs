@@ -119,6 +119,8 @@ where
             validator_set::ValidatorSetFetcher,
         };
 
+        info!("lightman1015: fetch config bytes config_name={:?}", config_name);
+
         match config_name {
             OnChainConfig::ConsensusConfig => {
                 let fetcher = ConsensusConfigFetcher::new(self);
