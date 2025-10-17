@@ -67,11 +67,13 @@ sol! {
     // DKG state containing last completed and in progress sessions
     struct DKGState {
         DKGSessionState lastCompleted;
+        bool hasLastCompleted;
         DKGSessionState inProgress;
+        bool hasInProgress;
     }
 
     // Function to get DKG state
-    function getDKGState(bool hasLastCompleted, bool hasInProgress) external view returns (DKGState memory);
+    function getDKGState() external view returns (DKGState memory);
 }
 
 /// Fetcher for DKG state information
@@ -96,10 +98,7 @@ where
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn fetch(&self, block_number: u64) -> Bytes {
-        let call = getDKGStateCall {
-            hasLastCompleted: true,
-            hasInProgress: true,
-        };
+        let call = getDKGStateCall {};
         let input: Bytes = call.abi_encode().into();
 
         let result = self.base_fetcher.eth_call(
