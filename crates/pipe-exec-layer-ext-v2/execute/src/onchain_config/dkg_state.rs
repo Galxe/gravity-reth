@@ -127,7 +127,7 @@ where
 /// Convert Solidity DKG state to BCS-encoded bytes
 fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
     let gravity_state = GravityDKGState {
-        last_completed: if solidity_state.lastCompleted.metadata.dealerEpoch == 0 {
+        last_completed: if !solidity_state.hasLastCompleted {
             None
         } else {
             Some(gravity_api_types::on_chain_config::dkg::DKGSessionState {
@@ -168,7 +168,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                 transcript: solidity_state.lastCompleted.transcript.to_vec(),
             })
         },
-        in_progress: if solidity_state.inProgress.metadata.dealerEpoch == 0 {
+        in_progress: if !solidity_state.hasInProgress {
             None
         } else {
             Some(gravity_api_types::on_chain_config::dkg::DKGSessionState {
