@@ -2,7 +2,7 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    GRAVITY_FRAMEWORK_ADDRESS, JWK_MANAGER_ADDR,
+    JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
@@ -79,6 +79,6 @@ where
     }
 
     fn caller_address() -> Address {
-        GRAVITY_FRAMEWORK_ADDRESS
+        SYSTEM_CALLER
     }
 }
