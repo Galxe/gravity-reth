@@ -2,7 +2,7 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    GRAVITY_FRAMEWORK_ADDRESS, JWK_MANAGER_ADDR,
+    JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Address, Bytes, Signature, U256};
@@ -220,7 +220,7 @@ where
     }
 
     fn caller_address() -> Address {
-        GRAVITY_FRAMEWORK_ADDRESS
+        SYSTEM_CALLER
     }
 }
 
