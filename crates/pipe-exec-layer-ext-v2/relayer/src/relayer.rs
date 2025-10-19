@@ -302,32 +302,16 @@ impl GravityRelayer {
     ///
     /// # Errors
     /// * Returns an error if unable to connect to the RPC endpoint or get finalized block
-    pub async fn new(rpc_url: &str, task: ParsedTask) -> Result<Self> {
+    pub async fn new(rpc_url: &str, task: ParsedTask, from_block: u64) -> Result<Self> {
         let eth_client = Arc::new(EthHttpCli::new(rpc_url)?);
 
         // Get the starting block number from the task filter or use finalized block as default
-        let start_block_number = match &task.task {
-            GravityTask::MonitorEvent(filter) => filter
-                .block_option
-                .get_from_block()
-                .and_then(|block| block.as_number())
-                .unwrap_or(0),
-            _ => 0,
-        };
-
-        // If no specific start block is set, use the current finalized block
-        let start_block_number = if start_block_number == 0 {
-            eth_client.get_finalized_block_number().await?
-        } else {
-            start_block_number
-        };
-
-        let last_observed =
-            ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
+        let start_block_number = from_block;
+        let last_observed = ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
 
         info!(target: "relayer",
             rpc_url=?rpc_url,
-            start_block_number=?start_block_number,
+            from_block=?start_block_number,
             task=?task,
             "relayer created"
         );
@@ -639,7 +623,7 @@ mod tests {
         let task = parser.parse(&uri).expect("Failed to parse test URI");
         println!("task: {:?}", task);
 
-        let relayer = GravityRelayer::new(&rpc_url, task).await.expect("Failed to create relayer");
+        let relayer = GravityRelayer::new(&rpc_url, task, 0).await.expect("Failed to create relayer");
 
         let state = relayer.poll_once().await.expect("Failed to poll relayer");
         println!("state: {:?}", state);

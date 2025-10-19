@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Add each URI (creates separate relayer for each)
     for uri in &uris {
-        match manager.add_uri(uri, rpc_url).await {
+        match manager.add_uri(uri, rpc_url, 0).await {
             Ok(()) => info!("Successfully added URI: {}", uri),
             Err(e) => info!("Failed to add URI {}: {}", uri, e),
         }
