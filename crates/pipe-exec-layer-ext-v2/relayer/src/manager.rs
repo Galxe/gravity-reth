@@ -50,7 +50,7 @@ impl RelayerManager {
         let task = self.uri_parser.parse(uri)?;
         info!("Adding URI: {} -> {:?}", uri, task);
 
-        let relayer = GravityRelayer::new(rpc_url, task ,from_block).await?;
+        let relayer = GravityRelayer::new(rpc_url, task, from_block).await?;
         info!("Successfully added URI: {}, relayer: {:?}", uri, relayer);
 
         let mut relayers = self.relayers.write().await;

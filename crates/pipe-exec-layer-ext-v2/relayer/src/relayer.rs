@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
-/// event DepositGravityEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
+/// DepositGravityEvent(address user, uint256 amount, address targetValidator, uint256 blockNumber);
 pub const DEPOSIT_GRAVITY_EVENT_SIGNATURE: [u8; 32] = [
     0xd5, 0x3b, 0xfb, 0x63, 0x0c, 0x04, 0x65, 0x4c, 0x6d, 0x1d, 0xa5, 0x02, 0x0f, 0x14, 0x67, 0x4f,
     0x19, 0x0f, 0x92, 0xc2, 0x57, 0xc9, 0x2d, 0x9b, 0x15, 0xd8, 0xec, 0xb4, 0x05, 0x05, 0x7c, 0x14,
@@ -307,7 +307,8 @@ impl GravityRelayer {
 
         // Get the starting block number from the task filter or use finalized block as default
         let start_block_number = from_block;
-        let last_observed = ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
+        let last_observed =
+            ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
 
         info!(target: "relayer",
             rpc_url=?rpc_url,
@@ -623,7 +624,8 @@ mod tests {
         let task = parser.parse(&uri).expect("Failed to parse test URI");
         println!("task: {:?}", task);
 
-        let relayer = GravityRelayer::new(&rpc_url, task, 0).await.expect("Failed to create relayer");
+        let relayer =
+            GravityRelayer::new(&rpc_url, task, 0).await.expect("Failed to create relayer");
 
         let state = relayer.poll_once().await.expect("Failed to poll relayer");
         println!("state: {:?}", state);
