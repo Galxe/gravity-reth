@@ -302,6 +302,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Wait untile there's no large gap between cache and db
         let block_number = block.number();
         let block_id = block.id();
+        let randomness = if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
+            ordered_block.randomness
+        } else {
+            U256::ZERO
+        };
         self.metrics.start_process_block_number.set(block_number as f64);
 
         // Retrieve the parent block header to generate the necessary configs for
@@ -415,7 +420,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             "state trie merklized"
         );
         block.header.state_root = state_root;
-        block.header.difficulty = rdered_block.randomness;
+        block.header.difficulty = randomness;
         info!("lightman1021: difficulty={}", block.header.difficulty);
 
         // Seal the block
