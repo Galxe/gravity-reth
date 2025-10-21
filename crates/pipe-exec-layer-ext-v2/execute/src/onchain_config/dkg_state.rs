@@ -11,6 +11,7 @@ use alloy_sol_types::SolCall;
 use gravity_api_types::on_chain_config::dkg::DKGState as GravityDKGState;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use tracing::*;
+use hex;
 
 // NOTE: The following DKG-related type definitions are shared with observed_jwk.rs
 // They must be kept in sync. Any changes here should be reflected in observed_jwk.rs
@@ -173,7 +174,7 @@ fn convert_validator(validator: &ValidatorConsensusInfo) -> gravity_api_types::o
         addr: gravity_api_types::account::ExternalAccountAddress::new(
             validator.aptosAddress.to_vec().try_into().unwrap(),
         ),
-        pk_bytes: validator.pkBytes.to_vec(),
+        pk_bytes: hex::decode(&validator.pkBytes).unwrap(),
         voting_power: validator.votingPower,
     }
 }
