@@ -52,7 +52,7 @@ reth-pipe-exec-layer-relayer.workspace = true
 # crypto and serialization for gravity-aptos validator_info
 bcs = "0.1"
 serde.workspace = true
-hex.workspace = true
+hex = { version = "0.4.3", features = ["serde"] }
 
 [dev-dependencies]
 reth-engine-primitives.workspace = true
