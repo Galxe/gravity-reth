@@ -153,8 +153,14 @@ fn convert_config_v2(config: &ConfigV2) -> gravity_api_types::on_chain_config::d
 
 /// Helper function to convert RandomnessConfigData
 fn convert_randomness_config(config: &RandomnessConfigData) -> gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
+    // Convert enum variant
+    let variant = match config.variant {
+        ConfigVariant::V1 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V1,
+        ConfigVariant::V2 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V2,
+    };
+    
     gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
-        variant: config.variant,
+        variant,
         configV1: convert_config_v1(&config.configV1),
         configV2: convert_config_v2(&config.configV2),
     }

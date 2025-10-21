@@ -71,8 +71,16 @@ use crate::onchain_config::{
 fn convert_randomness_config_for_event(
     config: &crate::onchain_config::observed_jwk::RandomnessConfigData,
 ) -> gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
+    use crate::onchain_config::observed_jwk::ConfigVariant;
+    
+    // Convert enum variant
+    let variant = match config.variant {
+        ConfigVariant::V1 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V1,
+        ConfigVariant::V2 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V2,
+    };
+    
     gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
-        variant: config.variant,
+        variant,
         configV1: gravity_api_types::on_chain_config::dkg::ConfigV1 {
             secrecyThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
                 value: config.configV1.secrecyThreshold.value,
