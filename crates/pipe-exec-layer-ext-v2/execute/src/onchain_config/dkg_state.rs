@@ -157,6 +157,7 @@ fn convert_randomness_config(config: &RandomnessConfigData) -> gravity_api_types
     let variant = match config.variant {
         ConfigVariant::V1 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V1,
         ConfigVariant::V2 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V2,
+        ConfigVariant::__Invalid => panic!("Invalid ConfigVariant"),
     };
     
     gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
