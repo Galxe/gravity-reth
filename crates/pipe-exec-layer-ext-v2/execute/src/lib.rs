@@ -67,6 +67,34 @@ use crate::onchain_config::{
     SYSTEM_CALLER,
 };
 
+/// Helper function to convert RandomnessConfigData for DKG events
+fn convert_randomness_config_for_event(
+    config: &crate::onchain_config::observed_jwk::RandomnessConfigData,
+) -> gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
+    gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
+        variant: config.variant,
+        configV1: gravity_api_types::on_chain_config::dkg::ConfigV1 {
+            secrecyThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+                value: config.configV1.secrecyThreshold.value,
+            },
+            reconstructionThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+                value: config.configV1.reconstructionThreshold.value,
+            },
+        },
+        configV2: gravity_api_types::on_chain_config::dkg::ConfigV2 {
+            secrecyThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+                value: config.configV2.secrecyThreshold.value,
+            },
+            reconstructionThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+                value: config.configV2.reconstructionThreshold.value,
+            },
+            fastPathSecrecyThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+                value: config.configV2.fastPathSecrecyThreshold.value,
+            },
+        },
+    }
+}
+
 /// Metadata about an executed block
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutedBlockMeta {
@@ -559,7 +587,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                         gravity_api_types::on_chain_config::dkg::DKGStartEvent {
                             session_metadata: gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
                                 dealer_epoch: event.metadata.dealerEpoch,
-                                // randomness_config: event.metadata.randomness_config,
+                                randomness_config: convert_randomness_config_for_event(&event.metadata.randomnessConfig),
                                 dealer_validator_set: event.metadata.dealerValidatorSet
                                     .iter()
                                     .map(|validator| gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
