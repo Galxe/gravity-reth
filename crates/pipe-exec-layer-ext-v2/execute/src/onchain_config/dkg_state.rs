@@ -12,6 +12,8 @@ use gravity_api_types::on_chain_config::dkg::DKGState as GravityDKGState;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use tracing::*;
 
+// NOTE: The following DKG-related type definitions are shared with observed_jwk.rs
+// They must be kept in sync. Any changes here should be reflected in observed_jwk.rs
 sol! {
     struct FixedPoint64 {
         uint128 value;
@@ -125,6 +127,60 @@ where
     }
 }
 
+/// Helper function to convert FixedPoint64
+fn convert_fixed_point64(fp: &FixedPoint64) -> gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+    gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+        value: fp.value,
+    }
+}
+
+/// Helper function to convert ConfigV1
+fn convert_config_v1(config: &ConfigV1) -> gravity_api_types::on_chain_config::dkg::ConfigV1 {
+    gravity_api_types::on_chain_config::dkg::ConfigV1 {
+        secrecyThreshold: convert_fixed_point64(&config.secrecyThreshold),
+        reconstructionThreshold: convert_fixed_point64(&config.reconstructionThreshold),
+    }
+}
+
+/// Helper function to convert ConfigV2
+fn convert_config_v2(config: &ConfigV2) -> gravity_api_types::on_chain_config::dkg::ConfigV2 {
+    gravity_api_types::on_chain_config::dkg::ConfigV2 {
+        secrecyThreshold: convert_fixed_point64(&config.secrecyThreshold),
+        reconstructionThreshold: convert_fixed_point64(&config.reconstructionThreshold),
+        fastPathSecrecyThreshold: convert_fixed_point64(&config.fastPathSecrecyThreshold),
+    }
+}
+
+/// Helper function to convert RandomnessConfigData
+fn convert_randomness_config(config: &RandomnessConfigData) -> gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
+    gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
+        variant: config.variant,
+        configV1: convert_config_v1(&config.configV1),
+        configV2: convert_config_v2(&config.configV2),
+    }
+}
+
+/// Helper function to convert ValidatorConsensusInfo
+fn convert_validator(validator: &ValidatorConsensusInfo) -> gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
+    gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
+        addr: gravity_api_types::account::ExternalAccountAddress::new(
+            validator.aptosAddress.to_vec().try_into().unwrap(),
+        ),
+        pk_bytes: validator.pkBytes.to_vec(),
+        voting_power: validator.votingPower,
+    }
+}
+
+/// Helper function to convert DKGSessionMetadata
+fn convert_dkg_session_metadata(metadata: &DKGSessionMetadata) -> gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
+    gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
+        dealer_epoch: metadata.dealerEpoch,
+        randomness_config: convert_randomness_config(&metadata.randomnessConfig),
+        dealer_validator_set: metadata.dealerValidatorSet.iter().map(convert_validator).collect(),
+        target_validator_set: metadata.targetValidatorSet.iter().map(convert_validator).collect(),
+    }
+}
+
 /// Convert Solidity DKG state to BCS-encoded bytes
 fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
     let gravity_state = GravityDKGState {
@@ -132,39 +188,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
             None
         } else {
             Some(gravity_api_types::on_chain_config::dkg::DKGSessionState {
-                metadata: gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
-                    dealer_epoch: solidity_state.lastCompleted.metadata.dealerEpoch,
-                    dealer_validator_set: solidity_state
-                        .lastCompleted
-                        .metadata
-                        .dealerValidatorSet
-                        .iter()
-                        .map(|validator| {
-                            gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.aptosAddress.to_vec().try_into().unwrap(),
-                                ),
-                                pk_bytes: validator.pkBytes.to_vec(),
-                                voting_power: validator.votingPower,
-                            }
-                        })
-                        .collect(),
-                    target_validator_set: solidity_state
-                        .lastCompleted
-                        .metadata
-                        .targetValidatorSet
-                        .iter()
-                        .map(|validator| {
-                            gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.aptosAddress.to_vec().try_into().unwrap(),
-                                ),
-                                pk_bytes: validator.pkBytes.to_vec(),
-                                voting_power: validator.votingPower,
-                            }
-                        })
-                        .collect(),
-                },
+                metadata: convert_dkg_session_metadata(&solidity_state.lastCompleted.metadata),
                 start_time_us: solidity_state.lastCompleted.startTimeUs,
                 transcript: solidity_state.lastCompleted.transcript.to_vec(),
             })
@@ -173,39 +197,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
             None
         } else {
             Some(gravity_api_types::on_chain_config::dkg::DKGSessionState {
-                metadata: gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
-                    dealer_epoch: solidity_state.inProgress.metadata.dealerEpoch,
-                    dealer_validator_set: solidity_state
-                        .inProgress
-                        .metadata
-                        .dealerValidatorSet
-                        .iter()
-                        .map(|validator| {
-                            gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.aptosAddress.to_vec().try_into().unwrap(),
-                                ),
-                                pk_bytes: validator.pkBytes.to_vec(),
-                                voting_power: validator.votingPower,
-                            }
-                        })
-                        .collect(),
-                    target_validator_set: solidity_state
-                        .inProgress
-                        .metadata
-                        .targetValidatorSet
-                        .iter()
-                        .map(|validator| {
-                            gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
-                                addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.aptosAddress.to_vec().try_into().unwrap(),
-                                ),
-                                pk_bytes: validator.pkBytes.to_vec(),
-                                voting_power: validator.votingPower,
-                            }
-                        })
-                        .collect(),
-                },
+                metadata: convert_dkg_session_metadata(&solidity_state.inProgress.metadata),
                 start_time_us: solidity_state.inProgress.startTimeUs,
                 transcript: solidity_state.inProgress.transcript.to_vec(),
             })

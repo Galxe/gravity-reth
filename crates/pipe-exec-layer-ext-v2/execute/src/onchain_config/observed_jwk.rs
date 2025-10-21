@@ -70,6 +70,8 @@ sol! {
     event ObservedJWKsUpdated(uint256 indexed epoch, ProviderJWKs[] jwks);
 }
 
+// NOTE: The following DKG-related type definitions are shared with dkg_state.rs
+// They must be kept in sync. Any changes here should be reflected in dkg_state.rs
 sol! {
     function finishWithDkgResult(
         bytes calldata dkg_result
