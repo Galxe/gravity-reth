@@ -112,7 +112,7 @@ where
         // Decode the Solidity DKG state
         let solidity_dkg_state = getDKGStateCall::abi_decode_returns(&result)
             .expect("Failed to decode getDKGState return value");
-        info!("lightman1020: solidity_dkg_state={:?}", solidity_dkg_state);
+        // info!("lightman1020: solidity_dkg_state={:?}", solidity_dkg_state);
         convert_dkg_state_to_bcs(&solidity_dkg_state)
     }
 
