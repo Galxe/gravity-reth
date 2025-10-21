@@ -45,7 +45,7 @@ sol! {
 
     // Struct for validator consensus information
     struct ValidatorConsensusInfo {
-        bytes aptos_address;
+        bytes aptosAddress;
         bytes pkBytes;
         uint64 votingPower;
     }
@@ -142,7 +142,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                 addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.aptos_address.to_vec().try_into().unwrap(),
+                                    validator.aptosAddress.to_vec().try_into().unwrap(),
                                 ),
                                 pk_bytes: validator.pkBytes.to_vec(),
                                 voting_power: validator.votingPower,
@@ -157,7 +157,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                 addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.aptos_address.to_vec().try_into().unwrap(),
+                                    validator.aptosAddress.to_vec().try_into().unwrap(),
                                 ),
                                 pk_bytes: validator.pkBytes.to_vec(),
                                 voting_power: validator.votingPower,
@@ -183,7 +183,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                 addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.aptos_address.to_vec().try_into().unwrap(),
+                                    validator.aptosAddress.to_vec().try_into().unwrap(),
                                 ),
                                 pk_bytes: validator.pkBytes.to_vec(),
                                 voting_power: validator.votingPower,
@@ -198,7 +198,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
                         .map(|validator| {
                             gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfoMoveStruct {
                                 addr: gravity_api_types::account::ExternalAccountAddress::new(
-                                    validator.aptos_address.to_vec().try_into().unwrap(),
+                                    validator.aptosAddress.to_vec().try_into().unwrap(),
                                 ),
                                 pk_bytes: validator.pkBytes.to_vec(),
                                 voting_power: validator.votingPower,
@@ -211,6 +211,7 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
             })
         },
     };
+    info!("lightman1021: gravity_state={:?}", gravity_state);
 
     // Serialize to BCS
     let bcs_bytes = bcs::to_bytes(&gravity_state)
