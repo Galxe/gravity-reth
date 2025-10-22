@@ -60,6 +60,7 @@ fn new_ordered_block(
                 .unwrap(),
         ),
         jwk_extra_data: vec![],
+        randomness: U256::ZERO,
     }
 }
 
