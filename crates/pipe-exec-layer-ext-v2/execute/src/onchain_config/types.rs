@@ -70,7 +70,7 @@ sol! {
         );
 
         function blockPrologueExt(
-            address proposer,
+            bytes proposer,
             uint64[] calldata failedProposerIndices,
             uint256 timestampMicros
         );
