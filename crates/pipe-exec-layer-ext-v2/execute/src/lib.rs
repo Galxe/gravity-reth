@@ -421,7 +421,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         block.header.state_root = state_root;
         block.header.difficulty = randomness;
-        info!("lightman1021: difficulty={}", block.header.difficulty);
+        info!("lightman1021: block_number={} difficulty={}", block_number, block.header.difficulty);
 
         // Seal the block
         let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
