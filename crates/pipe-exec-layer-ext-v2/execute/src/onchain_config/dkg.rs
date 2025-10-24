@@ -277,6 +277,26 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
     Bytes::from(bcs_bytes)
 }
 
+/// Construct DKG transaction from DKGTranscript
+/// 
+/// This function is called by the validator transactions construction logic in mod.rs
+pub(crate) fn construct_dkg_transaction(
+    dkg_transcript: gravity_api_types::on_chain_config::dkg::DKGTranscript,
+    nonce: u64,
+    gas_price: u128,
+) -> Result<reth_ethereum_primitives::TransactionSigned, String> {
+    use super::RECONFIGURATION_WITH_DKG_ADDR;
+    use alloy_primitives::Bytes;
+    use alloy_sol_types::SolCall;
+    
+    let call = finishWithDkgResultCall {
+        dkg_result: dkg_transcript.transcript_bytes.into(),
+    };
+    let input: Bytes = call.abi_encode().into();
+    
+    Ok(super::new_system_call_txn(RECONFIGURATION_WITH_DKG_ADDR, nonce, gas_price, input))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

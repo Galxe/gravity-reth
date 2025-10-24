@@ -59,3 +59,94 @@ pub const TIMELOCK_ADDR: Address = address!("00000000000000000000000000000000000
 pub const DKG_ADDR: Address = address!("0000000000000000000000000000000000002021");
 pub const RECONFIGURATION_WITH_DKG_ADDR: Address = address!("0000000000000000000000000000000000002022");
 pub const SYSTEM_CONTRACT_ADDRESS: Address = address!("0000000000000000000000000000000000002000");
+
+// ============================================================================
+// Validator Transactions Construction
+// ============================================================================
+
+use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
+use alloy_primitives::{Bytes, Signature, U256};
+use reth_ethereum_primitives::{Transaction, TransactionSigned};
+use revm_primitives::TxKind;
+use tracing::info;
+
+/// Construct validator transactions envelope (JWK updates and DKG transcripts)
+/// 
+/// Automatically detects data type through BCS deserialization and constructs
+/// appropriate transactions:
+/// - `ProviderJWKs` → `upsertObservedJWKs` transaction to JWK_MANAGER_ADDR
+/// - `DKGTranscript` → `finishWithDkgResult` transaction to RECONFIGURATION_WITH_DKG_ADDR
+pub fn construct_validator_txns_envelope(
+    data_array_bytes: &Vec<Vec<u8>>,
+    system_caller_nonce: u64,
+    gas_price: u128,
+) -> Result<Vec<EthereumTxEnvelope<TxEip4844>>, String> {
+    let system_caller_nonce = system_caller_nonce + 1;
+    let mut txns = Vec::new();
+    
+    for (index, data_bytes) in data_array_bytes.iter().enumerate() {
+        let current_nonce = system_caller_nonce + index as u64;
+        
+        // Detect data type through deserialization and process accordingly
+        match process_validator_data(data_bytes, current_nonce, gas_price) {
+            Ok(transaction) => txns.push(transaction),
+            Err(e) => {
+                return Err(format!("Failed to process validator data at index {}: {}", index, e));
+            }
+        }
+    }
+    
+    Ok(txns)
+}
+
+/// Process validator data by detecting its type through BCS deserialization
+/// 
+/// Supports:
+/// - JWK updates (ProviderJWKs)
+/// - DKG transcripts (DKGTranscript)
+fn process_validator_data(
+    data_bytes: &[u8],
+    nonce: u64,
+    gas_price: u128,
+) -> Result<TransactionSigned, String> {
+    // Try to deserialize as ProviderJWKs (JWK update)
+    if let Ok(provider_jwks) =
+        bcs::from_bytes::<gravity_api_types::on_chain_config::jwks::ProviderJWKs>(data_bytes)
+    {
+        info!("Processing JWK update for issuer: {}", String::from_utf8_lossy(&provider_jwks.issuer));
+        return observed_jwk::construct_jwk_transaction(provider_jwks, nonce, gas_price);
+    }
+    
+    // Try to deserialize as DKGTranscript
+    if let Ok(dkg_transcript) =
+        bcs::from_bytes::<gravity_api_types::on_chain_config::dkg::DKGTranscript>(data_bytes)
+    {
+        info!("Processing DKG transcript for epoch: {}", dkg_transcript.metadata.epoch);
+        return dkg_state::construct_dkg_transaction(dkg_transcript, nonce, gas_price);
+    }
+    
+    Err("Unable to deserialize data as any known validator data type (ProviderJWKs or DKGTranscript)".to_string())
+}
+
+/// Create a new system call transaction
+/// 
+/// Helper function used by both JWK and DKG transaction construction
+pub(crate) fn new_system_call_txn(
+    contract: Address,
+    nonce: u64,
+    gas_price: u128,
+    input: Bytes,
+) -> TransactionSigned {
+    TransactionSigned::new_unhashed(
+        Transaction::Legacy(TxLegacy {
+            chain_id: None,
+            nonce,
+            gas_price,
+            gas_limit: 30_000_000,
+            to: TxKind::Call(contract),
+            value: U256::ZERO,
+            input,
+        }),
+        Signature::new(U256::ZERO, U256::ZERO, false),
+    )
+}
