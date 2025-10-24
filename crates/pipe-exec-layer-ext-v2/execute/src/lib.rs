@@ -609,15 +609,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let (metadata_txn_result, state_changes) = {
             let mut state = State::builder().with_database_ref(&state).with_bundle_update().build();
             let mut evm_env = evm_env;
-            // Set randomness in block.difficulty if randomness is enabled
-            if ordered_block.enable_randomness {
-                evm_env.block_env.difficulty = ordered_block.randomness;
-                info!(target: "execute_ordered_block",
-                    block_number=?block_number,
-                    randomness=?ordered_block.randomness,
-                    "Set randomness to block.difficulty for blockPrologueExt"
-                );
-            }
+
             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
             let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
                 &mut evm,
