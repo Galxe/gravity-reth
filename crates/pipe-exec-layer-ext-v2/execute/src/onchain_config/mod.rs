@@ -4,7 +4,7 @@
 
 pub mod base;
 pub mod consensus_config;
-pub mod dkg_state;
+pub mod dkg;
 pub mod epoch;
 pub mod jwk_consensus_config;
 pub mod metadata_txn;
@@ -15,7 +15,7 @@ pub mod validator_set;
 // Re-export main types for convenience
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
 pub use consensus_config::ConsensusConfigFetcher;
-pub use dkg_state::DKGStateFetcher;
+pub use dkg::DKGStateFetcher;
 pub use epoch::EpochFetcher;
 pub use metadata_txn::{transact_metadata_contract_call, MetadataTxnResult};
 pub use types::{
