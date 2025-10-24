@@ -1,17 +1,16 @@
-//! Fetcher for consensus configuration
-
-use crate::onchain_config::RECONFIGURATION_WITH_DKG_ADDR;
+//! Fetcher for JWK (JSON Web Key) on-chain configuration
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    JWK_MANAGER_ADDR, SYSTEM_CALLER,
+    dkg_state::finishWithDkgResultCall,
+    JWK_MANAGER_ADDR, RECONFIGURATION_WITH_DKG_ADDR, SYSTEM_CALLER,
 };
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Address, Bytes, Signature, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent, SolType};
-use gravity_api_types::on_chain_config::{dkg, jwks::JWKStruct};
+use gravity_api_types::on_chain_config::jwks::JWKStruct;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use revm_primitives::TxKind;
@@ -68,60 +67,6 @@ sol! {
     ) external;
 
     event ObservedJWKsUpdated(uint256 indexed epoch, ProviderJWKs[] jwks);
-}
-
-// NOTE: The following DKG-related type definitions are shared with dkg_state.rs
-// They must be kept in sync. Any changes here should be reflected in dkg_state.rs
-sol! {
-    function finishWithDkgResult(
-        bytes calldata dkg_result
-    ) external;
-
-    struct FixedPoint64 {
-        uint128 value;
-    }
-
-    // Configuration variant enum
-    enum ConfigVariant {
-        V1,     // Basic configuration
-        V2      // Configuration with fast path
-    }
-
-    // Basic configuration struct
-    struct ConfigV1 {
-        FixedPoint64 secrecyThreshold;
-        FixedPoint64 reconstructionThreshold;
-    }
-
-    // Configuration with fast path struct
-    struct ConfigV2 {
-        FixedPoint64 secrecyThreshold;
-        FixedPoint64 reconstructionThreshold;
-        FixedPoint64 fastPathSecrecyThreshold;
-    }
-
-    // Main configuration struct
-    struct RandomnessConfigData {
-        ConfigVariant variant;
-        ConfigV1 configV1;
-        ConfigV2 configV2;
-    }
-
-    // Struct for validator consensus information
-    struct ValidatorConsensusInfo {
-        bytes aptosAddress;
-        bytes pkBytes;
-        uint64 votingPower;
-    }
-
-    // DKG session metadata - can be considered as the public input of DKG
-    struct DKGSessionMetadata {
-        uint64 dealerEpoch;
-        RandomnessConfigData randomnessConfig;
-        ValidatorConsensusInfo[] dealerValidatorSet;
-        ValidatorConsensusInfo[] targetValidatorSet;
-    }
-    event DKGStartEvent(DKGSessionMetadata metadata, uint64 startTimeUs);
 }
 
 fn convert_into_api_jwk(jwk: JWK) -> JWKStruct {
