@@ -384,7 +384,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         block.header.state_root = state_root;
         block.header.difficulty = randomness;
-        info!("lightman1021: block_number={} difficulty={}", block_number, block.header.difficulty);
 
         // Seal the block
         let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
@@ -647,7 +646,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         };
 
         let validator_txns = if !ordered_block.validator_txns_data.is_empty() {
-            info!("lightman1015: construct validator txns envelope block_number={} validator_txns_data_len={}", block_number, ordered_block.validator_txns_data.len());
             construct_validator_txns_envelope(
                 &ordered_block.validator_txns_data,
                 metadata_txn_result.txn.nonce(),

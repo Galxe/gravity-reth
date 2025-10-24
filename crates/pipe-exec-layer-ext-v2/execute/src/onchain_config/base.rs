@@ -119,7 +119,6 @@ where
             validator_set::ValidatorSetFetcher,
         };
 
-        info!("lightman1015: fetch config bytes config_name={:?}", config_name);
 
         match config_name {
             OnChainConfig::ConsensusConfig => {
@@ -145,7 +144,6 @@ where
                 fetcher.fetch(block_number).0.into()
             }
             OnChainConfig::DKGState => {
-                info!("lightman1015: fetch dkg state");
                 let fetcher = DKGStateFetcher::new(self);
                 fetcher.fetch(block_number).0.into()
             }
