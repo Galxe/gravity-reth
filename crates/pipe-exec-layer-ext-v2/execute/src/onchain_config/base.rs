@@ -114,7 +114,7 @@ where
         block_number: u64,
     ) -> OnChainConfigResType {
         use crate::onchain_config::{
-            consensus_config::ConsensusConfigFetcher, dkg_state::DKGStateFetcher, epoch::EpochFetcher,
+            consensus_config::ConsensusConfigFetcher, dkg::DKGStateFetcher, epoch::EpochFetcher,
             jwk_consensus_config::JwkConsensusConfigFetcher, observed_jwk::ObservedJwkFetcher,
             validator_set::ValidatorSetFetcher,
         };

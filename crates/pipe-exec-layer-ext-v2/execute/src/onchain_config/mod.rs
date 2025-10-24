@@ -122,7 +122,7 @@ fn process_validator_data(
         bcs::from_bytes::<gravity_api_types::on_chain_config::dkg::DKGTranscript>(data_bytes)
     {
         info!("Processing DKG transcript for epoch: {}", dkg_transcript.metadata.epoch);
-        return dkg_state::construct_dkg_transaction(dkg_transcript, nonce, gas_price);
+        return dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price);
     }
     
     Err("Unable to deserialize data as any known validator data type (ProviderJWKs or DKGTranscript)".to_string())

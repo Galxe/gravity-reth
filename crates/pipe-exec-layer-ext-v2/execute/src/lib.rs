@@ -60,7 +60,7 @@ use tracing::*;
 
 use crate::onchain_config::{
     construct_validator_txns_envelope,
-    dkg_state::{convert_dkg_start_event_to_api, DKGStartEvent},
+    dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
     observed_jwk::{convert_into_api_provider_jwks, ObservedJWKsUpdated},
     SYSTEM_CALLER,
 };
