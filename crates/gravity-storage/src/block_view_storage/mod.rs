@@ -110,9 +110,8 @@ impl<Tx: DbTx> DatabaseRef for RawBlockViewProvider<Tx> {
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         if let Some(cache) = &self.cache {
-            let value = cache.basic_account(&address).map(Into::into);
-            if value.is_some() {
-                return Ok(value);
+            if let Some(value) = cache.basic_account(&address) {
+                return Ok(value.map(Into::into))
             }
         }
         Ok(self.tx.get_by_encoded_key::<tables::PlainAccountState>(&address)?.map(Into::into))
@@ -139,7 +138,7 @@ impl<Tx: DbTx> DatabaseRef for RawBlockViewProvider<Tx> {
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
         if let Some(cache) = &self.cache {
             if let Some(value) = cache.storage(&address, &index) {
-                return Ok(value);
+                return Ok(value.unwrap_or_default());
             }
         }
         let mut cursor = self.tx.cursor_dup_read::<tables::PlainStorageState>()?;
@@ -178,9 +177,8 @@ impl DatabaseRef for BlockViewProvider {
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         if let Some(cache) = &self.cache {
-            let value = cache.basic_account(&address).map(Into::into);
-            if value.is_some() {
-                return Ok(value);
+            if let Some(value) = cache.basic_account(&address) {
+                return Ok(value.map(Into::into))
             }
         }
         self.db.basic_ref(address)
@@ -206,7 +204,7 @@ impl DatabaseRef for BlockViewProvider {
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
         if let Some(cache) = &self.cache {
             if let Some(value) = cache.storage(&address, &index) {
-                return Ok(value);
+                return Ok(value.unwrap_or_default());
             }
         }
         self.db.storage_ref(address, index)

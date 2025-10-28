@@ -120,8 +120,8 @@ impl<V> ValueWithTip<V> {
 #[derive(Default)]
 pub struct PersistBlockCacheInner {
     persist_wait: Arc<(Mutex<bool>, Condvar)>,
-    accounts: DashMap<Address, ValueWithTip<Account>>,
-    storage: DashMap<Address, DashMap<U256, ValueWithTip<U256>>>,
+    accounts: DashMap<Address, ValueWithTip<Option<Account>>>,
+    storage: DashMap<Address, DashMap<U256, ValueWithTip<Option<U256>>>>,
     contracts: DashMap<B256, ValueWithTip<Bytecode>>,
     account_trie: DashMap<Nibbles, ValueWithTip<StoredNode>>,
     storage_trie: DashMap<B256, DashMap<Nibbles, ValueWithTip<StoredNode>>>,
@@ -276,7 +276,7 @@ impl PersistBlockCache {
     }
 
     /// Get account from cache
-    pub fn basic_account(&self, address: &Address) -> Option<Account> {
+    pub fn basic_account(&self, address: &Address) -> Option<Option<Account>> {
         if let Some(value) = self.accounts.get(address) {
             self.metrics.block_cache_hit_record.hit();
             Some(value.value)
@@ -290,7 +290,7 @@ impl PersistBlockCache {
     pub fn cache_account(&self, address: Address, account: Account) {
         if let dashmap::Entry::Vacant(entry) = self.accounts.entry(address) {
             entry.insert(ValueWithTip::new(
-                account,
+                Some(account),
                 self.metrics.persist_block_number.load(Ordering::Relaxed),
             ));
         }
@@ -318,7 +318,13 @@ impl PersistBlockCache {
     }
 
     /// Get storage slot from cache
-    pub fn storage(&self, address: &Address, slot: &U256) -> Option<U256> {
+    pub fn storage(&self, address: &Address, slot: &U256) -> Option<Option<U256>> {
+        if let Some(account) = self.accounts.get(address) {
+            if account.value.is_none() {
+                self.metrics.block_cache_hit_record.hit();
+                return Some(None);
+            }
+        }
         if let Some(storage) = self.storage.get(address) {
             if let Some(value) = storage.get(slot) {
                 self.metrics.block_cache_hit_record.hit();
@@ -338,7 +344,7 @@ impl PersistBlockCache {
         if let Some(storage) = self.storage.get(&address) {
             if let dashmap::Entry::Vacant(entry) = storage.entry(slot) {
                 entry.insert(ValueWithTip::new(
-                    value,
+                    Some(value),
                     self.metrics.persist_block_number.load(Ordering::Relaxed),
                 ));
             }
@@ -348,7 +354,7 @@ impl PersistBlockCache {
                     entry.get().insert(
                         slot,
                         ValueWithTip::new(
-                            value,
+                            Some(value),
                             self.metrics.persist_block_number.load(Ordering::Relaxed),
                         ),
                     );
@@ -358,7 +364,7 @@ impl PersistBlockCache {
                     data.insert(
                         slot,
                         ValueWithTip::new(
-                            value,
+                            Some(value),
                             self.metrics.persist_block_number.load(Ordering::Relaxed),
                         ),
                     );
@@ -426,8 +432,9 @@ impl PersistBlockCache {
         {
             let mut guard = self.merged_block_number.lock().unwrap();
             if let Some(ref mut merged_block_number) = *guard {
-                assert!(
-                    block_number == *merged_block_number + 1,
+                assert_eq!(
+                    block_number,
+                    *merged_block_number + 1,
                     "Merged uncontinuous block, expect: {}, actual: {}",
                     *merged_block_number + 1,
                     block_number
@@ -453,11 +460,8 @@ impl PersistBlockCache {
             if is_value_known.is_not_known() || account.is_info_changed() {
                 // write account to database.
                 let info = account.info.clone();
-                if let Some(info) = info {
-                    self.accounts.insert(*address, ValueWithTip::new(info.into(), block_number));
-                } else {
-                    self.accounts.remove(address);
-                }
+                self.accounts
+                    .insert(*address, ValueWithTip::new(info.map(Into::into), block_number));
             }
 
             if was_destroyed {
@@ -484,18 +488,20 @@ impl PersistBlockCache {
                     if value.is_zero() {
                         // delete slot
                         if let Some(storage) = self.storage.get(address) {
-                            storage.remove(&slot);
+                            storage.insert(slot, ValueWithTip::new(None, block_number));
                         }
                     } else if let Some(storage) = self.storage.get(address) {
-                        storage.insert(slot, ValueWithTip::new(value, block_number));
+                        storage.insert(slot, ValueWithTip::new(Some(value), block_number));
                     } else {
                         match self.storage.entry(*address) {
                             dashmap::Entry::Occupied(entry) => {
-                                entry.get().insert(slot, ValueWithTip::new(value, block_number));
+                                entry
+                                    .get()
+                                    .insert(slot, ValueWithTip::new(Some(value), block_number));
                             }
                             dashmap::Entry::Vacant(entry) => {
                                 let data = DashMap::new();
-                                data.insert(slot, ValueWithTip::new(value, block_number));
+                                data.insert(slot, ValueWithTip::new(Some(value), block_number));
                                 entry.insert(data);
                             }
                         }
