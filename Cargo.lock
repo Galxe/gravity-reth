@@ -1010,7 +1010,7 @@ checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=de72c59#de72c593f34c931d1de8cfacba1eb9e7349e2cfb"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=3acef9f#3acef9f5fb8faecfaed9d7a720178e53449ea773"
 dependencies = [
  "anyhow",
  "async-trait",
