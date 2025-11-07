@@ -72,26 +72,25 @@ use tracing::info;
 
 /// Construct validator transactions envelope (JWK updates and DKG transcripts)
 /// 
-/// Automatically detects data type through BCS deserialization and constructs
-/// appropriate transactions:
-/// - `ProviderJWKs` → `upsertObservedJWKs` transaction to JWK_MANAGER_ADDR
-/// - `DKGTranscript` → `finishWithDkgResult` transaction to RECONFIGURATION_WITH_DKG_ADDR
+/// Uses ExtraDataType to construct appropriate transactions:
+/// - `ExtraDataType::JWK` → `upsertObservedJWKs` transaction to JWK_MANAGER_ADDR
+/// - `ExtraDataType::DKG` → `finishWithDkgResult` transaction to RECONFIGURATION_WITH_DKG_ADDR
 pub fn construct_validator_txns_envelope(
-    data_array_bytes: &Vec<Vec<u8>>,
+    extra_data: &Vec<gravity_api_types::ExtraDataType>,
     system_caller_nonce: u64,
     gas_price: u128,
 ) -> Result<Vec<EthereumTxEnvelope<TxEip4844>>, String> {
     let system_caller_nonce = system_caller_nonce + 1;
     let mut txns = Vec::new();
     
-    for (index, data_bytes) in data_array_bytes.iter().enumerate() {
+    for (index, data) in extra_data.iter().enumerate() {
         let current_nonce = system_caller_nonce + index as u64;
         
-        // Detect data type through deserialization and process accordingly
-        match process_validator_data(data_bytes, current_nonce, gas_price) {
+        // Process data based on ExtraDataType variant
+        match process_extra_data(data, current_nonce, gas_price) {
             Ok(transaction) => txns.push(transaction),
             Err(e) => {
-                return Err(format!("Failed to process validator data at index {}: {}", index, e));
+                return Err(format!("Failed to process extra data at index {}: {}", index, e));
             }
         }
     }
@@ -99,33 +98,32 @@ pub fn construct_validator_txns_envelope(
     Ok(txns)
 }
 
-/// Process validator data by detecting its type through BCS deserialization
+/// Process extra data based on its ExtraDataType variant
 /// 
 /// Supports:
-/// - JWK updates (ProviderJWKs)
-/// - DKG transcripts (DKGTranscript)
-fn process_validator_data(
-    data_bytes: &[u8],
+/// - JWK updates (ExtraDataType::JWK)
+/// - DKG transcripts (ExtraDataType::DKG)
+fn process_extra_data(
+    data: &gravity_api_types::ExtraDataType,
     nonce: u64,
     gas_price: u128,
 ) -> Result<TransactionSigned, String> {
-    // Try to deserialize as ProviderJWKs (JWK update)
-    if let Ok(provider_jwks) =
-        bcs::from_bytes::<gravity_api_types::on_chain_config::jwks::ProviderJWKs>(data_bytes)
-    {
-        info!("Processing JWK update for issuer: {}", String::from_utf8_lossy(&provider_jwks.issuer));
-        return observed_jwk::construct_jwk_transaction(provider_jwks, nonce, gas_price);
+    match data {
+        gravity_api_types::ExtraDataType::JWK(data_bytes) => {
+            // Deserialize as ProviderJWKs
+            let provider_jwks = bcs::from_bytes::<gravity_api_types::on_chain_config::jwks::ProviderJWKs>(data_bytes)
+                .map_err(|e| format!("Failed to deserialize JWK data: {}", e))?;
+            info!("Processing JWK update for issuer: {}", String::from_utf8_lossy(&provider_jwks.issuer));
+            observed_jwk::construct_jwk_transaction(provider_jwks, nonce, gas_price)
+        }
+        gravity_api_types::ExtraDataType::DKG(data_bytes) => {
+            // Deserialize as DKGTranscript
+            let dkg_transcript = bcs::from_bytes::<gravity_api_types::on_chain_config::dkg::DKGTranscript>(data_bytes)
+                .map_err(|e| format!("Failed to deserialize DKG data: {}", e))?;
+            info!("Processing DKG transcript for epoch: {}", dkg_transcript.metadata.epoch);
+            dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price)
+        }
     }
-    
-    // Try to deserialize as DKGTranscript
-    if let Ok(dkg_transcript) =
-        bcs::from_bytes::<gravity_api_types::on_chain_config::dkg::DKGTranscript>(data_bytes)
-    {
-        info!("Processing DKG transcript for epoch: {}", dkg_transcript.metadata.epoch);
-        return dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price);
-    }
-    
-    Err("Unable to deserialize data as any known validator data type (ProviderJWKs or DKGTranscript)".to_string())
 }
 
 /// Create a new system call transaction
