@@ -525,7 +525,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let mut epoch_change_result = None;
         
         for receipt in receipts {
-            info!(target: "execute_ordered_block",
+            debug!(target: "execute_ordered_block",
                 number=?block_number,
                 logs_len=?receipt.logs.len(),
                 "extract gravity events from receipt"
@@ -533,7 +533,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             for log in &receipt.logs {
                 // Check for AllValidatorsUpdated event (epoch change)
                 if let Ok(event) = crate::onchain_config::types::AllValidatorsUpdated::decode_log(log) {
-                    info!(target: "execute_ordered_block",
+                    debug!(target: "execute_ordered_block",
                         number=?block_number,
                         new_epoch=?event.newEpoch,
                         "detected epoch change from AllValidatorsUpdated event"
@@ -707,6 +707,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         
         // Check if any transaction (including JWK transactions) triggered a new epoch
+        // TODO(gravity_lightman): We need further more tests to test this branch
         if let Some((new_epoch, validators)) = epoch_change_result {
             // New epoch triggered, advance epoch and discard the block.
             assert_eq!(new_epoch, epoch + 1);
