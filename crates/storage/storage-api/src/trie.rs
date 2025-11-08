@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use alloy_primitives::{map::B256Map, Address, Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use reth_db_api::DatabaseError;
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie_common::{
@@ -7,7 +7,6 @@ use reth_trie_common::{
     AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
     StorageProof, TrieInput,
 };
-use std::sync::Arc;
 
 /// A type that can compute the state root of a given post state.
 #[auto_impl::auto_impl(&, Box, Arc)]
@@ -39,26 +38,6 @@ pub trait StateRootProvider: Send + Sync {
         &self,
         input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)>;
-
-    /// todo(ashin): should be removed
-    fn state_root_with_updates_v2(
-        &self,
-        state: HashedPostState,
-        hashed_state_vec: Vec<Arc<HashedPostState>>,
-        trie_updates_vec: Vec<Arc<TrieUpdates>>,
-    ) -> ProviderResult<(B256, TrieUpdates)> {
-        let mut input = TrieInput::from_state(state);
-        let mut state = HashedPostState::default();
-        let mut nodes = TrieUpdates::default();
-        for hashed_state in &hashed_state_vec {
-            state.extend_ref(hashed_state.as_ref());
-        }
-        for trie_updates in &trie_updates_vec {
-            nodes.extend_ref(trie_updates.as_ref());
-        }
-        input.prepend_cached(nodes, state);
-        self.state_root_from_nodes_with_updates(input)
-    }
 }
 
 /// A type that can compute the storage root for a given account.
@@ -128,16 +107,9 @@ pub trait StorageTrieWriter: Send + Sync {
     /// First sorts the storage trie updates by the hashed address key, writing in sorted order.
     ///
     /// Returns the number of entries modified.
-    fn write_storage_trie_updates(
+    fn write_storage_trie_updates<'a>(
         &self,
-        storage_tries: &B256Map<StorageTrieUpdates>,
-    ) -> ProviderResult<usize>;
-
-    /// Writes storage trie updates for the given hashed address.
-    fn write_individual_storage_trie_updates(
-        &self,
-        hashed_address: B256,
-        updates: &StorageTrieUpdates,
+        storage_tries: impl Iterator<Item = (&'a B256, &'a StorageTrieUpdates)>,
     ) -> ProviderResult<usize>;
 }
 

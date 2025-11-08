@@ -12,8 +12,6 @@ description = "Commonly used types for trie usage in reth."
 workspace = true
 
 [dependencies]
-# reth
-reth-storage-errors.workspace = true
 # alloy
 alloy-primitives.workspace = true
 alloy-rlp = { workspace = true, features = ["arrayvec"] }
@@ -32,6 +30,7 @@ nybbles = { workspace = true, features = ["rlp"] }
 
 # reth
 revm-database.workspace = true
+reth-storage-errors.workspace = true
 
 # `serde` feature
 serde = { workspace = true, optional = true }
@@ -105,7 +104,7 @@ serde = [
     "revm-state/serde",
     "parking_lot/serde",
 ]
-reth-codec = ["dep:reth-codecs", "dep:bytes", "bytes/std"]
+reth-codec = ["dep:reth-codecs", "dep:bytes"]
 serde-bincode-compat = [
     "serde",
     "reth-primitives-traits/serde-bincode-compat",

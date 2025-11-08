@@ -36,12 +36,10 @@ use reth_primitives_traits::{
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
-    BlockBodyIndicesProvider, DBProvider, NodePrimitivesProvider, StateCommitmentProvider,
-    StorageChangeSetReader,
+    BlockBodyIndicesProvider, DBProvider, NodePrimitivesProvider, StorageChangeSetReader,
 };
 use reth_storage_errors::provider::ProviderResult;
-use reth_trie::HashedPostState;
-use reth_trie_db::StateCommitment;
+use reth_trie::{HashedPostState, KeccakKeyHasher};
 use revm_database::BundleState;
 use std::{
     ops::{Add, RangeBounds, RangeInclusive, Sub},
@@ -173,10 +171,6 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for BlockchainProvider<N> {
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
         self.database.database_provider_rw()
     }
-}
-
-impl<N: ProviderNodeTypes> StateCommitmentProvider for BlockchainProvider<N> {
-    type StateCommitment = N::StateCommitment;
 }
 
 impl<N: ProviderNodeTypes> StaticFileProviderFactory for BlockchainProvider<N> {
@@ -520,6 +514,37 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
         }
     }
 
+    /// Returns a [`StateProviderBox`] indexed by the given block number or tag.
+    fn state_by_block_number_or_tag(
+        &self,
+        number_or_tag: BlockNumberOrTag,
+    ) -> ProviderResult<StateProviderBox> {
+        match number_or_tag {
+            BlockNumberOrTag::Latest => self.latest(),
+            BlockNumberOrTag::Finalized => {
+                // we can only get the finalized state by hash, not by num
+                let hash =
+                    self.finalized_block_hash()?.ok_or(ProviderError::FinalizedBlockNotFound)?;
+                self.state_by_block_hash(hash)
+            }
+            BlockNumberOrTag::Safe => {
+                // we can only get the safe state by hash, not by num
+                let hash = self.safe_block_hash()?.ok_or(ProviderError::SafeBlockNotFound)?;
+                self.state_by_block_hash(hash)
+            }
+            BlockNumberOrTag::Earliest => {
+                self.history_by_block_number(self.earliest_block_number()?)
+            }
+            BlockNumberOrTag::Pending => self.pending(),
+            BlockNumberOrTag::Number(num) => {
+                let hash = self
+                    .block_hash(num)?
+                    .ok_or_else(|| ProviderError::HeaderNotFound(num.into()))?;
+                self.state_by_block_hash(hash)
+            }
+        }
+    }
+
     fn history_by_block_number(
         &self,
         block_number: BlockNumber,
@@ -569,51 +594,26 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     }
 
     fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
-        if let Some(pending) = self.canonical_in_memory_state.pending_state() {
-            if pending.hash() == block_hash {
-                return Ok(Some(Box::new(self.block_state_provider(&pending)?)));
-            }
+        if let Some(pending) = self.canonical_in_memory_state.pending_state() &&
+            pending.hash() == block_hash
+        {
+            return Ok(Some(Box::new(self.block_state_provider(&pending)?)));
         }
         Ok(None)
     }
 
-    /// Returns a [`StateProviderBox`] indexed by the given block number or tag.
-    fn state_by_block_number_or_tag(
-        &self,
-        number_or_tag: BlockNumberOrTag,
-    ) -> ProviderResult<StateProviderBox> {
-        match number_or_tag {
-            BlockNumberOrTag::Latest => self.latest(),
-            BlockNumberOrTag::Finalized => {
-                // we can only get the finalized state by hash, not by num
-                let hash =
-                    self.finalized_block_hash()?.ok_or(ProviderError::FinalizedBlockNotFound)?;
-                self.state_by_block_hash(hash)
-            }
-            BlockNumberOrTag::Safe => {
-                // we can only get the safe state by hash, not by num
-                let hash = self.safe_block_hash()?.ok_or(ProviderError::SafeBlockNotFound)?;
-                self.state_by_block_hash(hash)
-            }
-            BlockNumberOrTag::Earliest => {
-                self.history_by_block_number(self.earliest_block_number()?)
-            }
-            BlockNumberOrTag::Pending => self.pending(),
-            BlockNumberOrTag::Number(num) => {
-                let hash = self
-                    .block_hash(num)?
-                    .ok_or_else(|| ProviderError::HeaderNotFound(num.into()))?;
-                self.state_by_block_hash(hash)
-            }
+    fn maybe_pending(&self) -> ProviderResult<Option<StateProviderBox>> {
+        if let Some(pending) = self.canonical_in_memory_state.pending_state() {
+            return Ok(Some(Box::new(self.block_state_provider(&pending)?)))
         }
+
+        Ok(None)
     }
 }
 
 impl<N: NodeTypesWithDB> HashedPostStateProvider for BlockchainProvider<N> {
     fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState {
-        HashedPostState::from_bundle_state::<<N::StateCommitment as StateCommitment>::KeyHasher>(
-            bundle_state.state(),
-        )
+        HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
     }
 }
 
@@ -858,7 +858,7 @@ mod tests {
             .iter()
             .chain(in_memory_blocks.iter())
             .map(|block| block.body().transactions.iter())
-            .map(|tx| tx.map(|tx| random_receipt(rng, tx, Some(2))).collect())
+            .map(|tx| tx.map(|tx| random_receipt(rng, tx, Some(2), None)).collect())
             .collect();
 
         let factory = create_test_provider_factory_with_chain_spec(chain_spec);
@@ -966,26 +966,26 @@ mod tests {
     ) {
         let hook_provider = provider.clone();
         provider.database.db_ref().set_post_transaction_hook(Box::new(move || {
-            if let Some(state) = hook_provider.canonical_in_memory_state.head_state() {
-                if state.anchor().number + 1 == block_number {
-                    let mut lowest_memory_block =
-                        state.parent_state_chain().last().expect("qed").block();
-                    let num_hash = lowest_memory_block.recovered_block().num_hash();
+            if let Some(state) = hook_provider.canonical_in_memory_state.head_state() &&
+                state.anchor().number + 1 == block_number
+            {
+                let mut lowest_memory_block =
+                    state.parent_state_chain().last().expect("qed").block();
+                let num_hash = lowest_memory_block.recovered_block().num_hash();
 
-                    let mut execution_output = (*lowest_memory_block.execution_output).clone();
-                    execution_output.first_block = lowest_memory_block.recovered_block().number;
-                    lowest_memory_block.execution_output = Arc::new(execution_output);
+                let mut execution_output = (*lowest_memory_block.execution_output).clone();
+                execution_output.first_block = lowest_memory_block.recovered_block().number;
+                lowest_memory_block.execution_output = Arc::new(execution_output);
 
-                    // Push to disk
-                    let provider_rw = hook_provider.database_provider_rw().unwrap();
-                    UnifiedStorageWriter::from(&provider_rw, &hook_provider.static_file_provider())
-                        .save_blocks(vec![lowest_memory_block])
-                        .unwrap();
-                    UnifiedStorageWriter::commit(provider_rw).unwrap();
+                // Push to disk
+                let provider_rw = hook_provider.database_provider_rw().unwrap();
+                UnifiedStorageWriter::from(&provider_rw, &hook_provider.static_file_provider())
+                    .save_blocks(vec![lowest_memory_block])
+                    .unwrap();
+                UnifiedStorageWriter::commit(provider_rw).unwrap();
 
-                    // Remove from memory
-                    hook_provider.canonical_in_memory_state.remove_persisted_blocks(num_hash);
-                }
+                // Remove from memory
+                hook_provider.canonical_in_memory_state.remove_persisted_blocks(num_hash);
             }
         }));
     }
@@ -1347,7 +1347,7 @@ mod tests {
     async fn test_canon_state_subscriptions() -> eyre::Result<()> {
         let factory = create_test_provider_factory();
 
-        // Generate a random block to initialise the blockchain provider.
+        // Generate a random block to initialize the blockchain provider.
         let mut test_block_builder = TestBlockBuilder::eth();
         let block_1 = test_block_builder.generate_random_block(0, B256::ZERO);
         let block_hash_1 = block_1.hash();
@@ -1708,7 +1708,6 @@ mod tests {
                 ..Default::default()
             },
             Default::default(),
-            Default::default(),
         )?;
         provider_rw.commit()?;
 
@@ -2042,7 +2041,7 @@ mod tests {
                     "partial mem data"
                 );
 
-                // Test range in in-memory to unbounded end
+                // Test range in memory to unbounded end
                 assert_eq!(provider.$method(in_mem_range.start() + 1..)?, &in_memory_data[1..], "unbounded mem data");
 
                 // Test last element in-memory

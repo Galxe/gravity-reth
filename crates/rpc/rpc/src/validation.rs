@@ -17,6 +17,7 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee_types::error::ErrorObject;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_consensus::{Consensus, FullConsensus};
+use reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE;
 use reth_engine_primitives::PayloadValidator;
 use reth_errors::{BlockExecutionError, ConsensusError, ProviderError};
 use reth_evm::{execute::Executor, ConfigureEvm};
@@ -26,7 +27,7 @@ use reth_metrics::{
     metrics::{gauge, Gauge},
     Metrics,
 };
-use reth_node_api::NewPayloadError;
+use reth_node_api::{NewPayloadError, PayloadTypes};
 use reth_primitives_traits::{
     constants::GAS_LIMIT_BOUND_DIVISOR, BlockBody, GotExpected, NodePrimitives, RecoveredBlock,
     SealedBlock, SealedHeaderFor,
@@ -45,14 +46,15 @@ use tracing::warn;
 
 /// The type that implements the `validation` rpc namespace trait
 #[derive(Clone, Debug, derive_more::Deref)]
-pub struct ValidationApi<Provider, E: ConfigureEvm> {
+pub struct ValidationApi<Provider, E: ConfigureEvm, T: PayloadTypes> {
     #[deref]
-    inner: Arc<ValidationApiInner<Provider, E>>,
+    inner: Arc<ValidationApiInner<Provider, E, T>>,
 }
 
-impl<Provider, E> ValidationApi<Provider, E>
+impl<Provider, E, T> ValidationApi<Provider, E, T>
 where
     E: ConfigureEvm,
+    T: PayloadTypes,
 {
     /// Create a new instance of the [`ValidationApi`]
     pub fn new(
@@ -62,10 +64,7 @@ where
         config: ValidationApiConfig,
         task_spawner: Box<dyn TaskSpawner>,
         payload_validator: Arc<
-            dyn PayloadValidator<
-                Block = <E::Primitives as NodePrimitives>::Block,
-                ExecutionData = ExecutionData,
-            >,
+            dyn PayloadValidator<T, Block = <E::Primitives as NodePrimitives>::Block>,
         >,
     ) -> Self {
         let ValidationApiConfig { disallow, validation_window } = config;
@@ -112,13 +111,14 @@ where
     }
 }
 
-impl<Provider, E> ValidationApi<Provider, E>
+impl<Provider, E, T> ValidationApi<Provider, E, T>
 where
     Provider: BlockReaderIdExt<Header = <E::Primitives as NodePrimitives>::BlockHeader>
         + ChainSpecProvider<ChainSpec: EthereumHardforks>
         + StateProviderFactory
         + 'static,
     E: ConfigureEvm + 'static,
+    T: PayloadTypes<ExecutionData = ExecutionData>,
 {
     /// Validates the given block and a [`BidTrace`] against it.
     pub async fn validate_message_against_block(
@@ -143,10 +143,10 @@ where
                 if self.disallow.contains(sender) {
                     return Err(ValidationApiError::Blacklist(*sender))
                 }
-                if let Some(to) = tx.to() {
-                    if self.disallow.contains(&to) {
-                        return Err(ValidationApiError::Blacklist(to))
-                    }
+                if let Some(to) = tx.to() &&
+                    self.disallow.contains(&to)
+                {
+                    return Err(ValidationApiError::Blacklist(to))
                 }
             }
         }
@@ -334,10 +334,10 @@ where
             return Err(ValidationApiError::ProposerPayment)
         }
 
-        if let Some(block_base_fee) = block.header().base_fee_per_gas() {
-            if tx.effective_tip_per_gas(block_base_fee).unwrap_or_default() != 0 {
-                return Err(ValidationApiError::ProposerPayment)
-            }
+        if let Some(block_base_fee) = block.header().base_fee_per_gas() &&
+            tx.effective_tip_per_gas(block_base_fee).unwrap_or_default() != 0
+        {
+            return Err(ValidationApiError::ProposerPayment)
         }
 
         Ok(())
@@ -455,6 +455,17 @@ where
             ),
         })?;
 
+        // Check block size as per EIP-7934 (only applies when Osaka hardfork is active)
+        let chain_spec = self.provider.chain_spec();
+        if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) &&
+            block.rlp_length() > MAX_RLP_BLOCK_SIZE
+        {
+            return Err(ValidationApiError::Consensus(ConsensusError::BlockTooLarge {
+                rlp_length: block.rlp_length(),
+                max_rlp_length: MAX_RLP_BLOCK_SIZE,
+            }));
+        }
+
         self.validate_message_against_block(
             block,
             request.request.message,
@@ -465,7 +476,7 @@ where
 }
 
 #[async_trait]
-impl<Provider, E> BlockSubmissionValidationApiServer for ValidationApi<Provider, E>
+impl<Provider, E, T> BlockSubmissionValidationApiServer for ValidationApi<Provider, E, T>
 where
     Provider: BlockReaderIdExt<Header = <E::Primitives as NodePrimitives>::BlockHeader>
         + ChainSpecProvider<ChainSpec: EthereumHardforks>
@@ -473,6 +484,7 @@ where
         + Clone
         + 'static,
     E: ConfigureEvm + 'static,
+    T: PayloadTypes<ExecutionData = ExecutionData>,
 {
     async fn validate_builder_submission_v1(
         &self,
@@ -545,18 +557,14 @@ where
     }
 }
 
-pub struct ValidationApiInner<Provider, E: ConfigureEvm> {
+pub struct ValidationApiInner<Provider, E: ConfigureEvm, T: PayloadTypes> {
     /// The provider that can interact with the chain.
     provider: Provider,
     /// Consensus implementation.
     consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
     /// Execution payload validator.
-    payload_validator: Arc<
-        dyn PayloadValidator<
-            Block = <E::Primitives as NodePrimitives>::Block,
-            ExecutionData = ExecutionData,
-        >,
-    >,
+    payload_validator:
+        Arc<dyn PayloadValidator<T, Block = <E::Primitives as NodePrimitives>::Block>>,
     /// Block executor factory.
     evm_config: E,
     /// Set of disallowed addresses
@@ -590,7 +598,7 @@ fn hash_disallow_list(disallow: &HashSet<Address>) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-impl<Provider, E: ConfigureEvm> fmt::Debug for ValidationApiInner<Provider, E> {
+impl<Provider, E: ConfigureEvm, T: PayloadTypes> fmt::Debug for ValidationApiInner<Provider, E, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ValidationApiInner").finish_non_exhaustive()
     }

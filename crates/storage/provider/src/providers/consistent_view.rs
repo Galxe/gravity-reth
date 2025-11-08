@@ -1,6 +1,5 @@
 use crate::{BlockNumReader, DatabaseProviderFactory, HeaderProvider};
 use alloy_primitives::B256;
-use reth_storage_api::StateCommitmentProvider;
 pub use reth_storage_errors::provider::ConsistentViewError;
 use reth_storage_errors::provider::ProviderResult;
 
@@ -27,8 +26,7 @@ pub struct ConsistentDbView<Factory> {
 
 impl<Factory> ConsistentDbView<Factory>
 where
-    Factory: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider>
-        + StateCommitmentProvider,
+    Factory: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider>,
 {
     /// Creates new consistent database view.
     pub const fn new(factory: Factory, tip: Option<(B256, u64)>) -> Self {
@@ -69,10 +67,10 @@ where
         //
         // To ensure this doesn't happen, we just have to make sure that we fetch from the same
         // data source that we used during initialization. In this case, that is static files
-        if let Some((hash, number)) = self.tip {
-            if provider_ro.sealed_header(number)?.is_none_or(|header| header.hash() != hash) {
-                return Err(ConsistentViewError::Reorged { block: hash }.into())
-            }
+        if let Some((hash, number)) = self.tip &&
+            provider_ro.sealed_header(number)?.is_none_or(|header| header.hash() != hash)
+        {
+            return Err(ConsistentViewError::Reorged { block: hash }.into())
         }
 
         Ok(provider_ro)

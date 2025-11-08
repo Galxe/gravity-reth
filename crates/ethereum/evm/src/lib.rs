@@ -20,22 +20,28 @@ extern crate alloc;
 use crate::parallel_execute::GrevmExecutor;
 use alloc::{borrow::Cow, boxed::Box, sync::Arc};
 use alloy_consensus::{BlockHeader, Header};
+use alloy_eips::Decodable2718;
 pub use alloy_evm::EthEvm;
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
     EthEvmFactory,
 };
 use alloy_primitives::{Bytes, U256};
+use alloy_rpc_types_engine::ExecutionData;
 use core::{convert::Infallible, fmt::Debug};
 use gravity_primitives::get_gravity_config;
-use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
     execute::{BasicBlockExecutor, BlockExecutionError},
     parallel_execute::{ParallelExecutor, WrapExecutor},
-    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
+    ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+    NextBlockEnvAttributes, ParallelDatabase,
 };
-use reth_primitives_traits::{SealedBlock, SealedHeader};
+use reth_primitives_traits::{
+    constants::MAX_TX_GAS_LIMIT_OSAKA, SealedBlock, SealedHeader, SignedTransaction, TxTy,
+};
+use reth_storage_errors::any::AnyError;
 use revm::{
     context::{BlockEnv, CfgEnv},
     context_interface::block::BlobExcessGasAndPrice,
@@ -127,7 +133,7 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
 
 impl<ChainSpec> ConfigureEvm for EthEvmConfig<ChainSpec>
 where
-    ChainSpec: EthExecutorSpec + EthChainSpec + Hardforks + 'static,
+    ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
 {
     type Primitives = EthPrimitives;
     type Error = Infallible;
@@ -143,7 +149,7 @@ where
         &self.block_assembler
     }
 
-    fn evm_env(&self, header: &Header) -> EvmEnv {
+    fn evm_env(&self, header: &Header) -> Result<EvmEnv, Self::Error> {
         let blob_params = self.chain_spec().blob_params_at_timestamp(header.timestamp);
         let spec = config::revm_spec(self.chain_spec(), header);
 
@@ -153,6 +159,10 @@ where
 
         if let Some(blob_params) = &blob_params {
             cfg_env.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
+        }
+
+        if self.chain_spec().is_osaka_active_at_timestamp(header.timestamp) {
+            cfg_env.tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA);
         }
 
         // derive the EIP-4844 blob fees from the header's `excess_blob_gas` and the current
@@ -174,7 +184,7 @@ where
             blob_excess_gas_and_price,
         };
 
-        EvmEnv { cfg_env, block_env }
+        Ok(EvmEnv { cfg_env, block_env })
     }
 
     fn next_evm_env(
@@ -199,6 +209,10 @@ where
             cfg.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
         }
 
+        if self.chain_spec().is_osaka_active_at_timestamp(attributes.timestamp) {
+            cfg.tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA);
+        }
+
         // if the parent block did not have excess blob gas (i.e. it was pre-cancun), but it is
         // cancun now, we need to set the excess blob gas to the default value(0)
         let blob_excess_gas_and_price = parent
@@ -210,9 +224,7 @@ where
                 BlobExcessGasAndPrice { excess_blob_gas, blob_gasprice }
             });
 
-        let mut basefee = parent.next_block_base_fee(
-            self.chain_spec().base_fee_params_at_timestamp(attributes.timestamp),
-        );
+        let mut basefee = chain_spec.next_block_base_fee(parent, attributes.timestamp);
 
         let mut gas_limit = attributes.gas_limit;
 
@@ -248,26 +260,29 @@ where
         Ok((cfg, block_env).into())
     }
 
-    fn context_for_block<'a>(&self, block: &'a SealedBlock<Block>) -> EthBlockExecutionCtx<'a> {
-        EthBlockExecutionCtx {
+    fn context_for_block<'a>(
+        &self,
+        block: &'a SealedBlock<Block>,
+    ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
+        Ok(EthBlockExecutionCtx {
             parent_hash: block.header().parent_hash,
             parent_beacon_block_root: block.header().parent_beacon_block_root,
             ommers: &block.body().ommers,
             withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
-        }
+        })
     }
 
     fn context_for_next_block(
         &self,
         parent: &SealedHeader,
         attributes: Self::NextBlockEnvCtx,
-    ) -> EthBlockExecutionCtx<'_> {
-        EthBlockExecutionCtx {
+    ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
+        Ok(EthBlockExecutionCtx {
             parent_hash: parent.hash(),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             ommers: &[],
             withdrawals: attributes.withdrawals.map(Cow::Owned),
-        }
+        })
     }
 
     fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
@@ -280,6 +295,75 @@ where
         } else {
             Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
         }
+    }
+}
+
+impl<ChainSpec> ConfigureEngineEvm<ExecutionData> for EthEvmConfig<ChainSpec>
+where
+    ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
+{
+    fn evm_env_for_payload(&self, payload: &ExecutionData) -> EvmEnvFor<Self> {
+        let timestamp = payload.payload.timestamp();
+        let block_number = payload.payload.block_number();
+
+        let blob_params = self.chain_spec().blob_params_at_timestamp(timestamp);
+        let spec =
+            revm_spec_by_timestamp_and_block_number(self.chain_spec(), timestamp, block_number);
+
+        // configure evm env based on parent block
+        let mut cfg_env =
+            CfgEnv::new().with_chain_id(self.chain_spec().chain().id()).with_spec(spec);
+
+        if let Some(blob_params) = &blob_params {
+            cfg_env.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
+        }
+
+        if self.chain_spec().is_osaka_active_at_timestamp(timestamp) {
+            cfg_env.tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA);
+        }
+
+        // derive the EIP-4844 blob fees from the header's `excess_blob_gas` and the current
+        // blobparams
+        let blob_excess_gas_and_price =
+            payload.payload.excess_blob_gas().zip(blob_params).map(|(excess_blob_gas, params)| {
+                let blob_gasprice = params.calc_blob_fee(excess_blob_gas);
+                BlobExcessGasAndPrice { excess_blob_gas, blob_gasprice }
+            });
+
+        let block_env = BlockEnv {
+            number: U256::from(block_number),
+            beneficiary: payload.payload.fee_recipient(),
+            timestamp: U256::from(timestamp),
+            difficulty: if spec >= SpecId::MERGE {
+                U256::ZERO
+            } else {
+                payload.payload.as_v1().prev_randao.into()
+            },
+            prevrandao: (spec >= SpecId::MERGE).then(|| payload.payload.as_v1().prev_randao),
+            gas_limit: payload.payload.gas_limit(),
+            basefee: payload.payload.saturated_base_fee_per_gas(),
+            blob_excess_gas_and_price,
+        };
+
+        EvmEnv { cfg_env, block_env }
+    }
+
+    fn context_for_payload<'a>(&self, payload: &'a ExecutionData) -> ExecutionCtxFor<'a, Self> {
+        EthBlockExecutionCtx {
+            parent_hash: payload.parent_hash(),
+            parent_beacon_block_root: payload.sidecar.parent_beacon_block_root(),
+            ommers: &[],
+            withdrawals: payload.payload.withdrawals().map(|w| Cow::Owned(w.clone().into())),
+        }
+    }
+
+    fn tx_iterator_for_payload(&self, payload: &ExecutionData) -> impl ExecutableTxIterator<Self> {
+        payload.payload.transactions().clone().into_iter().map(|tx| {
+            let tx =
+                TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(AnyError::new)?;
+            let signer = tx.try_recover().map_err(AnyError::new)?;
+            Ok::<_, AnyError>(tx.with_signer(signer))
+        })
     }
 }
 
@@ -315,7 +399,7 @@ mod tests {
         // Use the `EthEvmConfig` to fill the `cfg_env` and `block_env` based on the ChainSpec,
         // Header, and total difficulty
         let EvmEnv { cfg_env, .. } =
-            EthEvmConfig::new(Arc::new(chain_spec.clone())).evm_env(&header);
+            EthEvmConfig::new(Arc::new(chain_spec.clone())).evm_env(&header).unwrap();
 
         // Assert that the chain ID in the `cfg_env` is correctly set to the chain ID of the
         // ChainSpec

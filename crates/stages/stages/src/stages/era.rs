@@ -4,7 +4,7 @@ use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Url};
 use reth_config::config::EtlConfig;
 use reth_db_api::{table::Value, transaction::DbTxMut};
-use reth_era::era1_file::Era1Reader;
+use reth_era::{era1_file::Era1Reader, era_file_ops::StreamReader};
 use reth_era_downloader::{read_dir, EraClient, EraMeta, EraStream, EraStreamConfig};
 use reth_era_utils as era;
 use reth_etl::Collector;
@@ -153,18 +153,17 @@ where
             return Poll::Ready(Ok(()));
         }
 
-        if self.stream.is_none() {
-            if let Some(source) = self.source.clone() {
-                self.stream.replace(source.create(input)?);
-            }
+        if self.stream.is_none() &&
+            let Some(source) = self.source.clone()
+        {
+            self.stream.replace(source.create(input)?);
         }
-        if let Some(stream) = &mut self.stream {
-            if let Some(next) = ready!(stream.poll_next_unpin(cx))
+        if let Some(stream) = &mut self.stream &&
+            let Some(next) = ready!(stream.poll_next_unpin(cx))
                 .transpose()
                 .map_err(|e| StageError::Fatal(e.into()))?
-            {
-                self.item.replace(next);
-            }
+        {
+            self.item.replace(next);
         }
 
         Poll::Ready(Ok(()))
@@ -555,11 +554,10 @@ mod tests {
 
                         // Validate sequentiality only after prev progress,
                         // since the data before is mocked and can contain gaps
-                        if number > prev_progress {
-                            if let Some(prev_key) = prev_number {
+                        if number > prev_progress
+                            && let Some(prev_key) = prev_number {
                                 assert_eq!(prev_key + 1, number, "Body entries must be sequential");
                             }
-                        }
 
                         // Validate that the current entry is below or equals to the highest allowed block
                         assert!(

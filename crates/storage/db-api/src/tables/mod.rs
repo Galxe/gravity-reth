@@ -544,7 +544,7 @@ tables! {
 pub enum ChainStateKey {
     /// Last finalized block key
     LastFinalizedBlock,
-    /// Last finalized block key
+    /// Last safe block key
     LastSafeBlockBlock,
 }
 

@@ -1,5 +1,5 @@
 use crate::stages::MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD;
-use alloy_consensus::{BlockHeader, Header};
+use alloy_consensus::BlockHeader;
 use alloy_primitives::BlockNumber;
 use num_traits::Zero;
 use reth_config::config::ExecutionConfig;
@@ -8,12 +8,12 @@ use reth_db::{static_file::HeaderMask, tables};
 use reth_evm::{metrics::ExecutorMetrics, ConfigureEvm};
 use reth_execution_types::Chain;
 use reth_exex::{ExExManagerHandle, ExExNotification, ExExNotificationSource};
-use reth_primitives_traits::{format_gas_throughput, Block, BlockBody, NodePrimitives};
+use reth_primitives_traits::{format_gas_throughput, BlockBody, NodePrimitives};
 use reth_provider::{
     providers::{StaticFileProvider, StaticFileWriter},
     BlockHashReader, BlockReader, DBProvider, ExecutionOutcome, HeaderProvider,
-    LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateCommitmentProvider,
-    StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation, TransactionVariant,
+    LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateWriter,
+    StaticFileProviderFactory, StatsReader, StorageLocation, TransactionVariant,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
@@ -256,12 +256,12 @@ where
         + BlockReader<
             Block = <E::Primitives as NodePrimitives>::Block,
             Header = <E::Primitives as NodePrimitives>::BlockHeader,
-        > + StaticFileProviderFactory
-        + StatsReader
+        > + StaticFileProviderFactory<
+            Primitives: NodePrimitives<BlockHeader: reth_db_api::table::Value>,
+        > + StatsReader
         + BlockHashReader
-        + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
-        + StateCommitmentProvider,
-    ProviderRO: DBProvider + BlockHashReader + StateCommitmentProvider,
+        + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>,
+    ProviderRO: DBProvider + BlockHashReader,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -535,9 +535,8 @@ where
         if let Some(stage_checkpoint) = stage_checkpoint.as_mut() {
             for block_number in range {
                 stage_checkpoint.progress.processed -= provider
-                    .block_by_number(block_number)?
+                    .header_by_number(block_number)?
                     .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?
-                    .header()
                     .gas_used();
             }
         }
@@ -564,12 +563,15 @@ where
     }
 }
 
-fn execution_checkpoint<N: NodePrimitives>(
+fn execution_checkpoint<N>(
     provider: &StaticFileProvider<N>,
     start_block: BlockNumber,
     max_block: BlockNumber,
     checkpoint: StageCheckpoint,
-) -> Result<ExecutionCheckpoint, ProviderError> {
+) -> Result<ExecutionCheckpoint, ProviderError>
+where
+    N: NodePrimitives<BlockHeader: reth_db_api::table::Value>,
+{
     Ok(match checkpoint.execution_stage_checkpoint() {
         // If checkpoint block range fully matches our range,
         // we take the previously used stage checkpoint as-is.
@@ -632,10 +634,13 @@ fn execution_checkpoint<N: NodePrimitives>(
 }
 
 /// Calculates the total amount of gas used from the headers in the given range.
-pub fn calculate_gas_used_from_headers<N: NodePrimitives>(
+pub fn calculate_gas_used_from_headers<N>(
     provider: &StaticFileProvider<N>,
     range: RangeInclusive<BlockNumber>,
-) -> Result<u64, ProviderError> {
+) -> Result<u64, ProviderError>
+where
+    N: NodePrimitives<BlockHeader: reth_db_api::table::Value>,
+{
     debug!(target: "sync::stages::execution", ?range, "Calculating gas used from headers");
 
     let mut gas_total = 0;
@@ -645,10 +650,10 @@ pub fn calculate_gas_used_from_headers<N: NodePrimitives>(
     for entry in provider.fetch_range_iter(
         StaticFileSegment::Headers,
         *range.start()..*range.end() + 1,
-        |cursor, number| cursor.get_one::<HeaderMask<Header>>(number.into()),
+        |cursor, number| cursor.get_one::<HeaderMask<N::BlockHeader>>(number.into()),
     )? {
-        let Header { gas_used, .. } = entry?;
-        gas_total += gas_used;
+        let entry = entry?;
+        gas_total += entry.gas_used();
     }
 
     let duration = start.elapsed();

@@ -74,12 +74,6 @@ pub struct BlobStoreMetrics {
     pub(crate) blobstore_byte_size: Gauge,
     /// How many blobs are currently in the blobstore
     pub(crate) blobstore_entries: Gauge,
-    /// txn validation time
-    pub(crate) txn_validation_time: Histogram,
-    /// txn insertion time
-    pub(crate) txn_val_insertion_time: Histogram,
-    /// txn batch number
-    pub(crate) txn_batch_number: Histogram,
 }
 
 /// Transaction pool maintenance metrics
@@ -145,4 +139,12 @@ pub struct AllTransactionsMetrics {
 pub struct TxPoolValidationMetrics {
     /// How long to successfully validate a blob
     pub(crate) blob_validation_duration: Histogram,
+}
+
+/// Transaction pool validator task metrics
+#[derive(Metrics)]
+#[metrics(scope = "transaction_pool")]
+pub struct TxPoolValidatorMetrics {
+    /// Number of in-flight validation job sends waiting for channel capacity
+    pub(crate) inflight_validation_jobs: Gauge,
 }

@@ -63,7 +63,7 @@
 //!
 //! ## Validation Process
 //!
-//! ### Stateless Checks  
+//! ### Stateless Checks
 //!
 //! Ethereum transactions undergo several stateless checks:
 //!
@@ -271,9 +271,11 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 pub use crate::{
+    batcher::{BatchTxProcessor, BatchTxRequest},
     blobstore::{BlobStore, BlobStoreError},
     config::{
-        LocalTransactionConfig, PoolConfig, PriceBumpConfig, SubPoolLimit, DEFAULT_PRICE_BUMP,
+        LocalTransactionConfig, PoolConfig, PriceBumpConfig, SubPoolLimit,
+        DEFAULT_MAX_INFLIGHT_DELEGATED_SLOTS, DEFAULT_PRICE_BUMP,
         DEFAULT_TXPOOL_ADDITIONAL_VALIDATION_TASKS, MAX_NEW_PENDING_TXS_NOTIFICATIONS,
         REPLACE_BLOB_PRICE_BUMP, TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
         TXPOOL_SUBPOOL_MAX_SIZE_MB_DEFAULT, TXPOOL_SUBPOOL_MAX_TXS_DEFAULT,
@@ -281,8 +283,9 @@ pub use crate::{
     error::PoolResult,
     ordering::{CoinbaseTipOrdering, Priority, TransactionOrdering},
     pool::{
-        blob_tx_priority, fee_delta, state::SubPool, AllTransactionsEvents, FullTransactionEvent,
-        NewTransactionEvent, TransactionEvent, TransactionEvents, TransactionListenerKind,
+        blob_tx_priority, fee_delta, state::SubPool, AddedTransactionOutcome,
+        AllTransactionsEvents, FullTransactionEvent, NewTransactionEvent, TransactionEvent,
+        TransactionEvents, TransactionListenerKind,
     },
     traits::*,
     validate::{
@@ -302,14 +305,8 @@ use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
 use reth_primitives_traits::{Block, Recovered};
 use reth_storage_api::StateProviderFactory;
-use std::{
-    collections::HashSet,
-    sync::{
-        atomic::{AtomicBool, AtomicU8},
-        Arc,
-    },
-};
-use tokio::sync::{mpsc::Receiver, Mutex};
+use std::{collections::HashSet, sync::Arc};
+use tokio::sync::mpsc::Receiver;
 use tracing::{instrument, trace};
 
 pub mod error;
@@ -319,6 +316,7 @@ pub mod noop;
 pub mod pool;
 pub mod validate;
 
+pub mod batcher;
 pub mod blobstore;
 mod config;
 pub mod identifier;
@@ -341,37 +339,19 @@ pub type EthTransactionPool<Client, S, T = EthPooledTransaction> = Pool<
 pub struct Pool<V, T: TransactionOrdering, S> {
     /// Arc'ed instance of the pool internals
     pool: Arc<PoolInner<V, T, S>>,
-    batch_insert_task_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    batch_insert_task_running: Arc<AtomicBool>,
-}
-
-static ENABLE_BATCH_INSERT: AtomicU8 = AtomicU8::new(2);
-fn get_enable_batch_insert() -> bool {
-    let val = ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::Acquire);
-    if val == 2 {
-        let env = std::env::var("RETH_TXPOOL_BATCH_INSERT").unwrap_or_else(|_| "false".to_string());
-        ENABLE_BATCH_INSERT.store(env.parse().unwrap_or(0), std::sync::atomic::Ordering::Release);
-        return ENABLE_BATCH_INSERT.load(std::sync::atomic::Ordering::Acquire) == 1;
-    }
-    val == 1
 }
 
 // === impl Pool ===
 
 impl<V, T, S> Pool<V, T, S>
 where
-    V: TransactionValidator + 'static,
+    V: TransactionValidator,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
 {
     /// Create a new transaction pool instance.
     pub fn new(validator: V, ordering: T, blob_store: S, config: PoolConfig) -> Self {
-        let pool = Arc::new(PoolInner::new(validator, ordering, blob_store, config));
-        Self {
-            pool,
-            batch_insert_task_handle: Arc::new(Mutex::new(None)),
-            batch_insert_task_running: Arc::new(AtomicBool::new(false)),
-        }
+        Self { pool: Arc::new(PoolInner::new(validator, ordering, blob_store, config)) }
     }
 
     /// Returns the wrapped pool.
@@ -379,14 +359,18 @@ where
         &self.pool
     }
 
-    /// Returns the unix timestamp in milliseconds when the transaction was inserted into the pool.
-    pub fn txn_insert_time(&self, txn_hash: TxHash) -> Option<u64> {
-        self.inner().txn_insert_time.get(&txn_hash).map(|t| *t)
-    }
-
     /// Get the config the pool was configured with.
     pub fn config(&self) -> &PoolConfig {
         self.inner().config()
+    }
+
+    /// Validates the given transaction
+    async fn validate(
+        &self,
+        origin: TransactionOrigin,
+        transaction: V::Transaction,
+    ) -> TransactionValidationOutcome<V::Transaction> {
+        self.pool.validator().validate_transaction(origin, transaction).await
     }
 
     /// Returns future that validates all transactions in the given iterator.
@@ -396,26 +380,25 @@ where
         &self,
         origin: TransactionOrigin,
         transactions: impl IntoIterator<Item = V::Transaction> + Send,
-    ) -> Vec<(TxHash, TransactionValidationOutcome<V::Transaction>)> {
-        self.pool
-            .validator()
-            .validate_transactions_with_origin(origin, transactions)
-            .await
-            .into_iter()
-            .map(|tx| (tx.tx_hash(), tx))
-            .collect()
+    ) -> Vec<TransactionValidationOutcome<V::Transaction>> {
+        self.pool.validator().validate_transactions_with_origin(origin, transactions).await
     }
 
-    /// Validates the given transaction
-    async fn validate(
+    /// Validates all transactions with their individual origins.
+    ///
+    /// This returns the validated transactions in the same order as input.
+    async fn validate_all_with_origins(
         &self,
-        origin: TransactionOrigin,
-        transaction: V::Transaction,
-    ) -> (TxHash, TransactionValidationOutcome<V::Transaction>) {
-        let hash = *transaction.hash();
-
-        let outcome = self.pool.validator().validate_transaction(origin, transaction).await;
-        (hash, outcome)
+        transactions: Vec<(TransactionOrigin, V::Transaction)>,
+    ) -> Vec<(TransactionOrigin, TransactionValidationOutcome<V::Transaction>)> {
+        if transactions.len() == 1 {
+            let (origin, tx) = transactions.into_iter().next().unwrap();
+            let res = self.pool.validator().validate_transaction(origin, tx).await;
+            return vec![(origin, res)]
+        }
+        let origins: Vec<_> = transactions.iter().map(|(origin, _)| *origin).collect();
+        let tx_outcomes = self.pool.validator().validate_transactions(transactions).await;
+        origins.into_iter().zip(tx_outcomes).collect()
     }
 
     /// Number of transactions in the entire pool
@@ -486,7 +469,7 @@ where
 /// implements the `TransactionPool` interface for various transaction pool API consumers.
 impl<V, T, S> TransactionPool for Pool<V, T, S>
 where
-    V: TransactionValidator + 'static,
+    V: TransactionValidator,
     <V as TransactionValidator>::Transaction: EthPoolTransaction,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
@@ -506,7 +489,7 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> PoolResult<TransactionEvents> {
-        let (_, tx) = self.validate(origin, transaction).await;
+        let tx = self.validate(origin, transaction).await;
         self.pool.add_transaction_and_subscribe(origin, tx)
     }
 
@@ -514,32 +497,9 @@ where
         &self,
         origin: TransactionOrigin,
         transaction: Self::Transaction,
-    ) -> PoolResult<TxHash> {
-        let start = std::time::Instant::now();
-        let pool = self.pool.clone();
-        if self.batch_insert_task_running.load(std::sync::atomic::Ordering::Acquire) {
-            return self.pool.send_transaction(origin, transaction).await
-        }
-        if get_enable_batch_insert() {
-            {
-                let mut handle = self.batch_insert_task_handle.lock().await;
-                if handle.is_none() {
-                    tracing::info!("Batch insert task started");
-                    *handle = Some(std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().unwrap();
-                        rt.block_on(pool.batch_add_transactions_task());
-                    }));
-                }
-                self.batch_insert_task_running.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        };
-        let (_, tx) = self.validate(origin, transaction).await;
-        self.pool.blob_store_metrics.txn_validation_time.record(start.elapsed().as_millis() as f64);
+    ) -> PoolResult<AddedTransactionOutcome> {
+        let tx = self.validate(origin, transaction).await;
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
-        self.pool
-            .blob_store_metrics
-            .txn_val_insertion_time
-            .record(start.elapsed().as_millis() as f64);
         results.pop().expect("result length is the same as the input")
     }
 
@@ -547,12 +507,25 @@ where
         &self,
         origin: TransactionOrigin,
         transactions: Vec<Self::Transaction>,
-    ) -> Vec<PoolResult<TxHash>> {
+    ) -> Vec<PoolResult<AddedTransactionOutcome>> {
         if transactions.is_empty() {
             return Vec::new()
         }
         let validated = self.validate_all(origin, transactions).await;
-        self.pool.add_transactions(origin, validated.into_iter().map(|(_, tx)| tx))
+
+        self.pool.add_transactions(origin, validated.into_iter())
+    }
+
+    async fn add_transactions_with_origins(
+        &self,
+        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
+    ) -> Vec<PoolResult<AddedTransactionOutcome>> {
+        if transactions.is_empty() {
+            return Vec::new()
+        }
+        let validated = self.validate_all_with_origins(transactions).await;
+
+        self.pool.add_transactions_with_origins(validated)
     }
 
     fn transaction_event_listener(&self, tx_hash: TxHash) -> Option<TransactionEvents> {
@@ -650,6 +623,10 @@ where
 
     fn all_transactions(&self) -> AllPoolTransactions<Self::Transaction> {
         self.pool.all_transactions()
+    }
+
+    fn all_transaction_hashes(&self) -> Vec<TxHash> {
+        self.pool.all_transaction_hashes()
     }
 
     fn remove_transactions(
@@ -802,7 +779,7 @@ where
 
 impl<V, T, S> TransactionPoolExt for Pool<V, T, S>
 where
-    V: TransactionValidator + 'static,
+    V: TransactionValidator,
     <V as TransactionValidator>::Transaction: EthPoolTransaction,
     T: TransactionOrdering<Transaction = <V as TransactionValidator>::Transaction>,
     S: BlobStore,
@@ -837,12 +814,8 @@ where
     }
 }
 
-impl<V: 'static, T: TransactionOrdering, S> Clone for Pool<V, T, S> {
+impl<V, T: TransactionOrdering, S> Clone for Pool<V, T, S> {
     fn clone(&self) -> Self {
-        Self {
-            pool: Arc::clone(&self.pool),
-            batch_insert_task_handle: self.batch_insert_task_handle.clone(),
-            batch_insert_task_running: self.batch_insert_task_running.clone(),
-        }
+        Self { pool: Arc::clone(&self.pool) }
     }
 }

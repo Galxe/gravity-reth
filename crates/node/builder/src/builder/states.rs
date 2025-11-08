@@ -251,11 +251,88 @@ where
     AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>,
 {
     /// Launches the node with the given launcher.
-    pub async fn launch_with<L>(self, launcher: L) -> eyre::Result<L::Node>
+    pub fn launch_with<L>(self, launcher: L) -> L::Future
     where
         L: LaunchNode<Self>,
     {
-        launcher.launch_node(self).await
+        launcher.launch_node(self)
+    }
+
+    /// Sets the hook that is run once the rpc server is started.
+    pub fn on_rpc_started<F>(self, hook: F) -> Self
+    where
+        F: FnOnce(
+                RpcContext<'_, NodeAdapter<T, CB::Components>, AO::EthApi>,
+                RethRpcServerHandles,
+            ) -> eyre::Result<()>
+            + Send
+            + 'static,
+    {
+        self.map_add_ons(|mut add_ons| {
+            add_ons.hooks_mut().set_on_rpc_started(hook);
+            add_ons
+        })
+    }
+
+    /// Sets the hook that is run to configure the rpc modules.
+    pub fn extend_rpc_modules<F>(self, hook: F) -> Self
+    where
+        F: FnOnce(RpcContext<'_, NodeAdapter<T, CB::Components>, AO::EthApi>) -> eyre::Result<()>
+            + Send
+            + 'static,
+    {
+        self.map_add_ons(|mut add_ons| {
+            add_ons.hooks_mut().set_extend_rpc_modules(hook);
+            add_ons
+        })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::components::Components;
+    use reth_consensus::noop::NoopConsensus;
+    use reth_db_api::mock::DatabaseMock;
+    use reth_ethereum_engine_primitives::EthEngineTypes;
+    use reth_evm::noop::NoopEvmConfig;
+    use reth_evm_ethereum::MockEvmConfig;
+    use reth_network::EthNetworkPrimitives;
+    use reth_network_api::noop::NoopNetwork;
+    use reth_node_api::FullNodeTypesAdapter;
+    use reth_node_ethereum::EthereumNode;
+    use reth_payload_builder::PayloadBuilderHandle;
+    use reth_provider::noop::NoopProvider;
+    use reth_tasks::TaskManager;
+    use reth_transaction_pool::noop::NoopTransactionPool;
+
+    #[test]
+    fn test_noop_components() {
+        let components = Components::<
+            FullNodeTypesAdapter<EthereumNode, DatabaseMock, NoopProvider>,
+            NoopNetwork<EthNetworkPrimitives>,
+            _,
+            NoopEvmConfig<MockEvmConfig>,
+            _,
+        > {
+            transaction_pool: NoopTransactionPool::default(),
+            evm_config: NoopEvmConfig::default(),
+            consensus: NoopConsensus::default(),
+            network: NoopNetwork::default(),
+            payload_builder_handle: PayloadBuilderHandle::<EthEngineTypes>::noop(),
+        };
+
+        let task_executor = {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let handle = runtime.handle().clone();
+            let manager = TaskManager::new(handle);
+            manager.executor()
+        };
+
+        let node = NodeAdapter { components, task_executor, provider: NoopProvider::default() };
+
+        // test that node implements `FullNodeComponents``
+        <NodeAdapter<_, _> as FullNodeComponents>::pool(&node);
     }
 
     /// Sets the hook that is run once the rpc server is started.

@@ -80,16 +80,15 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
         added_at_index: usize,
     ) {
         let stage_id = stage.id();
-        if self.stages.insert(stage.id(), StageEntry { stage, enabled: true }).is_some() {
-            if let Some(to_remove) = self
+        if self.stages.insert(stage.id(), StageEntry { stage, enabled: true }).is_some() &&
+            let Some(to_remove) = self
                 .order
                 .iter()
                 .enumerate()
                 .find(|(i, id)| *i != added_at_index && **id == stage_id)
                 .map(|(i, _)| i)
-            {
-                self.order.remove(to_remove);
-            }
+        {
+            self.order.remove(to_remove);
         }
     }
 
@@ -283,10 +282,10 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     pub fn build(mut self) -> Vec<Box<dyn Stage<Provider, ProviderRO>>> {
         let mut stages = Vec::new();
         for id in &self.order {
-            if let Some(entry) = self.stages.remove(id) {
-                if entry.enabled {
-                    stages.push(entry.stage);
-                }
+            if let Some(entry) = self.stages.remove(id) &&
+                entry.enabled
+            {
+                stages.push(entry.stage);
             }
         }
         stages

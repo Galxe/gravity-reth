@@ -1,6 +1,5 @@
 use crate::{supervisor::SupervisorClient, InvalidCrossTx, OpPooledTx};
 use alloy_consensus::{BlockHeader, Transaction};
-use gravity_storage::block_view_storage::BlockViewProvider;
 use op_revm::L1BlockInfo;
 use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
@@ -9,7 +8,7 @@ use reth_optimism_forks::OpHardforks;
 use reth_primitives_traits::{
     transaction::error::InvalidTransactionError, Block, BlockBody, GotExpected, SealedBlock,
 };
-use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{AccountInfoReader, BlockReaderIdExt, StateProviderFactory};
 use reth_transaction_pool::{
     error::InvalidPoolTransactionError, EthPoolTransaction, EthTransactionValidator,
     TransactionOrigin, TransactionValidationOutcome, TransactionValidator,
@@ -44,7 +43,7 @@ impl OpL1BlockInfo {
 #[derive(Debug, Clone)]
 pub struct OpTransactionValidator<Client, Tx> {
     /// The type that performs the actual validation.
-    inner: EthTransactionValidator<Client, Tx>,
+    inner: Arc<EthTransactionValidator<Client, Tx>>,
     /// Additional block info required for validation.
     block_info: Arc<OpL1BlockInfo>,
     /// If true, ensure that the transaction's sender has enough balance to cover the L1 gas fee
@@ -119,7 +118,7 @@ where
         block_info: OpL1BlockInfo,
     ) -> Self {
         Self {
-            inner,
+            inner: Arc::new(inner),
             block_info: Arc::new(block_info),
             require_l1_data_gas_fee: true,
             supervisor_client: None,
@@ -182,7 +181,7 @@ where
         &self,
         origin: TransactionOrigin,
         transaction: Tx,
-        state: &mut Option<BlockViewProvider>,
+        state: &mut Option<Box<dyn AccountInfoReader>>,
     ) -> TransactionValidationOutcome<Tx> {
         if transaction.is_eip4844() {
             return TransactionValidationOutcome::Invalid(

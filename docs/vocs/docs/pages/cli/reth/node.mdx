@@ -233,6 +233,21 @@ Networking:
 
           [default: All]
 
+      --disable-tx-gossip
+          Disable transaction pool gossip
+
+          Disables gossiping of transactions in the mempool to peers. This can be omitted for personal nodes, though providers should always opt to enable this flag.
+
+      --tx-propagation-mode <PROPAGATION_MODE>
+          Sets the transaction propagation mode by determining how new pending transactions are propagated to other peers in full.
+
+          Examples: sqrt, all, max:10
+
+          [default: sqrt]
+
+      --required-block-hashes <REQUIRED_BLOCK_HASHES>
+          Comma separated list of required block hashes. Peers that don't have these blocks will be filtered out
+
 RPC:
       --http
           Enable the HTTP-RPC server
@@ -286,6 +301,11 @@ RPC:
           Filename for IPC socket/pipe within the datadir
 
           [default: <CACHE_DIR>.ipc]
+
+      --ipc.permissions <IPC_SOCKET_PERMISSIONS>
+          Set the permissions for the IPC socket file, in octal format.
+
+          If not specified, the permissions will be set by the system's umask.
 
       --authrpc.addr <AUTH_ADDR>
           Auth server address to listen on
@@ -390,6 +410,16 @@ RPC:
 
           [default: 25]
 
+      --rpc.pending-block <KIND>
+          Configures the pending block behavior for RPC responses.
+
+          Options: full (include all transactions), empty (header only), none (disable pending blocks).
+
+          [default: full]
+
+      --rpc.forwarder <FORWARDER>
+          Endpoint to forward transactions to
+
       --builder.disallow <PATH>
           Path to file containing disallowed addresses, json-encoded list of strings. Block validation API will reject blocks containing transactions from these addresses
 
@@ -434,6 +464,14 @@ Gas Price Oracle:
           The percentile of gas prices to use for the estimate
 
           [default: 60]
+
+      --gpo.default-suggested-fee <DEFAULT_SUGGESTED_FEE>
+          The default gas price to use if there are no blocks to use
+
+      --rpc.send-raw-transaction-sync-timeout <SECONDS>
+          Timeout for `send_raw_transaction_sync` RPC method
+
+          [default: 30s]
 
 TxPool:
       --txpool.pending-max-count <PENDING_MAX_COUNT>
@@ -560,6 +598,11 @@ TxPool:
       --txpool.disable-transactions-backup
           Disables transaction backup to disk on node shutdown
 
+      --txpool.max-batch-size <MAX_BATCH_SIZE>
+          Max batch size for transaction pool insertions
+
+          [default: 1]
+
 Builder:
       --builder.extradata <EXTRA_DATA>
           Block extra data set by the payload builder
@@ -601,8 +644,8 @@ Debug:
       --debug.etherscan [<ETHERSCAN_API_URL>]
           Runs a fake consensus client that advances the chain using recent block hashes on Etherscan. If specified, requires an `ETHERSCAN_API_KEY` environment variable
 
-      --debug.rpc-consensus-ws <RPC_CONSENSUS_WS>
-          Runs a fake consensus client using blocks fetched from an RPC `WebSocket` endpoint
+      --debug.rpc-consensus-url <RPC_URL>
+          Runs a fake consensus client using blocks fetched from an RPC endpoint. Supports both HTTP and `WebSocket` endpoints - `WebSocket` endpoints will use subscriptions, while HTTP endpoints will poll for new blocks
 
       --debug.skip-fcu <SKIP_FCU>
           If provided, the engine will skip `n` consecutive FCUs
@@ -665,6 +708,9 @@ Database:
 
       --db.read-transaction-timeout <READ_TRANSACTION_TIMEOUT>
           Read transaction timeout in seconds, 0 means no timeout
+
+      --db.max-readers <MAX_READERS>
+          Maximum number of readers allowed to access the database concurrently
 
 Dev testnet:
       --dev
@@ -761,7 +807,7 @@ Engine:
       --engine.memory-block-buffer-target <MEMORY_BLOCK_BUFFER_TARGET>
           Configure the target number of blocks to keep in memory
 
-          [default: 2]
+          [default: 0]
 
       --engine.legacy-state-root
           Enable legacy state root
@@ -769,8 +815,8 @@ Engine:
       --engine.disable-caching-and-prewarming
           Disable cross-block caching and parallel prewarming
 
-      --engine.parallel-sparse-trie
-          Enable the parallel sparse trie in the engine
+      --engine.disable-parallel-sparse-trie
+          Disable the parallel sparse trie in the engine
 
       --engine.state-provider-metrics
           Enable state provider latency metrics. This allows the engine to collect and report stats about how long state provider calls took during execution, but this does introduce slight overhead to state provider calls
@@ -806,6 +852,9 @@ Engine:
           Always process payload attributes and begin a payload build process even if `forkchoiceState.headBlockHash` is already the canonical head or an ancestor. See `TreeConfig::always_process_payload_attributes_on_canonical_head` for more details.
 
           Note: This is a no-op on OP Stack.
+
+      --engine.allow-unwind-canonical-header
+          Allow unwinding canonical header to ancestor during forkchoice updates. See `TreeConfig::unwind_canonical_header` for more details
 
 ERA:
       --era.enable
@@ -850,12 +899,12 @@ Logging:
       --log.stdout.format <FORMAT>
           The format to use for logs written to stdout
 
-          [default: terminal]
-
           Possible values:
           - json:     Represents JSON formatting for logs. This format outputs log records as JSON objects, making it suitable for structured logging
           - log-fmt:  Represents logfmt (key=value) formatting for logs. This format is concise and human-readable, typically used in command-line applications
           - terminal: Represents terminal-friendly formatting for logs
+
+          [default: terminal]
 
       --log.stdout.filter <FILTER>
           The filter to use for logs written to stdout
@@ -865,12 +914,12 @@ Logging:
       --log.file.format <FORMAT>
           The format to use for logs written to the log file
 
-          [default: terminal]
-
           Possible values:
           - json:     Represents JSON formatting for logs. This format outputs log records as JSON objects, making it suitable for structured logging
           - log-fmt:  Represents logfmt (key=value) formatting for logs. This format is concise and human-readable, typically used in command-line applications
           - terminal: Represents terminal-friendly formatting for logs
+
+          [default: terminal]
 
       --log.file.filter <FILTER>
           The filter to use for logs written to the log file
@@ -881,6 +930,11 @@ Logging:
           The path to put log files in
 
           [default: <CACHE_DIR>/logs]
+
+      --log.file.name <NAME>
+          The prefix name of the log files
+
+          [default: reth.log]
 
       --log.file.max-size <SIZE>
           The maximum size (in MB) of one log file
@@ -903,12 +957,12 @@ Logging:
       --color <COLOR>
           Sets whether or not the formatter emits ANSI terminal escape codes for colors and other text formatting
 
-          [default: always]
-
           Possible values:
           - always: Colors on
           - auto:   Colors on
           - never:  Colors off
+
+          [default: always]
 
 Display:
   -v, --verbosity...

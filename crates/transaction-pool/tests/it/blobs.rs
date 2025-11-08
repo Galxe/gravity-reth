@@ -3,7 +3,11 @@
 use reth_transaction_pool::{
     error::PoolErrorKind,
     test_utils::{MockTransaction, MockTransactionFactory, TestPoolBuilder},
+<<<<<<< HEAD
     PoolTransaction, TransactionOrigin, TransactionPool,
+=======
+    AddedTransactionOutcome, PoolTransaction, TransactionOrigin, TransactionPool,
+>>>>>>> v1.8.3
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -12,7 +16,7 @@ async fn blobs_exclusive() {
     let mut mock_tx_factory = MockTransactionFactory::default();
     let blob_tx = mock_tx_factory.create_eip4844();
 
-    let hash = txpool
+    let AddedTransactionOutcome { hash, .. } = txpool
         .add_transaction(TransactionOrigin::External, blob_tx.transaction.clone())
         .await
         .unwrap();

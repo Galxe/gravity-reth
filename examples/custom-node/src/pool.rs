@@ -1,6 +1,9 @@
-use crate::primitives::{CustomTransaction, CustomTransactionEnvelope};
+use crate::primitives::{CustomTransaction, TxPayment};
 use alloy_consensus::{
-    crypto::RecoveryError, error::ValueError, transaction::SignerRecoverable, TransactionEnvelope,
+    crypto::RecoveryError,
+    error::ValueError,
+    transaction::{SignerRecoverable, TxHashRef},
+    Signed, TransactionEnvelope,
 };
 use alloy_primitives::{Address, Sealed, B256};
 use op_alloy_consensus::{OpPooledTransaction, OpTransaction, TxDeposit};
@@ -14,9 +17,9 @@ pub enum CustomPooledTransaction {
     /// A regular Optimism transaction as defined by [`OpPooledTransaction`].
     #[envelope(flatten)]
     Op(OpPooledTransaction),
-    /// A [`CustomTransactionEnvelope`] tagged with type 0x7E.
+    /// A [`TxPayment`] tagged with type 0x7E.
     #[envelope(ty = 42)]
-    Payment(CustomTransactionEnvelope),
+    Payment(Signed<TxPayment>),
 }
 
 impl From<CustomPooledTransaction> for CustomTransaction {
@@ -45,17 +48,11 @@ impl RlpBincode for CustomPooledTransaction {}
 
 impl OpTransaction for CustomPooledTransaction {
     fn is_deposit(&self) -> bool {
-        match self {
-            CustomPooledTransaction::Op(_) => false,
-            CustomPooledTransaction::Payment(payment) => payment.is_deposit(),
-        }
+        false
     }
 
     fn as_deposit(&self) -> Option<&Sealed<TxDeposit>> {
-        match self {
-            CustomPooledTransaction::Op(_) => None,
-            CustomPooledTransaction::Payment(payment) => payment.as_deposit(),
-        }
+        None
     }
 }
 
@@ -75,14 +72,16 @@ impl SignerRecoverable for CustomPooledTransaction {
     }
 }
 
-impl SignedTransaction for CustomPooledTransaction {
+impl TxHashRef for CustomPooledTransaction {
     fn tx_hash(&self) -> &B256 {
         match self {
-            CustomPooledTransaction::Op(tx) => SignedTransaction::tx_hash(tx),
-            CustomPooledTransaction::Payment(tx) => SignedTransaction::tx_hash(tx),
+            CustomPooledTransaction::Op(tx) => tx.tx_hash(),
+            CustomPooledTransaction::Payment(tx) => tx.hash(),
         }
     }
 }
+
+impl SignedTransaction for CustomPooledTransaction {}
 
 impl InMemorySize for CustomPooledTransaction {
     fn size(&self) -> usize {

@@ -12,7 +12,24 @@ use reth_primitives_traits::SignerRecoverable;
 use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcConvert};
 use reth_rpc_eth_types::{error::FromEthApiError, EthApiError};
 use reth_storage_api::{ProviderReceipt, ProviderTx};
-use std::borrow::Cow;
+
+/// Calculates the gas used and next log index for a transaction at the given index
+pub fn calculate_gas_used_and_next_log_index(
+    tx_index: u64,
+    all_receipts: &[impl TxReceipt],
+) -> (u64, usize) {
+    let mut gas_used = 0;
+    let mut next_log_index = 0;
+
+    if tx_index > 0 {
+        for receipt in all_receipts.iter().take(tx_index as usize) {
+            gas_used = receipt.cumulative_gas_used();
+            next_log_index += receipt.logs().len();
+        }
+    }
+
+    (gas_used, next_log_index)
+}
 
 /// Assembles transaction receipt data w.r.t to network.
 ///
@@ -46,25 +63,17 @@ pub trait LoadReceipt:
                 .map_err(Self::Error::from_eth_err)?
                 .ok_or(EthApiError::HeaderNotFound(hash.into()))?;
 
-            let mut gas_used = 0;
-            let mut next_log_index = 0;
-
-            if meta.index > 0 {
-                for receipt in all_receipts.iter().take(meta.index as usize) {
-                    gas_used = receipt.cumulative_gas_used();
-                    next_log_index += receipt.logs().len();
-                }
-            }
+            let (gas_used, next_log_index) =
+                calculate_gas_used_and_next_log_index(meta.index, &all_receipts);
 
             Ok(self
                 .tx_resp_builder()
                 .convert_receipts(vec![ConvertReceiptInput {
-                    // FIXME: Hardcoded for meta txns with empty signature
                     tx: tx
                         .try_to_recovered_ref_unchecked()
                         .unwrap_or_else(|_| Recovered::new_unchecked(&tx, Address::ZERO)),
                     gas_used: receipt.cumulative_gas_used() - gas_used,
-                    receipt: Cow::Owned(receipt),
+                    receipt,
                     next_log_index,
                     meta,
                 }])?

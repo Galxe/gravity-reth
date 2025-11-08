@@ -15,11 +15,10 @@ env:
 name: bench
 jobs:
   codspeed:
-    if: false # FIXME: remove this line to enable the benchmarks job after fixing the issues with the test suite.
     runs-on:
       group: Reth
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
       - uses: rui314/setup-mold@v1
@@ -34,7 +33,8 @@ jobs:
       - name: Build the benchmark target(s)
         run: ./.github/scripts/codspeed-build.sh
       - name: Run the benchmarks
-        uses: CodSpeedHQ/action@v3
+        uses: CodSpeedHQ/action@v4
         with:
           run: cargo codspeed run --workspace
+          mode: instrumentation
           token: ${{ secrets.CODSPEED_TOKEN }}
