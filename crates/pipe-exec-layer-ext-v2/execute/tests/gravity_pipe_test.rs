@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_api_types::{
     config_storage::{ConfigStorage, OnChainConfig},
@@ -59,7 +59,9 @@ fn new_ordered_block(
                 .try_into()
                 .unwrap(),
         ),
-        jwk_extra_data: vec![],
+        extra_data: vec![],
+        randomness: U256::ZERO,
+        enable_randomness: false,
     }
 }
 

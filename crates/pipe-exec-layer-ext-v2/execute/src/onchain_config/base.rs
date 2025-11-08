@@ -11,6 +11,7 @@ use std::{fmt::Debug, sync::OnceLock};
 use tokio::runtime::Runtime;
 
 static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+use tracing::*;
 
 /// Base trait for all config fetchers
 pub trait ConfigFetcher {
@@ -113,10 +114,11 @@ where
         block_number: u64,
     ) -> OnChainConfigResType {
         use crate::onchain_config::{
-            consensus_config::ConsensusConfigFetcher, epoch::EpochFetcher,
+            consensus_config::ConsensusConfigFetcher, dkg::DKGStateFetcher, epoch::EpochFetcher,
             jwk_consensus_config::JwkConsensusConfigFetcher, observed_jwk::ObservedJwkFetcher,
             validator_set::ValidatorSetFetcher,
         };
+
 
         match config_name {
             OnChainConfig::ConsensusConfig => {
@@ -139,6 +141,10 @@ where
             }
             OnChainConfig::JWKConsensusConfig => {
                 let fetcher = JwkConsensusConfigFetcher::new(self);
+                fetcher.fetch(block_number).0.into()
+            }
+            OnChainConfig::DKGState => {
+                let fetcher = DKGStateFetcher::new(self);
                 fetcher.fetch(block_number).0.into()
             }
             _ => todo!("Implement fetching for other config types"),

@@ -68,6 +68,12 @@ sol! {
             uint64[] calldata failedProposerIndices,
             uint256 timestampMicros
         );
+
+        function blockPrologueExt(
+            bytes proposer,
+            uint64[] calldata failedProposerIndices,
+            uint256 timestampMicros
+        );
 }
 
 /// Helper function to convert Ethereum address to `AccountAddress` format

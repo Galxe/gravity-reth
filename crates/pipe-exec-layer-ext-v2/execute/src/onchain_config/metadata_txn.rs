@@ -1,7 +1,7 @@
 //! Metadata transaction execution
 
 use super::{
-    types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated},
+    types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated, blockPrologueExtCall},
     SYSTEM_CALLER,
 };
 use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
@@ -165,18 +165,37 @@ fn new_system_call_txn(
     )
 }
 
-/// Execute a metadata contract call (blockPrologue)
+/// Execute a metadata contract call (blockPrologue or blockPrologueExt)
+/// 
+/// If `enable_randomness` is true, calls blockPrologueExt.
+/// Otherwise, calls the legacy blockPrologue function.
+/// 
+/// Note: blockPrologueExt retrieves randomness from block.difficulty (set before this call),
+/// so it doesn't need to be passed as a parameter.
 pub fn transact_metadata_contract_call(
     evm: &mut impl Evm<DB = impl Database, Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     timestamp_us: u64,
     proposer: Option<[u8; 32]>,
+    enable_randomness: bool,
 ) -> (MetadataTxnResult, EvmState) {
-    let call = blockPrologueCall {
-        proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
-        failedProposerIndices: vec![],
-        timestampMicros: U256::from(timestamp_us),
+    let input: Bytes = if enable_randomness {
+        // Use blockPrologueExt - randomness is read from block.difficulty by the contract
+        let call = blockPrologueExtCall {
+            proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
+            failedProposerIndices: vec![],
+            timestampMicros: U256::from(timestamp_us),
+        };
+        call.abi_encode().into()
+    } else {
+        // Use legacy blockPrologue without randomness
+        let call = blockPrologueCall {
+            proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
+            failedProposerIndices: vec![],
+            timestampMicros: U256::from(timestamp_us),
+        };
+        call.abi_encode().into()
     };
-    let input: Bytes = call.abi_encode().into();
+
     let system_call_account =
         evm.db_mut().basic(SYSTEM_CALLER).unwrap().expect("SYSTEM_CALLER not exists");
     let txn = new_system_call_txn(
@@ -187,6 +206,14 @@ pub fn transact_metadata_contract_call(
     );
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
-    assert!(result.result.is_success(), "Failed to execute blockPrologue: {:?}", result.result);
+    
+    let function_name = if enable_randomness { "blockPrologueExt" } else { "blockPrologue" };
+    assert!(
+        result.result.is_success(),
+        "Failed to execute {}: {:?}",
+        function_name,
+        result.result
+    );
+    
     (MetadataTxnResult { result: result.result, txn }, result.state)
 }

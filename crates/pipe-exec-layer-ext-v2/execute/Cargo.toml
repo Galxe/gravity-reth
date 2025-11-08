@@ -12,7 +12,6 @@ description = "pipeline execution layer extension"
 workspace = true
 
 [dependencies]
-
 gravity-api-types.workspace = true
 reth-pipe-exec-layer-event-bus.workspace = true
 reth-primitives.workspace = true
@@ -53,6 +52,7 @@ reth-pipe-exec-layer-relayer.workspace = true
 # crypto and serialization for gravity-aptos validator_info
 bcs = "0.1"
 serde.workspace = true
+hex = { version = "0.4.3", features = ["serde"] }
 
 [dev-dependencies]
 reth-engine-primitives.workspace = true

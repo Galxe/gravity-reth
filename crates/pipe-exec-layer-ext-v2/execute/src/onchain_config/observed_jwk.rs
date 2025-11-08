@@ -1,18 +1,16 @@
-//! Fetcher for consensus configuration
+//! Fetcher for JWK (JSON Web Key) on-chain configuration
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
-use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
-use alloy_primitives::{Address, Bytes, Signature, U256};
+use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent, SolType};
 use gravity_api_types::on_chain_config::jwks::JWKStruct;
-use reth_ethereum_primitives::{Transaction, TransactionSigned};
+use reth_ethereum_primitives::TransactionSigned;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use revm_primitives::TxKind;
 use std::fmt::Debug;
 use tracing::info;
 
@@ -178,6 +176,28 @@ fn convert_into_bcs_all_providers_jwks(all_providers_jwks: AllProvidersJWKs) -> 
     bcs::to_bytes(&all_providers).expect("Failed to serialize AllProvidersJWKs").into()
 }
 
+/// Construct JWK transaction from ProviderJWKs
+/// 
+/// This function is called by the validator transactions construction logic in mod.rs
+pub(crate) fn construct_jwk_transaction(
+    provider_jwks: gravity_api_types::on_chain_config::jwks::ProviderJWKs,
+    nonce: u64,
+    gas_price: u128,
+) -> Result<TransactionSigned, String> {
+    let sol_provider_jwks = convert_into_sol_provider_jwks(provider_jwks);
+    let cross_chain_params = convert_into_sol_crosschain_params(
+        &sol_provider_jwks.jwks,
+        sol_provider_jwks.issuer.as_str(),
+    );
+    
+    let call = upsertObservedJWKsCall {
+        providerJWKsArray: vec![sol_provider_jwks],
+        crossChainParamsArray: cross_chain_params,
+    };
+    let input: Bytes = call.abi_encode().into();
+    Ok(super::new_system_call_txn(JWK_MANAGER_ADDR, nonce, gas_price, input))
+}
+
 /// Fetcher for consensus configuration
 #[derive(Debug)]
 pub struct ObservedJwkFetcher<'a, EthApi> {
@@ -222,57 +242,4 @@ where
     fn caller_address() -> Address {
         SYSTEM_CALLER
     }
-}
-
-/// Create a new system call transaction
-fn new_system_call_txn(
-    contract: Address,
-    nonce: u64,
-    gas_price: u128,
-    input: Bytes,
-) -> TransactionSigned {
-    TransactionSigned::new_unhashed(
-        Transaction::Legacy(TxLegacy {
-            chain_id: None,
-            nonce,
-            gas_price,
-            gas_limit: 30_000_000,
-            to: TxKind::Call(contract),
-            value: U256::ZERO,
-            input,
-        }),
-        Signature::new(U256::ZERO, U256::ZERO, false),
-    )
-}
-
-pub fn construct_observed_jwks_txns_envelope(
-    provider_jwks_array_bytes: &Vec<Vec<u8>>,
-    system_caller_nonce: u64,
-    gas_price: u128,
-) -> Vec<EthereumTxEnvelope<TxEip4844>> {
-    let system_caller_nonce = system_caller_nonce + 1;
-    let txns = provider_jwks_array_bytes
-        .iter()
-        .enumerate()
-        .map(|(index, provider_jwks_bytes)| {
-            let provider_jwks = bcs::from_bytes::<
-                gravity_api_types::on_chain_config::jwks::ProviderJWKs,
-            >(&provider_jwks_bytes)
-            .expect("Failed to deserialize provider JWKS");
-            let provider_jwks = convert_into_sol_provider_jwks(provider_jwks);
-            let cross_chain_params = convert_into_sol_crosschain_params(
-                &provider_jwks.jwks,
-                provider_jwks.issuer.as_str(),
-            );
-
-            let call = upsertObservedJWKsCall {
-                providerJWKsArray: vec![provider_jwks],
-                crossChainParamsArray: cross_chain_params,
-            };
-            let input: Bytes = call.abi_encode().into();
-            let current_nonce = system_caller_nonce + index as u64;
-            new_system_call_txn(JWK_MANAGER_ADDR, current_nonce, gas_price, input)
-        })
-        .collect();
-    txns
 }
