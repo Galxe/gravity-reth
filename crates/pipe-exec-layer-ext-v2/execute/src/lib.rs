@@ -696,7 +696,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             epoch,
         };
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
-        info!(target: "execute_ordered_block",
+        debug!(target: "execute_ordered_block",
             number=?result.block.number,
             receipts_len=?result.execution_output.receipts.len(),
             "insert metadata transaction result to executed ordered block result"
