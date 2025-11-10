@@ -277,9 +277,7 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 on_response!(resp, GetReceipts)
             }
             EthMessage::Receipts69(resp) => {
-                // TODO: remove mandatory blooms
-                let resp = resp.map(|receipts| receipts.into_with_bloom());
-                on_response!(resp, GetReceipts)
+                on_response!(resp, GetReceipts69)
             }
             EthMessage::BlockRangeUpdate(msg) => {
                 // Validate that earliest <= latest according to the spec
@@ -740,11 +738,11 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
 
         while this.internal_request_timeout_interval.poll_tick(cx).is_ready() {
             // check for timed out requests
-            if this.check_timed_out_requests(Instant::now()) {
-                if let Poll::Ready(Ok(_)) = this.to_session_manager.poll_reserve(cx) {
-                    let msg = ActiveSessionMessage::ProtocolBreach { peer_id: this.remote_peer_id };
-                    this.pending_message_to_session = Some(msg);
-                }
+            if this.check_timed_out_requests(Instant::now()) &&
+                let Poll::Ready(Ok(_)) = this.to_session_manager.poll_reserve(cx)
+            {
+                let msg = ActiveSessionMessage::ProtocolBreach { peer_id: this.remote_peer_id };
+                this.pending_message_to_session = Some(msg);
             }
         }
 

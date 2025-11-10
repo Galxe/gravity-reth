@@ -120,7 +120,7 @@ where
         for (index, header) in self.header_collector.iter()?.enumerate() {
             let (_, header_buf) = header?;
 
-            if index > 0 && index % interval == 0 && total_headers > 100 {
+            if index > 0 && index.is_multiple_of(interval) && total_headers > 100 {
                 info!(target: "sync::stages::headers", progress = %format!("{:.2}%", (index as f64 / total_headers as f64) * 100.0), "Writing headers");
             }
 
@@ -146,26 +146,25 @@ where
 
         let mut cursor_header_numbers =
             provider.tx_ref().cursor_write::<RawTable<tables::HeaderNumbers>>()?;
-        let mut first_sync = false;
-
         // If we only have the genesis block hash, then we are at first sync, and we can remove it,
         // add it to the collector and use tx.append on all hashes.
-        if provider.tx_ref().entries::<RawTable<tables::HeaderNumbers>>()? == 1 {
-            if let Some((hash, block_number)) = cursor_header_numbers.last()? {
-                if block_number.value()? == 0 {
-                    self.hash_collector.insert(hash.key()?, 0)?;
-                    cursor_header_numbers.delete_current()?;
-                    first_sync = true;
-                }
-            }
-        }
+        let first_sync = if provider.tx_ref().entries::<RawTable<tables::HeaderNumbers>>()? == 1 &&
+            let Some((hash, block_number)) = cursor_header_numbers.last()? &&
+            block_number.value()? == 0
+        {
+            self.hash_collector.insert(hash.key()?, 0)?;
+            cursor_header_numbers.delete_current()?;
+            true
+        } else {
+            false
+        };
 
         // Since ETL sorts all entries by hashes, we are either appending (first sync) or inserting
         // in order (further syncs).
         for (index, hash_to_number) in self.hash_collector.iter()?.enumerate() {
             let (hash, number) = hash_to_number?;
 
-            if index > 0 && index % interval == 0 && total_headers > 100 {
+            if index > 0 && index.is_multiple_of(interval) && total_headers > 100 {
                 info!(target: "sync::stages::headers", progress = %format!("{:.2}%", (index as f64 / total_headers as f64) * 100.0), "Writing headers hash index");
             }
 
@@ -415,7 +414,7 @@ mod tests {
     use reth_provider::{BlockWriter, ProviderFactory, StaticFileProviderFactory};
     use reth_stages_api::StageUnitCheckpoint;
     use reth_testing_utils::generators::{self, random_header, random_header_range};
-    use reth_trie::{updates::TrieUpdates, HashedPostStateSorted};
+    use reth_trie::HashedPostStateSorted;
     use std::sync::Arc;
     use test_runner::HeadersTestRunner;
 
@@ -658,7 +657,6 @@ mod tests {
                 sealed_blocks,
                 &ExecutionOutcome::default(),
                 HashedPostStateSorted::default(),
-                TrieUpdates::default(),
             )
             .unwrap();
         provider.commit().unwrap();

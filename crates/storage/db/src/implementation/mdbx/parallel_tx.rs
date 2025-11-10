@@ -6,9 +6,13 @@ use reth_db_api::{
     table::{DupSort, Encode, Table},
     transaction::DbTx,
 };
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex, MutexGuard,
+use reth_libmdbx::ffi::MDBX_dbi;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
 };
 
 const FIRST_TX_INDEX: usize = usize::MAX;
@@ -22,6 +26,7 @@ pub struct ParallelTxRO {
     // Auxiliary txs for parallelism.
     inner: Arc<Mutex<Inner>>,
     env: Environment,
+    dbis: Arc<HashMap<&'static str, MDBX_dbi>>,
     metrics: Option<Arc<DatabaseEnvMetrics>>,
     max_txs: usize,
     disable_long_read_transaction_safety: bool,
@@ -41,24 +46,27 @@ struct WrappedTx {
 
 fn create_tx(
     env: &Environment,
+    dbis: Arc<HashMap<&'static str, MDBX_dbi>>,
     metrics: Option<Arc<DatabaseEnvMetrics>>,
 ) -> Result<Tx<RO>, DatabaseError> {
-    Tx::new_with_metrics(env.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?, metrics)
+    Tx::new(env.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?, dbis, metrics)
         .map_err(|e| DatabaseError::InitTx(e.into()))
 }
 
 impl ParallelTxRO {
     pub(super) fn try_new(
         env: Environment,
+        dbis: Arc<HashMap<&'static str, MDBX_dbi>>,
         metrics: Option<Arc<DatabaseEnvMetrics>>,
     ) -> Result<Self, DatabaseError> {
-        let tx = create_tx(&env, metrics.clone())?;
+        let tx = create_tx(&env, dbis.clone(), metrics.clone())?;
         Ok(Self {
             tx,
             tx_held_count: Arc::new(AtomicUsize::new(0)),
             inner: Arc::new(Mutex::new(Inner { txs: vec![], num_txs: 1 })),
             max_txs: 8,
             env,
+            dbis,
             metrics,
             disable_long_read_transaction_safety: false,
         })
@@ -70,7 +78,7 @@ impl ParallelTxRO {
     ) -> Result<(usize, Arc<Tx<RO>>), DatabaseError> {
         inner.num_txs += 1;
         drop(inner);
-        match create_tx(&self.env, self.metrics.clone()) {
+        match create_tx(&self.env, self.dbis.clone(), self.metrics.clone()) {
             Ok(mut tx) => {
                 if self.disable_long_read_transaction_safety {
                     tx.disable_long_read_transaction_safety();

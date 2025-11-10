@@ -1,13 +1,14 @@
 //! Implementation of the [`jsonrpsee`] generated [`EthApiServer`](crate::EthApi) trait
 //! Handles RPC requests for the `eth_` namespace.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{eth::helpers::types::EthRpcConverter, EthApiBuilder};
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumberOrTag;
 use alloy_network::Ethereum;
 use alloy_primitives::{Bytes, U256};
+use alloy_rpc_client::RpcClient;
 use derive_more::Deref;
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_evm_ethereum::EthEvmConfig;
@@ -20,31 +21,35 @@ use reth_rpc_eth_api::{
     EthApiTypes, RpcNodeCore,
 };
 use reth_rpc_eth_types::{
-    receipt::EthReceiptConverter, EthApiError, EthStateCache, FeeHistoryCache, GasCap,
-    GasPriceOracle, PendingBlock,
+    builder::config::PendingBlockKind, receipt::EthReceiptConverter, tx_forward::ForwardConfig,
+    EthApiError, EthStateCache, FeeHistoryCache, GasCap, GasPriceOracle, PendingBlock,
 };
 use reth_storage_api::{noop::NoopProvider, BlockReaderIdExt, ProviderHeader};
 use reth_tasks::{
     pool::{BlockingTaskGuard, BlockingTaskPool},
     TaskSpawner, TokioTaskExecutor,
 };
-use reth_transaction_pool::noop::NoopTransactionPool;
-use tokio::sync::{broadcast, Mutex};
+use reth_transaction_pool::{
+    noop::NoopTransactionPool, AddedTransactionOutcome, BatchTxProcessor, BatchTxRequest,
+    TransactionPool,
+};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 const DEFAULT_BROADCAST_CAPACITY: usize = 2000;
 
 /// Helper type alias for [`RpcConverter`] with components from the given [`FullNodeComponents`].
-pub type EthRpcConverterFor<N> = RpcConverter<
-    Ethereum,
+pub type EthRpcConverterFor<N, NetworkT = Ethereum> = RpcConverter<
+    NetworkT,
     <N as FullNodeComponents>::Evm,
     EthReceiptConverter<<<N as FullNodeTypes>::Provider as ChainSpecProvider>::ChainSpec>,
 >;
 
 /// Helper type alias for [`EthApi`] with components from the given [`FullNodeComponents`].
-pub type EthApiFor<N> = EthApi<N, EthRpcConverterFor<N>>;
+pub type EthApiFor<N, NetworkT = Ethereum> = EthApi<N, EthRpcConverterFor<N, NetworkT>>;
 
 /// Helper type alias for [`EthApi`] with components from the given [`FullNodeComponents`].
-pub type EthApiBuilderFor<N> = EthApiBuilder<N, EthRpcConverterFor<N>>;
+pub type EthApiBuilderFor<N, NetworkT = Ethereum> =
+    EthApiBuilder<N, EthRpcConverterFor<N, NetworkT>>;
 
 /// `Eth` API implementation.
 ///
@@ -146,6 +151,10 @@ where
         fee_history_cache: FeeHistoryCache<ProviderHeader<N::Provider>>,
         proof_permits: usize,
         rpc_converter: Rpc,
+        max_batch_size: usize,
+        pending_block_kind: PendingBlockKind,
+        raw_tx_forwarder: ForwardConfig,
+        send_raw_transaction_sync_timeout: Duration,
     ) -> Self {
         let inner = EthApiInner::new(
             components,
@@ -160,6 +169,10 @@ where
             proof_permits,
             rpc_converter,
             (),
+            max_batch_size,
+            pending_block_kind,
+            raw_tx_forwarder.forwarder_client(),
+            send_raw_transaction_sync_timeout,
         );
 
         Self { inner: Arc::new(inner) }
@@ -284,11 +297,24 @@ pub struct EthApiInner<N: RpcNodeCore, Rpc: RpcConvert> {
     /// Transaction broadcast channel
     raw_tx_sender: broadcast::Sender<Bytes>,
 
+    /// Raw transaction forwarder
+    raw_tx_forwarder: Option<RpcClient>,
+
     /// Converter for RPC types.
     tx_resp_builder: Rpc,
 
     /// Builder for pending block environment.
     next_env_builder: Box<dyn PendingEnvBuilder<N::Evm>>,
+
+    /// Transaction batch sender for batching tx insertions
+    tx_batch_sender:
+        mpsc::UnboundedSender<BatchTxRequest<<N::Pool as TransactionPool>::Transaction>>,
+
+    /// Configuration for pending block construction.
+    pending_block_kind: PendingBlockKind,
+
+    /// Timeout duration for `send_raw_transaction_sync` RPC method.
+    send_raw_transaction_sync_timeout: Duration,
 }
 
 impl<N, Rpc> EthApiInner<N, Rpc>
@@ -311,6 +337,10 @@ where
         proof_permits: usize,
         tx_resp_builder: Rpc,
         next_env: impl PendingEnvBuilder<N::Evm>,
+        max_batch_size: usize,
+        pending_block_kind: PendingBlockKind,
+        raw_tx_forwarder: Option<RpcClient>,
+        send_raw_transaction_sync_timeout: Duration,
     ) -> Self {
         let signers = parking_lot::RwLock::new(Default::default());
         // get the block number of the latest block
@@ -325,6 +355,11 @@ where
         );
 
         let (raw_tx_sender, _) = broadcast::channel(DEFAULT_BROADCAST_CAPACITY);
+
+        // Create tx pool insertion batcher
+        let (processor, tx_batch_sender) =
+            BatchTxProcessor::new(components.pool().clone(), max_batch_size);
+        task_spawner.spawn_critical("tx-batcher", Box::pin(processor));
 
         Self {
             components,
@@ -341,8 +376,12 @@ where
             fee_history_cache,
             blocking_task_guard: BlockingTaskGuard::new(proof_permits),
             raw_tx_sender,
+            raw_tx_forwarder,
             tx_resp_builder,
             next_env_builder: Box::new(next_env),
+            tx_batch_sender,
+            pending_block_kind,
+            send_raw_transaction_sync_timeout,
         }
     }
 }
@@ -471,6 +510,48 @@ where
     #[inline]
     pub fn broadcast_raw_transaction(&self, raw_tx: Bytes) {
         let _ = self.raw_tx_sender.send(raw_tx);
+    }
+
+    /// Returns the transaction batch sender
+    #[inline]
+    const fn tx_batch_sender(
+        &self,
+    ) -> &mpsc::UnboundedSender<BatchTxRequest<<N::Pool as TransactionPool>::Transaction>> {
+        &self.tx_batch_sender
+    }
+
+    /// Adds an _unvalidated_ transaction into the pool via the transaction batch sender.
+    #[inline]
+    pub async fn add_pool_transaction(
+        &self,
+        transaction: <N::Pool as TransactionPool>::Transaction,
+    ) -> Result<AddedTransactionOutcome, EthApiError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let request = reth_transaction_pool::BatchTxRequest::new(transaction, response_tx);
+
+        self.tx_batch_sender()
+            .send(request)
+            .map_err(|_| reth_rpc_eth_types::EthApiError::BatchTxSendError)?;
+
+        Ok(response_rx.await??)
+    }
+
+    /// Returns the pending block kind
+    #[inline]
+    pub const fn pending_block_kind(&self) -> PendingBlockKind {
+        self.pending_block_kind
+    }
+
+    /// Returns a handle to the raw transaction forwarder.
+    #[inline]
+    pub const fn raw_tx_forwarder(&self) -> Option<&RpcClient> {
+        self.raw_tx_forwarder.as_ref()
+    }
+
+    /// Returns the timeout duration for `send_raw_transaction_sync` RPC method.
+    #[inline]
+    pub const fn send_raw_transaction_sync_timeout(&self) -> Duration {
+        self.send_raw_transaction_sync_timeout
     }
 }
 

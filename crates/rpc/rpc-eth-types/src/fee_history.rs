@@ -22,6 +22,8 @@ use reth_storage_api::BlockReaderIdExt;
 use serde::{Deserialize, Serialize};
 use tracing::trace;
 
+use crate::utils::checked_blob_gas_used_ratio;
+
 use super::{EthApiError, EthStateCache};
 
 /// Contains cached fee history entries for blocks.
@@ -232,13 +234,13 @@ pub async fn fee_history_cache_new_blocks_task<St, Provider, N>(
     let mut fetch_missing_block = Fuse::terminated();
 
     loop {
-        if fetch_missing_block.is_terminated() {
-            if let Some(block_number) = missing_blocks.pop_front() {
-                trace!(target: "rpc::fee", ?block_number, "Fetching missing block for fee history cache");
-                if let Ok(Some(hash)) = provider.block_hash(block_number) {
-                    // fetch missing block
-                    fetch_missing_block = cache.get_block_and_receipts(hash).boxed().fuse();
-                }
+        if fetch_missing_block.is_terminated() &&
+            let Some(block_number) = missing_blocks.pop_front()
+        {
+            trace!(target: "rpc::fee", ?block_number, "Fetching missing block for fee history cache");
+            if let Ok(Some(hash)) = provider.block_hash(block_number) {
+                // fetch missing block
+                fetch_missing_block = cache.get_block_and_receipts(hash).boxed().fuse();
             }
         }
 
@@ -376,12 +378,13 @@ where
             base_fee_per_blob_gas: header
                 .excess_blob_gas()
                 .and_then(|excess_blob_gas| Some(blob_params?.calc_blob_fee(excess_blob_gas))),
-            blob_gas_used_ratio: block.body().blob_gas_used() as f64 /
+            blob_gas_used_ratio: checked_blob_gas_used_ratio(
+                block.body().blob_gas_used(),
                 blob_params
                     .as_ref()
                     .map(|params| params.max_blob_gas_per_block())
-                    .unwrap_or(alloy_eips::eip4844::MAX_DATA_GAS_PER_BLOCK_DENCUN)
-                    as f64,
+                    .unwrap_or(alloy_eips::eip4844::MAX_DATA_GAS_PER_BLOCK_DENCUN),
+            ),
             rewards: Vec::new(),
             blob_params,
         }
@@ -402,10 +405,11 @@ where
     /// Returns a `None` if no excess blob gas is set, no EIP-4844 support
     pub fn next_block_excess_blob_gas(&self) -> Option<u64> {
         self.header.excess_blob_gas().and_then(|excess_blob_gas| {
-            Some(
-                self.blob_params?
-                    .next_block_excess_blob_gas(excess_blob_gas, self.header.blob_gas_used()?),
-            )
+            Some(self.blob_params?.next_block_excess_blob_gas_osaka(
+                excess_blob_gas,
+                self.header.blob_gas_used()?,
+                self.header.base_fee_per_gas()?,
+            ))
         })
     }
 }

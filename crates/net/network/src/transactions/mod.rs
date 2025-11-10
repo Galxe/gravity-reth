@@ -1,5 +1,7 @@
 //! Transactions management for the p2p network.
 
+use alloy_consensus::transaction::TxHashRef;
+
 /// Aggregation on configurable parameters for [`TransactionsManager`].
 pub mod config;
 /// Default and spec'd bounds.
@@ -61,8 +63,8 @@ use reth_primitives_traits::SignedTransaction;
 use reth_tokio_util::EventStream;
 use reth_transaction_pool::{
     error::{PoolError, PoolResult},
-    GetPooledTransactionLimit, PoolTransaction, PropagateKind, PropagatedTransactions,
-    TransactionPool, ValidPoolTransaction,
+    AddedTransactionOutcome, GetPooledTransactionLimit, PoolTransaction, PropagateKind,
+    PropagatedTransactions, TransactionPool, ValidPoolTransaction,
 };
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
@@ -81,7 +83,8 @@ use tracing::{debug, trace};
 /// The future for importing transactions into the pool.
 ///
 /// Resolves with the result of each transaction import.
-pub type PoolImportFuture = Pin<Box<dyn Future<Output = Vec<PoolResult<TxHash>>> + Send + 'static>>;
+pub type PoolImportFuture =
+    Pin<Box<dyn Future<Output = Vec<PoolResult<AddedTransactionOutcome>>> + Send + 'static>>;
 
 /// Api to interact with [`TransactionsManager`] task.
 ///
@@ -561,10 +564,10 @@ impl<Pool: TransactionPool, N: NetworkPrimitives, PBundle: TransactionPolicies>
     TransactionsManager<Pool, N, PBundle>
 {
     /// Processes a batch import results.
-    fn on_batch_import_result(&mut self, batch_results: Vec<PoolResult<TxHash>>) {
+    fn on_batch_import_result(&mut self, batch_results: Vec<PoolResult<AddedTransactionOutcome>>) {
         for res in batch_results {
             match res {
-                Ok(hash) => {
+                Ok(AddedTransactionOutcome { hash, .. }) => {
                     self.on_good_import(hash);
                 }
                 Err(err) => {
@@ -694,12 +697,11 @@ impl<Pool: TransactionPool, N: NetworkPrimitives, PBundle: TransactionPolicies>
                 }
             };
 
-            if is_eth68_message {
-                if let Some((actual_ty_byte, _)) = *metadata_ref_mut {
-                    if let Ok(parsed_tx_type) = TxType::try_from(actual_ty_byte) {
-                        tx_types_counter.increase_by_tx_type(parsed_tx_type);
-                    }
-                }
+            if is_eth68_message &&
+                let Some((actual_ty_byte, _)) = *metadata_ref_mut &&
+                let Ok(parsed_tx_type) = TxType::try_from(actual_ty_byte)
+            {
+                tx_types_counter.increase_by_tx_type(parsed_tx_type);
             }
 
             let decision = self
@@ -756,7 +758,7 @@ impl<Pool: TransactionPool, N: NetworkPrimitives, PBundle: TransactionPolicies>
 
         trace!(target: "net::tx::propagation",
             peer_id=format!("{peer_id:#}"),
-            hashes_len=valid_announcement_data.iter().count(),
+            hashes_len=valid_announcement_data.len(),
             hashes=?valid_announcement_data.keys().collect::<Vec<_>>(),
             msg_version=%valid_announcement_data.msg_version(),
             client_version=%client,
@@ -1106,6 +1108,10 @@ where
     /// This fetches all transaction from the pool, including the 4844 blob transactions but
     /// __without__ their sidecar, because 4844 transactions are only ever announced as hashes.
     fn propagate_all(&mut self, hashes: Vec<TxHash>) {
+        if self.peers.is_empty() {
+            // nothing to propagate
+            return
+        }
         let propagated = self.propagate_transactions(
             self.pool.get_all(hashes).into_iter().map(PropagateTransaction::pool_tx).collect(),
             PropagationMode::Basic,

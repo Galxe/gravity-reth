@@ -3,7 +3,7 @@ use alloy_primitives::{Address, B256, U256};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx, Database};
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
-    PersistBlockCache, ProviderError, ProviderResult, StateCommitmentProvider, StateProviderBox,
+    PersistBlockCache, ProviderError, ProviderResult, StateProviderBox,
     PERSIST_BLOCK_CACHE,
 };
 use reth_revm::{
@@ -26,7 +26,6 @@ pub struct BlockViewStorage<Client> {
 impl<Client> BlockViewStorage<Client>
 where
     Client: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
-        + StateCommitmentProvider
         + StateProviderFactory
         + Clone
         + Send
@@ -42,7 +41,6 @@ where
 impl<Client> GravityStorage for BlockViewStorage<Client>
 where
     Client: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
-        + StateCommitmentProvider
         + StateProviderFactory
         + Clone
         + Send

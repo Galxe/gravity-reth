@@ -30,6 +30,11 @@ EF_TESTS_TAG := v17.0
 EF_TESTS_URL := https://github.com/ethereum/tests/archive/refs/tags/$(EF_TESTS_TAG).tar.gz
 EF_TESTS_DIR := ./testing/ef-tests/ethereum-tests
 
+# The release tag of https://github.com/ethereum/execution-spec-tests to use for EEST tests
+EEST_TESTS_TAG := v4.5.0
+EEST_TESTS_URL := https://github.com/ethereum/execution-spec-tests/releases/download/$(EEST_TESTS_TAG)/fixtures_stable.tar.gz
+EEST_TESTS_DIR := ./testing/ef-tests/execution-spec-tests
+
 # The docker image name
 DOCKER_IMAGE_NAME ?= ghcr.io/paradigmxyz/reth
 
@@ -42,14 +47,14 @@ help: ## Display this help.
 ##@ Build
 
 .PHONY: install
-install: ## Build and install the reth binary under `~/.cargo/bin`.
+install: ## Build and install the reth binary under `$(CARGO_HOME)/bin`.
 	cargo install --path bin/reth --bin reth --force --locked \
 		--features "$(FEATURES)" \
 		--profile "$(PROFILE)" \
 		$(CARGO_INSTALL_EXTRA_FLAGS)
 
 .PHONY: install-op
-install-op: ## Build and install the op-reth binary under `~/.cargo/bin`.
+install-op: ## Build and install the op-reth binary under `$(CARGO_HOME)/bin`.
 	cargo install --path crates/optimism/bin --bin op-reth --force --locked \
 		--features "$(FEATURES)" \
 		--profile "$(PROFILE)" \
@@ -202,9 +207,30 @@ $(EF_TESTS_DIR):
 	tar -xzf ethereum-tests.tar.gz --strip-components=1 -C $(EF_TESTS_DIR)
 	rm ethereum-tests.tar.gz
 
+# Downloads and unpacks EEST tests in the `$(EEST_TESTS_DIR)` directory.
+#
+# Requires `wget` and `tar`
+$(EEST_TESTS_DIR):
+	mkdir $(EEST_TESTS_DIR)
+	wget $(EEST_TESTS_URL) -O execution-spec-tests.tar.gz
+	tar -xzf execution-spec-tests.tar.gz --strip-components=1 -C $(EEST_TESTS_DIR)
+	rm execution-spec-tests.tar.gz
+
 .PHONY: ef-tests
-ef-tests: $(EF_TESTS_DIR) ## Runs Ethereum Foundation tests.
-	cargo nextest run -p ef-tests --features ef-tests
+ef-tests: $(EF_TESTS_DIR) $(EEST_TESTS_DIR) ## Runs Legacy and EEST tests.
+	cargo nextest run -p ef-tests --release --features ef-tests
+
+##@ reth-bench
+
+.PHONY: reth-bench
+reth-bench: ## Build the reth-bench binary into the `target` directory.
+	cargo build --manifest-path bin/reth-bench/Cargo.toml --features "$(FEATURES)" --profile "$(PROFILE)"
+
+.PHONY: install-reth-bench
+install-reth-bench: ## Build and install the reth binary under `$(CARGO_HOME)/bin`.
+	cargo install --path bin/reth-bench --bin reth-bench --force --locked \
+		--features "$(FEATURES)" \
+		--profile "$(PROFILE)"
 
 ##@ reth-bench
 
@@ -420,7 +446,7 @@ lint-typos: ensure-typos
 
 ensure-typos:
 	@if ! command -v typos &> /dev/null; then \
-		echo "typos not found. Please install it by running the command `cargo install typos-cli` or refer to the following link for more information: https://github.com/crate-ci/typos" \
+		echo "typos not found. Please install it by running the command 'cargo install typos-cli' or refer to the following link for more information: https://github.com/crate-ci/typos"; \
 		exit 1; \
     fi
 
@@ -439,7 +465,7 @@ lint-toml: ensure-dprint
 
 ensure-dprint:
 	@if ! command -v dprint &> /dev/null; then \
-		echo "dprint not found. Please install it by running the command `cargo install --locked dprint` or refer to the following link for more information: https://github.com/dprint/dprint" \
+		echo "dprint not found. Please install it by running the command 'cargo install --locked dprint' or refer to the following link for more information: https://github.com/dprint/dprint"; \
 		exit 1; \
     fi
 

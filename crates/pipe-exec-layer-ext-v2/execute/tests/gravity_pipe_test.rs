@@ -25,7 +25,7 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
-use revm_primitives::{address, hex};
+use revm_primitives::hex;
 use std::{
     collections::BTreeMap,
     sync::Arc,

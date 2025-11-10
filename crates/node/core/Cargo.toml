@@ -75,8 +75,6 @@ proptest.workspace = true
 tokio.workspace = true
 
 [features]
-config-from-env = ["gravity-primitives/config-from-env"]
-
 # Features for vergen to generate correct env vars
 jemalloc = ["reth-cli-util/jemalloc"]
 asm-keccak = ["alloy-primitives/asm-keccak"]

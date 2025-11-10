@@ -23,6 +23,7 @@ use reth_libmdbx::{
 use reth_storage_errors::db::LogLevel;
 use reth_tracing::tracing::error;
 use std::{
+    collections::HashMap,
     ops::{Deref, Range},
     path::Path,
     sync::Arc,
@@ -104,6 +105,9 @@ pub struct DatabaseArguments {
     /// Sync mode for database commits. Controls the durability vs performance trade-off.
     /// If [None], the default value (Durable) is used.
     sync_mode: Option<SyncMode>,
+    /// MDBX allows up to 32767 readers (`MDBX_READERS_LIMIT`). This arg is to configure the max
+    /// readers.
+    max_readers: Option<u64>,
 }
 
 impl Default for DatabaseArguments {
@@ -118,7 +122,7 @@ impl DatabaseArguments {
         Self {
             client_version,
             geometry: Geometry {
-                size: Some(0..(4 * TERABYTE)),
+                size: Some(0..(8 * TERABYTE)),
                 growth_step: Some(4 * GIGABYTE as isize),
                 shrink_threshold: Some(0),
                 page_size: Some(PageSize::Set(default_page_size())),
@@ -127,6 +131,7 @@ impl DatabaseArguments {
             max_read_transaction_duration: None,
             exclusive: None,
             sync_mode: None,
+            max_readers: None,
         }
     }
 
@@ -181,9 +186,9 @@ impl DatabaseArguments {
         self
     }
 
-    /// Set the page size for database.
-    pub const fn with_page_size(mut self, page_size: Option<PageSize>) -> Self {
-        self.geometry.page_size = page_size;
+    /// Set `max_readers` flag.
+    pub const fn with_max_readers(mut self, max_readers: Option<u64>) -> Self {
+        self.max_readers = max_readers;
         self
     }
 
@@ -198,6 +203,12 @@ impl DatabaseArguments {
 pub struct DatabaseEnv {
     /// Libmdbx-sys environment.
     inner: Environment,
+    /// Opened DBIs for reuse.
+    /// Important: Do not manually close these DBIs, like via `mdbx_dbi_close`.
+    /// More generally, do not dynamically create, re-open, or drop tables at
+    /// runtime. It's better to perform table creation and migration only once
+    /// at startup.
+    dbis: Arc<HashMap<&'static str, ffi::MDBX_dbi>>,
     /// Cache for metric handles. If `None`, metrics are not recorded.
     metrics: Option<Arc<DatabaseEnvMetrics>>,
     /// Write lock for when dealing with a read-write environment.
@@ -209,12 +220,13 @@ impl Database for DatabaseEnv {
     type TXMut = tx::Tx<RW>;
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
-        ParallelTxRO::try_new(self.inner.clone(), self.metrics.clone())
+        ParallelTxRO::try_new(self.inner.clone(), self.dbis.clone(), self.metrics.clone())
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
-        Tx::new_with_metrics(
+        Tx::new(
             self.inner.begin_rw_txn().map_err(|e| DatabaseError::InitTx(e.into()))?,
+            self.dbis.clone(),
             self.metrics.clone(),
         )
         .map_err(|e| DatabaseError::InitTx(e.into()))
@@ -389,7 +401,7 @@ impl DatabaseEnv {
             ..Default::default()
         });
         // Configure more readers
-        inner_env.set_max_readers(DEFAULT_MAX_READERS);
+        inner_env.set_max_readers(args.max_readers.unwrap_or(DEFAULT_MAX_READERS));
         // This parameter sets the maximum size of the "reclaimed list", and the unit of measurement
         // is "pages". Reclaimed list is the list of freed pages that's populated during the
         // lifetime of DB transaction, and through which MDBX searches when it needs to insert new
@@ -449,6 +461,7 @@ impl DatabaseEnv {
 
         let env = Self {
             inner: inner_env.open(path).map_err(|e| DatabaseError::Open(e.into()))?,
+            dbis: Arc::default(),
             metrics: None,
             _lock_file,
         };
@@ -463,25 +476,60 @@ impl DatabaseEnv {
     }
 
     /// Creates all the tables defined in [`Tables`], if necessary.
-    pub fn create_tables(&self) -> Result<(), DatabaseError> {
-        self.create_tables_for::<Tables>()
+    ///
+    /// This keeps tracks of the created table handles and stores them for better efficiency.
+    pub fn create_tables(&mut self) -> Result<(), DatabaseError> {
+        self.create_and_track_tables_for::<Tables>()
     }
 
     /// Creates all the tables defined in the given [`TableSet`], if necessary.
-    pub fn create_tables_for<TS: TableSet>(&self) -> Result<(), DatabaseError> {
+    ///
+    /// This keeps tracks of the created table handles and stores them for better efficiency.
+    pub fn create_and_track_tables_for<TS: TableSet>(&mut self) -> Result<(), DatabaseError> {
+        let handles = self._create_tables::<TS>()?;
+        // Note: This is okay because self has mutable access here and `DatabaseEnv` must be Arc'ed
+        // before it can be shared.
+        let dbis = Arc::make_mut(&mut self.dbis);
+        dbis.extend(handles);
+
+        Ok(())
+    }
+
+    /// Creates all the tables defined in [`Tables`], if necessary.
+    ///
+    /// If this type is unique the created handle for the tables will be updated.
+    ///
+    /// This is recommended to be called during initialization to create and track additional tables
+    /// after the default [`Self::create_tables`] are created.
+    pub fn create_tables_for<TS: TableSet>(self: &mut Arc<Self>) -> Result<(), DatabaseError> {
+        let handles = self._create_tables::<TS>()?;
+        if let Some(db) = Arc::get_mut(self) {
+            // Note: The db is unique and the dbis as well, and they can also be cloned.
+            let dbis = Arc::make_mut(&mut db.dbis);
+            dbis.extend(handles);
+        }
+        Ok(())
+    }
+
+    /// Creates the tables and returns the identifiers of the tables.
+    fn _create_tables<TS: TableSet>(
+        &self,
+    ) -> Result<Vec<(&'static str, ffi::MDBX_dbi)>, DatabaseError> {
+        let mut handles = Vec::new();
         let tx = self.inner.begin_rw_txn().map_err(|e| DatabaseError::InitTx(e.into()))?;
 
         for table in TS::tables() {
             let flags =
                 if table.is_dupsort() { DatabaseFlags::DUP_SORT } else { DatabaseFlags::default() };
 
-            tx.create_db(Some(table.name()), flags)
+            let db = tx
+                .create_db(Some(table.name()), flags)
                 .map_err(|e| DatabaseError::CreateTable(e.into()))?;
+            handles.push((table.name(), db.dbi()));
         }
 
         tx.commit().map_err(|e| DatabaseError::Commit(e.into()))?;
-
-        Ok(())
+        Ok(handles)
     }
 
     /// Records version that accesses the database with write privileges.
@@ -547,8 +595,9 @@ mod tests {
 
     /// Create database for testing with specified path
     fn create_test_db_with_path(kind: DatabaseEnvKind, path: &Path) -> DatabaseEnv {
-        let env = DatabaseEnv::open(path, kind, DatabaseArguments::new(ClientVersion::default()))
-            .expect(ERROR_DB_CREATION);
+        let mut env =
+            DatabaseEnv::open(path, kind, DatabaseArguments::new(ClientVersion::default()))
+                .expect(ERROR_DB_CREATION);
         env.create_tables().expect(ERROR_TABLE_CREATION);
         env
     }

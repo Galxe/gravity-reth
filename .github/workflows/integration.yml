@@ -32,7 +32,7 @@ jobs:
         network: ["ethereum"]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Geth
@@ -87,7 +87,7 @@ jobs:
     if: false # FIXME: remove this line to enable the era1 file integration tests job after fixing the issues with the test suite.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest

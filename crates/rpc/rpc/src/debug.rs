@@ -1,4 +1,7 @@
-use alloy_consensus::{transaction::SignerRecoverable, BlockHeader};
+use alloy_consensus::{
+    transaction::{SignerRecoverable, TxHashRef},
+    BlockHeader,
+};
 use alloy_eips::{eip2718::Encodable2718, BlockId, BlockNumberOrTag};
 use alloy_genesis::ChainConfig;
 use alloy_primitives::{uint, Address, Bytes, B256};
@@ -15,10 +18,9 @@ use alloy_rpc_types_trace::geth::{
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_errors::RethError;
 use reth_evm::{execute::Executor, ConfigureEvm, EvmEnvFor, TxEnvFor};
-use reth_primitives_traits::{
-    Block as _, BlockBody, ReceiptWithBloom, RecoveredBlock, SignedTransaction,
-};
+use reth_primitives_traits::{Block as _, BlockBody, ReceiptWithBloom, RecoveredBlock};
 use reth_revm::{
     database::StateProviderDatabase,
     db::{CacheDB, State},
@@ -150,7 +152,12 @@ where
             .map_err(BlockError::RlpDecodeRawBlock)
             .map_err(Eth::Error::from_eth_err)?;
 
-        let evm_env = self.eth_api().evm_config().evm_env(block.header());
+        let evm_env = self
+            .eth_api()
+            .evm_config()
+            .evm_env(block.header())
+            .map_err(RethError::other)
+            .map_err(Eth::Error::from_eth_err)?;
 
         // Depending on EIP-2 we need to recover the transactions differently
         let senders =
@@ -269,8 +276,9 @@ where
         opts: GethDebugTracingCallOptions,
     ) -> Result<GethTrace, Eth::Error> {
         let at = block_id.unwrap_or_default();
-        let GethDebugTracingCallOptions { tracing_options, state_overrides, block_overrides } =
-            opts;
+        let GethDebugTracingCallOptions {
+            tracing_options, state_overrides, block_overrides, ..
+        } = opts;
         let overrides = EvmOverrides::new(state_overrides, block_overrides.map(Box::new));
         let GethDebugTracingOptions { config, tracer, tracer_config, .. } = tracing_options;
 
@@ -302,10 +310,11 @@ where
                         let frame = self
                             .eth_api()
                             .spawn_with_call_at(call, at, overrides, move |db, evm_env, tx_env| {
-                                let (res, (_, tx_env)) =
+                                let gas_limit = tx_env.gas_limit();
+                                let res =
                                     this.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
                                 let frame = inspector
-                                    .with_transaction_gas_limit(tx_env.gas_limit())
+                                    .with_transaction_gas_limit(gas_limit)
                                     .into_geth_builder()
                                     .geth_call_traces(call_config, res.result.gas_used());
                                 Ok(frame.into())
@@ -328,14 +337,15 @@ where
                                 // see <https://github.com/rust-lang/rust/issues/100013>
                                 let db = db.0;
 
-                                let (res, (_, tx_env)) = this.eth_api().inspect(
+                                let gas_limit = tx_env.gas_limit();
+                                let res = this.eth_api().inspect(
                                     &mut *db,
                                     evm_env,
                                     tx_env,
                                     &mut inspector,
                                 )?;
                                 let frame = inspector
-                                    .with_transaction_gas_limit(tx_env.gas_limit())
+                                    .with_transaction_gas_limit(gas_limit)
                                     .into_geth_builder()
                                     .geth_prestate_traces(&res, &prestate_config, db)
                                     .map_err(Eth::Error::from_eth_err)?;
@@ -369,7 +379,7 @@ where
                                     index: None,
                                 };
 
-                                let (res, _) = this.eth_api().inspect(
+                                let res = this.eth_api().inspect(
                                     &mut *db,
                                     evm_env,
                                     tx_env,
@@ -396,11 +406,11 @@ where
                             .inner
                             .eth_api
                             .spawn_with_call_at(call, at, overrides, move |db, evm_env, tx_env| {
-                                let (_res, (_, tx_env)) =
-                                    this.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
+                                let gas_limit = tx_env.gas_limit();
+                                this.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
                                 let tx_info = TransactionInfo::default();
                                 let frame: FlatCallFrame = inspector
-                                    .with_transaction_gas_limit(tx_env.gas_limit())
+                                    .with_transaction_gas_limit(gas_limit)
                                     .into_parity_builder()
                                     .into_localized_transaction_traces(tx_info);
                                 Ok(frame)
@@ -430,7 +440,7 @@ where
                             let mut inspector =
                                 revm_inspectors::tracing::js::JsInspector::new(code, config)
                                     .map_err(Eth::Error::from_eth_err)?;
-                            let (res, _) = this.eth_api().inspect(
+                            let res = this.eth_api().inspect(
                                 &mut *db,
                                 evm_env.clone(),
                                 tx_env.clone(),
@@ -460,9 +470,9 @@ where
         let (res, tx_gas_limit, inspector) = self
             .eth_api()
             .spawn_with_call_at(call, at, overrides, move |db, evm_env, tx_env| {
-                let (res, (_, tx_env)) =
-                    this.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
-                Ok((res, tx_env.gas_limit(), inspector))
+                let gas_limit = tx_env.gas_limit();
+                let res = this.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
+                Ok((res, gas_limit, inspector))
             })
             .await?;
         let gas_used = res.result.gas_used();
@@ -635,12 +645,12 @@ where
             .eth_api()
             .spawn_with_state_at_block(block.parent_hash().into(), move |state_provider| {
                 let db = StateProviderDatabase::new(&state_provider);
-                let block_executor = this.eth_api().evm_config().batch_executor(db);
+                let block_executor = this.eth_api().evm_config().executor(db);
 
                 let mut witness_record = ExecutionWitnessRecord::default();
 
                 let _ = block_executor
-                    .execute_with_state_closure(&(*block).clone(), |statedb: &State<_>| {
+                    .execute_with_state_closure(&block, |statedb: &State<_>| {
                         witness_record.record_executed_state(statedb);
                     })
                     .map_err(|err| EthApiError::Internal(err.into()))?;
@@ -668,7 +678,6 @@ where
         };
 
         let range = smallest..block_number;
-        // TODO: Check if headers_range errors when one of the headers in the range is missing
         exec_witness.headers = self
             .provider()
             .headers_range(range)
@@ -742,8 +751,7 @@ where
                 GethDebugTracerType::BuiltInTracer(tracer) => match tracer {
                     GethDebugBuiltInTracerType::FourByteTracer => {
                         let mut inspector = FourByteInspector::default();
-                        let (res, _) =
-                            self.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
+                        let res = self.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
                         return Ok((FourByteFrame::from(&inspector).into(), res.state))
                     }
                     GethDebugBuiltInTracerType::CallTracer => {
@@ -758,10 +766,10 @@ where
                             ))
                         });
 
-                        let (res, (_, tx_env)) =
-                            self.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
+                        let gas_limit = tx_env.gas_limit();
+                        let res = self.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
 
-                        inspector.set_transaction_gas_limit(tx_env.gas_limit());
+                        inspector.set_transaction_gas_limit(gas_limit);
 
                         let frame = inspector
                             .geth_builder()
@@ -780,10 +788,11 @@ where
                                 TracingInspectorConfig::from_geth_prestate_config(&prestate_config),
                             )
                         });
-                        let (res, (_, tx_env)) =
+                        let gas_limit = tx_env.gas_limit();
+                        let res =
                             self.eth_api().inspect(&mut *db, evm_env, tx_env, &mut inspector)?;
 
-                        inspector.set_transaction_gas_limit(tx_env.gas_limit());
+                        inspector.set_transaction_gas_limit(gas_limit);
                         let frame = inspector
                             .geth_builder()
                             .geth_prestate_traces(&res, &prestate_config, db)
@@ -803,7 +812,7 @@ where
                         let mut inspector = MuxInspector::try_from_config(mux_config)
                             .map_err(Eth::Error::from_eth_err)?;
 
-                        let (res, _) =
+                        let res =
                             self.eth_api().inspect(&mut *db, evm_env, tx_env, &mut inspector)?;
                         let frame = inspector
                             .try_into_mux_frame(&res, db, tx_info)
@@ -820,10 +829,10 @@ where
                             TracingInspectorConfig::from_flat_call_config(&flat_call_config),
                         );
 
-                        let (res, (_, tx_env)) =
-                            self.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
+                        let gas_limit = tx_env.gas_limit();
+                        let res = self.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
                         let frame: FlatCallFrame = inspector
-                            .with_transaction_gas_limit(tx_env.gas_limit())
+                            .with_transaction_gas_limit(gas_limit)
                             .into_parity_builder()
                             .into_localized_transaction_traces(tx_info);
 
@@ -844,8 +853,12 @@ where
                             transaction_context.unwrap_or_default(),
                         )
                         .map_err(Eth::Error::from_eth_err)?;
-                    let (res, (evm_env, tx_env)) =
-                        self.eth_api().inspect(&mut *db, evm_env, tx_env, &mut inspector)?;
+                    let res = self.eth_api().inspect(
+                        &mut *db,
+                        evm_env.clone(),
+                        tx_env.clone(),
+                        &mut inspector,
+                    )?;
 
                     let state = res.state.clone();
                     let result = inspector
@@ -866,10 +879,11 @@ where
             let inspector_config = TracingInspectorConfig::from_geth_config(config);
             TracingInspector::new(inspector_config)
         });
-        let (res, (_, tx_env)) = self.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
+        let gas_limit = tx_env.gas_limit();
+        let res = self.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
         let gas_used = res.result.gas_used();
         let return_value = res.result.into_output().unwrap_or_default();
-        inspector.set_transaction_gas_limit(tx_env.gas_limit());
+        inspector.set_transaction_gas_limit(gas_limit);
         let frame = inspector.geth_builder().geth_traces(gas_used, return_value, *config);
 
         Ok((frame.into(), res.state))

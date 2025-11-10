@@ -1,7 +1,7 @@
 //! Engine tree configuration.
 
 /// Triggers persistence when the number of canonical blocks in memory exceeds this threshold.
-pub const DEFAULT_PERSISTENCE_THRESHOLD: u64 = 0;
+pub const DEFAULT_PERSISTENCE_THRESHOLD: u64 = 2;
 
 /// How close to the canonical head we persist blocks.
 pub const DEFAULT_MEMORY_BLOCK_BUFFER_TARGET: u64 = 0;
@@ -65,8 +65,8 @@ pub struct TreeConfig {
     always_compare_trie_updates: bool,
     /// Whether to disable cross-block caching and parallel prewarming.
     disable_caching_and_prewarming: bool,
-    /// Whether to enable the parallel sparse trie state root algorithm.
-    enable_parallel_sparse_trie: bool,
+    /// Whether to disable the parallel sparse trie state root algorithm.
+    disable_parallel_sparse_trie: bool,
     /// Whether to enable state provider metrics.
     state_provider_metrics: bool,
     /// Cross-block cache size in bytes.
@@ -95,6 +95,8 @@ pub struct TreeConfig {
     /// where immediate payload regeneration is desired despite the head not changing or moving to
     /// an ancestor.
     always_process_payload_attributes_on_canonical_head: bool,
+    /// Whether to unwind canonical header to ancestor during forkchoice updates.
+    allow_unwind_canonical_header: bool,
 }
 
 impl Default for TreeConfig {
@@ -108,7 +110,7 @@ impl Default for TreeConfig {
             legacy_state_root: false,
             always_compare_trie_updates: false,
             disable_caching_and_prewarming: false,
-            enable_parallel_sparse_trie: false,
+            disable_parallel_sparse_trie: false,
             state_provider_metrics: false,
             cross_block_cache_size: DEFAULT_CROSS_BLOCK_CACHE_SIZE,
             has_enough_parallelism: has_enough_parallelism(),
@@ -117,6 +119,7 @@ impl Default for TreeConfig {
             precompile_cache_disabled: false,
             state_root_fallback: false,
             always_process_payload_attributes_on_canonical_head: false,
+            allow_unwind_canonical_header: false,
         }
     }
 }
@@ -133,7 +136,7 @@ impl TreeConfig {
         legacy_state_root: bool,
         always_compare_trie_updates: bool,
         disable_caching_and_prewarming: bool,
-        enable_parallel_sparse_trie: bool,
+        disable_parallel_sparse_trie: bool,
         state_provider_metrics: bool,
         cross_block_cache_size: u64,
         has_enough_parallelism: bool,
@@ -142,6 +145,7 @@ impl TreeConfig {
         precompile_cache_disabled: bool,
         state_root_fallback: bool,
         always_process_payload_attributes_on_canonical_head: bool,
+        allow_unwind_canonical_header: bool,
     ) -> Self {
         Self {
             persistence_threshold,
@@ -152,7 +156,7 @@ impl TreeConfig {
             legacy_state_root,
             always_compare_trie_updates,
             disable_caching_and_prewarming,
-            enable_parallel_sparse_trie,
+            disable_parallel_sparse_trie,
             state_provider_metrics,
             cross_block_cache_size,
             has_enough_parallelism,
@@ -161,6 +165,7 @@ impl TreeConfig {
             precompile_cache_disabled,
             state_root_fallback,
             always_process_payload_attributes_on_canonical_head,
+            allow_unwind_canonical_header,
         }
     }
 
@@ -210,9 +215,9 @@ impl TreeConfig {
         self.state_provider_metrics
     }
 
-    /// Returns whether or not the parallel sparse trie is enabled.
-    pub const fn enable_parallel_sparse_trie(&self) -> bool {
-        self.enable_parallel_sparse_trie
+    /// Returns whether or not the parallel sparse trie is disabled.
+    pub const fn disable_parallel_sparse_trie(&self) -> bool {
+        self.disable_parallel_sparse_trie
     }
 
     /// Returns whether or not cross-block caching and parallel prewarming should be used.
@@ -255,6 +260,11 @@ impl TreeConfig {
     /// canonical.
     pub const fn always_process_payload_attributes_on_canonical_head(&self) -> bool {
         self.always_process_payload_attributes_on_canonical_head
+    }
+
+    /// Returns true if canonical header should be unwound to ancestor during forkchoice updates.
+    pub const fn unwind_canonical_header(&self) -> bool {
+        self.allow_unwind_canonical_header
     }
 
     /// Setter for persistence threshold.
@@ -339,12 +349,12 @@ impl TreeConfig {
         self
     }
 
-    /// Setter for using the parallel sparse trie
-    pub const fn with_enable_parallel_sparse_trie(
+    /// Setter for whether to disable the parallel sparse trie
+    pub const fn with_disable_parallel_sparse_trie(
         mut self,
-        enable_parallel_sparse_trie: bool,
+        disable_parallel_sparse_trie: bool,
     ) -> Self {
-        self.enable_parallel_sparse_trie = enable_parallel_sparse_trie;
+        self.disable_parallel_sparse_trie = disable_parallel_sparse_trie;
         self
     }
 
@@ -372,6 +382,12 @@ impl TreeConfig {
     /// Setter for whether to use state root fallback, useful for testing.
     pub const fn with_state_root_fallback(mut self, state_root_fallback: bool) -> Self {
         self.state_root_fallback = state_root_fallback;
+        self
+    }
+
+    /// Setter for whether to unwind canonical header to ancestor during forkchoice updates.
+    pub const fn with_unwind_canonical_header(mut self, unwind_canonical_header: bool) -> Self {
+        self.allow_unwind_canonical_header = unwind_canonical_header;
         self
     }
 

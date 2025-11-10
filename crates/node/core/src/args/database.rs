@@ -6,12 +6,9 @@ use crate::version::default_client_version;
 use clap::{
     builder::{PossibleValue, TypedValueParser},
     error::ErrorKind,
-    Arg, Args, Command, Error, ValueEnum,
+    Arg, Args, Command, Error,
 };
-use reth_db::{
-    mdbx::{MaxReadTransactionDuration, SyncMode},
-    ClientVersion,
-};
+use reth_db::{mdbx::MaxReadTransactionDuration, ClientVersion};
 use reth_storage_errors::db::LogLevel;
 
 /// Parameters for database configuration
@@ -34,42 +31,9 @@ pub struct DatabaseArgs {
     /// Read transaction timeout in seconds, 0 means no timeout.
     #[arg(long = "db.read-transaction-timeout")]
     pub read_transaction_timeout: Option<u64>,
-    /// Database sync mode for commits. Controls the durability vs performance trade-off.
-    #[arg(long = "db.sync-mode", default_value = "durable", value_enum)]
-    pub sync_mode: SyncModeArg,
-    /// Database page size (e.g., 4KB, 16KB)
-    #[arg(long = "db.page-size", value_parser = parse_byte_size)]
-    pub page_size: Option<usize>,
-}
-
-/// Database sync mode options
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SyncModeArg {
-    /// Default robust and durable sync mode
-    Durable,
-    /// Don't sync the meta-page after commit
-    NoMetaSync,
-    /// Don't sync anything but keep previous steady commits
-    SafeNoSync,
-    /// Don't sync anything and wipe previous steady commits
-    UtterlyNoSync,
-}
-
-impl Default for SyncModeArg {
-    fn default() -> Self {
-        Self::Durable
-    }
-}
-
-impl From<SyncModeArg> for SyncMode {
-    fn from(mode: SyncModeArg) -> Self {
-        match mode {
-            SyncModeArg::Durable => Self::Durable,
-            SyncModeArg::NoMetaSync => Self::NoMetaSync,
-            SyncModeArg::SafeNoSync => Self::SafeNoSync,
-            SyncModeArg::UtterlyNoSync => Self::UtterlyNoSync,
-        }
-    }
+    /// Maximum number of readers allowed to access the database concurrently.
+    #[arg(long = "db.max-readers")]
+    pub max_readers: Option<u64>,
 }
 
 impl DatabaseArgs {
@@ -96,8 +60,7 @@ impl DatabaseArgs {
             .with_max_read_transaction_duration(max_read_transaction_duration)
             .with_geometry_max_size(self.max_size)
             .with_growth_step(self.growth_step)
-            .with_sync_mode(Some(self.sync_mode.into()))
-            .with_page_size(self.page_size.map(reth_db::mdbx::PageSize::Set))
+            .with_max_readers(self.max_readers)
     }
 }
 

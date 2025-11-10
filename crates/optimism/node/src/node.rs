@@ -7,7 +7,7 @@ use crate::{
     OpEngineApiBuilder, OpEngineTypes,
 };
 use op_alloy_consensus::{interop::SafetyLevel, OpPooledTransaction};
-use op_alloy_rpc_types_engine::{OpExecutionData, OpPayloadAttributes};
+use op_alloy_rpc_types_engine::OpExecutionData;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, Hardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_evm::ConfigureEvm;
@@ -16,8 +16,8 @@ use reth_network::{
     PeersInfo,
 };
 use reth_node_api::{
-    AddOnsContext, EngineTypes, FullNodeComponents, KeyHasherTy, NodeAddOns, NodePrimitives,
-    PayloadAttributesBuilder, PayloadTypes, PrimitivesTy, TxTy,
+    AddOnsContext, BuildNextEnv, EngineTypes, FullNodeComponents, HeaderTy, NodeAddOns,
+    NodePrimitives, PayloadAttributesBuilder, PayloadTypes, PrimitivesTy, TxTy,
 };
 use reth_node_builder::{
     components::{
@@ -27,19 +27,20 @@ use reth_node_builder::{
     },
     node::{FullNodeTypes, NodeTypes},
     rpc::{
-        EngineApiBuilder, EngineValidatorAddOn, EngineValidatorBuilder, EthApiBuilder, Identity,
-        RethRpcAddOns, RethRpcMiddleware, RethRpcServerHandles, RpcAddOns, RpcContext, RpcHandle,
+        BasicEngineValidatorBuilder, EngineApiBuilder, EngineValidatorAddOn,
+        EngineValidatorBuilder, EthApiBuilder, Identity, PayloadValidatorBuilder, RethRpcAddOns,
+        RethRpcMiddleware, RethRpcServerHandles, RpcAddOns, RpcContext, RpcHandle,
     },
     BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
 };
 use reth_optimism_chainspec::{OpChainSpec, OpHardfork};
 use reth_optimism_consensus::OpBeaconConsensus;
-use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes, OpRethReceiptBuilder};
+use reth_optimism_evm::{OpEvmConfig, OpRethReceiptBuilder};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_payload_builder::{
     builder::OpPayloadTransactions,
     config::{OpBuilderConfig, OpDAConfig},
-    OpBuiltPayload, OpPayloadBuilderAttributes, OpPayloadPrimitives,
+    OpAttributes, OpBuiltPayload, OpPayloadPrimitives,
 };
 use reth_optimism_primitives::{DepositReceipt, OpPrimitives};
 use reth_optimism_rpc::{
@@ -62,8 +63,10 @@ use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, EthPoolTransaction, PoolPooledTx, PoolTransaction,
     TransactionPool, TransactionValidationTaskExecutor,
 };
-use reth_trie_db::MerklePatriciaTrie;
+use reth_trie_common::KeccakKeyHasher;
+use serde::de::DeserializeOwned;
 use std::{marker::PhantomData, sync::Arc};
+use url::Url;
 
 /// Marker trait for Optimism node types with standard engine, chain spec, and primitives.
 pub trait OpNodeTypes:
@@ -173,6 +176,7 @@ impl OpNode {
             .with_enable_tx_conditional(self.args.enable_tx_conditional)
             .with_min_suggested_priority_fee(self.args.min_suggested_priority_fee)
             .with_historical_rpc(self.args.historical_rpc.clone())
+            .with_flashblocks(self.args.flashblocks_url.clone())
     }
 
     /// Instantiates the [`ProviderFactoryBuilder`] for an opstack node.
@@ -228,6 +232,7 @@ where
         OpEthApiBuilder,
         OpEngineValidatorBuilder,
         OpEngineApiBuilder<OpEngineValidatorBuilder>,
+        BasicEngineValidatorBuilder<OpEngineValidatorBuilder>,
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
@@ -259,7 +264,6 @@ where
 impl NodeTypes for OpNode {
     type Primitives = OpPrimitives;
     type ChainSpec = OpChainSpec;
-    type StateCommitment = MerklePatriciaTrie;
     type Storage = OpStorage;
     type Payload = OpEngineTypes;
 }
@@ -269,11 +273,17 @@ impl NodeTypes for OpNode {
 /// This type provides optimism-specific addons to the node and exposes the RPC server and engine
 /// API.
 #[derive(Debug)]
-pub struct OpAddOns<N: FullNodeComponents, EthB: EthApiBuilder<N>, EV, EB, RpcMiddleware = Identity>
-{
+pub struct OpAddOns<
+    N: FullNodeComponents,
+    EthB: EthApiBuilder<N>,
+    PVB,
+    EB = OpEngineApiBuilder<PVB>,
+    EVB = BasicEngineValidatorBuilder<PVB>,
+    RpcMiddleware = Identity,
+> {
     /// Rpc add-ons responsible for launching the RPC servers and instantiating the RPC handlers
     /// and eth-api.
-    pub rpc_add_ons: RpcAddOns<N, EthB, EV, EB, RpcMiddleware>,
+    pub rpc_add_ons: RpcAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>,
     /// Data availability configuration for the OP builder.
     pub da_config: OpDAConfig,
     /// Sequencer client, configured to forward submitted transactions to sequencer of given OP
@@ -290,16 +300,36 @@ pub struct OpAddOns<N: FullNodeComponents, EthB: EthApiBuilder<N>, EV, EB, RpcMi
     min_suggested_priority_fee: u64,
 }
 
-impl<N> Default
-    for OpAddOns<
-        N,
-        OpEthApiBuilder,
-        OpEngineValidatorBuilder,
-        OpEngineApiBuilder<OpEngineValidatorBuilder>,
-        Identity,
-    >
+impl<N, EthB, PVB, EB, EVB, RpcMiddleware> OpAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>
 where
-    N: FullNodeComponents<Types: NodeTypes>,
+    N: FullNodeComponents,
+    EthB: EthApiBuilder<N>,
+{
+    /// Creates a new instance from components.
+    pub const fn new(
+        rpc_add_ons: RpcAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>,
+        da_config: OpDAConfig,
+        sequencer_url: Option<String>,
+        sequencer_headers: Vec<String>,
+        historical_rpc: Option<String>,
+        enable_tx_conditional: bool,
+        min_suggested_priority_fee: u64,
+    ) -> Self {
+        Self {
+            rpc_add_ons,
+            da_config,
+            sequencer_url,
+            sequencer_headers,
+            historical_rpc,
+            enable_tx_conditional,
+            min_suggested_priority_fee,
+        }
+    }
+}
+
+impl<N> Default for OpAddOns<N, OpEthApiBuilder, OpEngineValidatorBuilder>
+where
+    N: FullNodeComponents<Types: OpNodeTypes>,
     OpEthApiBuilder: EthApiBuilder<N>,
 {
     fn default() -> Self {
@@ -316,7 +346,7 @@ impl<N, NetworkT, RpcMiddleware>
         RpcMiddleware,
     >
 where
-    N: FullNodeComponents<Types: NodeTypes>,
+    N: FullNodeComponents<Types: OpNodeTypes>,
     OpEthApiBuilder<NetworkT>: EthApiBuilder<N>,
 {
     /// Build a [`OpAddOns`] using [`OpAddOnsBuilder`].
@@ -325,7 +355,7 @@ where
     }
 }
 
-impl<N, EthB, EV, EB, RpcMiddleware> OpAddOns<N, EthB, EV, EB, RpcMiddleware>
+impl<N, EthB, PVB, EB, EVB, RpcMiddleware> OpAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>
 where
     N: FullNodeComponents,
     EthB: EthApiBuilder<N>,
@@ -334,7 +364,7 @@ where
     pub fn with_engine_api<T>(
         self,
         engine_api_builder: T,
-    ) -> OpAddOns<N, EthB, EV, T, RpcMiddleware> {
+    ) -> OpAddOns<N, EthB, PVB, T, EVB, RpcMiddleware> {
         let Self {
             rpc_add_ons,
             da_config,
@@ -343,23 +373,24 @@ where
             historical_rpc,
             enable_tx_conditional,
             min_suggested_priority_fee,
+            ..
         } = self;
-        OpAddOns {
-            rpc_add_ons: rpc_add_ons.with_engine_api(engine_api_builder),
+        OpAddOns::new(
+            rpc_add_ons.with_engine_api(engine_api_builder),
             da_config,
             sequencer_url,
             sequencer_headers,
-            enable_tx_conditional,
             historical_rpc,
+            enable_tx_conditional,
             min_suggested_priority_fee,
-        }
+        )
     }
 
-    /// Maps the [`EngineValidatorBuilder`] builder type.
-    pub fn with_engine_validator<T>(
+    /// Maps the [`PayloadValidatorBuilder`] builder type.
+    pub fn with_payload_validator<T>(
         self,
-        engine_validator_builder: T,
-    ) -> OpAddOns<N, EthB, T, EB, RpcMiddleware> {
+        payload_validator_builder: T,
+    ) -> OpAddOns<N, EthB, T, EB, EVB, RpcMiddleware> {
         let Self {
             rpc_add_ons,
             da_config,
@@ -368,16 +399,17 @@ where
             enable_tx_conditional,
             min_suggested_priority_fee,
             historical_rpc,
+            ..
         } = self;
-        OpAddOns {
-            rpc_add_ons: rpc_add_ons.with_engine_validator(engine_validator_builder),
+        OpAddOns::new(
+            rpc_add_ons.with_payload_validator(payload_validator_builder),
             da_config,
             sequencer_url,
             sequencer_headers,
+            historical_rpc,
             enable_tx_conditional,
             min_suggested_priority_fee,
-            historical_rpc,
-        }
+        )
     }
 
     /// Sets the RPC middleware stack for processing RPC requests.
@@ -387,7 +419,7 @@ where
     /// layer, allowing you to intercept, modify, or enhance RPC request processing.
     ///
     /// See also [`RpcAddOns::with_rpc_middleware`].
-    pub fn with_rpc_middleware<T>(self, rpc_middleware: T) -> OpAddOns<N, EthB, EV, EB, T> {
+    pub fn with_rpc_middleware<T>(self, rpc_middleware: T) -> OpAddOns<N, EthB, PVB, EB, EVB, T> {
         let Self {
             rpc_add_ons,
             da_config,
@@ -396,16 +428,17 @@ where
             enable_tx_conditional,
             min_suggested_priority_fee,
             historical_rpc,
+            ..
         } = self;
-        OpAddOns {
-            rpc_add_ons: rpc_add_ons.with_rpc_middleware(rpc_middleware),
+        OpAddOns::new(
+            rpc_add_ons.with_rpc_middleware(rpc_middleware),
             da_config,
             sequencer_url,
             sequencer_headers,
+            historical_rpc,
             enable_tx_conditional,
             min_suggested_priority_fee,
-            historical_rpc,
-        }
+        )
     }
 
     /// Sets the hook that is run once the rpc server is started.
@@ -429,17 +462,30 @@ where
     }
 }
 
-impl<N, EthB, EV, EB, RpcMiddleware> NodeAddOns<N> for OpAddOns<N, EthB, EV, EB, RpcMiddleware>
+impl<N, EthB, PVB, EB, EVB, Attrs, RpcMiddleware> NodeAddOns<N>
+    for OpAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>
 where
     N: FullNodeComponents<
-        Types: NodeTypes<ChainSpec: OpHardforks, Primitives: OpPayloadPrimitives>,
-        Evm: ConfigureEvm<NextBlockEnvCtx = OpNextBlockEnvAttributes>,
+        Types: NodeTypes<
+            ChainSpec: OpHardforks,
+            Primitives: OpPayloadPrimitives,
+            Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
+        >,
+        Evm: ConfigureEvm<
+            NextBlockEnvCtx: BuildNextEnv<
+                Attrs,
+                HeaderTy<N::Types>,
+                <N::Types as NodeTypes>::ChainSpec,
+            >,
+        >,
         Pool: TransactionPool<Transaction: OpPooledTx>,
     >,
     EthB: EthApiBuilder<N>,
-    EV: EngineValidatorBuilder<N>,
+    PVB: Send,
     EB: EngineApiBuilder<N>,
+    EVB: EngineValidatorBuilder<N>,
     RpcMiddleware: RethRpcMiddleware,
+    Attrs: OpAttributes<Transaction = TxTy<N::Types>, RpcPayloadAttributes: DeserializeOwned>,
 {
     type Handle = RpcHandle<N, EthB::EthApi>;
 
@@ -485,7 +531,7 @@ where
             ctx.node.evm_config().clone(),
         );
         // install additional OP specific rpc methods
-        let debug_ext = OpDebugWitnessApi::new(
+        let debug_ext = OpDebugWitnessApi::<_, _, _, Attrs>::new(
             ctx.node.provider().clone(),
             Box::new(ctx.node.task_executor().clone()),
             builder,
@@ -544,17 +590,30 @@ where
     }
 }
 
-impl<N, EthB, EV, EB, RpcMiddleware> RethRpcAddOns<N> for OpAddOns<N, EthB, EV, EB, RpcMiddleware>
+impl<N, EthB, PVB, EB, EVB, Attrs, RpcMiddleware> RethRpcAddOns<N>
+    for OpAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>
 where
     N: FullNodeComponents<
-        Types: OpFullNodeTypes,
-        Evm: ConfigureEvm<NextBlockEnvCtx = OpNextBlockEnvAttributes>,
+        Types: NodeTypes<
+            ChainSpec: OpHardforks,
+            Primitives: OpPayloadPrimitives,
+            Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
+        >,
+        Evm: ConfigureEvm<
+            NextBlockEnvCtx: BuildNextEnv<
+                Attrs,
+                HeaderTy<N::Types>,
+                <N::Types as NodeTypes>::ChainSpec,
+            >,
+        >,
     >,
     <<N as FullNodeComponents>::Pool as TransactionPool>::Transaction: OpPooledTx,
     EthB: EthApiBuilder<N>,
-    EV: EngineValidatorBuilder<N>,
+    PVB: PayloadValidatorBuilder<N>,
     EB: EngineApiBuilder<N>,
+    EVB: EngineValidatorBuilder<N>,
     RpcMiddleware: RethRpcMiddleware,
+    Attrs: OpAttributes<Transaction = TxTy<N::Types>, RpcPayloadAttributes: DeserializeOwned>,
 {
     type EthApi = EthB::EthApi;
 
@@ -563,19 +622,20 @@ where
     }
 }
 
-impl<N, NetworkT, EV, EB, RpcMiddleware> EngineValidatorAddOn<N>
-    for OpAddOns<N, OpEthApiBuilder<NetworkT>, EV, EB, RpcMiddleware>
+impl<N, EthB, PVB, EB, EVB, RpcMiddleware> EngineValidatorAddOn<N>
+    for OpAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware>
 where
-    N: FullNodeComponents<Types: OpFullNodeTypes>,
-    OpEthApiBuilder<NetworkT>: EthApiBuilder<N>,
-    EV: EngineValidatorBuilder<N> + Default,
+    N: FullNodeComponents,
+    EthB: EthApiBuilder<N>,
+    PVB: Send,
     EB: EngineApiBuilder<N>,
+    EVB: EngineValidatorBuilder<N>,
     RpcMiddleware: Send,
 {
-    type Validator = <EV as EngineValidatorBuilder<N>>::Validator;
+    type ValidatorBuilder = EVB;
 
-    async fn engine_validator(&self, ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::Validator> {
-        EV::default().build(ctx).await
+    fn engine_validator_builder(&self) -> Self::ValidatorBuilder {
+        EngineValidatorAddOn::engine_validator_builder(&self.rpc_add_ons)
     }
 }
 
@@ -600,6 +660,10 @@ pub struct OpAddOnsBuilder<NetworkT, RpcMiddleware = Identity> {
     min_suggested_priority_fee: u64,
     /// RPC middleware to use
     rpc_middleware: RpcMiddleware,
+    /// Optional tokio runtime to use for the RPC server.
+    tokio_runtime: Option<tokio::runtime::Handle>,
+    /// A URL pointing to a secure websocket service that streams out flashblocks.
+    flashblocks_url: Option<Url>,
 }
 
 impl<NetworkT> Default for OpAddOnsBuilder<NetworkT> {
@@ -613,6 +677,8 @@ impl<NetworkT> Default for OpAddOnsBuilder<NetworkT> {
             min_suggested_priority_fee: 1_000_000,
             _nt: PhantomData,
             rpc_middleware: Identity::new(),
+            tokio_runtime: None,
+            flashblocks_url: None,
         }
     }
 }
@@ -654,6 +720,14 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
         self
     }
 
+    /// Configures a custom tokio runtime for the RPC server.
+    ///
+    /// Caution: This runtime must not be created from within asynchronous context.
+    pub fn with_tokio_runtime(mut self, tokio_runtime: Option<tokio::runtime::Handle>) -> Self {
+        self.tokio_runtime = tokio_runtime;
+        self
+    }
+
     /// Configure the RPC middleware to use
     pub fn with_rpc_middleware<T>(self, rpc_middleware: T) -> OpAddOnsBuilder<NetworkT, T> {
         let Self {
@@ -663,7 +737,9 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
             da_config,
             enable_tx_conditional,
             min_suggested_priority_fee,
+            tokio_runtime,
             _nt,
+            flashblocks_url,
             ..
         } = self;
         OpAddOnsBuilder {
@@ -675,18 +751,29 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
             min_suggested_priority_fee,
             _nt,
             rpc_middleware,
+            tokio_runtime,
+            flashblocks_url,
         }
+    }
+
+    /// With a URL pointing to a flashblocks secure websocket subscription.
+    pub fn with_flashblocks(mut self, flashblocks_url: Option<Url>) -> Self {
+        self.flashblocks_url = flashblocks_url;
+        self
     }
 }
 
 impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
     /// Builds an instance of [`OpAddOns`].
-    pub fn build<N, EV, EB>(self) -> OpAddOns<N, OpEthApiBuilder<NetworkT>, EV, EB, RpcMiddleware>
+    pub fn build<N, PVB, EB, EVB>(
+        self,
+    ) -> OpAddOns<N, OpEthApiBuilder<NetworkT>, PVB, EB, EVB, RpcMiddleware>
     where
         N: FullNodeComponents<Types: NodeTypes>,
         OpEthApiBuilder<NetworkT>: EthApiBuilder<N>,
-        EV: Default,
+        PVB: PayloadValidatorBuilder<N> + Default,
         EB: Default,
+        EVB: Default,
     {
         let Self {
             sequencer_url,
@@ -696,26 +783,31 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
             min_suggested_priority_fee,
             historical_rpc,
             rpc_middleware,
+            tokio_runtime,
+            flashblocks_url,
             ..
         } = self;
 
-        OpAddOns {
-            rpc_add_ons: RpcAddOns::new(
+        OpAddOns::new(
+            RpcAddOns::new(
                 OpEthApiBuilder::default()
                     .with_sequencer(sequencer_url.clone())
                     .with_sequencer_headers(sequencer_headers.clone())
-                    .with_min_suggested_priority_fee(min_suggested_priority_fee),
-                EV::default(),
+                    .with_min_suggested_priority_fee(min_suggested_priority_fee)
+                    .with_flashblocks(flashblocks_url),
+                PVB::default(),
                 EB::default(),
+                EVB::default(),
                 rpc_middleware,
-            ),
-            da_config: da_config.unwrap_or_default(),
+            )
+            .with_tokio_runtime(tokio_runtime),
+            da_config.unwrap_or_default(),
             sequencer_url,
             sequencer_headers,
             historical_rpc,
             enable_tx_conditional,
             min_suggested_priority_fee,
-        }
+        )
     }
 }
 
@@ -865,9 +957,7 @@ where
         debug!(target: "reth::cli", "Spawned txpool maintenance task");
 
         // The Op txpool maintenance task is only spawned when interop is active
-        if ctx.chain_spec().is_interop_active_at_timestamp(ctx.head().timestamp) &&
-            self.supervisor_http == DEFAULT_SUPERVISOR_URL
-        {
+        if ctx.chain_spec().is_interop_active_at_timestamp(ctx.head().timestamp) {
             // spawn the Op txpool maintenance task
             let chain_events = ctx.provider().canonical_state_stream();
             ctx.task_executor().spawn_critical(
@@ -941,7 +1031,7 @@ impl<Txs> OpPayloadBuilder<Txs> {
     }
 }
 
-impl<Node, Pool, Txs, Evm> PayloadBuilderBuilder<Node, Pool, Evm> for OpPayloadBuilder<Txs>
+impl<Node, Pool, Txs, Evm, Attrs> PayloadBuilderBuilder<Node, Pool, Evm> for OpPayloadBuilder<Txs>
 where
     Node: FullNodeTypes<
         Provider: ChainSpecProvider<ChainSpec: OpHardforks>,
@@ -949,20 +1039,24 @@ where
             Primitives: OpPayloadPrimitives,
             Payload: PayloadTypes<
                 BuiltPayload = OpBuiltPayload<PrimitivesTy<Node::Types>>,
-                PayloadAttributes = OpPayloadAttributes,
-                PayloadBuilderAttributes = OpPayloadBuilderAttributes<TxTy<Node::Types>>,
+                PayloadBuilderAttributes = Attrs,
             >,
         >,
     >,
     Evm: ConfigureEvm<
             Primitives = PrimitivesTy<Node::Types>,
-            NextBlockEnvCtx = OpNextBlockEnvAttributes,
+            NextBlockEnvCtx: BuildNextEnv<
+                Attrs,
+                HeaderTy<Node::Types>,
+                <Node::Types as NodeTypes>::ChainSpec,
+            >,
         > + 'static,
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = TxTy<Node::Types>>> + Unpin + 'static,
     Txs: OpPayloadTransactions<Pool::Transaction>,
+    Attrs: OpAttributes<Transaction = TxTy<Node::Types>>,
 {
     type PayloadBuilder =
-        reth_optimism_payload_builder::OpPayloadBuilder<Pool, Node::Provider, Evm, Txs>;
+        reth_optimism_payload_builder::OpPayloadBuilder<Pool, Node::Provider, Evm, Txs, Attrs>;
 
     async fn build_payload_builder(
         self,
@@ -1103,9 +1197,14 @@ where
 #[non_exhaustive]
 pub struct OpEngineValidatorBuilder;
 
-impl<Node> EngineValidatorBuilder<Node> for OpEngineValidatorBuilder
+impl<Node> PayloadValidatorBuilder<Node> for OpEngineValidatorBuilder
 where
-    Node: FullNodeComponents<Types: OpNodeTypes>,
+    Node: FullNodeComponents<
+        Types: NodeTypes<
+            ChainSpec: OpHardforks,
+            Payload: PayloadTypes<ExecutionData = OpExecutionData>,
+        >,
+    >,
 {
     type Validator = OpEngineValidator<
         Node::Provider,
@@ -1114,7 +1213,7 @@ where
     >;
 
     async fn build(self, ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
-        Ok(OpEngineValidator::new::<KeyHasherTy<Node::Types>>(
+        Ok(OpEngineValidator::new::<KeccakKeyHasher>(
             ctx.config.chain.clone(),
             ctx.node.provider().clone(),
         ))

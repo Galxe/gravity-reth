@@ -5,8 +5,8 @@ use crate::{
     BlockReader, BlockReaderIdExt, BlockSource, BytecodeReader, ChangeSetReader,
     HashedPostStateProvider, HeaderProvider, NodePrimitivesProvider, PruneCheckpointReader,
     ReceiptProvider, ReceiptProviderIdExt, StageCheckpointReader, StateProofProvider,
-    StateProvider, StateProviderBox, StateProviderFactory, StateRootProvider, StorageRootProvider,
-    TransactionVariant, TransactionsProvider,
+    StateProvider, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
+    StorageRootProvider, TransactionVariant, TransactionsProvider,
 };
 
 #[cfg(feature = "db-api")]
@@ -27,6 +27,7 @@ use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, MAINNET};
 use reth_db_api::mock::{DatabaseMock, TxMock};
 use reth_db_models::{AccountBeforeTx, StoredBlockBodyIndices};
 use reth_ethereum_primitives::EthPrimitives;
+use reth_execution_types::ExecutionOutcome;
 use reth_primitives_traits::{Account, Bytecode, NodePrimitives, RecoveredBlock, SealedHeader};
 #[cfg(feature = "db-api")]
 use reth_prune_types::PruneModes;
@@ -268,7 +269,7 @@ impl<C: Send + Sync, N: NodePrimitives> TransactionsProvider for NoopProvider<C,
     }
 
     fn transaction_block(&self, _id: TxNumber) -> ProviderResult<Option<BlockNumber>> {
-        todo!()
+        Ok(None)
     }
 
     fn transactions_by_block(
@@ -477,6 +478,17 @@ impl<C: Send + Sync, N: NodePrimitives> HashedPostStateProvider for NoopProvider
     }
 }
 
+impl<C: Send + Sync, N: NodePrimitives> StateReader for NoopProvider<C, N> {
+    type Receipt = N::Receipt;
+
+    fn get_state(
+        &self,
+        _block: BlockNumber,
+    ) -> ProviderResult<Option<ExecutionOutcome<Self::Receipt>>> {
+        Ok(None)
+    }
+}
+
 impl<C: Send + Sync, N: NodePrimitives> StateProvider for NoopProvider<C, N> {
     fn storage(
         &self,
@@ -543,6 +555,10 @@ impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopP
     }
 
     fn pending_state_by_hash(&self, _block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+        Ok(Some(Box::new(self.clone())))
+    }
+
+    fn maybe_pending(&self) -> ProviderResult<Option<StateProviderBox>> {
         Ok(Some(Box::new(self.clone())))
     }
 }

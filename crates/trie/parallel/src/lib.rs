@@ -28,3 +28,7 @@ pub mod metrics;
 
 /// Parallel state root for nested trie
 pub mod nested_hash;
+
+/// Proof task manager metrics.
+#[cfg(feature = "metrics")]
+pub mod proof_task_metrics;

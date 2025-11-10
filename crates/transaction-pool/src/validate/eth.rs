@@ -9,9 +9,11 @@ use crate::{
     metrics::TxPoolValidationMetrics,
     traits::TransactionOrigin,
     validate::{ValidTransaction, ValidationTask, MAX_INIT_CODE_BYTE_SIZE},
-    EthBlobTransactionSidecar, EthPoolTransaction, LocalTransactionConfig,
-    TransactionValidationOutcome, TransactionValidationTaskExecutor, TransactionValidator,
+    Address, BlobTransactionSidecarVariant, EthBlobTransactionSidecar, EthPoolTransaction,
+    LocalTransactionConfig, TransactionValidationOutcome, TransactionValidationTaskExecutor,
+    TransactionValidator,
 };
+
 use alloy_consensus::{
     constants::{
         EIP1559_TX_TYPE_ID, EIP2930_TX_TYPE_ID, EIP4844_TX_TYPE_ID, EIP7702_TX_TYPE_ID,
@@ -23,14 +25,12 @@ use alloy_eips::{
     eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip4844::env_settings::EnvKzgSettings,
     eip7840::BlobParams,
 };
-use gravity_storage::block_view_storage::BlockViewProvider;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_primitives_traits::{
-    constants::MAX_TX_GAS_LIMIT_OSAKA, transaction::error::InvalidTransactionError, Block,
+    constants::MAX_TX_GAS_LIMIT_OSAKA, transaction::error::InvalidTransactionError, Account, Block,
     GotExpected, SealedBlock,
 };
-use reth_revm::{database::StateProviderDatabase, DatabaseRef};
-use reth_storage_api::{StateProviderFactory, PERSIST_BLOCK_CACHE};
+use reth_storage_api::{AccountInfoReader, BytecodeReader, StateProviderFactory};
 use reth_tasks::TaskSpawner;
 use std::{
     marker::PhantomData,
@@ -41,155 +41,6 @@ use std::{
     time::Instant,
 };
 use tokio::sync::Mutex;
-
-/// Validator for Ethereum transactions.
-/// It is a [`TransactionValidator`] implementation that validates ethereum transaction.
-#[derive(Debug, Clone)]
-pub struct EthTransactionValidator<Client, T> {
-    /// The type that performs the actual validation.
-    inner: Arc<EthTransactionValidatorInner<Client, T>>,
-}
-
-impl<Client, Tx> EthTransactionValidator<Client, Tx> {
-    /// Returns the configured chain spec
-    pub fn chain_spec(&self) -> Arc<Client::ChainSpec>
-    where
-        Client: ChainSpecProvider,
-    {
-        self.client().chain_spec()
-    }
-
-    /// Returns the configured client
-    pub fn client(&self) -> &Client {
-        &self.inner.client
-    }
-
-    /// Returns the tracks activated forks relevant for transaction validation
-    pub fn fork_tracker(&self) -> &ForkTracker {
-        &self.inner.fork_tracker
-    }
-
-    /// Returns if there are EIP-2718 type transactions
-    pub fn eip2718(&self) -> bool {
-        self.inner.eip2718
-    }
-
-    /// Returns if there are EIP-1559 type transactions
-    pub fn eip1559(&self) -> bool {
-        self.inner.eip1559
-    }
-
-    /// Returns if there are EIP-4844 blob transactions
-    pub fn eip4844(&self) -> bool {
-        self.inner.eip4844
-    }
-
-    /// Returns if there are EIP-7702 type transactions
-    pub fn eip7702(&self) -> bool {
-        self.inner.eip7702
-    }
-
-    /// Returns the current tx fee cap limit in wei locally submitted into the pool
-    pub fn tx_fee_cap(&self) -> &Option<u128> {
-        &self.inner.tx_fee_cap
-    }
-
-    /// Returns the minimum priority fee to enforce for acceptance into the pool
-    pub fn minimum_priority_fee(&self) -> &Option<u128> {
-        &self.inner.minimum_priority_fee
-    }
-
-    /// Returns the setup and parameters needed for validating KZG proofs.
-    pub fn kzg_settings(&self) -> &EnvKzgSettings {
-        &self.inner.kzg_settings
-    }
-
-    /// Returns the config to handle [`TransactionOrigin::Local`](TransactionOrigin) transactions..
-    pub fn local_transactions_config(&self) -> &LocalTransactionConfig {
-        &self.inner.local_transactions_config
-    }
-
-    /// Returns the maximum size in bytes a single transaction can have in order to be accepted into
-    /// the pool.
-    pub fn max_tx_input_bytes(&self) -> usize {
-        self.inner.max_tx_input_bytes
-    }
-}
-
-impl<Client, Tx> EthTransactionValidator<Client, Tx>
-where
-    Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
-    Tx: EthPoolTransaction,
-{
-    /// Returns the current max gas limit
-    pub fn block_gas_limit(&self) -> u64 {
-        self.inner.max_gas_limit()
-    }
-
-    /// Validates a single transaction.
-    ///
-    /// See also [`TransactionValidator::validate_transaction`]
-    pub fn validate_one(
-        &self,
-        origin: TransactionOrigin,
-        transaction: Tx,
-    ) -> TransactionValidationOutcome<Tx> {
-        self.inner.validate_one_with_provider(origin, transaction, &mut None)
-    }
-
-    /// Validates a single transaction with the provided state provider.
-    ///
-    /// This allows reusing the same provider across multiple transaction validations,
-    /// which can improve performance when validating many transactions.
-    ///
-    /// If `state` is `None`, a new state provider will be created.
-    pub fn validate_one_with_state(
-        &self,
-        origin: TransactionOrigin,
-        transaction: Tx,
-        state: &mut Option<BlockViewProvider>,
-    ) -> TransactionValidationOutcome<Tx> {
-        self.inner.validate_one_with_provider(origin, transaction, state)
-    }
-}
-
-impl<Client, Tx> TransactionValidator for EthTransactionValidator<Client, Tx>
-where
-    Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
-    Tx: EthPoolTransaction,
-{
-    type Transaction = Tx;
-
-    async fn validate_transaction(
-        &self,
-        origin: TransactionOrigin,
-        transaction: Self::Transaction,
-    ) -> TransactionValidationOutcome<Self::Transaction> {
-        self.validate_one(origin, transaction)
-    }
-
-    async fn validate_transactions(
-        &self,
-        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
-    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.inner.validate_batch(transactions)
-    }
-
-    async fn validate_transactions_with_origin(
-        &self,
-        origin: TransactionOrigin,
-        transactions: impl IntoIterator<Item = Self::Transaction> + Send,
-    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.inner.validate_batch_with_origin(origin, transactions)
-    }
-
-    fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
-    where
-        B: Block,
-    {
-        self.inner.on_new_head_block(new_tip_block.header())
-    }
-}
 
 /// A [`TransactionValidator`] implementation that validates ethereum transaction.
 ///
@@ -206,7 +57,7 @@ where
 ///
 /// And adheres to the configured [`LocalTransactionConfig`].
 #[derive(Debug)]
-pub(crate) struct EthTransactionValidatorInner<Client, T> {
+pub struct EthTransactionValidator<Client, T> {
     /// This type fetches account info from the db
     client: Client,
     /// Blobstore used for fetching re-injected blob transactions.
@@ -235,29 +86,127 @@ pub(crate) struct EthTransactionValidatorInner<Client, T> {
     max_tx_input_bytes: usize,
     /// Maximum gas limit for individual transactions
     max_tx_gas_limit: Option<u64>,
+    /// Disable balance checks during transaction validation
+    disable_balance_check: bool,
     /// Marker for the transaction type
     _marker: PhantomData<T>,
     /// Metrics for tsx pool validation
     validation_metrics: TxPoolValidationMetrics,
 }
 
-// === impl EthTransactionValidatorInner ===
+impl<Client, Tx> EthTransactionValidator<Client, Tx> {
+    /// Returns the configured chain spec
+    pub fn chain_spec(&self) -> Arc<Client::ChainSpec>
+    where
+        Client: ChainSpecProvider,
+    {
+        self.client().chain_spec()
+    }
 
-impl<Client: ChainSpecProvider, Tx> EthTransactionValidatorInner<Client, Tx> {
     /// Returns the configured chain id
-    pub(crate) fn chain_id(&self) -> u64 {
-        self.client.chain_spec().chain().id()
+    pub fn chain_id(&self) -> u64
+    where
+        Client: ChainSpecProvider,
+    {
+        self.client().chain_spec().chain().id()
+    }
+
+    /// Returns the configured client
+    pub const fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// Returns the tracks activated forks relevant for transaction validation
+    pub const fn fork_tracker(&self) -> &ForkTracker {
+        &self.fork_tracker
+    }
+
+    /// Returns if there are EIP-2718 type transactions
+    pub const fn eip2718(&self) -> bool {
+        self.eip2718
+    }
+
+    /// Returns if there are EIP-1559 type transactions
+    pub const fn eip1559(&self) -> bool {
+        self.eip1559
+    }
+
+    /// Returns if there are EIP-4844 blob transactions
+    pub const fn eip4844(&self) -> bool {
+        self.eip4844
+    }
+
+    /// Returns if there are EIP-7702 type transactions
+    pub const fn eip7702(&self) -> bool {
+        self.eip7702
+    }
+
+    /// Returns the current tx fee cap limit in wei locally submitted into the pool
+    pub const fn tx_fee_cap(&self) -> &Option<u128> {
+        &self.tx_fee_cap
+    }
+
+    /// Returns the minimum priority fee to enforce for acceptance into the pool
+    pub const fn minimum_priority_fee(&self) -> &Option<u128> {
+        &self.minimum_priority_fee
+    }
+
+    /// Returns the setup and parameters needed for validating KZG proofs.
+    pub const fn kzg_settings(&self) -> &EnvKzgSettings {
+        &self.kzg_settings
+    }
+
+    /// Returns the config to handle [`TransactionOrigin::Local`](TransactionOrigin) transactions..
+    pub const fn local_transactions_config(&self) -> &LocalTransactionConfig {
+        &self.local_transactions_config
+    }
+
+    /// Returns the maximum size in bytes a single transaction can have in order to be accepted into
+    /// the pool.
+    pub const fn max_tx_input_bytes(&self) -> usize {
+        self.max_tx_input_bytes
+    }
+
+    /// Returns whether balance checks are disabled for this validator.
+    pub const fn disable_balance_check(&self) -> bool {
+        self.disable_balance_check
     }
 }
 
-impl<Client, Tx> EthTransactionValidatorInner<Client, Tx>
+impl<Client, Tx> EthTransactionValidator<Client, Tx>
 where
     Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
     Tx: EthPoolTransaction,
 {
-    /// Returns the configured chain spec
-    fn chain_spec(&self) -> Arc<Client::ChainSpec> {
-        self.client.chain_spec()
+    /// Returns the current max gas limit
+    pub fn block_gas_limit(&self) -> u64 {
+        self.max_gas_limit()
+    }
+
+    /// Validates a single transaction.
+    ///
+    /// See also [`TransactionValidator::validate_transaction`]
+    pub fn validate_one(
+        &self,
+        origin: TransactionOrigin,
+        transaction: Tx,
+    ) -> TransactionValidationOutcome<Tx> {
+        self.validate_one_with_provider(origin, transaction, &mut None)
+    }
+
+    /// Validates a single transaction with the provided state provider.
+    ///
+    /// This allows reusing the same provider across multiple transaction validations,
+    /// which can improve performance when validating many transactions.
+    ///
+    /// If `state` is `None`, a new state provider will be created.
+    pub fn validate_one_with_state(
+        &self,
+        origin: TransactionOrigin,
+        transaction: Tx,
+        state: &mut Option<Box<dyn AccountInfoReader>>,
+    ) -> TransactionValidationOutcome<Tx> {
+        self.validate_one_with_provider(origin, transaction, state)
     }
 
     /// Validates a single transaction using an optional cached state provider.
@@ -267,7 +216,7 @@ where
         &self,
         origin: TransactionOrigin,
         transaction: Tx,
-        maybe_state: &mut Option<BlockViewProvider>,
+        maybe_state: &mut Option<Box<dyn AccountInfoReader>>,
     ) -> TransactionValidationOutcome<Tx> {
         match self.validate_one_no_state(origin, transaction) {
             Ok(transaction) => {
@@ -275,12 +224,8 @@ where
                 // If we don't have a state provider yet, fetch the latest state
                 if maybe_state.is_none() {
                     match self.client.latest() {
-                        Ok(state) => {
-                            let state_with_cache = BlockViewProvider::new(
-                                StateProviderDatabase::new(state),
-                                Some(PERSIST_BLOCK_CACHE.clone()),
-                            );
-                            *maybe_state = Some(state_with_cache);
+                        Ok(new_state) => {
+                            *maybe_state = Some(Box::new(new_state));
                         }
                         Err(err) => {
                             return TransactionValidationOutcome::Error(
@@ -291,7 +236,7 @@ where
                     }
                 }
 
-                let state = maybe_state.as_ref().expect("provider is set");
+                let state = maybe_state.as_deref().expect("provider is set");
 
                 self.validate_one_against_state(origin, transaction, state)
             }
@@ -367,19 +312,37 @@ where
         }
 
         // Reject transactions over defined size to prevent DOS attacks
-        let tx_input_len = transaction.input().len();
-        if tx_input_len > self.max_tx_input_bytes {
-            return Err(TransactionValidationOutcome::Invalid(
-                transaction,
-                InvalidPoolTransactionError::OversizedData(tx_input_len, self.max_tx_input_bytes),
-            ))
+        if transaction.is_eip4844() {
+            // Since blob transactions are pulled instead of pushed, and only the consensus data is
+            // kept in memory while the sidecar is cached on disk, there is no critical limit that
+            // should be enforced. Still, enforcing some cap on the input bytes. blob txs also must
+            // be executable right away when they enter the pool.
+            let tx_input_len = transaction.input().len();
+            if tx_input_len > self.max_tx_input_bytes {
+                return Err(TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidPoolTransactionError::OversizedData(
+                        tx_input_len,
+                        self.max_tx_input_bytes,
+                    ),
+                ))
+            }
+        } else {
+            // ensure the size of the non-blob transaction
+            let tx_size = transaction.encoded_length();
+            if tx_size > self.max_tx_input_bytes {
+                return Err(TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidPoolTransactionError::OversizedData(tx_size, self.max_tx_input_bytes),
+                ))
+            }
         }
 
         // Check whether the init code size has been exceeded.
-        if self.fork_tracker.is_shanghai_activated() {
-            if let Err(err) = transaction.ensure_max_init_code_size(MAX_INIT_CODE_BYTE_SIZE) {
-                return Err(TransactionValidationOutcome::Invalid(transaction, err))
-            }
+        if self.fork_tracker.is_shanghai_activated() &&
+            let Err(err) = transaction.ensure_max_init_code_size(MAX_INIT_CODE_BYTE_SIZE)
+        {
+            return Err(TransactionValidationOutcome::Invalid(transaction, err))
         }
 
         // Checks for gas limit
@@ -396,16 +359,16 @@ where
         }
 
         // Check individual transaction gas limit if configured
-        if let Some(max_tx_gas_limit) = self.max_tx_gas_limit {
-            if transaction_gas_limit > max_tx_gas_limit {
-                return Err(TransactionValidationOutcome::Invalid(
-                    transaction,
-                    InvalidPoolTransactionError::MaxTxGasLimitExceeded(
-                        transaction_gas_limit,
-                        max_tx_gas_limit,
-                    ),
-                ))
-            }
+        if let Some(max_tx_gas_limit) = self.max_tx_gas_limit &&
+            transaction_gas_limit > max_tx_gas_limit
+        {
+            return Err(TransactionValidationOutcome::Invalid(
+                transaction,
+                InvalidPoolTransactionError::MaxTxGasLimitExceeded(
+                    transaction_gas_limit,
+                    max_tx_gas_limit,
+                ),
+            ))
         }
 
         // Ensure max_priority_fee_per_gas (if EIP1559) is less than max_fee_per_gas if any.
@@ -459,13 +422,13 @@ where
         }
 
         // Checks for chainid
-        if let Some(chain_id) = transaction.chain_id() {
-            if chain_id != self.chain_id() {
-                return Err(TransactionValidationOutcome::Invalid(
-                    transaction,
-                    InvalidTransactionError::ChainIdMismatch.into(),
-                ))
-            }
+        if let Some(chain_id) = transaction.chain_id() &&
+            chain_id != self.chain_id()
+        {
+            return Err(TransactionValidationOutcome::Invalid(
+                transaction,
+                InvalidTransactionError::ChainIdMismatch.into(),
+            ))
         }
 
         if transaction.is_eip7702() {
@@ -538,149 +501,52 @@ where
     }
 
     /// Validates a single transaction using given state provider.
-    fn validate_one_against_state(
+    fn validate_one_against_state<P>(
         &self,
         origin: TransactionOrigin,
         mut transaction: Tx,
-        state: &BlockViewProvider,
-    ) -> TransactionValidationOutcome<Tx> {
+        state: P,
+    ) -> TransactionValidationOutcome<Tx>
+    where
+        P: AccountInfoReader,
+    {
         // Use provider to get account info
-        let account = match state.basic_ref(transaction.sender()) {
+        let account = match state.basic_account(transaction.sender_ref()) {
             Ok(account) => account.unwrap_or_default(),
             Err(err) => {
                 return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
             }
         };
 
-        // Unless Prague is active, the signer account shouldn't have bytecode.
-        //
-        // If Prague is active, only EIP-7702 bytecode is allowed for the sender.
-        //
-        // Any other case means that the account is not an EOA, and should not be able to send
-        // transactions.
-        if !account.is_empty_code_hash() {
-            let is_eip7702 = if self.fork_tracker.is_prague_activated() {
-                match state.code_by_hash_ref(account.code_hash) {
-                    Ok(bytecode) => bytecode.is_eip7702(),
-                    Err(err) => {
-                        return TransactionValidationOutcome::Error(
-                            *transaction.hash(),
-                            Box::new(err),
-                        )
-                    }
-                }
-            } else {
-                false
-            };
-
-            if !is_eip7702 {
-                return TransactionValidationOutcome::Invalid(
-                    transaction,
-                    InvalidTransactionError::SignerAccountHasBytecode.into(),
-                );
-            }
-        }
-
-        let tx_nonce = transaction.nonce();
+        // check for bytecode
+        match self.validate_sender_bytecode(&transaction, &account, &state) {
+            Err(outcome) => return outcome,
+            Ok(Err(err)) => return TransactionValidationOutcome::Invalid(transaction, err),
+            _ => {}
+        };
 
         // Checks for nonce
-        if tx_nonce < account.nonce {
-            return TransactionValidationOutcome::Invalid(
-                transaction,
-                InvalidTransactionError::NonceNotConsistent { tx: tx_nonce, state: account.nonce }
-                    .into(),
-            );
+        if let Err(err) = self.validate_sender_nonce(&transaction, &account) {
+            return TransactionValidationOutcome::Invalid(transaction, err)
         }
 
-        let cost = transaction.cost();
-
-        // Checks for max cost
-        if cost > &account.balance {
-            let expected = *cost;
-            return TransactionValidationOutcome::Invalid(
-                transaction,
-                InvalidTransactionError::InsufficientFunds(
-                    GotExpected { got: account.balance, expected }.into(),
-                )
-                .into(),
-            );
+        // checks for max cost not exceedng account_balance
+        if let Err(err) = self.validate_sender_balance(&transaction, &account) {
+            return TransactionValidationOutcome::Invalid(transaction, err)
         }
-
-        let mut maybe_blob_sidecar = None;
 
         // heavy blob tx validation
-        if transaction.is_eip4844() {
-            // extract the blob from the transaction
-            match transaction.take_blob() {
-                EthBlobTransactionSidecar::None => {
-                    // this should not happen
-                    return TransactionValidationOutcome::Invalid(
-                        transaction,
-                        InvalidTransactionError::TxTypeNotSupported.into(),
-                    );
-                }
-                EthBlobTransactionSidecar::Missing => {
-                    // This can happen for re-injected blob transactions (on re-org), since the blob
-                    // is stripped from the transaction and not included in a block.
-                    // check if the blob is in the store, if it's included we previously validated
-                    // it and inserted it
-                    if matches!(self.blob_store.contains(*transaction.hash()), Ok(true)) {
-                        // validated transaction is already in the store
-                    } else {
-                        return TransactionValidationOutcome::Invalid(
-                            transaction,
-                            InvalidPoolTransactionError::Eip4844(
-                                Eip4844PoolTransactionError::MissingEip4844BlobSidecar,
-                            ),
-                        );
-                    }
-                }
-                EthBlobTransactionSidecar::Present(sidecar) => {
-                    let now = Instant::now();
+        let maybe_blob_sidecar = match self.validate_eip4844(&mut transaction) {
+            Err(err) => return TransactionValidationOutcome::Invalid(transaction, err),
+            Ok(sidecar) => sidecar,
+        };
 
-                    if self.fork_tracker.is_osaka_activated() {
-                        if sidecar.is_eip4844() {
-                            return TransactionValidationOutcome::Invalid(
-                                transaction,
-                                InvalidPoolTransactionError::Eip4844(
-                                    Eip4844PoolTransactionError::UnexpectedEip4844SidecarAfterOsaka,
-                                ),
-                            )
-                        }
-                    } else if sidecar.is_eip7594() {
-                        return TransactionValidationOutcome::Invalid(
-                            transaction,
-                            InvalidPoolTransactionError::Eip4844(
-                                Eip4844PoolTransactionError::UnexpectedEip7594SidecarBeforeOsaka,
-                            ),
-                        )
-                    }
-
-                    // validate the blob
-                    if let Err(err) = transaction.validate_blob(&sidecar, self.kzg_settings.get()) {
-                        return TransactionValidationOutcome::Invalid(
-                            transaction,
-                            InvalidPoolTransactionError::Eip4844(
-                                Eip4844PoolTransactionError::InvalidEip4844Blob(err),
-                            ),
-                        );
-                    }
-                    // Record the duration of successful blob validation as histogram
-                    self.validation_metrics.blob_validation_duration.record(now.elapsed());
-                    // store the extracted blob
-                    maybe_blob_sidecar = Some(sidecar);
-                }
-            }
-        }
-
-        let authorities = transaction.authorization_list().map(|auths| {
-            auths.iter().flat_map(|auth| auth.recover_authority()).collect::<Vec<_>>()
-        });
+        let authorities = self.recover_authorities(&transaction);
         // Return the valid transaction
         TransactionValidationOutcome::Valid {
             balance: account.balance,
             state_nonce: account.nonce,
-            bytecode_hash: Some(account.code_hash),
+            bytecode_hash: account.bytecode_hash,
             transaction: ValidTransaction::new(transaction, maybe_blob_sidecar),
             // by this point assume all external transactions should be propagated
             propagate: match origin {
@@ -692,6 +558,143 @@ where
             },
             authorities,
         }
+    }
+
+    /// Validates that the sender’s account has valid or no bytecode.
+    pub fn validate_sender_bytecode(
+        &self,
+        transaction: &Tx,
+        sender: &Account,
+        state: impl BytecodeReader,
+    ) -> Result<Result<(), InvalidPoolTransactionError>, TransactionValidationOutcome<Tx>> {
+        // Unless Prague is active, the signer account shouldn't have bytecode.
+        //
+        // If Prague is active, only EIP-7702 bytecode is allowed for the sender.
+        //
+        // Any other case means that the account is not an EOA, and should not be able to send
+        // transactions.
+        if let Some(code_hash) = &sender.bytecode_hash {
+            let is_eip7702 = if self.fork_tracker.is_prague_activated() {
+                match state.bytecode_by_hash(code_hash) {
+                    Ok(bytecode) => bytecode.unwrap_or_default().is_eip7702(),
+                    Err(err) => {
+                        return Err(TransactionValidationOutcome::Error(
+                            *transaction.hash(),
+                            Box::new(err),
+                        ))
+                    }
+                }
+            } else {
+                false
+            };
+
+            if !is_eip7702 {
+                return Ok(Err(InvalidTransactionError::SignerAccountHasBytecode.into()))
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    /// Checks if the transaction nonce is valid.
+    pub fn validate_sender_nonce(
+        &self,
+        transaction: &Tx,
+        sender: &Account,
+    ) -> Result<(), InvalidPoolTransactionError> {
+        let tx_nonce = transaction.nonce();
+
+        if tx_nonce < sender.nonce {
+            return Err(InvalidTransactionError::NonceNotConsistent {
+                tx: tx_nonce,
+                state: sender.nonce,
+            }
+            .into())
+        }
+        Ok(())
+    }
+
+    /// Ensures the sender has sufficient account balance.
+    pub fn validate_sender_balance(
+        &self,
+        transaction: &Tx,
+        sender: &Account,
+    ) -> Result<(), InvalidPoolTransactionError> {
+        let cost = transaction.cost();
+
+        if !self.disable_balance_check && cost > &sender.balance {
+            let expected = *cost;
+            return Err(InvalidTransactionError::InsufficientFunds(
+                GotExpected { got: sender.balance, expected }.into(),
+            )
+            .into())
+        }
+        Ok(())
+    }
+
+    /// Validates EIP-4844 blob sidecar data and returns the extracted sidecar, if any.
+    pub fn validate_eip4844(
+        &self,
+        transaction: &mut Tx,
+    ) -> Result<Option<BlobTransactionSidecarVariant>, InvalidPoolTransactionError> {
+        let mut maybe_blob_sidecar = None;
+
+        // heavy blob tx validation
+        if transaction.is_eip4844() {
+            // extract the blob from the transaction
+            match transaction.take_blob() {
+                EthBlobTransactionSidecar::None => {
+                    // this should not happen
+                    return Err(InvalidTransactionError::TxTypeNotSupported.into())
+                }
+                EthBlobTransactionSidecar::Missing => {
+                    // This can happen for re-injected blob transactions (on re-org), since the blob
+                    // is stripped from the transaction and not included in a block.
+                    // check if the blob is in the store, if it's included we previously validated
+                    // it and inserted it
+                    if self.blob_store.contains(*transaction.hash()).is_ok_and(|c| c) {
+                        // validated transaction is already in the store
+                    } else {
+                        return Err(InvalidPoolTransactionError::Eip4844(
+                            Eip4844PoolTransactionError::MissingEip4844BlobSidecar,
+                        ))
+                    }
+                }
+                EthBlobTransactionSidecar::Present(sidecar) => {
+                    let now = Instant::now();
+
+                    if self.fork_tracker.is_osaka_activated() {
+                        if sidecar.is_eip4844() {
+                            return Err(InvalidPoolTransactionError::Eip4844(
+                                Eip4844PoolTransactionError::UnexpectedEip4844SidecarAfterOsaka,
+                            ))
+                        }
+                    } else if sidecar.is_eip7594() {
+                        return Err(InvalidPoolTransactionError::Eip4844(
+                            Eip4844PoolTransactionError::UnexpectedEip7594SidecarBeforeOsaka,
+                        ))
+                    }
+
+                    // validate the blob
+                    if let Err(err) = transaction.validate_blob(&sidecar, self.kzg_settings.get()) {
+                        return Err(InvalidPoolTransactionError::Eip4844(
+                            Eip4844PoolTransactionError::InvalidEip4844Blob(err),
+                        ))
+                    }
+                    // Record the duration of successful blob validation as histogram
+                    self.validation_metrics.blob_validation_duration.record(now.elapsed());
+                    // store the extracted blob
+                    maybe_blob_sidecar = Some(sidecar);
+                }
+            }
+        }
+        Ok(maybe_blob_sidecar)
+    }
+
+    /// Returns the recovered authorities for the given transaction
+    fn recover_authorities(&self, transaction: &Tx) -> std::option::Option<Vec<Address>> {
+        transaction
+            .authorization_list()
+            .map(|auths| auths.iter().flat_map(|auth| auth.recover_authority()).collect::<Vec<_>>())
     }
 
     /// Validates all given transactions.
@@ -753,6 +756,44 @@ where
     }
 }
 
+impl<Client, Tx> TransactionValidator for EthTransactionValidator<Client, Tx>
+where
+    Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
+    Tx: EthPoolTransaction,
+{
+    type Transaction = Tx;
+
+    async fn validate_transaction(
+        &self,
+        origin: TransactionOrigin,
+        transaction: Self::Transaction,
+    ) -> TransactionValidationOutcome<Self::Transaction> {
+        self.validate_one(origin, transaction)
+    }
+
+    async fn validate_transactions(
+        &self,
+        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
+    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
+        self.validate_batch(transactions)
+    }
+
+    async fn validate_transactions_with_origin(
+        &self,
+        origin: TransactionOrigin,
+        transactions: impl IntoIterator<Item = Self::Transaction> + Send,
+    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
+        self.validate_batch_with_origin(origin, transactions)
+    }
+
+    fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
+    where
+        B: Block,
+    {
+        self.on_new_head_block(new_tip_block.header())
+    }
+}
+
 /// A builder for [`EthTransactionValidator`] and [`TransactionValidationTaskExecutor`]
 #[derive(Debug)]
 pub struct EthTransactionValidatorBuilder<Client> {
@@ -794,6 +835,8 @@ pub struct EthTransactionValidatorBuilder<Client> {
     max_tx_input_bytes: usize,
     /// Maximum gas limit for individual transactions
     max_tx_gas_limit: Option<u64>,
+    /// Disable balance checks during transaction validation
+    disable_balance_check: bool,
 }
 
 impl<Client> EthTransactionValidatorBuilder<Client> {
@@ -837,6 +880,9 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
 
             // max blob count is prague by default
             max_blob_count: BlobParams::prague().max_blobs_per_tx,
+
+            // balance checks are enabled by default
+            disable_balance_check: false,
         }
     }
 
@@ -946,7 +992,8 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
 
     /// Configures validation rules based on the head block's timestamp.
     ///
-    /// For example, whether the Shanghai and Cancun hardfork is activated at launch.
+    /// For example, whether the Shanghai and Cancun hardfork is activated at launch, or max blob
+    /// counts.
     pub fn with_head_timestamp(mut self, timestamp: u64) -> Self
     where
         Client: ChainSpecProvider<ChainSpec: EthereumHardforks>,
@@ -992,6 +1039,12 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
         self
     }
 
+    /// Disables balance checks during transaction validation
+    pub const fn disable_balance_check(mut self) -> Self {
+        self.disable_balance_check = true;
+        self
+    }
+
     /// Builds a the [`EthTransactionValidator`] without spawning validator tasks.
     pub fn build<Tx, S>(self, blob_store: S) -> EthTransactionValidator<Client, Tx>
     where
@@ -1014,14 +1067,10 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
             local_transactions_config,
             max_tx_input_bytes,
             max_tx_gas_limit,
-            ..
+            disable_balance_check,
+            max_blob_count,
+            additional_tasks: _,
         } = self;
-
-        let max_blob_count = if prague {
-            BlobParams::prague().max_blobs_per_tx
-        } else {
-            BlobParams::cancun().max_blobs_per_tx
-        };
 
         let fork_tracker = ForkTracker {
             shanghai: AtomicBool::new(shanghai),
@@ -1031,10 +1080,7 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
             max_blob_count: AtomicU64::new(max_blob_count),
         };
 
-        // Ensure the kzg setup is loaded right away.
-        let _kzg_settings = kzg_settings.get();
-
-        let inner = EthTransactionValidatorInner {
+        EthTransactionValidator {
             client,
             eip2718,
             eip1559,
@@ -1049,11 +1095,10 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
             local_transactions_config,
             max_tx_input_bytes,
             max_tx_gas_limit,
+            disable_balance_check,
             _marker: Default::default(),
             validation_metrics: TxPoolValidationMetrics::default(),
-        };
-
-        EthTransactionValidator { inner: Arc::new(inner) }
+        }
     }
 
     /// Builds a [`EthTransactionValidator`] and spawns validation tasks via the
@@ -1095,7 +1140,7 @@ impl<Client> EthTransactionValidatorBuilder<Client> {
 
         let to_validation_task = Arc::new(Mutex::new(tx));
 
-        TransactionValidationTaskExecutor { validator, to_validation_task }
+        TransactionValidationTaskExecutor { validator: Arc::new(validator), to_validation_task }
     }
 }
 
@@ -1583,5 +1628,55 @@ mod tests {
         // unless the sender is specifically whitelisted in local_transactions_config
         let outcome = validator.validate_one(TransactionOrigin::Private, transaction);
         assert!(outcome.is_invalid()); // Still invalid because sender not in whitelist
+    }
+
+    #[test]
+    fn reject_oversized_tx() {
+        let mut transaction = get_transaction();
+        transaction.encoded_length = DEFAULT_MAX_TX_INPUT_BYTES + 1;
+        let provider = MockEthProvider::default();
+
+        // No minimum priority fee set (default is None)
+        let validator = create_validator_with_minimum_fee(provider, None, None);
+
+        let outcome = validator.validate_one(TransactionOrigin::External, transaction);
+        let invalid = outcome.as_invalid().unwrap();
+        assert!(invalid.is_oversized());
+    }
+
+    #[tokio::test]
+    async fn valid_with_disabled_balance_check() {
+        let transaction = get_transaction();
+        let provider = MockEthProvider::default();
+
+        // Set account with 0 balance
+        provider.add_account(
+            transaction.sender(),
+            ExtendedAccount::new(transaction.nonce(), alloy_primitives::U256::ZERO),
+        );
+
+        // Valdiate with balance check enabled
+        let validator = EthTransactionValidatorBuilder::new(provider.clone())
+            .build(InMemoryBlobStore::default());
+
+        let outcome = validator.validate_one(TransactionOrigin::External, transaction.clone());
+        let expected_cost = *transaction.cost();
+        if let TransactionValidationOutcome::Invalid(_, err) = outcome {
+            assert!(matches!(
+                err,
+                InvalidPoolTransactionError::Consensus(InvalidTransactionError::InsufficientFunds(ref funds_err))
+                if funds_err.got == alloy_primitives::U256::ZERO && funds_err.expected == expected_cost
+            ));
+        } else {
+            panic!("Expected Invalid outcome with InsufficientFunds error");
+        }
+
+        // Valdiate with balance check disabled
+        let validator = EthTransactionValidatorBuilder::new(provider)
+            .disable_balance_check() // This should allow the transaction through despite zero balance
+            .build(InMemoryBlobStore::default());
+
+        let outcome = validator.validate_one(TransactionOrigin::External, transaction);
+        assert!(outcome.is_valid()); // Should be valid because balance check is disabled
     }
 }

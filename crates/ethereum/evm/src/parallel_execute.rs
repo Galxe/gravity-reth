@@ -72,7 +72,10 @@ where
         let state_clear_flag = self.chain_spec.is_spurious_dragon_active_at_block(block.number);
         let state = self.state.as_mut().unwrap();
         state.set_state_clear_flag(state_clear_flag);
-        let mut evm = self.evm_config.evm_for_block(WrapDatabaseRef(state), block.header());
+        let mut evm =
+            self.evm_config.evm_for_block(WrapDatabaseRef(state), block.header()).map_err(|e| {
+                BlockExecutionError::Internal(InternalBlockExecutionError::Other(Box::new(e)))
+            })?;
         self.system_caller.apply_pre_execution_changes(block.header(), &mut evm)
     }
 
@@ -80,7 +83,9 @@ where
         &mut self,
         block: &RecoveredBlock<Block>,
     ) -> Result<ExecuteOutput<Receipt>, BlockExecutionError> {
-        let evm_env = self.evm_config.evm_env(block.header());
+        let evm_env = self.evm_config.evm_env(block.header()).map_err(|e| {
+            BlockExecutionError::Internal(InternalBlockExecutionError::Other(Box::new(e)))
+        })?;
 
         let mut txs = Vec::with_capacity(block.transaction_count());
         for tx in block.transactions_recovered() {
@@ -143,7 +148,10 @@ where
 
             let mut evm = self
                 .evm_config
-                .evm_for_block(WrapDatabaseRef(self.state.as_mut().unwrap()), block.header());
+                .evm_for_block(WrapDatabaseRef(self.state.as_mut().unwrap()), block.header())
+                .map_err(|e| {
+                    BlockExecutionError::Internal(InternalBlockExecutionError::Other(Box::new(e)))
+                })?;
             requests.extend(self.system_caller.apply_post_execution_changes(&mut evm)?);
             requests
         } else {
@@ -328,7 +336,7 @@ fn balance_increment_state<DB: ParallelDatabase>(
 
     balance_increments
         .iter()
-        .filter(|(_, &balance)| balance != 0)
+        .filter(|&(_, &balance)| balance != 0)
         .map(|(addr, _)| load_account(addr))
         .collect::<Result<EvmState, _>>()
 }
