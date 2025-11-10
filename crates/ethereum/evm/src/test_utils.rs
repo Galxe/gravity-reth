@@ -14,7 +14,7 @@ use reth_evm::{
     eth::{EthBlockExecutionCtx, EthEvmContext},
     parallel_execute::ParallelExecutor,
     ConfigureEngineEvm, ConfigureEvm, Database, EthEvm, EthEvmFactory, Evm, EvmEnvFor, EvmFactory,
-    ExecutableTxIterator, ExecutionCtxFor,
+    ExecutableTxIterator, ExecutionCtxFor, ParallelDatabase,
 };
 use reth_execution_types::{BlockExecutionResult, ExecutionOutcome};
 use reth_primitives_traits::{BlockTy, SealedBlock, SealedHeader};
@@ -103,6 +103,7 @@ impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExec
                 output: Output::Call(Bytes::from(vec![])),
             },
             Default::default(),
+            0,
         ))
     }
 

@@ -12,11 +12,7 @@ async fn txpool_new_pending_txs() {
 
     let added_result =
         txpool.add_transaction(TransactionOrigin::External, transaction.transaction.clone()).await;
-<<<<<<< HEAD
-    assert_matches!(added_result, Ok(hash) if hash == *transaction.transaction.get_hash());
-=======
     assert_matches!(added_result, Ok(outcome) if outcome.hash == *transaction.transaction.get_hash());
->>>>>>> v1.8.3
 
     let mut best_txns = txpool.best_transactions();
     assert_matches!(best_txns.next(), Some(tx) if tx.transaction.get_hash() == transaction.transaction.get_hash());
@@ -24,10 +20,6 @@ async fn txpool_new_pending_txs() {
     let transaction = mock_tx_factory.create_eip1559();
     let added_result =
         txpool.add_transaction(TransactionOrigin::External, transaction.transaction.clone()).await;
-<<<<<<< HEAD
-    assert_matches!(added_result, Ok(hash) if hash == *transaction.transaction.get_hash());
-=======
     assert_matches!(added_result, Ok(outcome) if outcome.hash == *transaction.transaction.get_hash());
->>>>>>> v1.8.3
     assert_matches!(best_txns.next(), Some(tx) if tx.transaction.get_hash() == transaction.transaction.get_hash());
 }
