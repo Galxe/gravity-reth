@@ -40,7 +40,10 @@ jobs:
             --exclude 'exex-subscription' \
             --exclude 'reth-bench' \
             --exclude 'ef-tests' \
-            --exclude 'op-reth' \
+            --exclude "op-reth" \
+            --exclude "reth-op" \
+            --exclude "reth-optimism-*" \
             --exclude 'reth' \
+            --exclude 'reth-pipe-exec-layer-*' \
             -E 'binary(e2e_testsuite)'
 
