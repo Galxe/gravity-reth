@@ -607,8 +607,6 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let (metadata_txn_result, state_changes) = {
             let mut state = State::builder().with_database_ref(&state).with_bundle_update().build();
-            let mut evm_env = evm_env;
-
             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
             let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
                 &mut evm,

@@ -47,8 +47,10 @@ jobs:
           cargo nextest run \
             --locked --features "asm-keccak ${{ matrix.network }} config-from-env" \
             --workspace --exclude ef-tests \
-            --exclude reth-pipe-exec-layer-ext-v2 \
+            --exclude "reth-pipe-exec-layer-*" \
             --exclude "example-*" \
+            --exclude "op-reth" \
+            --exclude "reth-op" \
             --exclude "reth-optimism-*" \
             -E "kind(test) and not binary(e2e_testsuite)"
 

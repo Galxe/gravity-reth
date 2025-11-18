@@ -52,8 +52,10 @@ jobs:
           cargo nextest run \
             ${{ matrix.args }} --workspace \
             --exclude ef-tests --no-tests=warn \
-            --exclude reth-pipe-exec-layer-ext-v2 \
+            --exclude "reth-pipe-exec-layer-*" \
             --exclude "example-*" \
+            --exclude "op-reth" \
+            --exclude "reth-op" \
             --exclude "reth-optimism-*" \
             --partition hash:${{ matrix.partition }}/2 \
             -E "!kind(test) and not binary(e2e_testsuite)"

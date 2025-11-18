@@ -16,7 +16,6 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use gravity_api_types::on_chain_config::dkg::DKGState as GravityDKGState;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use tracing::*;
 use hex;
 
 // ============================================================================

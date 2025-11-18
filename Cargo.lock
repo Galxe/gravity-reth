@@ -1037,7 +1037,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=f3ab5a497a498e4a2fffb19e70ba65ad289a73be#f3ab5a497a498e4a2fffb19e70ba65ad289a73be"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=94f5fef#94f5fefc1d44fe1ec6b164916f5912797e9aa7e4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8759,7 +8759,6 @@ dependencies = [
  "reth-provider",
  "reth-tasks",
  "reth-transaction-pool",
- "reth-trie-db",
  "tempfile",
  "thiserror 2.0.16",
  "tokio",
@@ -10610,6 +10609,7 @@ dependencies = [
  "reth-testing-utils",
  "reth-tracing",
  "reth-trie",
+ "reth-trie-db",
  "reth-trie-parallel",
  "tempfile",
  "thiserror 2.0.16",
