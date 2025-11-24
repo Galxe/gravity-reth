@@ -377,7 +377,7 @@ codegen-units = 1
 
 [workspace.dependencies]
 # reth
-gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "56f263fd35defbd3cea335098dbd57297aeac607" }
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", tag = "gravity-v1.1.0" }
 op-reth = { path = "crates/optimism/bin" }
 reth = { path = "bin/reth" }
 reth-storage-rpc-provider = { path = "crates/storage/rpc-provider" }
@@ -476,7 +476,7 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types", default-features = false }
 reth-revm = { path = "crates/revm", default-features = false }
-grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", rev = "93e1316" }
+grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", tag = "v2.2.3" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }
