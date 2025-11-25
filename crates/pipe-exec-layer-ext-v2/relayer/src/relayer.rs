@@ -5,7 +5,7 @@ use crate::{
     parser::{AccountActivityType, GravityTask, ParsedTask},
 };
 use alloy_primitives::{Address, B256};
-use alloy_rpc_types::{Filter, Log};
+use alloy_rpc_types::{BlockNumberOrTag, Filter, FilterBlockOption, Log};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolEvent, SolValue};
 use anyhow::{anyhow, Result};
@@ -291,6 +291,29 @@ impl GravityRelayer {
         std::cmp::min(cursor + Self::MAX_BLOCKS_PER_POLL, finalized_block)
     }
 
+    /// Extracts the from_block number from a Filter if it's a numeric block number
+    ///
+    /// # Arguments
+    /// * `filter` - The filter to extract from_block from
+    ///
+    /// # Returns
+    /// * `Option<u64>` - The block number if it's a numeric value, None otherwise
+    fn extract_from_block_number(filter: &Filter) -> Option<u64> {
+        match &filter.block_option {
+            FilterBlockOption::Range { from_block, .. } => {
+                if let Some(block_num) = from_block {
+                    match block_num {
+                        BlockNumberOrTag::Number(n) => Some(*n),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Creates a new GravityRelayer instance
     ///
     /// # Arguments
@@ -305,8 +328,19 @@ impl GravityRelayer {
     pub async fn new(rpc_url: &str, task: ParsedTask, from_block: u64) -> Result<Self> {
         let eth_client = Arc::new(EthHttpCli::new(rpc_url)?);
 
-        // Get the starting block number from the task filter or use finalized block as default
-        let start_block_number = from_block;
+        // Get the starting block number from the task filter or use the provided from_block parameter
+        // If both exist, use the maximum of the two
+        let start_block_number = match &task.task {
+            GravityTask::MonitorEvent(filter) => {
+                if let Some(uri_from_block) = Self::extract_from_block_number(filter) {
+                    // Use max of URI fromBlock and parameter from_block
+                    std::cmp::max(uri_from_block, from_block)
+                } else {
+                    from_block
+                }
+            }
+            _ => from_block,
+        };
         let last_observed =
             ObserveState { block_number: start_block_number, observed_value: ObservedValue::None };
 
@@ -596,7 +630,7 @@ mod tests {
     use alloy_rpc_types::Filter;
     use reth_primitives::Log;
 
-    use crate::{EthHttpCli, GravityRelayer, ObservedValue, UriParser};
+    use crate::{EthHttpCli, GravityRelayer, ObservedValue, UriParser, relayer::DepositGravityEvent};
     use alloy_sol_macro::sol;
     use alloy_sol_types::SolEvent;
 
@@ -656,31 +690,34 @@ mod tests {
     #[tokio::test]
     async fn test_direct() {
         // Create mock eth client - this needs actual test implementation
-        let rpc_url = std::env::var("RPC_URL")
-            .expect("RPC_URL environment variable must be set for this test");
+        let rpc_url = "https://sepolia.drpc.org".to_string();
         let eth_client = EthHttpCli::new(&rpc_url).expect("Failed to create ETH client");
 
+        let deposit_gravity_event_signature: [u8; 32] = [
+            0xd5, 0x3b, 0xfb, 0x63, 0x0c, 0x04, 0x65, 0x4c, 0x6d, 0x1d, 0xa5, 0x02, 0x0f, 0x14, 0x67, 0x4f,
+            0x19, 0x0f, 0x92, 0xc2, 0x57, 0xc9, 0x2d, 0x9b, 0x15, 0xd8, 0xec, 0xb4, 0x05, 0x05, 0x7c, 0x14,
+        ];
         let filter = Filter::new()
-            .address(address!("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"))
-            .event_signature(B256::from(hex!(
-                "0x3915136b10c16c5f181f4774902f3baf9e44a5f700cabf5c826ee1caed313624"
-            )))
-            .from_block(10)
-            .to_block(100);
+            .address(address!("0x283fC6799867BF96bF862a05BDade3EE89132027"))
+            .event_signature(B256::from(
+                deposit_gravity_event_signature
+            ))
+            .from_block(9565280)
+            .to_block(9565290);
 
         let logs = eth_client.get_logs(&filter).await.expect("Failed to get logs");
         println!("logs: {:?}", logs);
 
         for log in logs {
-            let decoded = log.log_decode::<USDC::USDCTransfer>().expect("Failed to decode log");
+            let decoded = log.log_decode::<DepositGravityEvent>().expect("Failed to decode log");
             let data = decoded.data();
-            let from = data.from;
-            let to = data.to;
+            let user = data.user;
             let amount = data.amount;
-            let timestamp = data.timestamp;
+            let target_address = data.targetAddress;
+            let block_number = data.blockNumber;
             println!(
-                "from: {:?}, to: {:?}, amount: {:?}, timestamp: {:?}",
-                from, to, amount, timestamp
+                "user: {:?}, amount: {:?}, target_validator: {:?}, block_number: {:?}",
+                user, amount, target_address, block_number
             );
         }
     }
