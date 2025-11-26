@@ -14,7 +14,7 @@ use reth_provider::{
     StaticFileProviderFactory, StaticFileWriter,
 };
 use reth_stages_api::{
-    BoxedConcurrentProvider, ExecInput, ExecOutput, Stage, StageError, UnwindInput, UnwindOutput,
+    ExecInput, ExecOutput, Stage, StageError, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_errors::ProviderError;
@@ -129,7 +129,7 @@ impl<Header, Body, F> EraStage<Header, Body, F> {
     }
 }
 
-impl<Provider, ProviderRO, N, F> Stage<Provider, ProviderRO>
+impl<Provider, N, F> Stage<Provider>
     for EraStage<N::BlockHeader, N::BlockBody, F>
 where
     Provider: DBProvider<Tx: DbTxMut>
@@ -172,7 +172,6 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         let height = if let Some(era) = self.item.take() {
@@ -228,7 +227,6 @@ where
     fn unwind(
         &mut self,
         _provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         Ok(UnwindOutput { checkpoint: input.checkpoint.with_block_number(input.unwind_to) })

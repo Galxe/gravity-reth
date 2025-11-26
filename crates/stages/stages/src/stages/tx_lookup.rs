@@ -17,7 +17,7 @@ use reth_provider::{
 };
 use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment};
 use reth_stages_api::{
-    BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
+    EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
     StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_storage_errors::provider::ProviderError;
@@ -57,7 +57,7 @@ impl TransactionLookupStage {
     }
 }
 
-impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for TransactionLookupStage
+impl<Provider> Stage<Provider> for TransactionLookupStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + PruneCheckpointWriter
@@ -76,7 +76,6 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         mut input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if let Some((target_prunable_block, prune_mode)) = self
@@ -191,7 +190,6 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let tx = provider.tx_ref();

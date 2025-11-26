@@ -27,7 +27,6 @@ use reth_static_file_types::StaticFileSegment;
 use reth_storage_errors::provider::ProviderError;
 use std::task::{ready, Context, Poll};
 
-use reth_stages_api::BoxedConcurrentProvider;
 use tokio::sync::watch;
 use tracing::*;
 
@@ -185,7 +184,7 @@ where
     }
 }
 
-impl<Provider, ProviderRO, P, D> Stage<Provider, ProviderRO> for HeaderStage<P, D>
+impl<Provider, P, D> Stage<Provider> for HeaderStage<P, D>
 where
     Provider: DBProvider<Tx: DbTxMut> + StaticFileProviderFactory,
     P: HeaderSyncGapProvider<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>,
@@ -286,7 +285,6 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         let current_checkpoint = input.checkpoint();
@@ -335,7 +333,6 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         self.sync_gap.take();

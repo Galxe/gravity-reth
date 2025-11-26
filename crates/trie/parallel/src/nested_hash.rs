@@ -90,23 +90,21 @@ where
 
 /// Root hash for nested trie
 #[derive(Debug)]
-pub struct NestedStateRoot<Tx, F>
+pub struct NestedStateRoot<'tx, Tx>
 where
     Tx: DbTx,
-    F: Fn() -> ProviderResult<Tx>,
 {
-    provider: F,
+    tx: &'tx Tx,
     cache: Option<PersistBlockCache>,
 }
 
-impl<Tx, F> NestedStateRoot<Tx, F>
+impl<'tx, Tx> NestedStateRoot<'tx, Tx>
 where
     Tx: DbTx,
-    F: Fn() -> ProviderResult<Tx>,
 {
     /// Create a new `NestedStateRoot`
-    pub const fn new(provider: F, cache: Option<PersistBlockCache>) -> Self {
-        Self { provider, cache }
+    pub const fn new(tx: &'tx Tx, cache: Option<PersistBlockCache>) -> Self {
+        Self { tx, cache }
     }
 
     /// Compatible with origin `BranchNodeCompact` trie
@@ -116,7 +114,7 @@ where
     ) -> ProviderResult<HashedPostState> {
         let mut accounts = HashMap::default();
         let mut storages: B256Map<HashedStorage> = HashMap::default();
-        let tx = (self.provider)()?;
+        let tx = self.tx;
         if let Some(range) = range {
             // Walk account changeset and insert account prefixes.
             let mut account_changeset_cursor = tx.cursor_read::<tables::AccountChangeSets>()?;
@@ -170,10 +168,9 @@ where
     }
 }
 
-impl<Tx, F> NestedStateRoot<Tx, F>
+impl<'tx, Tx> NestedStateRoot<'tx, Tx>
 where
     Tx: DbTx,
-    F: Fn() -> ProviderResult<Tx> + Send + Sync,
 {
     /// Calculate the root hash of nested trie
     pub fn calculate(
@@ -197,7 +194,6 @@ where
                 }
                 scope.spawn(|_| {
                     let wrap = || -> ProviderResult<()> {
-                        let tx = (self.provider)()?;
                         let index = (partition[0].0[0] >> 4) as usize;
                         let mut updated_account_nodes = updated_account_nodes[index].lock();
                         for (hashed_address, account) in partition {
@@ -226,7 +222,7 @@ where
                                 let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] =
                                     Default::default();
                                 let create_reader = || {
-                                    let cursor = (self.provider)()?
+                                    let cursor = self.tx
                                         .cursor_dup_read::<tables::StoragesTrieV2>()?;
                                     Ok(StorageTrieReader::new(
                                         cursor,
@@ -235,7 +231,7 @@ where
                                     ))
                                 };
 
-                                let cursor = tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
+                                let cursor = self.tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
                                 let trie_reader = StorageTrieReader::new(
                                     cursor,
                                     hashed_address,
@@ -303,10 +299,10 @@ where
         let updated_account_nodes = updated_account_nodes.map(|u| u.into_inner());
         let mut trie_update = trie_update.into_inner();
         let create_reader = || {
-            let cursor = (self.provider)()?.cursor_read::<tables::AccountsTrieV2>()?;
+            let cursor = self.tx.cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
         };
-        let cursor = (self.provider)()?.cursor_read::<tables::AccountsTrieV2>()?;
+        let cursor = self.tx.cursor_read::<tables::AccountsTrieV2>()?;
         let mut account_trie = Trie::new(AccountTrieReader(cursor, self.cache.clone()), true)?;
         account_trie.parallel_update(updated_account_nodes, create_reader)?;
 
@@ -566,7 +562,6 @@ mod tests {
         let state = random_state();
         // test parallel root hash
         let factory = create_test_provider_factory();
-        let provider = || factory.database_provider_ro().map(|db| db.into_tx());
         let mut hashed_state = HashedPostState::default();
         for (address, (account, storage)) in state.clone() {
             let hashed_address = keccak256(address);
@@ -578,8 +573,9 @@ mod tests {
             hashed_state.storages.insert(hashed_address, hashed_storage);
         }
 
+        let tx = factory.database_provider_ro().unwrap().tx_ref();
         let (parallel_root_hash, ..) =
-            NestedStateRoot::new(provider, None).calculate(&hashed_state).unwrap();
+            NestedStateRoot::new(tx, None).calculate(&hashed_state).unwrap();
         assert_eq!(parallel_root_hash, test_utils::state_root(state))
     }
 }

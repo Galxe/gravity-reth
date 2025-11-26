@@ -35,7 +35,7 @@ use reth_errors::RethResult;
 pub use set::*;
 
 /// A container for a queued stage.
-pub(crate) type BoxedStage<DB, DBRO> = Box<dyn Stage<DB, DBRO>>;
+pub(crate) type BoxedStage<DB> = Box<dyn Stage<DB>>;
 
 /// The future that returns the owned pipeline and the result of the pipeline run. See
 /// [`Pipeline::run_as_fut`].
@@ -45,7 +45,6 @@ pub type PipelineFut<N> = Pin<Box<dyn Future<Output = PipelineWithResult<N>> + S
 pub type PipelineWithResult<N> = (Pipeline<N>, Result<ControlFlow, PipelineError>);
 
 type DatabaseProviderRW<N> = <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW;
-type DatabaseProviderRO<N> = <ProviderFactory<N> as DatabaseProviderFactory>::Provider;
 
 const SYNC_BATCH_SIZE: u64 = 10000;
 
@@ -75,7 +74,7 @@ pub struct Pipeline<N: ProviderNodeTypes> {
     /// Provider factory.
     provider_factory: ProviderFactory<N>,
     /// All configured stages in the order they will be executed.
-    stages: Vec<BoxedStage<DatabaseProviderRW<N>, DatabaseProviderRO<N>>>,
+    stages: Vec<BoxedStage<DatabaseProviderRW<N>>>,
     /// The maximum block number to sync to.
     max_block: Option<BlockNumber>,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
@@ -101,7 +100,7 @@ pub struct Pipeline<N: ProviderNodeTypes> {
 
 impl<N: ProviderNodeTypes> Pipeline<N> {
     /// Construct a pipeline using a [`PipelineBuilder`].
-    pub fn builder() -> PipelineBuilder<DatabaseProviderRW<N>, DatabaseProviderRO<N>> {
+    pub fn builder() -> PipelineBuilder<DatabaseProviderRW<N>> {
         PipelineBuilder::default()
     }
 
@@ -128,7 +127,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     pub fn stage(
         &mut self,
         idx: usize,
-    ) -> &mut dyn Stage<DatabaseProviderRW<N>, DatabaseProviderRO<N>> {
+    ) -> &mut dyn Stage<DatabaseProviderRW<N>> {
         &mut self.stages[idx]
     }
 }
@@ -370,10 +369,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 self.event_sender.notify(PipelineEvent::Unwind { stage_id, input });
 
                 let output = {
-                    let provider_factory = self.provider_factory.clone();
                     stage.unwind(
                         &provider_rw,
-                        Box::new(move || provider_factory.database_provider_ro()),
                         input,
                     )
                 };
@@ -505,10 +502,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 target,
             });
 
-            let provider_factory = self.provider_factory.clone();
             match self.stage(stage_index).execute(
                 &provider_rw,
-                Box::new(move || provider_factory.database_provider_ro()),
                 exec_input,
             ) {
                 Ok(out @ ExecOutput { checkpoint, done }) => {

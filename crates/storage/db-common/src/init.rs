@@ -8,7 +8,7 @@ use reth_codecs::Compact;
 use reth_config::config::EtlConfig;
 use reth_db_api::{
     tables,
-    transaction::{DbTx, DbTxMut},
+    transaction::DbTxMut,
     DatabaseError,
 };
 use reth_etl::Collector;
@@ -145,8 +145,7 @@ where
 
     // use transaction to insert genesis header
     let provider_rw = factory.database_provider_rw()?;
-    let nested_provider = || factory.database_provider_ro().map(|db| db.into_tx());
-    insert_world_trie(nested_provider, &provider_rw, alloc.iter())?;
+    insert_world_trie(&provider_rw, alloc.iter())?;
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
     insert_genesis_history(&provider_rw, alloc.iter())?;
 
@@ -312,15 +311,12 @@ where
 }
 
 /// Insert the genesis world trie
-pub fn insert_world_trie<'a, 'b, Tx, F, Writer>(
-    provider: F,
-    writer: &Writer,
+pub fn insert_world_trie<'a, 'b, Provider>(
+    provider: &Provider,
     alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
 ) -> ProviderResult<()>
 where
-    Tx: DbTx,
-    F: Fn() -> ProviderResult<Tx> + Send + Sync,
-    Writer: DBProvider<Tx: DbTxMut> + TrieWriterV2,
+    Provider: DBProvider<Tx: DbTxMut> + TrieWriterV2,
 {
     let mut accounts = HashMap::default();
     let mut storages = HashMap::default();
@@ -337,10 +333,11 @@ where
         storages.insert(hashed_address, hashed_storages);
     }
     let hashed_state = HashedPostState { accounts, storages };
-    let nested_hash = NestedStateRoot::new(provider, None);
+    let tx = provider.tx_ref();
+    let nested_hash = NestedStateRoot::new(tx, None);
     let (root_hash, trie_updates) = nested_hash.calculate(&hashed_state)?;
 
-    writer.write_trie_updatesv2(&trie_updates)?;
+    provider.write_trie_updatesv2(&trie_updates)?;
     info!(target: "reth::cli",
     root_hash=?root_hash,
     "Inserted world trie");

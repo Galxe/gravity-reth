@@ -17,7 +17,7 @@ use reth_provider::{
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
-    BlockErrorKind, BoxedConcurrentProvider, CheckpointBlockRange, EntitiesCheckpoint, ExecInput,
+    BlockErrorKind, CheckpointBlockRange, EntitiesCheckpoint, ExecInput,
     ExecOutput, ExecutionCheckpoint, ExecutionStageThresholds, Stage, StageCheckpoint, StageError,
     StageId, UnwindInput, UnwindOutput,
 };
@@ -249,7 +249,7 @@ where
     }
 }
 
-impl<E, Provider, ProviderRO> Stage<Provider, ProviderRO> for ExecutionStage<E>
+impl<E, Provider> Stage<Provider> for ExecutionStage<E>
 where
     E: ConfigureEvm,
     Provider: DBProvider
@@ -261,7 +261,6 @@ where
         > + StatsReader
         + BlockHashReader
         + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>,
-    ProviderRO: DBProvider + BlockHashReader,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -282,7 +281,6 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
@@ -295,8 +293,7 @@ where
 
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
-        let provider_ro = provider_ro()?;
-        let db = StateProviderDatabase(LatestStateProviderRef::new(&provider_ro));
+        let db = StateProviderDatabase(LatestStateProviderRef::new(provider));
         let mut executor = self.evm_config.parallel_executor(db);
 
         // Progress tracking
@@ -492,7 +489,6 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_to, _) =

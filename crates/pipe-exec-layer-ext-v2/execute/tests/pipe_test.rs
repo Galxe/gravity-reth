@@ -142,8 +142,8 @@ async fn run_pipe(
     drop(db_provider);
 
     // write new state root
-    let nested_provider = || provider.database_provider_ro().map(|db| db.into_tx());
-    let nested_hash = NestedStateRoot::new(nested_provider, None);
+    let tx = provider.database_provider_ro().unwrap().into_tx();
+    let nested_hash = NestedStateRoot::new(&tx, None);
     let hashed_state = nested_hash.read_hashed_state(None).unwrap();
     let (root_hash, trie_updates) = nested_hash.calculate(&hashed_state).unwrap();
     let trie_write = provider.database_provider_rw().unwrap();

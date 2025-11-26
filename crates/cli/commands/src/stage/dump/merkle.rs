@@ -96,30 +96,18 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
     StorageHashingStage::default()
         .unwind(
             &provider,
-            Box::new({
-                let provider_factory = db_tool.provider_factory.clone();
-                move || provider_factory.database_provider_ro()
-            }),
             unwind,
         )
         .unwrap();
     AccountHashingStage::default()
         .unwind(
             &provider,
-            Box::new({
-                let provider_factory = db_tool.provider_factory.clone();
-                move || provider_factory.database_provider_ro()
-            }),
             unwind,
         )
         .unwrap();
 
     MerkleStage::default_unwind().unwind(
         &provider,
-        Box::new({
-            let provider_factory = db_tool.provider_factory.clone();
-            move || provider_factory.database_provider_ro()
-        }),
         unwind,
     )?;
 
@@ -139,10 +127,6 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
 
     exec_stage.unwind(
         &provider,
-        Box::new({
-            let provider_factory = db_tool.provider_factory.clone();
-            move || provider_factory.database_provider_ro()
-        }),
         UnwindInput {
             unwind_to: to,
             checkpoint: StageCheckpoint::new(tip_block_number),
@@ -158,10 +142,6 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
     }
     .execute(
         &provider,
-        Box::new({
-            let provider_factory = db_tool.provider_factory.clone();
-            move || provider_factory.database_provider_ro()
-        }),
         execute_input,
     )
     .unwrap();
@@ -172,10 +152,6 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
     }
     .execute(
         &provider,
-        Box::new({
-            let provider_factory = db_tool.provider_factory.clone();
-            move || provider_factory.database_provider_ro()
-        }),
         execute_input,
     )
     .unwrap();
@@ -216,10 +192,6 @@ where
         if stage
             .execute(
                 &provider,
-                Box::new({
-                    let provider_factory = output_provider_factory.clone();
-                    move || provider_factory.database_provider_ro()
-                }),
                 input,
             )?
             .done

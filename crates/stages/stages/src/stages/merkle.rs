@@ -12,7 +12,7 @@ use reth_provider::{
     StatsReader, TrieWriter, TrieWriterV2,
 };
 use reth_stages_api::{
-    BlockErrorKind, BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput,
+    BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput,
     MerkleCheckpoint, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_trie_parallel::nested_hash::NestedStateRoot;
@@ -151,7 +151,7 @@ impl MerkleStage {
     }
 }
 
-impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for MerkleStage
+impl<Provider> Stage<Provider> for MerkleStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + TrieWriter
@@ -160,7 +160,6 @@ where
         + HeaderProvider
         + StageCheckpointReader
         + StageCheckpointWriter,
-    ProviderRO: DBProvider,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -176,7 +175,6 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if matches!(self, Self::Unwind) {
@@ -198,8 +196,8 @@ where
         } else {
             debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
             // Use optimized nested hash algorithm for state root calculation
-            let nested_state_root =
-                NestedStateRoot::new(|| provider_ro().map(|db| db.into_tx()), None);
+            // Create a read-only transaction for parallel trie calculation
+            let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
             // Read the hashed state from database for the specified range
             let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
             let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
@@ -236,7 +234,6 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let tx = provider.tx_ref();
@@ -270,10 +267,7 @@ where
             info!(target: "sync::stages::merkle::unwind", "Nothing to unwind");
         } else {
             // Use optimized nested hash algorithm for state root calculation
-            // TODO(gaoxin): `read_hashed_state` returns wrong `HashedPostState`, so merkle state is
-            // unwond incorrectly
-            let nested_state_root =
-                NestedStateRoot::new(|| provider_ro().map(|db| db.into_tx()), None);
+            let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
             let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
             let (block_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
 
