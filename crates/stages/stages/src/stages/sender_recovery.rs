@@ -16,7 +16,7 @@ use reth_provider::{
 };
 use reth_prune_types::PruneSegment;
 use reth_stages_api::{
-    BlockErrorKind, BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput, Stage,
+    BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, Stage,
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
@@ -58,7 +58,7 @@ impl Default for SenderRecoveryStage {
     }
 }
 
-impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for SenderRecoveryStage
+impl<Provider> Stage<Provider> for SenderRecoveryStage
 where
     Provider: DBProvider<Tx: DbTxMut>
         + BlockReader
@@ -78,7 +78,6 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
@@ -128,7 +127,6 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (_, unwind_to, _) = input.unwind_block_range_with_threshold(self.commit_threshold);

@@ -12,7 +12,7 @@ use reth_etl::Collector;
 use reth_primitives_traits::StorageEntry;
 use reth_provider::{DBProvider, HashingWriter, StatsReader, StorageReader};
 use reth_stages_api::{
-    BoxedConcurrentProvider, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
+    EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
     StageError, StageId, StorageHashingCheckpoint, UnwindInput, UnwindOutput,
 };
 use reth_storage_errors::provider::ProviderResult;
@@ -62,7 +62,7 @@ impl Default for StorageHashingStage {
     }
 }
 
-impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for StorageHashingStage
+impl<Provider> Stage<Provider> for StorageHashingStage
 where
     Provider: DBProvider<Tx: DbTxMut> + StorageReader + HashingWriter + StatsReader,
 {
@@ -75,7 +75,6 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         let tx = provider.tx_ref();
@@ -169,7 +168,6 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_progress, _) =

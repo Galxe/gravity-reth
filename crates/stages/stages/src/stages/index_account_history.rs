@@ -5,7 +5,7 @@ use reth_db_api::{models::ShardedKey, table::Decode, tables, transaction::DbTxMu
 use reth_provider::{DBProvider, HistoryWriter, PruneCheckpointReader, PruneCheckpointWriter};
 use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment};
 use reth_stages_api::{
-    BoxedConcurrentProvider, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
+    ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
     UnwindInput, UnwindOutput,
 };
 use std::fmt::Debug;
@@ -42,7 +42,7 @@ impl Default for IndexAccountHistoryStage {
     }
 }
 
-impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for IndexAccountHistoryStage
+impl<Provider> Stage<Provider> for IndexAccountHistoryStage
 where
     Provider:
         DBProvider<Tx: DbTxMut> + HistoryWriter + PruneCheckpointReader + PruneCheckpointWriter,
@@ -56,7 +56,6 @@ where
     fn execute(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         mut input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
         if let Some((target_prunable_block, prune_mode)) = self
@@ -129,7 +128,6 @@ where
     fn unwind(
         &mut self,
         provider: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_progress, _) =

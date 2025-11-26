@@ -1,6 +1,5 @@
 use crate::{error::StageError, StageCheckpoint, StageId};
 use alloy_primitives::{BlockNumber, TxNumber};
-use reth_errors::ProviderResult;
 use reth_provider::{BlockReader, ProviderError};
 use std::{
     cmp::{max, min},
@@ -8,9 +7,6 @@ use std::{
     ops::{Range, RangeInclusive},
     task::{Context, Poll},
 };
-
-/// Support to create concurrent reader
-pub type BoxedConcurrentProvider<P> = Box<dyn Fn() -> ProviderResult<P> + Send + Sync>;
 
 /// Stage execution input, see [`Stage::execute`].
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -199,7 +195,7 @@ pub struct UnwindOutput {
 ///
 /// Stages receive [`DBProvider`](reth_provider::DBProvider).
 #[auto_impl::auto_impl(Box)]
-pub trait Stage<Provider, ProviderRO>: Send + Sync {
+pub trait Stage<Provider>: Send + Sync {
     /// Get the ID of the stage.
     ///
     /// Stage IDs must be unique.
@@ -243,7 +239,6 @@ pub trait Stage<Provider, ProviderRO>: Send + Sync {
     fn execute(
         &mut self,
         provider: &Provider,
-        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: ExecInput,
     ) -> Result<ExecOutput, StageError>;
 
@@ -260,7 +255,6 @@ pub trait Stage<Provider, ProviderRO>: Send + Sync {
     fn unwind(
         &mut self,
         provider: &Provider,
-        provider_ro: BoxedConcurrentProvider<ProviderRO>,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError>;
 
@@ -275,7 +269,7 @@ pub trait Stage<Provider, ProviderRO>: Send + Sync {
 }
 
 /// [Stage] trait extension.
-pub trait StageExt<Provider, ProviderRO>: Stage<Provider, ProviderRO> {
+pub trait StageExt<Provider>: Stage<Provider> {
     /// Utility extension for the `Stage` trait that invokes `Stage::poll_execute_ready`
     /// with [`poll_fn`] context. For more information see [`Stage::poll_execute_ready`].
     fn execute_ready(
@@ -286,7 +280,7 @@ pub trait StageExt<Provider, ProviderRO>: Stage<Provider, ProviderRO> {
     }
 }
 
-impl<Provider, ProviderRO, S: Stage<Provider, ProviderRO> + ?Sized> StageExt<Provider, ProviderRO>
+impl<Provider, S: Stage<Provider> + ?Sized> StageExt<Provider>
     for S
 {
 }

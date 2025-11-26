@@ -10,29 +10,29 @@ use std::{
 /// individual stage sets to determine what kind of configuration they expose.
 ///
 /// Individual stages in the set can be added, removed and overridden using [`StageSetBuilder`].
-pub trait StageSet<Provider, ProviderRO>: Sized {
+pub trait StageSet<Provider>: Sized {
     /// Configures the stages in the set.
-    fn builder(self) -> StageSetBuilder<Provider, ProviderRO>;
+    fn builder(self) -> StageSetBuilder<Provider>;
 
     /// Overrides the given [`Stage`], if it is in this set.
     ///
     /// # Panics
     ///
     /// Panics if the [`Stage`] is not in this set.
-    fn set<S: Stage<Provider, ProviderRO> + 'static>(
+    fn set<S: Stage<Provider> + 'static>(
         self,
         stage: S,
-    ) -> StageSetBuilder<Provider, ProviderRO> {
+    ) -> StageSetBuilder<Provider> {
         self.builder().set(stage)
     }
 }
 
-struct StageEntry<Provider, ProviderRO> {
-    stage: Box<dyn Stage<Provider, ProviderRO>>,
+struct StageEntry<Provider> {
+    stage: Box<dyn Stage<Provider>>,
     enabled: bool,
 }
 
-impl<Provider, ProviderRO> Debug for StageEntry<Provider, ProviderRO> {
+impl<Provider> Debug for StageEntry<Provider> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StageEntry")
             .field("stage", &self.stage.id())
@@ -47,18 +47,18 @@ impl<Provider, ProviderRO> Debug for StageEntry<Provider, ProviderRO> {
 /// to the final sync pipeline before/after their dependencies.
 ///
 /// Stages inside the set can be disabled, enabled, overridden and reordered.
-pub struct StageSetBuilder<Provider, ProviderRO> {
-    stages: HashMap<StageId, StageEntry<Provider, ProviderRO>>,
+pub struct StageSetBuilder<Provider> {
+    stages: HashMap<StageId, StageEntry<Provider>>,
     order: Vec<StageId>,
 }
 
-impl<Provider, ProviderRO> Default for StageSetBuilder<Provider, ProviderRO> {
+impl<Provider> Default for StageSetBuilder<Provider> {
     fn default() -> Self {
         Self { stages: HashMap::default(), order: Vec::new() }
     }
 }
 
-impl<Provider, ProviderRO> Debug for StageSetBuilder<Provider, ProviderRO> {
+impl<Provider> Debug for StageSetBuilder<Provider> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StageSetBuilder")
             .field("stages", &self.stages)
@@ -67,7 +67,7 @@ impl<Provider, ProviderRO> Debug for StageSetBuilder<Provider, ProviderRO> {
     }
 }
 
-impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
+impl<Provider> StageSetBuilder<Provider> {
     fn index_of(&self, stage_id: StageId) -> usize {
         let index = self.order.iter().position(|&id| id == stage_id);
 
@@ -76,7 +76,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
 
     fn upsert_stage_state(
         &mut self,
-        stage: Box<dyn Stage<Provider, ProviderRO>>,
+        stage: Box<dyn Stage<Provider>>,
         added_at_index: usize,
     ) {
         let stage_id = stage.id();
@@ -97,7 +97,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     /// # Panics
     ///
     /// Panics if the [`Stage`] is not in this set.
-    pub fn set<S: Stage<Provider, ProviderRO> + 'static>(mut self, stage: S) -> Self {
+    pub fn set<S: Stage<Provider> + 'static>(mut self, stage: S) -> Self {
         let entry = self
             .stages
             .get_mut(&stage.id())
@@ -116,7 +116,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     ///
     /// If the new stage has a different ID,
     /// it will maintain the original stage's position in the execution order.
-    pub fn replace<S: Stage<Provider, ProviderRO> + 'static>(
+    pub fn replace<S: Stage<Provider> + 'static>(
         mut self,
         stage_id: StageId,
         stage: S,
@@ -138,7 +138,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     /// Adds the given [`Stage`] at the end of this set.
     ///
     /// If the stage was already in the group, it is removed from its previous place.
-    pub fn add_stage<S: Stage<Provider, ProviderRO> + 'static>(mut self, stage: S) -> Self {
+    pub fn add_stage<S: Stage<Provider> + 'static>(mut self, stage: S) -> Self {
         let target_index = self.order.len();
         self.order.push(stage.id());
         self.upsert_stage_state(Box::new(stage), target_index);
@@ -148,7 +148,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     /// Adds the given [`Stage`] at the end of this set if it's [`Some`].
     ///
     /// If the stage was already in the group, it is removed from its previous place.
-    pub fn add_stage_opt<S: Stage<Provider, ProviderRO> + 'static>(self, stage: Option<S>) -> Self {
+    pub fn add_stage_opt<S: Stage<Provider> + 'static>(self, stage: Option<S>) -> Self {
         if let Some(stage) = stage {
             self.add_stage(stage)
         } else {
@@ -160,7 +160,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     ///
     /// If a stage is in both sets, it is removed from its previous place in this set. Because of
     /// this, it is advisable to merge sets first and re-order stages after if needed.
-    pub fn add_set<Set: StageSet<Provider, ProviderRO>>(mut self, set: Set) -> Self {
+    pub fn add_set<Set: StageSet<Provider>>(mut self, set: Set) -> Self {
         for stage in set.builder().build() {
             let target_index = self.order.len();
             self.order.push(stage.id());
@@ -176,7 +176,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     /// # Panics
     ///
     /// Panics if the dependency stage is not in this set.
-    pub fn add_before<S: Stage<Provider, ProviderRO> + 'static>(
+    pub fn add_before<S: Stage<Provider> + 'static>(
         mut self,
         stage: S,
         before: StageId,
@@ -194,7 +194,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     /// # Panics
     ///
     /// Panics if the dependency stage is not in this set.
-    pub fn add_after<S: Stage<Provider, ProviderRO> + 'static>(
+    pub fn add_after<S: Stage<Provider> + 'static>(
         mut self,
         stage: S,
         after: StageId,
@@ -279,7 +279,7 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     }
 
     /// Consumes the builder and returns the contained [`Stage`]s in the order specified.
-    pub fn build(mut self) -> Vec<Box<dyn Stage<Provider, ProviderRO>>> {
+    pub fn build(mut self) -> Vec<Box<dyn Stage<Provider>>> {
         let mut stages = Vec::new();
         for id in &self.order {
             if let Some(entry) = self.stages.remove(id) &&
@@ -292,8 +292,8 @@ impl<Provider, ProviderRO> StageSetBuilder<Provider, ProviderRO> {
     }
 }
 
-impl<Provider, ProviderRO> StageSet<Provider, ProviderRO>
-    for StageSetBuilder<Provider, ProviderRO>
+impl<Provider> StageSet<Provider>
+    for StageSetBuilder<Provider>
 {
     fn builder(self) -> Self {
         self

@@ -154,8 +154,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         let prune_modes = config.prune.clone().map(|prune| prune.segments).unwrap_or_default();
 
         let (mut exec_stage, mut unwind_stage): (
-            Box<dyn Stage<_, _>>,
-            Option<Box<dyn Stage<_, _>>>,
+            Box<dyn Stage<_>>,
+            Option<Box<dyn Stage<_>>>,
         ) = match self.stage {
             StageEnum::Headers => {
                 let consensus = Arc::new(components.consensus().clone());
@@ -332,10 +332,6 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
             while unwind.checkpoint.block_number > self.from {
                 let UnwindOutput { checkpoint } = unwind_stage.unwind(
                     &provider_rw,
-                    Box::new({
-                        let provider_factory = provider_factory.clone();
-                        move || provider_factory.database_provider_ro()
-                    }),
                     unwind,
                 )?;
                 unwind.checkpoint = checkpoint;
@@ -362,10 +358,6 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
             exec_stage.execute_ready(input).await?;
             let ExecOutput { checkpoint, done } = exec_stage.execute(
                 &provider_rw,
-                Box::new({
-                    let provider_factory = provider_factory.clone();
-                    move || provider_factory.database_provider_ro()
-                }),
                 input,
             )?;
 

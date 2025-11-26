@@ -57,8 +57,8 @@ where
     }
 
     fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieUpdatesV2)> {
-        let provider = || self.client.database_provider_ro().map(|db| db.into_tx());
-        let nested_hash = NestedStateRoot::new(provider, Some(self.cache.clone()));
+        let tx = self.client.database_provider_ro()?.into_tx();
+        let nested_hash = NestedStateRoot::new(&tx, Some(self.cache.clone()));
         nested_hash.calculate(hashed_state)
     }
 
