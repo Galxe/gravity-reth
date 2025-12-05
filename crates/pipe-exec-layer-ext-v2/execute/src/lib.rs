@@ -46,7 +46,7 @@ use revm::{
     state::AccountInfo,
     DatabaseCommit,
 };
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::{Duration, Instant}};
 
 use gravity_storage::GravityStorage;
 use onchain_config::{transact_metadata_contract_call, OnchainConfigFetcher};
@@ -139,6 +139,13 @@ impl ReceivedBlock {
             Self::HistoryBlock(block) => block.number(),
         }
     }
+
+    fn epoch(&self) -> u64 {
+        match self {
+            Self::OrderedBlock(block) => block.epoch,
+            Self::HistoryBlock(_) => 0,
+        }
+    }
 }
 
 /// Events emitted by the pipeline execution layer
@@ -206,12 +213,14 @@ struct Core<Storage: GravityStorage> {
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
-    execute_block_barrier: Channel<u64 /* block number */, ExecuteBlockContext>,
+    execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
     seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
     make_canonical_barrier: Channel<u64 /* block number */, Instant>,
     discard_txs_tx: UnboundedSender<Vec<TxHash>>,
     cache: PersistBlockCache,
+    epoch: AtomicU64,
+    execute_height: AtomicU64,
     metrics: PipeExecLayerMetrics,
 }
 
@@ -235,6 +244,7 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
                 id=?block.id(),
                 parent_id=?block.parent_id(),
                 number=?block.number(),
+                epoch=?block.epoch(),
                 elapsed=?elapsed,
                 "new ordered block"
             );
@@ -261,41 +271,55 @@ struct ExecuteOrderedBlockResult {
 }
 
 impl<Storage: GravityStorage> Core<Storage> {
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    fn execute_height(&self) -> u64 {
+        self.execute_height.load(Ordering::Acquire)
+    }
+
     async fn process(&self, block: ReceivedBlock) {
         // Wait untile there's no large gap between cache and db
         let block_number = block.number();
         let block_id = block.id();
-        let randomness = if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
-            ordered_block.randomness
+        let (randomness, block_epoch) = if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
+            (ordered_block.randomness, ordered_block.epoch)
         } else {
-            U256::ZERO
+            (U256::ZERO, self.epoch())
         };
         self.metrics.start_process_block_number.set(block_number as f64);
 
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
-        let ExecuteBlockContext { parent_header, prev_start_execute_time, epoch } =
-            self.execute_block_barrier.wait(block_number - 1).await.unwrap();
-
-        if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
-            if ordered_block.epoch != epoch {
-                // Discard the block if the epoch is not equal to the current epoch
-                self.execute_block_barrier.notify(
-                    block_number - 1,
-                    ExecuteBlockContext { parent_header, prev_start_execute_time, epoch },
-                );
-                info!(target: "PipeExecService.process",
-                    block_number=?block_number,
-                    block_id=?block_id,
-                    block_epoch=?ordered_block.epoch,
-                    current_epoch=?epoch,
-                    "epoch mismatch"
-                );
-                assert!(ordered_block.epoch < epoch);
-                return;
+        let ExecuteBlockContext { parent_header, prev_start_execute_time, epoch } = loop {
+            info!("Wait execute_block_barrier {} => ({}, {})", block_number, block_epoch, block_number - 1);
+            match self.execute_block_barrier.wait_timeout((block_epoch, block_number - 1), Duration::from_secs(2)).await {
+                Some(parent) => break parent,
+                // Make sure the ordered blocks are idempotent
+                None => if block_epoch < self.epoch() || block_number <= self.execute_height() {
+                    warn!(target: "PipeExecService.process",
+                        block_number=?block_number,
+                        block_id=?block_id,
+                        block_epoch=?block_epoch,
+                        current_epoch=?self.epoch(),
+                        execute_height=?self.execute_height(),
+                        "epoch or execute height mismatch"
+                    );
+                    return;
+                } else {
+                    warn!(target: "PipeExecService.process",
+                        block_number=?block_number,
+                        block_id=?block_id,
+                        block_epoch=?block_epoch,
+                        "timeout(2s) wait for execute_block_barrier"
+                    );
+                }
             }
+        };
+        if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
+            assert!(ordered_block.epoch == epoch);
         }
-
         self.storage.insert_block_id(block_number, block_id);
 
         // Wait for persist gap with a reasonable timeout (2 seconds)
@@ -352,9 +376,20 @@ impl<Storage: GravityStorage> Core<Storage> {
             "gas_used mismatch, block_number: {}",
             block.number,
         );
+        if epoch > block_epoch {
+            info!(target: "PipeExecService.process",
+                block_number=?block_number,
+                block_id=?block_id,
+                prev_epoch=?block_epoch,
+                new_epoch=?epoch,
+                "new epoch"
+            );
+            assert_eq!(self.epoch.fetch_max(epoch, Ordering::Release), block_epoch);
+        }
+        assert_eq!(self.execute_height.fetch_add(1, Ordering::Release), block_number - 1);
         self.execute_block_barrier
             .notify(
-                block_number,
+                (epoch, block_number),
                 ExecuteBlockContext {
                     parent_header: block.header.clone(),
                     prev_start_execute_time: start_time,
@@ -1075,7 +1110,7 @@ where
             chain_spec,
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
-                latest_block_number,
+                (epoch, latest_block_number),
                 ExecuteBlockContext {
                     parent_header: latest_block_header,
                     prev_start_execute_time: start_time,
@@ -1087,6 +1122,8 @@ where
             make_canonical_barrier: Channel::new_with_states([(latest_block_number, start_time)]),
             discard_txs_tx,
             cache: PERSIST_BLOCK_CACHE.clone(),
+            epoch: AtomicU64::new(epoch),
+            execute_height: AtomicU64::new(latest_block_number),
             metrics: PipeExecLayerMetrics::default(),
         }),
         ordered_block_rx,

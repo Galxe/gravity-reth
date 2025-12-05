@@ -3,6 +3,7 @@ use std::{
     fmt::Debug,
     hash::Hash,
     sync::{Mutex, MutexGuard},
+    time::Duration,
 };
 
 use tokio::sync::oneshot;
@@ -40,6 +41,16 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
     /// Wait until the key is notified.
     /// Returns `None` if the barrier has been closed.
     pub(crate) async fn wait(&self, key: K) -> Option<V> {
+        self.wait_inner(key, None).await
+    }
+
+    /// Wait until the key is notified with a timeout.
+    /// Returns `None` if the barrier has been closed or the timeout is reached.
+    pub(crate) async fn wait_timeout(&self, key: K, timeout: Duration) -> Option<V> {
+        self.wait_inner(key, Some(timeout)).await
+    }
+
+    async fn wait_inner(&self, key: K, timeout: Option<Duration>) -> Option<V> {
         // ATTN: We can guarantee that `.await` will not occur within the critical zone, which means
         // `MutexGuard` will not be sent across threads.
         struct SendMutexGuard<'a, T>(MutexGuard<'a, T>);
@@ -54,14 +65,32 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
         match state {
             Some(State::Notified(v)) => Some(v),
             Some(State::Waiting(_)) => {
-                panic!("unexpected state: {key:?}");
+                // Return None if there're more consumers, only one can get the notifier.
+                None
             }
             None => {
                 let (tx, rx) = oneshot::channel();
-                inner.0.states.insert(key, State::Waiting(tx));
+                inner.0.states.insert(key.clone(), State::Waiting(tx));
                 drop(inner);
 
-                rx.await.ok()
+                match timeout {
+                    Some(duration) => {
+                        match tokio::time::timeout(duration, rx).await {
+                            Ok(result) => result.ok(),
+                            Err(_) => {
+                                // Timeout occurred, clean up the waiting state only if still waiting.
+                                // If the state is Notified, we should not remove it to avoid losing
+                                // the notify signal.
+                                let mut inner = self.inner.lock().unwrap();
+                                if matches!(inner.states.get(&key), Some(State::Waiting(_))) {
+                                    inner.states.remove(&key);
+                                }
+                                None
+                            }
+                        }
+                    }
+                    None => rx.await.ok(),
+                }
             }
         }
     }
