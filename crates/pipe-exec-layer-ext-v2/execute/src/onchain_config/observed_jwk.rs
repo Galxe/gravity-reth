@@ -4,7 +4,7 @@ use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent, SolType};
@@ -152,7 +152,7 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 amount: event.1,
                 blockNumber: event.3,
                 issuer: issuer.to_string(),
-                data: "", // deposit模式为空
+                data: Bytes::new(), // deposit模式为空
             }
         }
         hash if hash == 2 => {
@@ -169,16 +169,16 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 "observed_jwk change record event created"
             );
             // For ChangeRecord, we store sequenceNumber in data field
-            let sequence_bytes = event_data.1.to_be_bytes();
+            let sequence_bytes: [u8; 32] = event_data.1.to_be_bytes();
             
             CrossChainParams {
                 id: unsupported_jwk.id,
                 sender: Address::ZERO, // updater is in topics, not available here
                 targetAddress: Address::ZERO, // ChangeRecord doesn't have targetAddress
-                amount: 0u64.into(), // ChangeRecord doesn't have amount
+                amount: U256::ZERO, // ChangeRecord doesn't have amount
                 blockNumber: event_data.0,
                 issuer: issuer.to_string(),
-                data: sequence_bytes.to_vec().into(), // Store sequenceNumber in data
+                data: Bytes::from(sequence_bytes.to_vec()), // Store sequenceNumber in data
             }
         }
         _ => panic!("Unsupported event type: {:?}, id: {:?}", data_type, unsupported_jwk.id),
