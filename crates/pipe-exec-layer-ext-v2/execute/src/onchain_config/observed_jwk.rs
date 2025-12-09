@@ -4,7 +4,7 @@ use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent, SolType};
@@ -23,10 +23,10 @@ sol! {
     );
 
     event ChangeRecord(
-        bytes32 indexed key,
-        bytes32 indexed value,
+        bytes32 key,
+        bytes32 value,
         uint256 blockNumber,
-        address indexed updater,
+        address updater,
         uint256 sequenceNumber
     );
 }
@@ -120,6 +120,20 @@ fn convert_into_sol_provider_jwks(
     }
 }
 
+/// Parse chain_id from issuer URI
+/// Issuer format: gravity://{chain_id}/event?address={contract_address}&topic0={topic0}&fromBlock={from_block}
+fn parse_chain_id_from_issuer(issuer: &str) -> Option<u32> {
+    if issuer.starts_with("gravity://") {
+        // Extract the part after "gravity://" and before the next "/"
+        let after_protocol = &issuer[10..]; // Skip "gravity://"
+        if let Some(slash_pos) = after_protocol.find('/') {
+            let chain_id_str = &after_protocol[..slash_pos];
+            return chain_id_str.parse().ok();
+        }
+    }
+    None
+}
+
 fn convert_into_sol_crosschain_params(jwks: &Vec<JWK>, issuer: &str) -> Vec<CrossChainParams> {
     jwks.iter()
         .filter(|jwk| jwk.variant == 1)
@@ -157,28 +171,68 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
         }
         hash if hash == 2 => {
             // ChangeRecord
-            // Note: ChangeRecord has indexed parameters (key, value, updater) in topics
-            // and non-indexed parameters (blockNumber, sequenceNumber) in data
-            // The payload here contains only the data part (blockNumber, sequenceNumber)
-            let event_data = ChangeRecord::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            // event_data is a tuple: (blockNumber, sequenceNumber)
+            // All parameters are non-indexed, so all fields are in the data part
+            let event = ChangeRecord::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            let hash_value: B256 = event.1;
+            let block_number = event.2;
+            let sequence_number = event.4;
+
+            //bytes memory data = crossChainParam.data;
+            // require(data.length == 76, "Invalid hash record data length");
+
+            // bytes32 hash;
+            // uint64 sourceBlockNumber;
+            // uint32 sourceChainId;
+            // uint256 sequenceNumber;
+
+            // assembly {
+            //     hash := mload(add(data, 32))
+            //     sourceBlockNumber := mload(add(data, 64))
+            //     sourceChainId := mload(add(data, 72))
+            //     sequenceNumber := mload(add(data, 104))
+            // }
+            // Build 76-byte data according to Solidity contract expectations:
+            // - hash (bytes32): 32 bytes at offset 0 (from event.1)
+            // - sourceBlockNumber (uint64): 8 bytes at offset 32 (from event.2, converted to u64)
+            // - sourceChainId (uint32): 4 bytes at offset 40 (parsed from issuer)
+            // - sequenceNumber (uint256): 32 bytes at offset 44 (from event.4)
+            // Total: 76 bytes
+            let mut data_bytes = vec![0u8; 76];
+
+            // hash (bytes32) - 32 bytes at offset 0 (event.1)
+            data_bytes[0..32].copy_from_slice(hash_value.as_slice());
+
+            // sourceBlockNumber (uint64) - 8 bytes at offset 32 (event.2 converted to u64)
+            let source_block_number = block_number.to::<u64>();
+            data_bytes[32..40].copy_from_slice(&source_block_number.to_be_bytes());
+
+            // sourceChainId (uint32) - 4 bytes at offset 40 (parsed from issuer)
+            let source_chain_id = parse_chain_id_from_issuer(issuer).unwrap_or(0u32);
 
             info!(target: "observed_jwk change record event",
-                block_number=?event_data.0,
-                sequence_number=?event_data.1,
+                key=?event.0,
+                hash=?hash_value,
+                block_number=?block_number,
+                updater=?event.3,
+                sequence_number=?sequence_number,
+                source_chain_id=?source_chain_id,
                 "observed_jwk change record event created"
             );
-            // For ChangeRecord, we store sequenceNumber in data field
-            let sequence_bytes: [u8; 32] = event_data.1.to_be_bytes();
-            
+
+            data_bytes[40..44].copy_from_slice(&source_chain_id.to_be_bytes());
+
+            // sequenceNumber (uint256) - 32 bytes at offset 44 (event.4)
+            let sequence_bytes: [u8; 32] = sequence_number.to_be_bytes();
+            data_bytes[44..76].copy_from_slice(&sequence_bytes);
+
             CrossChainParams {
                 id: unsupported_jwk.id,
-                sender: Address::ZERO, // updater is in topics, not available here
+                sender: event.3,              // updater is in event.3
                 targetAddress: Address::ZERO, // ChangeRecord doesn't have targetAddress
-                amount: U256::ZERO, // ChangeRecord doesn't have amount
-                blockNumber: event_data.0,
+                amount: U256::ZERO,           // ChangeRecord doesn't have amount
+                blockNumber: block_number,
                 issuer: issuer.to_string(),
-                data: Bytes::from(sequence_bytes.to_vec()), // Store sequenceNumber in data
+                data: Bytes::from(data_bytes), // Store 76-byte data as expected by contract
             }
         }
         _ => panic!("Unsupported event type: {:?}, id: {:?}", data_type, unsupported_jwk.id),
@@ -213,7 +267,7 @@ fn convert_into_bcs_all_providers_jwks(all_providers_jwks: AllProvidersJWKs) -> 
 }
 
 /// Construct JWK transaction from ProviderJWKs
-/// 
+///
 /// This function is called by the validator transactions construction logic in mod.rs
 pub(crate) fn construct_jwk_transaction(
     provider_jwks: gravity_api_types::on_chain_config::jwks::ProviderJWKs,
@@ -225,7 +279,7 @@ pub(crate) fn construct_jwk_transaction(
         &sol_provider_jwks.jwks,
         sol_provider_jwks.issuer.as_str(),
     );
-    
+
     let call = upsertObservedJWKsCall {
         providerJWKsArray: vec![sol_provider_jwks],
         crossChainParamsArray: cross_chain_params,

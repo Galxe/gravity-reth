@@ -41,10 +41,10 @@ sol! {
     );
 
     event ChangeRecord(
-        bytes32 indexed key,
-        bytes32 indexed value,
+        bytes32 key,
+        bytes32 value,
         uint256 blockNumber,
-        address indexed updater,
+        address updater,
         uint256 sequenceNumber
     );
 }
@@ -682,10 +682,10 @@ mod tests {
             );
 
             event ChangeRecord(
-                bytes32 indexed key,
-                bytes32 indexed value,
+                bytes32 key,
+                bytes32 value,
                 uint256 blockNumber,
-                address indexed updater,
+                address updater,
                 uint256 sequenceNumber
             );
         }
