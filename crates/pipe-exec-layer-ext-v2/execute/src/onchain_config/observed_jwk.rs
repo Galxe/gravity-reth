@@ -21,6 +21,14 @@ sol! {
         address targetAddress,
         uint256 blockNumber
     );
+
+    event ChangeRecord(
+        bytes32 indexed key,
+        bytes32 indexed value,
+        uint256 blockNumber,
+        address indexed updater,
+        uint256 sequenceNumber
+    );
 }
 
 sol! {
@@ -32,6 +40,7 @@ sol! {
         uint256 amount;
         uint256 blockNumber;
         string issuer;
+        bytes data; // 额外数据（用于哈希记录等）
     }
 
     // 0 => Raw,
@@ -143,6 +152,33 @@ fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
                 amount: event.1,
                 blockNumber: event.3,
                 issuer: issuer.to_string(),
+                data: "", // deposit模式为空
+            }
+        }
+        hash if hash == 2 => {
+            // ChangeRecord
+            // Note: ChangeRecord has indexed parameters (key, value, updater) in topics
+            // and non-indexed parameters (blockNumber, sequenceNumber) in data
+            // The payload here contains only the data part (blockNumber, sequenceNumber)
+            let event_data = ChangeRecord::abi_decode_data(&unsupported_jwk.payload).unwrap();
+            // event_data is a tuple: (blockNumber, sequenceNumber)
+
+            info!(target: "observed_jwk change record event",
+                block_number=?event_data.0,
+                sequence_number=?event_data.1,
+                "observed_jwk change record event created"
+            );
+            // For ChangeRecord, we store sequenceNumber in data field
+            let sequence_bytes = event_data.1.to_be_bytes();
+            
+            CrossChainParams {
+                id: unsupported_jwk.id,
+                sender: Address::ZERO, // updater is in topics, not available here
+                targetAddress: Address::ZERO, // ChangeRecord doesn't have targetAddress
+                amount: 0u64.into(), // ChangeRecord doesn't have amount
+                blockNumber: event_data.0,
+                issuer: issuer.to_string(),
+                data: sequence_bytes.to_vec().into(), // Store sequenceNumber in data
             }
         }
         _ => panic!("Unsupported event type: {:?}, id: {:?}", data_type, unsupported_jwk.id),
