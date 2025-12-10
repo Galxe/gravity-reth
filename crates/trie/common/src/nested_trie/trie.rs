@@ -2,6 +2,7 @@ use once_cell::sync::OnceCell;
 
 use parking_lot::Mutex;
 
+use alloc::{boxed::Box, vec::Vec};
 use alloy_primitives::{
     map::{HashMap, HashSet},
     B256,

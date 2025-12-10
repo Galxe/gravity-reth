@@ -104,6 +104,8 @@ pub mod engine;
 pub mod metrics;
 /// The background writer service, coordinating write operations on static files and the database.
 pub mod persistence;
+/// Storage recovery helper for interrupted block writes.
+pub mod recovery;
 /// Support for interacting with the blockchain tree.
 pub mod tree;
 

@@ -1,3 +1,5 @@
+use reth_primitives_traits::SubkeyContainedValue;
+
 use super::{BranchNodeCompact, StoredNibblesSubKey};
 
 /// Account storage trie node.
@@ -8,6 +10,12 @@ pub struct StorageTrieEntry {
     pub nibbles: StoredNibblesSubKey,
     /// Encoded node.
     pub node: BranchNodeCompact,
+}
+
+impl SubkeyContainedValue for StorageTrieEntry {
+    fn subkey_length(&self) -> Option<usize> {
+        Some(self.nibbles.len().div_ceil(2) + 1)
+    }
 }
 
 // NOTE: Removing reth_codec and manually encode subkey

@@ -29,7 +29,7 @@ use alloy_primitives::{
     Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256,
 };
 use itertools::Itertools;
-use rayon::slice::ParallelSliceMut;
+use rayon::{prelude::*, slice::ParallelSliceMut};
 use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
@@ -77,6 +77,7 @@ use std::{
     sync::{mpsc, Arc},
 };
 use tracing::{debug, trace};
+use ::metrics::histogram;
 
 /// A [`DatabaseProvider`] that holds a read-only database transaction.
 pub type DatabaseProviderRO<DB, N> = DatabaseProvider<<DB as Database>::TX, N>;
@@ -808,6 +809,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
 
     /// Load shard and remove it. If list is empty, last shard was full or
     /// there are no shards at all.
+    #[allow(dead_code)]
     fn take_shard<T>(
         &self,
         cursor: &mut <TX as DbTxMut>::CursorMut<T>,
@@ -835,17 +837,33 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
     fn append_history_index<P, T>(
         &self,
         index_updates: impl IntoIterator<Item = (P, impl IntoIterator<Item = u64>)>,
-        mut sharded_key_factory: impl FnMut(P, BlockNumber) -> T::Key,
+        sharded_key_factory: impl Fn(P, BlockNumber) -> T::Key + Sync,
     ) -> ProviderResult<()>
     where
-        P: Copy,
+        P: Copy + Send,
         T: Table<Value = BlockNumberList>,
     {
+        let index_updates: Vec<(P, Vec<u64>)> = index_updates
+            .into_iter()
+            .map(|(pk, indices)| (pk, indices.into_iter().collect::<Vec<_>>()))
+            .collect();
+        
+        let shards: Result<Vec<_>, _> = index_updates
+            .into_par_iter()
+            .map(|(partial_key, indices)| -> ProviderResult<(P, Vec<u64>)> {
+                let key = sharded_key_factory(partial_key, u64::MAX);
+                let mut last_shard = if let Some(list) = self.tx.get::<T>(key)? {
+                    list.iter().collect::<Vec<_>>()
+                } else {
+                    vec![]
+                };
+                last_shard.extend(indices);
+                Ok((partial_key, last_shard))
+            })
+            .collect();
+        let shards = shards?;
         let mut cursor = self.tx.cursor_write::<T>()?;
-        for (partial_key, indices) in index_updates {
-            let mut last_shard =
-                self.take_shard::<T>(&mut cursor, sharded_key_factory(partial_key, u64::MAX))?;
-            last_shard.extend(indices);
+        for (partial_key, last_shard) in shards {
             // Chunk indices and insert them in shards of N size.
             let mut chunks = last_shard.chunks(sharded_key::NUM_OF_INDICES_IN_SHARD).peekable();
             while let Some(list) = chunks.next() {
@@ -855,7 +873,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
                     // Insert last list with `u64::MAX`.
                     u64::MAX
                 };
-                cursor.insert(
+                cursor.upsert(
                     sharded_key_factory(partial_key, highest_block_number),
                     &BlockNumberList::new_pre_sorted(list.iter().copied()),
                 )?;
@@ -1152,6 +1170,13 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
             .max(
                 self.static_file_provider.get_highest_static_file_block(StaticFileSegment::Headers),
             )
+            .unwrap_or_default())
+    }
+
+    fn recover_block_number(&self) -> ProviderResult<BlockNumber> {
+        Ok(self
+            .get_stage_checkpoint(StageId::Execution)?
+            .map(|checkpoint| checkpoint.block_number)
             .unwrap_or_default())
     }
 
@@ -1770,11 +1795,12 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 {
     type Receipt = ReceiptTy<N>;
 
-    fn write_state(
+    fn write_state_with_indices(
         &self,
         execution_outcome: &ExecutionOutcome<Self::Receipt>,
         is_value_known: OriginalValuesKnown,
         write_receipts_to: StorageLocation,
+        body_indices: Option<Vec<StoredBlockBodyIndices>>,
     ) -> ProviderResult<()> {
         let first_block = execution_outcome.first_block();
         let block_count = execution_outcome.len() as u64;
@@ -1790,11 +1816,14 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         self.write_state_changes(plain_state)?;
 
         // Fetch the first transaction number for each block in the range
-        let block_indices: Vec<_> = self
-            .block_body_indices_range(block_range)?
-            .into_iter()
-            .map(|b| b.first_tx_num)
-            .collect();
+        let block_indices: Vec<_> = if let Some(body_indices) = body_indices {
+            body_indices.into_iter().map(|b| b.first_tx_num).collect()
+        } else {
+            self.block_body_indices_range(block_range)?
+                .into_iter()
+                .map(|b| b.first_tx_num)
+                .collect()
+        };
 
         // Ensure all expected blocks are present.
         if block_indices.len() < block_count as usize {
@@ -1952,13 +1981,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         Ok(())
     }
 
-    fn write_state_changes(&self, mut changes: StateChangeset) -> ProviderResult<()> {
-        // sort all entries so they can be written to database in more performant way.
-        // and take smaller memory footprint.
-        changes.accounts.par_sort_by_key(|a| a.0);
-        changes.storage.par_sort_by_key(|a| a.address);
-        changes.contracts.par_sort_by_key(|a| a.0);
-
+    fn write_state_changes(&self, changes: StateChangeset) -> ProviderResult<()> {
         // Write new account state
         tracing::trace!(len = changes.accounts.len(), "Writing new account state");
         let mut accounts_cursor = self.tx_ref().cursor_write::<tables::PlainAccountState>()?;
@@ -1967,9 +1990,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             if let Some(account) = account {
                 tracing::trace!(?address, "Updating plain state account");
                 accounts_cursor.upsert(address, &account.into())?;
-            } else if accounts_cursor.seek_exact(address)?.is_some() {
+            } else {
                 tracing::trace!(?address, "Deleting plain state account");
-                accounts_cursor.delete_current()?;
+                accounts_cursor.delete_by_key(address)?;
             }
         }
 
@@ -1985,26 +2008,20 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         let mut storages_cursor = self.tx_ref().cursor_dup_write::<tables::PlainStorageState>()?;
         for PlainStorageChangeset { address, wipe_storage, storage } in changes.storage {
             // Wiping of storage.
-            if wipe_storage && storages_cursor.seek_exact(address)?.is_some() {
-                storages_cursor.delete_current_duplicates()?;
+            if wipe_storage {
+                storages_cursor.delete_by_key(address)?;
             }
             // cast storages to B256.
-            let mut storage = storage
+            let storage = storage
                 .into_iter()
                 .map(|(k, value)| StorageEntry { key: k.into(), value })
                 .collect::<Vec<_>>();
-            // sort storage slots by key.
-            storage.par_sort_unstable_by_key(|a| a.key);
 
             for entry in storage {
                 tracing::trace!(?address, ?entry.key, "Updating plain state storage");
-                if let Some(db_entry) = storages_cursor.seek_by_key_subkey(address, entry.key)? &&
-                    db_entry.key == entry.key
-                {
-                    storages_cursor.delete_current()?;
-                }
-
-                if !entry.value.is_zero() {
+                if entry.value.is_zero() {
+                    storages_cursor.delete_by_key_subkey(address, entry.key)?;
+                } else {
                     storages_cursor.upsert(address, &entry)?;
                 }
             }
@@ -2015,38 +2032,39 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 
     fn write_hashed_state(&self, hashed_state: &HashedPostStateSorted) -> ProviderResult<()> {
         // Write hashed account updates.
+        let mut num_updated = 0;
         let mut hashed_accounts_cursor = self.tx_ref().cursor_write::<tables::HashedAccounts>()?;
         for (hashed_address, account) in hashed_state.accounts().accounts_sorted() {
+            num_updated += 1;
             if let Some(account) = account {
                 hashed_accounts_cursor.upsert(hashed_address, &account)?;
-            } else if hashed_accounts_cursor.seek_exact(hashed_address)?.is_some() {
-                hashed_accounts_cursor.delete_current()?;
+            } else {
+                hashed_accounts_cursor.delete_by_key(hashed_address)?;
             }
         }
+        histogram!("table_block_updated_entries", &[("table", "HashedAccounts")]).record(num_updated as f64);
 
         // Write hashed storage changes.
-        let sorted_storages = hashed_state.account_storages().iter().sorted_by_key(|(key, _)| *key);
+        num_updated = 0;
         let mut hashed_storage_cursor =
             self.tx_ref().cursor_dup_write::<tables::HashedStorages>()?;
-        for (hashed_address, storage) in sorted_storages {
-            if storage.is_wiped() && hashed_storage_cursor.seek_exact(*hashed_address)?.is_some() {
-                hashed_storage_cursor.delete_current_duplicates()?;
+        for (hashed_address, storage) in hashed_state.account_storages() {
+            if storage.is_wiped() {
+                hashed_storage_cursor.delete_by_key(*hashed_address)?;
+                num_updated += 1;
             }
 
             for (hashed_slot, value) in storage.storage_slots_sorted() {
-                let entry = StorageEntry { key: hashed_slot, value };
-                if let Some(db_entry) =
-                    hashed_storage_cursor.seek_by_key_subkey(*hashed_address, entry.key)? &&
-                    db_entry.key == entry.key
-                {
-                    hashed_storage_cursor.delete_current()?;
-                }
-
-                if !entry.value.is_zero() {
+                num_updated += 1;
+                if value.is_zero() {
+                    hashed_storage_cursor.delete_by_key_subkey(*hashed_address, hashed_slot)?;
+                } else {
+                    let entry = StorageEntry { key: hashed_slot, value };
                     hashed_storage_cursor.upsert(*hashed_address, &entry)?;
                 }
             }
         }
+        histogram!("table_block_updated_entries", &[("table", "HashedStorages")]).record(num_updated as f64);
 
         Ok(())
     }
@@ -2295,63 +2313,38 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
         let tx = self.tx_ref();
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
         let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
-
-        let mut account_updates = input
-            .removed_nodes
-            .iter()
-            .filter_map(|n| (!input.account_nodes.contains_key(n)).then_some((n, None)))
-            .collect::<Vec<_>>();
-        account_updates.extend(input.account_nodes.iter().map(|(p, n)| (p, Some(n))));
-        // Sort trie node updates.
-        account_updates.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        for (path, node) in account_updates {
-            let path = StoredNibbles(*path);
+        for path in &input.removed_nodes {
+            account_trie_cursor.delete_by_key((*path).into())?;
             num_updated += 1;
-            match node {
-                Some(node) => {
-                    account_trie_cursor.upsert(path, &node.clone().into())?;
-                }
-                None => {
-                    if account_trie_cursor.seek_exact(path)?.is_some() {
-                        account_trie_cursor.delete_current()?;
-                    }
-                }
-            }
         }
+        for (path, node) in &input.account_nodes {
+            account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
+            num_updated += 1;
+        }
+        let num_updated_accounts = num_updated;
+        histogram!("table_block_updated_entries", &[("table", "AccountsTrieV2")]).record(num_updated_accounts as f64);
 
         for (hashed_address, storage_trie_update) in &input.storage_tries {
             if storage_trie_update.is_deleted {
                 // self-destruct
-                if storage_trie_cursor.seek_exact(*hashed_address)?.is_some() {
-                    storage_trie_cursor.delete_current_duplicates()?;
-                }
+                storage_trie_cursor.delete_by_key(*hashed_address)?;
+                num_updated += 1;
             } else {
-                let mut storage_updates = storage_trie_update
-                    .removed_nodes
-                    .iter()
-                    .filter_map(|n| {
-                        (!storage_trie_update.storage_nodes.contains_key(n)).then_some((n, None))
-                    })
-                    .collect::<Vec<_>>();
-                storage_updates
-                    .extend(storage_trie_update.storage_nodes.iter().map(|(p, n)| (p, Some(n))));
-                for (path, node) in storage_updates {
-                    num_updated += 1;
+                for path in &storage_trie_update.removed_nodes {
                     let path = StoredNibblesSubKey(*path);
-                    if let Some(entry) =
-                        storage_trie_cursor.seek_by_key_subkey(*hashed_address, path.clone())?
-                    {
-                        if entry.path == path {
-                            storage_trie_cursor.delete_current()?;
-                        }
-                    }
-                    if let Some(node) = node {
-                        storage_trie_cursor
-                            .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
-                    }
+                    storage_trie_cursor.delete_by_key_subkey(*hashed_address, path)?;
+                    num_updated += 1;
+                }
+                for (path, node) in &storage_trie_update.storage_nodes {
+                    let path = StoredNibblesSubKey(*path);
+                    storage_trie_cursor
+                        .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
+                    num_updated += 1;
                 }
             }
         }
+        let num_updated_storage = num_updated - num_updated_accounts;
+        histogram!("table_block_updated_entries", &[("table", "StoragesTrieV2")]).record(num_updated_storage as f64);
 
         Ok(num_updated)
     }

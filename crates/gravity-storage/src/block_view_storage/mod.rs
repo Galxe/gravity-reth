@@ -142,7 +142,7 @@ impl<Tx: DbTx> DatabaseRef for RawBlockViewProvider<Tx> {
         let mut cursor = self.tx.cursor_dup_read::<tables::PlainStorageState>()?;
         let storage_key = B256::new(index.to_be_bytes());
         Ok(cursor
-            .seek_by_key_subkey(address, storage_key)?
+            .get_by_key_subkey(address, storage_key)?
             .filter(|e| e.key == storage_key)
             .map(|e| e.value)
             .unwrap_or_default())

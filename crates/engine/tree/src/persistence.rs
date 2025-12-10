@@ -1,24 +1,23 @@
 use crate::metrics::PersistenceMetrics;
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
-use reth_chain_state::ExecutedBlockWithTrieUpdates;
+use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_errors::ProviderError;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_primitives_traits::NodePrimitives;
-use reth_provider::{
-    providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader,
-    ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory,
-    PERSIST_BLOCK_CACHE,
-};
+use reth_provider::{providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockWriter, ChainStateBlockWriter, DatabaseProviderFactory, HistoryWriter, ProviderFactory, StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StaticFileWriter, StorageLocation, TrieWriterV2, PERSIST_BLOCK_CACHE};
 use reth_prune::{PrunerError, PrunerOutput, PrunerWithFactory};
-use reth_stages_api::{MetricEvent, MetricEventsSender};
+use reth_stages_api::{MetricEvent, MetricEventsSender, StageCheckpoint, StageId};
 use std::{
-    sync::mpsc::{Receiver, SendError, Sender},
-    time::Instant,
+    sync::mpsc::{Receiver, SendError, Sender}, time::Instant
 };
+use std::sync::Arc;
+use revm::database::OriginalValuesKnown;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
+use reth_db::tables;
+use reth_db::transaction::{DbTx, DbTxMut};
 
 /// Writes parts of reth's in memory tree state to the database and static files.
 ///
@@ -152,17 +151,81 @@ where
         });
 
         let num_blocks = blocks.len();
-        if let Some(last_block_hn) = &last_block_hash_num {
-            let provider_rw = self.provider.database_provider_rw()?;
-            let static_file_provider = self.provider.static_file_provider();
+        if last_block_hash_num.is_some() {
+            let first_block = blocks.first().unwrap().recovered_block();
+            let last_block = blocks.last().unwrap().recovered_block();
+            let first_number = first_block.number();
+            let last_block_number = last_block.number();
+            debug!(target: "provider::storage_writer", block_count = blocks.len(), "Writing blocks and execution data to storage");
 
-            UnifiedStorageWriter::from(&provider_rw, &static_file_provider).save_blocks(blocks)?;
+            for ExecutedBlockWithTrieUpdates {
+                block: ExecutedBlock { recovered_block, execution_output, hashed_state },
+                trie: _,
+                triev2,
+            } in blocks {
+                let block_number = recovered_block.number();
+                {
+                    let start = Instant::now();
+                    let provider_rw = self.provider.database_provider_rw()?;
+                    let static_file_provider = self.provider.static_file_provider();
+                    let ck = provider_rw.tx_ref().get::<tables::StageCheckpoints>(StageId::Execution.to_string()).map_err(ProviderError::Database)?.unwrap_or_default();
+                    assert_eq!(ck.block_number + 1, block_number);
+                    let body_indices = provider_rw.insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
+                    // Write state and changesets to the database.
+                    // Must be written after blocks because of the receipt lookup.
+                    provider_rw.write_state_with_indices(
+                        &execution_output,
+                        OriginalValuesKnown::No,
+                        StorageLocation::StaticFiles,
+                        Some(vec![body_indices]),
+                    )?;
+                    provider_rw.tx_ref().put::<tables::StageCheckpoints>(StageId::Execution.to_string(), StageCheckpoint{block_number, ..ck}).map_err(ProviderError::Database)?;
+                    static_file_provider.commit()?;
+                    provider_rw.commit()?;
+                    metrics::histogram!("save_blocks_time", &[("process", "write_state")]).record(start.elapsed());
+                }
+                {
+                    let start = Instant::now();
+                    let provider_rw = self.provider.database_provider_rw()?;
+                    let ck = provider_rw.tx_ref().get::<tables::StageCheckpoints>(StageId::AccountHashing.to_string()).map_err(ProviderError::Database)?.unwrap_or_default();
+                    assert_eq!(ck.block_number + 1, block_number);
+                    // insert hashes and intermediate merkle nodes
+                    provider_rw.write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
+                    provider_rw.tx_ref().put::<tables::StageCheckpoints>(StageId::AccountHashing.to_string(), StageCheckpoint{block_number, ..ck}).map_err(ProviderError::Database)?;
+                    provider_rw.commit()?;
+                    metrics::histogram!("save_blocks_time", &[("process", "write_hashed_state")]).record(start.elapsed());
+                }
+                {
+                    let start = Instant::now();
+                    let provider_rw = self.provider.database_provider_rw()?;
+                    let ck = provider_rw.tx_ref().get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string()).map_err(ProviderError::Database)?.unwrap_or_default();
+                    assert_eq!(ck.block_number + 1, block_number);
+                    provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
+                    provider_rw.tx_ref().put::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string(), StageCheckpoint{block_number, ..ck}).map_err(ProviderError::Database)?;
+                    provider_rw.commit()?;
+                    metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")]).record(start.elapsed());
+                }
+                {
+                    let start = Instant::now();
+                    let provider_rw = self.provider.database_provider_rw()?;
+                    let ck = provider_rw.tx_ref().get::<tables::StageCheckpoints>(StageId::IndexAccountHistory.to_string()).map_err(ProviderError::Database)?.unwrap_or_default();
+                    assert_eq!(ck.block_number + 1, block_number);
+                    provider_rw.update_history_indices(block_number..=block_number)?;
+                    provider_rw.tx_ref().put::<tables::StageCheckpoints>(StageId::IndexAccountHistory.to_string(), StageCheckpoint{block_number, ..ck}).map_err(ProviderError::Database)?;
+                    provider_rw.commit()?;
+                    metrics::histogram!("save_blocks_time", &[("process", "update_history_indices")]).record(start.elapsed());
+                }
+                PERSIST_BLOCK_CACHE.persist_tip(block_number);
+            }
+            // Update pipeline progress
             let start_time = Instant::now();
-            UnifiedStorageWriter::commit(provider_rw)?;
+            let provider_rw = self.provider.database_provider_rw()?;
+            provider_rw.update_pipeline_stages(last_block_number, false)?;
+            provider_rw.commit()?;
             self.metrics
                 .persist_commit_duration_seconds
                 .record(start_time.elapsed().as_secs_f64() / num_blocks as f64);
-            PERSIST_BLOCK_CACHE.persist_tip(last_block_hn.number);
+            debug!(target: "provider::storage_writer", range = ?first_number..=last_block_number, "Appended block data");
         }
         let elapsed = start_time.elapsed();
         self.metrics.save_blocks_duration_seconds.record(elapsed);

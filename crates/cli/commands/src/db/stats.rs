@@ -1,11 +1,10 @@
 use crate::{common::CliNodeTypes, db::checksum::ChecksumViewer};
 use clap::Parser;
 use comfy_table::{Cell, Row, Table as ComfyTable};
-use eyre::WrapErr;
 use human_bytes::human_bytes;
 use itertools::Itertools;
 use reth_chainspec::EthereumHardforks;
-use reth_db::{mdbx, static_file::iter_static_files, DatabaseEnv};
+use reth_db::{static_file::iter_static_files, DatabaseEnv};
 use reth_db_api::{database::Database, TableViewer, Tables};
 use reth_db_common::DbTool;
 use reth_fs_util as fs;
@@ -75,30 +74,28 @@ impl Command {
             "Total Size",
         ]);
 
-        tool.provider_factory.db_ref().view(|tx| {
+        tool.provider_factory.db_ref().view(|_tx| {
             let mut db_tables = Tables::ALL.iter().map(|table| table.name()).collect::<Vec<_>>();
             db_tables.sort();
             let mut total_size = 0;
             for db_table in db_tables {
-                let table_db = tx.open_db(Some(db_table)).wrap_err("Could not open db.")?;
+                // TODO: Implement open_db and db_stat for RocksDB
+                // let table_db = tx.open_db(Some(db_table)).wrap_err("Could not open db.")?;
+                // let stats = tx.db_stat(&table_db).wrap_err(format!("Could not find table:
+                // {db_table}"))?;
 
-                let stats =
-                    tx.db_stat(&table_db).wrap_err(format!("Could not find table: {db_table}"))?;
-
-                // Defaults to 16KB right now but we should
-                // re-evaluate depending on the DB we end up using
-                // (e.g. REDB does not have these options as configurable intentionally)
-                let page_size = stats.page_size() as usize;
-                let leaf_pages = stats.leaf_pages();
-                let branch_pages = stats.branch_pages();
-                let overflow_pages = stats.overflow_pages();
+                // Placeholder values for RocksDB
+                let page_size = 16384;
+                let leaf_pages = 0;
+                let branch_pages = 0;
+                let overflow_pages = 0;
                 let num_pages = leaf_pages + branch_pages + overflow_pages;
                 let table_size = page_size * num_pages;
 
                 total_size += table_size;
                 let mut row = Row::new();
                 row.add_cell(Cell::new(db_table))
-                    .add_cell(Cell::new(stats.entries()))
+                    .add_cell(Cell::new(0)) // Placeholder for RocksDB
                     .add_cell(Cell::new(branch_pages))
                     .add_cell(Cell::new(leaf_pages))
                     .add_cell(Cell::new(overflow_pages))
@@ -122,9 +119,13 @@ impl Command {
                 .add_cell(Cell::new(human_bytes(total_size as f64)));
             table.add_row(row);
 
-            let freelist = tx.env().freelist()?;
-            let pagesize = tx.db_stat(&mdbx::Database::freelist_db())?.page_size() as usize;
-            let freelist_size = freelist * pagesize;
+            // TODO: Implement freelist for RocksDB
+            // let freelist = tx.env().freelist()?;
+            // let pagesize = tx.db_stat(&mdbx::Database::freelist_db())?.page_size() as usize;
+            // let freelist_size = freelist * pagesize;
+            // Placeholder values for RocksDB
+            let freelist = 0;
+            let freelist_size = 0;
 
             let mut row = Row::new();
             row.add_cell(Cell::new("Freelist"))

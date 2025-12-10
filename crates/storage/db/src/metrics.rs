@@ -120,14 +120,12 @@ impl DatabaseEnvMetrics {
     }
 
     /// Record metrics for closing a database transactions.
-    #[cfg(feature = "mdbx")]
     pub(crate) fn record_closed_transaction(
         &self,
         mode: TransactionMode,
         outcome: TransactionOutcome,
         open_duration: Duration,
         close_duration: Option<Duration>,
-        commit_latency: Option<reth_libmdbx::CommitLatency>,
     ) {
         self.transactions
             .get(&mode)
@@ -137,7 +135,7 @@ impl DatabaseEnvMetrics {
         self.transaction_outcomes
             .get(&(mode, outcome))
             .expect("transaction outcome metric handle not found")
-            .record(open_duration, close_duration, commit_latency);
+            .record(open_duration, close_duration);
     }
 }
 
@@ -303,29 +301,15 @@ pub(crate) struct TransactionOutcomeMetrics {
 
 impl TransactionOutcomeMetrics {
     /// Record transaction closing with the duration it was open and the duration it took to close
-    /// it.
-    #[cfg(feature = "mdbx")]
     pub(crate) fn record(
         &self,
         open_duration: Duration,
         close_duration: Option<Duration>,
-        commit_latency: Option<reth_libmdbx::CommitLatency>,
     ) {
         self.open_duration_seconds.record(open_duration);
 
         if let Some(close_duration) = close_duration {
             self.close_duration_seconds.record(close_duration)
-        }
-
-        if let Some(commit_latency) = commit_latency {
-            self.commit_preparation_duration_seconds.record(commit_latency.preparation());
-            self.commit_gc_wallclock_duration_seconds.record(commit_latency.gc_wallclock());
-            self.commit_audit_duration_seconds.record(commit_latency.audit());
-            self.commit_write_duration_seconds.record(commit_latency.write());
-            self.commit_sync_duration_seconds.record(commit_latency.sync());
-            self.commit_ending_duration_seconds.record(commit_latency.ending());
-            self.commit_whole_duration_seconds.record(commit_latency.whole());
-            self.commit_gc_cputime_duration_seconds.record(commit_latency.gc_cputime());
         }
     }
 }

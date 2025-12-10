@@ -25,6 +25,10 @@ pub struct GravityArgs {
     /// The max size of cached items
     #[arg(long = "gravity.cache.capacity", default_value_t = 2_000_000)]
     pub cache_capacity: u64,
+
+    /// Report db metrics. default false.
+    #[arg(long = "gravity.report-db-metrics", default_value = "false")]
+    pub report_db_metrics: bool,
 }
 
 impl Default for GravityArgs {
@@ -35,6 +39,7 @@ impl Default for GravityArgs {
             pipe_block_gas_limit: 1_000_000_000,
             cache_max_persist_gap: 64,
             cache_capacity: 2_000_000,
+            report_db_metrics: false,
         }
     }
 }
@@ -48,6 +53,7 @@ impl GravityArgs {
             pipe_block_gas_limit: self.pipe_block_gas_limit,
             cache_max_persist_gap: self.cache_max_persist_gap,
             cache_capacity: self.cache_capacity,
+            report_db_metrics: self.report_db_metrics,
         }
     }
 }

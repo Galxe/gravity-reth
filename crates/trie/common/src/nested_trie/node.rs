@@ -1,4 +1,4 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use alloy_primitives::{keccak256, Bytes, B256};
 use alloy_rlp::{length_of_length, BufMut, Encodable, Header, EMPTY_STRING_CODE};
@@ -8,6 +8,7 @@ use alloy_trie::{
 };
 use bytes::BytesMut;
 use nybbles::Nibbles;
+use reth_primitives_traits::SubkeyContainedValue;
 
 use crate::StoredNibblesSubKey;
 
@@ -149,6 +150,12 @@ pub struct StorageNodeEntry {
     pub path: StoredNibblesSubKey,
     /// stored node
     pub node: StoredNode,
+}
+
+impl SubkeyContainedValue for StorageNodeEntry {
+    fn subkey_length(&self) -> Option<usize> {
+        Some(self.path.len().div_ceil(2) + 1)
+    }
 }
 
 impl StorageNodeEntry {

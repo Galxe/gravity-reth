@@ -24,6 +24,12 @@ pub trait BlockNumReader: BlockHashReader + Send + Sync {
         Ok(0)
     }
 
+    /// The last persisted block that has written execution result successfully.
+    /// In other word, the last block that has updated `StageId::Execution` in `tables::StageCheckpoints`
+    fn recover_block_number(&self) -> ProviderResult<BlockNumber> {
+        unimplemented!("Not support recover_block_number");
+    }
+
     /// Gets the `BlockNumber` for the given hash. Returns `None` if no block with this hash exists.
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>>;
 

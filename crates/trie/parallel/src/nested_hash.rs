@@ -56,7 +56,7 @@ where
         let path = StoredNibblesSubKey(*path);
         Ok(self
             .cursor
-            .seek_by_key_subkey(self.hashed_address, path.clone())?
+            .get_by_key_subkey(self.hashed_address, path.clone())?
             .filter(|e| e.path == path)
             .map(|e| e.node.into()))
     }
@@ -84,7 +84,7 @@ where
                 return Ok(value);
             }
         }
-        Ok(self.0.seek_exact(StoredNibbles(*path))?.map(|(_, value)| value.into()))
+        Ok(self.0.get(StoredNibbles(*path))?.map(|(_, value)| value.into()))
     }
 }
 

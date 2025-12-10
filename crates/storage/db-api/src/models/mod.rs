@@ -9,7 +9,7 @@ use alloy_genesis::GenesisAccount;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use reth_codecs::{add_arbitrary_tests, Compact};
 use reth_ethereum_primitives::{Receipt, TransactionSigned, TxType};
-use reth_primitives_traits::{Account, Bytecode, StorageEntry};
+use reth_primitives_traits::{Account, Bytecode, StorageEntry, SubkeyContainedValue};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::StageCheckpoint;
 use reth_trie_common::{nested_trie::StorageNodeEntry, StoredNibbles, StoredNibblesSubKey, *};
@@ -210,6 +210,32 @@ macro_rules! impl_compression_for_compact {
     };
 }
 
+/// Implements copression for Compact type with subkey.
+macro_rules! impl_compression_for_value_with_subkey {
+    ($($name:ident$(<$($generic:ident),*>)?),+) => {
+        $(
+            impl$(<$($generic: core::fmt::Debug + Send + Sync + Compact),*>)? Compress for $name$(<$($generic),*>)? {
+                type Compressed = Vec<u8>;
+
+                fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+                    let _ = Compact::to_compact(self, buf);
+                }
+
+                fn subkey_compress_length(&self) -> Option<usize> {
+                    self.subkey_length()
+                }
+            }
+
+            impl$(<$($generic: core::fmt::Debug + Send + Sync + Compact),*>)? Decompress for $name$(<$($generic),*>)? {
+                fn decompress(value: &[u8]) -> Result<$name$(<$($generic),*>)?, $crate::DatabaseError> {
+                    let (obj, _) = Compact::from_compact(value, value.len());
+                    Ok(obj)
+                }
+            }
+        )+
+    };
+}
+
 impl_compression_for_compact!(
     Bytes,
     Header,
@@ -217,18 +243,14 @@ impl_compression_for_compact!(
     Log,
     Receipt<T>,
     TxType,
-    StorageEntry,
     BranchNodeCompact,
     StoredNibbles,
     StoredNibblesSubKey,
-    StorageTrieEntry,
-    StorageNodeEntry,
     StoredBlockBodyIndices,
     StoredBlockOmmers<H>,
     StoredBlockWithdrawals,
     StaticFileBlockWithdrawals,
     Bytecode,
-    AccountBeforeTx,
     TransactionSigned,
     CompactU256,
     StageCheckpoint,
@@ -236,6 +258,13 @@ impl_compression_for_compact!(
     ClientVersion,
     // Non-DB
     GenesisAccount
+);
+
+impl_compression_for_value_with_subkey!(
+    StorageEntry,
+    AccountBeforeTx,
+    StorageTrieEntry,
+    StorageNodeEntry
 );
 
 #[cfg(feature = "op")]
