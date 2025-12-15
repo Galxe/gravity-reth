@@ -10,6 +10,7 @@ use alloy_evm::{
     EvmEnv,
 };
 use alloy_primitives::{map::HashMap, Address};
+use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
@@ -56,8 +57,9 @@ where
     /// Creates a new [`GrevmExecutor`]
     pub fn new(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
         let system_caller = SystemCaller::new(chain_spec.clone());
+        let report_db_metrics = get_gravity_config().report_db_metrics;
         Self {
-            state: Some(ParallelState::new(db, true, false)),
+            state: Some(ParallelState::new(db, true, report_db_metrics)),
             chain_spec,
             evm_config: evm_config.clone(),
             system_caller,

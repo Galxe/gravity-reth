@@ -15,6 +15,8 @@ pub struct Config {
     pub cache_max_persist_gap: u64,
     /// The max size of cached items
     pub cache_capacity: u64,
+    /// Report db metrics
+    pub report_db_metrics: bool,
 }
 
 /// Global configuration instance, initialized once.

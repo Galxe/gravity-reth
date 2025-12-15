@@ -27,8 +27,10 @@ alloy-primitives.workspace = true
 reth-libmdbx = { workspace = true, optional = true, features = ["return-borrowed", "read-tx-timeouts"] }
 eyre = { workspace = true, optional = true }
 
+# rocksdb
+rocksdb = { version = "0.22.0", optional = true, default-features = true }
+
 # metrics
-reth-metrics = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 
 # misc
@@ -36,12 +38,8 @@ page_size = { workspace = true, optional = true }
 thiserror.workspace = true
 tempfile = { workspace = true, optional = true }
 derive_more.workspace = true
-rustc-hash = { workspace = true, optional = true, features = ["std"] }
 sysinfo = { workspace = true, features = ["system"] }
 parking_lot = { workspace = true, optional = true }
-
-# arbitrary utils
-strum = { workspace = true, features = ["derive"], optional = true }
 
 [dev-dependencies]
 # reth libs with arbitrary
@@ -64,21 +62,29 @@ proptest.workspace = true
 assert_matches.workspace = true
 
 [features]
-default = ["mdbx"]
+# Always use RocksDB as the default database backend
+default = ["rocksdb"]
 mdbx = [
     "dep:reth-libmdbx",
     "dep:eyre",
     "dep:page_size",
-    "reth-metrics",
     "dep:metrics",
-    "dep:strum",
-    "dep:rustc-hash",
+    "reth-storage-errors/std",
+    "alloy-primitives/std",
+]
+rocksdb = [
+    "dep:rocksdb",
+    "dep:eyre",
+    "dep:metrics",
+    "reth-storage-errors/std",
+    "alloy-primitives/std",
+    "dep:parking_lot",
 ]
 test-utils = [
     "dep:tempfile",
-    "mdbx",
+    "rocksdb",
     "arbitrary",
-    "parking_lot",
+    "dep:parking_lot",
     "reth-db-api/test-utils",
     "reth-nippy-jar/test-utils",
     "reth-primitives-traits/test-utils",

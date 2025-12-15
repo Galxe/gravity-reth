@@ -70,6 +70,8 @@ revm-state.workspace = true
 [features]
 default = ["std"]
 std = [
+    "dep:bytes",
+    "dep:rayon",
     "alloy-consensus/std",
     "alloy-genesis/std",
     "alloy-primitives/std",
@@ -77,7 +79,7 @@ std = [
     "alloy-rpc-types-eth?/std",
     "alloy-serde?/std",
     "alloy-trie/std",
-    "bytes?/std",
+    "bytes/std",
     "derive_more/std",
     "nybbles/std",
     "reth-primitives-traits/std",

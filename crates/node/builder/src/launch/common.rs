@@ -65,6 +65,8 @@ use reth_node_metrics::{
     server::{MetricServer, MetricServerConfig},
     version::VersionInfo,
 };
+use gravity_primitives::get_gravity_config;
+use reth_engine_tree::recovery::StorageRecoveryHelper;
 use reth_provider::{
     providers::{NodeTypesForProvider, ProviderNodeTypes, StaticFileProvider},
     BlockHashReader, BlockNumReader, BlockReaderIdExt, ChainSpecProvider, ProviderError,
@@ -528,6 +530,13 @@ where
             rx.await?.inspect_err(|err| {
                 error!(target: "reth::cli", unwind_target = %unwind_target, %err, "failed to run unwind")
             })?;
+        }
+
+        // In pipe execution mode (disable_pipe_execution = false), we need to recover
+        // any interrupted block writes from checkpoints
+        if !get_gravity_config().disable_pipe_execution {
+            info!(target: "reth::cli", "Checking for interrupted block writes and recovering if needed");
+            StorageRecoveryHelper::new(&factory).check_and_recover()?;
         }
 
         Ok(factory)

@@ -16,6 +16,7 @@ use alloy_primitives::{
     b256, keccak256, Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256,
 };
 use dashmap::DashMap;
+use gravity_primitives::get_gravity_config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::RwLock;
 use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, NamedChain};
@@ -744,6 +745,9 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         Provider: DBProvider + BlockReader + StageCheckpointReader + ChainSpecProvider,
         N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
     {
+        if !get_gravity_config().disable_pipe_execution {
+            return Ok(None)
+        }
         // OVM historical import is broken and does not work with this check. It's importing
         // duplicated receipts resulting in having more receipts than the expected transaction
         // range.

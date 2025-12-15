@@ -96,9 +96,7 @@ impl<N: NodeTypes> TableViewer<()> for ListTableViewer<'_, N> {
 
     fn view<T: Table>(&self) -> Result<(), Self::Error> {
         self.tool.provider_factory.db_ref().view(|tx| {
-            let table_db = tx.open_db(Some(self.args.table.name())).wrap_err("Could not open db.")?;
-            let stats = tx.db_stat(&table_db).wrap_err(format!("Could not find table: {}", stringify!($table)))?;
-            let total_entries = stats.entries();
+            let total_entries = tx.table_entries(self.args.table.name()).wrap_err("Could not open db.")?;
             let final_entry_idx = total_entries.saturating_sub(1);
             if self.args.skip > final_entry_idx {
                 error!(

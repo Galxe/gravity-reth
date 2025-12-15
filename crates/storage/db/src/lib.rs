@@ -1,7 +1,7 @@
-//! MDBX implementation for reth's database abstraction layer.
+//! Database implementations for reth's database abstraction layer.
 //!
-//! This crate is an implementation of `reth-db-api` for MDBX, as well as a few other common
-//! database types.
+//! This crate provides implementations of `reth-db-api` for multiple database backends,
+//! including MDBX and RocksDB.
 //!
 //! # Overview
 //!
@@ -15,24 +15,22 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+pub mod database;
 mod implementation;
 pub mod lockfile;
-#[cfg(feature = "mdbx")]
-mod metrics;
 pub mod static_file;
-#[cfg(feature = "mdbx")]
-mod utils;
 pub mod version;
 
-#[cfg(feature = "mdbx")]
-pub mod mdbx;
+// Backend-specific modules are now handled through the unified database module
+
+pub mod generic;
 
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
-#[cfg(feature = "mdbx")]
-pub use utils::is_database_empty;
 
-#[cfg(feature = "mdbx")]
-pub use mdbx::{create_db, init_db, open_db, open_db_read_only, DatabaseEnv, DatabaseEnvKind};
+pub use generic::{create_db, init_db, open_db, open_db_read_only};
+
+// Always use RocksDB implementation
+pub use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 
 pub use models::ClientVersion;
 pub use reth_db_api::*;
@@ -41,13 +39,12 @@ pub use reth_db_api::*;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     use super::*;
-    use crate::mdbx::DatabaseArguments;
+    use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
         database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
     };
     use reth_fs_util;
-    use reth_libmdbx::MaxReadTransactionDuration;
     use std::{
         fmt::Formatter,
         path::{Path, PathBuf},
@@ -173,8 +170,7 @@ pub mod test_utils {
 
         let db = init_db(
             &path,
-            DatabaseArguments::new(ClientVersion::default())
-                .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded)),
+            DatabaseArguments::new(ClientVersion::default()),
         )
         .expect(&emsg);
 
@@ -187,8 +183,7 @@ pub mod test_utils {
         let path = path.as_ref().to_path_buf();
         let db = init_db(
             path.as_path(),
-            DatabaseArguments::new(ClientVersion::default())
-                .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded)),
+            DatabaseArguments::new(ClientVersion::default()),
         )
         .expect(ERROR_DB_CREATION);
         Arc::new(TempDatabase::new(db, path))
@@ -197,8 +192,7 @@ pub mod test_utils {
     /// Create read only database for testing
     #[track_caller]
     pub fn create_test_ro_db() -> Arc<TempDatabase<DatabaseEnv>> {
-        let args = DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
+        let args = DatabaseArguments::new(ClientVersion::default());
 
         let path = tempdir_path();
         {
@@ -213,7 +207,7 @@ pub mod test_utils {
 mod tests {
     use crate::{
         init_db,
-        mdbx::DatabaseArguments,
+        DatabaseArguments,
         open_db, tables,
         version::{db_version_file_path, DatabaseVersionError},
     };
@@ -221,7 +215,6 @@ mod tests {
     use reth_db_api::{
         cursor::DbCursorRO, database::Database, models::ClientVersion, transaction::DbTx,
     };
-    use reth_libmdbx::MaxReadTransactionDuration;
     use std::time::Duration;
     use tempfile::tempdir;
 
@@ -229,8 +222,7 @@ mod tests {
     fn db_version() {
         let path = tempdir().unwrap();
 
-        let args = DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
+        let args = DatabaseArguments::new(ClientVersion::default());
 
         // Database is empty
         {

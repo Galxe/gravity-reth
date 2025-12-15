@@ -17,6 +17,11 @@ pub trait DbCursorRO<T: Table> {
     /// Seeks to the KV pair exactly at `key`.
     fn seek_exact(&mut self, key: T::Key) -> PairResult<T>;
 
+    /// Get the KV pair exactly at `key`.
+    fn get(&mut self, key: T::Key) -> PairResult<T> {
+        self.seek_exact(key)
+    }
+
     /// Seeks to the KV pair whose key is greater than or equal to `key`.
     fn seek(&mut self, key: T::Key) -> PairResult<T>;
 
@@ -79,6 +84,11 @@ pub trait DbDupCursorRO<T: DupSort> {
     /// exist.
     fn seek_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T>;
 
+    /// Get the KV pair exactly at `key` + `subkey`.
+    fn get_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T> {
+        self.seek_by_key_subkey(key, subkey)
+    }
+
     /// Get an iterator that walks through the dup table.
     ///
     /// The cursor will start at different points in the table depending on the values of `key` and
@@ -117,6 +127,11 @@ pub trait DbCursorRW<T: Table> {
 
     /// Delete current value that cursor points to
     fn delete_current(&mut self) -> Result<(), DatabaseError>;
+
+    /// Delete by key
+    fn delete_by_key(&mut self, _key: T::Key) -> Result<(), DatabaseError> {
+        unimplemented!("not support")
+    }
 }
 
 /// Read Write Cursor over `DupSorted` table.
@@ -128,6 +143,11 @@ pub trait DbDupCursorRW<T: DupSort> {
     ///
     /// This is efficient for pre-sorted data. If the data is not pre-sorted, use `insert`.
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError>;
+
+    /// Delete by key and subkey
+    fn delete_by_key_subkey(&mut self, _key: T::Key, _subkey: T::SubKey) -> Result<(), DatabaseError> {
+        unimplemented!("not support")
+    }
 }
 
 /// Provides an iterator to `Cursor` when handling `Table`.

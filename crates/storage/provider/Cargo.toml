@@ -21,7 +21,7 @@ reth-fs-util.workspace = true
 reth-errors.workspace = true
 reth-storage-errors.workspace = true
 reth-storage-api = { workspace = true, features = ["std", "db-api"] }
-reth-db = { workspace = true, features = ["mdbx"] }
+reth-db = { workspace = true }
 reth-db-api.workspace = true
 reth-prune-types.workspace = true
 reth-stages-types.workspace = true
@@ -33,6 +33,7 @@ reth-evm.workspace = true
 reth-chain-state.workspace = true
 reth-node-types.workspace = true
 reth-static-file-types.workspace = true
+gravity-primitives.workspace = true
 # ethereum
 alloy-eips.workspace = true
 alloy-primitives.workspace = true

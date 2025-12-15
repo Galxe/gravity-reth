@@ -18,7 +18,7 @@ reth-cli-util.workspace = true
 reth-codecs.workspace = true
 reth-config = { workspace = true, features = ["serde"] }
 reth-consensus.workspace = true
-reth-db = { workspace = true, features = ["mdbx"] }
+reth-db = { workspace = true }
 reth-db-api.workspace = true
 reth-db-common.workspace = true
 reth-downloaders.workspace = true
@@ -41,6 +41,7 @@ reth-node-core.workspace = true
 reth-node-events.workspace = true
 reth-node-metrics.workspace = true
 reth-ethereum-primitives = { workspace = true, optional = true }
+reth-engine-tree.workspace = true
 reth-provider.workspace = true
 reth-prune.workspace = true
 reth-prune-types = { workspace = true, optional = true }

@@ -8,8 +8,8 @@ use std::{
 /// The name of the file that contains the version of the database.
 pub const DB_VERSION_FILE_NAME: &str = "database.version";
 /// The version of the database stored in the [`DB_VERSION_FILE_NAME`] file in the same directory as
-/// database.
-pub const DB_VERSION: u64 = 2;
+/// database. Always use RocksDB version.
+pub const DB_VERSION: u64 = 3; // RocksDB
 
 /// Error when checking a database version using [`check_db_version_file`]
 #[derive(thiserror::Error, Debug)]

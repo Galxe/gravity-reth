@@ -1,2 +1,2 @@
-#[cfg(feature = "mdbx")]
-pub(crate) mod mdbx;
+// Always export rocksdb as the primary implementation
+pub(crate) mod rocksdb;

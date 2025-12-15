@@ -255,6 +255,10 @@ impl<N: ProviderNodeTypes> BlockNumReader for BlockchainProvider<N> {
         self.database.last_block_number()
     }
 
+    fn recover_block_number(&self) -> ProviderResult<BlockNumber> {
+        self.database.recover_block_number()
+    }
+
     fn earliest_block_number(&self) -> ProviderResult<BlockNumber> {
         self.database.earliest_block_number()
     }

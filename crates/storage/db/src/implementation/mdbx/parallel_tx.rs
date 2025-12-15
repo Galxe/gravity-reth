@@ -153,6 +153,12 @@ impl ParallelTxRO {
         self.tx.inner.db_stat(db)
     }
 
+    pub fn table_entries(&self, name: &str) -> reth_libmdbx::Result<usize> {
+        let db = self.open_db(Some(name))?;
+        let stat = self.db_stat(&db)?;
+        Ok(stat.entries())
+    }
+
     /// Returns a raw pointer to the MDBX environment.
     pub const fn env(&self) -> &Environment {
         &self.env

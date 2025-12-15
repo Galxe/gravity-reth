@@ -1,4 +1,5 @@
 use alloy_primitives::BlockNumber;
+use reth_db_models::StoredBlockBodyIndices;
 use reth_execution_types::ExecutionOutcome;
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie_common::HashedPostStateSorted;
@@ -16,12 +17,24 @@ pub trait StateWriter {
 
     /// Write the state and receipts to the database or static files if `static_file_producer` is
     /// `Some`. It should be `None` if there is any kind of pruning/filtering over the receipts.
+    fn write_state_with_indices(
+        &self,
+        execution_outcome: &ExecutionOutcome<Self::Receipt>,
+        is_value_known: OriginalValuesKnown,
+        write_receipts_to: StorageLocation,
+        body_indices: Option<Vec<StoredBlockBodyIndices>>,
+    ) -> ProviderResult<()>;
+
+    /// Write the state and receipts to the database or static files if `static_file_producer` is
+    /// `Some`. It should be `None` if there is any kind of pruning/filtering over the receipts.
     fn write_state(
         &self,
         execution_outcome: &ExecutionOutcome<Self::Receipt>,
         is_value_known: OriginalValuesKnown,
         write_receipts_to: StorageLocation,
-    ) -> ProviderResult<()>;
+    ) -> ProviderResult<()> {
+        self.write_state_with_indices(execution_outcome, is_value_known, write_receipts_to, None)
+    }
 
     /// Write state reverts to the database.
     ///

@@ -122,6 +122,8 @@ where
                     // has previous shards, replace it with the previous shard.
                     Some((prev_key, prev_value)) if key_matches(&prev_key, &key) => {
                         cursor.delete_current()?;
+                        // Rocksdb doesn't move cursor pointer in write operation
+                        cursor.next()?;
                         // Upsert will replace the last shard for this sharded key with
                         // the previous value.
                         cursor.upsert(RawKey::new(key), &prev_value)?;
