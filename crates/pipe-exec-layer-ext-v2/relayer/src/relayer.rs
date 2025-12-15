@@ -21,6 +21,12 @@ pub const DEPOSIT_GRAVITY_EVENT_SIGNATURE: [u8; 32] = [
     0x19, 0x0f, 0x92, 0xc2, 0x57, 0xc9, 0x2d, 0x9b, 0x15, 0xd8, 0xec, 0xb4, 0x05, 0x05, 0x7c, 0x14,
 ];
 
+/// ChangeRecord(bytes32 indexed key, bytes32 indexed value, uint256 blockNumber, address indexed updater, uint256 sequenceNumber);
+pub const CHANGE_RECORD_EVENT_SIGNATURE: [u8; 32] = [
+    0xf6, 0x9d, 0x80, 0xcc, 0x71, 0xff, 0xd8, 0x74, 0x04, 0x59, 0x74, 0xba, 0x04, 0x6a, 0x0b, 0xee,
+    0x23, 0x1a, 0xd0, 0x5e, 0xc4, 0x59, 0x0b, 0xdd, 0xe9, 0x85, 0x75, 0xcf, 0xe0, 0x7f, 0xd7, 0x66,
+];
+
 sol! {
     struct UnsupportedJWK {
         bytes id;
@@ -32,6 +38,14 @@ sol! {
         uint256 amount,
         address targetAddress,
         uint256 blockNumber
+    );
+
+    event ChangeRecord(
+        bytes32 key,
+        bytes32 value,
+        uint256 blockNumber,
+        address updater,
+        uint256 sequenceNumber
     );
 }
 /// Represents the current state of observation for a gravity task
@@ -89,6 +103,8 @@ pub enum EventDataType {
     Raw,
     /// Deposit gravity event with structured data
     DepositGravityEvent,
+    /// Change record event with structured data
+    ChangeRecord,
 }
 
 /// Represents a blockchain event log with all relevant metadata
@@ -160,6 +176,27 @@ impl EventLog {
                 "relayer stake event created"
             );
             EventDataType::DepositGravityEvent
+        } else if event_signature == CHANGE_RECORD_EVENT_SIGNATURE {
+            // ChangeRecord has indexed parameters (key, value, updater) in topics and
+            // non-indexed parameters (blockNumber, sequenceNumber) in data
+            let change_record_data = ChangeRecord::abi_decode_data(&self.data).unwrap();
+            // Extract indexed parameters from topics (topics[1] = key, topics[2] = value, topics[3] = updater)
+            let key = if self.topics.len() > 1 { Some(self.topics[1]) } else { None };
+            let value = if self.topics.len() > 2 { Some(self.topics[2]) } else { None };
+            let updater = if self.topics.len() > 3 {
+                Some(Address::from_slice(&self.topics[3].0[12..]))
+            } else {
+                None
+            };
+            info!(target: "relayer change record event",
+                key=?key,
+                value=?value,
+                block_number=?change_record_data.0,
+                updater=?updater,
+                sequence_number=?change_record_data.1,
+                "relayer change record event created"
+            );
+            EventDataType::ChangeRecord
         } else {
             EventDataType::Raw
         }
@@ -171,6 +208,7 @@ impl EventLog {
         self.data_type = match event_type {
             EventDataType::Raw => 0,
             EventDataType::DepositGravityEvent => 1,
+            EventDataType::ChangeRecord => 2,
         };
     }
 }
@@ -642,6 +680,14 @@ mod tests {
                 uint256 amount,
                 uint256 timestamp
             );
+
+            event ChangeRecord(
+                bytes32 key,
+                bytes32 value,
+                uint256 blockNumber,
+                address updater,
+                uint256 sequenceNumber
+            );
         }
     }
 
@@ -680,6 +726,57 @@ mod tests {
                     println!(
                         "from: {:?}, to: {:?}, amount: {:?}, timestamp: {:?}",
                         from, to, amount, timestamp
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn test_change_record_parsed_and_run() {
+        // URI components - modify these values as needed
+        let chain_id = "31337";
+        let contract_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+        let topic0 = "0xf69d80cc71ffd874045974ba046a0bee231ad05ec4590bdde98575cfe07fd766"; // ChangeRecord event signature
+        let from_block = "120";
+        
+        // Construct URI from components
+        let uri = format!(
+            "gravity://{}/event?address={}&topic0={}&fromBlock={}",
+            chain_id, contract_address, topic0, from_block
+        );
+        let rpc_url = "http://localhost:8545".to_string();
+
+        // ChangeRecord event signature: ChangeRecord(bytes32,bytes32,uint256,address,uint256)
+        // topic0: 0xf69d80cc71ffd874045974ba046a0bee231ad05ec4590bdde98575cfe07fd766
+        let parser = UriParser::new();
+        let task = parser.parse(&uri).expect("Failed to parse test URI");
+        println!("task: {:?}", task);
+
+        let relayer =
+            GravityRelayer::new(&rpc_url, task, 0).await.expect("Failed to create relayer");
+
+        let state = relayer.poll_once().await.expect("Failed to poll relayer");
+        println!("state: {:?}", state);
+
+        match state.observed_state.observed_value {
+            ObservedValue::Events { logs } => {
+                for log in logs {
+                    let log_obj = Log::new(log.address, log.topics, Bytes::from(log.data))
+                        .expect("Failed to create log object");
+                    let decoded = USDC::ChangeRecord::decode_log(&log_obj)
+                        .expect("Failed to decode ChangeRecord event");
+
+                    let data = decoded.data;
+                    let key = data.key;
+                    let value = data.value;
+                    let block_number = data.blockNumber;
+                    let updater = data.updater;
+                    let sequence_number = data.sequenceNumber;
+                    println!(
+                        "key: {:?}, value: {:?}, block_number: {:?}, updater: {:?}, sequence_number: {:?}",
+                        key, value, block_number, updater, sequence_number
                     );
                 }
             }
