@@ -7,6 +7,7 @@ use std::{
 };
 
 use tokio::sync::oneshot;
+use tracing::warn;
 
 #[derive(Debug)]
 pub(crate) struct Channel<K, V> {
@@ -106,7 +107,12 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
         let state = inner.states.remove(&key);
         match state {
             Some(State::Waiting(tx)) => {
-                let _ = tx.send(val);
+                // If send fails, the receiver was already dropped (likely due to timeout).
+                // In this case, we store the value as Notified so it won't be lost.
+                if let Err(v) = tx.send(val) {
+                    warn!("Channel send notifier(key: {:?}) failed,  the receiver was already dropped", key);
+                    inner.states.insert(key, State::Notified(v));
+                }
             }
             Some(State::Notified(_)) => {
                 panic!("unexpected state: {key:?}");

@@ -31,6 +31,7 @@ nybbles = { workspace = true, features = ["rlp"] }
 # reth
 revm-database.workspace = true
 reth-storage-errors.workspace = true
+gravity-primitives.workspace = true
 
 # `serde` feature
 serde = { workspace = true, optional = true }

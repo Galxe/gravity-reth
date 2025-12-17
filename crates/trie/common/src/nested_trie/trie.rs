@@ -1,3 +1,4 @@
+use gravity_primitives::get_gravity_config;
 use once_cell::sync::OnceCell;
 
 use parking_lot::Mutex;
@@ -12,6 +13,9 @@ use nybbles::Nibbles;
 use reth_storage_errors::{db::DatabaseError, ProviderResult};
 
 use crate::nested_trie::node::{Node, NodeFlag};
+
+/// The min number of nodes to parallelly update MPT sub-trie
+pub const MIN_PARALLEL_NODES: usize = 128;
 
 /// Node reader for nested trie
 pub trait TrieReader {
@@ -57,8 +61,8 @@ where
         Ok(Self { root, reader, trie_output: Default::default(), parallel })
     }
 
-    fn new_with_root(reader: R, root: Option<Node>) -> Self {
-        Self { root, reader, trie_output: Default::default(), parallel: false }
+    fn new_with_root(reader: R, root: Option<Node>, parallel: bool) -> Self {
+        Self { root, reader, trie_output: Default::default(), parallel }
     }
 
     /// Take the trie output
@@ -240,10 +244,34 @@ where
         f: F,
     ) -> ProviderResult<()>
     where
-        F: Fn() -> ProviderResult<R> + Send + Sync,
+        F: Fn() -> ProviderResult<R> + Clone + Send + Sync,
     {
-        if self.parallel && self.root.is_some() {
+        self.parallel_update_inner(batches, 1, f)
+    }
+
+    /// Parallel insert/delete `ValueNode` by full path.
+    /// Each path is partitioned by the first nibble.
+    /// Node for delete, and Some for insert.
+    fn parallel_update_inner<F>(
+        &mut self,
+        batches: [Vec<(Nibbles, Option<Node>)>; 16], // Some for insert, None for delete
+        level: usize,
+        f: F,
+    ) -> ProviderResult<()>
+    where
+        F: Fn() -> ProviderResult<R> + Clone + Send + Sync,
+    {
+        let max_parallel_levels = get_gravity_config().trie_parallel_levels as usize;
+        let mut level_prefix = None;
+        for batch in &batches {
+            if !batch.is_empty() {
+                level_prefix = Some(batch[0].0.slice(0..level-1));
+            }
+        }
+        if max_parallel_levels > 0 && self.parallel && level_prefix.is_some() && self.root.is_some() {
+            let level_prefix = level_prefix.unwrap();
             let root = self.root.take().unwrap();
+            let root = self.resolve(root, level_prefix)?.unwrap();
             if let Node::FullNode { mut children, .. } = root {
                 let removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
                 let abort = OnceCell::new();
@@ -254,22 +282,35 @@ where
                         }
                         scope.spawn(|_| {
                             let wrap = || -> ProviderResult<()> {
-                                let prefix = batch[0].0.slice(0..1);
                                 let child_root = child.take().map(|n| *n);
-                                let reader = f()?;
-                                let mut child_trie = Self::new_with_root(reader, child_root);
-                                for (key, value) in batch {
-                                    let child_root = child_trie.root.take();
-                                    let result = if let Some(value) = value {
-                                        child_trie
-                                            .insert_inner(child_root, prefix, key.slice(1..), value)
-                                            .map(|(dirty, node)| (dirty, Some(node)))
-                                    } else {
-                                        child_trie.delete_inner(child_root, prefix, key.slice(1..))
-                                    };
-                                    let (_, node) = result?;
-                                    child_trie.root = node;
-                                }
+                                let mut child_trie = if level < max_parallel_levels && batch.len() > MIN_PARALLEL_NODES {
+                                    let mut sub_batches: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
+                                    for (key, value) in batch {
+                                        let index = key.get_unchecked(level) as usize;
+                                        sub_batches[index].push((key, value));
+                                    }
+                                    let reader = f()?;
+                                    let mut child_trie = Self::new_with_root(reader, child_root, true);
+                                    child_trie.parallel_update_inner(sub_batches, level + 1, f.clone())?;
+                                    child_trie
+                                } else {
+                                    let prefix = batch[0].0.slice(0..level);
+                                    let reader = f()?;
+                                    let mut child_trie = Self::new_with_root(reader, child_root, false);
+                                    for (key, value) in batch {
+                                        let child_root = child_trie.root.take();
+                                        let result = if let Some(value) = value {
+                                            child_trie
+                                                .insert_inner(child_root, prefix, key.slice(level..), value)
+                                                .map(|(dirty, node)| (dirty, Some(node)))
+                                        } else {
+                                            child_trie.delete_inner(child_root, prefix, key.slice(level..))
+                                        };
+                                        let (_, node) = result?;
+                                        child_trie.root = node;
+                                    }
+                                    child_trie
+                                };
                                 let _ = child_trie.hash();
                                 *child = child_trie.root.take().map(Box::new);
                                 if !child_trie.trie_output.removed_nodes.is_empty() {
@@ -303,7 +344,8 @@ where
                 }
                 if pos >= 0 {
                     // Fall back into a extension node
-                    let nibble_path = Nibbles::from_nibbles_unchecked([pos as u8]);
+                    let mut nibble_path = level_prefix;
+                    nibble_path.push_unchecked(pos as u8);
                     let single_child = *children[pos as usize].take().unwrap();
                     let single_child = self.resolve(single_child, nibble_path)?.unwrap();
 
@@ -330,7 +372,7 @@ where
                     self.root = Some(Node::FullNode { children, flags: NodeFlag::dirty_node() });
                 } else if pos == -1 {
                     self.root = None;
-                    removed_nodes.insert(Nibbles::new());
+                    removed_nodes.insert(level_prefix);
                 }
 
                 if self.trie_output.removed_nodes.is_empty() {
