@@ -12,6 +12,8 @@ description = "Common types in gravity-reth."
 workspace = true
 
 [dependencies]
+tokio.workspace = true
+grevm.workspace = true
 
 [features]
 config-from-env = []

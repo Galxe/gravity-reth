@@ -3,6 +3,7 @@
 mod channel;
 mod metrics;
 pub mod onchain_config;
+pub mod prewarm;
 use alloy_sol_types::SolEvent;
 pub use reth_pipe_exec_layer_relayer::{ObserveState, ObservedValue, RelayerManager};
 
@@ -172,6 +173,8 @@ struct PipeExecService<Storage: GravityStorage> {
     ordered_block_rx: UnboundedReceiver<ReceivedBlock>,
     /// Receive the execution init args from `GravitySDK`
     execution_args_rx: oneshot::Receiver<ExecutionArgs>,
+    /// Shutdown sender for prewarm service.
+    shutdown_prewarm_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// Information about a transaction in the executed block
@@ -243,6 +246,10 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
                     self.core.execute_block_barrier.close();
                     self.core.merklize_barrier.close();
                     self.core.make_canonical_barrier.close();
+                    // Send shutdown signal to prewarm service
+                    if let Some(tx) = self.shutdown_prewarm_tx.take() {
+                        let _ = tx.send(());
+                    }
                     return;
                 }
             };
@@ -1121,6 +1128,19 @@ where
     let storage = Arc::new(storage);
     let onchain_config_fetcher = OnchainConfigFetcher::new(eth_api);
 
+    // Create PrewarmService for MPT prewarming
+    let (prewarm_tx, prewarm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (shutdown_prewarm_tx, shutdown_prewarm_rx) = tokio::sync::oneshot::channel();
+    if gravity_primitives::get_gravity_config().prewarm_enabled {
+        let prewarm_config = gravity_primitives::PrewarmConfig::from_env();
+        info!(target: "PipeExecService.new_pipe_exec_layer_api", "Creating prewarm service config: {:?}", prewarm_config);
+        let prewarm_service = crate::prewarm::PrewarmService::new(prewarm_rx, shutdown_prewarm_rx, prewarm_config);
+        tokio::spawn(async move {
+            prewarm_service.run().await;
+        });
+        let _ = gravity_primitives::set_global_prewarm_sender(prewarm_tx).expect("prewarm sender already set");
+    }
+
     let latest_block_number = latest_block_header.number;
     let epoch = onchain_config_fetcher
         .fetch_epoch(latest_block_number.into())
@@ -1160,6 +1180,7 @@ where
         }),
         ordered_block_rx,
         execution_args_rx,
+        shutdown_prewarm_tx: Some(shutdown_prewarm_tx),
     };
     tokio::spawn(service.run());
 

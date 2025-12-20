@@ -30,7 +30,6 @@ use revm::{
     state::{Account, AccountStatus, EvmState},
     DatabaseCommit,
 };
-
 /// EVM executor using Grevm that executes blocks in parallel.
 #[derive(Debug)]
 pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
@@ -99,7 +98,10 @@ where
 
         let (results, state) = {
             let EvmEnv { cfg_env, block_env } = evm_env;
-            let executor = Scheduler::new(cfg_env, block_env, txs, state, false);
+            let mut executor = Scheduler::new(cfg_env, block_env, txs, state, false);
+            if let Some(sender) = gravity_primitives::get_global_prewarm_sender() {
+                executor = executor.with_prewarm_sender(sender.clone());
+            }
             executor.parallel_execute(None).map_err(|e| {
                 BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
                     hash: block

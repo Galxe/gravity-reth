@@ -1,6 +1,8 @@
 //! Configuration options for the Gravity Reth.
 
+use grevm::PrewarmTask;
 use std::sync::OnceLock;
+use tokio::sync::mpsc;
 
 /// Configuration options for the Gravity Reth.
 #[derive(Debug, Clone)]
@@ -19,6 +21,50 @@ pub struct Config {
     pub report_db_metrics: bool,
     /// Max parallel levels in nested hash
     pub trie_parallel_levels: u64,
+    /// Whether MPT prewarming is enabled. default true.
+    pub prewarm_enabled: bool,
+}
+
+/// MPT prewarm configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct PrewarmConfig {
+    /// Storage threshold for prewarming accounts with multiple storage slots.
+    pub storage_threshold: usize,
+    /// Whether to only prewarm contract accounts (skip EOAs).
+    pub contracts_only: bool,
+}
+
+impl PrewarmConfig {
+    /// Convert from environment variables.
+    pub fn from_env() -> Self {
+        Self {
+            storage_threshold: std::env::var("RETH_PREWARM_STORAGE_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2),
+            contracts_only: std::env::var("RETH_PREWARM_CONTRACTS_ONLY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(false),
+        }
+    }
+}
+
+/// Global prewarm task sender.
+static GLOBAL_PREWARM_SENDER: OnceLock<mpsc::UnboundedSender<PrewarmTask>> = OnceLock::new();
+
+/// Sets the global prewarm sender.
+///
+/// Returns `Err(())` if the sender was already set.
+pub fn set_global_prewarm_sender(sender: mpsc::UnboundedSender<PrewarmTask>) -> Result<(), ()> {
+    GLOBAL_PREWARM_SENDER.set(sender).map_err(|_| ())
+}
+
+/// Gets a reference to the global prewarm sender.
+///
+/// Returns `None` if the sender has not been set yet.
+pub fn get_global_prewarm_sender() -> Option<&'static mpsc::UnboundedSender<PrewarmTask>> {
+    GLOBAL_PREWARM_SENDER.get()
 }
 
 /// Global configuration instance, initialized once.
@@ -45,6 +91,7 @@ pub fn get_gravity_config() -> &'static Config {
             cache_capacity: 2_000_000,
             report_db_metrics: false,
             trie_parallel_levels: 1,
+            prewarm: PrewarmConfig::default(),
         })
     }
 }
