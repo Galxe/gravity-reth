@@ -668,7 +668,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
             let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
                 &mut evm,
-                ordered_block.timestamp * 1_000_000,
+                ordered_block.timestamp,
                 ordered_block.proposer,
                 ordered_block.enable_randomness,
             );

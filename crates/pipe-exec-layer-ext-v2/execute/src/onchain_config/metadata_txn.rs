@@ -185,7 +185,7 @@ pub fn transact_metadata_contract_call(
         let call = blockPrologueExtCall {
             proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
             failedProposerIndices: vec![],
-            timestampMicros: U256::from(timestamp_us),
+            timestampMicros: timestamp_us,
         };
         call.abi_encode().into()
     } else {
@@ -193,7 +193,7 @@ pub fn transact_metadata_contract_call(
         let call = blockPrologueCall {
             proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
             failedProposerIndices: vec![],
-            timestampMicros: U256::from(timestamp_us),
+            timestampMicros: timestamp_us,
         };
         call.abi_encode().into()
     };
