@@ -99,6 +99,9 @@ pub fn convert_validator_info(
     // Convert voting power from wei to ether
     let power_ether = wei_to_ether(solidity_info.votingPower);
 
+    // Convert stakeCreditAddress from Address to Vec<u8>
+    // This will be used once GravityValidatorInfo is updated to include stakeCreditAddress field
+    let stake_credit_address = solidity_info.stakeCreditAddress.as_slice().to_vec();
     GravityValidatorInfo::new(
         account_address,
         power_ether.to::<u64>(),
@@ -108,6 +111,7 @@ pub fn convert_validator_info(
             solidity_info.fullnodeNetworkAddresses.clone().into(),
             solidity_info.validatorIndex.to::<u64>(),
         ),
+        stake_credit_address,
     )
 }
 
