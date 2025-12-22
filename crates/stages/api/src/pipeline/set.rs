@@ -19,10 +19,7 @@ pub trait StageSet<Provider>: Sized {
     /// # Panics
     ///
     /// Panics if the [`Stage`] is not in this set.
-    fn set<S: Stage<Provider> + 'static>(
-        self,
-        stage: S,
-    ) -> StageSetBuilder<Provider> {
+    fn set<S: Stage<Provider> + 'static>(self, stage: S) -> StageSetBuilder<Provider> {
         self.builder().set(stage)
     }
 }
@@ -74,11 +71,7 @@ impl<Provider> StageSetBuilder<Provider> {
         index.unwrap_or_else(|| panic!("Stage does not exist in set: {stage_id}"))
     }
 
-    fn upsert_stage_state(
-        &mut self,
-        stage: Box<dyn Stage<Provider>>,
-        added_at_index: usize,
-    ) {
+    fn upsert_stage_state(&mut self, stage: Box<dyn Stage<Provider>>, added_at_index: usize) {
         let stage_id = stage.id();
         if self.stages.insert(stage.id(), StageEntry { stage, enabled: true }).is_some() &&
             let Some(to_remove) = self
@@ -116,11 +109,7 @@ impl<Provider> StageSetBuilder<Provider> {
     ///
     /// If the new stage has a different ID,
     /// it will maintain the original stage's position in the execution order.
-    pub fn replace<S: Stage<Provider> + 'static>(
-        mut self,
-        stage_id: StageId,
-        stage: S,
-    ) -> Self {
+    pub fn replace<S: Stage<Provider> + 'static>(mut self, stage_id: StageId, stage: S) -> Self {
         self.stages
             .get(&stage_id)
             .unwrap_or_else(|| panic!("Stage does not exist in set: {stage_id}"));
@@ -176,11 +165,7 @@ impl<Provider> StageSetBuilder<Provider> {
     /// # Panics
     ///
     /// Panics if the dependency stage is not in this set.
-    pub fn add_before<S: Stage<Provider> + 'static>(
-        mut self,
-        stage: S,
-        before: StageId,
-    ) -> Self {
+    pub fn add_before<S: Stage<Provider> + 'static>(mut self, stage: S, before: StageId) -> Self {
         let target_index = self.index_of(before);
         self.order.insert(target_index, stage.id());
         self.upsert_stage_state(Box::new(stage), target_index);
@@ -194,11 +179,7 @@ impl<Provider> StageSetBuilder<Provider> {
     /// # Panics
     ///
     /// Panics if the dependency stage is not in this set.
-    pub fn add_after<S: Stage<Provider> + 'static>(
-        mut self,
-        stage: S,
-        after: StageId,
-    ) -> Self {
+    pub fn add_after<S: Stage<Provider> + 'static>(mut self, stage: S, after: StageId) -> Self {
         let target_index = self.index_of(after) + 1;
         self.order.insert(target_index, stage.id());
         self.upsert_stage_state(Box::new(stage), target_index);
@@ -292,9 +273,7 @@ impl<Provider> StageSetBuilder<Provider> {
     }
 }
 
-impl<Provider> StageSet<Provider>
-    for StageSetBuilder<Provider>
-{
+impl<Provider> StageSet<Provider> for StageSetBuilder<Provider> {
     fn builder(self) -> Self {
         self
     }

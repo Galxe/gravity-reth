@@ -118,7 +118,6 @@ where
             validator_set::ValidatorSetFetcher,
         };
 
-
         match config_name {
             OnChainConfig::ConsensusConfig => {
                 let fetcher = ConsensusConfigFetcher::new(self);

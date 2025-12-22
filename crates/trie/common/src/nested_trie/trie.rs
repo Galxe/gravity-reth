@@ -265,10 +265,11 @@ where
         let mut level_prefix = None;
         for batch in &batches {
             if !batch.is_empty() {
-                level_prefix = Some(batch[0].0.slice(0..level-1));
+                level_prefix = Some(batch[0].0.slice(0..level - 1));
             }
         }
-        if max_parallel_levels > 0 && self.parallel && level_prefix.is_some() && self.root.is_some() {
+        if max_parallel_levels > 0 && self.parallel && level_prefix.is_some() && self.root.is_some()
+        {
             let level_prefix = level_prefix.unwrap();
             let root = self.root.take().unwrap();
             let root = self.resolve(root, level_prefix)?.unwrap();
@@ -283,28 +284,46 @@ where
                         scope.spawn(|_| {
                             let wrap = || -> ProviderResult<()> {
                                 let child_root = child.take().map(|n| *n);
-                                let mut child_trie = if level < max_parallel_levels && batch.len() > MIN_PARALLEL_NODES {
-                                    let mut sub_batches: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
+                                let mut child_trie = if level < max_parallel_levels &&
+                                    batch.len() > MIN_PARALLEL_NODES
+                                {
+                                    let mut sub_batches: [Vec<(Nibbles, Option<Node>)>; 16] =
+                                        Default::default();
                                     for (key, value) in batch {
                                         let index = key.get_unchecked(level) as usize;
                                         sub_batches[index].push((key, value));
                                     }
                                     let reader = f()?;
-                                    let mut child_trie = Self::new_with_root(reader, child_root, true);
-                                    child_trie.parallel_update_inner(sub_batches, level + 1, f.clone())?;
+                                    let mut child_trie =
+                                        Self::new_with_root(reader, child_root, true);
+                                    child_trie.parallel_update_inner(
+                                        sub_batches,
+                                        level + 1,
+                                        f.clone(),
+                                    )?;
                                     child_trie
                                 } else {
                                     let prefix = batch[0].0.slice(0..level);
                                     let reader = f()?;
-                                    let mut child_trie = Self::new_with_root(reader, child_root, false);
+                                    let mut child_trie =
+                                        Self::new_with_root(reader, child_root, false);
                                     for (key, value) in batch {
                                         let child_root = child_trie.root.take();
                                         let result = if let Some(value) = value {
                                             child_trie
-                                                .insert_inner(child_root, prefix, key.slice(level..), value)
+                                                .insert_inner(
+                                                    child_root,
+                                                    prefix,
+                                                    key.slice(level..),
+                                                    value,
+                                                )
                                                 .map(|(dirty, node)| (dirty, Some(node)))
                                         } else {
-                                            child_trie.delete_inner(child_root, prefix, key.slice(level..))
+                                            child_trie.delete_inner(
+                                                child_root,
+                                                prefix,
+                                                key.slice(level..),
+                                            )
                                         };
                                         let (_, node) = result?;
                                         child_trie.root = node;

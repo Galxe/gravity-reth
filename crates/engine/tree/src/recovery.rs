@@ -6,13 +6,15 @@
 //! checkpoints and rebuilding the missing data.
 
 use alloy_primitives::BlockNumber;
-use reth_db::tables;
-use reth_db::transaction::{DbTx, DbTxMut};
+use reth_db::{
+    tables,
+    transaction::{DbTx, DbTxMut},
+};
 use reth_errors::ProviderError;
 use reth_provider::{
     providers::ProviderNodeTypes, AccountExtReader, BlockNumReader, DatabaseProviderFactory,
-    HashingWriter, HistoryWriter, ProviderFactory, ProviderResult, StorageReader, TrieWriterV2,
-    StageCheckpointWriter,
+    HashingWriter, HistoryWriter, ProviderFactory, ProviderResult, StageCheckpointWriter,
+    StorageReader, TrieWriterV2,
 };
 use reth_stages_api::{StageCheckpoint, StageId};
 use reth_trie_parallel::nested_hash::NestedStateRoot;
@@ -83,11 +85,13 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         if ck.block_number < block_number {
             info!(target: "engine::recovery", checkpoint = ?ck.block_number, block_number = ?block_number, "Recovering hashing state");
             // rebuild hashing account
-            let lists = provider_rw.changed_accounts_with_range(ck.block_number + 1..=block_number)?;
+            let lists =
+                provider_rw.changed_accounts_with_range(ck.block_number + 1..=block_number)?;
             let accounts = provider_rw.basic_accounts(lists)?;
             provider_rw.insert_account_for_hashing(accounts)?;
             // rebuild hashing storage
-            let lists = provider_rw.changed_storages_with_range(ck.block_number + 1..=block_number)?;
+            let lists =
+                provider_rw.changed_storages_with_range(ck.block_number + 1..=block_number)?;
             let storages = provider_rw.plain_state_storages(lists)?;
             provider_rw.insert_storage_for_hashing(storages)?;
 
@@ -120,9 +124,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
             let hashed_state =
                 nested_state_root.read_hashed_state(Some(ck.block_number + 1..=block_number))?;
             let (_final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
-            provider_rw
-                .write_trie_updatesv2(&trie_updates_v2)
-                .map_err(ProviderError::Database)?;
+            provider_rw.write_trie_updatesv2(&trie_updates_v2).map_err(ProviderError::Database)?;
 
             provider_rw
                 .tx_ref()
@@ -165,4 +167,3 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         Ok(())
     }
 }
-

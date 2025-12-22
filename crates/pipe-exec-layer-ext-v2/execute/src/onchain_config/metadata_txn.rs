@@ -1,7 +1,9 @@
 //! Metadata transaction execution
 
 use super::{
-    types::{blockPrologueCall, convert_validator_set_to_bcs, AllValidatorsUpdated, blockPrologueExtCall},
+    types::{
+        blockPrologueCall, blockPrologueExtCall, convert_validator_set_to_bcs, AllValidatorsUpdated,
+    },
     SYSTEM_CALLER,
 };
 use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
@@ -166,10 +168,10 @@ fn new_system_call_txn(
 }
 
 /// Execute a metadata contract call (blockPrologue or blockPrologueExt)
-/// 
+///
 /// If `enable_randomness` is true, calls blockPrologueExt.
 /// Otherwise, calls the legacy blockPrologue function.
-/// 
+///
 /// Note: blockPrologueExt retrieves randomness from block.difficulty (set before this call),
 /// so it doesn't need to be passed as a parameter.
 pub fn transact_metadata_contract_call(
@@ -206,14 +208,9 @@ pub fn transact_metadata_contract_call(
     );
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
-    
+
     let function_name = if enable_randomness { "blockPrologueExt" } else { "blockPrologue" };
-    assert!(
-        result.result.is_success(),
-        "Failed to execute {}: {:?}",
-        function_name,
-        result.result
-    );
-    
+    assert!(result.result.is_success(), "Failed to execute {}: {:?}", function_name, result.result);
+
     (MetadataTxnResult { result: result.result, txn }, result.state)
 }

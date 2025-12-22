@@ -1,8 +1,10 @@
 //! Transaction implementation for RocksDB.
 
 use crate::{
-    DatabaseError, implementation::rocksdb::{cursor, get_cf_handle, read_error, to_error_info}
+    implementation::rocksdb::{cursor, get_cf_handle, read_error, to_error_info},
+    DatabaseError,
 };
+use parking_lot::Mutex;
 use reth_db_api::{
     table::{Compress, Decompress, DupSort, Encode, Table, TableImporter},
     transaction::{DbTx, DbTxMut},
@@ -10,7 +12,6 @@ use reth_db_api::{
 use reth_storage_errors::db::DatabaseErrorInfo;
 use rocksdb::DB;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 pub(crate) use cursor::{RO, RW};
 
@@ -33,10 +34,10 @@ impl<K: cursor::TransactionKind> std::fmt::Debug for Tx<K> {
 
 impl<K: cursor::TransactionKind> Tx<K> {
     pub(crate) fn new(db: Arc<DB>) -> Self {
-        Self { 
-            db, 
+        Self {
+            db,
             batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
-            _mode: std::marker::PhantomData 
+            _mode: std::marker::PhantomData,
         }
     }
 
@@ -93,9 +94,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         // Write the batch to RocksDB atomically
         let mut batch_guard = self.batch.lock();
         let batch = std::mem::take(&mut *batch_guard);
-        self.db.write(batch).map_err(|e| {
-            DatabaseError::Commit(to_error_info(e))
-        })?;
+        self.db.write(batch).map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
         Ok(true)
     }
 

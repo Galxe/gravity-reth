@@ -1,13 +1,11 @@
 //! RocksDB implementation for the database.
 
 use crate::{DatabaseError, TableSet};
-use reth_db_api::{
-    database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, Tables,
-};
-use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
-use rocksdb::{Options, DB, BlockBasedOptions, Cache};
-use std::{path::Path, sync::Arc};
 use metrics::Label;
+use reth_db_api::{database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, Tables};
+use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
+use rocksdb::{BlockBasedOptions, Cache, Options, DB};
+use std::{path::Path, sync::Arc};
 
 pub(crate) mod cursor;
 pub(crate) mod tx;
@@ -242,30 +240,30 @@ impl DatabaseEnv {
         // === Parallelism Configuration ===
         // Configure background jobs for compaction and flush
         opts.set_max_background_jobs(args.max_background_jobs());
-        
+
         // Increase parallelism for multi-threaded compactions
         let parallelism = (args.max_background_jobs() + 2).max(4) as i32;
         opts.increase_parallelism(parallelism);
-        
+
         // Set max open files limit
         opts.set_max_open_files(args.max_open_files());
-        
+
         // === Memory Configuration ===
         // Write buffer size per memtable
         let write_buffer_size = args.write_buffer_size();
         opts.set_write_buffer_size(write_buffer_size);
-        
+
         // Configure max write buffers (memtables) before blocking writes
         // More buffers allow absorbing write spikes but use more memory
         opts.set_max_write_buffer_number(args.max_write_buffer_number());
-        
+
         // Min write buffers to merge before flush (reduce write amplification)
         opts.set_min_write_buffer_number_to_merge(2);
-        
+
         // Total memtable size across all column families (8GB)
         // Helps absorb write spikes
         opts.set_db_write_buffer_size(8 * 1024 * 1024 * 1024);
-        
+
         // === Block Cache Configuration ===
         // Shared block cache for all column families (configurable, default 8GB)
         // Critical for read performance with frequent random reads
@@ -276,62 +274,62 @@ impl DatabaseEnv {
         block_opts.set_block_size(32 * 1024); // 32KB blocks (good for random reads)
         block_opts.set_cache_index_and_filter_blocks(true); // Cache index/filters
         block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); // Keep L0 indexes in cache
-        
+
         // Enable bloom filters for faster point lookups
         block_opts.set_bloom_filter(10.0, false); // 10 bits per key
-        
+
         opts.set_block_based_table_factory(&block_opts);
-        
+
         // === Compaction Configuration ===
         // Level-based compaction with higher thresholds to delay write stalls
         opts.set_level_compaction_dynamic_level_bytes(true);
-        
+
         // L0 file triggers - configurable to balance read/write amplification
         let l0_trigger = args.level0_file_num_compaction_trigger();
         opts.set_level_zero_file_num_compaction_trigger(l0_trigger);
         // Slowdown and stop triggers scale with compaction trigger
         opts.set_level_zero_slowdown_writes_trigger(l0_trigger * 7); // 7x trigger
         opts.set_level_zero_stop_writes_trigger(l0_trigger * 12); // 12x trigger
-        
+
         // Pending compaction bytes limits - increased for high-throughput
         // Soft limit triggers slowdown, hard limit stops writes
         opts.set_soft_pending_compaction_bytes_limit(128 * 1024 * 1024 * 1024); // 128GB
         opts.set_hard_pending_compaction_bytes_limit(512 * 1024 * 1024 * 1024); // 512GB
-        
+
         // Target file size for L1 (256MB, doubles per level)
         opts.set_target_file_size_base(256 * 1024 * 1024);
         opts.set_target_file_size_multiplier(2);
-        
+
         // L1 size - configurable to control LSM tree structure
         opts.set_max_bytes_for_level_base(args.max_bytes_for_level_base());
         opts.set_max_bytes_for_level_multiplier(10.0);
-        
+
         // Maximum compaction bytes at once (2GB)
         opts.set_max_compaction_bytes(2 * 1024 * 1024 * 1024);
-        
+
         // === Write Configuration ===
         // Note: set_delayed_write_rate not available in rocksdb-rs 0.22
         // The default delayed_write_rate will be used when write stall occurs
-        
+
         // Enable pipelined writes for better concurrency
         opts.set_enable_pipelined_write(true);
-        
+
         // WAL configuration
         opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2GB max WAL size
         opts.set_wal_bytes_per_sync(4 * 1024 * 1024); // Sync WAL every 4MB
-        
+
         // === Compression Configuration ===
         // Use LZ4 for L0-L1 (fast), Zstd for L2+ (better compression)
         opts.set_compression_per_level(&[
-            rocksdb::DBCompressionType::Lz4,    // L0
-            rocksdb::DBCompressionType::Lz4,    // L1
-            rocksdb::DBCompressionType::Zstd,   // L2
-            rocksdb::DBCompressionType::Zstd,   // L3
-            rocksdb::DBCompressionType::Zstd,   // L4
-            rocksdb::DBCompressionType::Zstd,   // L5
-            rocksdb::DBCompressionType::Zstd,   // L6
+            rocksdb::DBCompressionType::Lz4,  // L0
+            rocksdb::DBCompressionType::Lz4,  // L1
+            rocksdb::DBCompressionType::Zstd, // L2
+            rocksdb::DBCompressionType::Zstd, // L3
+            rocksdb::DBCompressionType::Zstd, // L4
+            rocksdb::DBCompressionType::Zstd, // L5
+            rocksdb::DBCompressionType::Zstd, // L6
         ]);
-        
+
         // === I/O Optimization ===
         // Optimize for SSD with high IOPS
         opts.set_bytes_per_sync(args.bytes_per_sync()); // Configurable background sync
@@ -341,7 +339,7 @@ impl DatabaseEnv {
         let required_tables: Vec<String> = Tables::tables().map(|t| t.name().to_string()).collect();
         let db = DB::open_cf(&opts, path, &required_tables)
             .map_err(|e| DatabaseError::Other(format!("Failed to open RocksDB: {}", e)))?;
-        
+
         Ok(Self { inner: Arc::new(db), kind })
     }
 
@@ -362,9 +360,14 @@ impl DatabaseEnv {
 
     /// Records the client version in the database.
     pub fn record_client_version(&self, version: ClientVersion) -> Result<(), DatabaseError> {
-        use reth_db_api::{cursor::{DbCursorRO, DbCursorRW}, database::Database, transaction::{DbTx, DbTxMut}, tables};
+        use reth_db_api::{
+            cursor::{DbCursorRO, DbCursorRW},
+            database::Database,
+            tables,
+            transaction::{DbTx, DbTxMut},
+        };
         use std::time::{SystemTime, UNIX_EPOCH};
-        
+
         if version.is_empty() {
             return Ok(())
         }
@@ -388,7 +391,7 @@ impl DatabaseEnv {
 impl DatabaseMetrics for DatabaseEnv {
     fn histogram_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
         let mut metrics = Vec::new();
-        
+
         // 1. rocksdb.actual-delayed-write-rate
         // Current write rate limit in bytes/sec when write stall occurs
         // Threshold: 0 = healthy, >0 = write stall active
@@ -398,14 +401,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Increase delayed_write_rate limit (currently 64MB/s)
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.actual-delayed-write-rate") {
             if let Ok(rate) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.actual_delayed_write_rate",
-                    rate as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.actual_delayed_write_rate", rate as f64, vec![]));
             }
         }
-        
+
         // 2. rocksdb.is-write-stopped
         // Whether writes are completely stopped (0=no, 1=yes)
         // Threshold: 0 = healthy, 1 = CRITICAL
@@ -416,31 +415,23 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Increase hard_pending_compaction_bytes_limit above 512GB
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.is-write-stopped") {
             if let Ok(stopped) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.is_write_stopped",
-                    stopped as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.is_write_stopped", stopped as f64, vec![]));
             }
         }
-        
+
         // 3. rocksdb.num-immutable-mem-table
         // Number of immutable memtables not yet flushed to disk
-        // Threshold: 0-2 = healthy, 3-4 = warning, >=5 = critical (approaching max_write_buffer_number=6)
-        // Action: If >=4, flush is falling behind
+        // Threshold: 0-2 = healthy, 3-4 = warning, >=5 = critical (approaching
+        // max_write_buffer_number=6) Action: If >=4, flush is falling behind
         // - Increase max_background_jobs for more flush threads
         // - Reduce write_buffer_size (currently 256MB) to flush more frequently
         // - Increase max_write_buffer_number above 6 for more buffer
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-immutable-mem-table") {
             if let Ok(num) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.num_immutable_mem_table",
-                    num as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.num_immutable_mem_table", num as f64, vec![]));
             }
         }
-        
+
         // 4. rocksdb.mem-table-flush-pending
         // Whether a memtable flush is pending (0=no, 1=yes)
         // Threshold: 0 = healthy, 1 = flush in progress or queued
@@ -448,18 +439,14 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Same actions as num_immutable_mem_table
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.mem-table-flush-pending") {
             if let Ok(pending) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.mem_table_flush_pending",
-                    pending as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.mem_table_flush_pending", pending as f64, vec![]));
             }
         }
-        
+
         // 5. rocksdb.num-files-at-level0
         // Number of SST files at Level 0 (most critical metric for write stalls)
-        // Threshold: 0-20 = healthy, 21-29 = warning, 30-49 = slowdown active, >=50 = writes stopped
-        // Action based on range:
+        // Threshold: 0-20 = healthy, 21-29 = warning, 30-49 = slowdown active, >=50 = writes
+        // stopped Action based on range:
         // - 21-29: Monitor, compaction catching up
         // - 30-49: Write slowdown active
         //   - Increase level_zero_slowdown_writes_trigger above 30
@@ -470,14 +457,10 @@ impl DatabaseMetrics for DatabaseEnv {
         //   - Reduce write throughput temporarily
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-files-at-level0") {
             if let Ok(num) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.num_files_at_level0",
-                    num as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.num_files_at_level0", num as f64, vec![]));
             }
         }
-        
+
         // 6. rocksdb.estimate-pending-compaction-bytes
         // Estimated bytes needing compaction to reach target level sizes
         // Threshold: 0-64GB = healthy, 64-128GB = warning, 128-512GB = slowdown, >=512GB = stopped
@@ -490,16 +473,14 @@ impl DatabaseMetrics for DatabaseEnv {
         // - >=512GB: Hard limit, writes stopped
         //   - Increase hard_pending_compaction_bytes_limit above 512GB
         //   - Add more CPU cores to max_background_jobs
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.estimate-pending-compaction-bytes") {
+        if let Ok(Some(value)) =
+            self.inner.property_value("rocksdb.estimate-pending-compaction-bytes")
+        {
             if let Ok(bytes) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.estimate_pending_compaction_bytes",
-                    bytes as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.estimate_pending_compaction_bytes", bytes as f64, vec![]));
             }
         }
-        
+
         // 7. rocksdb.cur-size-all-mem-tables
         // Total memory used by all memtables (active and immutable)
         // Threshold: Expect up to db_write_buffer_size (8GB)
@@ -508,14 +489,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - May increase db_write_buffer_size if memory available
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.cur-size-all-mem-tables") {
             if let Ok(size) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.cur_size_all_mem_tables",
-                    size as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.cur_size_all_mem_tables", size as f64, vec![]));
             }
         }
-        
+
         // 8. rocksdb.num-running-compactions
         // Number of compaction threads currently active
         // Threshold: 0-14 = normal (max_background_jobs=14), >14 should not happen
@@ -524,14 +501,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Check disk I/O is not saturated (30000 IOPS available)
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-running-compactions") {
             if let Ok(num) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.num_running_compactions",
-                    num as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.num_running_compactions", num as f64, vec![]));
             }
         }
-        
+
         // 9. rocksdb.num-running-flushes
         // Number of memtable flush operations currently active
         // Threshold: 0-4 = normal, >4 with high num_immutable_mem_table = bottleneck
@@ -541,14 +514,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Increase max_background_jobs for more flush threads
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-running-flushes") {
             if let Ok(num) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.num_running_flushes",
-                    num as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.num_running_flushes", num as f64, vec![]));
             }
         }
-        
+
         // 10. rocksdb.compaction-pending
         // Whether any compaction is pending (0=no, 1=yes)
         // Threshold: 0-1 = normal (1 expected under load)
@@ -557,14 +526,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Indicates compaction scheduler is active
         if let Ok(Some(value)) = self.inner.property_value("rocksdb.compaction-pending") {
             if let Ok(pending) = value.parse::<u64>() {
-                metrics.push((
-                    "rocksdb.compaction_pending",
-                    pending as f64,
-                    vec![],
-                ));
+                metrics.push(("rocksdb.compaction_pending", pending as f64, vec![]));
             }
         }
-        
+
         metrics
     }
 }

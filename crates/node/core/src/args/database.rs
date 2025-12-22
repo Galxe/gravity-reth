@@ -332,11 +332,8 @@ mod tests {
         assert_eq!(cmd.args.max_open_files, Some(1000));
 
         // Test unlimited open files (use = to avoid -1 being parsed as a flag)
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.max-open-files=-1",
-        ])
-        .unwrap();
+        let cmd = CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.max-open-files=-1"])
+            .unwrap();
         assert_eq!(cmd.args.max_open_files, Some(-1));
     }
 
@@ -349,11 +346,8 @@ mod tests {
         ]);
         assert!(result.is_err());
 
-        let result = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.block-cache-size",
-            "2PB",
-        ]);
+        let result =
+            CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.block-cache-size", "2PB"]);
         assert!(result.is_err());
     }
 
@@ -454,12 +448,9 @@ mod tests {
 
     #[test]
     fn test_command_parser_with_bytes_per_sync() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.bytes-per-sync",
-            "8MB",
-        ])
-        .unwrap();
+        let cmd =
+            CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.bytes-per-sync", "8MB"])
+                .unwrap();
         assert_eq!(cmd.args.bytes_per_sync, Some((MEGABYTE * 8) as u64));
     }
 

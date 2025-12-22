@@ -93,23 +93,10 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
 
     // Unwind hashes all the way to FROM
 
-    StorageHashingStage::default()
-        .unwind(
-            &provider,
-            unwind,
-        )
-        .unwrap();
-    AccountHashingStage::default()
-        .unwind(
-            &provider,
-            unwind,
-        )
-        .unwrap();
+    StorageHashingStage::default().unwind(&provider, unwind).unwrap();
+    AccountHashingStage::default().unwind(&provider, unwind).unwrap();
 
-    MerkleStage::default_unwind().unwind(
-        &provider,
-        unwind,
-    )?;
+    MerkleStage::default_unwind().unwind(&provider, unwind)?;
 
     // Bring Plainstate to TO (hashing stage execution requires it)
     let mut exec_stage = ExecutionStage::new(
@@ -140,20 +127,14 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
         commit_threshold: u64::MAX,
         etl_config: EtlConfig::default(),
     }
-    .execute(
-        &provider,
-        execute_input,
-    )
+    .execute(&provider, execute_input)
     .unwrap();
     StorageHashingStage {
         clean_threshold: u64::MAX,
         commit_threshold: u64::MAX,
         etl_config: EtlConfig::default(),
     }
-    .execute(
-        &provider,
-        execute_input,
-    )
+    .execute(&provider, execute_input)
     .unwrap();
 
     let unwind_inner_tx = provider.into_tx();
@@ -189,13 +170,7 @@ where
             target: Some(to),
             checkpoint: Some(StageCheckpoint::new(from)),
         };
-        if stage
-            .execute(
-                &provider,
-                input,
-            )?
-            .done
-        {
+        if stage.execute(&provider, input)?.done {
             break;
         }
     }

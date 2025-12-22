@@ -79,8 +79,9 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
                         match tokio::time::timeout(duration, rx).await {
                             Ok(result) => result.ok(),
                             Err(_) => {
-                                // Timeout occurred, clean up the waiting state only if still waiting.
-                                // If the state is Notified, we should not remove it to avoid losing
+                                // Timeout occurred, clean up the waiting state only if still
+                                // waiting. If the state is
+                                // Notified, we should not remove it to avoid losing
                                 // the notify signal.
                                 let mut inner = self.inner.lock().unwrap();
                                 if matches!(inner.states.get(&key), Some(State::Waiting(_))) {

@@ -9,7 +9,8 @@ pub use reth_pipe_exec_layer_relayer::{ObserveState, ObservedValue, RelayerManag
 use channel::Channel;
 use gravity_api_types::{
     config_storage::{ConfigStorage, OnChainConfig, OnChainConfigResType},
-    events::contract_event::GravityEvent, ExtraDataType,
+    events::contract_event::GravityEvent,
+    ExtraDataType,
 };
 use metrics::PipeExecLayerMetrics;
 
@@ -46,7 +47,14 @@ use revm::{
     state::AccountInfo,
     DatabaseCommit,
 };
-use std::{collections::BTreeMap, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::{Duration, Instant}};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 use gravity_storage::GravityStorage;
 use onchain_config::{transact_metadata_contract_call, OnchainConfigFetcher};
@@ -293,27 +301,38 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
         let ExecuteBlockContext { parent_header, prev_start_execute_time, epoch } = loop {
-            info!("Wait execute_block_barrier {} => ({}, {})", block_number, block_epoch, block_number - 1);
-            match self.execute_block_barrier.wait_timeout((block_epoch, block_number - 1), Duration::from_secs(2)).await {
+            info!(
+                "Wait execute_block_barrier {} => ({}, {})",
+                block_number,
+                block_epoch,
+                block_number - 1
+            );
+            match self
+                .execute_block_barrier
+                .wait_timeout((block_epoch, block_number - 1), Duration::from_secs(2))
+                .await
+            {
                 Some(parent) => break parent,
                 // Make sure the ordered blocks are idempotent
-                None => if block_epoch < self.epoch() || block_number <= self.execute_height() {
-                    warn!(target: "PipeExecService.process",
-                        block_number=?block_number,
-                        block_id=?block_id,
-                        block_epoch=?block_epoch,
-                        current_epoch=?self.epoch(),
-                        execute_height=?self.execute_height(),
-                        "epoch or execute height mismatch"
-                    );
-                    return;
-                } else {
-                    warn!(target: "PipeExecService.process",
-                        block_number=?block_number,
-                        block_id=?block_id,
-                        block_epoch=?block_epoch,
-                        "timeout(2s) wait for execute_block_barrier"
-                    );
+                None => {
+                    if block_epoch < self.epoch() || block_number <= self.execute_height() {
+                        warn!(target: "PipeExecService.process",
+                            block_number=?block_number,
+                            block_id=?block_id,
+                            block_epoch=?block_epoch,
+                            current_epoch=?self.epoch(),
+                            execute_height=?self.execute_height(),
+                            "epoch or execute height mismatch"
+                        );
+                        return;
+                    } else {
+                        warn!(target: "PipeExecService.process",
+                            block_number=?block_number,
+                            block_id=?block_id,
+                            block_epoch=?block_epoch,
+                            "timeout(2s) wait for execute_block_barrier"
+                        );
+                    }
                 }
             }
         };
@@ -550,7 +569,8 @@ impl<Storage: GravityStorage> Core<Storage> {
     }
 
     /// Extract gravity events from execution receipts
-    /// Returns (gravity_events, epoch_change_result) where epoch_change_result is Some((new_epoch, validators)) if epoch changed
+    /// Returns (gravity_events, epoch_change_result) where epoch_change_result is Some((new_epoch,
+    /// validators)) if epoch changed
     fn extract_gravity_events_from_receipts(
         &self,
         receipts: &[Receipt],
@@ -558,7 +578,7 @@ impl<Storage: GravityStorage> Core<Storage> {
     ) -> (Vec<GravityEvent>, Option<(u64, Bytes)>) {
         let mut gravity_events = vec![];
         let mut epoch_change_result = None;
-        
+
         for receipt in receipts {
             debug!(target: "execute_ordered_block",
                 number=?block_number,
@@ -567,17 +587,22 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
             for log in &receipt.logs {
                 // Check for AllValidatorsUpdated event (epoch change)
-                if let Ok(event) = crate::onchain_config::types::AllValidatorsUpdated::decode_log(log) {
+                if let Ok(event) =
+                    crate::onchain_config::types::AllValidatorsUpdated::decode_log(log)
+                {
                     debug!(target: "execute_ordered_block",
                         number=?block_number,
                         new_epoch=?event.newEpoch,
                         "detected epoch change from AllValidatorsUpdated event"
                     );
                     let solidity_validator_set = &event.validatorSet;
-                    let validator_bytes = crate::onchain_config::types::convert_validator_set_to_bcs(solidity_validator_set);
+                    let validator_bytes =
+                        crate::onchain_config::types::convert_validator_set_to_bcs(
+                            solidity_validator_set,
+                        );
                     epoch_change_result = Some((event.newEpoch.to::<u64>(), validator_bytes));
                 }
-                
+
                 if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
                     info!(target: "execute_ordered_block",
                         number=?block_number,
@@ -598,9 +623,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                         number=?block_number,
                         "dkg start"
                     );
-                    gravity_events.push(GravityEvent::DKG(
-                        convert_dkg_start_event_to_api(&event)
-                    ));
+                    gravity_events.push(GravityEvent::DKG(convert_dkg_start_event_to_api(&event)));
                 }
             }
         }
@@ -683,7 +706,8 @@ impl<Storage: GravityStorage> Core<Storage> {
                 &ordered_block.extra_data,
                 metadata_txn_result.txn.nonce(),
                 metadata_txn_result.txn.gas_price().expect("metadata txn gas price is not set"),
-            ).unwrap()
+            )
+            .unwrap()
         } else {
             vec![]
         };
@@ -738,7 +762,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             &result.execution_output.receipts,
             result.block.number,
         );
-        
+
         // Check if any transaction (including JWK transactions) triggered a new epoch
         // TODO(gravity_lightman): We need further more tests to test this branch
         if let Some((new_epoch, validators)) = epoch_change_result {
@@ -755,7 +779,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             gravity_events.push(GravityEvent::NewEpoch(new_epoch, validators.into()));
             result.epoch = new_epoch;
         }
-        
+
         result.gravity_events.extend(gravity_events);
         result
     }

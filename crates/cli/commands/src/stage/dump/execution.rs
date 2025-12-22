@@ -183,10 +183,7 @@ where
 
     let input =
         reth_stages::ExecInput { target: Some(to), checkpoint: Some(StageCheckpoint::new(from)) };
-    exec_stage.execute(
-        &output_provider_factory.database_provider_rw()?,
-        input,
-    )?;
+    exec_stage.execute(&output_provider_factory.database_provider_rw()?, input)?;
 
     info!(target: "reth::cli", "Success");
 

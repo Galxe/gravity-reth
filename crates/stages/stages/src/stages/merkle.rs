@@ -12,8 +12,8 @@ use reth_provider::{
     StatsReader, TrieWriter, TrieWriterV2,
 };
 use reth_stages_api::{
-    BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput,
-    MerkleCheckpoint, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
+    BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
+    StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use std::fmt::Debug;
@@ -172,11 +172,7 @@ where
     }
 
     /// Execute the stage.
-    fn execute(
-        &mut self,
-        provider: &Provider,
-        input: ExecInput,
-    ) -> Result<ExecOutput, StageError> {
+    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
         if matches!(self, Self::Unwind) {
             info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
             return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
