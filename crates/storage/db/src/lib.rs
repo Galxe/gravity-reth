@@ -168,11 +168,7 @@ pub mod test_utils {
         let path = tempdir_path();
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
 
-        let db = init_db(
-            &path,
-            DatabaseArguments::new(ClientVersion::default()),
-        )
-        .expect(&emsg);
+        let db = init_db(&path, DatabaseArguments::new(ClientVersion::default())).expect(&emsg);
 
         Arc::new(TempDatabase::new(db, path))
     }
@@ -181,11 +177,8 @@ pub mod test_utils {
     #[track_caller]
     pub fn create_test_rw_db_with_path<P: AsRef<Path>>(path: P) -> Arc<TempDatabase<DatabaseEnv>> {
         let path = path.as_ref().to_path_buf();
-        let db = init_db(
-            path.as_path(),
-            DatabaseArguments::new(ClientVersion::default()),
-        )
-        .expect(ERROR_DB_CREATION);
+        let db = init_db(path.as_path(), DatabaseArguments::new(ClientVersion::default()))
+            .expect(ERROR_DB_CREATION);
         Arc::new(TempDatabase::new(db, path))
     }
 
@@ -206,10 +199,9 @@ pub mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::{
-        init_db,
-        DatabaseArguments,
-        open_db, tables,
+        init_db, open_db, tables,
         version::{db_version_file_path, DatabaseVersionError},
+        DatabaseArguments,
     };
     use assert_matches::assert_matches;
     use reth_db_api::{

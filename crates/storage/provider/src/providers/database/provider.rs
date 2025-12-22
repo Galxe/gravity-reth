@@ -14,10 +14,11 @@ use crate::{
     DBProvider, HashingWriter, HeaderProvider, HeaderSyncGapProvider, HistoricalStateProvider,
     HistoricalStateProviderRef, HistoryWriter, LatestStateProvider, LatestStateProviderRef,
     OriginalValuesKnown, ProviderError, PruneCheckpointReader, PruneCheckpointWriter, RevertsInit,
-    StageCheckpointReader, StateProviderBox, StateWriter,
-    StaticFileProviderFactory, StatsReader, StorageLocation, StorageReader, StorageTrieWriter,
-    TransactionVariant, TransactionsProvider, TransactionsProviderExt, TrieWriter, TrieWriterV2,
+    StageCheckpointReader, StateProviderBox, StateWriter, StaticFileProviderFactory, StatsReader,
+    StorageLocation, StorageReader, StorageTrieWriter, TransactionVariant, TransactionsProvider,
+    TransactionsProviderExt, TrieWriter, TrieWriterV2,
 };
+use ::metrics::histogram;
 use alloy_consensus::{
     transaction::{SignerRecoverable, TransactionMeta, TxHashRef},
     BlockHeader, Header, TxReceipt,
@@ -77,7 +78,6 @@ use std::{
     sync::{mpsc, Arc},
 };
 use tracing::{debug, trace};
-use ::metrics::histogram;
 
 /// A [`DatabaseProvider`] that holds a read-only database transaction.
 pub type DatabaseProviderRO<DB, N> = DatabaseProvider<<DB as Database>::TX, N>;
@@ -847,7 +847,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
             .into_iter()
             .map(|(pk, indices)| (pk, indices.into_iter().collect::<Vec<_>>()))
             .collect();
-        
+
         let shards: Result<Vec<_>, _> = index_updates
             .into_par_iter()
             .map(|(partial_key, indices)| -> ProviderResult<(P, Vec<u64>)> {
@@ -2042,7 +2042,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                 hashed_accounts_cursor.delete_by_key(hashed_address)?;
             }
         }
-        histogram!("table_block_updated_entries", &[("table", "HashedAccounts")]).record(num_updated as f64);
+        histogram!("table_block_updated_entries", &[("table", "HashedAccounts")])
+            .record(num_updated as f64);
 
         // Write hashed storage changes.
         num_updated = 0;
@@ -2064,7 +2065,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                 }
             }
         }
-        histogram!("table_block_updated_entries", &[("table", "HashedStorages")]).record(num_updated as f64);
+        histogram!("table_block_updated_entries", &[("table", "HashedStorages")])
+            .record(num_updated as f64);
 
         Ok(())
     }
@@ -2322,7 +2324,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
             num_updated += 1;
         }
         let num_updated_accounts = num_updated;
-        histogram!("table_block_updated_entries", &[("table", "AccountsTrieV2")]).record(num_updated_accounts as f64);
+        histogram!("table_block_updated_entries", &[("table", "AccountsTrieV2")])
+            .record(num_updated_accounts as f64);
 
         for (hashed_address, storage_trie_update) in &input.storage_tries {
             if storage_trie_update.is_deleted {
@@ -2344,7 +2347,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
             }
         }
         let num_updated_storage = num_updated - num_updated_accounts;
-        histogram!("table_block_updated_entries", &[("table", "StoragesTrieV2")]).record(num_updated_storage as f64);
+        histogram!("table_block_updated_entries", &[("table", "StoragesTrieV2")])
+            .record(num_updated_storage as f64);
 
         Ok(num_updated)
     }

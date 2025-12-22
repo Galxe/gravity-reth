@@ -121,7 +121,8 @@ fn convert_into_sol_provider_jwks(
 }
 
 /// Parse chain_id from issuer URI
-/// Issuer format: gravity://{chain_id}/event?address={contract_address}&topic0={topic0}&fromBlock={from_block}
+/// Issuer format:
+/// gravity://{chain_id}/event?address={contract_address}&topic0={topic0}&fromBlock={from_block}
 fn parse_chain_id_from_issuer(issuer: &str) -> Option<u32> {
     if issuer.starts_with("gravity://") {
         // Extract the part after "gravity://" and before the next "/"

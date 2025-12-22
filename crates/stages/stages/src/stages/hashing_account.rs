@@ -11,8 +11,8 @@ use reth_etl::Collector;
 use reth_primitives_traits::Account;
 use reth_provider::{AccountExtReader, DBProvider, HashingWriter, StatsReader};
 use reth_stages_api::{
-    AccountHashingCheckpoint, EntitiesCheckpoint, ExecInput, ExecOutput,
-    Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
+    AccountHashingCheckpoint, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
+    StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_storage_errors::provider::ProviderResult;
 use std::{
@@ -142,11 +142,7 @@ where
     }
 
     /// Execute the stage.
-    fn execute(
-        &mut self,
-        provider: &Provider,
-        input: ExecInput,
-    ) -> Result<ExecOutput, StageError> {
+    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
         }

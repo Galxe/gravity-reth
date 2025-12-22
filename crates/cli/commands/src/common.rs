@@ -2,6 +2,7 @@
 
 use alloy_primitives::B256;
 use clap::Parser;
+use gravity_primitives::get_gravity_config;
 use reth_chainspec::EthChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_config::{config::EtlConfig, Config};
@@ -9,6 +10,7 @@ use reth_consensus::noop::NoopConsensus;
 use reth_db::{init_db, open_db_read_only, DatabaseEnv};
 use reth_db_common::init::init_genesis;
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
+use reth_engine_tree::recovery::StorageRecoveryHelper;
 use reth_eth_wire::NetPrimitivesFor;
 use reth_evm::{noop::NoopEvmConfig, ConfigureEvm};
 use reth_network::NetworkEventListenerProvider;
@@ -20,8 +22,6 @@ use reth_node_core::{
     args::{DatabaseArgs, DatadirArgs},
     dirs::{ChainPath, DataDirPath},
 };
-use gravity_primitives::get_gravity_config;
-use reth_engine_tree::recovery::StorageRecoveryHelper;
 use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider, StaticFileProvider},
     ProviderFactory, StaticFileProviderFactory,

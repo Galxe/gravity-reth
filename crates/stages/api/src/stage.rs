@@ -236,11 +236,7 @@ pub trait Stage<Provider>: Send + Sync {
     /// Execute the stage.
     /// It is expected that the stage will write all necessary data to the database
     /// upon invoking this method.
-    fn execute(
-        &mut self,
-        provider: &Provider,
-        input: ExecInput,
-    ) -> Result<ExecOutput, StageError>;
+    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError>;
 
     /// Post execution commit hook.
     ///
@@ -280,7 +276,4 @@ pub trait StageExt<Provider>: Stage<Provider> {
     }
 }
 
-impl<Provider, S: Stage<Provider> + ?Sized> StageExt<Provider>
-    for S
-{
-}
+impl<Provider, S: Stage<Provider> + ?Sized> StageExt<Provider> for S {}

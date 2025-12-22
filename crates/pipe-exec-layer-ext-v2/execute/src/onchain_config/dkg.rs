@@ -1,5 +1,5 @@
 //! DKG state and event handling module
-//! 
+//!
 //! This module contains all DKG-related functionality including:
 //! - Solidity type definitions for DKG structures
 //! - DKG state fetching from contracts
@@ -8,15 +8,15 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    SYSTEM_CALLER, DKG_ADDR
+    DKG_ADDR, SYSTEM_CALLER,
 };
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use gravity_api_types::on_chain_config::dkg::DKGState as GravityDKGState;
-use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use hex;
+use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 
 // ============================================================================
 // Solidity Type Definitions
@@ -85,12 +85,12 @@ sol! {
 
     // Function to get DKG state
     function getDKGState() external view returns (DKGState memory);
-    
+
     // Function to finish DKG with result
     function finishWithDkgResult(
         bytes calldata dkg_result
     ) external;
-    
+
     // DKG start event
     event DKGStartEvent(DKGSessionMetadata metadata, uint64 startTimeUs);
 }
@@ -147,10 +147,10 @@ where
 }
 
 /// Helper function to convert FixedPoint64
-fn convert_fixed_point64(fp: &FixedPoint64) -> gravity_api_types::on_chain_config::dkg::FixedPoint64 {
-    gravity_api_types::on_chain_config::dkg::FixedPoint64 {
-        value: fp.value,
-    }
+fn convert_fixed_point64(
+    fp: &FixedPoint64,
+) -> gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+    gravity_api_types::on_chain_config::dkg::FixedPoint64 { value: fp.value }
 }
 
 /// Helper function to convert ConfigV1
@@ -171,14 +171,16 @@ fn convert_config_v2(config: &ConfigV2) -> gravity_api_types::on_chain_config::d
 }
 
 /// Helper function to convert RandomnessConfigData
-fn convert_randomness_config(config: &RandomnessConfigData) -> gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
+fn convert_randomness_config(
+    config: &RandomnessConfigData,
+) -> gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
     // Convert enum variant
     let variant = match config.variant {
         ConfigVariant::V1 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V1,
         ConfigVariant::V2 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V2,
         ConfigVariant::__Invalid => panic!("Invalid ConfigVariant"),
     };
-    
+
     gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
         variant,
         configV1: convert_config_v1(&config.configV1),
@@ -187,7 +189,9 @@ fn convert_randomness_config(config: &RandomnessConfigData) -> gravity_api_types
 }
 
 /// Helper function to convert ValidatorConsensusInfo
-fn convert_validator(validator: &ValidatorConsensusInfo) -> gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
+fn convert_validator(
+    validator: &ValidatorConsensusInfo,
+) -> gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
         addr: gravity_api_types::account::ExternalAccountAddress::new(
             validator.aptosAddress.to_vec().try_into().unwrap(),
@@ -198,7 +202,9 @@ fn convert_validator(validator: &ValidatorConsensusInfo) -> gravity_api_types::o
 }
 
 /// Helper function to convert DKGSessionMetadata
-fn convert_dkg_session_metadata(metadata: &DKGSessionMetadata) -> gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
+fn convert_dkg_session_metadata(
+    metadata: &DKGSessionMetadata,
+) -> gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
     gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
         dealer_epoch: metadata.dealerEpoch,
         randomness_config: convert_randomness_config(&metadata.randomnessConfig),
@@ -212,7 +218,9 @@ fn convert_dkg_session_metadata(metadata: &DKGSessionMetadata) -> gravity_api_ty
 // ============================================================================
 
 /// Helper function to convert ValidatorConsensusInfo for events (uses to_vec())
-fn convert_validator_for_event(validator: &ValidatorConsensusInfo) -> gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
+fn convert_validator_for_event(
+    validator: &ValidatorConsensusInfo,
+) -> gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
         addr: gravity_api_types::account::ExternalAccountAddress::new(
             validator.aptosAddress.to_vec().try_into().unwrap(),
@@ -223,17 +231,29 @@ fn convert_validator_for_event(validator: &ValidatorConsensusInfo) -> gravity_ap
 }
 
 /// Helper function to convert DKGSessionMetadata for events
-fn convert_dkg_session_metadata_for_event(metadata: &DKGSessionMetadata) -> gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
+fn convert_dkg_session_metadata_for_event(
+    metadata: &DKGSessionMetadata,
+) -> gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
     gravity_api_types::on_chain_config::dkg::DKGSessionMetadata {
         dealer_epoch: metadata.dealerEpoch,
         randomness_config: convert_randomness_config(&metadata.randomnessConfig),
-        dealer_validator_set: metadata.dealerValidatorSet.iter().map(convert_validator_for_event).collect(),
-        target_validator_set: metadata.targetValidatorSet.iter().map(convert_validator_for_event).collect(),
+        dealer_validator_set: metadata
+            .dealerValidatorSet
+            .iter()
+            .map(convert_validator_for_event)
+            .collect(),
+        target_validator_set: metadata
+            .targetValidatorSet
+            .iter()
+            .map(convert_validator_for_event)
+            .collect(),
     }
 }
 
 /// Convert DKGStartEvent to API type (public interface for external use)
-pub fn convert_dkg_start_event_to_api(event: &DKGStartEvent) -> gravity_api_types::on_chain_config::dkg::DKGStartEvent {
+pub fn convert_dkg_start_event_to_api(
+    event: &DKGStartEvent,
+) -> gravity_api_types::on_chain_config::dkg::DKGStartEvent {
     gravity_api_types::on_chain_config::dkg::DKGStartEvent {
         session_metadata: convert_dkg_session_metadata_for_event(&event.metadata),
         start_time_us: event.startTimeUs,
@@ -268,14 +288,13 @@ fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
     };
 
     // Serialize to BCS
-    let bcs_bytes = bcs::to_bytes(&gravity_state)
-        .expect("Failed to serialize DKG state to BCS");
+    let bcs_bytes = bcs::to_bytes(&gravity_state).expect("Failed to serialize DKG state to BCS");
 
     Bytes::from(bcs_bytes)
 }
 
 /// Construct DKG transaction from DKGTranscript
-/// 
+///
 /// This function is called by the validator transactions construction logic in mod.rs
 pub(crate) fn construct_dkg_transaction(
     dkg_transcript: gravity_api_types::on_chain_config::dkg::DKGTranscript,
@@ -285,12 +304,10 @@ pub(crate) fn construct_dkg_transaction(
     use super::RECONFIGURATION_WITH_DKG_ADDR;
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
-    
-    let call = finishWithDkgResultCall {
-        dkg_result: dkg_transcript.transcript_bytes.into(),
-    };
+
+    let call = finishWithDkgResultCall { dkg_result: dkg_transcript.transcript_bytes.into() };
     let input: Bytes = call.abi_encode().into();
-    
+
     Ok(super::new_system_call_txn(RECONFIGURATION_WITH_DKG_ADDR, nonce, gas_price, input))
 }
 

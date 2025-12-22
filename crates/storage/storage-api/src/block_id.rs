@@ -25,7 +25,8 @@ pub trait BlockNumReader: BlockHashReader + Send + Sync {
     }
 
     /// The last persisted block that has written execution result successfully.
-    /// In other word, the last block that has updated `StageId::Execution` in `tables::StageCheckpoints`
+    /// In other word, the last block that has updated `StageId::Execution` in
+    /// `tables::StageCheckpoints`
     fn recover_block_number(&self) -> ProviderResult<BlockNumber> {
         unimplemented!("Not support recover_block_number");
     }

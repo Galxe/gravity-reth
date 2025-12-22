@@ -3,7 +3,9 @@
 use core::ops::RangeInclusive;
 
 use alloy_primitives::{
-    B256, BlockNumber, KECCAK256_EMPTY, U256, keccak256, map::{B256Map, HashMap, hash_map}
+    keccak256,
+    map::{hash_map, B256Map, HashMap},
+    BlockNumber, B256, KECCAK256_EMPTY, U256,
 };
 use alloy_rlp::encode_fixed_size;
 use gravity_primitives::get_gravity_config;
@@ -20,7 +22,9 @@ use reth_primitives_traits::Account;
 use reth_provider::{PersistBlockCache, ProviderResult};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
-    EMPTY_ROOT_HASH, HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles, StoredNibblesSubKey, nested_trie::{MIN_PARALLEL_NODES, Node, Trie, TrieReader}
+    nested_trie::{Node, Trie, TrieReader, MIN_PARALLEL_NODES},
+    HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles,
+    StoredNibblesSubKey, EMPTY_ROOT_HASH,
 };
 use reth_trie_common::updates::TrieUpdatesV2;
 
@@ -209,22 +213,28 @@ where
                                 if let Some(storage) = &storage {
                                     if storage.wiped {
                                         let account = account.into_trie_account(EMPTY_ROOT_HASH);
-                                        updated_account_nodes.push((path, Some(Node::ValueNode(alloy_rlp::encode(account)))));
+                                        updated_account_nodes.push((
+                                            path,
+                                            Some(Node::ValueNode(alloy_rlp::encode(account))),
+                                        ));
                                         deleted_storage();
                                         continue;
                                     }
                                 }
                                 if account.get_bytecode_hash() == KECCAK256_EMPTY && pipe_mode {
                                     let account = account.into_trie_account(EMPTY_ROOT_HASH);
-                                    updated_account_nodes.push((path, Some(Node::ValueNode(alloy_rlp::encode(account)))));
+                                    updated_account_nodes.push((
+                                        path,
+                                        Some(Node::ValueNode(alloy_rlp::encode(account))),
+                                    ));
                                     continue;
                                 }
 
                                 let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] =
                                     Default::default();
                                 let create_reader = || {
-                                    let cursor = self.tx
-                                        .cursor_dup_read::<tables::StoragesTrieV2>()?;
+                                    let cursor =
+                                        self.tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
                                     Ok(StorageTrieReader::new(
                                         cursor,
                                         hashed_address,

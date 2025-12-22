@@ -13,9 +13,7 @@ use reth_provider::{
     BlockReader, BlockWriter, DBProvider, HeaderProvider, StageCheckpointWriter,
     StaticFileProviderFactory, StaticFileWriter,
 };
-use reth_stages_api::{
-    ExecInput, ExecOutput, Stage, StageError, UnwindInput, UnwindOutput,
-};
+use reth_stages_api::{ExecInput, ExecOutput, Stage, StageError, UnwindInput, UnwindOutput};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_errors::ProviderError;
 use std::{
@@ -129,8 +127,7 @@ impl<Header, Body, F> EraStage<Header, Body, F> {
     }
 }
 
-impl<Provider, N, F> Stage<Provider>
-    for EraStage<N::BlockHeader, N::BlockBody, F>
+impl<Provider, N, F> Stage<Provider> for EraStage<N::BlockHeader, N::BlockBody, F>
 where
     Provider: DBProvider<Tx: DbTxMut>
         + StaticFileProviderFactory<Primitives = N>
@@ -169,11 +166,7 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn execute(
-        &mut self,
-        provider: &Provider,
-        input: ExecInput,
-    ) -> Result<ExecOutput, StageError> {
+    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
         let height = if let Some(era) = self.item.take() {
             let static_file_provider = provider.static_file_provider();
 

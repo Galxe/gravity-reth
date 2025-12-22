@@ -3,8 +3,7 @@ use alloy_primitives::{Address, B256, U256};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx, Database};
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
-    PersistBlockCache, ProviderError, ProviderResult, StateProviderBox,
-    PERSIST_BLOCK_CACHE,
+    PersistBlockCache, ProviderError, ProviderResult, StateProviderBox, PERSIST_BLOCK_CACHE,
 };
 use reth_revm::{
     bytecode::Bytecode, database::StateProviderDatabase, primitives::BLOCK_HASH_HISTORY,

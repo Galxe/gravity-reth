@@ -92,13 +92,7 @@ fn dry_run<N: ProviderNodeTypes>(
             target: Some(to),
             checkpoint: Some(StageCheckpoint::new(from)),
         };
-        if stage
-            .execute(
-                &provider,
-                input,
-            )?
-            .done
-        {
+        if stage.execute(&provider, input)?.done {
             break;
         }
     }

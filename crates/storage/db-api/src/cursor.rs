@@ -145,7 +145,11 @@ pub trait DbDupCursorRW<T: DupSort> {
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError>;
 
     /// Delete by key and subkey
-    fn delete_by_key_subkey(&mut self, _key: T::Key, _subkey: T::SubKey) -> Result<(), DatabaseError> {
+    fn delete_by_key_subkey(
+        &mut self,
+        _key: T::Key,
+        _subkey: T::SubKey,
+    ) -> Result<(), DatabaseError> {
         unimplemented!("not support")
     }
 }

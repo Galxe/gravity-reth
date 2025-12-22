@@ -79,7 +79,10 @@ impl<K: TransactionKind, T: Table> std::fmt::Debug for Cursor<K, T> {
 impl<K: TransactionKind, T: Table> Cursor<K, T> {
     const KEY_LENGTH: usize = mem::size_of::<<T::Key as Encode>::Encoded>();
 
-    pub(crate) fn new(db: Arc<DB>, batch: Arc<Mutex<rocksdb::WriteBatch>>) -> Result<Self, DatabaseError> {
+    pub(crate) fn new(
+        db: Arc<DB>,
+        batch: Arc<Mutex<rocksdb::WriteBatch>>,
+    ) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&db)?;
 
         // Create iterator at construction time - always ready to use
@@ -441,8 +444,7 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     fn seek_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> ValueOnlyResult<T> {
         let encoded_key = key.encode();
         let encoded_subkey = subkey.encode();
-        let composite_key =
-            Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
+        let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
 
         // Position iterator at the exact composite key
         self.iterator.seek(&composite_key);
@@ -531,7 +533,11 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         Ok(())
     }
 
-    fn delete_by_key_subkey(&mut self, key: T::Key, subkey: T::SubKey) -> Result<(), DatabaseError> {
+    fn delete_by_key_subkey(
+        &mut self,
+        key: T::Key,
+        subkey: T::SubKey,
+    ) -> Result<(), DatabaseError> {
         let encoded_key = key.encode();
         let encoded_subkey = subkey.encode();
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());

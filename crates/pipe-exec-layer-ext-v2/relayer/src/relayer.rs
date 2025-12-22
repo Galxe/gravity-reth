@@ -21,7 +21,8 @@ pub const DEPOSIT_GRAVITY_EVENT_SIGNATURE: [u8; 32] = [
     0x19, 0x0f, 0x92, 0xc2, 0x57, 0xc9, 0x2d, 0x9b, 0x15, 0xd8, 0xec, 0xb4, 0x05, 0x05, 0x7c, 0x14,
 ];
 
-/// ChangeRecord(bytes32 indexed key, bytes32 indexed value, uint256 blockNumber, address indexed updater, uint256 sequenceNumber);
+/// ChangeRecord(bytes32 indexed key, bytes32 indexed value, uint256 blockNumber, address indexed
+/// updater, uint256 sequenceNumber);
 pub const CHANGE_RECORD_EVENT_SIGNATURE: [u8; 32] = [
     0xf6, 0x9d, 0x80, 0xcc, 0x71, 0xff, 0xd8, 0x74, 0x04, 0x59, 0x74, 0xba, 0x04, 0x6a, 0x0b, 0xee,
     0x23, 0x1a, 0xd0, 0x5e, 0xc4, 0x59, 0x0b, 0xdd, 0xe9, 0x85, 0x75, 0xcf, 0xe0, 0x7f, 0xd7, 0x66,
@@ -180,7 +181,8 @@ impl EventLog {
             // ChangeRecord has indexed parameters (key, value, updater) in topics and
             // non-indexed parameters (blockNumber, sequenceNumber) in data
             let change_record_data = ChangeRecord::abi_decode_data(&self.data).unwrap();
-            // Extract indexed parameters from topics (topics[1] = key, topics[2] = value, topics[3] = updater)
+            // Extract indexed parameters from topics (topics[1] = key, topics[2] = value, topics[3]
+            // = updater)
             let key = if self.topics.len() > 1 { Some(self.topics[1]) } else { None };
             let value = if self.topics.len() > 2 { Some(self.topics[2]) } else { None };
             let updater = if self.topics.len() > 3 {
@@ -366,8 +368,8 @@ impl GravityRelayer {
     pub async fn new(rpc_url: &str, task: ParsedTask, from_block: u64) -> Result<Self> {
         let eth_client = Arc::new(EthHttpCli::new(rpc_url)?);
 
-        // Get the starting block number from the task filter or use the provided from_block parameter
-        // If both exist, use the maximum of the two
+        // Get the starting block number from the task filter or use the provided from_block
+        // parameter If both exist, use the maximum of the two
         let start_block_number = match &task.task {
             GravityTask::MonitorEvent(filter) => {
                 if let Some(uri_from_block) = Self::extract_from_block_number(filter) {
@@ -668,7 +670,9 @@ mod tests {
     use alloy_rpc_types::Filter;
     use reth_primitives::Log;
 
-    use crate::{EthHttpCli, GravityRelayer, ObservedValue, UriParser, relayer::DepositGravityEvent};
+    use crate::{
+        relayer::DepositGravityEvent, EthHttpCli, GravityRelayer, ObservedValue, UriParser,
+    };
     use alloy_sol_macro::sol;
     use alloy_sol_types::SolEvent;
 
@@ -740,7 +744,7 @@ mod tests {
         let contract_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
         let topic0 = "0xf69d80cc71ffd874045974ba046a0bee231ad05ec4590bdde98575cfe07fd766"; // ChangeRecord event signature
         let from_block = "120";
-        
+
         // Construct URI from components
         let uri = format!(
             "gravity://{}/event?address={}&topic0={}&fromBlock={}",
@@ -791,14 +795,13 @@ mod tests {
         let eth_client = EthHttpCli::new(&rpc_url).expect("Failed to create ETH client");
 
         let deposit_gravity_event_signature: [u8; 32] = [
-            0xd5, 0x3b, 0xfb, 0x63, 0x0c, 0x04, 0x65, 0x4c, 0x6d, 0x1d, 0xa5, 0x02, 0x0f, 0x14, 0x67, 0x4f,
-            0x19, 0x0f, 0x92, 0xc2, 0x57, 0xc9, 0x2d, 0x9b, 0x15, 0xd8, 0xec, 0xb4, 0x05, 0x05, 0x7c, 0x14,
+            0xd5, 0x3b, 0xfb, 0x63, 0x0c, 0x04, 0x65, 0x4c, 0x6d, 0x1d, 0xa5, 0x02, 0x0f, 0x14,
+            0x67, 0x4f, 0x19, 0x0f, 0x92, 0xc2, 0x57, 0xc9, 0x2d, 0x9b, 0x15, 0xd8, 0xec, 0xb4,
+            0x05, 0x05, 0x7c, 0x14,
         ];
         let filter = Filter::new()
             .address(address!("0x283fC6799867BF96bF862a05BDade3EE89132027"))
-            .event_signature(B256::from(
-                deposit_gravity_event_signature
-            ))
+            .event_signature(B256::from(deposit_gravity_event_signature))
             .from_block(9565280)
             .to_block(9565290);
 

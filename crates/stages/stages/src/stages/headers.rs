@@ -282,11 +282,7 @@ where
 
     /// Download the headers in reverse order (falling block numbers)
     /// starting from the tip of the chain
-    fn execute(
-        &mut self,
-        provider: &Provider,
-        input: ExecInput,
-    ) -> Result<ExecOutput, StageError> {
+    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
         let current_checkpoint = input.checkpoint();
 
         if self.sync_gap.take().ok_or(StageError::MissingSyncGap)?.is_closed() {

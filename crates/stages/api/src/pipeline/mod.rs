@@ -124,10 +124,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     }
 
     /// Get a mutable reference to a stage by index.
-    pub fn stage(
-        &mut self,
-        idx: usize,
-    ) -> &mut dyn Stage<DatabaseProviderRW<N>> {
+    pub fn stage(&mut self, idx: usize) -> &mut dyn Stage<DatabaseProviderRW<N>> {
         &mut self.stages[idx]
     }
 }
@@ -368,12 +365,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 let input = UnwindInput { checkpoint, unwind_to: to, bad_block };
                 self.event_sender.notify(PipelineEvent::Unwind { stage_id, input });
 
-                let output = {
-                    stage.unwind(
-                        &provider_rw,
-                        input,
-                    )
-                };
+                let output = { stage.unwind(&provider_rw, input) };
                 match output {
                     Ok(unwind_output) => {
                         checkpoint = unwind_output.checkpoint;
@@ -502,10 +494,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 target,
             });
 
-            match self.stage(stage_index).execute(
-                &provider_rw,
-                exec_input,
-            ) {
+            match self.stage(stage_index).execute(&provider_rw, exec_input) {
                 Ok(out @ ExecOutput { checkpoint, done }) => {
                     // Update stage checkpoint.
                     provider_rw.save_stage_checkpoint(stage_id, checkpoint)?;
