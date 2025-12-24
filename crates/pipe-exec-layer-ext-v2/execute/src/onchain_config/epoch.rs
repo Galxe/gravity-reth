@@ -4,6 +4,7 @@ use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     EPOCH_MANAGER_ADDR, SYSTEM_CALLER,
 };
+use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
@@ -37,7 +38,7 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    fn fetch(&self, block_number: u64) -> Option<Bytes> {
+    fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
         #[cfg(feature = "pipe_test")]
         {
             // For testing, return epoch 0
@@ -52,14 +53,9 @@ where
             // uint64 currentEpoch = uint64(IEpochManager(EPOCH_MANAGER_ADDR).currentEpoch());
             let result = self
                 .base_fetcher
-                .eth_call(
-                    Self::caller_address(),
-                    Self::contract_address(),
-                    input,
-                    block_number,
-                )
+                .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
                 .map_err(|e| {
-                    tracing::warn!("Failed to fetch epoch info at block {}: {:?}", block_number, e);
+                    tracing::warn!("Failed to fetch epoch info at block {}: {:?}", block_id, e);
                 })
                 .ok()?;
 

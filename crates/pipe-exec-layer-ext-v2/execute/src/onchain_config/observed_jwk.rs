@@ -4,6 +4,7 @@ use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
+use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
@@ -310,15 +311,15 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    fn fetch(&self, block_number: u64) -> Option<Bytes> {
+    fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
         let call = getObservedJWKsCall {};
         let input: Bytes = call.abi_encode().into();
 
         let result = self
             .base_fetcher
-            .eth_call(Self::caller_address(), Self::contract_address(), input, block_number)
+            .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
             .map_err(|e| {
-                tracing::warn!("Failed to fetch observed JWKs at block {}: {:?}", block_number, e);
+                tracing::warn!("Failed to fetch observed JWKs at block {}: {:?}", block_id, e);
             })
             .ok()?;
 
