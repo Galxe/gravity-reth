@@ -1033,7 +1033,7 @@ where
         config_name: OnChainConfig,
         block_number: u64,
     ) -> Option<OnChainConfigResType> {
-        Some(self.onchain_config_fetcher.fetch_config_bytes(config_name, block_number))
+        self.onchain_config_fetcher.fetch_config_bytes(config_name, block_number)
     }
 }
 
@@ -1116,7 +1116,8 @@ where
     let onchain_config_fetcher = OnchainConfigFetcher::new(eth_api);
 
     let latest_block_number = latest_block_header.number;
-    let epoch = onchain_config_fetcher.fetch_epoch(latest_block_number);
+    let epoch =
+        onchain_config_fetcher.fetch_epoch(latest_block_number).expect("Failed to fetch epoch");
     info!(target: "PipeExecService.new_pipe_exec_layer_api",
         latest_block_number=?latest_block_number,
         latest_block_hash=?latest_block_hash,

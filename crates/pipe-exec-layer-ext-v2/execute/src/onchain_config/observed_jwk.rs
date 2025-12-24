@@ -310,20 +310,21 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    fn fetch(&self, block_number: u64) -> Bytes {
+    fn fetch(&self, block_number: u64) -> Option<Bytes> {
         let call = getObservedJWKsCall {};
         let input: Bytes = call.abi_encode().into();
 
-        let result = self.base_fetcher.eth_call(
-            Self::caller_address(),
-            Self::contract_address(),
-            input,
-            block_number,
-        );
+        let result = self
+            .base_fetcher
+            .eth_call(Self::caller_address(), Self::contract_address(), input, block_number)
+            .map_err(|e| {
+                tracing::warn!("Failed to fetch observed JWKs at block {}: {:?}", block_number, e);
+            })
+            .ok()?;
 
         let solidity_all_providers_jwks = getObservedJWKsCall::abi_decode_returns(&result)
             .expect("Failed to decode getObservedJWKs return value");
-        convert_into_bcs_all_providers_jwks(solidity_all_providers_jwks)
+        Some(convert_into_bcs_all_providers_jwks(solidity_all_providers_jwks))
     }
 
     fn contract_address() -> Address {

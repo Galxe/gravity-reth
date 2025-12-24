@@ -120,21 +120,22 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    fn fetch(&self, block_number: u64) -> Bytes {
+    fn fetch(&self, block_number: u64) -> Option<Bytes> {
         let call = getDKGStateCall {};
         let input: Bytes = call.abi_encode().into();
 
-        let result = self.base_fetcher.eth_call(
-            Self::caller_address(),
-            Self::contract_address(),
-            input,
-            block_number,
-        );
+        let result = self
+            .base_fetcher
+            .eth_call(Self::caller_address(), Self::contract_address(), input, block_number)
+            .map_err(|e| {
+                tracing::warn!("Failed to fetch DKG state at block {}: {:?}", block_number, e);
+            })
+            .ok()?;
 
         // Decode the Solidity DKG state
         let solidity_dkg_state = getDKGStateCall::abi_decode_returns(&result)
             .expect("Failed to decode getDKGState return value");
-        convert_dkg_state_to_bcs(&solidity_dkg_state)
+        Some(convert_dkg_state_to_bcs(&solidity_dkg_state))
     }
 
     fn contract_address() -> Address {

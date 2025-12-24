@@ -35,19 +35,26 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    fn fetch(&self, block_number: u64) -> Bytes {
+    fn fetch(&self, block_number: u64) -> Option<Bytes> {
         let call = getCurrentConfigCall {};
         let input: Bytes = call.abi_encode().into();
 
-        let result = self.base_fetcher.eth_call(
-            Self::caller_address(),
-            Self::contract_address(),
-            input,
-            block_number,
-        );
+        let result = self
+            .base_fetcher
+            .eth_call(Self::caller_address(), Self::contract_address(), input, block_number)
+            .map_err(|e| {
+                tracing::warn!(
+                    "Failed to fetch consensus config at block {}: {:?}",
+                    block_number,
+                    e
+                );
+            })
+            .ok()?;
 
-        getCurrentConfigCall::abi_decode_returns(&result)
-            .expect("Failed to decode getCurrentConfig return value")
+        Some(
+            getCurrentConfigCall::abi_decode_returns(&result)
+                .expect("Failed to decode getCurrentConfig return value"),
+        )
     }
 
     fn contract_address() -> Address {
