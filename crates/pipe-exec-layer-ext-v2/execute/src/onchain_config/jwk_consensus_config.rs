@@ -4,6 +4,7 @@ use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
+use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
@@ -58,20 +59,25 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    fn fetch(&self, block_number: u64) -> Bytes {
+    fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
         let call = getActiveProvidersCall {};
         let input: Bytes = call.abi_encode().into();
 
-        let result = self.base_fetcher.eth_call(
-            Self::caller_address(),
-            Self::contract_address(),
-            input,
-            block_number,
-        );
+        let result = self
+            .base_fetcher
+            .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
+            .map_err(|e| {
+                tracing::warn!(
+                    "Failed to fetch JWK consensus config at block {}: {:?}",
+                    block_id,
+                    e
+                );
+            })
+            .ok()?;
 
         let solidity_active_providers = getActiveProvidersCall::abi_decode_returns(&result)
             .expect("Failed to decode getActiveProviders return value");
-        convert_into_bcs_active_providers(solidity_active_providers)
+        Some(convert_into_bcs_active_providers(solidity_active_providers))
     }
 
     fn contract_address() -> Address {

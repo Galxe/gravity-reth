@@ -3,7 +3,7 @@
 use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_api_types::{
-    config_storage::{ConfigStorage, OnChainConfig},
+    config_storage::{BlockNumber, ConfigStorage, OnChainConfig},
     events::contract_event::GravityEvent,
 };
 use gravity_storage::{block_view_storage::BlockViewStorage, GravityStorage};
@@ -82,7 +82,7 @@ where
     async fn run(self, latest_block_number: u64) {
         let Self { pipeline_api } = self;
         let mut epoch: u64 = pipeline_api
-            .fetch_config_bytes(OnChainConfig::Epoch, latest_block_number)
+            .fetch_config_bytes(OnChainConfig::Epoch, BlockNumber::Latest)
             .unwrap()
             .try_into()
             .unwrap();
@@ -111,7 +111,10 @@ where
                         assert_eq!(new_epoch, epoch + 1);
                         pipeline_api.wait_for_block_persistence(block_number).await.unwrap();
                         let stored_epoch: u64 = pipeline_api
-                            .fetch_config_bytes(OnChainConfig::Epoch, block_number)
+                            .fetch_config_bytes(
+                                OnChainConfig::Epoch,
+                                BlockNumber::Number(block_number),
+                            )
                             .unwrap()
                             .try_into()
                             .unwrap();

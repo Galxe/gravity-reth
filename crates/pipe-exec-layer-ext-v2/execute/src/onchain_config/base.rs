@@ -15,7 +15,7 @@ static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 /// Base trait for all config fetchers
 pub trait ConfigFetcher {
     /// Fetch configuration data for a specific block
-    fn fetch(&self, block_number: u64) -> Bytes;
+    fn fetch(&self, block_id: BlockId) -> Option<Bytes>;
 
     /// Get the contract address for this fetcher
     fn contract_address() -> Address;
@@ -41,7 +41,13 @@ where
     }
 
     /// Execute an `eth_call` with retry logic
-    pub fn eth_call(&self, from: Address, to: Address, input: Bytes, block_number: u64) -> Bytes {
+    pub fn eth_call(
+        &self,
+        from: Address,
+        to: Address,
+        input: Bytes,
+        block_id: BlockId,
+    ) -> Result<Bytes, EthApi::Error> {
         let rt_handle = ETH_CALL_RUNTIME
             .get_or_init(|| {
                 tokio::runtime::Builder::new_multi_thread()
@@ -55,63 +61,39 @@ where
 
         tokio::task::block_in_place(|| {
             rt_handle.block_on(async {
-                const RETRY: u64 = 5;
-                let mut count = 0;
-                loop {
-                    match self
-                        .eth_api
-                        .call(
-                            TransactionRequest {
-                                from: Some(from),
-                                to: Some(TxKind::Call(to)),
-                                input: TransactionInput::new(input.clone()),
-                                ..Default::default()
-                            },
-                            Some(BlockId::from(block_number)),
-                            EvmOverrides::new(None, None),
-                        )
-                        .await
-                    {
-                        Ok(result) => return result,
-                        Err(err) => {
-                            tracing::warn!(
-                                "Failed to execute eth_call at {block_number}, retrying... (attempt {count}/{RETRY}): {err}"
-                            );
-                            count += 1;
-                            assert!(count <= RETRY, "Failed to execute eth_call: {err}");
-                            tokio::time::sleep(std::time::Duration::from_millis(10 * count)).await;
-                        }
-                    }
-                }
+                self.eth_api
+                    .call(
+                        TransactionRequest {
+                            from: Some(from),
+                            to: Some(TxKind::Call(to)),
+                            input: TransactionInput::new(input.clone()),
+                            ..Default::default()
+                        },
+                        Some(block_id),
+                        EvmOverrides::new(None, None),
+                    )
+                    .await
             })
         })
     }
 
     /// Fetch epoch directly
-    pub fn fetch_epoch(&self, block_number: u64) -> u64 {
-        let fetcher = super::epoch::EpochFetcher::new(self);
-        let epoch_bytes = fetcher.fetch(block_number);
-        u64::from_le_bytes(epoch_bytes.as_ref().try_into().unwrap_or([0; 8]))
-    }
-
-    /// Fetch consensus config directly
-    pub fn fetch_consensus_config(&self, block_number: u64) -> Bytes {
-        let fetcher = super::consensus_config::ConsensusConfigFetcher::new(self);
-        fetcher.fetch(block_number)
-    }
-
-    /// Fetch validator set directly
-    pub fn fetch_validator_set(&self, block_number: u64) -> Bytes {
-        let fetcher = super::validator_set::ValidatorSetFetcher::new(self);
-        fetcher.fetch(block_number)
+    pub fn fetch_epoch(&self, block_id: BlockId) -> Option<u64> {
+        super::epoch::EpochFetcher::new(self).fetch(block_id).map(|epoch_bytes| {
+            u64::from_le_bytes(
+                epoch_bytes.as_ref().try_into().unwrap_or_else(|_| {
+                    panic!("Failed to convert bytes to u64: {:?}", epoch_bytes)
+                }),
+            )
+        })
     }
 
     /// Generic method to fetch config bytes
     pub fn fetch_config_bytes(
         &self,
         config_name: OnChainConfig,
-        block_number: u64,
-    ) -> OnChainConfigResType {
+        block_id: BlockId,
+    ) -> Option<OnChainConfigResType> {
         use crate::onchain_config::{
             consensus_config::ConsensusConfigFetcher, dkg::DKGStateFetcher, epoch::EpochFetcher,
             jwk_consensus_config::JwkConsensusConfigFetcher, observed_jwk::ObservedJwkFetcher,
@@ -121,29 +103,34 @@ where
         match config_name {
             OnChainConfig::ConsensusConfig => {
                 let fetcher = ConsensusConfigFetcher::new(self);
-                fetcher.fetch(block_number).0.into()
+                fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             OnChainConfig::Epoch => {
                 let fetcher = EpochFetcher::new(self);
-                let epoch_bytes = fetcher.fetch(block_number);
+                let epoch_bytes = fetcher.fetch(block_id);
                 // Convert bytes back to u64 for the epoch
-                u64::from_le_bytes(epoch_bytes.as_ref().try_into().unwrap_or([0; 8])).into()
+                epoch_bytes.map(|bytes| {
+                    u64::from_le_bytes(
+                        bytes.as_ref().try_into().expect("Failed to convert bytes to u64"),
+                    )
+                    .into()
+                })
             }
             OnChainConfig::ValidatorSet => {
                 let fetcher = ValidatorSetFetcher::new(self);
-                fetcher.fetch(block_number).0.into()
+                fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             OnChainConfig::ObservedJWKs => {
                 let fetcher = ObservedJwkFetcher::new(self);
-                fetcher.fetch(block_number).0.into()
+                fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             OnChainConfig::JWKConsensusConfig => {
                 let fetcher = JwkConsensusConfigFetcher::new(self);
-                fetcher.fetch(block_number).0.into()
+                fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             OnChainConfig::DKGState => {
                 let fetcher = DKGStateFetcher::new(self);
-                fetcher.fetch(block_number).0.into()
+                fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             _ => todo!("Implement fetching for other config types"),
         }
@@ -231,17 +218,21 @@ mod tests {
     struct ConfigFetcherTestFramework<T> {
         mock_eth_call: MockEthCall,
         fetcher: T,
-        block_number: u64,
+        block_id: BlockId,
     }
 
     impl<T> ConfigFetcherTestFramework<T> {
         fn new(fetcher: T) -> Self {
-            Self { mock_eth_call: MockEthCall::new(), fetcher, block_number: 100 }
+            Self {
+                mock_eth_call: MockEthCall::new(),
+                fetcher,
+                block_id: BlockId::Number(100.into()),
+            }
         }
 
-        /// Set the block number for tests
-        fn with_block_number(mut self, block_number: u64) -> Self {
-            self.block_number = block_number;
+        /// Set the block id for tests
+        fn with_block_id(mut self, block_id: BlockId) -> Self {
+            self.block_id = block_id;
             self
         }
     }
@@ -255,7 +246,7 @@ mod tests {
                 let framework =
                     ConfigFetcherTestFramework::new(<$fetcher_type>::new(&MockEthCall::new()));
                 $setup(&framework);
-                let result = framework.fetcher.fetch(framework.block_number);
+                let result = framework.fetcher.fetch(framework.block_id);
                 $validation(result);
             }
         };

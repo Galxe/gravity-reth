@@ -5,6 +5,7 @@ use super::{
     types::{convert_validator_set_to_bcs, getValidatorSetCall},
     SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR,
 };
+use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
@@ -33,22 +34,23 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    fn fetch(&self, block_number: u64) -> Bytes {
+    fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
         let call = getValidatorSetCall {};
         let input: Bytes = call.abi_encode().into();
 
-        let result = self.base_fetcher.eth_call(
-            Self::caller_address(),
-            Self::contract_address(),
-            input,
-            block_number,
-        );
+        let result = self
+            .base_fetcher
+            .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
+            .map_err(|e| {
+                tracing::warn!("Failed to fetch validator set at block {}: {:?}", block_id, e);
+            })
+            .ok()?;
 
         // Decode the Solidity validator set
         let solidity_validator_set = getValidatorSetCall::abi_decode_returns(&result)
             .expect("Failed to decode getValidatorSet return value");
 
-        convert_validator_set_to_bcs(&solidity_validator_set)
+        Some(convert_validator_set_to_bcs(&solidity_validator_set))
     }
 
     fn contract_address() -> Address {

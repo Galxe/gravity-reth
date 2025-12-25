@@ -4,6 +4,7 @@ use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
     EPOCH_MANAGER_ADDR, SYSTEM_CALLER,
 };
+use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
@@ -37,11 +38,11 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    fn fetch(&self, block_number: u64) -> Bytes {
+    fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
         #[cfg(feature = "pipe_test")]
         {
             // For testing, return epoch 0
-            Bytes::from(0u64.to_le_bytes().to_vec())
+            Some(Bytes::from(0u64.to_le_bytes().to_vec()))
         }
 
         #[cfg(not(feature = "pipe_test"))]
@@ -50,19 +51,20 @@ where
             let input: Bytes = call.abi_encode().into();
 
             // uint64 currentEpoch = uint64(IEpochManager(EPOCH_MANAGER_ADDR).currentEpoch());
-            let result = self.base_fetcher.eth_call(
-                Self::caller_address(),
-                Self::contract_address(),
-                input,
-                block_number,
-            );
+            let result = self
+                .base_fetcher
+                .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
+                .map_err(|e| {
+                    tracing::warn!("Failed to fetch epoch info at block {}: {:?}", block_id, e);
+                })
+                .ok()?;
 
             let epoch_info = EpochManager::getCurrentEpochInfoCall::abi_decode_returns(&result)
                 .expect("Failed to decode getCurrentEpoch return value");
 
             // Convert epoch to bytes
             let epoch: u64 = epoch_info.epoch.to::<u64>();
-            Bytes::from(epoch.to_le_bytes().to_vec())
+            Some(Bytes::from(epoch.to_le_bytes().to_vec()))
         }
     }
 

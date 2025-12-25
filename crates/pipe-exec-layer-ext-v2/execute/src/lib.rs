@@ -8,7 +8,7 @@ pub use reth_pipe_exec_layer_relayer::{ObserveState, ObservedValue, RelayerManag
 
 use channel::Channel;
 use gravity_api_types::{
-    config_storage::{ConfigStorage, OnChainConfig, OnChainConfigResType},
+    config_storage::{BlockNumber, ConfigStorage, OnChainConfig, OnChainConfigResType},
     events::contract_event::GravityEvent,
     ExtraDataType,
 };
@@ -17,7 +17,7 @@ use metrics::PipeExecLayerMetrics;
 use alloy_consensus::{
     constants::EMPTY_WITHDRAWALS, BlockHeader, Header, Transaction, EMPTY_OMMER_ROOT_HASH,
 };
-use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
+use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{
     map::{HashMap, HashSet},
     Address, Bytes, TxHash, B256, U256,
@@ -1031,9 +1031,15 @@ where
     fn fetch_config_bytes(
         &self,
         config_name: OnChainConfig,
-        block_number: u64,
+        block_id: BlockNumber,
     ) -> Option<OnChainConfigResType> {
-        Some(self.onchain_config_fetcher.fetch_config_bytes(config_name, block_number))
+        self.onchain_config_fetcher.fetch_config_bytes(
+            config_name,
+            match block_id {
+                BlockNumber::Number(number) => number.into(),
+                BlockNumber::Latest => alloy_eips::BlockId::Number(BlockNumberOrTag::Latest),
+            },
+        )
     }
 }
 
@@ -1116,7 +1122,9 @@ where
     let onchain_config_fetcher = OnchainConfigFetcher::new(eth_api);
 
     let latest_block_number = latest_block_header.number;
-    let epoch = onchain_config_fetcher.fetch_epoch(latest_block_number);
+    let epoch = onchain_config_fetcher
+        .fetch_epoch(latest_block_number.into())
+        .expect("Failed to fetch epoch");
     info!(target: "PipeExecService.new_pipe_exec_layer_api",
         latest_block_number=?latest_block_number,
         latest_block_hash=?latest_block_hash,
