@@ -166,6 +166,12 @@ impl EvmFactory for MintEvmFactory {
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
+        info!(
+            target: "evm::mint_evm_factory",
+            precompile_address = ?MINT_TOKEN_PRECOMPILE_ADDRESS,
+            "MintEvmFactory::create_evm called, registering mint_token precompile"
+        );
+        
         let spec = input.cfg_env.spec;
         let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
 
