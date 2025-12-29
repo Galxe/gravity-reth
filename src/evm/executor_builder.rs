@@ -1,12 +1,11 @@
 //! ExecutorBuilder 实现，使用 MintEvmFactory
 
-use reth_ethereum::{
-    node::{
-        api::{FullNodeTypes, NodeTypes},
-        builder::{components::ExecutorBuilder, BuilderContext},
-    },
-    EthPrimitives,
+use reth_node_builder::{
+    components::ExecutorBuilder,
+    node::{FullNodeTypes, NodeTypes},
+    BuilderContext,
 };
+use reth_ethereum::EthPrimitives;
 use reth_evm_ethereum::{EthEvmConfig, MintStateQueue};
 use reth_chainspec::ChainSpec;
 
