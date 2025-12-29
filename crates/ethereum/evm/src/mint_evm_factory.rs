@@ -139,6 +139,10 @@ pub struct MintEvmFactory {
 impl MintEvmFactory {
     /// 创建新的 MintEvmFactory
     pub fn new(mint_queue: MintStateQueue) -> Self {
+        info!(
+            target: "evm::mint_evm_factory",
+            "MintEvmFactory::new called - factory created"
+        );
         Self { mint_queue }
     }
 

@@ -48,6 +48,7 @@ use revm::{
     database::WrapDatabaseRef,
     primitives::hardfork::SpecId,
 };
+use tracing::info;
 
 mod config;
 use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip7840::BlobParams};
@@ -146,6 +147,10 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
         chain_spec: Arc<ChainSpec>,
         mint_queue: MintStateQueue,
     ) -> EthEvmConfig<ChainSpec, MintEvmFactory> {
+        info!(
+            target: "evm::config",
+            "EthEvmConfig::new_with_mint_evm_factory called - creating MintEvmFactory"
+        );
         let mint_evm_factory = MintEvmFactory::new(mint_queue.clone());
         EthEvmConfig {
             block_assembler: EthBlockAssembler::new(chain_spec.clone()),
