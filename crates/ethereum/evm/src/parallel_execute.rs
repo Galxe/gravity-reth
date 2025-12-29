@@ -12,6 +12,7 @@ use alloy_evm::{
 use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
+use parking_lot::Mutex;
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
@@ -31,6 +32,70 @@ use revm::{
     DatabaseCommit,
 };
 
+/// Mint 请求结构
+/// 用于在预编译合约和执行层之间传递 mint 请求
+#[derive(Debug, Clone)]
+pub struct MintRequest {
+    /// 接收地址
+    pub recipient: Address,
+    /// 要 mint 的数量
+    pub amount: u128,
+}
+
+/// Mint 状态队列
+/// 
+/// 用于在预编译合约和执行层之间传递 mint 请求
+/// 预编译合约将请求加入队列，在区块执行后的 `apply_post_execution_changes` 中
+/// 从队列取出所有请求，合并到 `balance_increments` 中，通过 `increment_balances` 统一处理
+#[derive(Debug, Clone)]
+pub struct MintStateQueue {
+    /// 内部的 mint 请求队列
+    queue: Arc<Mutex<Vec<MintRequest>>>,
+}
+
+impl MintStateQueue {
+    /// 创建新的 MintStateQueue
+    pub fn new() -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// 添加一个 mint 请求到队列
+    pub fn push(&self, request: MintRequest) {
+        self.queue.lock().push(request);
+    }
+
+    /// 获取并清空队列中的所有请求
+    /// 
+    /// 这个方法由 Executor 在 `apply_post_execution_changes` 时调用
+    /// 返回所有待处理的 mint 请求，并清空队列
+    pub fn drain(&self) -> Vec<MintRequest> {
+        self.queue.lock().drain(..).collect()
+    }
+
+    /// 获取队列的共享引用（用于传递给预编译合约）
+    pub fn as_shared(&self) -> Arc<Mutex<Vec<MintRequest>>> {
+        self.queue.clone()
+    }
+
+    /// 检查队列是否为空
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().is_empty()
+    }
+
+    /// 获取队列中的请求数量
+    pub fn len(&self) -> usize {
+        self.queue.lock().len()
+    }
+}
+
+impl Default for MintStateQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// EVM executor using Grevm that executes blocks in parallel.
 #[derive(Debug)]
 pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
@@ -42,6 +107,8 @@ pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
     state: Option<ParallelState<DB>>,
     /// System caller for executing system calls.
     system_caller: SystemCaller<Arc<ChainSpec>>,
+    /// Mint 请求队列（用于预编译合约 mint_token）
+    mint_queue: MintStateQueue,
 }
 
 impl<DB, EvmConfig, ChainSpec> GrevmExecutor<DB, EvmConfig, ChainSpec>
@@ -56,6 +123,16 @@ where
 {
     /// Creates a new [`GrevmExecutor`]
     pub fn new(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
+        Self::new_with_mint_queue(chain_spec, evm_config, db, MintStateQueue::default())
+    }
+
+    /// Creates a new [`GrevmExecutor`] with a custom mint queue
+    pub fn new_with_mint_queue(
+        chain_spec: Arc<ChainSpec>,
+        evm_config: &EvmConfig,
+        db: DB,
+        mint_queue: MintStateQueue,
+    ) -> Self {
         let system_caller = SystemCaller::new(chain_spec.clone());
         let report_db_metrics = get_gravity_config().report_db_metrics;
         Self {
@@ -63,6 +140,7 @@ where
             chain_spec,
             evm_config: evm_config.clone(),
             system_caller,
+            mint_queue,
         }
     }
 
@@ -161,6 +239,13 @@ where
         };
 
         let mut balance_increments = post_block_balance_increments(&self.chain_spec, block);
+        
+        // 从预编译合约队列中收集 mint 请求并合并到 balance_increments
+        let mint_requests = self.mint_queue.drain();
+        for mint_request in mint_requests {
+            *balance_increments.entry(mint_request.recipient).or_default() += mint_request.amount;
+        }
+        
         let state = self.state.as_mut().unwrap();
 
         // Irregular state change at Ethereum DAO hardfork

@@ -66,6 +66,11 @@ pub mod execute {
 }
 
 pub mod parallel_execute;
+pub mod mint_evm_factory;
+
+// 重新导出 mint 相关的类型
+pub use parallel_execute::{MintRequest, MintStateQueue};
+pub use mint_evm_factory::{MintEvmFactory, MINT_TOKEN_PRECOMPILE_ADDRESS};
 
 mod build;
 pub use build::EthBlockAssembler;
@@ -85,6 +90,8 @@ pub struct EthEvmConfig<C = ChainSpec, EvmFactory = EthEvmFactory> {
     pub executor_factory: EthBlockExecutorFactory<RethReceiptBuilder, Arc<C>, EvmFactory>,
     /// Ethereum block assembler.
     pub block_assembler: EthBlockAssembler<C>,
+    /// Optional mint queue for mint token precompile (used when EvmFactory is MintEvmFactory)
+    pub mint_queue: Option<MintStateQueue>,
 }
 
 impl EthEvmConfig {
@@ -116,6 +123,24 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
                 chain_spec,
                 evm_factory,
             ),
+            mint_queue: None,
+        }
+    }
+
+    /// Creates a new Ethereum EVM configuration with MintEvmFactory and mint queue.
+    pub fn new_with_mint_evm_factory(
+        chain_spec: Arc<ChainSpec>,
+        mint_queue: MintStateQueue,
+    ) -> EthEvmConfig<ChainSpec, MintEvmFactory> {
+        let mint_evm_factory = MintEvmFactory::new(mint_queue.clone());
+        EthEvmConfig {
+            block_assembler: EthBlockAssembler::new(chain_spec.clone()),
+            executor_factory: EthBlockExecutorFactory::new(
+                RethReceiptBuilder::default(),
+                chain_spec,
+                mint_evm_factory,
+            ),
+            mint_queue: Some(mint_queue),
         }
     }
 
@@ -293,7 +318,14 @@ where
         if get_gravity_config().disable_grevm {
             Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
         } else {
-            Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
+            // 如果配置了 mint_queue，使用它创建 GrevmExecutor
+            let mint_queue = self.mint_queue.clone().unwrap_or_default();
+            Box::new(GrevmExecutor::new_with_mint_queue(
+                self.chain_spec().clone(),
+                self,
+                db,
+                mint_queue,
+            ))
         }
     }
 }

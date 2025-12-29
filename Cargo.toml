@@ -43,6 +43,14 @@ gravity-storage.workspace = true
 reth-metrics.workspace = true
 gravity-primitives.workspace = true
 
+# 预编译合约相关依赖
+alloy-primitives.workspace = true
+alloy-evm.workspace = true
+parking_lot.workspace = true
+reth-evm.workspace = true
+reth-ethereum = { workspace = true, features = ["evm"] }
+eyre.workspace = true
+
 [workspace.package]
 version = "1.8.3"
 edition = "2024"
