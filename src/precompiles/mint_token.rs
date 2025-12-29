@@ -9,6 +9,7 @@ use reth_ethereum::evm::revm::precompile::{
     PrecompileId, PrecompileOutput, PrecompileResult, PrecompileError
 };
 use reth_evm::precompiles::DynPrecompile;
+use tracing::{debug, warn};
 
 /// 预编译合约地址
 pub const MINT_TOKEN_PRECOMPILE_ADDRESS: Address = 
@@ -52,14 +53,31 @@ fn mint_token_handler(
     input: PrecompileInput<'_>,
     mint_queue: std::sync::Arc<parking_lot::Mutex<Vec<MintRequest>>>,
 ) -> PrecompileResult {
+    debug!(
+        target: "evm::precompile::mint_token",
+        input_len = input.data.len(),
+        "mint_token precompile called"
+    );
+
     // 1. 参数长度检查
     // 需要：1字节函数ID + 20字节地址 + 32字节token数量 = 53字节
     if input.data.len() < 53 {
+        warn!(
+            target: "evm::precompile::mint_token",
+            input_len = input.data.len(),
+            "invalid input length, expected at least 53 bytes"
+        );
         return Err(PrecompileError::OutOfGas);
     }
     
     // 2. 解析函数ID
     if input.data[0] != FUNC_MINT {
+        warn!(
+            target: "evm::precompile::mint_token",
+            func_id = input.data[0],
+            expected = FUNC_MINT,
+            "invalid function id"
+        );
         return Err(PrecompileError::OutOfGas);
     }
     
@@ -69,14 +87,35 @@ fn mint_token_handler(
     // 4. 解析token数量（偏移21字节，长度32字节）
     let amount = match U256::from_be_slice(&input.data[21..53]).try_into() {
         Ok(amount) if amount > 0 => amount,
-        _ => return Err(PrecompileError::OutOfGas),
+        _ => {
+            warn!(
+                target: "evm::precompile::mint_token",
+                ?recipient,
+                "invalid amount (zero or overflow)"
+            );
+            return Err(PrecompileError::OutOfGas);
+        }
     };
+
+    debug!(
+        target: "evm::precompile::mint_token",
+        ?recipient,
+        amount,
+        "mint request parsed successfully"
+    );
     
     // 5. 将 mint 请求加入队列（在区块执行后统一处理）
     mint_queue.lock().push(MintRequest {
         recipient,
         amount,
     });
+
+    debug!(
+        target: "evm::precompile::mint_token",
+        ?recipient,
+        amount,
+        "mint request added to queue"
+    );
     
     // 6. 计算并返回 gas
     let gas_used = calculate_mint_gas();

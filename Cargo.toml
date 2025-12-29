@@ -50,6 +50,7 @@ parking_lot.workspace = true
 reth-evm.workspace = true
 reth-ethereum = { workspace = true, features = ["evm"] }
 eyre.workspace = true
+tracing.workspace = true
 
 [workspace.package]
 version = "1.8.3"
