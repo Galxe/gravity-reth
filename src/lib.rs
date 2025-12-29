@@ -3,9 +3,6 @@ pub use gravity_storage;
 pub use reqwest;
 pub use reth;
 
-// 预编译合约模块
-pub mod precompiles;
-
 // EVM 相关模块
 pub mod evm;
 pub use reth_basic_payload_builder;
