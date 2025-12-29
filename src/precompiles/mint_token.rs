@@ -9,7 +9,7 @@ use reth_ethereum::evm::revm::precompile::{
     PrecompileId, PrecompileOutput, PrecompileResult, PrecompileError
 };
 use reth_evm::precompiles::DynPrecompile;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 /// 预编译合约地址
 pub const MINT_TOKEN_PRECOMPILE_ADDRESS: Address = 
@@ -53,7 +53,7 @@ fn mint_token_handler(
     input: PrecompileInput<'_>,
     mint_queue: std::sync::Arc<parking_lot::Mutex<Vec<MintRequest>>>,
 ) -> PrecompileResult {
-    debug!(
+    info!(
         target: "evm::precompile::mint_token",
         input_len = input.data.len(),
         "mint_token precompile called"
@@ -97,7 +97,7 @@ fn mint_token_handler(
         }
     };
 
-    debug!(
+    info!(
         target: "evm::precompile::mint_token",
         ?recipient,
         amount,
