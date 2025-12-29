@@ -6,7 +6,7 @@ use reth_node_builder::{
     BuilderContext,
 };
 use reth_ethereum::EthPrimitives;
-use reth_evm_ethereum::{EthEvmConfig, MintStateQueue};
+use reth_evm_ethereum::{EthEvmConfig, MintEvmFactory, MintStateQueue};
 use reth_chainspec::ChainSpec;
 
 /// ExecutorBuilder，使用 MintEvmFactory 和 Mint Token 预编译合约
@@ -25,7 +25,7 @@ where
         let mint_queue = MintStateQueue::default();
         
         // 使用 new_with_mint_evm_factory 创建配置
-        let evm_config = EthEvmConfig::new_with_mint_evm_factory(
+        let evm_config = EthEvmConfig::<ChainSpec, MintEvmFactory>::new_with_mint_evm_factory(
             ctx.chain_spec(),
             mint_queue,
         );
