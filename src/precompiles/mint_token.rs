@@ -110,7 +110,7 @@ fn mint_token_handler(
         amount,
     });
 
-    debug!(
+    info!(
         target: "evm::precompile::mint_token",
         ?recipient,
         amount,
