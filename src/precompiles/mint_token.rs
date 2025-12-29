@@ -11,10 +11,6 @@ use reth_ethereum::evm::revm::precompile::{
 use reth_evm::precompiles::DynPrecompile;
 use tracing::{info, warn};
 
-/// 预编译合约地址
-pub const MINT_TOKEN_PRECOMPILE_ADDRESS: Address = 
-    address!("0x0000000000000000000000000000000000002024");
-
 /// 函数ID定义（使用自定义格式避免选择器冲突）
 const FUNC_MINT: u8 = 0x01;
 
