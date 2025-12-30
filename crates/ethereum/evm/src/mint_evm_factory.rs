@@ -15,7 +15,7 @@ use alloy_evm::{
         primitives::hardfork::SpecId,
         MainBuilder, MainContext,
     },
-    Database, EvmEnv, EvmFactory, Evm as AlloyEvm,
+    Database, EvmEnv, EvmFactory,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
 use parking_lot::Mutex;
@@ -174,10 +174,21 @@ impl EvmFactory for MintEvmFactory {
         info!(
             target: "evm::mint_evm_factory",
             precompile_address = ?MINT_TOKEN_PRECOMPILE_ADDRESS,
-            "MintEvmFactory::create_evm called, registering mint_token precompile"
+            "MintEvmFactory::create_evm called"
         );
         
-        let precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
+        // 创建带 mint token 预编译合约的 PrecompilesMap
+        let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
+        let mint_precompile = create_mint_token_precompile(&self.mint_queue);
+        precompiles.apply_precompile(
+            &MINT_TOKEN_PRECOMPILE_ADDRESS,
+            |_| Some(mint_precompile),
+        );
+
+        info!(
+            target: "evm::mint_evm_factory",
+            "mint_token precompile registered in PrecompilesMap"
+        );
 
         let evm = Context::mainnet()
             .with_db(db)
@@ -186,21 +197,7 @@ impl EvmFactory for MintEvmFactory {
             .build_mainnet_with_inspector(NoOpInspector {})
             .with_precompiles(precompiles);
 
-        let mut evm = EthEvm::new(evm, false);
-
-        // 在 EVM 创建后注册 Mint Token 预编译合约
-        let mint_precompile = create_mint_token_precompile(&self.mint_queue);
-        evm.precompiles_mut().apply_precompile(
-            &MINT_TOKEN_PRECOMPILE_ADDRESS,
-            |_| Some(mint_precompile),
-        );
-
-        info!(
-            target: "evm::mint_evm_factory",
-            "mint_token precompile registered via evm.precompiles_mut().apply_precompile()"
-        );
-
-        evm
+        EthEvm::new(evm, false)
     }
 
     fn create_evm_with_inspector<
@@ -214,12 +211,31 @@ impl EvmFactory for MintEvmFactory {
     ) -> Self::Evm<DB, I> {
         info!(
             target: "evm::mint_evm_factory",
+            precompile_address = ?MINT_TOKEN_PRECOMPILE_ADDRESS,
             "MintEvmFactory::create_evm_with_inspector called"
         );
-        EthEvm::new(
-            self.create_evm(db, input).into_inner().with_inspector(inspector),
-            true,
-        )
+        
+        // 创建带 mint token 预编译合约的 PrecompilesMap
+        let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
+        let mint_precompile = create_mint_token_precompile(&self.mint_queue);
+        precompiles.apply_precompile(
+            &MINT_TOKEN_PRECOMPILE_ADDRESS,
+            |_| Some(mint_precompile),
+        );
+
+        info!(
+            target: "evm::mint_evm_factory",
+            "mint_token precompile registered in PrecompilesMap (with_inspector)"
+        );
+
+        let evm = Context::mainnet()
+            .with_db(db)
+            .with_cfg(input.cfg_env)
+            .with_block(input.block_env)
+            .build_mainnet_with_inspector(inspector)
+            .with_precompiles(precompiles);
+
+        EthEvm::new(evm, true)
     }
 }
 
