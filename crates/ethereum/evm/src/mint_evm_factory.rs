@@ -15,10 +15,11 @@ use alloy_evm::{
         primitives::hardfork::SpecId,
         MainBuilder, MainContext,
     },
-    Database, EvmEnv, EvmFactory, EthEvm,
+    Database, EvmEnv, EvmFactory, Evm as AlloyEvm,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
 use parking_lot::Mutex;
+use reth_evm::EthEvm;
 use reth_evm::precompiles::DynPrecompile;
 
 /// 预编译合约地址
@@ -176,15 +177,7 @@ impl EvmFactory for MintEvmFactory {
             "MintEvmFactory::create_evm called, registering mint_token precompile"
         );
         
-        let spec = input.cfg_env.spec;
-        let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
-
-        // 注册 Mint Token 预编译合约
-        let mint_precompile = create_mint_token_precompile(&self.mint_queue);
-        precompiles.apply_precompile(
-            &MINT_TOKEN_PRECOMPILE_ADDRESS,
-            |_| Some(mint_precompile),
-        );
+        let precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
 
         let evm = Context::mainnet()
             .with_db(db)
@@ -193,12 +186,21 @@ impl EvmFactory for MintEvmFactory {
             .build_mainnet_with_inspector(NoOpInspector {})
             .with_precompiles(precompiles);
 
-        // 如果支持 Prague，可以在这里添加其他自定义预编译合约
-        if spec == SpecId::PRAGUE {
-            // 可以添加其他 Prague 特定的预编译合约
-        }
+        let mut evm = EthEvm::new(evm, false);
 
-        EthEvm::new(evm, false)
+        // 在 EVM 创建后注册 Mint Token 预编译合约
+        let mint_precompile = create_mint_token_precompile(&self.mint_queue);
+        evm.precompiles_mut().apply_precompile(
+            &MINT_TOKEN_PRECOMPILE_ADDRESS,
+            |_| Some(mint_precompile),
+        );
+
+        info!(
+            target: "evm::mint_evm_factory",
+            "mint_token precompile registered via evm.precompiles_mut().apply_precompile()"
+        );
+
+        evm
     }
 
     fn create_evm_with_inspector<
@@ -210,6 +212,10 @@ impl EvmFactory for MintEvmFactory {
         input: EvmEnv,
         inspector: I,
     ) -> Self::Evm<DB, I> {
+        info!(
+            target: "evm::mint_evm_factory",
+            "MintEvmFactory::create_evm_with_inspector called"
+        );
         EthEvm::new(
             self.create_evm(db, input).into_inner().with_inspector(inspector),
             true,
