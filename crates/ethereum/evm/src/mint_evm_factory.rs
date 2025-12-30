@@ -177,8 +177,23 @@ impl EvmFactory for MintEvmFactory {
             "MintEvmFactory::create_evm called"
         );
         
+        // 先创建带默认 precompiles 的 EVM
+        let mut evm = Context::mainnet()
+            .with_db(db)
+            .with_cfg(input.cfg_env)
+            .with_block(input.block_env)
+            .build_mainnet_with_inspector(NoOpInspector {})
+            .with_precompiles(PrecompilesMap::from_static(EthPrecompiles::default().precompiles));
+
         // 创建带 mint token 预编译合约的 PrecompilesMap
         let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
+        
+        info!(
+            target: "evm::mint_evm_factory",
+            default_precompile_count = precompiles.addresses().count(),
+            "Default precompiles loaded"
+        );
+        
         let mint_precompile = create_mint_token_precompile(&self.mint_queue);
         precompiles.apply_precompile(
             &MINT_TOKEN_PRECOMPILE_ADDRESS,
@@ -187,15 +202,18 @@ impl EvmFactory for MintEvmFactory {
 
         info!(
             target: "evm::mint_evm_factory",
-            "mint_token precompile registered in PrecompilesMap"
+            total_precompile_count = precompiles.addresses().count(),
+            has_mint_precompile = precompiles.get(&MINT_TOKEN_PRECOMPILE_ADDRESS).is_some(),
+            "After applying mint_token precompile"
         );
 
-        let evm = Context::mainnet()
-            .with_db(db)
-            .with_cfg(input.cfg_env)
-            .with_block(input.block_env)
-            .build_mainnet_with_inspector(NoOpInspector {})
-            .with_precompiles(precompiles);
+        // 再次设置 precompiles 以包含自定义预编译合约
+        evm = evm.with_precompiles(precompiles);
+
+        info!(
+            target: "evm::mint_evm_factory",
+            "mint_token precompile registered in EVM context"
+        );
 
         EthEvm::new(evm, false)
     }
@@ -215,27 +233,8 @@ impl EvmFactory for MintEvmFactory {
             "MintEvmFactory::create_evm_with_inspector called"
         );
         
-        // 创建带 mint token 预编译合约的 PrecompilesMap
-        let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
-        let mint_precompile = create_mint_token_precompile(&self.mint_queue);
-        precompiles.apply_precompile(
-            &MINT_TOKEN_PRECOMPILE_ADDRESS,
-            |_| Some(mint_precompile),
-        );
-
-        info!(
-            target: "evm::mint_evm_factory",
-            "mint_token precompile registered in PrecompilesMap (with_inspector)"
-        );
-
-        let evm = Context::mainnet()
-            .with_db(db)
-            .with_cfg(input.cfg_env)
-            .with_block(input.block_env)
-            .build_mainnet_with_inspector(inspector)
-            .with_precompiles(precompiles);
-
-        EthEvm::new(evm, true)
+        // 复用 create_evm 的逻辑
+        EthEvm::new(self.create_evm(db, input).into_inner().with_inspector(inspector), true)
     }
 }
 
