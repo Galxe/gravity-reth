@@ -33,6 +33,10 @@ pub struct GravityArgs {
     /// Max parallel level in nested hash
     #[arg(long = "gravity.trie.parallel-level", default_value_t = 1)]
     pub trie_parallel_levels: u64,
+
+    /// Worker as a validator node only, not supply history service.
+    #[arg(long = "gravity.validator-node-only", default_value = "false")]
+    pub validator_node_only: bool,
 }
 
 impl Default for GravityArgs {
@@ -45,6 +49,7 @@ impl Default for GravityArgs {
             cache_capacity: 2_000_000,
             report_db_metrics: false,
             trie_parallel_levels: 1,
+            validator_node_only: false,
         }
     }
 }
@@ -60,6 +65,7 @@ impl GravityArgs {
             cache_capacity: self.cache_capacity,
             report_db_metrics: self.report_db_metrics,
             trie_parallel_levels: self.trie_parallel_levels,
+            validator_node_only: self.validator_node_only,
         }
     }
 }

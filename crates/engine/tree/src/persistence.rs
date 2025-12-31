@@ -1,6 +1,7 @@
 use crate::metrics::PersistenceMetrics;
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
+use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
     tables,
@@ -255,7 +256,7 @@ where
                     metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")])
                         .record(start.elapsed());
                 }
-                {
+                if !get_gravity_config().validator_node_only {
                     let start = Instant::now();
                     let provider_rw = self.provider.database_provider_rw()?;
                     let ck = provider_rw

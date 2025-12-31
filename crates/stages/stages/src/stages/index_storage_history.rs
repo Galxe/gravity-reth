@@ -238,16 +238,7 @@ mod tests {
         };
         let mut stage = IndexStorageHistoryStage::default();
         let provider = db.factory.database_provider_rw().unwrap();
-        let out = stage
-            .execute(
-                &provider,
-                Box::new({
-                    let factory = db.factory.clone();
-                    move || factory.database_provider_ro()
-                }),
-                input,
-            )
-            .unwrap();
+        let out = stage.execute(&provider, input).unwrap();
         assert_eq!(out, ExecOutput { checkpoint: StageCheckpoint::new(run_to), done: true });
         provider.commit().unwrap();
     }
@@ -260,16 +251,7 @@ mod tests {
         };
         let mut stage = IndexStorageHistoryStage::default();
         let provider = db.factory.database_provider_rw().unwrap();
-        let out = stage
-            .unwind(
-                &provider,
-                Box::new({
-                    let factory = db.factory.clone();
-                    move || factory.database_provider_ro()
-                }),
-                input,
-            )
-            .unwrap();
+        let out = stage.unwind(&provider, input).unwrap();
         assert_eq!(out, UnwindOutput { checkpoint: StageCheckpoint::new(unwind_to) });
         provider.commit().unwrap();
     }
@@ -519,16 +501,7 @@ mod tests {
             ..Default::default()
         };
         let provider = db.factory.database_provider_rw().unwrap();
-        let out = stage
-            .execute(
-                &provider,
-                Box::new({
-                    let factory = db.factory.clone();
-                    move || factory.database_provider_ro()
-                }),
-                input,
-            )
-            .unwrap();
+        let out = stage.execute(&provider, input).unwrap();
         assert_eq!(out, ExecOutput { checkpoint: StageCheckpoint::new(20000), done: true });
         provider.commit().unwrap();
 

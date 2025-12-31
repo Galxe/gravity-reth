@@ -19,6 +19,8 @@ pub struct Config {
     pub report_db_metrics: bool,
     /// Max parallel levels in nested hash
     pub trie_parallel_levels: u64,
+    /// Worker as a validator node only, not supply history service.
+    pub validator_node_only: bool,
 }
 
 /// Global configuration instance, initialized once.
@@ -45,6 +47,7 @@ pub fn get_gravity_config() -> &'static Config {
             cache_capacity: 2_000_000,
             report_db_metrics: false,
             trie_parallel_levels: 1,
+            validator_node_only: false,
         })
     }
 }
