@@ -9,7 +9,7 @@ use alloy_evm::{
     eth::{dao_fork, eip6110, spec::EthExecutorSpec, EthBlockExecutorFactory},
     EvmEnv,
 };
-use alloy_primitives::{map::HashMap, Address};
+use alloy_primitives::{map::HashMap, map::HashSet, Address, B256};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
 use parking_lot::Mutex;
@@ -35,8 +35,10 @@ use tracing::info;
 
 /// Mint 请求结构
 /// 用于在预编译合约和执行层之间传递 mint 请求
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MintRequest {
+    /// 请求唯一标识（用于去重）
+    pub request_id: B256,
     /// 接收地址
     pub recipient: Address,
     /// 要 mint 的数量
@@ -243,31 +245,29 @@ where
 
         let mut balance_increments = post_block_balance_increments(&self.chain_spec, block);
         
-        // 从预编译合约队列中收集 mint 请求并合并到 balance_increments
-        let mint_requests = self.mint_queue.drain();
-        if !mint_requests.is_empty() {
+        // 从预编译合约队列中收集 mint 请求
+        // 使用 HashSet 基于 request_id 去重，自动过滤 Grevm 并行执行产生的重复请求
+        let all_mint_requests = self.mint_queue.drain();
+        let unique_requests: HashSet<MintRequest> = all_mint_requests.into_iter().collect();
+        
+        if !unique_requests.is_empty() {
             info!(
                 target: "evm::executor",
-                count = mint_requests.len(),
+                count = unique_requests.len(),
                 block_number = block.number(),
-                "Applying mint requests from precompile queue"
+                "Applying unique mint requests (deduplicated by request_id)"
             );
-            for mint_request in mint_requests {
+            
+            for mint_request in unique_requests {
                 info!(
                     target: "evm::executor",
+                    request_id = ?mint_request.request_id,
                     recipient = ?mint_request.recipient,
                     amount = mint_request.amount,
-                    block_number = block.number(),
                     "Adding mint balance increment"
                 );
                 *balance_increments.entry(mint_request.recipient).or_default() += mint_request.amount;
             }
-        } else {
-            info!(
-                target: "evm::executor",
-                block_number = block.number(),
-                "No mint requests to apply"
-            );
         }
         
         let state = self.state.as_mut().unwrap();

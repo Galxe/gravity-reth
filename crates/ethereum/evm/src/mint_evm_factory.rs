@@ -68,29 +68,22 @@ fn create_mint_token_precompile() -> DynPrecompile {
 }
 
 /// Mint Token 处理函数
+/// 
+/// 参数格式（85 bytes）：
+/// - 1 byte: 函数ID (0x01)
+/// - 32 bytes: request_id (用于去重，调用方需要保证唯一性)
+/// - 20 bytes: recipient 地址
+/// - 32 bytes: amount (u256)
 fn mint_token_handler(
     input: PrecompileInput<'_>,
     mint_queue: Arc<Mutex<Vec<MintRequest>>>,
 ) -> PrecompileResult {
-    // 使用原子计数器追踪调用次数
-    use core::sync::atomic::{AtomicU64, Ordering};
-    static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let call_id = CALL_COUNTER.fetch_add(1, Ordering::SeqCst);
-    
-    info!(
-        target: "evm::precompile::mint_token",
-        call_id = call_id,
-        input_len = input.data.len(),
-        queue_len_before = mint_queue.lock().len(),
-        "mint_token precompile called"
-    );
-
-    // 1. 参数长度检查 (1字节函数ID + 20字节地址 + 32字节数量 = 53字节)
-    if input.data.len() < 53 {
+    // 1. 参数长度检查 (1 + 32 + 20 + 32 = 85 bytes)
+    if input.data.len() < 85 {
         warn!(
             target: "evm::precompile::mint_token",
             input_len = input.data.len(),
-            "invalid input length"
+            "invalid input length, expected 85 bytes"
         );
         return Err(PrecompileError::OutOfGas);
     }
@@ -105,9 +98,14 @@ fn mint_token_handler(
         return Err(PrecompileError::OutOfGas);
     }
     
-    // 3. 解析地址和数量
-    let recipient = Address::from_slice(&input.data[1..21]);
-    let amount = match U256::from_be_slice(&input.data[21..53]).try_into() {
+    // 3. 解析 request_id (bytes 1-32)
+    let request_id = alloy_primitives::B256::from_slice(&input.data[1..33]);
+    
+    // 4. 解析地址 (bytes 33-52)
+    let recipient = Address::from_slice(&input.data[33..53]);
+    
+    // 5. 解析数量 (bytes 53-84)
+    let amount = match U256::from_be_slice(&input.data[53..85]).try_into() {
         Ok(amount) if amount > 0 => amount,
         _ => {
             warn!(target: "evm::precompile::mint_token", ?recipient, "invalid amount");
@@ -117,15 +115,18 @@ fn mint_token_handler(
 
     info!(
         target: "evm::precompile::mint_token",
-        call_id = call_id,
+        request_id = ?request_id,
         ?recipient,
         amount,
-        queue_len_after = mint_queue.lock().len(),
-        "mint request added to queue"
+        "Mint request received"
     );
     
-    // 4. 将 mint 请求加入队列
-    mint_queue.lock().push(MintRequest { recipient, amount });
+    // 6. 将 mint 请求加入队列（包含 request_id）
+    mint_queue.lock().push(MintRequest { 
+        request_id,
+        recipient, 
+        amount 
+    });
     
     // 5. 返回成功，消耗 gas
     Ok(PrecompileOutput {
