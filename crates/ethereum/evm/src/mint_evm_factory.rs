@@ -36,6 +36,10 @@ const GAS_COST_SSTORE_RESET: u64 = 5000;       // 重置存储槽（账户存在
 
 /// 创建 Mint Token 预编译合约
 fn create_mint_token_precompile(mint_queue: &MintStateQueue) -> DynPrecompile {
+    info!(
+        target: "evm::mint_evm_factory",
+        "create_mint_token_precompile called"
+    );
     let queue = mint_queue.as_shared();
     let precompile_id = PrecompileId::custom("mint_token");
     
@@ -200,16 +204,15 @@ impl EvmFactory for MintEvmFactory {
             |_| Some(mint_precompile),
         );
 
-        info!(
-            target: "evm::mint_evm_factory",
-            total_precompile_count = precompiles.addresses().count(),
-            has_mint_precompile = precompiles.get(&MINT_TOKEN_PRECOMPILE_ADDRESS).is_some(),
-            "After applying mint_token precompile"
-        );
 
         // 再次设置 precompiles 以包含自定义预编译合约
         evm = evm.with_precompiles(precompiles);
-
+        info!(
+            target: "evm::mint_evm_factory",
+            total_precompile_count = evm.precompiles.addresses().count(),
+            has_mint_precompile = evm.precompiles.get(&MINT_TOKEN_PRECOMPILE_ADDRESS).is_some(),
+            "After applying mint_token precompile, [emv]"
+        );
         info!(
             target: "evm::mint_evm_factory",
             "mint_token precompile registered in EVM context"
@@ -230,11 +233,19 @@ impl EvmFactory for MintEvmFactory {
         info!(
             target: "evm::mint_evm_factory",
             precompile_address = ?MINT_TOKEN_PRECOMPILE_ADDRESS,
-            "MintEvmFactory::create_evm_with_inspector called"
+            "MintEvmFactory::create_evm_with_inspector called (RPC path)"
         );
         
-        // 复用 create_evm 的逻辑
-        EthEvm::new(self.create_evm(db, input).into_inner().with_inspector(inspector), true)
+        // 复用 create_evm 的逻辑，这会添加预编译合约
+        let base_evm = self.create_evm(db, input);
+        let evm = EthEvm::new(base_evm.into_inner().with_inspector(inspector), true);
+        
+        info!(
+            target: "evm::mint_evm_factory",
+            "MintEvmFactory::create_evm_with_inspector completed"
+        );
+        
+        evm
     }
 }
 
