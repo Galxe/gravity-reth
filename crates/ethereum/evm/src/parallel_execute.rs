@@ -1,6 +1,6 @@
 //! Parallel EVM executor using Grevm
 
-use crate::RethReceiptBuilder;
+use crate::{RethReceiptBuilder, MintEvmFactory};
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::BlockHeader;
 use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
@@ -117,7 +117,7 @@ where
     EvmConfig: Clone
         + ConfigureEvm<
             Primitives = EthPrimitives,
-            BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
+            BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, MintEvmFactory>,
         >,
     DB: ParallelDatabase,
     ChainSpec: EthExecutorSpec + EthChainSpec + Hardforks + 'static,
@@ -307,7 +307,7 @@ impl<DB, EvmConfig, ChainSpec> ParallelExecutor for GrevmExecutor<DB, EvmConfig,
 where
     EvmConfig: ConfigureEvm<
         Primitives = EthPrimitives,
-        BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>>,
+        BlockExecutorFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, MintEvmFactory>,
     >,
     DB: ParallelDatabase,
     ChainSpec: EthExecutorSpec + EthChainSpec + Hardforks + 'static,
