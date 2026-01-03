@@ -122,18 +122,8 @@ where
     DB: ParallelDatabase,
     ChainSpec: EthExecutorSpec + EthChainSpec + Hardforks + 'static,
 {
-    /// Creates a new [`GrevmExecutor`]
+    /// Creates a new [`GrevmExecutor`] - 使用全局 mint_queue
     pub fn new(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
-        Self::new_with_mint_queue(chain_spec, evm_config, db, MintStateQueue::default())
-    }
-
-    /// Creates a new [`GrevmExecutor`] with a custom mint queue
-    pub fn new_with_mint_queue(
-        chain_spec: Arc<ChainSpec>,
-        evm_config: &EvmConfig,
-        db: DB,
-        mint_queue: MintStateQueue,
-    ) -> Self {
         let system_caller = SystemCaller::new(chain_spec.clone());
         let report_db_metrics = get_gravity_config().report_db_metrics;
         Self {
@@ -141,8 +131,20 @@ where
             chain_spec,
             evm_config: evm_config.clone(),
             system_caller,
-            mint_queue,
+            mint_queue: crate::mint_evm_factory::global_mint_queue().clone(),
         }
+    }
+
+    /// Creates a new [`GrevmExecutor`] with a custom mint queue
+    /// @deprecated 使用 new() 即可，它会自动使用全局队列
+    pub fn new_with_mint_queue(
+        chain_spec: Arc<ChainSpec>,
+        evm_config: &EvmConfig,
+        db: DB,
+        _mint_queue: MintStateQueue,
+    ) -> Self {
+        // 忽略传入的 mint_queue，始终使用全局队列
+        Self::new(chain_spec, evm_config, db)
     }
 
     fn apply_pre_execution_changes(

@@ -18,29 +18,47 @@ use alloy_evm::{
     Database, EvmEnv, EvmFactory,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use reth_evm::EthEvm;
 use reth_evm::precompiles::DynPrecompile;
+
+// ============================================================================
+// 全局 Mint Queue
+// ============================================================================
+
+/// 全局 MintStateQueue 单例
+/// RPC 和 block executor 共享此队列，确保预编译合约的 mint 请求能被正确处理
+static GLOBAL_MINT_QUEUE: Lazy<MintStateQueue> = 
+    Lazy::new(|| {
+        info!(target: "evm::mint", "Initializing global MINT_QUEUE");
+        MintStateQueue::default()
+    });
+
+/// 获取全局 MintStateQueue 引用
+pub fn global_mint_queue() -> &'static MintStateQueue {
+    &GLOBAL_MINT_QUEUE
+}
+
+// ============================================================================
+// Mint Token 预编译合约
+// ============================================================================
 
 /// 预编译合约地址
 pub const MINT_TOKEN_PRECOMPILE_ADDRESS: Address = 
     address!("0x0000000000000000000000000000000000002024");
 
-/// 函数ID定义（使用自定义格式避免选择器冲突）
+/// 函数ID定义
 const FUNC_MINT: u8 = 0x01;
 
 /// Gas 消耗常量
-const GAS_COST_BASE: u64 = 21000;              // 基础 gas
-const GAS_COST_SLOAD: u64 = 100;               // 读取存储
-const GAS_COST_SSTORE_RESET: u64 = 5000;       // 重置存储槽（账户存在）
+const GAS_COST_BASE: u64 = 21000;
+const GAS_COST_SLOAD: u64 = 100;
+const GAS_COST_SSTORE_RESET: u64 = 5000;
 
-/// 创建 Mint Token 预编译合约
-fn create_mint_token_precompile(mint_queue: &MintStateQueue) -> DynPrecompile {
-    info!(
-        target: "evm::mint_evm_factory",
-        "create_mint_token_precompile called"
-    );
-    let queue = mint_queue.as_shared();
+/// 创建 Mint Token 预编译合约（使用全局队列）
+fn create_mint_token_precompile() -> DynPrecompile {
+    let queue = global_mint_queue().as_shared();
     let precompile_id = PrecompileId::custom("mint_token");
     
     (precompile_id, move |input: PrecompileInput<'_>| -> PrecompileResult {
@@ -60,13 +78,12 @@ fn mint_token_handler(
         "mint_token precompile called"
     );
 
-    // 1. 参数长度检查
-    // 需要：1字节函数ID + 20字节地址 + 32字节token数量 = 53字节
+    // 1. 参数长度检查 (1字节函数ID + 20字节地址 + 32字节数量 = 53字节)
     if input.data.len() < 53 {
         warn!(
             target: "evm::precompile::mint_token",
             input_len = input.data.len(),
-            "invalid input length, expected at least 53 bytes"
+            "invalid input length"
         );
         return Err(PrecompileError::OutOfGas);
     }
@@ -76,24 +93,17 @@ fn mint_token_handler(
         warn!(
             target: "evm::precompile::mint_token",
             func_id = input.data[0],
-            expected = FUNC_MINT,
             "invalid function id"
         );
         return Err(PrecompileError::OutOfGas);
     }
     
-    // 3. 解析地址（偏移1字节，长度20字节）
+    // 3. 解析地址和数量
     let recipient = Address::from_slice(&input.data[1..21]);
-    
-    // 4. 解析token数量（偏移21字节，长度32字节）
     let amount = match U256::from_be_slice(&input.data[21..53]).try_into() {
         Ok(amount) if amount > 0 => amount,
         _ => {
-            warn!(
-                target: "evm::precompile::mint_token",
-                ?recipient,
-                "invalid amount (zero or overflow)"
-            );
+            warn!(target: "evm::precompile::mint_token", ?recipient, "invalid amount");
             return Err(PrecompileError::OutOfGas);
         }
     };
@@ -102,64 +112,33 @@ fn mint_token_handler(
         target: "evm::precompile::mint_token",
         ?recipient,
         amount,
-        "mint request parsed successfully"
+        "mint request parsed, adding to queue"
     );
     
-    // 5. 将 mint 请求加入队列（在区块执行后统一处理）
-    mint_queue.lock().push(MintRequest {
-        recipient,
-        amount,
-    });
-
-    info!(
-        target: "evm::precompile::mint_token",
-        ?recipient,
-        amount,
-        "mint request added to queue"
-    );
+    // 4. 将 mint 请求加入队列
+    mint_queue.lock().push(MintRequest { recipient, amount });
     
-    // 6. 计算并返回 gas
-    let gas_used = GAS_COST_BASE + GAS_COST_SLOAD + GAS_COST_SSTORE_RESET;
-    
+    // 5. 返回成功，消耗 gas
     Ok(PrecompileOutput {
-        gas_used,
+        gas_used: GAS_COST_BASE + GAS_COST_SLOAD + GAS_COST_SSTORE_RESET,
         bytes: Bytes::new(),
         reverted: false,
     })
 }
 
-/// Trait for EvmFactory that provides mint queue access
-pub trait MintQueueProvider {
-    /// 获取 mint_queue 的引用
-    fn mint_queue(&self) -> Option<&MintStateQueue>;
-}
+// ============================================================================
+// MintEvmFactory
+// ============================================================================
 
 /// 自定义 EvmFactory，支持 Mint Token 预编译合约
-#[derive(Debug, Clone)]
-pub struct MintEvmFactory {
-    /// Mint 请求队列
-    mint_queue: MintStateQueue,
-}
+/// 使用全局 mint_queue
+#[derive(Debug, Clone, Default)]
+pub struct MintEvmFactory;
 
 impl MintEvmFactory {
     /// 创建新的 MintEvmFactory
-    pub fn new(mint_queue: MintStateQueue) -> Self {
-        info!(
-            target: "evm::mint_evm_factory",
-            "MintEvmFactory::new called - factory created"
-        );
-        Self { mint_queue }
-    }
-
-    /// 获取 mint_queue 的引用
-    pub fn mint_queue(&self) -> &MintStateQueue {
-        &self.mint_queue
-    }
-}
-
-impl MintQueueProvider for MintEvmFactory {
-    fn mint_queue(&self) -> Option<&MintStateQueue> {
-        Some(&self.mint_queue)
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -175,13 +154,7 @@ impl EvmFactory for MintEvmFactory {
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
-        info!(
-            target: "evm::mint_evm_factory",
-            precompile_address = ?MINT_TOKEN_PRECOMPILE_ADDRESS,
-            "MintEvmFactory::create_evm called"
-        );
-        
-        // 先创建带默认 precompiles 的 EVM
+        // 创建带默认 precompiles 的 EVM
         let mut evm = Context::mainnet()
             .with_db(db)
             .with_cfg(input.cfg_env)
@@ -189,63 +162,25 @@ impl EvmFactory for MintEvmFactory {
             .build_mainnet_with_inspector(NoOpInspector {})
             .with_precompiles(PrecompilesMap::from_static(EthPrecompiles::default().precompiles));
 
-        // 创建带 mint token 预编译合约的 PrecompilesMap
+        // 添加 mint token 预编译合约
         let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
-        
-        info!(
-            target: "evm::mint_evm_factory",
-            default_precompile_count = precompiles.addresses().count(),
-            "Default precompiles loaded"
-        );
-        
-        let mint_precompile = create_mint_token_precompile(&self.mint_queue);
-        precompiles.apply_precompile(
-            &MINT_TOKEN_PRECOMPILE_ADDRESS,
-            |_| Some(mint_precompile),
-        );
+        let mint_precompile = create_mint_token_precompile();
+        precompiles.apply_precompile(&MINT_TOKEN_PRECOMPILE_ADDRESS, |_| Some(mint_precompile));
 
-
-        // 再次设置 precompiles 以包含自定义预编译合约
+        // 设置包含自定义预编译合约的 precompiles
         evm = evm.with_precompiles(precompiles);
-        info!(
-            target: "evm::mint_evm_factory",
-            total_precompile_count = evm.precompiles.addresses().count(),
-            has_mint_precompile = evm.precompiles.get(&MINT_TOKEN_PRECOMPILE_ADDRESS).is_some(),
-            "After applying mint_token precompile, [emv]"
-        );
-        info!(
-            target: "evm::mint_evm_factory",
-            "mint_token precompile registered in EVM context"
-        );
 
         EthEvm::new(evm, false)
     }
 
-    fn create_evm_with_inspector<
-        DB: Database,
-        I: Inspector<Self::Context<DB>, EthInterpreter>,
-    >(
+    fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>, EthInterpreter>>(
         &self,
         db: DB,
         input: EvmEnv,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        info!(
-            target: "evm::mint_evm_factory",
-            precompile_address = ?MINT_TOKEN_PRECOMPILE_ADDRESS,
-            "MintEvmFactory::create_evm_with_inspector called (RPC path)"
-        );
-        
-        // 复用 create_evm 的逻辑，这会添加预编译合约
+        // 复用 create_evm 的逻辑
         let base_evm = self.create_evm(db, input);
-        let evm = EthEvm::new(base_evm.into_inner().with_inspector(inspector), true);
-        
-        info!(
-            target: "evm::mint_evm_factory",
-            "MintEvmFactory::create_evm_with_inspector completed"
-        );
-        
-        evm
+        EthEvm::new(base_evm.into_inner().with_inspector(inspector), true)
     }
 }
-

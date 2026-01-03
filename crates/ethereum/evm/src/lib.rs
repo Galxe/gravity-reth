@@ -48,7 +48,6 @@ use revm::{
     database::WrapDatabaseRef,
     primitives::hardfork::SpecId,
 };
-use tracing::info;
 
 mod config;
 use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip7840::BlobParams};
@@ -142,16 +141,12 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
         }
     }
 
-    /// Creates a new Ethereum EVM configuration with MintEvmFactory and mint queue.
+    /// Creates a new Ethereum EVM configuration with MintEvmFactory
+    /// 使用全局 mint_queue
     pub fn new_with_mint_evm_factory(
         chain_spec: Arc<ChainSpec>,
-        mint_queue: MintStateQueue,
     ) -> EthEvmConfig<ChainSpec, MintEvmFactory> {
-        info!(
-            target: "evm::config",
-            "EthEvmConfig::new_with_mint_evm_factory called - creating MintEvmFactory"
-        );
-        let mint_evm_factory = MintEvmFactory::new(mint_queue.clone());
+        let mint_evm_factory = MintEvmFactory::new();
         EthEvmConfig {
             block_assembler: EthBlockAssembler::new(chain_spec.clone()),
             executor_factory: EthBlockExecutorFactory::new(
@@ -159,7 +154,7 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
                 chain_spec,
                 mint_evm_factory,
             ),
-            mint_queue: Some(mint_queue),
+            mint_queue: Some(crate::mint_evm_factory::global_mint_queue().clone()),
         }
     }
 
@@ -337,14 +332,8 @@ where
         if get_gravity_config().disable_grevm {
             Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
         } else {
-            // 如果配置了 mint_queue，使用它创建 GrevmExecutor
-            let mint_queue = self.mint_queue.clone().unwrap_or_default();
-            Box::new(GrevmExecutor::new_with_mint_queue(
-                self.chain_spec().clone(),
-                self,
-                db,
-                mint_queue,
-            ))
+            // 使用全局 mint_queue
+            Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
         }
     }
 }

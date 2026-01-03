@@ -22,23 +22,10 @@ where
     type EVM = EthEvmConfig<ChainSpec, reth_evm_ethereum::MintEvmFactory>;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        info!(
-            target: "evm::executor_builder",
-            "MintExecutorBuilder::build_evm called - creating EVM with MintEvmFactory"
-        );
+        info!(target: "evm::executor_builder", "Building EVM with MintEvmFactory (global queue)");
         
-        // 创建 mint_queue
-        let mint_queue = MintStateQueue::default();
-        
-        // 使用 new_with_mint_evm_factory 创建配置
         let evm_config = EthEvmConfig::<ChainSpec, MintEvmFactory>::new_with_mint_evm_factory(
             ctx.chain_spec(),
-            mint_queue,
-        );
-        
-        info!(
-            target: "evm::executor_builder",
-            "MintExecutorBuilder::build_evm completed - EVM config created"
         );
         
         Ok(evm_config)
