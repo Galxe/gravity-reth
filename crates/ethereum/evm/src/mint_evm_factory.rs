@@ -95,7 +95,7 @@ fn mint_token_handler(
             authorized = ?AUTHORIZED_CALLER,
             "Unauthorized caller, only JWK Manager can call mint precompile"
         );
-        return Err(PrecompileError::OutOfGas);
+        return Err(PrecompileError::Other("Unauthorized caller".into()));
     }
     
     // 2. 参数长度检查 (1 + 32 + 20 + 32 = 85 bytes)
@@ -105,7 +105,7 @@ fn mint_token_handler(
             input_len = input.data.len(),
             "invalid input length, expected 85 bytes"
         );
-        return Err(PrecompileError::OutOfGas);
+        return Err(PrecompileError::Other(format!("Invalid input length: {}, expected 85", input.data.len()).into()));
     }
     
     // 3. 解析函数ID
@@ -115,7 +115,7 @@ fn mint_token_handler(
             func_id = input.data[0],
             "invalid function id"
         );
-        return Err(PrecompileError::OutOfGas);
+        return Err(PrecompileError::Other(format!("Invalid function ID: {:#x}", input.data[0]).into()));
     }
     
     // 4. 解析 request_id (bytes 1-32)
@@ -129,7 +129,7 @@ fn mint_token_handler(
         Ok(amount) if amount > 0 => amount,
         _ => {
             warn!(target: "evm::precompile::mint_token", ?recipient, "invalid amount");
-            return Err(PrecompileError::OutOfGas);
+            return Err(PrecompileError::Other("Invalid or zero amount".into()));
         }
     };
 
@@ -149,7 +149,7 @@ fn mint_token_handler(
         amount 
     });
     
-    // 5. 返回成功，消耗 gas
+    // 8. 返回成功，消耗 gas
     Ok(PrecompileOutput {
         gas_used: GAS_COST_BASE + GAS_COST_SLOAD + GAS_COST_SSTORE_RESET,
         bytes: Bytes::new(),
