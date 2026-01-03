@@ -48,6 +48,11 @@ pub fn global_mint_queue() -> &'static MintStateQueue {
 pub const MINT_TOKEN_PRECOMPILE_ADDRESS: Address = 
     address!("0x0000000000000000000000000000000000002024");
 
+/// 授权的调用方地址（JWK Manager）
+/// 预编译合约会验证 caller 地址，只允许此地址调用
+pub const AUTHORIZED_CALLER: Address = 
+    address!("0x0000000000000000000000000000000000002018");
+
 /// 函数ID定义
 const FUNC_MINT: u8 = 0x01;
 
@@ -69,6 +74,10 @@ fn create_mint_token_precompile() -> DynPrecompile {
 
 /// Mint Token 处理函数
 /// 
+/// **安全机制**：
+/// - 只允许 JWK Manager (0x2018) 调用此预编译合约
+/// - 其他地址调用将被拒绝
+/// 
 /// 参数格式（85 bytes）：
 /// - 1 byte: 函数ID (0x01)
 /// - 32 bytes: request_id (用于去重，调用方需要保证唯一性)
@@ -78,7 +87,18 @@ fn mint_token_handler(
     input: PrecompileInput<'_>,
     mint_queue: Arc<Mutex<Vec<MintRequest>>>,
 ) -> PrecompileResult {
-    // 1. 参数长度检查 (1 + 32 + 20 + 32 = 85 bytes)
+    // 1. 校验 caller 地址，只允许 JWK_MANAGER 调用
+    if input.caller != AUTHORIZED_CALLER {
+        warn!(
+            target: "evm::precompile::mint_token",
+            caller = ?input.caller,
+            authorized = ?AUTHORIZED_CALLER,
+            "Unauthorized caller, only JWK Manager can call mint precompile"
+        );
+        return Err(PrecompileError::OutOfGas);
+    }
+    
+    // 2. 参数长度检查 (1 + 32 + 20 + 32 = 85 bytes)
     if input.data.len() < 85 {
         warn!(
             target: "evm::precompile::mint_token",
@@ -88,7 +108,7 @@ fn mint_token_handler(
         return Err(PrecompileError::OutOfGas);
     }
     
-    // 2. 解析函数ID
+    // 3. 解析函数ID
     if input.data[0] != FUNC_MINT {
         warn!(
             target: "evm::precompile::mint_token",
@@ -98,13 +118,13 @@ fn mint_token_handler(
         return Err(PrecompileError::OutOfGas);
     }
     
-    // 3. 解析 request_id (bytes 1-32)
+    // 4. 解析 request_id (bytes 1-32)
     let request_id = alloy_primitives::B256::from_slice(&input.data[1..33]);
     
-    // 4. 解析地址 (bytes 33-52)
+    // 5. 解析地址 (bytes 33-52)
     let recipient = Address::from_slice(&input.data[33..53]);
     
-    // 5. 解析数量 (bytes 53-84)
+    // 6. 解析数量 (bytes 53-84)
     let amount = match U256::from_be_slice(&input.data[53..85]).try_into() {
         Ok(amount) if amount > 0 => amount,
         _ => {
@@ -115,13 +135,14 @@ fn mint_token_handler(
 
     info!(
         target: "evm::precompile::mint_token",
+        caller = ?input.caller,
         request_id = ?request_id,
         ?recipient,
         amount,
-        "Mint request received"
+        "Mint request authorized and received"
     );
     
-    // 6. 将 mint 请求加入队列（包含 request_id）
+    // 7. 将 mint 请求加入队列（包含 request_id）
     mint_queue.lock().push(MintRequest { 
         request_id,
         recipient, 
