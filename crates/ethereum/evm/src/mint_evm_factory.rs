@@ -87,6 +87,12 @@ fn mint_token_handler(
     input: PrecompileInput<'_>,
     mint_queue: Arc<Mutex<Vec<MintRequest>>>,
 ) -> PrecompileResult {
+    // 0. 首先检查 gas 是否足够（提前返回，避免不必要的计算）
+    const REQUIRED_GAS: u64 = GAS_COST_BASE + GAS_COST_SLOAD + GAS_COST_SSTORE_RESET;
+    if input.gas < REQUIRED_GAS {
+        return Err(PrecompileError::OutOfGas);
+    }
+    
     // 1. 校验 caller 地址，只允许 JWK_MANAGER 调用
     if input.caller != AUTHORIZED_CALLER {
         warn!(
@@ -149,9 +155,9 @@ fn mint_token_handler(
         amount 
     });
     
-    // 8. 返回成功，消耗 gas
+    // 8. 返回成功，消耗 gas（已在函数开头验证过 gas 足够）
     Ok(PrecompileOutput {
-        gas_used: GAS_COST_BASE + GAS_COST_SLOAD + GAS_COST_SSTORE_RESET,
+        gas_used: REQUIRED_GAS,
         bytes: Bytes::new(),
         reverted: false,
     })
