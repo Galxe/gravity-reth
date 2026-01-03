@@ -245,19 +245,29 @@ where
         
         // 从预编译合约队列中收集 mint 请求并合并到 balance_increments
         let mint_requests = self.mint_queue.drain();
-        info!(
-            target: "evm::executor",
-            count = mint_requests.len(),
-            "Applying mint requests from precompile queue"
-        );
-        for mint_request in mint_requests {
+        if !mint_requests.is_empty() {
             info!(
                 target: "evm::executor",
-                recipient = ?mint_request.recipient,
-                amount = mint_request.amount,
-                "Adding mint balance increment"
+                count = mint_requests.len(),
+                block_number = block.number(),
+                "Applying mint requests from precompile queue"
             );
-            *balance_increments.entry(mint_request.recipient).or_default() += mint_request.amount;
+            for mint_request in mint_requests {
+                info!(
+                    target: "evm::executor",
+                    recipient = ?mint_request.recipient,
+                    amount = mint_request.amount,
+                    block_number = block.number(),
+                    "Adding mint balance increment"
+                );
+                *balance_increments.entry(mint_request.recipient).or_default() += mint_request.amount;
+            }
+        } else {
+            info!(
+                target: "evm::executor",
+                block_number = block.number(),
+                "No mint requests to apply"
+            );
         }
         
         let state = self.state.as_mut().unwrap();

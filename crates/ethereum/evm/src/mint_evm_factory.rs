@@ -72,9 +72,16 @@ fn mint_token_handler(
     input: PrecompileInput<'_>,
     mint_queue: Arc<Mutex<Vec<MintRequest>>>,
 ) -> PrecompileResult {
+    // 使用原子计数器追踪调用次数
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let call_id = CALL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    
     info!(
         target: "evm::precompile::mint_token",
+        call_id = call_id,
         input_len = input.data.len(),
+        queue_len_before = mint_queue.lock().len(),
         "mint_token precompile called"
     );
 
@@ -110,9 +117,11 @@ fn mint_token_handler(
 
     info!(
         target: "evm::precompile::mint_token",
+        call_id = call_id,
         ?recipient,
         amount,
-        "mint request parsed, adding to queue"
+        queue_len_after = mint_queue.lock().len(),
+        "mint request added to queue"
     );
     
     // 4. 将 mint 请求加入队列
@@ -154,6 +163,16 @@ impl EvmFactory for MintEvmFactory {
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static EVM_CREATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let evm_id = EVM_CREATE_COUNTER.fetch_add(1, Ordering::SeqCst);
+        
+        info!(
+            target: "evm::mint_evm_factory",
+            evm_id = evm_id,
+            "MintEvmFactory::create_evm called"
+        );
+        
         // 创建带默认 precompiles 的 EVM
         let mut evm = Context::mainnet()
             .with_db(db)
