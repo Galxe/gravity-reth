@@ -31,6 +31,7 @@ use revm::{
     state::{Account, AccountStatus, EvmState},
     DatabaseCommit,
 };
+use tracing::info;
 
 /// Mint 请求结构
 /// 用于在预编译合约和执行层之间传递 mint 请求
@@ -242,7 +243,20 @@ where
         
         // 从预编译合约队列中收集 mint 请求并合并到 balance_increments
         let mint_requests = self.mint_queue.drain();
+        if !mint_requests.is_empty() {
+            info!(
+                target: "evm::executor",
+                count = mint_requests.len(),
+                "Applying mint requests from precompile queue"
+            );
+        }
         for mint_request in mint_requests {
+            info!(
+                target: "evm::executor",
+                recipient = ?mint_request.recipient,
+                amount = mint_request.amount,
+                "Adding mint balance increment"
+            );
             *balance_increments.entry(mint_request.recipient).or_default() += mint_request.amount;
         }
         
