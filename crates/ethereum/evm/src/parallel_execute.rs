@@ -243,13 +243,11 @@ where
         
         // 从预编译合约队列中收集 mint 请求并合并到 balance_increments
         let mint_requests = self.mint_queue.drain();
-        if !mint_requests.is_empty() {
-            info!(
-                target: "evm::executor",
-                count = mint_requests.len(),
-                "Applying mint requests from precompile queue"
-            );
-        }
+        info!(
+            target: "evm::executor",
+            count = mint_requests.len(),
+            "Applying mint requests from precompile queue"
+        );
         for mint_request in mint_requests {
             info!(
                 target: "evm::executor",
