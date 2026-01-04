@@ -538,7 +538,7 @@ revm-context = { package = "revm-context", git = "file:///Users/lightman/repos/r
 revm-context-interface = { package = "revm-context-interface", git = "file:///Users/lightman/repos/revm", branch = "v29.0.1-gravity", default-features = false }
 revm-database-interface = { package = "revm-database-interface", git = "file:///Users/lightman/repos/revm", branch = "v29.0.1-gravity", default-features = false }
 op-revm = { package = "op-revm", git = "file:///Users/lightman/repos/revm", branch = "v29.0.1-gravity", default-features = false }
-revm-inspectors = { package = "revm-inspectors", git = "https://github.com/Galxe/revm-inspectors", branch = "v0.30.0-gravity" }
+revm-inspectors = { package = "revm-inspectors", git = "file:///Users/lightman/repos/revm-inspectors", branch = "v0.30.0-gravity" }
 
 # eth
 alloy-chains = { version = "0.2.5", default-features = false }
