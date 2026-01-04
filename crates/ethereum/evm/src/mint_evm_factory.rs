@@ -2,8 +2,7 @@
 
 use crate::parallel_execute::{MintRequest, MintStateQueue};
 use alloc::{sync::Arc, vec::Vec};
-use tracing::{info, warn, error};
-use std::backtrace::Backtrace;
+use tracing::{info, warn};
 use alloy_evm::{
     eth::EthEvmContext,
     precompiles::{PrecompileInput, PrecompilesMap},
@@ -19,27 +18,9 @@ use alloy_evm::{
     Database, EvmEnv, EvmFactory,
 };
 use alloy_primitives::{address, Address, Bytes, U256};
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use reth_evm::EthEvm;
 use reth_evm::precompiles::DynPrecompile;
-
-// ============================================================================
-// 全局 Mint Queue
-// ============================================================================
-
-/// 全局 MintStateQueue 单例
-/// RPC 和 block executor 共享此队列，确保预编译合约的 mint 请求能被正确处理
-static GLOBAL_MINT_QUEUE: Lazy<MintStateQueue> = 
-    Lazy::new(|| {
-        info!(target: "evm::mint", "Initializing global MINT_QUEUE");
-        MintStateQueue::default()
-    });
-
-/// 获取全局 MintStateQueue 引用
-pub fn global_mint_queue() -> &'static MintStateQueue {
-    &GLOBAL_MINT_QUEUE
-}
 
 // ============================================================================
 // Mint Token 预编译合约
@@ -62,9 +43,22 @@ const GAS_COST_BASE: u64 = 21000;
 const GAS_COST_SLOAD: u64 = 100;
 const GAS_COST_SSTORE_RESET: u64 = 5000;
 
-/// 创建 Mint Token 预编译合约（使用全局队列）
-fn create_mint_token_precompile() -> DynPrecompile {
-    let queue = global_mint_queue().as_shared();
+/// 创建 Mint Token 预编译合约（使用指定的队列）
+/// 注意：此函数现在主要用于向后兼容，实际使用时应该使用 create_mint_token_precompile_with_queue
+pub fn create_mint_token_precompile() -> DynPrecompile {
+    // 创建一个临时的队列（仅用于向后兼容，实际不应该使用）
+    let temp_queue = MintStateQueue::new();
+    create_mint_token_precompile_with_queue(&temp_queue)
+}
+
+/// 创建 Mint Token 预编译合约（使用指定的队列）
+pub fn create_mint_token_precompile_with_queue(mint_queue: &crate::parallel_execute::MintStateQueue) -> DynPrecompile {
+    let queue = mint_queue.as_shared();
+    create_mint_token_precompile_with_queue_internal(queue)
+}
+
+/// 内部函数：使用共享队列创建预编译合约
+fn create_mint_token_precompile_with_queue_internal(queue: Arc<Mutex<Vec<MintRequest>>>) -> DynPrecompile {
     let precompile_id = PrecompileId::custom("mint_token");
     
     (precompile_id, move |input: PrecompileInput<'_>| -> PrecompileResult {
@@ -203,20 +197,13 @@ impl EvmFactory for MintEvmFactory {
         );
         
         // 创建带默认 precompiles 的 EVM
-        let mut evm = Context::mainnet()
+        // 注意：mint token 预编译合约现在通过 Scheduler::new 传入，不再在这里注册
+        let evm = Context::mainnet()
             .with_db(db)
             .with_cfg(input.cfg_env)
             .with_block(input.block_env)
             .build_mainnet_with_inspector(NoOpInspector {})
             .with_precompiles(PrecompilesMap::from_static(EthPrecompiles::default().precompiles));
-
-        // 添加 mint token 预编译合约
-        let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
-        let mint_precompile = create_mint_token_precompile();
-        precompiles.apply_precompile(&MINT_TOKEN_PRECOMPILE_ADDRESS, |_| Some(mint_precompile));
-
-        // 设置包含自定义预编译合约的 precompiles
-        evm = evm.with_precompiles(precompiles);
 
         EthEvm::new(evm, false)
     }

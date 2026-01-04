@@ -110,8 +110,6 @@ pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
     state: Option<ParallelState<DB>>,
     /// System caller for executing system calls.
     system_caller: SystemCaller<Arc<ChainSpec>>,
-    /// Mint 请求队列（用于预编译合约 mint_token）
-    mint_queue: MintStateQueue,
 }
 
 impl<DB, EvmConfig, ChainSpec> GrevmExecutor<DB, EvmConfig, ChainSpec>
@@ -124,7 +122,7 @@ where
     DB: ParallelDatabase,
     ChainSpec: EthExecutorSpec + EthChainSpec + Hardforks + 'static,
 {
-    /// Creates a new [`GrevmExecutor`] - 使用全局 mint_queue
+    /// Creates a new [`GrevmExecutor`]
     pub fn new(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
         let system_caller = SystemCaller::new(chain_spec.clone());
         let report_db_metrics = get_gravity_config().report_db_metrics;
@@ -133,20 +131,7 @@ where
             chain_spec,
             evm_config: evm_config.clone(),
             system_caller,
-            mint_queue: crate::mint_evm_factory::global_mint_queue().clone(),
         }
-    }
-
-    /// Creates a new [`GrevmExecutor`] with a custom mint queue
-    /// @deprecated 使用 new() 即可，它会自动使用全局队列
-    pub fn new_with_mint_queue(
-        chain_spec: Arc<ChainSpec>,
-        evm_config: &EvmConfig,
-        db: DB,
-        _mint_queue: MintStateQueue,
-    ) -> Self {
-        // 忽略传入的 mint_queue，始终使用全局队列
-        Self::new(chain_spec, evm_config, db)
     }
 
     fn apply_pre_execution_changes(
@@ -167,6 +152,7 @@ where
     fn execute_transactions(
         &mut self,
         block: &RecoveredBlock<Block>,
+        mint_queue: &MintStateQueue,
     ) -> Result<ExecuteOutput<Receipt>, BlockExecutionError> {
         let evm_env = self.evm_config.evm_env(block.header()).map_err(|e| {
             BlockExecutionError::Internal(InternalBlockExecutionError::Other(Box::new(e)))
@@ -184,7 +170,14 @@ where
         let (results, state) = {
             info!("lightman0104 block_number: {:?}, execute txs len: {:?}", block.number(), txs.len());
             let EvmEnv { cfg_env, block_env } = evm_env;
-            let executor = Scheduler::new(cfg_env, block_env, txs, state, false, None);
+            
+            // 使用 mint_queue 创建预编译合约映射并传给 Scheduler
+            let mint_precompile = crate::mint_evm_factory::create_mint_token_precompile_with_queue(mint_queue);
+            let mut precompiles_map = HashMap::new();
+            precompiles_map.insert(crate::mint_evm_factory::MINT_TOKEN_PRECOMPILE_ADDRESS, mint_precompile);
+            let precompiles_arc = Arc::new(precompiles_map);
+            
+            let executor = Scheduler::new(cfg_env, block_env, txs, state, false, Some(precompiles_arc));
             executor.parallel_execute(None).map_err(|e| {
                 BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
                     hash: block
@@ -222,6 +215,7 @@ where
         &mut self,
         block: &RecoveredBlock<Block>,
         receipts: &[Receipt],
+        mint_queue: &MintStateQueue,
     ) -> Result<Requests, BlockExecutionError> {
         let requests = if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
             // Collect all EIP-6110 deposits
@@ -250,7 +244,7 @@ where
         
         // 从预编译合约队列中收集 mint 请求
         // 使用 HashSet 基于 request_id 去重，自动过滤 Grevm 并行执行产生的重复请求
-        let all_mint_requests = self.mint_queue.drain();
+        let all_mint_requests = mint_queue.drain();
         let unique_requests: HashSet<MintRequest> = all_mint_requests.into_iter().collect();
         
         if !unique_requests.is_empty() {
@@ -323,13 +317,16 @@ where
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
+        // 每次执行时创建新的 MintStateQueue
+        let mint_queue = MintStateQueue::new();
+        
         self.apply_pre_execution_changes(block)?;
         let ExecuteOutput { receipts, gas_used } = if block.transaction_count() == 0 {
             ExecuteOutput { receipts: Vec::new(), gas_used: 0 }
         } else {
-            self.execute_transactions(block)?
+            self.execute_transactions(block, &mint_queue)?
         };
-        let requests = self.apply_post_execution_changes(block, &receipts)?;
+        let requests = self.apply_post_execution_changes(block, &receipts, &mint_queue)?;
         let state_mut =
             self.state.as_mut().expect("state should be set before calling merge_transitions");
         if let Some(transition_state) =
