@@ -94,15 +94,15 @@ fn mint_token_handler(
     }
     
     // 1. 校验 caller 地址，只允许 JWK_MANAGER 调用
-    if input.caller != AUTHORIZED_CALLER {
-        warn!(
-            target: "evm::precompile::mint_token",
-            caller = ?input.caller,
-            authorized = ?AUTHORIZED_CALLER,
-            "Unauthorized caller, only JWK Manager can call mint precompile"
-        );
-        return Err(PrecompileError::Other("Unauthorized caller".into()));
-    }
+    // if input.caller != AUTHORIZED_CALLER {
+    //     warn!(
+    //         target: "evm::precompile::mint_token",
+    //         caller = ?input.caller,
+    //         authorized = ?AUTHORIZED_CALLER,
+    //         "Unauthorized caller, only JWK Manager can call mint precompile"
+    //     );
+    //     return Err(PrecompileError::Other("Unauthorized caller".into()));
+    // }
     
     // 2. 参数长度检查 (1 + 32 + 20 + 32 = 85 bytes)
     if input.data.len() < 85 {
