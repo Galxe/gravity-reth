@@ -309,9 +309,7 @@ where
         db: DB,
     ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
     {
-        
-        Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
-        
+        Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
     }
 }
 
