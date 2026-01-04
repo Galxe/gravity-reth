@@ -309,7 +309,11 @@ where
         db: DB,
     ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
     {
-        Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
+        if get_gravity_config().disable_grevm {
+            Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
+        } else {
+            Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
+        }
     }
 }
 
