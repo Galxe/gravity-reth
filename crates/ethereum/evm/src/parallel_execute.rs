@@ -174,7 +174,7 @@ where
 
         let mut txs = Vec::with_capacity(block.transaction_count());
         for tx in block.transactions_recovered() {
-            info!("block_number: {:?}, tx: {:?}", block.number(), tx);
+            info!("lightman0104 block_number: {:?}, tx: {:?}", block.number(), tx);
             txs.push(self.evm_config.tx_env(tx));
         }
 
@@ -182,7 +182,7 @@ where
         let state = self.state.take().unwrap();
 
         let (results, state) = {
-            info!("block_number: {:?}, execute txs len: {:?}", block.number(), txs.len());
+            info!("lightman0104 block_number: {:?}, execute txs len: {:?}", block.number(), txs.len());
             let EvmEnv { cfg_env, block_env } = evm_env;
             let executor = Scheduler::new(cfg_env, block_env, txs, state, false);
             executor.parallel_execute(None).map_err(|e| {
@@ -206,6 +206,7 @@ where
         for (result, tx_type) in
             results.into_iter().zip(block.body().transactions().map(|tx| tx.tx_type()))
         {
+            info!("lightman0104 block_number: {:?}, result: {:?}", block.number(), result);
             cumulative_gas_used += result.gas_used();
             receipts.push(Receipt {
                 tx_type,
