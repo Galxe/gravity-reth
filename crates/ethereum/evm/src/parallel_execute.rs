@@ -174,7 +174,7 @@ where
 
         let mut txs = Vec::with_capacity(block.transaction_count());
         for tx in block.transactions_recovered() {
-            info!("tx: {:?}", tx);
+            info!("block_number: {:?}, tx: {:?}", block.number(), tx);
             txs.push(self.evm_config.tx_env(tx));
         }
 
@@ -182,6 +182,7 @@ where
         let state = self.state.take().unwrap();
 
         let (results, state) = {
+            info!("block_number: {:?}, execute txs len: {:?}", block.number(), txs.len());
             let EvmEnv { cfg_env, block_env } = evm_env;
             let executor = Scheduler::new(cfg_env, block_env, txs, state, false);
             executor.parallel_execute(None).map_err(|e| {
