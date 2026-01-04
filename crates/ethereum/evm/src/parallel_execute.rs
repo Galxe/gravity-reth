@@ -184,7 +184,7 @@ where
         let (results, state) = {
             info!("lightman0104 block_number: {:?}, execute txs len: {:?}", block.number(), txs.len());
             let EvmEnv { cfg_env, block_env } = evm_env;
-            let executor = Scheduler::new(cfg_env, block_env, txs, state, false);
+            let executor = Scheduler::new(cfg_env, block_env, txs, state, false, None);
             executor.parallel_execute(None).map_err(|e| {
                 BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
                     hash: block
