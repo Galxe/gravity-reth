@@ -87,6 +87,7 @@ fn mint_token_handler(
     input: PrecompileInput<'_>,
     mint_queue: Arc<Mutex<Vec<MintRequest>>>,
 ) -> PrecompileResult {
+    assert!(false);
     // 0. 首先检查 gas 是否足够（提前返回，避免不必要的计算）
     const REQUIRED_GAS: u64 = GAS_COST_BASE + GAS_COST_SLOAD + GAS_COST_SSTORE_RESET;
     if input.gas < REQUIRED_GAS {
