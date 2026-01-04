@@ -174,6 +174,7 @@ where
 
         let mut txs = Vec::with_capacity(block.transaction_count());
         for tx in block.transactions_recovered() {
+            info!("tx: {:?}", tx);
             txs.push(self.evm_config.tx_env(tx));
         }
 
