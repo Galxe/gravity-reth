@@ -18,7 +18,9 @@ pub mod validator_set;
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
 pub use consensus_config::ConsensusConfigFetcher;
 pub use epoch::EpochFetcher;
-pub use metadata_txn::{transact_metadata_contract_call, MetadataTxnResult};
+pub use metadata_txn::{
+    construct_metadata_txn, transact_system_txn, SystemTxnResult,
+};
 pub use types::{
     convert_active_validators_to_bcs, convert_validator_consensus_info, ValidatorConsensusInfo,
     ValidatorStatus,
@@ -118,7 +120,7 @@ pub fn construct_validator_txns_envelope(
         let current_nonce = system_caller_nonce + index as u64;
 
         // Process data based on ExtraDataType variant
-        match process_extra_data(data, current_nonce, gas_price) {
+        match construct_validator_txn_from_extra_data(data, current_nonce, gas_price) {
             Ok(transaction) => txns.push(transaction),
             Err(e) => {
                 return Err(format!("Failed to process extra data at index {}: {}", index, e));
@@ -129,12 +131,12 @@ pub fn construct_validator_txns_envelope(
     Ok(txns)
 }
 
-/// Process extra data based on its ExtraDataType variant
+/// Construct a single validator transaction from ExtraDataType
 ///
 /// Supports:
 /// - JWK/Oracle updates (ExtraDataType::JWK) - includes both RSA JWKs and blockchain events
 /// - DKG transcripts (ExtraDataType::DKG)
-fn process_extra_data(
+pub fn construct_validator_txn_from_extra_data(
     data: &gravity_api_types::ExtraDataType,
     nonce: u64,
     gas_price: u128,
