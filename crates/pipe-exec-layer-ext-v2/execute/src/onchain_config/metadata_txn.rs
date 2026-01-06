@@ -68,7 +68,7 @@ impl MetadataTxnResult {
         let mut block = Block {
             header: Header {
                 beneficiary: ordered_block.coinbase,
-                timestamp: ordered_block.timestamp,
+                timestamp: ordered_block.timestamp_us,
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,

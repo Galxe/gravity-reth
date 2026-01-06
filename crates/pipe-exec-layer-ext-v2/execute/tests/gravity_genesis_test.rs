@@ -153,7 +153,7 @@ fn test_gravity_system_call<DB: Database<Error: Debug + Send + Sync + 'static> +
         ..Default::default()
     });
     let db = State::builder().with_bundle_update().with_database(db).build();
-    let mut evm = evm_config.evm_with_env(db, evm_env);
+    let mut evm = evm_config.evm_with_env(db, evm_env.unwrap());
     let result = evm
         .transact_raw(new_system_call_txn(
             EPOCH_MANAGER_ADDRESS,
