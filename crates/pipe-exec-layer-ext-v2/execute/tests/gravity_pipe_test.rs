@@ -47,7 +47,7 @@ fn new_ordered_block(
         parent_id: parent_block_id,
         id: block_id,
         number: block_number,
-        timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+        timestamp_us: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros() as u64,
         coinbase: Address::ZERO,
         prev_randao: B256::ZERO,
         withdrawals: Default::default(),
@@ -61,7 +61,7 @@ fn new_ordered_block(
         ),
         extra_data: vec![],
         randomness: U256::ZERO,
-        enable_randomness: false,
+        enable_randomness: true,
     }
 }
 

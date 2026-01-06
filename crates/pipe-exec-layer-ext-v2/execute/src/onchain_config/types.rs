@@ -66,13 +66,13 @@ sol! {
         function blockPrologue(
             bytes proposer,
             uint64[] calldata failedProposerIndices,
-            uint256 timestampMicros
+            uint64 timestampMicros
         );
 
         function blockPrologueExt(
             bytes proposer,
             uint64[] calldata failedProposerIndices,
-            uint256 timestampMicros
+            uint64 timestampMicros
         );
 }
 

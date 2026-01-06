@@ -95,8 +95,8 @@ pub struct OrderedBlock {
     pub id: B256,
     /// Block number of the block
     pub number: u64,
-    /// Timestamp of the block
-    pub timestamp: u64,
+    /// Timestamp of the block in microseconds
+    pub timestamp_us: u64,
     /// Coinbase address of the block
     pub coinbase: Address,
     /// Block header mix hash, used as prevRandao in the block
@@ -507,7 +507,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let mut block = Block {
             header: Header {
                 beneficiary: ordered_block.coinbase,
-                timestamp: ordered_block.timestamp,
+                timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,
@@ -648,7 +648,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             .next_evm_env(
                 parent_header,
                 &NextBlockEnvAttributes {
-                    timestamp: ordered_block.timestamp,
+                    timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
                     suggested_fee_recipient: ordered_block.coinbase,
                     prev_randao: ordered_block.prev_randao,
                     gas_limit: get_gravity_config().pipe_block_gas_limit,
@@ -668,7 +668,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
             let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
                 &mut evm,
-                ordered_block.timestamp * 1_000_000,
+                ordered_block.timestamp_us,
                 ordered_block.proposer,
                 ordered_block.enable_randomness,
             );
