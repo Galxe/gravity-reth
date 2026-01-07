@@ -182,8 +182,6 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
     if !get_gravity_config().disable_pipe_execution {
         let pool = pool.clone();
         tokio::spawn(async move {
-            // Wait for PipeExecLayerExt to be available
-            tokio::time::sleep(Duration::from_secs(3)).await;
             let mut discard_txs_rx = get_pipe_exec_layer_event_bus::<N>()
                 .unwrap()
                 .discard_txs
