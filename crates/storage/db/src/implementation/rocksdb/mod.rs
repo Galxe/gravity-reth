@@ -532,6 +532,26 @@ impl DatabaseMetrics for DatabaseEnv {
 
         metrics
     }
+
+    fn gauge_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
+        let mut metrics = Vec::new();
+        for table in Tables::ALL.iter().map(Tables::name) {
+            if let Some(cf_handle) = self.inner.cf_handle(table) {
+                if let Ok(Some(value)) =
+                    self.inner.property_value_cf(cf_handle, "rocksdb.estimate-num-keys")
+                {
+                    if let Ok(entries) = value.parse::<usize>() {
+                        metrics.push((
+                            "db.table_entries",
+                            entries as f64,
+                            vec![Label::new("table", table)],
+                        ));
+                    }
+                }
+            }
+        }
+        metrics
+    }
 }
 
 // Implement Database trait for RocksDB
