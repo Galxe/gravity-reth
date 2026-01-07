@@ -4,8 +4,9 @@ use alloy_primitives::TxHash;
 use once_cell::sync::OnceCell;
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_primitives::NodePrimitives;
-use std::any::Any;
+use std::{any::Any, thread::sleep, time::Duration};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
+use tracing::info;
 
 /// A static instance of `PipeExecLayerEventBus` used for dispatching events.
 pub static PIPE_EXEC_LAYER_EVENT_BUS: OnceCell<Box<dyn Any + Send + Sync>> = OnceCell::new();
@@ -13,9 +14,19 @@ pub static PIPE_EXEC_LAYER_EVENT_BUS: OnceCell<Box<dyn Any + Send + Sync>> = Onc
 /// Get a reference to the global `PipeExecLayerEventBus` instance.
 pub fn get_pipe_exec_layer_event_bus<N: NodePrimitives>(
 ) -> Option<&'static PipeExecLayerEventBus<N>> {
-    PIPE_EXEC_LAYER_EVENT_BUS
-        .get()
-        .map(|ext| ext.downcast_ref::<PipeExecLayerEventBus<N>>().unwrap())
+    let mut wait_time = 0;
+    loop {
+        sleep(Duration::from_secs(1));
+        wait_time += 1;
+        let event_bus = PIPE_EXEC_LAYER_EVENT_BUS
+            .get()
+            .map(|ext| ext.downcast_ref::<PipeExecLayerEventBus<N>>().unwrap());
+        if event_bus.is_some() {
+            break event_bus;
+        } else if wait_time % 5 == 0 {
+            info!("Wait PipeExecLayerEventBus ready...");
+        }
+    }
 }
 
 /// Event to make a block canonical

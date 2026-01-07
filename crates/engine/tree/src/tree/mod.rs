@@ -560,8 +560,6 @@ where
     }
 
     fn pipe_run_inner(mut self) {
-        // Wait for the pipe exec layer to be initialized
-        std::thread::sleep(std::time::Duration::from_secs(3));
         let pipe_event_rx =
             get_pipe_exec_layer_event_bus::<N>().unwrap().event_rx.lock().unwrap().take().unwrap();
         loop {

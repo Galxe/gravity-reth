@@ -47,7 +47,8 @@ fn new_ordered_block(
         parent_id: parent_block_id,
         id: block_id,
         number: block_number,
-        timestamp_us: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros() as u64,
+        timestamp_us: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros()
+            as u64,
         coinbase: Address::ZERO,
         prev_randao: B256::ZERO,
         withdrawals: Default::default(),

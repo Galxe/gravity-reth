@@ -9968,6 +9968,7 @@ dependencies = [
  "reth-chain-state",
  "reth-primitives",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
