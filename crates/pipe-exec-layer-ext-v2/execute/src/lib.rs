@@ -666,9 +666,17 @@ impl<Storage: GravityStorage> Core<Storage> {
         let (metadata_txn_result, state_changes) = {
             let mut state = State::builder().with_database_ref(&state).with_bundle_update().build();
             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
+            let timestamp_sec = ordered_block.timestamp_us / 1_000_000;
+            let timestamp_us = if self.chain_spec.is_devnet_v0_5_active_at_timestamp(timestamp_sec)
+            {
+                ordered_block.timestamp_us
+            } else {
+                // Simulate the timestamp conversion before devnet-v0.5
+                timestamp_sec * 1_000_000
+            };
             let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
                 &mut evm,
-                ordered_block.timestamp_us,
+                timestamp_us,
                 ordered_block.proposer,
                 ordered_block.enable_randomness,
             );
