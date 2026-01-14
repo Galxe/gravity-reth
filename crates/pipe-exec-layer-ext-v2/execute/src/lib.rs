@@ -710,10 +710,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         };
 
         let validator_txns = if !ordered_block.extra_data.is_empty() {
+            let block_timestamp = ordered_block.timestamp_us / 1_000_000; // convert to seconds
             construct_validator_txns_envelope(
                 &ordered_block.extra_data,
                 metadata_txn_result.txn.nonce(),
                 metadata_txn_result.txn.gas_price().expect("metadata txn gas price is not set"),
+                &self.chain_spec,
+                block_timestamp,
             )
             .unwrap()
         } else {
@@ -1027,12 +1030,13 @@ pub struct PipeExecLayerApi<Storage, EthApi> {
     verified_block_hash_tx: Arc<Channel<B256 /* block id */, Option<B256> /* block hash */>>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     storage: Arc<Storage>,
+    chain_spec: Arc<ChainSpec>,
     onchain_config_fetcher: OnchainConfigFetcher<EthApi>,
 }
 
 impl<Storage, EthApi> ConfigStorage for PipeExecLayerApi<Storage, EthApi>
 where
-    Storage: Sync + Send + 'static,
+    Storage: GravityStorage,
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
@@ -1041,12 +1045,26 @@ where
         config_name: OnChainConfig,
         block_id: BlockNumber,
     ) -> Option<OnChainConfigResType> {
+        // Get block timestamp from storage for JWK-related configurations
+        let timestamp = match block_id {
+            BlockNumber::Number(number) => self.storage.get_block_timestamp(number),
+            BlockNumber::Latest => {
+                // For latest block, use current system time as approximation
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            }
+        };
+
         self.onchain_config_fetcher.fetch_config_bytes(
             config_name,
             match block_id {
                 BlockNumber::Number(number) => number.into(),
                 BlockNumber::Latest => alloy_eips::BlockId::Number(BlockNumberOrTag::Latest),
             },
+            self.chain_spec.clone(),
+            timestamp,
         )
     }
 }
@@ -1184,6 +1202,7 @@ where
         verified_block_hash_tx: verified_block_hash_ch,
         event_tx,
         storage,
+        chain_spec,
         onchain_config_fetcher,
     }
 }

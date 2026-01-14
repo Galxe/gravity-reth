@@ -1,15 +1,17 @@
-//! Fetcher for consensus configuration
+//! Fetcher for JWK consensus configuration
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    JWK_MANAGER_ADDR, SYSTEM_CALLER,
+    get_jwk_manager_addr, JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
 use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
+use reth_chainspec::ChainSpec;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
+use std::sync::Arc;
 
 sol! {
     struct OIDCProvider {
@@ -38,19 +40,37 @@ fn convert_into_bcs_active_providers(oidc_providers: Vec<OIDCProvider>) -> Bytes
     bcs::to_bytes(&jwk_consensus_config).expect("Failed to serialize JwkConsensusConfig").into()
 }
 
-/// Fetcher for consensus configuration
+/// Fetcher for JWK consensus configuration
+///
+/// Supports ChainSpec-based contract address selection for JWK Manager upgrade.
 #[derive(Debug)]
 pub struct JwkConsensusConfigFetcher<'a, EthApi> {
     base_fetcher: &'a OnchainConfigFetcher<EthApi>,
+    /// ChainSpec for determining hardfork status
+    chain_spec: Arc<ChainSpec>,
+    /// Timestamp used to determine which JWK Manager contract address to use
+    timestamp: u64,
 }
 
 impl<'a, EthApi> JwkConsensusConfigFetcher<'a, EthApi>
 where
     EthApi: EthCall,
 {
-    /// Create a new consensus config fetcher
-    pub const fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
-        Self { base_fetcher }
+    /// Create a new JWK consensus config fetcher
+    ///
+    /// Uses `chain_spec.is_devnet_v0_5_active_at_timestamp(timestamp)` to determine
+    /// which JWK Manager contract address to use (v1 or v2).
+    pub fn new(
+        base_fetcher: &'a OnchainConfigFetcher<EthApi>,
+        chain_spec: Arc<ChainSpec>,
+        timestamp: u64,
+    ) -> Self {
+        Self { base_fetcher, chain_spec, timestamp }
+    }
+
+    /// Get the JWK Manager contract address
+    fn get_contract_address(&self) -> Address {
+        get_jwk_manager_addr(&self.chain_spec, self.timestamp)
     }
 }
 
@@ -63,9 +83,10 @@ where
         let call = getActiveProvidersCall {};
         let input: Bytes = call.abi_encode().into();
 
+        let contract_addr = self.get_contract_address();
         let result = self
             .base_fetcher
-            .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
+            .eth_call(Self::caller_address(), contract_addr, input, block_id)
             .map_err(|e| {
                 tracing::warn!(
                     "Failed to fetch JWK consensus config at block {}: {:?}",
@@ -81,6 +102,8 @@ where
     }
 
     fn contract_address() -> Address {
+        // Note: This returns the default address. Use get_contract_address() for timestamp-aware
+        // address.
         JWK_MANAGER_ADDR
     }
 

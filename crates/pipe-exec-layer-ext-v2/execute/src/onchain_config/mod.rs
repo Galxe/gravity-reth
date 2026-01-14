@@ -26,6 +26,7 @@ pub use validator_set::ValidatorSetFetcher;
 
 // Common addresses and constants
 use alloy_primitives::{address, Address};
+use reth_chainspec::ChainSpec;
 
 pub const GRAVITY_FRAMEWORK_ADDRESS: Address = address!("00000000000000000000000000000000000000ff");
 pub const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000000000000f0");
@@ -49,6 +50,21 @@ pub const VALIDATOR_PERFORMANCE_TRACKER_ADDR: Address =
 pub const BLOCK_ADDR: Address = address!("0000000000000000000000000000000000002016");
 pub const TIMESTAMP_ADDR: Address = address!("0000000000000000000000000000000000002017");
 pub const JWK_MANAGER_ADDR: Address = address!("0000000000000000000000000000000000002018");
+/// New JWK Manager contract address (v2) - used after DevnetV0_5 hardfork is active
+pub const JWK_MANAGER_ADDR_V2: Address = address!("2BB0961D1b7f928FB3dF4d90A1A825d55e2F4e1A");
+
+/// Get the appropriate JWK Manager address based on whether the upgrade is active
+///
+/// Returns `JWK_MANAGER_ADDR_V2` if DevnetV0_5 hardfork is active at the given timestamp,
+/// otherwise returns `JWK_MANAGER_ADDR`.
+pub fn get_jwk_manager_addr(chain_spec: &ChainSpec, timestamp: u64) -> Address {
+    if chain_spec.is_devnet_v0_5_active_at_timestamp(timestamp) {
+        JWK_MANAGER_ADDR_V2
+    } else {
+        JWK_MANAGER_ADDR
+    }
+}
+
 pub const KEYLESS_ACCOUNT_ADDR: Address = address!("0000000000000000000000000000000000002019");
 pub const SYSTEM_REWARD_ADDR: Address = address!("000000000000000000000000000000000000201A");
 pub const GOV_HUB_ADDR: Address = address!("000000000000000000000000000000000000201b");
@@ -69,17 +85,24 @@ use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Bytes, Signature, U256};
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use revm_primitives::TxKind;
+use std::sync::Arc;
 use tracing::info;
 
 /// Construct validator transactions envelope (JWK updates and DKG transcripts)
 ///
 /// Uses ExtraDataType to construct appropriate transactions:
-/// - `ExtraDataType::JWK` → `upsertObservedJWKs` transaction to JWK_MANAGER_ADDR
+/// - `ExtraDataType::JWK` → `upsertObservedJWKs` transaction to JWK_MANAGER_ADDR (or V2 after
+///   upgrade)
 /// - `ExtraDataType::DKG` → `finishWithDkgResult` transaction to RECONFIGURATION_WITH_DKG_ADDR
+///
+/// The `chain_spec` and `timestamp` parameters are used to determine which JWK Manager contract
+/// address to use.
 pub fn construct_validator_txns_envelope(
     extra_data: &Vec<gravity_api_types::ExtraDataType>,
     system_caller_nonce: u64,
     gas_price: u128,
+    chain_spec: &ChainSpec,
+    timestamp: u64,
 ) -> Result<Vec<EthereumTxEnvelope<TxEip4844>>, String> {
     let system_caller_nonce = system_caller_nonce + 1;
     let mut txns = Vec::new();
@@ -88,7 +111,7 @@ pub fn construct_validator_txns_envelope(
         let current_nonce = system_caller_nonce + index as u64;
 
         // Process data based on ExtraDataType variant
-        match process_extra_data(data, current_nonce, gas_price) {
+        match process_extra_data(data, current_nonce, gas_price, chain_spec, timestamp) {
             Ok(transaction) => txns.push(transaction),
             Err(e) => {
                 return Err(format!("Failed to process extra data at index {}: {}", index, e));
@@ -108,6 +131,8 @@ fn process_extra_data(
     data: &gravity_api_types::ExtraDataType,
     nonce: u64,
     gas_price: u128,
+    chain_spec: &ChainSpec,
+    timestamp: u64,
 ) -> Result<TransactionSigned, String> {
     match data {
         gravity_api_types::ExtraDataType::JWK(data_bytes) => {
@@ -120,7 +145,13 @@ fn process_extra_data(
                 "Processing JWK update for issuer: {}",
                 String::from_utf8_lossy(&provider_jwks.issuer)
             );
-            observed_jwk::construct_jwk_transaction(provider_jwks, nonce, gas_price)
+            observed_jwk::construct_jwk_transaction(
+                provider_jwks,
+                nonce,
+                gas_price,
+                chain_spec,
+                timestamp,
+            )
         }
         gravity_api_types::ExtraDataType::DKG(data_bytes) => {
             // Deserialize as DKGTranscript
