@@ -53,6 +53,7 @@ reth-pipe-exec-layer-relayer.workspace = true
 bcs = "0.1"
 serde.workspace = true
 hex = { version = "0.4.3", features = ["serde"] }
+tiny-keccak = { version = "2.0", features = ["sha3"] }
 
 [dev-dependencies]
 reth-engine-primitives.workspace = true

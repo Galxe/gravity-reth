@@ -24,7 +24,8 @@ fn oidc_providers_task_name() -> B256 {
     keccak256("oidc_providers")
 }
 
-// OracleTaskConfig contract ABI (aligned with gravity_chain_core_contracts/src/oracle/IOracleTaskConfig.sol)
+// OracleTaskConfig contract ABI (aligned with
+// gravity_chain_core_contracts/src/oracle/IOracleTaskConfig.sol)
 sol! {
     /// @notice Configuration for a continuous oracle task
     struct OracleTask {
@@ -58,8 +59,12 @@ fn convert_task_config_to_bcs(task: OracleTask) -> Option<Bytes> {
             enabled: false,
             oidc_providers: Vec::new(),
         };
-    
-        return Some(bcs::to_bytes(&jwk_consensus_config).expect("Failed to serialize JwkConsensusConfig").into());
+
+        return Some(
+            bcs::to_bytes(&jwk_consensus_config)
+                .expect("Failed to serialize JwkConsensusConfig")
+                .into(),
+        );
     }
 
     // ABI decode the config bytes to get OIDCProvider[]
@@ -87,8 +92,12 @@ fn convert_task_config_to_bcs(task: OracleTask) -> Option<Bytes> {
         enabled: false,
         oidc_providers: active_providers,
     };
-    
-    Some(bcs::to_bytes(&jwk_consensus_config).expect("Failed to serialize JwkConsensusConfig").into())
+
+    Some(
+        bcs::to_bytes(&jwk_consensus_config)
+            .expect("Failed to serialize JwkConsensusConfig")
+            .into(),
+    )
 }
 
 /// Fetcher for JWK consensus configuration from OracleTaskConfig
@@ -135,7 +144,7 @@ where
 
         let task = getTaskCall::abi_decode_returns(&result)
             .expect("Failed to decode getTask return value");
-        
+
         convert_task_config_to_bcs(task)
     }
 

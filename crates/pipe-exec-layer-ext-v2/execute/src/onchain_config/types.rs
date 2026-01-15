@@ -3,7 +3,7 @@
 
 #![allow(missing_docs)]
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Bytes, U256};
 use alloy_sol_macro::sol;
 use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
 
@@ -62,12 +62,16 @@ sol! {
     );
 }
 
-/// Helper function to convert Ethereum address to `AccountAddress` format
-/// Ethereum addresses are 20 bytes, need to pad to 32 bytes for `AccountAddress`
-pub fn convert_account(acc: &Address) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    bytes[12..].copy_from_slice(acc.as_slice());
-    bytes
+/// Derive 32-byte AccountAddress from BLS consensus public key using SHA3-256
+/// This matches the derivation used in gravity-sdk for validator identity
+pub fn derive_account_address_from_consensus_pubkey(consensus_pubkey: &[u8]) -> [u8; 32] {
+    use tiny_keccak::{Hasher, Sha3};
+
+    let mut hasher = Sha3::v256();
+    hasher.update(consensus_pubkey);
+    let mut output = [0u8; 32];
+    hasher.finalize(&mut output);
+    output
 }
 
 /// Convert Solidity `ValidatorConsensusInfo` to Gravity API `ValidatorInfo`
@@ -78,9 +82,10 @@ pub fn convert_validator_consensus_info(
         validator_config::ValidatorConfig, validator_info::ValidatorInfo as GravityValidatorInfo,
     };
 
-    // Convert Address to AccountAddress (20 bytes -> AccountAddress with 12 bytes padding)
+    // Derive AccountAddress from consensus public key using SHA3-256
+    let account_address_bytes = derive_account_address_from_consensus_pubkey(&info.consensusPubkey);
     let account_address =
-        gravity_api_types::u256_define::AccountAddress::from_bytes(&convert_account(&info.validator));
+        gravity_api_types::u256_define::AccountAddress::from_bytes(&account_address_bytes);
 
     // Convert voting power from wei to ether
     let power_ether = wei_to_ether(info.votingPower);
@@ -104,10 +109,8 @@ pub fn convert_validator_consensus_info(
 /// Convert array of ValidatorConsensusInfo to BCS-encoded ValidatorSet
 /// Used by ValidatorSetFetcher to convert getActiveValidators() response
 pub fn convert_active_validators_to_bcs(validators: &[ValidatorConsensusInfo]) -> Bytes {
-    let total_voting_power: u128 = validators
-        .iter()
-        .map(|v| wei_to_ether(v.votingPower).to::<u128>())
-        .sum();
+    let total_voting_power: u128 =
+        validators.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
 
     let gravity_validator_set = GravityValidatorSet {
         active_validators: validators.iter().map(convert_validator_consensus_info).collect(),
@@ -120,4 +123,3 @@ pub fn convert_active_validators_to_bcs(validators: &[ValidatorConsensusInfo]) -
     // Serialize to BCS format (gravity-aptos standard)
     bcs::to_bytes(&gravity_validator_set).expect("Failed to serialize validator set").into()
 }
-

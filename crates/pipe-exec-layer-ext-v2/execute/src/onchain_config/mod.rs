@@ -19,8 +19,8 @@ pub use dkg::DKGStateFetcher;
 pub use epoch::EpochFetcher;
 pub use metadata_txn::{transact_metadata_contract_call, MetadataTxnResult};
 pub use types::{
-    convert_account, convert_active_validators_to_bcs, convert_validator_consensus_info,
-    ValidatorConsensusInfo, ValidatorStatus,
+    convert_active_validators_to_bcs, convert_validator_consensus_info, ValidatorConsensusInfo,
+    ValidatorStatus,
 };
 pub use validator_set::ValidatorSetFetcher;
 
@@ -63,7 +63,8 @@ pub const VERSION_CONFIG_ADDR: Address = address!("00000000000000000000000000000
 pub const CONSENSUS_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1007");
 pub const EXECUTION_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1008");
 pub const ORACLE_TASK_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1009");
-pub const ON_DEMAND_ORACLE_TASK_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f100a");
+pub const ON_DEMAND_ORACLE_TASK_CONFIG_ADDR: Address =
+    address!("00000000000000000000000000000001625f100a");
 
 // Staking & Validator (0x1625F2xxx)
 pub const STAKING_ADDR: Address = address!("00000000000000000000000000000001625f2000");
@@ -81,7 +82,8 @@ pub const JWK_MANAGER_ADDR: Address = address!("00000000000000000000000000000001
 pub const ORACLE_REQUEST_QUEUE_ADDR: Address = address!("00000000000000000000000000000001625f4002");
 
 // Precompiles (0x1625F5xxx)
-pub const NATIVE_MINT_PRECOMPILE_ADDR: Address = address!("00000000000000000000000000000001625f5000");
+pub const NATIVE_MINT_PRECOMPILE_ADDR: Address =
+    address!("00000000000000000000000000000001625f5000");
 
 // Legacy aliases (for backward compatibility)
 pub const SYSTEM_CONTRACT_ADDRESS: Address = SYSTEM_CALLER;

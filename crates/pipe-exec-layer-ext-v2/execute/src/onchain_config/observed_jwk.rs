@@ -360,11 +360,11 @@ pub(crate) fn construct_jwk_transaction(
     gas_price: u128,
 ) -> Result<TransactionSigned, String> {
     let sol_provider_jwks = convert_into_sol_provider_jwks(provider_jwks.clone());
-    
+
     // Calculate sourceId from issuer hash
     let issuer_hash = keccak256(&provider_jwks.issuer);
     let source_id = U256::from_be_bytes(issuer_hash.0);
-    
+
     // Encode payload: (bytes issuer, uint64 version, RSA_JWK[] jwks)
     // Note: This encodes the RSA JWKs for JWKManager callback
     let rsa_jwks: Vec<OracleRSA_JWK> = sol_provider_jwks
@@ -383,7 +383,7 @@ pub(crate) fn construct_jwk_transaction(
             }
         })
         .collect();
-    
+
     // For now, continue using the old upsertObservedJWKs for backward compatibility
     // TODO: Migrate to NativeOracle.record() once contract migration is complete
     let cross_chain_params = convert_into_sol_crosschain_params(

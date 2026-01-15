@@ -585,9 +585,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
             for log in &receipt.logs {
                 // Check for NewEpochEvent event (epoch change)
-                if let Ok(event) =
-                    crate::onchain_config::types::NewEpochEvent::decode_log(log)
-                {
+                if let Ok(event) = crate::onchain_config::types::NewEpochEvent::decode_log(log) {
                     debug!(target: "execute_ordered_block",
                         number=?block_number,
                         new_epoch=?event.newEpoch,

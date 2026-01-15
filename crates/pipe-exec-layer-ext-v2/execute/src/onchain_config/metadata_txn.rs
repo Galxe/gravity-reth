@@ -8,7 +8,7 @@ use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock}
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
 use gravity_primitives::get_gravity_config;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
@@ -25,7 +25,6 @@ use revm::{
     Database,
 };
 use std::fmt::Debug;
-use alloy_sol_types::SolEvent;
 
 /// NIL proposer index constant (from Blocker.sol)
 /// NIL blocks occur when consensus cannot produce a block with transactions
@@ -209,4 +208,3 @@ pub fn transact_metadata_contract_call(
 
     (MetadataTxnResult { result: result.result, txn }, result.state)
 }
-

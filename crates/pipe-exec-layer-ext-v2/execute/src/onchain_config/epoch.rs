@@ -11,7 +11,8 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 
-// New Reconfiguration contract ABI (aligned with gravity_chain_core_contracts/src/blocker/IReconfiguration.sol)
+// New Reconfiguration contract ABI (aligned with
+// gravity_chain_core_contracts/src/blocker/IReconfiguration.sol)
 sol! {
     contract Reconfiguration {
         function currentEpoch() external view returns (uint64);
