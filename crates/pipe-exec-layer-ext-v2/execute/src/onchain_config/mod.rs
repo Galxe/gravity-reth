@@ -51,7 +51,7 @@ pub const BLOCK_ADDR: Address = address!("00000000000000000000000000000000000020
 pub const TIMESTAMP_ADDR: Address = address!("0000000000000000000000000000000000002017");
 pub const JWK_MANAGER_ADDR: Address = address!("0000000000000000000000000000000000002018");
 /// New JWK Manager contract address (v2) - used after DevnetV0_5 hardfork is active
-pub const JWK_MANAGER_ADDR_V2: Address = address!("2BB0961D1b7f928FB3dF4d90A1A825d55e2F4e1A");
+pub const JWK_MANAGER_ADDR_V2: Address = address!("919F5f9EeA137382099707Ed8cf135f8A43f0205");
 
 /// Get the appropriate JWK Manager address based on whether the upgrade is active
 ///
