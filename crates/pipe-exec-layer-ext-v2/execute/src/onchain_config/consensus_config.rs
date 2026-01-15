@@ -2,7 +2,7 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    CONSENSUS_CONFIG_CONTRACT_ADDRESS, SYSTEM_CALLER,
+    CONSENSUS_CONFIG_ADDR, SYSTEM_CALLER,
 };
 use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
@@ -55,7 +55,7 @@ where
     }
 
     fn contract_address() -> Address {
-        CONSENSUS_CONFIG_CONTRACT_ADDRESS
+        CONSENSUS_CONFIG_ADDR
     }
 
     fn caller_address() -> Address {

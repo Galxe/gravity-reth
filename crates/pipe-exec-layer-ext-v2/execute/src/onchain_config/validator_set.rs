@@ -2,7 +2,7 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    types::{convert_validator_set_to_bcs, getValidatorSetCall},
+    types::{convert_active_validators_to_bcs, getActiveValidatorsCall},
     SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR,
 };
 use alloy_eips::BlockId;
@@ -35,7 +35,8 @@ where
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
-        let call = getValidatorSetCall {};
+        // Use new getActiveValidators() function
+        let call = getActiveValidatorsCall {};
         let input: Bytes = call.abi_encode().into();
 
         let result = self
@@ -46,11 +47,12 @@ where
             })
             .ok()?;
 
-        // Decode the Solidity validator set
-        let solidity_validator_set = getValidatorSetCall::abi_decode_returns(&result)
-            .expect("Failed to decode getValidatorSet return value");
+        // Decode the response as ValidatorConsensusInfo[]
+        let validators = getActiveValidatorsCall::abi_decode_returns(&result)
+            .expect("Failed to decode getActiveValidators return value");
 
-        Some(convert_validator_set_to_bcs(&solidity_validator_set))
+        // Convert to BCS-encoded ValidatorSet format
+        Some(convert_active_validators_to_bcs(&validators))
     }
 
     fn contract_address() -> Address {
