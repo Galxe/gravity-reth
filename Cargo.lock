@@ -9977,6 +9977,7 @@ version = "1.8.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "alloy-sol-macro",
