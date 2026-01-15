@@ -1165,7 +1165,7 @@ where
             verified_block_hash_rx: verified_block_hash_ch.clone(),
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
-            chain_spec,
+            chain_spec: chain_spec.clone(),
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
                 (epoch, latest_block_number),
