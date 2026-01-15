@@ -19,10 +19,8 @@ pub(crate) enum TestRunnerError {
 
 /// A generic test runner for stages.
 pub(crate) trait StageTestRunner {
-    type S: Stage<
-            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>,
-            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TX, MockNodeTypesWithDB>,
-        > + 'static;
+    type S: Stage<DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>>
+        + 'static;
 
     /// Return a reference to the database.
     fn db(&self) -> &TestStageDB;
@@ -51,7 +49,7 @@ pub(crate) trait ExecuteStageTestRunner: StageTestRunner {
         tokio::spawn(async move {
             let result = stage.execute_ready(input).await.and_then(|_| {
                 let provider_rw = db.provider_rw().unwrap();
-                let result = stage.execute(&provider_rw, Box::new(move || db.provider()), input);
+                let result = stage.execute(&provider_rw, input);
                 provider_rw.commit().expect("failed to commit");
                 result
             });
@@ -76,7 +74,7 @@ pub(crate) trait UnwindStageTestRunner: StageTestRunner {
         let (db, mut stage) = (self.db().factory.clone(), self.stage());
         tokio::spawn(async move {
             let provider = db.provider_rw().unwrap();
-            let result = stage.unwind(&provider, Box::new(move || db.provider()), input);
+            let result = stage.unwind(&provider, input);
             provider.commit().expect("failed to commit");
             tx.send(result).expect("failed to send result");
         });

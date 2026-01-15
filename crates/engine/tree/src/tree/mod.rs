@@ -561,7 +561,7 @@ where
 
     fn pipe_run_inner(mut self) {
         let pipe_event_rx =
-            get_pipe_exec_layer_event_bus::<N>().unwrap().event_rx.lock().unwrap().take().unwrap();
+            get_pipe_exec_layer_event_bus::<N>().event_rx.lock().unwrap().take().unwrap();
         loop {
             match self.try_recv_pipe_exec_event(&pipe_event_rx) {
                 Ok(Some(event)) => self.on_pipe_exec_event(event),

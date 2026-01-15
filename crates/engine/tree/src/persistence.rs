@@ -4,7 +4,7 @@ use alloy_eips::BlockNumHash;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
-    tables,
+    set_fail_point, tables,
     transaction::{DbTx, DbTxMut},
 };
 use reth_errors::ProviderError;
@@ -24,6 +24,7 @@ use std::{
         mpsc::{Receiver, SendError, Sender},
         Arc,
     },
+    thread,
     time::Instant,
 };
 use thiserror::Error;
@@ -176,110 +177,143 @@ where
             } in blocks
             {
                 let block_number = recovered_block.number();
-                {
-                    let start = Instant::now();
-                    let provider_rw = self.provider.database_provider_rw()?;
-                    let static_file_provider = self.provider.static_file_provider();
-                    let ck = provider_rw
-                        .tx_ref()
-                        .get::<tables::StageCheckpoints>(StageId::Execution.to_string())
-                        .map_err(ProviderError::Database)?
-                        .unwrap_or_default();
-                    assert_eq!(ck.block_number + 1, block_number);
-                    let body_indices = provider_rw.insert_block(
-                        Arc::unwrap_or_clone(recovered_block),
-                        StorageLocation::Both,
-                    )?;
-                    // Write state and changesets to the database.
-                    // Must be written after blocks because of the receipt lookup.
-                    provider_rw.write_state_with_indices(
-                        &execution_output,
-                        OriginalValuesKnown::No,
-                        StorageLocation::StaticFiles,
-                        Some(vec![body_indices]),
-                    )?;
-                    provider_rw
-                        .tx_ref()
-                        .put::<tables::StageCheckpoints>(
-                            StageId::Execution.to_string(),
-                            StageCheckpoint { block_number, ..ck },
+                let inner_provider = &self.provider;
+
+                // Parallel execution of state and trie updates is safe because the database is
+                // split into three separate RocksDB instances: state_db (for state and history),
+                // account_db (for account trie), and storage_db (for storage trie). This allows
+                // concurrent writes and commits across different DB instances without conflicts.
+                // The `write_trie_updatesv2` implementation also parallelizes writes to account_db
+                // and storage_db internally. For fault tolerance, stage checkpoints ensure
+                // idempotency - each stage's checkpoint is verified before writing, guaranteeing
+                // exactly-once execution even if the process crashes mid-block.
+                thread::scope(|scope| -> Result<(), PersistenceError> {
+                    let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
+                        let start = Instant::now();
+                        let provider_rw = inner_provider.database_provider_rw()?;
+                        let static_file_provider = inner_provider.static_file_provider();
+                        let ck = provider_rw
+                            .tx_ref()
+                            .get::<tables::StageCheckpoints>(StageId::Execution.to_string())
+                            .map_err(ProviderError::Database)?
+                            .unwrap_or_default();
+                        assert_eq!(ck.block_number + 1, block_number);
+                        let body_indices = provider_rw.insert_block(
+                            Arc::unwrap_or_clone(recovered_block),
+                            StorageLocation::Both,
+                        )?;
+                        set_fail_point!("persistence::after_write_state");
+                        // Write state and changesets to the database.
+                        // Must be written after blocks because of the receipt lookup.
+                        provider_rw.write_state_with_indices(
+                            &execution_output,
+                            OriginalValuesKnown::No,
+                            StorageLocation::StaticFiles,
+                            Some(vec![body_indices]),
+                        )?;
+                        provider_rw
+                            .tx_ref()
+                            .put::<tables::StageCheckpoints>(
+                                StageId::Execution.to_string(),
+                                StageCheckpoint { block_number, ..ck },
+                            )
+                            .map_err(ProviderError::Database)?;
+                        static_file_provider.commit()?;
+                        provider_rw.commit()?;
+                        set_fail_point!("persistence::after_state_commit");
+                        metrics::histogram!("save_blocks_time", &[("process", "write_state")])
+                            .record(start.elapsed());
+
+                        let start = Instant::now();
+                        let provider_rw = inner_provider.database_provider_rw()?;
+                        let ck = provider_rw
+                            .tx_ref()
+                            .get::<tables::StageCheckpoints>(StageId::AccountHashing.to_string())
+                            .map_err(ProviderError::Database)?
+                            .unwrap_or_default();
+                        assert_eq!(ck.block_number + 1, block_number);
+                        // insert hashes and intermediate merkle nodes
+                        provider_rw.write_hashed_state(
+                            &Arc::unwrap_or_clone(hashed_state).into_sorted(),
+                        )?;
+                        set_fail_point!("persistence::after_hashed_state");
+                        provider_rw
+                            .tx_ref()
+                            .put::<tables::StageCheckpoints>(
+                                StageId::AccountHashing.to_string(),
+                                StageCheckpoint { block_number, ..ck },
+                            )
+                            .map_err(ProviderError::Database)?;
+                        provider_rw.commit()?;
+                        set_fail_point!("persistence::after_hashed_state_commit");
+                        metrics::histogram!(
+                            "save_blocks_time",
+                            &[("process", "write_hashed_state")]
                         )
-                        .map_err(ProviderError::Database)?;
-                    static_file_provider.commit()?;
-                    provider_rw.commit()?;
-                    metrics::histogram!("save_blocks_time", &[("process", "write_state")])
                         .record(start.elapsed());
-                }
-                {
-                    let start = Instant::now();
-                    let provider_rw = self.provider.database_provider_rw()?;
-                    let ck = provider_rw
-                        .tx_ref()
-                        .get::<tables::StageCheckpoints>(StageId::AccountHashing.to_string())
-                        .map_err(ProviderError::Database)?
-                        .unwrap_or_default();
-                    assert_eq!(ck.block_number + 1, block_number);
-                    // insert hashes and intermediate merkle nodes
-                    provider_rw
-                        .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
-                    provider_rw
-                        .tx_ref()
-                        .put::<tables::StageCheckpoints>(
-                            StageId::AccountHashing.to_string(),
-                            StageCheckpoint { block_number, ..ck },
+
+                        if !get_gravity_config().validator_node_only {
+                            let start = Instant::now();
+                            let provider_rw = inner_provider.database_provider_rw()?;
+                            let ck = provider_rw
+                                .tx_ref()
+                                .get::<tables::StageCheckpoints>(
+                                    StageId::IndexAccountHistory.to_string(),
+                                )
+                                .map_err(ProviderError::Database)?
+                                .unwrap_or_default();
+                            assert_eq!(ck.block_number + 1, block_number);
+                            provider_rw.update_history_indices(block_number..=block_number)?;
+                            set_fail_point!("persistence::after_history_indices");
+                            provider_rw
+                                .tx_ref()
+                                .put::<tables::StageCheckpoints>(
+                                    StageId::IndexAccountHistory.to_string(),
+                                    StageCheckpoint { block_number, ..ck },
+                                )
+                                .map_err(ProviderError::Database)?;
+                            provider_rw.commit()?;
+                            set_fail_point!("persistence::after_history_commit");
+                            metrics::histogram!(
+                                "save_blocks_time",
+                                &[("process", "update_history_indices")]
+                            )
+                            .record(start.elapsed());
+                        }
+                        Ok(())
+                    });
+                    let trie_handle = scope.spawn(|| -> Result<(), PersistenceError> {
+                        let start = Instant::now();
+                        let provider_rw = inner_provider.database_provider_rw()?;
+                        let ck = provider_rw
+                            .tx_ref()
+                            .get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string())
+                            .map_err(ProviderError::Database)?
+                            .unwrap_or_default();
+                        assert_eq!(ck.block_number + 1, block_number);
+                        provider_rw
+                            .write_trie_updatesv2(triev2.as_ref())
+                            .map_err(ProviderError::Database)?;
+                        set_fail_point!("persistence::after_trie_update");
+                        provider_rw
+                            .tx_ref()
+                            .put::<tables::StageCheckpoints>(
+                                StageId::MerkleExecute.to_string(),
+                                StageCheckpoint { block_number, ..ck },
+                            )
+                            .map_err(ProviderError::Database)?;
+                        provider_rw.commit()?;
+                        set_fail_point!("persistence::after_trie_commit");
+                        metrics::histogram!(
+                            "save_blocks_time",
+                            &[("process", "write_trie_updatesv2")]
                         )
-                        .map_err(ProviderError::Database)?;
-                    provider_rw.commit()?;
-                    metrics::histogram!("save_blocks_time", &[("process", "write_hashed_state")])
                         .record(start.elapsed());
-                }
-                {
-                    let start = Instant::now();
-                    let provider_rw = self.provider.database_provider_rw()?;
-                    let ck = provider_rw
-                        .tx_ref()
-                        .get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string())
-                        .map_err(ProviderError::Database)?
-                        .unwrap_or_default();
-                    assert_eq!(ck.block_number + 1, block_number);
-                    provider_rw
-                        .write_trie_updatesv2(triev2.as_ref())
-                        .map_err(ProviderError::Database)?;
-                    provider_rw
-                        .tx_ref()
-                        .put::<tables::StageCheckpoints>(
-                            StageId::MerkleExecute.to_string(),
-                            StageCheckpoint { block_number, ..ck },
-                        )
-                        .map_err(ProviderError::Database)?;
-                    provider_rw.commit()?;
-                    metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")])
-                        .record(start.elapsed());
-                }
-                if !get_gravity_config().validator_node_only {
-                    let start = Instant::now();
-                    let provider_rw = self.provider.database_provider_rw()?;
-                    let ck = provider_rw
-                        .tx_ref()
-                        .get::<tables::StageCheckpoints>(StageId::IndexAccountHistory.to_string())
-                        .map_err(ProviderError::Database)?
-                        .unwrap_or_default();
-                    assert_eq!(ck.block_number + 1, block_number);
-                    provider_rw.update_history_indices(block_number..=block_number)?;
-                    provider_rw
-                        .tx_ref()
-                        .put::<tables::StageCheckpoints>(
-                            StageId::IndexAccountHistory.to_string(),
-                            StageCheckpoint { block_number, ..ck },
-                        )
-                        .map_err(ProviderError::Database)?;
-                    provider_rw.commit()?;
-                    metrics::histogram!(
-                        "save_blocks_time",
-                        &[("process", "update_history_indices")]
-                    )
-                    .record(start.elapsed());
-                }
+                        Ok(())
+                    });
+                    state_handle.join().unwrap()?;
+                    trie_handle.join().unwrap()
+                })?;
                 PERSIST_BLOCK_CACHE.persist_tip(block_number);
             }
             // Update pipeline progress

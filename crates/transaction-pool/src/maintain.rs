@@ -182,13 +182,8 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
     if !get_gravity_config().disable_pipe_execution {
         let pool = pool.clone();
         tokio::spawn(async move {
-            let mut discard_txs_rx = get_pipe_exec_layer_event_bus::<N>()
-                .unwrap()
-                .discard_txs
-                .lock()
-                .await
-                .take()
-                .unwrap();
+            let mut discard_txs_rx =
+                get_pipe_exec_layer_event_bus::<N>().discard_txs.lock().await.take().unwrap();
             while let Some(discard_txs) = discard_txs_rx.recv().await {
                 debug!(target: "txpool", count=%discard_txs.len(), "discarding transactions");
                 pool.remove_transactions(discard_txs);

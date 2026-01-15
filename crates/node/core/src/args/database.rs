@@ -8,7 +8,7 @@ use clap::{
     error::ErrorKind,
     Arg, Args, Command, Error,
 };
-use reth_db::{ClientVersion, DatabaseArguments};
+use reth_db::{ClientVersion, DatabaseArguments, ShardingDirectories};
 use reth_storage_errors::db::LogLevel;
 
 /// Parameters for database configuration (RocksDB)
@@ -33,9 +33,9 @@ pub struct DatabaseArgs {
     /// Default: 14
     #[arg(long = "db.max-background-jobs")]
     pub max_background_jobs: Option<i32>,
-    /// Maximum number of open files. Set to -1 for unlimited.
+    /// Maximum number of open files.
     /// Lower values if you hit OS file descriptor limits.
-    /// Default: -1 (unlimited)
+    /// Default: 10000
     #[arg(long = "db.max-open-files")]
     pub max_open_files: Option<i32>,
     /// Maximum number of write buffers (memtables).
@@ -63,6 +63,13 @@ pub struct DatabaseArgs {
     /// Default: 4MB
     #[arg(long = "db.bytes-per-sync", value_parser = parse_byte_size_u64)]
     pub bytes_per_sync: Option<u64>,
+    /// Semicolon separated RocksDB sharding directories. Accepts 2 or 3 paths.
+    /// Always creates 3 databases (state, account_trie, storage_trie).
+    /// - 0 paths (default): Creates subdirs under --datadir: state/, account_trie/, storage_trie/
+    /// - 2 paths: First dir contains state + account_trie; second dir contains storage_trie
+    /// - 3 paths: First dir is state, second is account_trie, third is storage_trie
+    #[arg(long = "db.sharding-directories", value_parser = parse_sharding_directories)]
+    pub sharding_directories: Option<ShardingDirectories>,
 }
 
 impl DatabaseArgs {
@@ -84,6 +91,7 @@ impl DatabaseArgs {
             .with_level0_file_num_compaction_trigger(self.level0_file_num_compaction_trigger)
             .with_max_bytes_for_level_base(self.max_bytes_for_level_base)
             .with_bytes_per_sync(self.bytes_per_sync)
+            .with_sharding_directories(self.sharding_directories)
     }
 }
 
@@ -201,6 +209,16 @@ fn parse_byte_size(s: &str) -> Result<usize, String> {
 /// Value parser function for u64 byte sizes.
 fn parse_byte_size_u64(s: &str) -> Result<u64, String> {
     s.parse::<ByteSize>().map(|b| b.0 as u64)
+}
+
+/// Value parser for sharding directories (semicolon separated).
+fn parse_sharding_directories(raw: &str) -> Result<ShardingDirectories, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Sharding directories cannot be empty".to_string());
+    }
+    // Leak once to obtain a static str; acceptable because values are process-scoped config.
+    Ok(Box::leak(trimmed.to_owned().into_boxed_str()))
 }
 
 #[cfg(test)]

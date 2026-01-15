@@ -141,6 +141,11 @@ test-utils = [
     "reth-node-ethereum/test-utils",
     "reth-evm-ethereum/test-utils",
 ]
+failpoints = ["fail/failpoints"]
+
+[dependencies.fail]
+version = "0.5"
+optional = true
 
 [[test]]
 name = "e2e_testsuite"

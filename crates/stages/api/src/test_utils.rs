@@ -1,9 +1,6 @@
 #![allow(missing_docs)]
 
-use crate::{
-    BoxedConcurrentProvider, ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput,
-    UnwindOutput,
-};
+use crate::{ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput, UnwindOutput};
 use std::{
     collections::VecDeque,
     sync::{
@@ -71,17 +68,12 @@ impl TestStage {
     }
 }
 
-impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for TestStage {
+impl<Provider> Stage<Provider> for TestStage {
     fn id(&self) -> StageId {
         self.id
     }
 
-    fn execute(
-        &mut self,
-        _: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
-        _input: ExecInput,
-    ) -> Result<ExecOutput, StageError> {
+    fn execute(&mut self, _: &Provider, _input: ExecInput) -> Result<ExecOutput, StageError> {
         self.exec_outputs
             .pop_front()
             .unwrap_or_else(|| panic!("Test stage {} executed too many times.", self.id))
@@ -93,12 +85,7 @@ impl<Provider, ProviderRO> Stage<Provider, ProviderRO> for TestStage {
         Ok(())
     }
 
-    fn unwind(
-        &mut self,
-        _: &Provider,
-        _: BoxedConcurrentProvider<ProviderRO>,
-        _input: UnwindInput,
-    ) -> Result<UnwindOutput, StageError> {
+    fn unwind(&mut self, _: &Provider, _input: UnwindInput) -> Result<UnwindOutput, StageError> {
         self.unwind_outputs
             .pop_front()
             .unwrap_or_else(|| panic!("Test stage {} unwound too many times.", self.id))

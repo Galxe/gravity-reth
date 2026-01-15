@@ -127,6 +127,7 @@ min-trace-logs = [
     "reth-ethereum-cli/min-trace-logs",
 ]
 
+failpoints = ["reth-node-ethereum/failpoints"]
 [[bin]]
 name = "reth"
 path = "src/main.rs"

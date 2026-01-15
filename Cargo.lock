@@ -3850,6 +3850,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fail"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe5e43d0f78a42ad591453aedb1d7ae631ce7ee445c7643691055a9ed8d3b01c"
+dependencies = [
+ "log",
+ "once_cell",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "fast-float2"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7882,6 +7893,7 @@ dependencies = [
  "codspeed-criterion-compat",
  "derive_more",
  "eyre",
+ "fail",
  "metrics",
  "page_size",
  "parking_lot",
@@ -8278,6 +8290,7 @@ dependencies = [
  "crossbeam-channel",
  "derive_more",
  "eyre",
+ "fail",
  "futures",
  "gravity-primitives",
  "metrics",
@@ -10268,6 +10281,7 @@ dependencies = [
  "async-trait",
  "derive_more",
  "dyn-clone",
+ "fail",
  "futures",
  "http",
  "http-body",
