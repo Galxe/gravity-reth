@@ -6,8 +6,12 @@ use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequ
 
 use alloy_primitives::TxKind;
 use gravity_api_types::config_storage::{OnChainConfig, OnChainConfigResType};
+use reth_chainspec::ChainSpec;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use std::{fmt::Debug, sync::OnceLock};
+use std::{
+    fmt::Debug,
+    sync::{Arc, OnceLock},
+};
 use tokio::runtime::Runtime;
 
 static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -89,10 +93,16 @@ where
     }
 
     /// Generic method to fetch config bytes
+    ///
+    /// The `chain_spec` and `timestamp` parameters are used to determine
+    /// which JWK Manager contract address to use for JWK-related configurations.
+    /// This ensures consistent behavior across distributed nodes.
     pub fn fetch_config_bytes(
         &self,
         config_name: OnChainConfig,
         block_id: BlockId,
+        chain_spec: Arc<ChainSpec>,
+        timestamp: u64,
     ) -> Option<OnChainConfigResType> {
         use crate::onchain_config::{
             consensus_config::ConsensusConfigFetcher, dkg::DKGStateFetcher, epoch::EpochFetcher,
@@ -121,11 +131,13 @@ where
                 fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             OnChainConfig::ObservedJWKs => {
-                let fetcher = ObservedJwkFetcher::new(self);
+                // Use chain_spec and timestamp to determine the JWK Manager contract address
+                let fetcher = ObservedJwkFetcher::new(self, chain_spec, timestamp);
                 fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             OnChainConfig::JWKConsensusConfig => {
-                let fetcher = JwkConsensusConfigFetcher::new(self);
+                // Use chain_spec and timestamp to determine the JWK Manager contract address
+                let fetcher = JwkConsensusConfigFetcher::new(self, chain_spec, timestamp);
                 fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             OnChainConfig::DKGState => {
