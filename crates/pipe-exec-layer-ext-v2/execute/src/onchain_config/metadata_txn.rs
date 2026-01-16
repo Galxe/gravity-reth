@@ -180,6 +180,7 @@ pub fn transact_metadata_contract_call(
     proposer: Option<[u8; 32]>,
     enable_randomness: bool,
 ) -> (MetadataTxnResult, EvmState) {
+    let timestamp_us = U256::from(timestamp_us);
     let input: Bytes = if enable_randomness {
         // Use blockPrologueExt - randomness is read from block.difficulty by the contract
         let call = blockPrologueExtCall {
