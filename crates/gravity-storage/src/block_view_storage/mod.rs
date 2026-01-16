@@ -1,6 +1,7 @@
 use crate::GravityStorage;
 use alloy_primitives::{Address, B256, U256};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx, Database};
+use reth_primitives_traits::AlloyBlockHeader;
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
     PersistBlockCache, ProviderError, ProviderResult, StateProviderBox, PERSIST_BLOCK_CACHE,
@@ -83,6 +84,35 @@ where
                 block_number_to_id.pop_first();
             } else {
                 break;
+            }
+        }
+    }
+
+    fn get_block_timestamp(&self, block_number: u64) -> u64 {
+        use reth_primitives_traits::BlockHeader;
+
+        match self.client.database_provider_ro() {
+            Ok(provider) => match provider.header_by_number(block_number) {
+                Ok(Some(header)) => header.timestamp(),
+                Ok(None) => {
+                    tracing::warn!(
+                        "Block header not found for block_number {}, using 0 as timestamp",
+                        block_number
+                    );
+                    0
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to fetch block header for block_number {}: {:?}, using 0 as timestamp",
+                        block_number,
+                        e
+                    );
+                    0
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Failed to get database provider: {:?}, using 0 as timestamp", e);
+                0
             }
         }
     }

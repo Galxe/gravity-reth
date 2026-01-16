@@ -60,6 +60,25 @@ jobs:
             --partition hash:${{ matrix.partition }}/2 \
             -E "!kind(test) and not binary(e2e_testsuite)"
 
+  hardfork-tests:
+    name: hardfork tests
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: rui314/setup-mold@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Run hardfork tests
+        run: |
+          cargo test -p reth-pipe-exec-layer-ext-v2 --test hardfork_tests
+          cargo test -p reth-chainspec test_gravity_devnet
+
+
   state:
     if: false # FIXME: remove this line to enable the state tests job after fixing the issues with the test suite.
     name: Ethereum state tests
@@ -119,7 +138,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     #needs: [test, state, doc]
-    needs: [test]
+    needs: [test, hardfork-tests]
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed

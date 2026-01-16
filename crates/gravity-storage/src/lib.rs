@@ -27,4 +27,9 @@ pub trait GravityStorage: Send + Sync + 'static {
 
     /// Update canonical to `block_number` and reclaim the intermediate result cache
     fn update_canonical(&self, block_number: u64, block_hash: B256);
+
+    /// Get the block timestamp by block number
+    ///
+    /// Returns the timestamp in seconds, or 0 if the block is not found.
+    fn get_block_timestamp(&self, block_number: u64) -> u64;
 }
