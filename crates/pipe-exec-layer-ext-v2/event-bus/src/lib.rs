@@ -12,20 +12,19 @@ use tracing::info;
 pub static PIPE_EXEC_LAYER_EVENT_BUS: OnceCell<Box<dyn Any + Send + Sync>> = OnceCell::new();
 
 /// Get a reference to the global `PipeExecLayerEventBus` instance.
-pub fn get_pipe_exec_layer_event_bus<N: NodePrimitives>(
-) -> Option<&'static PipeExecLayerEventBus<N>> {
+pub fn get_pipe_exec_layer_event_bus<N: NodePrimitives>() -> &'static PipeExecLayerEventBus<N> {
     let mut wait_time = 0;
     loop {
-        sleep(Duration::from_secs(1));
-        wait_time += 1;
         let event_bus = PIPE_EXEC_LAYER_EVENT_BUS
             .get()
             .map(|ext| ext.downcast_ref::<PipeExecLayerEventBus<N>>().unwrap());
         if event_bus.is_some() {
-            break event_bus;
+            break event_bus.unwrap();
         } else if wait_time % 5 == 0 {
             info!("Wait PipeExecLayerEventBus ready...");
         }
+        sleep(Duration::from_secs(1));
+        wait_time += 1;
     }
 }
 

@@ -18,8 +18,8 @@ impl TestStages {
     }
 }
 
-impl<Provider, ProviderRO> StageSet<Provider, ProviderRO> for TestStages {
-    fn builder(self) -> StageSetBuilder<Provider, ProviderRO> {
+impl<Provider> StageSet<Provider> for TestStages {
+    fn builder(self) -> StageSetBuilder<Provider> {
         StageSetBuilder::default().add_stage(
             TestStage::new(TEST_STAGE_ID)
                 .with_exec(self.exec_outputs)

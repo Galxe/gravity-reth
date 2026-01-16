@@ -76,6 +76,7 @@ use std::{
     fmt::Debug,
     ops::{Deref, DerefMut, Range, RangeBounds, RangeInclusive},
     sync::{mpsc, Arc},
+    thread,
 };
 use tracing::{debug, trace};
 
@@ -2311,46 +2312,55 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 
 impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvider<TX, N> {
     fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
-        let mut num_updated = 0;
         let tx = self.tx_ref();
         let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
         let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
-        for path in &input.removed_nodes {
-            account_trie_cursor.delete_by_key((*path).into())?;
-            num_updated += 1;
-        }
-        for (path, node) in &input.account_nodes {
-            account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
-            num_updated += 1;
-        }
-        let num_updated_accounts = num_updated;
-        histogram!("table_block_updated_entries", &[("table", "AccountsTrieV2")])
-            .record(num_updated_accounts as f64);
-
-        for (hashed_address, storage_trie_update) in &input.storage_tries {
-            if storage_trie_update.is_deleted {
-                // self-destruct
-                storage_trie_cursor.delete_by_key(*hashed_address)?;
-                num_updated += 1;
-            } else {
-                for path in &storage_trie_update.removed_nodes {
-                    let path = StoredNibblesSubKey(*path);
-                    storage_trie_cursor.delete_by_key_subkey(*hashed_address, path)?;
+        thread::scope(|scope| -> Result<usize, DatabaseError> {
+            let account_handle = scope.spawn(|| -> Result<usize, DatabaseError> {
+                let mut num_updated = 0;
+                for path in &input.removed_nodes {
+                    account_trie_cursor.delete_by_key((*path).into())?;
                     num_updated += 1;
                 }
-                for (path, node) in &storage_trie_update.storage_nodes {
-                    let path = StoredNibblesSubKey(*path);
-                    storage_trie_cursor
-                        .upsert(*hashed_address, &StorageNodeEntry::new(path, node.clone()))?;
+                for (path, node) in &input.account_nodes {
+                    account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
                     num_updated += 1;
                 }
-            }
-        }
-        let num_updated_storage = num_updated - num_updated_accounts;
-        histogram!("table_block_updated_entries", &[("table", "StoragesTrieV2")])
-            .record(num_updated_storage as f64);
-
-        Ok(num_updated)
+                Ok(num_updated)
+            });
+            let storage_handle = scope.spawn(|| -> Result<usize, DatabaseError> {
+                let mut num_updated = 0;
+                for (hashed_address, storage_trie_update) in &input.storage_tries {
+                    if storage_trie_update.is_deleted {
+                        // self-destruct
+                        storage_trie_cursor.delete_by_key(*hashed_address)?;
+                        num_updated += 1;
+                    } else {
+                        for path in &storage_trie_update.removed_nodes {
+                            let path = StoredNibblesSubKey(*path);
+                            storage_trie_cursor.delete_by_key_subkey(*hashed_address, path)?;
+                            num_updated += 1;
+                        }
+                        for (path, node) in &storage_trie_update.storage_nodes {
+                            let path = StoredNibblesSubKey(*path);
+                            storage_trie_cursor.upsert(
+                                *hashed_address,
+                                &StorageNodeEntry::new(path, node.clone()),
+                            )?;
+                            num_updated += 1;
+                        }
+                    }
+                }
+                Ok(num_updated)
+            });
+            let num_updated_accounts = account_handle.join().unwrap()?;
+            histogram!("table_block_updated_entries", &[("table", "AccountsTrieV2")])
+                .record(num_updated_accounts as f64);
+            let num_updated_storage = storage_handle.join().unwrap()?;
+            histogram!("table_block_updated_entries", &[("table", "StoragesTrieV2")])
+                .record(num_updated_storage as f64);
+            Ok(num_updated_accounts + num_updated_storage)
+        })
     }
 }
 

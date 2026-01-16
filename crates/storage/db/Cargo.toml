@@ -24,11 +24,14 @@ reth-static-file-types.workspace = true
 alloy-primitives.workspace = true
 
 # mdbx
-reth-libmdbx = { workspace = true, optional = true, features = ["return-borrowed", "read-tx-timeouts"] }
+reth-libmdbx = { workspace = true, optional = true, features = [
+    "return-borrowed",
+    "read-tx-timeouts",
+] }
 eyre = { workspace = true, optional = true }
 
 # rocksdb
-rocksdb = { version = "0.22.0", optional = true, default-features = true }
+rocksdb = { version = "0.24.0", optional = true, default-features = true }
 
 # metrics
 metrics = { workspace = true, optional = true }
@@ -98,11 +101,13 @@ arbitrary = [
     "reth-primitives-traits/arbitrary",
     "reth-prune-types/arbitrary",
 ]
-op = [
-    "reth-db-api/op",
-    "reth-primitives-traits/op",
-]
+op = ["reth-db-api/op", "reth-primitives-traits/op"]
+failpoints = ["fail/failpoints"]
 disable-lock = []
+
+[dependencies.fail]
+version = "0.5"
+optional = true
 
 [[bench]]
 name = "hash_keys"

@@ -96,3 +96,4 @@ test-utils = [
     "reth-primitives-traits/test-utils",
     "reth-evm-ethereum/test-utils",
 ]
+failpoints = ["reth-node-builder/failpoints"]

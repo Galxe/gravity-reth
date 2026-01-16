@@ -2,10 +2,17 @@
 
 use crate::{DatabaseError, TableSet};
 use metrics::Label;
-use reth_db_api::{database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, Tables};
+use reth_db_api::{
+    database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, tables, Tables,
+};
 use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
+use reth_tracing::tracing::info;
 use rocksdb::{BlockBasedOptions, Cache, Options, DB};
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub(crate) mod cursor;
 pub(crate) mod tx;
@@ -25,6 +32,12 @@ impl DatabaseEnvKind {
         matches!(self, Self::RW)
     }
 }
+
+/// Copyable sharding directories payload.
+///
+/// Kept as a `'static` str; callers are responsible for providing a leaked string when parsing
+/// CLI/config input.
+pub type ShardingDirectories = &'static str;
 
 /// Database arguments for RocksDB.
 #[derive(Debug, Clone)]
@@ -60,17 +73,20 @@ pub struct DatabaseArguments {
     /// Bytes to write before background sync (default: 4MB).
     /// Larger values reduce I/O overhead but may affect durability guarantees.
     pub bytes_per_sync: Option<u64>,
+    /// Semicolon separated RocksDB sharding directories.
+    /// If set, must contain 2 or 3 paths. See `DatabaseEnv::open` for routing rules.
+    pub sharding_directories: Option<ShardingDirectories>,
 }
 
 impl DatabaseArguments {
-    /// Default block cache size: 8GB
-    pub const DEFAULT_BLOCK_CACHE_SIZE: usize = 8 * 1024 * 1024 * 1024;
-    /// Default write buffer size: 256MB
-    pub const DEFAULT_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
+    /// Default block cache size: 4GB
+    pub const DEFAULT_BLOCK_CACHE_SIZE: usize = 4 * 1024 * 1024 * 1024;
+    /// Default write buffer size: 128MB
+    pub const DEFAULT_WRITE_BUFFER_SIZE: usize = 128 * 1024 * 1024;
     /// Default max background jobs: 14
     pub const DEFAULT_MAX_BACKGROUND_JOBS: i32 = 14;
-    /// Default max open files: unlimited (-1)
-    pub const DEFAULT_MAX_OPEN_FILES: i32 = -1;
+    /// Default max open files: 10000
+    pub const DEFAULT_MAX_OPEN_FILES: i32 = 10000;
     /// Default max write buffer number: 6
     pub const DEFAULT_MAX_WRITE_BUFFER_NUMBER: i32 = 6;
     /// Default compaction readahead size: 4MB
@@ -96,6 +112,7 @@ impl DatabaseArguments {
             level0_file_num_compaction_trigger: None,
             max_bytes_for_level_base: None,
             bytes_per_sync: None,
+            sharding_directories: None,
         }
     }
 
@@ -159,6 +176,12 @@ impl DatabaseArguments {
         self
     }
 
+    /// Set sharding directories for RocksDB (semicolon separated paths).
+    pub fn with_sharding_directories(mut self, dirs: Option<ShardingDirectories>) -> Self {
+        self.sharding_directories = dirs;
+        self
+    }
+
     /// Get the client version.
     pub fn client_version(&self) -> &ClientVersion {
         &self.client_version
@@ -209,6 +232,11 @@ impl DatabaseArguments {
     pub fn bytes_per_sync(&self) -> u64 {
         self.bytes_per_sync.unwrap_or(Self::DEFAULT_BYTES_PER_SYNC)
     }
+
+    /// Get sharding directories if configured.
+    pub fn sharding_directories(&self) -> Option<&str> {
+        self.sharding_directories
+    }
 }
 
 impl Default for DatabaseArguments {
@@ -220,8 +248,12 @@ impl Default for DatabaseArguments {
 /// RocksDB database environment.
 #[derive(Debug)]
 pub struct DatabaseEnv {
-    /// Inner RocksDB database.
-    pub(crate) inner: Arc<DB>,
+    /// RocksDB database for state and history tables.
+    pub(crate) state_db: Arc<DB>,
+    /// RocksDB database for account trie tables.
+    pub(crate) account_db: Arc<DB>,
+    /// RocksDB database for storage trie tables.
+    pub(crate) storage_db: Arc<DB>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
 }
@@ -233,114 +265,178 @@ impl DatabaseEnv {
         kind: DatabaseEnvKind,
         args: DatabaseArguments,
     ) -> Result<Self, DatabaseError> {
+        // Determine sharding layout (always 3 databases)
+        let (state_path, account_path, storage_path) =
+            Self::resolve_shard_paths(path, args.sharding_directories())?;
+        info!(target: "database::open", state_path = ?state_path, account_path = ?account_path, storage_path = ?storage_path , "Generate RocksDB instance path");
+
+        // Configure RocksDB options (shared across the 3-db architecture)
+        let opts = Self::create_db_options(&args);
+
+        // Assign tables to their target databases
+        let tables_by_path =
+            Self::assign_tables_to_shards(&state_path, &account_path, &storage_path);
+        info!(target: "database::open", tables_by_path = ?tables_by_path, "Assign tables into RocksDB instance");
+
+        // Open one RocksDB per unique path
+        let dbs = Self::open_rocksdb_instances(&opts, tables_by_path)?;
+
+        let state_db = dbs.get(&state_path).cloned().expect("state DB handle missing");
+        let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
+        let storage_db = dbs.get(&storage_path).cloned().expect("storage DB handle missing");
+
+        Ok(Self { state_db, account_db, storage_db, kind })
+    }
+
+    /// Resolve shard paths based on configuration.
+    /// Always returns 3 distinct (or aliased) paths for state, account_trie, storage_trie.
+    fn resolve_shard_paths(
+        base_path: &Path,
+        sharding_config: Option<&str>,
+    ) -> Result<(PathBuf, PathBuf, PathBuf), DatabaseError> {
+        match sharding_config {
+            Some(raw) => {
+                let parts: Vec<_> =
+                    raw.split(';').map(str::trim).filter(|p| !p.is_empty()).collect();
+                match parts.len() {
+                    2 => {
+                        // First dir: state + account; Second dir: storage
+                        let dir1 = PathBuf::from(parts[0]);
+                        let dir2 = PathBuf::from(parts[1]);
+                        Ok((
+                            dir1.join("state"),
+                            dir1.join("account_trie"),
+                            dir2.join("storage_trie"),
+                        ))
+                    }
+                    3 => {
+                        // First: state; Second: account; Third: storage
+                        let dir1 = PathBuf::from(parts[0]);
+                        let dir2 = PathBuf::from(parts[1]);
+                        let dir3 = PathBuf::from(parts[2]);
+                        Ok((dir1.clone(), dir2.clone(), dir3.clone()))
+                    }
+                    other => Err(DatabaseError::Other(format!(
+                        "db.sharding-directories expects 2 or 3 ';' separated paths, got {}",
+                        other
+                    ))),
+                }
+            }
+            None => {
+                // Default: create 3 subdirectories under base path
+                Ok((
+                    base_path.join("state"),
+                    base_path.join("account_trie"),
+                    base_path.join("storage_trie"),
+                ))
+            }
+        }
+    }
+
+    /// Create optimized RocksDB options for 3-db architecture.
+    fn create_db_options(args: &DatabaseArguments) -> Options {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
         // === Parallelism Configuration ===
-        // Configure background jobs for compaction and flush
         opts.set_max_background_jobs(args.max_background_jobs());
-
-        // Increase parallelism for multi-threaded compactions
         let parallelism = (args.max_background_jobs() + 2).max(4) as i32;
         opts.increase_parallelism(parallelism);
-
-        // Set max open files limit
         opts.set_max_open_files(args.max_open_files());
 
         // === Memory Configuration ===
-        // Write buffer size per memtable
         let write_buffer_size = args.write_buffer_size();
         opts.set_write_buffer_size(write_buffer_size);
-
-        // Configure max write buffers (memtables) before blocking writes
-        // More buffers allow absorbing write spikes but use more memory
         opts.set_max_write_buffer_number(args.max_write_buffer_number());
-
-        // Min write buffers to merge before flush (reduce write amplification)
         opts.set_min_write_buffer_number_to_merge(2);
+        opts.set_db_write_buffer_size(3 * 1024 * 1024 * 1024);
 
-        // Total memtable size across all column families (8GB)
-        // Helps absorb write spikes
-        opts.set_db_write_buffer_size(8 * 1024 * 1024 * 1024);
-
-        // === Block Cache Configuration ===
-        // Shared block cache for all column families (configurable, default 8GB)
-        // Critical for read performance with frequent random reads
+        // === Block Cache Configuration (per DB) ===
         let block_cache_size = args.block_cache_size();
         let cache = Cache::new_lru_cache(block_cache_size);
         let mut block_opts = BlockBasedOptions::default();
         block_opts.set_block_cache(&cache);
-        block_opts.set_block_size(32 * 1024); // 32KB blocks (good for random reads)
-        block_opts.set_cache_index_and_filter_blocks(true); // Cache index/filters
-        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); // Keep L0 indexes in cache
-
-        // Enable bloom filters for faster point lookups
-        block_opts.set_bloom_filter(10.0, false); // 10 bits per key
-
+        block_opts.set_block_size(32 * 1024);
+        block_opts.set_cache_index_and_filter_blocks(true);
+        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        block_opts.set_bloom_filter(10.0, false);
         opts.set_block_based_table_factory(&block_opts);
 
         // === Compaction Configuration ===
-        // Level-based compaction with higher thresholds to delay write stalls
         opts.set_level_compaction_dynamic_level_bytes(true);
-
-        // L0 file triggers - configurable to balance read/write amplification
         let l0_trigger = args.level0_file_num_compaction_trigger();
         opts.set_level_zero_file_num_compaction_trigger(l0_trigger);
-        // Slowdown and stop triggers scale with compaction trigger
-        opts.set_level_zero_slowdown_writes_trigger(l0_trigger * 7); // 7x trigger
-        opts.set_level_zero_stop_writes_trigger(l0_trigger * 12); // 12x trigger
-
-        // Pending compaction bytes limits - increased for high-throughput
-        // Soft limit triggers slowdown, hard limit stops writes
-        opts.set_soft_pending_compaction_bytes_limit(128 * 1024 * 1024 * 1024); // 128GB
-        opts.set_hard_pending_compaction_bytes_limit(512 * 1024 * 1024 * 1024); // 512GB
-
-        // Target file size for L1 (256MB, doubles per level)
+        opts.set_level_zero_slowdown_writes_trigger(l0_trigger * 7);
+        opts.set_level_zero_stop_writes_trigger(l0_trigger * 12);
+        opts.set_soft_pending_compaction_bytes_limit(64 * 1024 * 1024 * 1024); // 64GB
+        opts.set_hard_pending_compaction_bytes_limit(256 * 1024 * 1024 * 1024); // 256GB
         opts.set_target_file_size_base(256 * 1024 * 1024);
         opts.set_target_file_size_multiplier(2);
-
-        // L1 size - configurable to control LSM tree structure
         opts.set_max_bytes_for_level_base(args.max_bytes_for_level_base());
         opts.set_max_bytes_for_level_multiplier(10.0);
-
-        // Maximum compaction bytes at once (2GB)
         opts.set_max_compaction_bytes(2 * 1024 * 1024 * 1024);
 
         // === Write Configuration ===
-        // Note: set_delayed_write_rate not available in rocksdb-rs 0.22
-        // The default delayed_write_rate will be used when write stall occurs
-
-        // Enable pipelined writes for better concurrency
         opts.set_enable_pipelined_write(true);
-
-        // WAL configuration
-        opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2GB max WAL size
-        opts.set_wal_bytes_per_sync(4 * 1024 * 1024); // Sync WAL every 4MB
+        opts.set_max_total_wal_size(1 * 1024 * 1024 * 1024); // 1GB max WAL per DB
+        opts.set_wal_bytes_per_sync(4 * 1024 * 1024);
 
         // === Compression Configuration ===
-        // Use LZ4 for L0-L1 (fast), Zstd for L2+ (better compression)
         opts.set_compression_per_level(&[
-            rocksdb::DBCompressionType::Lz4,  // L0
-            rocksdb::DBCompressionType::Lz4,  // L1
-            rocksdb::DBCompressionType::Zstd, // L2
-            rocksdb::DBCompressionType::Zstd, // L3
-            rocksdb::DBCompressionType::Zstd, // L4
-            rocksdb::DBCompressionType::Zstd, // L5
-            rocksdb::DBCompressionType::Zstd, // L6
+            rocksdb::DBCompressionType::Lz4,
+            rocksdb::DBCompressionType::Lz4,
+            rocksdb::DBCompressionType::Zstd,
+            rocksdb::DBCompressionType::Zstd,
+            rocksdb::DBCompressionType::Zstd,
+            rocksdb::DBCompressionType::Zstd,
+            rocksdb::DBCompressionType::Zstd,
         ]);
 
         // === I/O Optimization ===
-        // Optimize for SSD with high IOPS
-        opts.set_bytes_per_sync(args.bytes_per_sync()); // Configurable background sync
-        opts.set_compaction_readahead_size(args.compaction_readahead_size()); // Configurable compaction readahead
+        opts.set_bytes_per_sync(args.bytes_per_sync());
+        opts.set_compaction_readahead_size(args.compaction_readahead_size());
 
-        // Get all required table names
-        let required_tables: Vec<String> = Tables::tables().map(|t| t.name().to_string()).collect();
-        let db = DB::open_cf(&opts, path, &required_tables)
-            .map_err(|e| DatabaseError::Other(format!("Failed to open RocksDB: {}", e)))?;
+        opts
+    }
 
-        Ok(Self { inner: Arc::new(db), kind })
+    /// Assign tables to their target shard databases.
+    fn assign_tables_to_shards(
+        state_path: &Path,
+        account_trie_path: &Path,
+        storage_trie_path: &Path,
+    ) -> HashMap<PathBuf, Vec<String>> {
+        let mut tables_by_path: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for table in Tables::tables() {
+            let name = table.name().to_string();
+            let target = match name.as_str() {
+                tables::AccountsTrieV2::NAME => account_trie_path,
+                tables::StoragesTrieV2::NAME => storage_trie_path,
+                _ => state_path,
+            };
+            tables_by_path.entry(target.to_path_buf()).or_default().push(name);
+        }
+        tables_by_path
+    }
+
+    /// Open RocksDB instances for all unique shard paths.
+    fn open_rocksdb_instances(
+        opts: &Options,
+        tables_by_path: HashMap<PathBuf, Vec<String>>,
+    ) -> Result<HashMap<PathBuf, Arc<DB>>, DatabaseError> {
+        let mut dbs: HashMap<PathBuf, Arc<DB>> = HashMap::new();
+        for (db_path, cf_names) in tables_by_path.iter() {
+            let db = DB::open_cf(opts, db_path, cf_names).map_err(|e| {
+                DatabaseError::Other(format!(
+                    "Failed to open RocksDB at {}: {}",
+                    db_path.display(),
+                    e
+                ))
+            })?;
+            info!("Success open RocksDb at {:?}", db_path);
+            dbs.insert(db_path.clone(), Arc::new(db));
+        }
+        Ok(dbs)
     }
 
     /// Returns `true` if the database is read-only.
@@ -369,7 +465,7 @@ impl DatabaseEnv {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         if version.is_empty() {
-            return Ok(())
+            return Ok(());
         }
 
         let tx = self.tx_mut()?;
@@ -399,7 +495,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Check num_files_at_level0 and estimate_pending_compaction_bytes
         // - Increase max_background_jobs (currently 14)
         // - Increase delayed_write_rate limit (currently 64MB/s)
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.actual-delayed-write-rate") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.actual-delayed-write-rate") {
             if let Ok(rate) = value.parse::<u64>() {
                 metrics.push(("rocksdb.actual_delayed_write_rate", rate as f64, vec![]));
             }
@@ -413,7 +509,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Or pending_compaction_bytes >= 512GB (hard limit)
         // - Increase level_zero_stop_writes_trigger above 50
         // - Increase hard_pending_compaction_bytes_limit above 512GB
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.is-write-stopped") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.is-write-stopped") {
             if let Ok(stopped) = value.parse::<u64>() {
                 metrics.push(("rocksdb.is_write_stopped", stopped as f64, vec![]));
             }
@@ -426,7 +522,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Increase max_background_jobs for more flush threads
         // - Reduce write_buffer_size (currently 256MB) to flush more frequently
         // - Increase max_write_buffer_number above 6 for more buffer
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-immutable-mem-table") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-immutable-mem-table") {
             if let Ok(num) = value.parse::<u64>() {
                 metrics.push(("rocksdb.num_immutable_mem_table", num as f64, vec![]));
             }
@@ -437,7 +533,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // Threshold: 0 = healthy, 1 = flush in progress or queued
         // Action: If sustained at 1 with high num_immutable_mem_table
         // - Same actions as num_immutable_mem_table
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.mem-table-flush-pending") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.mem-table-flush-pending") {
             if let Ok(pending) = value.parse::<u64>() {
                 metrics.push(("rocksdb.mem_table_flush_pending", pending as f64, vec![]));
             }
@@ -455,7 +551,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // - >=50: Writes stopped, immediate action needed
         //   - Increase level_zero_stop_writes_trigger above 50
         //   - Reduce write throughput temporarily
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-files-at-level0") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-files-at-level0") {
             if let Ok(num) = value.parse::<u64>() {
                 metrics.push(("rocksdb.num_files_at_level0", num as f64, vec![]));
             }
@@ -474,7 +570,7 @@ impl DatabaseMetrics for DatabaseEnv {
         //   - Increase hard_pending_compaction_bytes_limit above 512GB
         //   - Add more CPU cores to max_background_jobs
         if let Ok(Some(value)) =
-            self.inner.property_value("rocksdb.estimate-pending-compaction-bytes")
+            self.state_db.property_value("rocksdb.estimate-pending-compaction-bytes")
         {
             if let Ok(bytes) = value.parse::<u64>() {
                 metrics.push(("rocksdb.estimate_pending_compaction_bytes", bytes as f64, vec![]));
@@ -487,7 +583,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // Action: If approaching 8GB with high num_immutable_mem_table
         // - Flush is bottlenecked, same actions as num_immutable_mem_table
         // - May increase db_write_buffer_size if memory available
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.cur-size-all-mem-tables") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.cur-size-all-mem-tables") {
             if let Ok(size) = value.parse::<u64>() {
                 metrics.push(("rocksdb.cur_size_all_mem_tables", size as f64, vec![]));
             }
@@ -499,7 +595,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // Action: If consistently at max (14) with pending_compaction_bytes growing
         // - Increase max_background_jobs above 14 (if CPU available)
         // - Check disk I/O is not saturated (30000 IOPS available)
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-running-compactions") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-running-compactions") {
             if let Ok(num) = value.parse::<u64>() {
                 metrics.push(("rocksdb.num_running_compactions", num as f64, vec![]));
             }
@@ -512,7 +608,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Check disk write bandwidth (may be saturated)
         // - Reduce write_buffer_size (256MB) for faster individual flushes
         // - Increase max_background_jobs for more flush threads
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.num-running-flushes") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-running-flushes") {
             if let Ok(num) = value.parse::<u64>() {
                 metrics.push(("rocksdb.num_running_flushes", num as f64, vec![]));
             }
@@ -524,7 +620,7 @@ impl DatabaseMetrics for DatabaseEnv {
         // Action: If 1 with high estimate_pending_compaction_bytes
         // - See estimate_pending_compaction_bytes actions
         // - Indicates compaction scheduler is active
-        if let Ok(Some(value)) = self.inner.property_value("rocksdb.compaction-pending") {
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.compaction-pending") {
             if let Ok(pending) = value.parse::<u64>() {
                 metrics.push(("rocksdb.compaction_pending", pending as f64, vec![]));
             }
@@ -536,9 +632,14 @@ impl DatabaseMetrics for DatabaseEnv {
     fn gauge_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
         let mut metrics = Vec::new();
         for table in Tables::ALL.iter().map(Tables::name) {
-            if let Some(cf_handle) = self.inner.cf_handle(table) {
+            let db = match table {
+                tables::AccountsTrieV2::NAME => &self.account_db,
+                tables::StoragesTrieV2::NAME => &self.storage_db,
+                _ => &self.state_db,
+            };
+            if let Some(cf_handle) = db.cf_handle(table) {
                 if let Ok(Some(value)) =
-                    self.inner.property_value_cf(cf_handle, "rocksdb.estimate-num-keys")
+                    db.property_value_cf(cf_handle, "rocksdb.estimate-num-keys")
                 {
                     if let Ok(entries) = value.parse::<usize>() {
                         metrics.push((
@@ -560,11 +661,11 @@ impl reth_db_api::database::Database for DatabaseEnv {
     type TXMut = tx::Tx<tx::RW>;
 
     fn tx(&self) -> Result<Self::TX, crate::DatabaseError> {
-        Ok(tx::Tx::new(self.inner.clone()))
+        Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
-        Ok(tx::Tx::new(self.inner.clone()))
+        Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
     }
 }
 
