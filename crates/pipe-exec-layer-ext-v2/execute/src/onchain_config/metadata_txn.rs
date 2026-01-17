@@ -1,9 +1,7 @@
 //! Metadata transaction execution
 
 use super::{
-    types::{
-        blockPrologueCall, blockPrologueExtCall, convert_validator_set_to_bcs, AllValidatorsUpdated,
-    },
+    types::{convert_active_validators_to_bcs, onBlockStartCall, NewEpochEvent},
     SYSTEM_CALLER,
 };
 use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
@@ -28,6 +26,10 @@ use revm::{
 };
 use std::fmt::Debug;
 
+/// NIL proposer index constant (from Blocker.sol)
+/// NIL blocks occur when consensus cannot produce a block with transactions
+pub const NIL_PROPOSER_INDEX: u64 = u64::MAX;
+
 /// Result of a metadata transaction execution
 #[derive(Debug)]
 pub struct MetadataTxnResult {
@@ -38,15 +40,14 @@ pub struct MetadataTxnResult {
 }
 
 impl MetadataTxnResult {
-    /// Check if the transaction emitted a `NewEpoch` event
+    /// Check if the transaction emitted a `NewEpochEvent` event
     pub fn emit_new_epoch(&self) -> Option<(u64, Bytes)> {
         for log in self.result.logs() {
-            match AllValidatorsUpdated::decode_log(log) {
+            match NewEpochEvent::decode_log(log) {
                 Ok(event) => {
-                    let solidity_validator_set = &event.validatorSet;
-                    // Convert to Gravity validator set
-                    let validator_bytes = convert_validator_set_to_bcs(solidity_validator_set);
-                    return Some((event.newEpoch.to::<u64>(), validator_bytes));
+                    // Convert ValidatorConsensusInfo[] to BCS-encoded ValidatorSet
+                    let validator_bytes = convert_active_validators_to_bcs(&event.validatorSet);
+                    return Some((event.newEpoch, validator_bytes));
                 }
                 Err(_) => {}
             }
@@ -167,36 +168,30 @@ fn new_system_call_txn(
     )
 }
 
-/// Execute a metadata contract call (blockPrologue or blockPrologueExt)
+/// Execute a metadata contract call (onBlockStart from Blocker.sol)
 ///
-/// If `enable_randomness` is true, calls blockPrologueExt.
-/// Otherwise, calls the legacy blockPrologue function.
+/// Calls Blocker.onBlockStart(proposerIndex, failedProposerIndices, timestampMicros)
+/// to perform block prologue operations including:
+/// - Resolving proposer address from index
+/// - Updating global timestamp
+/// - Checking and potentially starting epoch transition
 ///
-/// Note: blockPrologueExt retrieves randomness from block.difficulty (set before this call),
-/// so it doesn't need to be passed as a parameter.
+/// @param proposer_index Index of the proposer in the active validator set,
+///        or None for NIL blocks (will use NIL_PROPOSER_INDEX = u64::MAX)
 pub fn transact_metadata_contract_call(
     evm: &mut impl Evm<DB = impl Database, Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     timestamp_us: u64,
-    proposer: Option<[u8; 32]>,
-    enable_randomness: bool,
+    proposer_index: Option<u64>,
 ) -> (MetadataTxnResult, EvmState) {
-    let input: Bytes = if enable_randomness {
-        // Use blockPrologueExt - randomness is read from block.difficulty by the contract
-        let call = blockPrologueExtCall {
-            proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
-            failedProposerIndices: vec![],
-            timestampMicros: timestamp_us,
-        };
-        call.abi_encode().into()
-    } else {
-        // Use legacy blockPrologue without randomness
-        let call = blockPrologueCall {
-            proposer: proposer.map(|p| Bytes::from(p)).unwrap_or(Bytes::from([0u8; 32])),
-            failedProposerIndices: vec![],
-            timestampMicros: timestamp_us,
-        };
-        call.abi_encode().into()
+    // For NIL blocks, use NIL_PROPOSER_INDEX (type(uint64).max in Solidity)
+    let proposer_idx = proposer_index.unwrap_or(NIL_PROPOSER_INDEX);
+
+    let call = onBlockStartCall {
+        proposerIndex: proposer_idx,
+        failedProposerIndices: vec![],
+        timestampMicros: timestamp_us,
     };
+    let input: Bytes = call.abi_encode().into();
 
     let system_call_account =
         evm.db_mut().basic(SYSTEM_CALLER).unwrap().expect("SYSTEM_CALLER not exists");
@@ -209,8 +204,7 @@ pub fn transact_metadata_contract_call(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
 
-    let function_name = if enable_randomness { "blockPrologueExt" } else { "blockPrologue" };
-    assert!(result.result.is_success(), "Failed to execute {}: {:?}", function_name, result.result);
+    assert!(result.result.is_success(), "Failed to execute onBlockStart: {:?}", result.result);
 
     (MetadataTxnResult { result: result.result, txn }, result.state)
 }

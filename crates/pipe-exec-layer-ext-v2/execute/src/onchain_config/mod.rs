@@ -19,7 +19,7 @@ pub use dkg::DKGStateFetcher;
 pub use epoch::EpochFetcher;
 pub use metadata_txn::{transact_metadata_contract_call, MetadataTxnResult};
 pub use types::{
-    convert_account, convert_validator_info, Commission, ValidatorInfo, ValidatorSet,
+    convert_active_validators_to_bcs, convert_validator_consensus_info, ValidatorConsensusInfo,
     ValidatorStatus,
 };
 pub use validator_set::ValidatorSetFetcher;
@@ -36,30 +36,59 @@ pub const VALIDATOR_SET_CONTRACT_ADDRESS: Address =
     address!("00000000000000000000000000000000000000f3");
 
 pub const DEAD_ADDRESS: Address = address!("000000000000000000000000000000000000dEaD");
-pub const SYSTEM_CALLER: Address = address!("0000000000000000000000000000000000002000");
-pub const PERFORMANCE_TRACKER_ADDR: Address = address!("000000000000000000000000000000000000200f");
-pub const EPOCH_MANAGER_ADDR: Address = address!("0000000000000000000000000000000000002010");
-pub const STAKE_CONFIG_ADDR: Address = address!("0000000000000000000000000000000000002011");
-pub const DELEGATION_ADDR: Address = address!("0000000000000000000000000000000000002012");
-pub const VALIDATOR_MANAGER_ADDR: Address = address!("0000000000000000000000000000000000002013");
-pub const VALIDATOR_MANAGER_UTILS_ADDR: Address =
-    address!("0000000000000000000000000000000000002014");
-pub const VALIDATOR_PERFORMANCE_TRACKER_ADDR: Address =
-    address!("0000000000000000000000000000000000002015");
-pub const BLOCK_ADDR: Address = address!("0000000000000000000000000000000000002016");
-pub const TIMESTAMP_ADDR: Address = address!("0000000000000000000000000000000000002017");
-pub const JWK_MANAGER_ADDR: Address = address!("0000000000000000000000000000000000002018");
-pub const KEYLESS_ACCOUNT_ADDR: Address = address!("0000000000000000000000000000000000002019");
-pub const SYSTEM_REWARD_ADDR: Address = address!("000000000000000000000000000000000000201A");
-pub const GOV_HUB_ADDR: Address = address!("000000000000000000000000000000000000201b");
-pub const STAKE_CREDIT_ADDR: Address = address!("000000000000000000000000000000000000201c");
-pub const GOV_TOKEN_ADDR: Address = address!("000000000000000000000000000000000000201D");
-pub const GOVERNOR_ADDR: Address = address!("000000000000000000000000000000000000201E");
-pub const TIMELOCK_ADDR: Address = address!("000000000000000000000000000000000000201F");
-pub const DKG_ADDR: Address = address!("0000000000000000000000000000000000002021");
-pub const RECONFIGURATION_WITH_DKG_ADDR: Address =
-    address!("0000000000000000000000000000000000002022");
-pub const SYSTEM_CONTRACT_ADDRESS: Address = address!("0000000000000000000000000000000000002000");
+
+// ============================================================================
+// System Addresses (aligned with gravity_chain_core_contracts/src/foundation/SystemAddresses.sol)
+// Address ranges:
+//   0x1625F0xxx: Consensus Engine
+//   0x1625F1xxx: Runtime Configurations
+//   0x1625F2xxx: Staking & Validator
+//   0x1625F3xxx: Governance
+//   0x1625F4xxx: Oracle
+//   0x1625F5xxx: Precompiles
+// ============================================================================
+
+// Consensus Engine (0x1625F0xxx)
+pub const SYSTEM_CALLER: Address = address!("00000000000000000000000000000001625f0000");
+pub const GENESIS_ADDR: Address = address!("00000000000000000000000000000001625f0001");
+
+// Runtime Configurations (0x1625F1xxx)
+pub const TIMESTAMP_ADDR: Address = address!("00000000000000000000000000000001625f1000");
+pub const STAKE_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1001");
+pub const VALIDATOR_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1002");
+pub const RANDOMNESS_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1003");
+pub const GOVERNANCE_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1004");
+pub const EPOCH_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1005");
+pub const VERSION_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1006");
+pub const CONSENSUS_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1007");
+pub const EXECUTION_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1008");
+pub const ORACLE_TASK_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1009");
+pub const ON_DEMAND_ORACLE_TASK_CONFIG_ADDR: Address =
+    address!("00000000000000000000000000000001625f100a");
+
+// Staking & Validator (0x1625F2xxx)
+pub const STAKING_ADDR: Address = address!("00000000000000000000000000000001625f2000");
+pub const VALIDATOR_MANAGER_ADDR: Address = address!("00000000000000000000000000000001625f2001");
+pub const DKG_ADDR: Address = address!("00000000000000000000000000000001625f2002");
+pub const RECONFIGURATION_ADDR: Address = address!("00000000000000000000000000000001625f2003");
+pub const BLOCK_ADDR: Address = address!("00000000000000000000000000000001625f2004");
+
+// Governance (0x1625F3xxx)
+pub const GOVERNANCE_ADDR: Address = address!("00000000000000000000000000000001625f3000");
+
+// Oracle (0x1625F4xxx)
+pub const NATIVE_ORACLE_ADDR: Address = address!("00000000000000000000000000000001625f4000");
+pub const JWK_MANAGER_ADDR: Address = address!("00000000000000000000000000000001625f4001");
+pub const ORACLE_REQUEST_QUEUE_ADDR: Address = address!("00000000000000000000000000000001625f4002");
+
+// Precompiles (0x1625F5xxx)
+pub const NATIVE_MINT_PRECOMPILE_ADDR: Address =
+    address!("00000000000000000000000000000001625f5000");
+
+// Legacy aliases (for backward compatibility)
+pub const SYSTEM_CONTRACT_ADDRESS: Address = SYSTEM_CALLER;
+pub const EPOCH_MANAGER_ADDR: Address = RECONFIGURATION_ADDR;
+pub const RECONFIGURATION_WITH_DKG_ADDR: Address = RECONFIGURATION_ADDR;
 
 // ============================================================================
 // Validator Transactions Construction

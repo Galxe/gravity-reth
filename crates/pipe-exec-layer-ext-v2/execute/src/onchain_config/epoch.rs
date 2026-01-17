@@ -11,9 +11,12 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 
+// New Reconfiguration contract ABI (aligned with
+// gravity_chain_core_contracts/src/blocker/IReconfiguration.sol)
 sol! {
-    contract EpochManager {
-        function getCurrentEpochInfo() external view returns (uint256 epoch, uint256 lastTransitionTime, uint256 interval);
+    contract Reconfiguration {
+        function currentEpoch() external view returns (uint64);
+        function lastReconfigurationTime() external view returns (uint64);
     }
 }
 
@@ -47,10 +50,9 @@ where
 
         #[cfg(not(feature = "pipe_test"))]
         {
-            let call = EpochManager::getCurrentEpochInfoCall {};
+            let call = Reconfiguration::currentEpochCall {};
             let input: Bytes = call.abi_encode().into();
 
-            // uint64 currentEpoch = uint64(IEpochManager(EPOCH_MANAGER_ADDR).currentEpoch());
             let result = self
                 .base_fetcher
                 .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
@@ -59,11 +61,10 @@ where
                 })
                 .ok()?;
 
-            let epoch_info = EpochManager::getCurrentEpochInfoCall::abi_decode_returns(&result)
-                .expect("Failed to decode getCurrentEpoch return value");
+            let epoch = Reconfiguration::currentEpochCall::abi_decode_returns(&result)
+                .expect("Failed to decode currentEpoch return value");
 
             // Convert epoch to bytes
-            let epoch: u64 = epoch_info.epoch.to::<u64>();
             Some(Bytes::from(epoch.to_le_bytes().to_vec()))
         }
     }

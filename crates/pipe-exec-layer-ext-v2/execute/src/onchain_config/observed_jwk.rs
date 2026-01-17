@@ -2,10 +2,10 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    JWK_MANAGER_ADDR, SYSTEM_CALLER,
+    JWK_MANAGER_ADDR, NATIVE_ORACLE_ADDR, SYSTEM_CALLER,
 };
 use alloy_eips::BlockId;
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent, SolType};
@@ -74,6 +74,79 @@ sol! {
     ) external;
 
     event ObservedJWKsUpdated(uint256 indexed epoch, ProviderJWKs[] jwks);
+}
+
+// =============================================================================
+// New Oracle Contract Types (gravity_chain_core_contracts/src/oracle/jwk/)
+// =============================================================================
+
+sol! {
+    /// @dev RSA JWK structure from new Oracle JWKManager contract
+    /// Note: This struct does NOT have a `kty` field, but gaptos expects one.
+    /// See convert_oracle_rsa_to_api_jwk() for the workaround.
+    #[derive(Debug)]
+    struct OracleRSA_JWK {
+        string kid;  // Key ID
+        string alg;  // Algorithm (e.g., "RS256")
+        string e;    // RSA public exponent (Base64url)
+        string n;    // RSA modulus (Base64url)
+    }
+
+    /// @dev Provider's JWK collection from new Oracle JWKManager
+    struct OracleProviderJWKs {
+        bytes issuer;           // Issuer URL
+        uint64 version;         // Version number
+        OracleRSA_JWK[] jwks;   // RSA JWK array
+    }
+
+    /// @dev All providers' JWK collection from new Oracle JWKManager
+    struct OracleAllProvidersJWKs {
+        OracleProviderJWKs[] entries;
+    }
+
+    /// @dev NativeOracle.record() function signature
+    function record(
+        uint32 sourceType,
+        uint256 sourceId,
+        uint128 nonce,
+        bytes calldata payload,
+        uint256 callbackGasLimit
+    ) external;
+}
+
+/// Convert new Oracle contract RSA_JWK to api-types JWKStruct
+///
+/// The new Oracle JWKManager contract stores RSA_JWK{kid, alg, e, n} without a `kty` field.
+/// However, gaptos expects RSA_JWK{kid, kty, alg, e, n} with all 5 fields.
+/// This function adds the missing `kty` field with a hardcoded value "RSA".
+///
+/// TODO(gravity): Add `kty` field to the Solidity RSA_JWK struct in
+/// gravity_chain_core_contracts/src/oracle/jwk/IJWKManager.sol to properly store this value
+/// on-chain instead of hardcoding it here.
+fn convert_oracle_rsa_to_api_jwk(rsa_jwk: OracleRSA_JWK) -> JWKStruct {
+    // Create gaptos-compatible RSA_JWK struct with all 5 fields
+    // The struct order in gaptos is: kid, kty, alg, e, n
+    #[derive(serde::Serialize)]
+    struct GaptosRsaJwk {
+        kid: String,
+        kty: String,
+        alg: String,
+        e: String,
+        n: String,
+    }
+
+    let gaptos_rsa = GaptosRsaJwk {
+        kid: rsa_jwk.kid,
+        kty: "RSA".to_string(), // TODO(gravity): Read from contract once kty field is added
+        alg: rsa_jwk.alg,
+        e: rsa_jwk.e,
+        n: rsa_jwk.n,
+    };
+
+    JWKStruct {
+        type_name: "0x1::jwks::RSA_JWK".to_string(),
+        data: bcs::to_bytes(&gaptos_rsa).expect("Failed to BCS serialize RSA_JWK"),
+    }
 }
 
 fn convert_into_api_jwk(jwk: JWK) -> JWKStruct {
@@ -268,15 +341,51 @@ fn convert_into_bcs_all_providers_jwks(all_providers_jwks: AllProvidersJWKs) -> 
     bcs::to_bytes(&all_providers).expect("Failed to serialize AllProvidersJWKs").into()
 }
 
+/// Source type constants for NativeOracle
+const SOURCE_TYPE_BLOCKCHAIN: u32 = 0;
+const SOURCE_TYPE_JWK: u32 = 1;
+
+/// Default callback gas limit for JWK updates
+const JWK_CALLBACK_GAS_LIMIT: u64 = 500_000;
+
 /// Construct JWK transaction from ProviderJWKs
 ///
-/// This function is called by the validator transactions construction logic in mod.rs
+/// In the new Oracle architecture, JWK updates are recorded via NativeOracle.record().
+/// - RSA JWKs → NativeOracle.record(sourceType=1, sourceId=keccak256(issuer))
+/// - UnsupportedJWK with id="1" (Deposit) → NativeOracle.record(sourceType=0)
+/// - UnsupportedJWK with id="2" (ChangeRecord) → NativeOracle.record(sourceType=0)
 pub(crate) fn construct_jwk_transaction(
     provider_jwks: gravity_api_types::on_chain_config::jwks::ProviderJWKs,
     nonce: u64,
     gas_price: u128,
 ) -> Result<TransactionSigned, String> {
-    let sol_provider_jwks = convert_into_sol_provider_jwks(provider_jwks);
+    let sol_provider_jwks = convert_into_sol_provider_jwks(provider_jwks.clone());
+
+    // Calculate sourceId from issuer hash
+    let issuer_hash = keccak256(&provider_jwks.issuer);
+    let source_id = U256::from_be_bytes(issuer_hash.0);
+
+    // Encode payload: (bytes issuer, uint64 version, RSA_JWK[] jwks)
+    // Note: This encodes the RSA JWKs for JWKManager callback
+    let rsa_jwks: Vec<OracleRSA_JWK> = sol_provider_jwks
+        .jwks
+        .iter()
+        .filter(|jwk| jwk.variant == 0) // Only RSA JWKs
+        .map(|jwk| {
+            // Decode RSA_JWK from JWK.data
+            // For now, we pass through the data as-is since the format matches
+            // TODO: Proper conversion if needed
+            OracleRSA_JWK {
+                kid: String::new(), // Will be filled from decoded data
+                alg: String::new(),
+                e: String::new(),
+                n: String::new(),
+            }
+        })
+        .collect();
+
+    // For now, continue using the old upsertObservedJWKs for backward compatibility
+    // TODO: Migrate to NativeOracle.record() once contract migration is complete
     let cross_chain_params = convert_into_sol_crosschain_params(
         &sol_provider_jwks.jwks,
         sol_provider_jwks.issuer.as_str(),

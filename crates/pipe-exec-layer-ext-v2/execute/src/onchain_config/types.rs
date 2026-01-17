@@ -3,7 +3,7 @@
 
 #![allow(missing_docs)]
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Bytes, U256};
 use alloy_sol_macro::sol;
 use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
 
@@ -16,120 +16,108 @@ fn wei_to_ether(wei: U256) -> U256 {
 }
 
 sol! {
+    // Validator lifecycle status enum (from Types.sol)
     enum ValidatorStatus {
-        PENDING_ACTIVE, // 0
-        ACTIVE, // 1
-        PENDING_INACTIVE, // 2
-        INACTIVE // 3
+        INACTIVE, // 0
+        PENDING_ACTIVE, // 1
+        ACTIVE, // 2
+        PENDING_INACTIVE // 3
     }
 
-    // Commission structure
-    struct Commission {
-        uint64 rate; // the commission rate charged to delegators(10000 is 100%)
-        uint64 maxRate; // maximum commission rate which validator can ever charge
-        uint64 maxChangeRate; // maximum daily increase of the validator commission
+    /// Validator consensus info (from Types.sol in gravity_chain_core_contracts)
+    /// Returned by ValidatorManagement.getActiveValidators()
+    struct ValidatorConsensusInfo {
+        address validator;           // Validator identity address
+        bytes consensusPubkey;       // BLS public key for consensus
+        bytes consensusPop;          // Proof of possession for BLS key
+        uint256 votingPower;         // Voting power derived from bond
+        uint64 validatorIndex;       // Index in active validator array
+        bytes networkAddresses;      // Network addresses for P2P communication
+        bytes fullnodeAddresses;     // Fullnode addresses for sync
     }
 
-    /// Complete validator information (merged from multiple contracts)
-    struct ValidatorInfo {
-        // Basic information (from ValidatorManager)
-        bytes consensusPublicKey;
-        Commission commission;
-        string moniker;
-        bool registered;
-        address stakeCreditAddress;
-        ValidatorStatus status;
-        uint256 votingPower; // Changed from uint64 to uint256 to prevent overflow
-        uint256 validatorIndex;
-        uint256 updateTime;
-        address operator;
-        bytes validatorNetworkAddresses; // BCS serialized Vec<NetworkAddress>
-        bytes fullnodeNetworkAddresses; // BCS serialized Vec<NetworkAddress>
-        bytes aptosAddress; // [u8; 32]
-    }
+    // Function from ValidatorManagement contract
+    function getActiveValidators() external view returns (ValidatorConsensusInfo[] memory);
 
-    struct ValidatorSet {
-        ValidatorInfo[] activeValidators; // Active validators for the current epoch
-        ValidatorInfo[] pendingInactive; // Pending validators to leave in next epoch (still active)
-        ValidatorInfo[] pendingActive; // Pending validators to join in next epoch
-        uint256 totalVotingPower; // Current total voting power
-        uint256 totalJoiningPower; // Total voting power waiting to join in the next epoch
-    }
-
-    // event NewEpoch(uint64 indexed epoch, bytes validators);
-    event AllValidatorsUpdated(uint256 indexed newEpoch, ValidatorSet validatorSet);
-
-    function getValidatorSet() external view returns (ValidatorSet memory);
+    /// NewEpochEvent from Reconfiguration.sol
+    /// Emitted when epoch transition completes with full validator set
+    event NewEpochEvent(
+        uint64 indexed newEpoch,
+        ValidatorConsensusInfo[] validatorSet,
+        uint256 totalVotingPower,
+        uint64 transitionTime
+    );
 }
 
 sol! {
-        function blockPrologue(
-            bytes proposer,
-            uint64[] calldata failedProposerIndices,
-            uint64 timestampMicros
-        );
-
-        function blockPrologueExt(
-            bytes proposer,
-            uint64[] calldata failedProposerIndices,
-            uint64 timestampMicros
-        );
+    /// onBlockStart from Blocker.sol
+    /// Called by blockchain runtime at the start of each block
+    /// @param proposerIndex Index of the block proposer in the active validator set
+    /// @param failedProposerIndices Indices of validators who failed to propose
+    /// @param timestampMicros Block timestamp in microseconds
+    function onBlockStart(
+        uint64 proposerIndex,
+        uint64[] calldata failedProposerIndices,
+        uint64 timestampMicros
+    );
 }
 
-/// Helper function to convert Ethereum address to `AccountAddress` format
-/// Ethereum addresses are 20 bytes, need to pad to 32 bytes for `AccountAddress`
-pub fn convert_account(acc: &Address) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    bytes[12..].copy_from_slice(acc.as_slice());
-    bytes
+/// Derive 32-byte AccountAddress from BLS consensus public key using SHA3-256
+/// This matches the derivation used in gravity-sdk for validator identity
+pub fn derive_account_address_from_consensus_pubkey(consensus_pubkey: &[u8]) -> [u8; 32] {
+    use tiny_keccak::{Hasher, Sha3};
+
+    let mut hasher = Sha3::v256();
+    hasher.update(consensus_pubkey);
+    let mut output = [0u8; 32];
+    hasher.finalize(&mut output);
+    output
 }
 
-/// Convert Solidity `ValidatorInfo` to Gravity API `ValidatorInfo`
-pub fn convert_validator_info(
-    solidity_info: &ValidatorInfo,
+/// Convert Solidity `ValidatorConsensusInfo` to Gravity API `ValidatorInfo`
+pub fn convert_validator_consensus_info(
+    info: &ValidatorConsensusInfo,
 ) -> gravity_api_types::on_chain_config::validator_info::ValidatorInfo {
     use gravity_api_types::on_chain_config::{
         validator_config::ValidatorConfig, validator_info::ValidatorInfo as GravityValidatorInfo,
     };
 
-    // Convert Address to AccountAddress (20 bytes -> AccountAddress)
+    // Derive AccountAddress from consensus public key using SHA3-256
+    let account_address_bytes = derive_account_address_from_consensus_pubkey(&info.consensusPubkey);
     let account_address =
-        gravity_api_types::u256_define::AccountAddress::from_bytes(&solidity_info.aptosAddress);
+        gravity_api_types::u256_define::AccountAddress::from_bytes(&account_address_bytes);
 
     // Convert voting power from wei to ether
-    let power_ether = wei_to_ether(solidity_info.votingPower);
+    let power_ether = wei_to_ether(info.votingPower);
+
+    // Original Ethereum address (20 bytes) as reth_account_address
+    let reth_account_address = info.validator.as_slice().to_vec();
 
     GravityValidatorInfo::new(
         account_address,
         power_ether.to::<u64>(),
         ValidatorConfig::new(
-            solidity_info.consensusPublicKey.clone().into(),
-            solidity_info.validatorNetworkAddresses.clone().into(),
-            solidity_info.fullnodeNetworkAddresses.clone().into(),
-            solidity_info.validatorIndex.to::<u64>(),
+            info.consensusPubkey.clone().into(),
+            info.networkAddresses.to_vec(),
+            info.fullnodeAddresses.to_vec(),
+            info.validatorIndex,
         ),
+        reth_account_address,
     )
 }
 
-pub fn convert_validator_set_to_bcs(solidity_validator_set: &ValidatorSet) -> Bytes {
+/// Convert array of ValidatorConsensusInfo to BCS-encoded ValidatorSet
+/// Used by ValidatorSetFetcher to convert getActiveValidators() response
+pub fn convert_active_validators_to_bcs(validators: &[ValidatorConsensusInfo]) -> Bytes {
+    let total_voting_power: u128 =
+        validators.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
+
     let gravity_validator_set = GravityValidatorSet {
-        active_validators: solidity_validator_set
-            .activeValidators
-            .iter()
-            .map(convert_validator_info)
-            .collect(),
-        pending_inactive: solidity_validator_set
-            .pendingInactive
-            .iter()
-            .map(convert_validator_info)
-            .collect(),
-        pending_active: solidity_validator_set
-            .pendingActive
-            .iter()
-            .map(convert_validator_info)
-            .collect(),
-        total_voting_power: wei_to_ether(solidity_validator_set.totalVotingPower).to::<u128>(),
-        total_joining_power: wei_to_ether(solidity_validator_set.totalJoiningPower).to::<u128>(),
+        active_validators: validators.iter().map(convert_validator_consensus_info).collect(),
+        pending_inactive: vec![], // Not returned by getActiveValidators()
+        pending_active: vec![],   // Not returned by getActiveValidators()
+        total_voting_power,
+        total_joining_power: 0, // Not returned by getActiveValidators()
     };
 
     // Serialize to BCS format (gravity-aptos standard)
