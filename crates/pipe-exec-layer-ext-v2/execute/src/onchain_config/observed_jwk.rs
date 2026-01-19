@@ -82,11 +82,10 @@ sol! {
 
 sol! {
     /// @dev RSA JWK structure from new Oracle JWKManager contract
-    /// Note: This struct does NOT have a `kty` field, but gaptos expects one.
-    /// See convert_oracle_rsa_to_api_jwk() for the workaround.
     #[derive(Debug)]
     struct OracleRSA_JWK {
         string kid;  // Key ID
+        string kty;  // Key Type (RSA)
         string alg;  // Algorithm (e.g., "RS256")
         string e;    // RSA public exponent (Base64url)
         string n;    // RSA modulus (Base64url)
@@ -116,13 +115,8 @@ sol! {
 
 /// Convert new Oracle contract RSA_JWK to api-types JWKStruct
 ///
-/// The new Oracle JWKManager contract stores RSA_JWK{kid, alg, e, n} without a `kty` field.
-/// However, gaptos expects RSA_JWK{kid, kty, alg, e, n} with all 5 fields.
-/// This function adds the missing `kty` field with a hardcoded value "RSA".
-///
-/// TODO(gravity): Add `kty` field to the Solidity RSA_JWK struct in
-/// gravity_chain_core_contracts/src/oracle/jwk/IJWKManager.sol to properly store this value
-/// on-chain instead of hardcoding it here.
+/// The Oracle JWKManager contract stores RSA_JWK{kid, kty, alg, e, n} with all 5 fields.
+/// This function converts the Solidity struct to the gaptos-compatible format.
 fn convert_oracle_rsa_to_api_jwk(rsa_jwk: OracleRSA_JWK) -> JWKStruct {
     // Create gaptos-compatible RSA_JWK struct with all 5 fields
     // The struct order in gaptos is: kid, kty, alg, e, n
@@ -137,7 +131,7 @@ fn convert_oracle_rsa_to_api_jwk(rsa_jwk: OracleRSA_JWK) -> JWKStruct {
 
     let gaptos_rsa = GaptosRsaJwk {
         kid: rsa_jwk.kid,
-        kty: "RSA".to_string(), // TODO(gravity): Read from contract once kty field is added
+        kty: rsa_jwk.kty,
         alg: rsa_jwk.alg,
         e: rsa_jwk.e,
         n: rsa_jwk.n,
@@ -377,6 +371,7 @@ pub(crate) fn construct_jwk_transaction(
             // TODO: Proper conversion if needed
             OracleRSA_JWK {
                 kid: String::new(), // Will be filled from decoded data
+                kty: String::new(),
                 alg: String::new(),
                 e: String::new(),
                 n: String::new(),
