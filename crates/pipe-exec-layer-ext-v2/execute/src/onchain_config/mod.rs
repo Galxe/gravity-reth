@@ -7,8 +7,10 @@ pub mod consensus_config;
 pub mod dkg;
 pub mod epoch;
 pub mod jwk_consensus_config;
+pub mod jwk_oracle;
 pub mod metadata_txn;
 pub mod observed_jwk;
+pub mod oracle_task_helpers;
 pub mod types;
 pub mod validator_set;
 
@@ -97,7 +99,7 @@ use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Bytes, Signature, U256};
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use revm_primitives::TxKind;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// Construct validator transactions envelope (JWK updates and DKG transcripts)
 ///
@@ -130,7 +132,7 @@ pub fn construct_validator_txns_envelope(
 /// Process extra data based on its ExtraDataType variant
 ///
 /// Supports:
-/// - JWK updates (ExtraDataType::JWK)
+/// - JWK/Oracle updates (ExtraDataType::JWK) - includes both RSA JWKs and blockchain events
 /// - DKG transcripts (ExtraDataType::DKG)
 fn process_extra_data(
     data: &gravity_api_types::ExtraDataType,
@@ -144,11 +146,13 @@ fn process_extra_data(
                 gravity_api_types::on_chain_config::jwks::ProviderJWKs,
             >(data_bytes)
             .map_err(|e| format!("Failed to deserialize JWK data: {}", e))?;
-            info!(
-                "Processing JWK update for issuer: {}",
-                String::from_utf8_lossy(&provider_jwks.issuer)
-            );
-            observed_jwk::construct_jwk_transaction(provider_jwks, nonce, gas_price)
+
+            let issuer_str = String::from_utf8_lossy(&provider_jwks.issuer);
+            info!("Processing oracle update for issuer: {}", issuer_str);
+
+            // Unified handler for all oracle data (JWK and blockchain events)
+            // Routing between sourceType is done inside construct_oracle_record_transaction
+            jwk_oracle::construct_oracle_record_transaction(provider_jwks, nonce, gas_price)
         }
         gravity_api_types::ExtraDataType::DKG(data_bytes) => {
             // Deserialize as DKGTranscript

@@ -39,6 +39,13 @@ sol! {
     // Function from ValidatorManagement contract
     function getActiveValidators() external view returns (ValidatorConsensusInfo[] memory);
 
+    // Functions to get pending validators (now return full ValidatorConsensusInfo[])
+    function getPendingActiveValidators() external view returns (ValidatorConsensusInfo[] memory);
+    function getPendingInactiveValidators() external view returns (ValidatorConsensusInfo[] memory);
+
+    // Function to get total voting power directly from contract
+    function getTotalVotingPower() external view returns (uint256);
+
     /// NewEpochEvent from Reconfiguration.sol
     /// Emitted when epoch transition completes with full validator set
     event NewEpochEvent(
@@ -106,20 +113,105 @@ pub fn convert_validator_consensus_info(
     )
 }
 
-/// Convert array of ValidatorConsensusInfo to BCS-encoded ValidatorSet
+/// Convert arrays of ValidatorConsensusInfo to BCS-encoded ValidatorSet
 /// Used by ValidatorSetFetcher to convert getActiveValidators() response
-pub fn convert_active_validators_to_bcs(validators: &[ValidatorConsensusInfo]) -> Bytes {
+///
+/// # Arguments
+/// * `active_validators` - Active validators from getActiveValidators()
+/// * `pending_active` - Validators pending activation (optional, from getCurValidatorConsensusInfos
+///   style query)
+/// * `pending_inactive` - Validators pending deactivation (still in active set for this epoch)
+pub fn convert_validators_to_bcs(
+    active_validators: &[ValidatorConsensusInfo],
+    pending_active: &[ValidatorConsensusInfo],
+    pending_inactive: &[ValidatorConsensusInfo],
+) -> Bytes {
+    // Calculate total voting power from active validators (in Ether units)
     let total_voting_power: u128 =
-        validators.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
+        active_validators.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
+
+    // Calculate total joining power from pending_active validators
+    let total_joining_power: u128 =
+        pending_active.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
 
     let gravity_validator_set = GravityValidatorSet {
-        active_validators: validators.iter().map(convert_validator_consensus_info).collect(),
-        pending_inactive: vec![], // Not returned by getActiveValidators()
-        pending_active: vec![],   // Not returned by getActiveValidators()
+        active_validators: active_validators.iter().map(convert_validator_consensus_info).collect(),
+        pending_inactive: pending_inactive.iter().map(convert_validator_consensus_info).collect(),
+        pending_active: pending_active.iter().map(convert_validator_consensus_info).collect(),
         total_voting_power,
-        total_joining_power: 0, // Not returned by getActiveValidators()
+        total_joining_power,
     };
 
     // Serialize to BCS format (gravity-aptos standard)
     bcs::to_bytes(&gravity_validator_set).expect("Failed to serialize validator set").into()
+}
+
+/// Legacy function for backward compatibility - only active validators
+/// Used when we don't have pending validator info available
+pub fn convert_active_validators_to_bcs(validators: &[ValidatorConsensusInfo]) -> Bytes {
+    convert_validators_to_bcs(validators, &[], &[])
+}
+
+// =============================================================================
+// Oracle JWK Types (shared by jwk_oracle.rs and observed_jwk.rs)
+// =============================================================================
+
+/// Source type for JWK in NativeOracle
+pub const SOURCE_TYPE_JWK: u32 = 1;
+
+sol! {
+    /// RSA JWK structure from JWKManager contract
+    struct OracleRSA_JWK {
+        string kid;
+        string kty;
+        string alg;
+        string e;
+        string n;
+    }
+
+    /// Provider's JWK collection from JWKManager
+    struct OracleProviderJWKs {
+        bytes issuer;
+        uint64 version;
+        OracleRSA_JWK[] jwks;
+    }
+
+    /// All providers' JWK collection from JWKManager
+    struct OracleAllProvidersJWKs {
+        OracleProviderJWKs[] entries;
+    }
+
+    /// JWKManager.getObservedJWKs()
+    function getObservedJWKs() external view returns (OracleAllProvidersJWKs memory);
+
+    /// Event emitted when JWKs are updated
+    event ObservedJWKsUpdated(uint256 indexed epoch, OracleProviderJWKs[] jwks);
+}
+
+/// RSA JWK fields for BCS serialization - matches gravity-aptos struct order
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct GaptosRsaJwk {
+    pub kid: String,
+    pub kty: String,
+    pub alg: String,
+    pub e: String,
+    pub n: String,
+}
+
+/// Convert Oracle RSA_JWK to api-types JWKStruct
+pub fn convert_oracle_rsa_to_api_jwk(
+    rsa_jwk: OracleRSA_JWK,
+) -> gravity_api_types::on_chain_config::jwks::JWKStruct {
+    let gaptos_rsa = GaptosRsaJwk {
+        kid: rsa_jwk.kid,
+        kty: rsa_jwk.kty,
+        alg: rsa_jwk.alg,
+        e: rsa_jwk.e,
+        n: rsa_jwk.n,
+    };
+
+    gravity_api_types::on_chain_config::jwks::JWKStruct {
+        type_name: "0x1::jwks::RSA_JWK".to_string(),
+        data: bcs::to_bytes(&gaptos_rsa).expect("Failed to BCS serialize RSA_JWK"),
+    }
 }

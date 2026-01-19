@@ -6,33 +6,32 @@ homepage.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "replayer for pipeline execution layer extension"
+description = "Oracle data source relayer for Gravity chain"
 
 [lints]
 workspace = true
 
 [dependencies]
-gravity-api-types.workspace = true
-reth-primitives.workspace = true
-reth-tracing.workspace = true
+# Alloy primitives and types
 alloy-primitives.workspace = true
-once_cell.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-
-alloy-network.workspace = true
-alloy-provider.workspace = true
 alloy-rpc-types.workspace = true
-alloy-transport.workspace = true
-anyhow.workspace = true
-serde.workspace = true
-tracing.workspace = true
-url.workspace = true
-reqwest = { workspace = true, features = ["rustls-tls"] }
 alloy-sol-macro.workspace = true
 alloy-sol-types.workspace = true
+alloy-provider.workspace = true
+alloy-transport.workspace = true
+alloy-network.workspace = true
 
-serde_json.workspace = true
+# Gravity API types (reuse types from gaptos)
+gravity-api-types.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+async-trait.workspace = true
+
+# Error handling and utilities
+anyhow.workspace = true
+tracing.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls"] }
+url.workspace = true
 
 [dev-dependencies]
-alloy-sol-macro.workspace = true
 alloy-sol-types.workspace = true
+hex = "0.4"

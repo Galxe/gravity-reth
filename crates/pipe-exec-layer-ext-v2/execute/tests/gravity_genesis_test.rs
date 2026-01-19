@@ -119,16 +119,7 @@ pub fn convert_validator_info(
     let account_address =
         gravity_api_types::u256_define::AccountAddress::from_bytes(&solidity_info.aptosAddress);
 
-    GravityValidatorInfo::new(
-        account_address,
-        solidity_info.votingPower.to::<u64>(),
-        ValidatorConfig::new(
-            solidity_info.consensusPublicKey.clone().into(),
-            solidity_info.validatorNetworkAddresses.clone().into(),
-            solidity_info.fullnodeNetworkAddresses.clone().into(),
-            solidity_info.validatorIndex.to::<u64>(),
-        ),
-    )
+    todo!()
 }
 
 fn new_system_call_txn(contract: Address, input: Bytes) -> TxEnv {
