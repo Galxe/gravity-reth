@@ -261,7 +261,11 @@ fn convert_validator(
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
         addr: gravity_api_types::account::ExternalAccountAddress::new(addr_bytes),
         pk_bytes: validator.consensusPubkey.to_vec(),
-        voting_power: validator.votingPower.try_into().unwrap_or(u64::MAX),
+        // Convert wei to tokens by dividing by 10^18
+        voting_power: (validator.votingPower /
+            alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18)))
+        .try_into()
+        .unwrap_or(u64::MAX),
     }
 }
 
@@ -293,7 +297,11 @@ fn convert_validator_for_event(
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
         addr: gravity_api_types::account::ExternalAccountAddress::new(addr_bytes),
         pk_bytes: validator.consensusPubkey.to_vec(),
-        voting_power: validator.votingPower.try_into().unwrap_or(u64::MAX),
+        // Convert wei to tokens by dividing by 10^18
+        voting_power: (validator.votingPower /
+            alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18)))
+        .try_into()
+        .unwrap_or(u64::MAX),
     }
 }
 
