@@ -616,6 +616,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 if let Ok(event) = DKGStartEvent::decode_log(&log) {
                     info!(target: "execute_ordered_block",
                         number=?block_number,
+                        dealer_epoch=?event.dealerEpoch,
                         "dkg start"
                     );
                     gravity_events.push(GravityEvent::DKG(convert_dkg_start_event_to_api(&event)));
