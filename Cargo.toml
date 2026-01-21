@@ -377,7 +377,7 @@ codegen-units = 1
 
 [workspace.dependencies]
 # reth
-gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "1df8aff" }
+gravity-api-types = { package = "api-types", git = "file:///Users/lightman/repos/gravity-aptos", branch = "dev-0112-new" }
 op-reth = { path = "crates/optimism/bin" }
 reth = { path = "bin/reth" }
 reth-storage-rpc-provider = { path = "crates/storage/rpc-provider" }
