@@ -2,7 +2,10 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    types::{convert_active_validators_to_bcs, getActiveValidatorsCall},
+    types::{
+        convert_validators_to_bcs, getActiveValidatorsCall, getPendingActiveValidatorsCall,
+        getPendingInactiveValidatorsCall,
+    },
     SYSTEM_CALLER, VALIDATOR_MANAGER_ADDR,
 };
 use alloy_eips::BlockId;
@@ -10,8 +13,6 @@ use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-
-// BCS for serialization
 
 /// Fetcher for validator set information
 #[derive(Debug)]
@@ -35,24 +36,65 @@ where
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
-        // Use new getActiveValidators() function
-        let call = getActiveValidatorsCall {};
-        let input: Bytes = call.abi_encode().into();
+        // 1. Fetch active validators
+        let active_validators = {
+            let call = getActiveValidatorsCall {};
+            let input: Bytes = call.abi_encode().into();
+            let result = self
+                .base_fetcher
+                .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
+                .map_err(|e| {
+                    tracing::warn!(
+                        "Failed to fetch active validators at block {}: {:?}",
+                        block_id,
+                        e
+                    );
+                })
+                .ok()?;
+            getActiveValidatorsCall::abi_decode_returns(&result)
+                .expect("Failed to decode getActiveValidators return value")
+        };
 
-        let result = self
-            .base_fetcher
-            .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
-            .map_err(|e| {
-                tracing::warn!("Failed to fetch validator set at block {}: {:?}", block_id, e);
-            })
-            .ok()?;
+        // 2. Fetch pending active validators
+        let pending_active = {
+            let call = getPendingActiveValidatorsCall {};
+            let input: Bytes = call.abi_encode().into();
+            let result = self
+                .base_fetcher
+                .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
+                .map_err(|e| {
+                    tracing::warn!(
+                        "Failed to fetch pending active validators at block {}: {:?}",
+                        block_id,
+                        e
+                    );
+                })
+                .ok()?;
+            getPendingActiveValidatorsCall::abi_decode_returns(&result)
+                .expect("Failed to decode getPendingActiveValidators return value")
+        };
 
-        // Decode the response as ValidatorConsensusInfo[]
-        let validators = getActiveValidatorsCall::abi_decode_returns(&result)
-            .expect("Failed to decode getActiveValidators return value");
+        // 3. Fetch pending inactive validators
+        let pending_inactive = {
+            let call = getPendingInactiveValidatorsCall {};
+            let input: Bytes = call.abi_encode().into();
+            let result = self
+                .base_fetcher
+                .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
+                .map_err(|e| {
+                    tracing::warn!(
+                        "Failed to fetch pending inactive validators at block {}: {:?}",
+                        block_id,
+                        e
+                    );
+                })
+                .ok()?;
+            getPendingInactiveValidatorsCall::abi_decode_returns(&result)
+                .expect("Failed to decode getPendingInactiveValidators return value")
+        };
 
-        // Convert to BCS-encoded ValidatorSet format
-        Some(convert_active_validators_to_bcs(&validators))
+        // Convert to BCS-encoded ValidatorSet format with all validator lists
+        Some(convert_validators_to_bcs(&active_validators, &pending_active, &pending_inactive))
     }
 
     fn contract_address() -> Address {
