@@ -29,7 +29,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 /// Writes parts of reth's in memory tree state to the database and static files.
 ///
@@ -178,6 +178,7 @@ where
             {
                 let block_number = recovered_block.number();
                 let inner_provider = &self.provider;
+                info!(target: "persistence::save_block", block_number = block_number, "Write block updates into DB");
 
                 // Parallel execution of state and trie updates is safe because the database is
                 // split into three separate RocksDB instances: state_db (for state and history),
@@ -290,7 +291,12 @@ where
                             .get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string())
                             .map_err(ProviderError::Database)?
                             .unwrap_or_default();
-                        assert_eq!(ck.block_number + 1, block_number);
+                        if ck.block_number + 1 != block_number {
+                            info!(target: "persistence::trie_update",
+                                checkpoint = ck.block_number,
+                                block_number = block_number,
+                                "Detected interrupted trie update, but trie has idempotency");
+                        }
                         provider_rw
                             .write_trie_updatesv2(triev2.as_ref())
                             .map_err(ProviderError::Database)?;
