@@ -156,7 +156,7 @@ fn process_extra_data(
                 gravity_api_types::on_chain_config::dkg::DKGTranscript,
             >(data_bytes)
             .map_err(|e| format!("Failed to deserialize DKG data: {}", e))?;
-            info!("Processing DKG transcript for epoch: {}", dkg_transcript.metadata.epoch);
+            info!("Processing DKG transcript for epoch: {:?}", dkg_transcript);
             dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price)
         }
     }
