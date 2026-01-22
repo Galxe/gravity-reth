@@ -77,9 +77,9 @@ sol! {
         bool hasInProgress
     );
 
-    // Function to finish DKG with result
-    function finishWithDkgResult(
-        bytes calldata dkg_result
+    // Function to finish DKG with result - matches IReconfiguration.finishTransition
+    function finishTransition(
+        bytes calldata dkgResult
     ) external;
 
     // Function to get current randomness configuration - matches RandomnessConfig.getCurrentConfig()
@@ -380,7 +380,7 @@ pub(crate) fn construct_dkg_transaction(
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
 
-    let call = finishWithDkgResultCall { dkg_result: dkg_transcript.transcript_bytes.into() };
+    let call = finishTransitionCall { dkgResult: dkg_transcript.transcript_bytes.into() };
     let input: Bytes = call.abi_encode().into();
 
     Ok(super::new_system_call_txn(RECONFIGURATION_WITH_DKG_ADDR, nonce, gas_price, input))
