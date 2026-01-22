@@ -97,7 +97,7 @@ use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Bytes, Signature, U256};
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use revm_primitives::TxKind;
-use tracing::info;
+use tracing::{info, debug};
 
 /// Construct validator transactions envelope (JWK updates and DKG transcripts)
 ///
