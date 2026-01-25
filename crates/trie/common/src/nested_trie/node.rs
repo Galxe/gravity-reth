@@ -3,7 +3,7 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_primitives::{keccak256, Bytes, B256};
 use alloy_rlp::{length_of_length, BufMut, Encodable, Header, EMPTY_STRING_CODE};
 use alloy_trie::{
-    nodes::{encode_path_leaf, RlpNode},
+    nodes::{encode_path_leaf, BranchNode, ExtensionNode, LeafNode, RlpNode, TrieNode},
     BranchNodeCompact, TrieMask,
 };
 use bytes::BytesMut;
@@ -312,6 +312,45 @@ impl From<StoredNode> for Node {
     }
 }
 
+impl From<Node> for TrieNode {
+    fn from(node: Node) -> Self {
+        match node {
+            Node::FullNode { children, .. } => {
+                let mut stack = Vec::new();
+                let mut state_mask = TrieMask::default();
+                for (i, child) in children.into_iter().enumerate() {
+                    if let Some(child) = child {
+                        state_mask.set_bit(i as u8);
+                        if let Node::HashNode(rlp) = *child {
+                            stack.push(rlp);
+                        } else {
+                            panic!("FullNode children should be HashNode for proof conversion");
+                        }
+                    }
+                }
+                TrieNode::Branch(BranchNode::new(stack, state_mask))
+            }
+            Node::ShortNode { key, value, .. } => {
+                match *value {
+                    Node::ValueNode(v) => {
+                        // Leaf node
+                        TrieNode::Leaf(LeafNode::new(key, v))
+                    }
+                    Node::HashNode(rlp) => {
+                        // Extension node
+                        TrieNode::Extension(ExtensionNode::new(key, rlp))
+                    }
+                    _ => panic!(
+                        "ShortNode value should be ValueNode or HashNode for proof conversion"
+                    ),
+                }
+            }
+            Node::HashNode(_) => panic!("HashNode cannot be directly converted to TrieNode"),
+            Node::ValueNode(_) => panic!("ValueNode cannot be directly converted to TrieNode"),
+        }
+    }
+}
+
 impl Node {
     /// Get the cached hash
     pub const fn cached_rlp(&self) -> Option<&RlpNode> {
@@ -321,6 +360,16 @@ impl Node {
             }
             Self::ValueNode(_) => None,
             Self::HashNode(rlp_node) => Some(rlp_node),
+        }
+    }
+
+    /// Set cached hash
+    pub fn set_rlp(&mut self, rlp: RlpNode) {
+        match self {
+            Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
+                flags.rlp = Some(rlp);
+            }
+            _ => {}
         }
     }
 

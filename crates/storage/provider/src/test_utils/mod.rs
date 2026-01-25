@@ -85,7 +85,9 @@ pub fn insert_genesis<N: ProviderNodeTypes<ChainSpec = ChainSpec>>(
         })
     });
     provider.insert_storage_for_hashing(alloc_storage)?;
+    provider.commit()?;
 
+    let provider = provider_factory.provider_rw()?;
     let (root, updates) = StateRoot::from_tx(provider.tx_ref())
         .root_with_updates()
         .map_err(reth_db::DatabaseError::from)?;

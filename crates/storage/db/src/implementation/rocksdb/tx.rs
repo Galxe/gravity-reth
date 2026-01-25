@@ -236,27 +236,25 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             // Both trie batches have data - commit them in parallel for maximum throughput.
             // If either fails, we return an error BEFORE committing state_batch, ensuring
             // no checkpoint is written and the stage will be retried.
+            let account_batch_data = std::mem::take(&mut *account_batch);
+            let storage_batch_data = std::mem::take(&mut *storage_batch);
             thread::scope(|scope| -> Result<(), DatabaseError> {
-                let mut handles = vec![];
-                handles.push(scope.spawn(|| -> Result<(), DatabaseError> {
-                    let account_batch = std::mem::take(&mut *account_batch);
+                let account_handle = scope.spawn(|| -> Result<(), DatabaseError> {
                     self.account_db
-                        .write(account_batch)
+                        .write(account_batch_data)
                         .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
                     set_fail_point!("db::commit::after_account_trie");
                     Ok(())
-                }));
-                handles.push(scope.spawn(|| -> Result<(), DatabaseError> {
-                    let storage_batch = std::mem::take(&mut *storage_batch);
+                });
+                let storage_handle = scope.spawn(|| -> Result<(), DatabaseError> {
                     self.storage_db
-                        .write(storage_batch)
+                        .write(storage_batch_data)
                         .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
                     set_fail_point!("db::commit::after_storage_trie");
                     Ok(())
-                }));
-                for handle in handles {
-                    handle.join().unwrap()?;
-                }
+                });
+                account_handle.join().unwrap()?;
+                storage_handle.join().unwrap()?;
                 Ok(())
             })?;
         } else {

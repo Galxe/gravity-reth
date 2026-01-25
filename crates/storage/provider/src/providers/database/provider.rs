@@ -12,8 +12,8 @@ use crate::{
     AccountReader, BlockBodyWriter, BlockExecutionWriter, BlockHashReader, BlockNumReader,
     BlockReader, BlockWriter, BundleStateInit, ChainStateBlockReader, ChainStateBlockWriter,
     DBProvider, HashingWriter, HeaderProvider, HeaderSyncGapProvider, HistoricalStateProvider,
-    HistoricalStateProviderRef, HistoryWriter, LatestStateProvider, LatestStateProviderRef,
-    OriginalValuesKnown, ProviderError, PruneCheckpointReader, PruneCheckpointWriter, RevertsInit,
+    HistoricalStateProviderRef, HistoryWriter, LatestStateProviderRef, OriginalValuesKnown,
+    ProviderError, PruneCheckpointReader, PruneCheckpointWriter, RevertsInit,
     StageCheckpointReader, StateProviderBox, StateWriter, StaticFileProviderFactory, StatsReader,
     StorageLocation, StorageReader, StorageTrieWriter, TransactionVariant, TransactionsProvider,
     TransactionsProviderExt, TrieWriter, TrieWriterV2,
@@ -171,11 +171,12 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
     ) -> ProviderResult<Box<dyn StateProvider + 'a>> {
         let mut block_number =
             self.block_number(block_hash)?.ok_or(ProviderError::BlockHashNotFound(block_hash))?;
-        if block_number == self.best_block_number().unwrap_or_default() &&
-            block_number == self.last_block_number().unwrap_or_default()
-        {
-            return Ok(Box::new(LatestStateProviderRef::new(self)))
-        }
+        // Always return historical provider in rocksdb
+        // if block_number == self.best_block_number().unwrap_or_default() &&
+        //     block_number == self.last_block_number().unwrap_or_default()
+        // {
+        //     return Ok(Box::new(LatestStateProviderRef::new(self)))
+        // }
 
         // +1 as the changeset that we want is the one that was applied after this block.
         block_number += 1;
@@ -378,9 +379,10 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
     ) -> ProviderResult<StateProviderBox> {
         // if the block number is the same as the currently best block number on disk we can use the
         // latest state provider here
-        if block_number == self.best_block_number().unwrap_or_default() {
-            return Ok(Box::new(LatestStateProvider::new(self)))
-        }
+        // Always return historical provider in rocksdb
+        // if block_number == self.best_block_number().unwrap_or_default() {
+        //     return Ok(Box::new(LatestStateProvider::new(self)))
+        // }
 
         // +1 as the changeset that we want is the one that was applied after this block.
         block_number += 1;

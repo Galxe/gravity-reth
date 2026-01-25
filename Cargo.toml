@@ -335,7 +335,7 @@ too_long_first_doc_paragraph = "allow"
 # Uncomment this section if you're using a debugger.
 [profile.dev]
 # https://davidlattimore.github.io/posts/2024/02/04/speeding-up-the-rust-edit-build-run-cycle.html
-debug = "line-tables-only"
+debug = true
 split-debuginfo = "unpacked"
 
 # Speed up tests.

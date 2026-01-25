@@ -8,7 +8,7 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     B256,
 };
-use alloy_trie::EMPTY_ROOT_HASH;
+use alloy_trie::{nodes::TrieNode, EMPTY_ROOT_HASH};
 use nybbles::Nibbles;
 use reth_storage_errors::{db::DatabaseError, ProviderResult};
 
@@ -71,6 +71,88 @@ where
             self.take_output_inner(root, Nibbles::new());
         }
         self.trie_output
+    }
+
+    /// Get proof for leaf node with `path`.
+    /// Returns a vector of TrieNodes from root to the target path.
+    pub fn get_proof(&mut self, path: Nibbles) -> Result<Vec<TrieNode>, DatabaseError> {
+        let mut proof_nodes = Vec::new();
+        if let Some(mut root) = self.root.take() {
+            let mut buf = Vec::new();
+            // make sure no dirty trie node
+            root.build_hash(&mut buf);
+            self.get_proof_inner(&mut root, Nibbles::new(), path, &mut proof_nodes)?;
+            self.root = Some(root);
+        }
+        Ok(proof_nodes.into_iter().map(Into::into).collect())
+    }
+
+    fn get_proof_inner(
+        &mut self,
+        node: &mut Node,
+        prefix: Nibbles,
+        key: Nibbles,
+        proof: &mut Vec<Node>,
+    ) -> Result<(), DatabaseError> {
+        match node {
+            Node::FullNode { children, .. } => {
+                let mut convert: [Option<Box<Node>>; 17] = Default::default();
+                for (nibble, child) in children.iter().enumerate() {
+                    if let Some(child) = child {
+                        let rlp = child.cached_rlp().unwrap().clone();
+                        convert[nibble] = Some(Box::new(Node::HashNode(rlp)));
+                    }
+                }
+                proof.push(Node::FullNode { children: convert, flags: NodeFlag::default() });
+                if key.is_empty() {
+                    return Ok(());
+                }
+
+                let index = key.get_unchecked(0) as usize;
+                let mut new_prefix = prefix;
+                new_prefix.push_unchecked(key.get_unchecked(0));
+                if let Some(child) = &mut children[index] {
+                    self.get_proof_inner(child.as_mut(), new_prefix, key.slice(1..), proof)?;
+                }
+                Ok(())
+            }
+            Node::ShortNode { key: node_key, value: node_value, .. } => {
+                let matchlen = key.common_prefix_length(&node_key);
+                if let Node::ValueNode(value) = node_value.as_ref() {
+                    proof.push(Node::ShortNode {
+                        key: node_key.clone(),
+                        value: Box::new(Node::ValueNode(value.clone())),
+                        flags: NodeFlag::default(),
+                    });
+                } else {
+                    proof.push(Node::ShortNode {
+                        key: node_key.clone(),
+                        value: Box::new(Node::HashNode(node_value.cached_rlp().unwrap().clone())),
+                        flags: NodeFlag::default(),
+                    });
+                    if matchlen != node_key.len() {
+                        return Ok(());
+                    }
+                    let mut new_prefix = prefix;
+                    new_prefix.extend(&node_key);
+                    self.get_proof_inner(
+                        node_value.as_mut(),
+                        new_prefix,
+                        key.slice(matchlen..),
+                        proof,
+                    )?;
+                }
+                Ok(())
+            }
+            Node::HashNode(rlp) => {
+                let mut real_node = self.reader.read(&prefix)?.unwrap();
+                real_node.set_rlp(rlp.clone());
+                self.get_proof_inner(&mut real_node, prefix, key, proof)?;
+                *node = real_node;
+                Ok(())
+            }
+            Node::ValueNode(..) => Ok(()),
+        }
     }
 
     fn take_output_inner(&mut self, node: Node, prefix: Nibbles) {

@@ -521,7 +521,9 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
             }
         } else {
             trace!(target: "providers::blockchain", "Using database state for latest state provider");
-            self.database.latest()
+            // Always return historical provider in Rocksdb
+            let best_block_number = self.database.best_block_number()?;
+            self.database.history_by_block_number(best_block_number)
         }
     }
 

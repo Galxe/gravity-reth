@@ -33,21 +33,14 @@ pub fn init_gravity_config(config: Config) {
 
 /// Get the global configuration
 pub fn get_gravity_config() -> &'static Config {
-    #[cfg(not(feature = "config-from-env"))]
-    {
-        GLOBAL_CONFIG.get().expect("Global gravity config not initialized")
-    }
-    #[cfg(feature = "config-from-env")]
-    {
-        GLOBAL_CONFIG.get_or_init(|| Config {
-            disable_pipe_execution: std::env::var("GRETH_DISABLE_PIPE_EXECUTION").is_ok(),
-            disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
-            pipe_block_gas_limit: 1_000_000_000,
-            cache_max_persist_gap: 64,
-            cache_capacity: 2_000_000,
-            report_db_metrics: false,
-            trie_parallel_levels: 1,
-            validator_node_only: false,
-        })
-    }
+    GLOBAL_CONFIG.get_or_init(|| Config {
+        disable_pipe_execution: std::env::var("GRETH_DISABLE_PIPE_EXECUTION").is_ok(),
+        disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
+        pipe_block_gas_limit: 1_000_000_000,
+        cache_max_persist_gap: 64,
+        cache_capacity: 2_000_000,
+        report_db_metrics: false,
+        trie_parallel_levels: 1,
+        validator_node_only: false,
+    })
 }

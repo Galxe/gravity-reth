@@ -17,6 +17,7 @@ use alloy_rpc_types_eth::{
 use alloy_serde::JsonStorageKey;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_rpc_convert::RpcTxReq;
+use reth_rpc_eth_types::EthApiError;
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use tracing::trace;
 
@@ -842,7 +843,8 @@ where
         block_number: Option<BlockId>,
     ) -> RpcResult<EIP1186AccountProofResponse> {
         trace!(target: "rpc::eth", ?address, ?keys, ?block_number, "Serving eth_getProof");
-        Ok(EthState::get_proof(self, address, keys, block_number)?.await?)
+        // Ok(EthState::get_proof(self, address, keys, block_number)?.await?)
+        Err(EthApiError::Unsupported("Not support eth_getProof in nested hash").into())
     }
 
     /// Handler for: `eth_getAccountInfo`

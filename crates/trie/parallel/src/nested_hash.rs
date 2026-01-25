@@ -23,8 +23,8 @@ use reth_provider::{PersistBlockCache, ProviderResult};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     nested_trie::{Node, Trie, TrieReader, MIN_PARALLEL_NODES},
-    HashedPostState, HashedStorage, Nibbles, StorageTrieUpdatesV2, StoredNibbles,
-    StoredNibblesSubKey, EMPTY_ROOT_HASH,
+    AccountProof, HashedPostState, HashedStorage, MultiProofTargets, Nibbles, StorageTrieUpdatesV2,
+    StoredNibbles, StoredNibblesSubKey, EMPTY_ROOT_HASH,
 };
 use reth_trie_common::updates::TrieUpdatesV2;
 
@@ -173,13 +173,94 @@ impl<'tx, Tx> NestedStateRoot<'tx, Tx>
 where
     Tx: DbTx,
 {
+    /// Generate merkle proofs for target accounts and storage slots at a historical block.
+    ///
+    /// # Algorithm Background
+    ///
+    /// To query proofs at block N when the current trie height is H:
+    ///
+    /// ```text
+    /// Block Timeline:
+    ///
+    ///     Block N        Block N+1       Block N+2        ...        Block H (snapshot)
+    ///        │               │               │                           │
+    ///        ▼               ▼               ▼                           ▼
+    ///   ┌─────────┐    ┌─────────┐    ┌─────────┐                  ┌─────────┐
+    ///   │ State N │───▶│State N+1│───▶│State N+2│───▶  ...  ───▶   │ State H │
+    ///   └─────────┘    └─────────┘    └─────────┘                  └─────────┘
+    ///        ▲               │               │                           │
+    ///        │               │               │                           │
+    ///        │         ChangeSets from N+1 to H (reverted_state)         │
+    ///        │◀──────────────────────────────────────────────────────────┘
+    ///        │                    Revert/Rollback
+    ///   ┌─────────┐
+    ///   │ Query N │  ◀── We need proofs at this state
+    ///   └─────────┘
+    /// ```
+    ///
+    /// # Workflow
+    ///
+    /// **Step 1**: Obtain a RocksDB snapshot that guarantees account trie and storage trie
+    /// are at the same height H with complete data. Read the trie checkpoint to get height H.
+    ///
+    /// **Step 2**: Construct `reverted_state` by reading `AccountChangeSets` and
+    /// `StorageChangeSets` for blocks N+1 to H, extracting "before" values to reconstruct
+    /// Block N's state.
+    ///
+    /// **Step 3**: Apply `reverted_state` to rollback the trie from H to N and collect proofs.
+    ///
+    /// # Why reverted_state Construction is Correct
+    ///
+    /// The change set tables (`AccountChangeSets`, `StorageChangeSets`) use block number as
+    /// key prefix. Even if block production continues and height advances beyond H, reading
+    /// change sets for blocks N+1 to H remains unaffected - the data is immutable once written.
+    ///
+    /// The proof calculation process is identical to `calculate()` for block production,
+    /// since `reverted_state` represents exactly the state values at Block N.
+    ///
+    /// # Current TODO Status
+    ///
+    /// This function contains `todo!()` placeholders because **Step 1** is not yet implemented.
+    /// The current RocksDB storage design has consistency challenges:
+    ///
+    /// 1. **Trie tables only store latest state**: While `multiproof` is called, block production
+    ///    continues, so trie height may have advanced to H+1, H+2, etc.
+    ///
+    /// 2. **No block-level transaction guarantee**: RocksDB writes don't guarantee atomicity at the
+    ///    block level. Storage trie might be at H while account trie is at H+1.
+    ///
+    /// ## Required Changes for Implementation
+    ///
+    /// To use RocksDB's snapshot interface for an immutable read-only view:
+    /// 1. **Single database**: Cannot use separate DBs, otherwise unable to get a consistent
+    ///    snapshot across all trie tables
+    /// 2. **Atomic writes**: Account trie and storage trie updates must be in the same `WriteBatch`
+    ///    to ensure height consistency
+    pub fn multiproof(
+        &self,
+        reverted_state: &HashedPostState,
+        targets: MultiProofTargets,
+    ) -> ProviderResult<B256Map<AccountProof>> {
+        self.calculate_and_proof(reverted_state, targets).map(|r| r.2)
+    }
+
     /// Calculate the root hash of nested trie
     pub fn calculate(
         &self,
         hashed_state: &HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        self.calculate_and_proof(hashed_state, Default::default()).map(|r| (r.0, r.1))
+    }
+
+    fn calculate_and_proof(
+        &self,
+        hashed_state: &HashedPostState,
+        targets: MultiProofTargets,
+    ) -> ProviderResult<(B256, TrieUpdatesV2, B256Map<AccountProof>)> {
+        let need_update = targets.is_empty();
         let pipe_mode = !get_gravity_config().disable_pipe_execution;
         let trie_update = Mutex::new(TrieUpdatesV2::default());
+        let proofs: Mutex<B256Map<AccountProof>> = Default::default();
         let updated_account_nodes: [Mutex<Vec<(Nibbles, Option<Node>)>>; 16] = Default::default();
         let mut partitioned_accounts: [Vec<(&B256, &Option<Account>)>; 16] = Default::default();
         let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
@@ -203,10 +284,12 @@ where
                             let account = *account;
                             let path = Nibbles::unpack(hashed_address);
                             let deleted_storage = || {
-                                trie_update
-                                    .lock()
-                                    .storage_tries
-                                    .insert(hashed_address, StorageTrieUpdatesV2::deleted());
+                                if need_update {
+                                    trie_update
+                                        .lock()
+                                        .storage_tries
+                                        .insert(hashed_address, StorageTrieUpdatesV2::deleted());
+                                }
                             };
                             if let Some(account) = account {
                                 let storage = hashed_storages.get(&hashed_address).cloned();
@@ -275,20 +358,24 @@ where
                                     Some(Node::ValueNode(alloy_rlp::encode(account))),
                                 ));
 
-                                let trie_output = storage_trie.take_output();
-                                if !trie_output.is_empty() {
-                                    assert!(trie_update
-                                        .lock()
-                                        .storage_tries
-                                        .insert(
-                                            hashed_address,
-                                            StorageTrieUpdatesV2 {
-                                                is_deleted: false,
-                                                storage_nodes: trie_output.update_nodes,
-                                                removed_nodes: trie_output.removed_nodes,
-                                            }
-                                        )
-                                        .is_none());
+                                if need_update {
+                                    let trie_output = storage_trie.take_output();
+                                    if !trie_output.is_empty() {
+                                        assert!(trie_update
+                                            .lock()
+                                            .storage_tries
+                                            .insert(
+                                                hashed_address,
+                                                StorageTrieUpdatesV2 {
+                                                    is_deleted: false,
+                                                    storage_nodes: trie_output.update_nodes,
+                                                    removed_nodes: trie_output.removed_nodes,
+                                                }
+                                            )
+                                            .is_none());
+                                    }
+                                } else if let Some(..) = targets.get(&hashed_address) {
+                                    todo!("update storage proofs");
                                 }
                             } else {
                                 updated_account_nodes.push((path, None));
@@ -309,6 +396,7 @@ where
 
         let updated_account_nodes = updated_account_nodes.map(|u| u.into_inner());
         let mut trie_update = trie_update.into_inner();
+        let proofs = proofs.into_inner();
         let create_reader = || {
             let cursor = self.tx.cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
@@ -318,11 +406,15 @@ where
         account_trie.parallel_update(updated_account_nodes, create_reader)?;
 
         let root_hash = account_trie.hash();
-        let output = account_trie.take_output();
-        trie_update.account_nodes = output.update_nodes;
-        trie_update.removed_nodes = output.removed_nodes;
+        if need_update {
+            let output = account_trie.take_output();
+            trie_update.account_nodes = output.update_nodes;
+            trie_update.removed_nodes = output.removed_nodes;
+        } else {
+            todo!("update account proofs");
+        }
 
-        Ok((root_hash, trie_update))
+        Ok((root_hash, trie_update, proofs))
     }
 }
 
@@ -495,11 +587,12 @@ mod tests {
         (0..10)
             .map(|_| {
                 let address = Address::random();
-                let account =
+                let mut account =
                     Account { balance: U256::from(rng.random::<u64>()), ..Default::default() };
                 let mut storage = HashMap::<B256, U256>::default();
                 let has_storage = rng.random_bool(0.7);
                 if has_storage {
+                    account.bytecode_hash = Some(B256::from(U256::from(rng.random::<u64>())));
                     for _ in 0..10000 {
                         storage.insert(
                             B256::from(U256::from(rng.random::<u64>())),
