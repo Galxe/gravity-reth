@@ -15,7 +15,6 @@ pub mod validator_set;
 // Re-export main types for convenience
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
 pub use consensus_config::ConsensusConfigFetcher;
-pub use dkg::DKGStateFetcher;
 pub use epoch::EpochFetcher;
 pub use metadata_txn::{transact_metadata_contract_call, MetadataTxnResult};
 pub use types::{
@@ -98,7 +97,7 @@ use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Bytes, Signature, U256};
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use revm_primitives::TxKind;
-use tracing::info;
+use tracing::{info, debug};
 
 /// Construct validator transactions envelope (JWK updates and DKG transcripts)
 ///
@@ -157,7 +156,7 @@ fn process_extra_data(
                 gravity_api_types::on_chain_config::dkg::DKGTranscript,
             >(data_bytes)
             .map_err(|e| format!("Failed to deserialize DKG data: {}", e))?;
-            info!("Processing DKG transcript for epoch: {}", dkg_transcript.metadata.epoch);
+            debug!("Processing DKG transcript for epoch: {:?}", dkg_transcript);
             dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price)
         }
     }

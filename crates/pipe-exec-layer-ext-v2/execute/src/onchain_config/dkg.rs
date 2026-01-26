@@ -8,7 +8,7 @@
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    DKG_ADDR, SYSTEM_CALLER,
+    DKG_ADDR, RANDOMNESS_CONFIG_ADDR, SYSTEM_CALLER,
 };
 use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
@@ -16,7 +16,6 @@ use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use gravity_api_types::on_chain_config::dkg::DKGState as GravityDKGState;
-use hex;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 
 // ============================================================================
@@ -24,44 +23,38 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 // ============================================================================
 
 sol! {
-    struct FixedPoint64 {
-        uint128 value;
-    }
-
-    // Configuration variant enum
+    // Configuration variant enum - matches RandomnessConfig.sol
     enum ConfigVariant {
-        V1,     // Basic configuration
+        Off,    // Randomness disabled
         V2      // Configuration with fast path
     }
 
-    // Basic configuration struct
-    struct ConfigV1 {
-        FixedPoint64 secrecyThreshold;
-        FixedPoint64 reconstructionThreshold;
+    // V2 configuration data with DKG thresholds - matches RandomnessConfig.ConfigV2Data
+    // Thresholds are fixed-point values (value / 2^64), stored as uint128
+    struct ConfigV2Data {
+        uint128 secrecyThreshold;
+        uint128 reconstructionThreshold;
+        uint128 fastPathSecrecyThreshold;
     }
 
-    // Configuration with fast path struct
-    struct ConfigV2 {
-        FixedPoint64 secrecyThreshold;
-        FixedPoint64 reconstructionThreshold;
-        FixedPoint64 fastPathSecrecyThreshold;
-    }
-
-    // Main configuration struct
+    // Main configuration struct - matches RandomnessConfig.RandomnessConfigData
     struct RandomnessConfigData {
         ConfigVariant variant;
-        ConfigV1 configV1;
-        ConfigV2 configV2;
+        ConfigV2Data configV2;
     }
 
-    // Struct for validator consensus information
+    // Struct for validator consensus information - matches Types.ValidatorConsensusInfo
     struct ValidatorConsensusInfo {
-        bytes aptosAddress;
-        bytes pkBytes;
-        uint64 votingPower;
+        address validator;
+        bytes consensusPubkey;
+        bytes consensusPop;
+        uint256 votingPower;
+        uint64 validatorIndex;
+        bytes networkAddresses;
+        bytes fullnodeAddresses;
     }
 
-    // DKG session metadata - can be considered as the public input of DKG
+    // DKG session metadata - matches IDKG.DKGSessionMetadata
     struct DKGSessionMetadata {
         uint64 dealerEpoch;
         RandomnessConfigData randomnessConfig;
@@ -69,31 +62,35 @@ sol! {
         ValidatorConsensusInfo[] targetValidatorSet;
     }
 
-    // DKG session state
-    struct DKGSessionState {
+    // DKG session info - matches IDKG.DKGSessionInfo
+    struct DKGSessionInfo {
         DKGSessionMetadata metadata;
         uint64 startTimeUs;
         bytes transcript;
     }
 
-    // DKG state containing last completed and in progress sessions
-    struct DKGState {
-        DKGSessionState lastCompleted;
-        bool hasLastCompleted;
-        DKGSessionState inProgress;
-        bool hasInProgress;
-    }
+    // Function to get DKG state - multi-value return matching DKG.getDKGState()
+    function getDKGState() external view returns (
+        DKGSessionInfo memory lastCompleted,
+        bool hasLastCompleted,
+        DKGSessionInfo memory inProgress,
+        bool hasInProgress
+    );
 
-    // Function to get DKG state
-    function getDKGState() external view returns (DKGState memory);
-
-    // Function to finish DKG with result
-    function finishWithDkgResult(
-        bytes calldata dkg_result
+    // Function to finish DKG with result - matches IReconfiguration.finishTransition
+    function finishTransition(
+        bytes calldata dkgResult
     ) external;
 
-    // DKG start event
-    event DKGStartEvent(DKGSessionMetadata metadata, uint64 startTimeUs);
+    // Function to get current randomness configuration - matches RandomnessConfig.getCurrentConfig()
+    function getCurrentConfig() external view returns (RandomnessConfigData memory);
+
+    // DKG start event - matches DKG.DKGStartEvent
+    event DKGStartEvent(
+        uint64 indexed dealerEpoch,
+        uint64 startTimeUs,
+        DKGSessionMetadata metadata
+    );
 }
 
 // ============================================================================
@@ -148,27 +145,83 @@ where
     }
 }
 
-/// Helper function to convert FixedPoint64
-fn convert_fixed_point64(
-    fp: &FixedPoint64,
-) -> gravity_api_types::on_chain_config::dkg::FixedPoint64 {
-    gravity_api_types::on_chain_config::dkg::FixedPoint64 { value: fp.value }
+// ============================================================================
+// Randomness Config Fetcher
+// ============================================================================
+
+/// Fetcher for Randomness configuration information
+#[derive(Debug)]
+pub struct RandomnessConfigFetcher<'a, EthApi> {
+    base_fetcher: &'a OnchainConfigFetcher<EthApi>,
 }
 
-/// Helper function to convert ConfigV1
-fn convert_config_v1(config: &ConfigV1) -> gravity_api_types::on_chain_config::dkg::ConfigV1 {
-    gravity_api_types::on_chain_config::dkg::ConfigV1 {
-        secrecyThreshold: convert_fixed_point64(&config.secrecyThreshold),
-        reconstructionThreshold: convert_fixed_point64(&config.reconstructionThreshold),
+impl<'a, EthApi> RandomnessConfigFetcher<'a, EthApi>
+where
+    EthApi: EthCall,
+{
+    /// Create a new randomness config fetcher
+    pub const fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
+        Self { base_fetcher }
     }
 }
 
-/// Helper function to convert ConfigV2
-fn convert_config_v2(config: &ConfigV2) -> gravity_api_types::on_chain_config::dkg::ConfigV2 {
+impl<'a, EthApi> ConfigFetcher for RandomnessConfigFetcher<'a, EthApi>
+where
+    EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
+{
+    fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
+        let call = getCurrentConfigCall {};
+        let input: Bytes = call.abi_encode().into();
+
+        let result = self
+            .base_fetcher
+            .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
+            .map_err(|e| {
+                tracing::warn!("Failed to fetch RandomnessConfig at block {}: {:?}", block_id, e);
+            })
+            .ok()?;
+
+        // Decode the Solidity RandomnessConfig
+        let solidity_config = getCurrentConfigCall::abi_decode_returns(&result)
+            .expect("Failed to decode getCurrentConfig return value");
+        Some(convert_randomness_config_to_bcs(&solidity_config))
+    }
+
+    fn contract_address() -> Address {
+        RANDOMNESS_CONFIG_ADDR
+    }
+
+    fn caller_address() -> Address {
+        SYSTEM_CALLER
+    }
+}
+
+/// Convert RandomnessConfigData to BCS-encoded bytes
+fn convert_randomness_config_to_bcs(config: &RandomnessConfigData) -> Bytes {
+    let gravity_config = convert_randomness_config(config);
+
+    // Serialize to BCS
+    let bcs_bytes =
+        bcs::to_bytes(&gravity_config).expect("Failed to serialize RandomnessConfig to BCS");
+
+    Bytes::from(bcs_bytes)
+}
+
+/// Helper function to convert ConfigV2Data
+fn convert_config_v2_data(
+    config: &ConfigV2Data,
+) -> gravity_api_types::on_chain_config::dkg::ConfigV2 {
     gravity_api_types::on_chain_config::dkg::ConfigV2 {
-        secrecyThreshold: convert_fixed_point64(&config.secrecyThreshold),
-        reconstructionThreshold: convert_fixed_point64(&config.reconstructionThreshold),
-        fastPathSecrecyThreshold: convert_fixed_point64(&config.fastPathSecrecyThreshold),
+        secrecyThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+            value: config.secrecyThreshold,
+        },
+        reconstructionThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+            value: config.reconstructionThreshold,
+        },
+        fastPathSecrecyThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 {
+            value: config.fastPathSecrecyThreshold,
+        },
     }
 }
 
@@ -176,17 +229,23 @@ fn convert_config_v2(config: &ConfigV2) -> gravity_api_types::on_chain_config::d
 fn convert_randomness_config(
     config: &RandomnessConfigData,
 ) -> gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
-    // Convert enum variant
+    // Convert enum variant (Off -> V1, V2 -> V2 in API types)
     let variant = match config.variant {
-        ConfigVariant::V1 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V1,
+        ConfigVariant::Off => gravity_api_types::on_chain_config::dkg::ConfigVariant::V1,
         ConfigVariant::V2 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V2,
         ConfigVariant::__Invalid => panic!("Invalid ConfigVariant"),
     };
 
+    // For Off variant, configV1 should be default/empty
+    let config_v1 = gravity_api_types::on_chain_config::dkg::ConfigV1 {
+        secrecyThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 { value: 0 },
+        reconstructionThreshold: gravity_api_types::on_chain_config::dkg::FixedPoint64 { value: 0 },
+    };
+
     gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
         variant,
-        configV1: convert_config_v1(&config.configV1),
-        configV2: convert_config_v2(&config.configV2),
+        configV1: config_v1,
+        configV2: convert_config_v2_data(&config.configV2),
     }
 }
 
@@ -194,12 +253,19 @@ fn convert_randomness_config(
 fn convert_validator(
     validator: &ValidatorConsensusInfo,
 ) -> gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
+    // Convert address to 32-byte array (pad with zeros if needed)
+    let mut addr_bytes = [0u8; 32];
+    let validator_bytes = validator.validator.as_slice();
+    addr_bytes[32 - validator_bytes.len()..].copy_from_slice(validator_bytes);
+
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
-        addr: gravity_api_types::account::ExternalAccountAddress::new(
-            validator.aptosAddress.to_vec().try_into().unwrap(),
-        ),
-        pk_bytes: hex::decode(&validator.pkBytes).unwrap(),
-        voting_power: validator.votingPower,
+        addr: gravity_api_types::account::ExternalAccountAddress::new(addr_bytes),
+        pk_bytes: validator.consensusPubkey.to_vec(),
+        // Convert wei to tokens by dividing by 10^18
+        voting_power: (validator.votingPower /
+            alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18)))
+        .try_into()
+        .unwrap_or(u64::MAX),
     }
 }
 
@@ -223,12 +289,19 @@ fn convert_dkg_session_metadata(
 fn convert_validator_for_event(
     validator: &ValidatorConsensusInfo,
 ) -> gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
+    // Convert address to 32-byte array (pad with zeros if needed)
+    let mut addr_bytes = [0u8; 32];
+    let validator_bytes = validator.validator.as_slice();
+    addr_bytes[32 - validator_bytes.len()..].copy_from_slice(validator_bytes);
+
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
-        addr: gravity_api_types::account::ExternalAccountAddress::new(
-            validator.aptosAddress.to_vec().try_into().unwrap(),
-        ),
-        pk_bytes: validator.pkBytes.to_vec(),
-        voting_power: validator.votingPower,
+        addr: gravity_api_types::account::ExternalAccountAddress::new(addr_bytes),
+        pk_bytes: validator.consensusPubkey.to_vec(),
+        // Convert wei to tokens by dividing by 10^18
+        voting_power: (validator.votingPower /
+            alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18)))
+        .try_into()
+        .unwrap_or(u64::MAX),
     }
 }
 
@@ -266,8 +339,8 @@ pub fn convert_dkg_start_event_to_api(
 // DKG State Conversion
 // ============================================================================
 
-/// Convert Solidity DKG state to BCS-encoded bytes
-fn convert_dkg_state_to_bcs(solidity_state: &DKGState) -> Bytes {
+/// Convert Solidity DKG state (multi-value return) to BCS-encoded bytes
+fn convert_dkg_state_to_bcs(solidity_state: &getDKGStateReturn) -> Bytes {
     let gravity_state = GravityDKGState {
         last_completed: if !solidity_state.hasLastCompleted {
             None
@@ -307,7 +380,7 @@ pub(crate) fn construct_dkg_transaction(
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
 
-    let call = finishWithDkgResultCall { dkg_result: dkg_transcript.transcript_bytes.into() };
+    let call = finishTransitionCall { dkgResult: dkg_transcript.transcript_bytes.into() };
     let input: Bytes = call.abi_encode().into();
 
     Ok(super::new_system_call_txn(RECONFIGURATION_WITH_DKG_ADDR, nonce, gas_price, input))
