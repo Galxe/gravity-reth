@@ -1,405 +1,50 @@
-//! Fetcher for JWK (JSON Web Key) on-chain configuration
+//! Fetcher for Oracle on-chain data
+//!
+//! This module handles the READ path for ALL oracle data from the chain:
+//! - RSA JWKs from JWKManager contract
+//! - Blockchain events from NativeOracle (sourced from OracleTaskConfig)
+//!
+//! Both are packaged as AllProvidersJWKs for gravity-aptos JWK consensus.
+//! The data format matches what the relayer sends for byte-exact comparison.
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
-    JWK_MANAGER_ADDR, NATIVE_ORACLE_ADDR, SYSTEM_CALLER,
+    oracle_task_helpers::OracleTaskClient,
+    types::{convert_oracle_rsa_to_api_jwk, getObservedJWKsCall, OracleProviderJWKs},
+    JWK_MANAGER_ADDR, SYSTEM_CALLER,
 };
 use alloy_eips::BlockId;
-use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
-use alloy_sol_macro::sol;
-use alloy_sol_types::{SolCall, SolEvent, SolType};
-use gravity_api_types::on_chain_config::jwks::JWKStruct;
-use reth_ethereum_primitives::TransactionSigned;
+use alloy_sol_types::SolCall;
+use gravity_api_types::on_chain_config::jwks::ProviderJWKs;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use std::fmt::Debug;
-use tracing::info;
-
-sol! {
-    event DepositGravityEvent(
-        address user,
-        uint256 amount,
-        address targetAddress,
-        uint256 blockNumber
-    );
-
-    event ChangeRecord(
-        bytes32 key,
-        bytes32 value,
-        uint256 blockNumber,
-        address updater,
-        uint256 sequenceNumber
-    );
-}
-
-sol! {
-    struct CrossChainParams {
-        // 1 => CrossChainDepositEvent
-        bytes id;
-        address sender;
-        address targetAddress;
-        uint256 amount;
-        uint256 blockNumber;
-        string issuer;
-        bytes data; // 额外数据（用于哈希记录等）
-    }
-
-    // 0 => Raw,
-    // 1 => CrossChainDepositEvent
-    struct UnsupportedJWK {
-        bytes id;
-        bytes payload;
-    }
-    struct JWK {
-        uint8 variant; // 0: RSA_JWK, 1: UnsupportedJWK
-        bytes data; // Encoded JWK data
-    }
-
-    /// @dev Provider's JWK collection
-    struct ProviderJWKs {
-        string issuer; // Issuer
-        uint64 version; // Version number
-        JWK[] jwks; // JWK array, sorted by kid
-    }
-
-    /// @dev All providers' JWK collection
-    struct AllProvidersJWKs {
-        ProviderJWKs[] entries; // Provider array sorted by issuer
-    }
-    function getObservedJWKs() external view returns (AllProvidersJWKs memory);
-
-    function upsertObservedJWKs(
-        ProviderJWKs[] calldata providerJWKsArray,
-        CrossChainParams[] calldata crossChainParamsArray
-    ) external;
-
-    event ObservedJWKsUpdated(uint256 indexed epoch, ProviderJWKs[] jwks);
-}
+use tracing::{debug, info};
 
 // =============================================================================
-// New Oracle Contract Types (gravity_chain_core_contracts/src/oracle/jwk/)
+// Conversion Functions
 // =============================================================================
 
-sol! {
-    /// @dev RSA JWK structure from new Oracle JWKManager contract
-    /// Note: This struct does NOT have a `kty` field, but gaptos expects one.
-    /// See convert_oracle_rsa_to_api_jwk() for the workaround.
-    #[derive(Debug)]
-    struct OracleRSA_JWK {
-        string kid;  // Key ID
-        string alg;  // Algorithm (e.g., "RS256")
-        string e;    // RSA public exponent (Base64url)
-        string n;    // RSA modulus (Base64url)
-    }
-
-    /// @dev Provider's JWK collection from new Oracle JWKManager
-    struct OracleProviderJWKs {
-        bytes issuer;           // Issuer URL
-        uint64 version;         // Version number
-        OracleRSA_JWK[] jwks;   // RSA JWK array
-    }
-
-    /// @dev All providers' JWK collection from new Oracle JWKManager
-    struct OracleAllProvidersJWKs {
-        OracleProviderJWKs[] entries;
-    }
-
-    /// @dev NativeOracle.record() function signature
-    function record(
-        uint32 sourceType,
-        uint256 sourceId,
-        uint128 nonce,
-        bytes calldata payload,
-        uint256 callbackGasLimit
-    ) external;
-}
-
-/// Convert new Oracle contract RSA_JWK to api-types JWKStruct
-///
-/// The new Oracle JWKManager contract stores RSA_JWK{kid, alg, e, n} without a `kty` field.
-/// However, gaptos expects RSA_JWK{kid, kty, alg, e, n} with all 5 fields.
-/// This function adds the missing `kty` field with a hardcoded value "RSA".
-///
-/// TODO(gravity): Add `kty` field to the Solidity RSA_JWK struct in
-/// gravity_chain_core_contracts/src/oracle/jwk/IJWKManager.sol to properly store this value
-/// on-chain instead of hardcoding it here.
-fn convert_oracle_rsa_to_api_jwk(rsa_jwk: OracleRSA_JWK) -> JWKStruct {
-    // Create gaptos-compatible RSA_JWK struct with all 5 fields
-    // The struct order in gaptos is: kid, kty, alg, e, n
-    #[derive(serde::Serialize)]
-    struct GaptosRsaJwk {
-        kid: String,
-        kty: String,
-        alg: String,
-        e: String,
-        n: String,
-    }
-
-    let gaptos_rsa = GaptosRsaJwk {
-        kid: rsa_jwk.kid,
-        kty: "RSA".to_string(), // TODO(gravity): Read from contract once kty field is added
-        alg: rsa_jwk.alg,
-        e: rsa_jwk.e,
-        n: rsa_jwk.n,
-    };
-
-    JWKStruct {
-        type_name: "0x1::jwks::RSA_JWK".to_string(),
-        data: bcs::to_bytes(&gaptos_rsa).expect("Failed to BCS serialize RSA_JWK"),
-    }
-}
-
-fn convert_into_api_jwk(jwk: JWK) -> JWKStruct {
-    if jwk.variant == 0 {
-        // Note: Gravity relayer does not fetch RSA JWKs directly. RSA JWKs are fetched in Aptos
-        JWKStruct { type_name: "0x1::jwks::RSA_JWK".to_string(), data: jwk.data.into() }
-    } else {
-        // All data fetched by gravity relayer is contained within UnsupportedJWK in the data field
-        JWKStruct { type_name: "0x1::jwks::UnsupportedJWK".to_string(), data: jwk.data.into() }
-    }
-}
-
-pub fn convert_into_api_provider_jwks(
-    provider_jwks: ProviderJWKs,
-) -> gravity_api_types::on_chain_config::jwks::ProviderJWKs {
-    gravity_api_types::on_chain_config::jwks::ProviderJWKs {
-        issuer: provider_jwks.issuer.into(),
-        version: provider_jwks.version,
-        jwks: provider_jwks
-            .jwks
-            .iter()
-            .map(|jwk: &JWK| convert_into_api_jwk(jwk.clone()))
-            .collect::<Vec<_>>(),
-    }
-}
-
-fn convert_into_sol_provider_jwks(
-    provider_jwks: gravity_api_types::on_chain_config::jwks::ProviderJWKs,
-) -> ProviderJWKs {
+/// Convert Oracle ProviderJWKs to api-types ProviderJWKs
+fn convert_oracle_provider_jwks(provider_jwks: OracleProviderJWKs) -> ProviderJWKs {
     ProviderJWKs {
-        issuer: String::from_utf8(provider_jwks.issuer)
-            .expect("Failed to convert issuer to string"),
+        issuer: provider_jwks.issuer.to_vec(),
         version: provider_jwks.version,
-        jwks: provider_jwks
-            .jwks
-            .into_iter()
-            .map(|jwk| {
-                let variant = match jwk.type_name.as_str() {
-                    "0x1::jwks::RSA_JWK" => 0,
-                    _ => 1,
-                };
-                JWK { variant, data: jwk.data.into() }
-            })
-            .collect(),
+        jwks: provider_jwks.jwks.into_iter().map(convert_oracle_rsa_to_api_jwk).collect(),
     }
 }
 
-/// Parse chain_id from issuer URI
-/// Issuer format:
-/// gravity://{chain_id}/event?address={contract_address}&topic0={topic0}&fromBlock={from_block}
-fn parse_chain_id_from_issuer(issuer: &str) -> Option<u32> {
-    if issuer.starts_with("gravity://") {
-        // Extract the part after "gravity://" and before the next "/"
-        let after_protocol = &issuer[10..]; // Skip "gravity://"
-        if let Some(slash_pos) = after_protocol.find('/') {
-            let chain_id_str = &after_protocol[..slash_pos];
-            return chain_id_str.parse().ok();
-        }
-    }
-    None
+/// Convert Oracle ProviderJWKs to api-types ProviderJWKs (pub for lib.rs event parsing)
+pub fn convert_into_api_provider_jwks(provider_jwks: OracleProviderJWKs) -> ProviderJWKs {
+    convert_oracle_provider_jwks(provider_jwks)
 }
 
-fn convert_into_sol_crosschain_params(jwks: &Vec<JWK>, issuer: &str) -> Vec<CrossChainParams> {
-    jwks.iter()
-        .filter(|jwk| jwk.variant == 1)
-        .map(|jwk| process_unsupported_jwk(jwk, &issuer))
-        .collect()
-}
+// =============================================================================
+// ObservedJwkFetcher - Unified READ Path
+// =============================================================================
 
-fn process_unsupported_jwk(jwk: &JWK, issuer: &str) -> CrossChainParams {
-    let unsupported_jwk = UnsupportedJWK::abi_decode(&jwk.data).unwrap();
-    let id_string = String::from_utf8(unsupported_jwk.id.to_vec())
-        .expect("Failed to convert id bytes to string");
-    let data_type: u8 = id_string.parse().expect("Failed to parse data_type from string");
-
-    match data_type {
-        hash if hash == 1 => {
-            // DepositGravityEvent
-            let event = DepositGravityEvent::abi_decode_data(&unsupported_jwk.payload).unwrap();
-
-            info!(target: "observed_jwk stake event",
-                user=?event.0,
-                amount=?event.1,
-                target_address=?event.2,
-                block_number=?event.3,
-                "observed_jwk stake event created"
-            );
-            CrossChainParams {
-                id: unsupported_jwk.id,
-                sender: event.0,
-                targetAddress: event.2,
-                amount: event.1,
-                blockNumber: event.3,
-                issuer: issuer.to_string(),
-                data: Bytes::new(), // deposit模式为空
-            }
-        }
-        hash if hash == 2 => {
-            // ChangeRecord
-            // All parameters are non-indexed, so all fields are in the data part
-            let event = ChangeRecord::abi_decode_data(&unsupported_jwk.payload).unwrap();
-            let hash_value: B256 = event.1;
-            let block_number = event.2;
-            let sequence_number = event.4;
-
-            //bytes memory data = crossChainParam.data;
-            // require(data.length == 76, "Invalid hash record data length");
-
-            // bytes32 hash;
-            // uint64 sourceBlockNumber;
-            // uint32 sourceChainId;
-            // uint256 sequenceNumber;
-
-            // assembly {
-            //     hash := mload(add(data, 32))
-            //     sourceBlockNumber := mload(add(data, 64))
-            //     sourceChainId := mload(add(data, 72))
-            //     sequenceNumber := mload(add(data, 104))
-            // }
-            // Build 76-byte data according to Solidity contract expectations:
-            // - hash (bytes32): 32 bytes at offset 0 (from event.1)
-            // - sourceBlockNumber (uint64): 8 bytes at offset 32 (from event.2, converted to u64)
-            // - sourceChainId (uint32): 4 bytes at offset 40 (parsed from issuer)
-            // - sequenceNumber (uint256): 32 bytes at offset 44 (from event.4)
-            // Total: 76 bytes
-            let mut data_bytes = vec![0u8; 76];
-
-            // hash (bytes32) - 32 bytes at offset 0 (event.1)
-            data_bytes[0..32].copy_from_slice(hash_value.as_slice());
-
-            // sourceBlockNumber (uint64) - 8 bytes at offset 32 (event.2 converted to u64)
-            let source_block_number = block_number.to::<u64>();
-            data_bytes[32..40].copy_from_slice(&source_block_number.to_be_bytes());
-
-            // sourceChainId (uint32) - 4 bytes at offset 40 (parsed from issuer)
-            let source_chain_id = parse_chain_id_from_issuer(issuer).unwrap_or(0u32);
-
-            info!(target: "observed_jwk change record event",
-                key=?event.0,
-                hash=?hash_value,
-                block_number=?block_number,
-                updater=?event.3,
-                sequence_number=?sequence_number,
-                source_chain_id=?source_chain_id,
-                "observed_jwk change record event created"
-            );
-
-            data_bytes[40..44].copy_from_slice(&source_chain_id.to_be_bytes());
-
-            // sequenceNumber (uint256) - 32 bytes at offset 44 (event.4)
-            let sequence_bytes: [u8; 32] = sequence_number.to_be_bytes();
-            data_bytes[44..76].copy_from_slice(&sequence_bytes);
-
-            CrossChainParams {
-                id: unsupported_jwk.id,
-                sender: event.3,              // updater is in event.3
-                targetAddress: Address::ZERO, // ChangeRecord doesn't have targetAddress
-                amount: U256::ZERO,           // ChangeRecord doesn't have amount
-                blockNumber: block_number,
-                issuer: issuer.to_string(),
-                data: Bytes::from(data_bytes), // Store 76-byte data as expected by contract
-            }
-        }
-        _ => panic!("Unsupported event type: {:?}, id: {:?}", data_type, unsupported_jwk.id),
-    }
-}
-
-fn convert_into_api_all_providers_jwks(
-    all_providers_jwks: AllProvidersJWKs,
-) -> gravity_api_types::on_chain_config::jwks::AllProvidersJWKs {
-    gravity_api_types::on_chain_config::jwks::AllProvidersJWKs {
-        entries: all_providers_jwks
-            .entries
-            .iter()
-            .map(|provider_jwks: &ProviderJWKs| {
-                convert_into_api_provider_jwks(provider_jwks.clone())
-            })
-            .collect::<Vec<_>>(),
-    }
-}
-
-fn convert_into_observed_jwks(
-    all_providers_jwks: AllProvidersJWKs,
-) -> gravity_api_types::on_chain_config::jwks::ObservedJWKs {
-    gravity_api_types::on_chain_config::jwks::ObservedJWKs {
-        jwks: convert_into_api_all_providers_jwks(all_providers_jwks),
-    }
-}
-
-fn convert_into_bcs_all_providers_jwks(all_providers_jwks: AllProvidersJWKs) -> Bytes {
-    let all_providers = convert_into_observed_jwks(all_providers_jwks);
-    bcs::to_bytes(&all_providers).expect("Failed to serialize AllProvidersJWKs").into()
-}
-
-/// Source type constants for NativeOracle
-const SOURCE_TYPE_BLOCKCHAIN: u32 = 0;
-const SOURCE_TYPE_JWK: u32 = 1;
-
-/// Default callback gas limit for JWK updates
-const JWK_CALLBACK_GAS_LIMIT: u64 = 500_000;
-
-/// Construct JWK transaction from ProviderJWKs
-///
-/// In the new Oracle architecture, JWK updates are recorded via NativeOracle.record().
-/// - RSA JWKs → NativeOracle.record(sourceType=1, sourceId=keccak256(issuer))
-/// - UnsupportedJWK with id="1" (Deposit) → NativeOracle.record(sourceType=0)
-/// - UnsupportedJWK with id="2" (ChangeRecord) → NativeOracle.record(sourceType=0)
-pub(crate) fn construct_jwk_transaction(
-    provider_jwks: gravity_api_types::on_chain_config::jwks::ProviderJWKs,
-    nonce: u64,
-    gas_price: u128,
-) -> Result<TransactionSigned, String> {
-    let sol_provider_jwks = convert_into_sol_provider_jwks(provider_jwks.clone());
-
-    // Calculate sourceId from issuer hash
-    let issuer_hash = keccak256(&provider_jwks.issuer);
-    let source_id = U256::from_be_bytes(issuer_hash.0);
-
-    // Encode payload: (bytes issuer, uint64 version, RSA_JWK[] jwks)
-    // Note: This encodes the RSA JWKs for JWKManager callback
-    let rsa_jwks: Vec<OracleRSA_JWK> = sol_provider_jwks
-        .jwks
-        .iter()
-        .filter(|jwk| jwk.variant == 0) // Only RSA JWKs
-        .map(|jwk| {
-            // Decode RSA_JWK from JWK.data
-            // For now, we pass through the data as-is since the format matches
-            // TODO: Proper conversion if needed
-            OracleRSA_JWK {
-                kid: String::new(), // Will be filled from decoded data
-                alg: String::new(),
-                e: String::new(),
-                n: String::new(),
-            }
-        })
-        .collect();
-
-    // For now, continue using the old upsertObservedJWKs for backward compatibility
-    // TODO: Migrate to NativeOracle.record() once contract migration is complete
-    let cross_chain_params = convert_into_sol_crosschain_params(
-        &sol_provider_jwks.jwks,
-        sol_provider_jwks.issuer.as_str(),
-    );
-
-    let call = upsertObservedJWKsCall {
-        providerJWKsArray: vec![sol_provider_jwks],
-        crossChainParamsArray: cross_chain_params,
-    };
-    let input: Bytes = call.abi_encode().into();
-    Ok(super::new_system_call_txn(JWK_MANAGER_ADDR, nonce, gas_price, input))
-}
-
-/// Fetcher for consensus configuration
+/// Fetcher for all oracle data (JWKs + blockchain events)
 #[derive(Debug)]
 pub struct ObservedJwkFetcher<'a, EthApi> {
     base_fetcher: &'a OnchainConfigFetcher<EthApi>,
@@ -408,10 +53,47 @@ pub struct ObservedJwkFetcher<'a, EthApi> {
 impl<'a, EthApi> ObservedJwkFetcher<'a, EthApi>
 where
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    /// Create a new consensus config fetcher
     pub const fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
         Self { base_fetcher }
+    }
+
+    /// Get shared oracle task client
+    fn oracle_client(&self) -> OracleTaskClient<'_, EthApi> {
+        OracleTaskClient::new(self.base_fetcher)
+    }
+
+    /// Fetch JWKs from JWKManager contract
+    fn fetch_jwk_manager_providers(&self, block_id: BlockId) -> Option<Vec<ProviderJWKs>> {
+        let call = getObservedJWKsCall {};
+        let input: Bytes = call.abi_encode().into();
+
+        let result = self
+            .base_fetcher
+            .eth_call(SYSTEM_CALLER, JWK_MANAGER_ADDR, input, block_id)
+            .map_err(|e| {
+                debug!("Failed to fetch JWKs from JWKManager: {:?}", e);
+            })
+            .ok()?;
+
+        let oracle_jwks = getObservedJWKsCall::abi_decode_returns(&result).ok()?;
+
+        Some(oracle_jwks.entries.into_iter().map(convert_oracle_provider_jwks).collect())
+    }
+
+    /// Fetch blockchain event providers using shared OracleTaskClient
+    fn fetch_blockchain_providers(&self, block_id: BlockId) -> Vec<ProviderJWKs> {
+        let task_uris = self.oracle_client().fetch_blockchain_task_uris(block_id);
+
+        task_uris
+            .into_iter()
+            .map(|(uri, nonce)| ProviderJWKs {
+                issuer: uri.into_bytes(),
+                version: nonce as u64,
+                jwks: vec![], // Empty - only use version for comparison
+            })
+            .collect()
     }
 }
 
@@ -420,21 +102,35 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
+    /// Fetch ALL oracle data (JWKs + blockchain events) and return as BCS-encoded ObservedJWKs
     fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
-        let call = getObservedJWKsCall {};
-        let input: Bytes = call.abi_encode().into();
+        let mut all_entries: Vec<ProviderJWKs> = Vec::new();
 
-        let result = self
-            .base_fetcher
-            .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
-            .map_err(|e| {
-                tracing::warn!("Failed to fetch observed JWKs at block {}: {:?}", block_id, e);
-            })
-            .ok()?;
+        // 1. Fetch JWKs from JWKManager
+        if let Some(jwk_entries) = self.fetch_jwk_manager_providers(block_id) {
+            all_entries.extend(jwk_entries);
+        }
 
-        let solidity_all_providers_jwks = getObservedJWKsCall::abi_decode_returns(&result)
-            .expect("Failed to decode getObservedJWKs return value");
-        Some(convert_into_bcs_all_providers_jwks(solidity_all_providers_jwks))
+        // 2. Fetch blockchain events from NativeOracle (for configured chains from
+        //    OracleTaskConfig)
+        let blockchain_entries = self.fetch_blockchain_providers(block_id);
+        all_entries.extend(blockchain_entries);
+
+        info!(
+            jwk_count = all_entries.iter().filter(|e| e.issuer.starts_with(b"https://")).count(),
+            blockchain_count =
+                all_entries.iter().filter(|e| e.issuer.starts_with(b"gravity://")).count(),
+            "Fetched all oracle providers"
+        );
+
+        // 3. Build and BCS-encode ObservedJWKs
+        let api_all_providers =
+            gravity_api_types::on_chain_config::jwks::AllProvidersJWKs { entries: all_entries };
+
+        let observed_jwks =
+            gravity_api_types::on_chain_config::jwks::ObservedJWKs { jwks: api_all_providers };
+
+        Some(bcs::to_bytes(&observed_jwks).expect("Failed to BCS serialize ObservedJWKs").into())
     }
 
     fn contract_address() -> Address {

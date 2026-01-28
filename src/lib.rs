@@ -21,6 +21,7 @@ pub use reth_node_core;
 pub use reth_node_ethereum;
 pub use reth_payload_builder;
 pub use reth_pipe_exec_layer_ext_v2;
+pub use reth_pipe_exec_layer_relayer;
 pub use reth_primitives;
 pub use reth_provider;
 pub use reth_rpc;

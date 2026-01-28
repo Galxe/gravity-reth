@@ -4,7 +4,6 @@ mod channel;
 mod metrics;
 pub mod onchain_config;
 use alloy_sol_types::SolEvent;
-pub use reth_pipe_exec_layer_relayer::{ObserveState, ObservedValue, RelayerManager};
 
 use channel::Channel;
 use gravity_api_types::{
@@ -69,7 +68,8 @@ use tracing::*;
 use crate::onchain_config::{
     construct_validator_txns_envelope,
     dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
-    observed_jwk::{convert_into_api_provider_jwks, ObservedJWKsUpdated},
+    observed_jwk::convert_into_api_provider_jwks,
+    types::ObservedJWKsUpdated,
     SYSTEM_CALLER,
 };
 

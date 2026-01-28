@@ -1,106 +1,47 @@
 //! Fetcher for JWK consensus configuration from OracleTaskConfig
 //!
-//! In the new Oracle architecture, provider configuration is stored in OracleTaskConfig
-//! instead of JWKManager. The task is retrieved using:
-//!   OracleTaskConfig.getTask(sourceType=1, sourceId=0, taskName=keccak256("oidc_providers"))
+//! In the new Oracle architecture, provider configuration is stored in OracleTaskConfig.
+//! This fetcher enumerates ALL oracle tasks (JWK, blockchain, etc.) and formats them
+//! as OIDCProviders for the gravity-aptos JWK consensus system.
 
 use super::{
     base::{ConfigFetcher, OnchainConfigFetcher},
+    oracle_task_helpers::{OracleTaskClient, SOURCE_TYPE_JWK},
     ORACLE_TASK_CONFIG_ADDR, SYSTEM_CALLER,
 };
 use alloy_eips::BlockId;
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
-use alloy_sol_types::SolCall;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
+use tracing::info;
 
-/// Source type for JWK in the Oracle system
-const SOURCE_TYPE_JWK: u32 = 1;
-
-/// Task name for OIDC providers configuration
-/// keccak256("oidc_providers")
+// Well-known task names
 fn oidc_providers_task_name() -> B256 {
     keccak256("oidc_providers")
 }
 
-// OracleTaskConfig contract ABI (aligned with
-// gravity_chain_core_contracts/src/oracle/IOracleTaskConfig.sol)
+// =============================================================================
+// JWK-specific ABI (not shared with observed_jwk)
+// =============================================================================
+
 sol! {
-    /// @notice Configuration for a continuous oracle task
-    struct OracleTask {
-        /// Task configuration bytes (ABI-encoded OIDCProvider[])
-        bytes config;
-        /// Timestamp when this task was last updated
-        uint64 updatedAt;
+    /// OIDC Provider stored in task config (for JWK sourceType=1)
+    struct TaskOIDCProvider {
+        bytes name;
+        bytes configUrl;
+        uint64 blockNumber;
     }
-
-    /// @notice OIDC Provider stored in the task config
-    /// Note: This is what's ABI-encoded inside OracleTask.config
-    struct OIDCProvider {
-        bytes name;      // Provider name, e.g., "https://accounts.google.com"
-        bytes configUrl; // OpenID configuration URL
-        uint64 blockNumber; // Onchain block number
-    }
-
-    /// @notice Get an oracle task by its key tuple
-    function getTask(
-        uint32 sourceType,
-        uint256 sourceId,
-        bytes32 taskName
-    ) external view returns (OracleTask memory task);
 }
 
-/// Convert OracleTaskConfig providers to BCS-encoded JWKConsensusConfig
-fn convert_task_config_to_bcs(task: OracleTask) -> Option<Bytes> {
-    if task.config.is_empty() {
-        tracing::warn!("OracleTaskConfig: oidc_providers task has empty config");
-        let jwk_consensus_config = gravity_api_types::on_chain_config::jwks::JWKConsensusConfig {
-            enabled: false,
-            oidc_providers: Vec::new(),
-        };
+// =============================================================================
+// JwkConsensusConfigFetcher
+// =============================================================================
 
-        return Some(
-            bcs::to_bytes(&jwk_consensus_config)
-                .expect("Failed to serialize JwkConsensusConfig")
-                .into(),
-        );
-    }
-
-    // ABI decode the config bytes to get OIDCProvider[]
-    // The config is ABI-encoded as a dynamic array of OIDCProvider structs
-    let providers = match <alloy_sol_types::sol_data::Array<OIDCProvider> as alloy_sol_types::SolType>::abi_decode(
-        &task.config,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("Failed to ABI decode OIDCProvider[] from task config: {:?}", e);
-            return None;
-        }
-    };
-
-    let active_providers = providers
-        .iter()
-        .map(|provider| gravity_api_types::on_chain_config::jwks::OIDCProvider {
-            name: String::from_utf8_lossy(&provider.name).to_string(),
-            config_url: String::from_utf8_lossy(&provider.configUrl).to_string(),
-            onchain_block_number: Some(provider.blockNumber),
-        })
-        .collect::<Vec<_>>();
-
-    let jwk_consensus_config = gravity_api_types::on_chain_config::jwks::JWKConsensusConfig {
-        enabled: false,
-        oidc_providers: active_providers,
-    };
-
-    Some(
-        bcs::to_bytes(&jwk_consensus_config)
-            .expect("Failed to serialize JwkConsensusConfig")
-            .into(),
-    )
-}
-
-/// Fetcher for JWK consensus configuration from OracleTaskConfig
+/// Fetcher for JWK consensus configuration
+///
+/// Enumerates ALL oracle tasks from OracleTaskConfig and formats them as OIDCProviders
+/// for gravity-aptos JWK consensus.
 #[derive(Debug)]
 pub struct JwkConsensusConfigFetcher<'a, EthApi> {
     base_fetcher: &'a OnchainConfigFetcher<EthApi>,
@@ -109,10 +50,67 @@ pub struct JwkConsensusConfigFetcher<'a, EthApi> {
 impl<'a, EthApi> JwkConsensusConfigFetcher<'a, EthApi>
 where
     EthApi: EthCall,
+    EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
-    /// Create a new consensus config fetcher
     pub const fn new(base_fetcher: &'a OnchainConfigFetcher<EthApi>) -> Self {
         Self { base_fetcher }
+    }
+
+    /// Get shared oracle task client
+    fn oracle_client(&self) -> OracleTaskClient<'_, EthApi> {
+        OracleTaskClient::new(self.base_fetcher)
+    }
+
+    /// Fetch and parse JWK providers (sourceType=1)
+    fn fetch_jwk_providers(
+        &self,
+        block_id: BlockId,
+    ) -> Vec<gravity_api_types::on_chain_config::jwks::OIDCProvider> {
+        let mut providers = Vec::new();
+
+        // Try to get the "oidc_providers" task for JWK
+        if let Some(task) = self.oracle_client().call_get_task(
+            SOURCE_TYPE_JWK,
+            U256::ZERO,
+            oidc_providers_task_name(),
+            block_id,
+        ) {
+            if !task.config.is_empty() {
+                // ABI decode TaskOIDCProvider[]
+                if let Ok(oidc_providers) = <alloy_sol_types::sol_data::Array<TaskOIDCProvider> as alloy_sol_types::SolType>::abi_decode(&task.config) {
+                    for provider in oidc_providers {
+                        providers.push(gravity_api_types::on_chain_config::jwks::OIDCProvider {
+                            name: String::from_utf8_lossy(&provider.name).to_string(),
+                            config_url: String::from_utf8_lossy(&provider.configUrl).to_string(),
+                            onchain_nonce: None, // JWK providers don't use nonce
+                        });
+                    }
+                }
+            }
+        }
+
+        providers
+    }
+
+    /// Fetch and parse blockchain providers (sourceType=0)
+    /// Uses shared OracleTaskClient for task enumeration
+    fn fetch_blockchain_providers(
+        &self,
+        block_id: BlockId,
+    ) -> Vec<gravity_api_types::on_chain_config::jwks::OIDCProvider> {
+        let task_uris = self.oracle_client().fetch_blockchain_task_uris(block_id);
+
+        task_uris
+            .into_iter()
+            .map(|(uri, nonce)| {
+                info!(uri = %uri, nonce = nonce, "Found blockchain monitoring task");
+                gravity_api_types::on_chain_config::jwks::OIDCProvider {
+                    name: uri.clone(),
+                    config_url: uri,
+                    onchain_nonce: Some(nonce as u64),
+                }
+            })
+            .collect()
     }
 }
 
@@ -122,30 +120,28 @@ where
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
-        // Call OracleTaskConfig.getTask(SOURCE_TYPE_JWK, 0, keccak256("oidc_providers"))
-        let call = getTaskCall {
-            sourceType: SOURCE_TYPE_JWK,
-            sourceId: U256::ZERO,
-            taskName: oidc_providers_task_name(),
+        let mut all_providers = Vec::new();
+
+        // 1. Fetch JWK providers (sourceType=1)
+        all_providers.extend(self.fetch_jwk_providers(block_id));
+
+        // 2. Fetch blockchain providers (sourceType=0)
+        all_providers.extend(self.fetch_blockchain_providers(block_id));
+
+        info!(provider_count = all_providers.len(), "Fetched oracle task providers");
+
+        // Build JWKConsensusConfig
+        // TODO(gravity): should read the onchain config
+        let jwk_consensus_config = gravity_api_types::on_chain_config::jwks::JWKConsensusConfig {
+            enabled: !all_providers.is_empty(),
+            oidc_providers: all_providers,
         };
-        let input: Bytes = call.abi_encode().into();
 
-        let result = self
-            .base_fetcher
-            .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
-            .map_err(|e| {
-                tracing::warn!(
-                    "Failed to fetch JWK consensus config from OracleTaskConfig at block {}: {:?}",
-                    block_id,
-                    e
-                );
-            })
-            .ok()?;
-
-        let task = getTaskCall::abi_decode_returns(&result)
-            .expect("Failed to decode getTask return value");
-
-        convert_task_config_to_bcs(task)
+        Some(
+            bcs::to_bytes(&jwk_consensus_config)
+                .expect("Failed to serialize JwkConsensusConfig")
+                .into(),
+        )
     }
 
     fn contract_address() -> Address {
