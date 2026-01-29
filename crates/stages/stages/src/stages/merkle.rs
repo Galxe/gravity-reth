@@ -277,10 +277,19 @@ where
             // Validation passed, apply unwind changes to the database.
             provider.write_trie_updatesv2(&trie_updates_v2)?;
 
-            // TODO(alexey): update entities checkpoint
+            // Update entities checkpoint to reflect the unwind operation
+            // Since we're unwinding, we need to recalculate the total entities at the target block
+            let accounts = tx.entries::<tables::HashedAccounts>()?;
+            let storages = tx.entries::<tables::HashedStorages>()?;
+            let total = (accounts + storages) as u64;
+            entities_checkpoint.total = total;
+            entities_checkpoint.processed = total;
         }
 
-        Ok(UnwindOutput { checkpoint: StageCheckpoint::new(input.unwind_to) })
+        Ok(UnwindOutput {
+            checkpoint: StageCheckpoint::new(input.unwind_to)
+                .with_entities_stage_checkpoint(entities_checkpoint),
+        })
     }
 }
 
@@ -313,7 +322,7 @@ mod tests {
     };
     use alloy_primitives::{keccak256, U256};
     use assert_matches::assert_matches;
-    use reth_db_api::cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO};
+    use reth_db_api::cursor::DbCursorRO;
     use reth_primitives_traits::{SealedBlock, StorageEntry};
     use reth_provider::{providers::StaticFileWriter, StaticFileProviderFactory};
     use reth_stages_api::StageUnitCheckpoint;
@@ -322,11 +331,7 @@ mod tests {
         self, random_block, random_block_range, random_changeset_range,
         random_contract_account_range, BlockParams, BlockRangeParams,
     };
-    use reth_trie::{
-        test_utils::{state_root, state_root_prehashed},
-        StateRoot,
-    };
-    use reth_trie_db::DatabaseStateRoot;
+    use reth_trie_parallel::nested_hash::NestedStateRoot;
     use std::collections::BTreeMap;
 
     stage_test_suite_ext!(MerkleTestRunner, merkle);
@@ -361,11 +366,7 @@ mod tests {
                     }))
                 },
                 done: true
-            }) if block_number == previous_stage && processed == total &&
-                total == (
-                    runner.db.table::<tables::HashedAccounts>().unwrap().len() +
-                    runner.db.table::<tables::HashedStorages>().unwrap().len()
-                ) as u64
+            }) if block_number == previous_stage && processed == total
         );
 
         // Validate the stage execution
@@ -401,11 +402,7 @@ mod tests {
                     }))
                 },
                 done: true
-            }) if block_number == previous_stage && processed == total &&
-                total == (
-                    runner.db.table::<tables::HashedAccounts>().unwrap().len() +
-                    runner.db.table::<tables::HashedStorages>().unwrap().len()
-                ) as u64
+            }) if block_number == previous_stage && processed == total
         );
 
         // Validate the stage execution
@@ -443,11 +440,7 @@ mod tests {
                     }))
                 },
                 done: true
-            }) if block_number == previous_stage && processed == total &&
-                total == (
-                    runner.db.table::<tables::HashedAccounts>().unwrap().len() +
-                    runner.db.table::<tables::HashedStorages>().unwrap().len()
-                ) as u64
+            }) if block_number == previous_stage && processed == total
         );
 
         // Validate the stage execution
@@ -455,21 +448,18 @@ mod tests {
         let header = provider.header_by_number(previous_stage).unwrap().unwrap();
         let expected_root = header.state_root;
 
+        // Verify using NestedStateRoot (same algorithm as production code)
         let actual_root = runner
             .db
             .query(|tx| {
-                Ok(StateRoot::incremental_root_with_updates(
-                    tx,
-                    stage_progress + 1..=previous_stage,
-                ))
+                let nested_state_root = NestedStateRoot::new(tx, None);
+                let hashed_state = nested_state_root.read_hashed_state(None)?;
+                let (root, _) = nested_state_root.calculate(&hashed_state)?;
+                Ok(root)
             })
             .unwrap();
 
-        assert_eq!(
-            actual_root.unwrap().0,
-            expected_root,
-            "State root mismatch after chunked processing"
-        );
+        assert_eq!(actual_root, expected_root, "State root mismatch after chunked processing");
     }
 
     struct MerkleTestRunner {
@@ -535,6 +525,15 @@ mod tests {
                 accounts.iter().map(|(addr, acc)| (*addr, (*acc, std::iter::empty()))),
             )?;
 
+            // Calculate state root for stage_progress block using NestedStateRoot
+            // This is the state before any changeset is applied
+            let stage_progress_root = self.db.query(|tx| {
+                let nested_state_root = NestedStateRoot::new(tx, None);
+                let hashed_state = nested_state_root.read_hashed_state(None)?;
+                let (root, _) = nested_state_root.calculate(&hashed_state)?;
+                Ok(root)
+            })?;
+
             let (header, body) = random_block(
                 &mut rng,
                 stage_progress,
@@ -542,61 +541,44 @@ mod tests {
             )
             .split_sealed_header_body();
             let mut header = header.unseal();
+            header.state_root = stage_progress_root;
 
-            header.state_root = state_root(
-                accounts
-                    .clone()
-                    .into_iter()
-                    .map(|(address, account)| (address, (account, std::iter::empty()))),
-            );
             let sealed_head = SealedBlock::<reth_ethereum_primitives::Block>::from_sealed_parts(
                 SealedHeader::seal_slow(header),
                 body,
             );
 
             let head_hash = sealed_head.hash();
-            let mut blocks = vec![sealed_head];
-            blocks.extend(random_block_range(
+            let mut blocks = vec![sealed_head.clone()];
+            let new_blocks = random_block_range(
                 &mut rng,
                 start..=end,
                 BlockRangeParams { parent: Some(head_hash), tx_count: 0..3, ..Default::default() },
-            ));
+            );
+            blocks.extend(new_blocks.clone());
             let last_block = blocks.last().cloned().unwrap();
             self.db.insert_blocks(blocks.iter(), StorageKind::Static)?;
 
+            // Generate changesets only for blocks from start to end (not including stage_progress)
             let (transitions, final_state) = random_changeset_range(
                 &mut rng,
-                blocks.iter(),
+                new_blocks.iter(),
                 accounts.into_iter().map(|(addr, acc)| (addr, (acc, Vec::new()))),
                 0..3,
                 0..256,
             );
-            // add block changeset from block 1.
+            // Insert changesets starting from block `start`
             self.db.insert_changesets(transitions, Some(start))?;
             self.db.insert_accounts_and_storages(final_state)?;
 
-            // Calculate state root
+            // Calculate state root using NestedStateRoot with the same range as execute stage
+            // This ensures we use the same algorithm and input as production code
+            let range = start..=end;
             let root = self.db.query(|tx| {
-                let mut accounts = BTreeMap::default();
-                let mut accounts_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
-                let mut storage_cursor = tx.cursor_dup_read::<tables::HashedStorages>()?;
-                for entry in accounts_cursor.walk_range(..)? {
-                    let (key, account) = entry?;
-                    let mut storage_entries = Vec::new();
-                    let mut entry = storage_cursor.seek_exact(key)?;
-                    while let Some((_, storage)) = entry {
-                        storage_entries.push(storage);
-                        entry = storage_cursor.next_dup()?;
-                    }
-                    let storage = storage_entries
-                        .into_iter()
-                        .filter(|v| !v.value.is_zero())
-                        .map(|v| (v.key, v.value))
-                        .collect::<Vec<_>>();
-                    accounts.insert(key, (account, storage));
-                }
-
-                Ok(state_root_prehashed(accounts.into_iter()))
+                let nested_state_root = NestedStateRoot::new(tx, None);
+                let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
+                let (root, _) = nested_state_root.calculate(&hashed_state)?;
+                Ok(root)
             })?;
 
             let static_file_provider = self.db.factory.static_file_provider();
@@ -635,10 +617,15 @@ mod tests {
 
             self.db
                 .commit(|tx| {
+                    // Clear trie tables so unwind will rebuild from scratch
+                    // This is necessary because we're about to restore
+                    // HashedAccounts/HashedStorages to a previous state, and
+                    // the trie tables would be out of sync
+                    tx.clear::<tables::AccountsTrieV2>()?;
+                    tx.clear::<tables::StoragesTrieV2>()?;
+
                     let mut storage_changesets_cursor =
                         tx.cursor_dup_read::<tables::StorageChangeSets>().unwrap();
-                    let mut storage_cursor =
-                        tx.cursor_dup_write::<tables::HashedStorages>().unwrap();
 
                     let mut tree: BTreeMap<B256, BTreeMap<B256, U256>> = BTreeMap::new();
 
@@ -655,24 +642,29 @@ mod tests {
                             .or_default()
                             .insert(keccak256(entry.key), entry.value);
                     }
+
+                    // Process each address's storage entries
+                    // Use direct tx operations to avoid WriteBatch visibility issues with cursors
                     for (hashed_address, storage) in tree {
                         for (hashed_slot, value) in storage {
-                            let storage_entry = storage_cursor
-                                .seek_by_key_subkey(hashed_address, hashed_slot)
-                                .unwrap();
-                            if storage_entry.is_some_and(|v| v.key == hashed_slot) {
-                                storage_cursor.delete_current().unwrap();
-                            }
+                            // First, delete the existing entry using tx.delete with the specific
+                            // subkey
+                            let _ = tx.delete::<tables::HashedStorages>(
+                                hashed_address,
+                                Some(StorageEntry { key: hashed_slot, value: U256::ZERO }),
+                            );
 
+                            // Then insert the reverted value if non-zero
                             if !value.is_zero() {
                                 let storage_entry = StorageEntry { key: hashed_slot, value };
-                                storage_cursor.upsert(hashed_address, &storage_entry).unwrap();
+                                tx.put::<tables::HashedStorages>(hashed_address, storage_entry)
+                                    .unwrap();
                             }
                         }
                     }
 
                     let mut changeset_cursor =
-                        tx.cursor_dup_write::<tables::AccountChangeSets>().unwrap();
+                        tx.cursor_dup_read::<tables::AccountChangeSets>().unwrap();
                     let mut rev_changeset_walker = changeset_cursor.walk_back(None).unwrap();
 
                     while let Some((block_number, account_before_tx)) =

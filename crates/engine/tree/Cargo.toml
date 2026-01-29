@@ -141,7 +141,7 @@ test-utils = [
     "reth-node-ethereum/test-utils",
     "reth-evm-ethereum/test-utils",
 ]
-failpoints = ["fail/failpoints"]
+failpoints = ["fail/failpoints", "reth-db/failpoints"]
 
 [dependencies.fail]
 version = "0.5"

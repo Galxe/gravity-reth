@@ -51,13 +51,11 @@ mod tests {
     };
     use alloy_rlp::Decodable;
     use reth_chainspec::ChainSpecBuilder;
-    use reth_db::mdbx::{cursor::Cursor, RW};
     use reth_db_api::{
         cursor::{DbCursorRO, DbCursorRW},
         table::Table,
         tables,
         transaction::{DbTx, DbTxMut},
-        AccountsHistory,
     };
     use reth_ethereum_consensus::EthBeaconConsensus;
     use reth_ethereum_primitives::Block;
@@ -197,7 +195,7 @@ mod tests {
                 assert!(acc_indexing_stage.execute(&provider, input).is_err());
             } else {
                 acc_indexing_stage.execute(&provider, input).unwrap();
-                let mut account_history: Cursor<RW, AccountsHistory> =
+                let mut account_history =
                     provider.tx_ref().cursor_read::<tables::AccountsHistory>().unwrap();
                 assert_eq!(account_history.walk(None).unwrap().count(), expect_num_acc_changesets);
             }

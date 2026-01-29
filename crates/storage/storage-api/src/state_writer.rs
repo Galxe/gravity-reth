@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use alloy_primitives::BlockNumber;
 use reth_db_models::StoredBlockBodyIndices;
 use reth_execution_types::ExecutionOutcome;

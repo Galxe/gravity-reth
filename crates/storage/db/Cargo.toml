@@ -24,10 +24,7 @@ reth-static-file-types.workspace = true
 alloy-primitives.workspace = true
 
 # mdbx
-reth-libmdbx = { workspace = true, optional = true, features = [
-    "return-borrowed",
-    "read-tx-timeouts",
-] }
+reth-libmdbx = { workspace = true, optional = true, features = ["return-borrowed", "read-tx-timeouts"] }
 eyre = { workspace = true, optional = true }
 
 # rocksdb

@@ -11,7 +11,7 @@ use clap::{
 use reth_db::{ClientVersion, DatabaseArguments, ShardingDirectories};
 use reth_storage_errors::db::LogLevel;
 
-/// Parameters for database configuration (RocksDB)
+/// Parameters for database configuration (`RocksDB`)
 #[derive(Debug, Args, PartialEq, Eq, Default, Clone, Copy)]
 #[command(next_help_heading = "Database")]
 pub struct DatabaseArgs {
@@ -63,11 +63,12 @@ pub struct DatabaseArgs {
     /// Default: 4MB
     #[arg(long = "db.bytes-per-sync", value_parser = parse_byte_size_u64)]
     pub bytes_per_sync: Option<u64>,
-    /// Semicolon separated RocksDB sharding directories. Accepts 2 or 3 paths.
-    /// Always creates 3 databases (state, account_trie, storage_trie).
-    /// - 0 paths (default): Creates subdirs under --datadir: state/, account_trie/, storage_trie/
-    /// - 2 paths: First dir contains state + account_trie; second dir contains storage_trie
-    /// - 3 paths: First dir is state, second is account_trie, third is storage_trie
+    /// Semicolon separated `RocksDB` sharding directories. Accepts 2 or 3 paths.
+    /// Always creates 3 databases (state, `account_trie`, `storage_trie`).
+    /// - 0 paths (default): Creates subdirs under --datadir: state/, `account_trie`/,
+    ///   `storage_trie`/
+    /// - 2 paths: First dir contains state + `account_trie`; second dir contains `storage_trie`
+    /// - 3 paths: First dir is state, second is `account_trie`, third is `storage_trie`
     #[arg(long = "db.sharding-directories", value_parser = parse_sharding_directories)]
     pub sharding_directories: Option<ShardingDirectories>,
 }
@@ -79,7 +80,7 @@ impl DatabaseArgs {
     }
 
     /// Returns the database arguments with configured parameters and client version.
-    pub fn get_database_args(&self, client_version: ClientVersion) -> DatabaseArguments {
+    pub const fn get_database_args(&self, client_version: ClientVersion) -> DatabaseArguments {
         DatabaseArguments::new(client_version)
             .with_log_level(self.log_level)
             .with_block_cache_size(self.block_cache_size)
@@ -230,7 +231,7 @@ mod tests {
     const KILOBYTE: usize = 1024;
     const MEGABYTE: usize = KILOBYTE * 1024;
     const GIGABYTE: usize = MEGABYTE * 1024;
-    const TERABYTE: usize = GIGABYTE * 1024;
+    // const TERABYTE: usize = GIGABYTE * 1024;
 
     /// A helper type to parse Args more easily
     #[derive(Parser)]

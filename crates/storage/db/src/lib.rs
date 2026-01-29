@@ -1,7 +1,7 @@
 //! Database implementations for reth's database abstraction layer.
 //!
 //! This crate provides implementations of `reth-db-api` for multiple database backends,
-//! including MDBX and RocksDB.
+//! including MDBX and `RocksDB`.
 //!
 //! # Overview
 //!

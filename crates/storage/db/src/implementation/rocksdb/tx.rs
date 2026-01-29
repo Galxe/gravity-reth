@@ -1,4 +1,4 @@
-//! Transaction implementation for RocksDB.
+//! Transaction implementation for `RocksDB`.
 
 use crate::{
     implementation::rocksdb::{cursor, get_cf_handle, read_error, to_error_info},
@@ -17,14 +17,14 @@ use std::{sync::Arc, thread};
 use crate::set_fail_point;
 pub(crate) use cursor::{RO, RW};
 
-/// RocksDB transaction with three-database sharding architecture.
+/// `RocksDB` transaction with three-database sharding architecture.
 ///
-/// This transaction type splits data across three separate RocksDB instances to enable
+/// This transaction type splits data across three separate `RocksDB` instances to enable
 /// parallel writes and commits, improving write throughput and reducing lock contention.
 ///
 /// # Architecture
 ///
-/// The database is partitioned into three independent RocksDB instances:
+/// The database is partitioned into three independent `RocksDB` instances:
 /// - `state_db`: Stores state tables (accounts, contract storage, receipts) and history indices
 /// - `account_db`: Stores the account trie (Merkle Patricia Trie for account state root)
 /// - `storage_db`: Stores the storage trie (Merkle Patricia Trie for contract storage)
@@ -34,13 +34,13 @@ pub(crate) use cursor::{RO, RW};
 ///
 /// # Write Batches
 ///
-/// Each DB instance has a corresponding WriteBatch wrapped in Arc<Mutex<_>>:
+/// Each DB instance has a corresponding `WriteBatch` wrapped in Arc<Mutex<_>>:
 /// - Arc enables sharing the batch across threads spawned during parallel commits
 /// - Mutex provides interior mutability, allowing batch modifications through shared references
 /// - Separate batches ensure writes to different DBs can be built concurrently
 ///
-/// During commit, if both account_batch and storage_batch contain data, they are committed
-/// in parallel using thread::scope. The state_batch is always committed last to ensure
+/// During commit, if both `account_batch` and `storage_batch` contain data, they are committed
+/// in parallel using `thread::scope`. The `state_batch` is always committed last to ensure
 /// atomicity - if state commit succeeds, the entire transaction is considered successful.
 ///
 /// # Type Parameter
@@ -53,11 +53,11 @@ pub struct Tx<K: cursor::TransactionKind> {
     state_db: Arc<DB>,
 
     /// Account trie database instance (Merkle Patricia Trie for account state).
-    /// Can be committed in parallel with storage_db.
+    /// Can be committed in parallel with `storage_db`.
     account_db: Arc<DB>,
 
     /// Storage trie database instance (Merkle Patricia Trie for contract storage).
-    /// Can be committed in parallel with account_db.
+    /// Can be committed in parallel with `account_db`.
     storage_db: Arc<DB>,
 
     /// Write batch for state database.
@@ -144,6 +144,22 @@ impl<K: cursor::TransactionKind> Tx<K> {
             Err(e) => Err(read_error(e)),
         }
     }
+
+    fn dupsort_key_value<T: Table>(
+        key: T::Key,
+        value: T::Value,
+    ) -> (Vec<u8>, <T::Value as Compress>::Compressed) {
+        let subkey_length = value.subkey_compress_length().expect("DupSort table must have subkey");
+        let encoded_key = key.encode();
+        let encoded_value = value.compress();
+        let encoded_key_ref = encoded_key.as_ref();
+        let encoded_value_ref = encoded_value.as_ref();
+        let subkey = &encoded_value_ref[..subkey_length];
+        let mut composite_key = Vec::with_capacity(encoded_key_ref.len() + subkey.len());
+        composite_key.extend_from_slice(encoded_key_ref);
+        composite_key.extend_from_slice(subkey);
+        (composite_key, encoded_value)
+    }
 }
 
 impl<K: cursor::TransactionKind> DbTx for Tx<K> {
@@ -162,12 +178,32 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         let db = self.db_for_table::<T>();
         let cf_handle = get_cf_handle::<T>(db)?;
 
-        match db.get_cf(cf_handle, key) {
-            Ok(Some(value)) => {
-                T::Value::decompress(&value).map(Some).map_err(|_| DatabaseError::Decode)
+        if T::DUPSORT {
+            // For DupSort tables, we need to seek to the first entry with this key prefix
+            // because RocksDB stores composite keys (primary_key + subkey)
+            let mut iter = db.raw_iterator_cf(cf_handle);
+            let encoded_key_ref = key.as_ref();
+            iter.seek(encoded_key_ref);
+
+            if iter.valid() &&
+                let (Some(k), Some(v)) = (iter.key(), iter.value())
+            {
+                // Check if this key has the same prefix (same primary key)
+                if k.len() >= encoded_key_ref.len() &&
+                    &k[..encoded_key_ref.len()] == encoded_key_ref
+                {
+                    return T::Value::decompress(v).map(Some).map_err(|_| DatabaseError::Decode);
+                }
             }
-            Ok(None) => Ok(None),
-            Err(e) => Err(read_error(e)),
+            Ok(None)
+        } else {
+            match db.get_cf(cf_handle, key) {
+                Ok(Some(value)) => {
+                    T::Value::decompress(&value).map(Some).map_err(|_| DatabaseError::Decode)
+                }
+                Ok(None) => Ok(None),
+                Err(e) => Err(read_error(e)),
+            }
         }
     }
 
@@ -178,12 +214,12 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     /// This commit strategy ensures correctness through careful ordering and checkpoint-based
     /// idempotency, even in the face of partial failures:
     ///
-    /// 1. **Parallel Trie Commits**: If both account_batch and storage_batch contain data, they are
-    ///    committed in parallel to maximize throughput. These commits may succeed or fail
+    /// 1. **Parallel Trie Commits**: If both `account_batch` and `storage_batch` contain data, they
+    ///    are committed in parallel to maximize throughput. These commits may succeed or fail
     ///    independently.
     ///
-    /// 2. **State Commit as Coordinator**: The state_batch is ALWAYS committed last. This is
-    ///    critical because stage checkpoints are stored in state_db. A checkpoint's presence
+    /// 2. **State Commit as Coordinator**: The `state_batch` is ALWAYS committed last. This is
+    ///    critical because stage checkpoints are stored in `state_db`. A checkpoint's presence
     ///    indicates that the corresponding stage has been fully completed.
     ///
     /// # Failure Scenarios and Recovery
@@ -192,19 +228,19 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     /// checkpoint-based recovery:
     ///
     /// **Scenario 1: Trie commit fails, state commit succeeds**
-    /// - If account_batch or storage_batch commit fails, the function returns an error
-    /// - The state_batch commit never executes, so no checkpoint is written
+    /// - If `account_batch` or `storage_batch` commit fails, the function returns an error
+    /// - The `state_batch` commit never executes, so no checkpoint is written
     /// - On retry, the entire transaction is re-executed (idempotent trie writes)
     ///
     /// **Scenario 2: Account commit succeeds, storage commit fails**
-    /// - When running in parallel, account_db write may succeed while storage_db write fails
-    /// - The function returns an error before state_batch is committed
+    /// - When running in parallel, `account_db` write may succeed while `storage_db` write fails
+    /// - The function returns an error before `state_batch` is committed
     /// - No checkpoint is written; account trie data is orphaned but harmless
     /// - On retry, account trie writes are idempotent and will overwrite orphaned data
     ///
     /// **Scenario 3: Both trie commits succeed, state commit fails**
     /// - Account and storage trie data is written to disk
-    /// - State_batch commit fails, so no checkpoint is recorded
+    /// - `State_batch` commit fails, so no checkpoint is recorded
     /// - On retry, the stage is re-executed because the checkpoint is missing
     /// - Trie writes are idempotent: re-writing the same trie nodes produces identical results
     ///
@@ -216,7 +252,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     ///
     /// - Orphaned trie data (from failed state commits) can be safely overwritten
     /// - Retrying a stage will produce consistent results even if partial trie data exists
-    /// - The checkpoint in state_db acts as the authoritative "commit point" for the entire
+    /// - The checkpoint in `state_db` acts as the authoritative "commit point" for the entire
     ///   multi-database transaction
     ///
     /// # Performance vs. Atomicity Trade-off
@@ -225,14 +261,14 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     /// The lack of distributed transaction coordination means we can have temporary
     /// inconsistencies (orphaned trie data), but these are always resolved by the checkpoint
     /// mechanism and idempotent retry logic.
-    fn commit(self) -> Result<bool, DatabaseError> {
+    fn commit_view(&self) -> Result<bool, DatabaseError> {
         // Acquire locks on all batches upfront to prepare for commit
         let mut state_batch = self.state_batch.lock();
         let mut account_batch = self.account_batch.lock();
         let mut storage_batch = self.storage_batch.lock();
 
         // Phase 1: Commit trie batches (potentially in parallel)
-        if account_batch.len() > 0 && storage_batch.len() > 0 {
+        if !account_batch.is_empty() && !storage_batch.is_empty() {
             // Both trie batches have data - commit them in parallel for maximum throughput.
             // If either fails, we return an error BEFORE committing state_batch, ensuring
             // no checkpoint is written and the stage will be retried.
@@ -259,14 +295,14 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             })?;
         } else {
             // Only one trie batch has data - commit sequentially (no parallelism benefit)
-            if account_batch.len() > 0 {
+            if !account_batch.is_empty() {
                 let account_batch = std::mem::take(&mut *account_batch);
                 self.account_db
                     .write(account_batch)
                     .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
                 set_fail_point!("db::commit::after_account_trie");
             }
-            if storage_batch.len() > 0 {
+            if !storage_batch.is_empty() {
                 let storage_batch = std::mem::take(&mut *storage_batch);
                 self.storage_db
                     .write(storage_batch)
@@ -279,7 +315,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         // The state_db contains stage checkpoints. Only when this commit succeeds is the
         // checkpoint written, marking the stage as complete. If this commit fails, the
         // checkpoint is absent, triggering a retry that will idempotently re-execute the stage.
-        if state_batch.len() > 0 {
+        if !state_batch.is_empty() {
             let state_batch = std::mem::take(&mut *state_batch);
             self.state_db
                 .write(state_batch)
@@ -287,6 +323,10 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             set_fail_point!("db::commit::after_state");
         }
         Ok(true)
+    }
+
+    fn commit(self) -> Result<bool, DatabaseError> {
+        self.commit_view()
     }
 
     fn abort(self) {
@@ -318,28 +358,62 @@ impl DbTxMut for Tx<cursor::RW> {
     fn put<T: Table>(&self, key: T::Key, value: T::Value) -> Result<(), DatabaseError> {
         let db = self.db_for_table::<T>();
         let cf_handle = get_cf_handle::<T>(db)?;
-
-        let encoded_key = key.encode();
-        let encoded_value = value.compress();
-
         let mut batch = self.batch_for_table::<T>().lock();
-        batch.put_cf(cf_handle, &encoded_key, &encoded_value);
 
+        if T::DUPSORT {
+            let (composite_key, encoded_value) = Self::dupsort_key_value::<T>(key, value);
+            batch.put_cf(cf_handle, &composite_key, &encoded_value);
+        } else {
+            let encoded_key = key.encode();
+            let encoded_value = value.compress();
+            batch.put_cf(cf_handle, &encoded_key, &encoded_value);
+        }
         Ok(())
     }
 
     fn delete<T: Table>(
         &self,
         key: T::Key,
-        _value: Option<T::Value>,
+        value: Option<T::Value>,
     ) -> Result<bool, DatabaseError> {
         let db = self.db_for_table::<T>();
         let cf_handle = get_cf_handle::<T>(db)?;
-
-        let encoded_key = key.encode();
-
         let mut batch = self.batch_for_table::<T>().lock();
-        batch.delete_cf(cf_handle, &encoded_key);
+
+        if T::DUPSORT {
+            if let Some(value) = value {
+                // Delete specific key/value pair
+                let (composite_key, _) = Self::dupsort_key_value::<T>(key, value);
+                batch.delete_cf(cf_handle, &composite_key);
+            } else {
+                // Delete all values for this key (MDBX semantics: value=None deletes all)
+                let encoded_key = key.encode();
+                let encoded_key_ref = encoded_key.as_ref();
+
+                // Use iterator to find and delete all entries with this key prefix
+                let mut iter = db.raw_iterator_cf(cf_handle);
+                iter.seek(encoded_key_ref);
+
+                while iter.valid() {
+                    if let Some(k) = iter.key() {
+                        // Check if this key still has the same prefix (same primary key)
+                        if k.len() >= encoded_key_ref.len() &&
+                            &k[..encoded_key_ref.len()] == encoded_key_ref
+                        {
+                            batch.delete_cf(cf_handle, k);
+                            iter.next();
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else {
+            let encoded_key = key.encode();
+            batch.delete_cf(cf_handle, &encoded_key);
+        }
         Ok(true)
     }
 

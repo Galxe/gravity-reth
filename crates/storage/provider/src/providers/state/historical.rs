@@ -250,8 +250,7 @@ impl<Provider: DBProvider + BlockNumReader> AccountReader
             HistoryInfo::InChangeset(changeset_block_number) => Ok(self
                 .tx()
                 .cursor_dup_read::<tables::AccountChangeSets>()?
-                .seek_by_key_subkey(changeset_block_number, *address)?
-                .filter(|acc| &acc.address == address)
+                .get_by_key_subkey(changeset_block_number, *address)?
                 .ok_or(ProviderError::AccountChangesetNotFound {
                     block_number: changeset_block_number,
                     address: *address,
@@ -407,8 +406,7 @@ impl<Provider: DBProvider + BlockNumReader + BlockHashReader> StateProvider
             HistoryInfo::InChangeset(changeset_block_number) => Ok(Some(
                 self.tx()
                     .cursor_dup_read::<tables::StorageChangeSets>()?
-                    .seek_by_key_subkey((changeset_block_number, address).into(), storage_key)?
-                    .filter(|entry| entry.key == storage_key)
+                    .get_by_key_subkey((changeset_block_number, address).into(), storage_key)?
                     .ok_or_else(|| ProviderError::StorageChangesetNotFound {
                         block_number: changeset_block_number,
                         address,
@@ -419,8 +417,7 @@ impl<Provider: DBProvider + BlockNumReader + BlockHashReader> StateProvider
             HistoryInfo::InPlainState | HistoryInfo::MaybeInPlainState => Ok(self
                 .tx()
                 .cursor_dup_read::<tables::PlainStorageState>()?
-                .seek_by_key_subkey(address, storage_key)?
-                .filter(|entry| entry.key == storage_key)
+                .get_by_key_subkey(address, storage_key)?
                 .map(|entry| entry.value)
                 .or(Some(StorageValue::ZERO))),
         }

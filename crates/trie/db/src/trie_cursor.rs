@@ -236,6 +236,8 @@ mod tests {
                 )
                 .unwrap();
         }
+        provider.tx_ref().commit_view().unwrap();
+        let mut cursor = provider.tx_ref().cursor_write::<tables::AccountsTrie>().unwrap();
 
         let db_data = cursor.walk_range(..).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(db_data[0].0 .0.to_vec(), data[0]);
@@ -263,6 +265,8 @@ mod tests {
         cursor
             .upsert(hashed_address, &StorageTrieEntry { nibbles: key.clone(), node: value.clone() })
             .unwrap();
+        provider.tx_ref().commit_view().unwrap();
+        let cursor = provider.tx_ref().cursor_dup_write::<tables::StoragesTrie>().unwrap();
 
         let mut cursor = DatabaseStorageTrieCursor::new(cursor, hashed_address);
         assert_eq!(cursor.seek(key.into()).unwrap().unwrap().1, value);

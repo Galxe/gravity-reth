@@ -54,7 +54,7 @@ macro_rules! compress_to_buf_or_ref {
     };
 }
 
-/// RocksDB cursor with RawIterator caching for performance.
+/// `RocksDB` cursor with `RawIterator` caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
     db: Arc<DB>,
     /// Iterator for cursor operations - always ready to use
@@ -96,7 +96,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         Ok(Self { db, iterator, batch, buf: Vec::new(), _phantom: PhantomData })
     }
 
-    /// Encode DupSort composite key: key + subkey
+    /// Encode `DupSort` composite key: key + subkey
     fn encode_dupsort_key(key: &[u8], subkey: &[u8]) -> Vec<u8> {
         let mut composite = Vec::with_capacity(key.len() + subkey.len());
         composite.extend_from_slice(key);
@@ -134,10 +134,10 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
 impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
     fn first(&mut self) -> PairResult<T> {
         self.iterator.seek_to_first();
-        if self.iterator.valid() {
-            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                return Self::decode_key_value(key, value).map(Some);
-            }
+        if self.iterator.valid() &&
+            let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            return Self::decode_key_value(key, value).map(Some);
         }
         Ok(None)
     }
@@ -147,16 +147,16 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
         let encoded_key = key.encode();
         self.iterator.seek(encoded_key.as_ref());
 
-        if self.iterator.valid() {
-            if let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                if T::DUPSORT {
-                    let main_key = Self::extract_main_key(found_key)?;
-                    if main_key == encoded_key.as_ref() {
-                        return Self::decode_key_value(found_key, value).map(Some);
-                    }
-                } else if found_key == encoded_key.as_ref() {
+        if self.iterator.valid() &&
+            let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            if T::DUPSORT {
+                let main_key = Self::extract_main_key(found_key)?;
+                if main_key == encoded_key.as_ref() {
                     return Self::decode_key_value(found_key, value).map(Some);
                 }
+            } else if found_key == encoded_key.as_ref() {
+                return Self::decode_key_value(found_key, value).map(Some);
             }
         }
         Ok(None)
@@ -175,50 +175,50 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
     fn seek(&mut self, key: T::Key) -> PairResult<T> {
         let encoded_key = key.encode();
         self.iterator.seek(encoded_key.as_ref());
-        if self.iterator.valid() {
-            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                return Self::decode_key_value(key, value).map(Some);
-            }
+        if self.iterator.valid() &&
+            let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            return Self::decode_key_value(key, value).map(Some);
         }
         Ok(None)
     }
 
     fn next(&mut self) -> PairResult<T> {
         self.iterator.next();
-        if self.iterator.valid() {
-            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                return Self::decode_key_value(key, value).map(Some);
-            }
+        if self.iterator.valid() &&
+            let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            return Self::decode_key_value(key, value).map(Some);
         }
         Ok(None)
     }
 
     fn prev(&mut self) -> PairResult<T> {
         self.iterator.prev();
-        if self.iterator.valid() {
-            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                return Self::decode_key_value(key, value).map(Some);
-            }
+        if self.iterator.valid() &&
+            let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            return Self::decode_key_value(key, value).map(Some);
         }
         Ok(None)
     }
 
     fn last(&mut self) -> PairResult<T> {
         self.iterator.seek_to_last();
-        if self.iterator.valid() {
-            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                return Self::decode_key_value(key, value).map(Some);
-            }
+        if self.iterator.valid() &&
+            let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            return Self::decode_key_value(key, value).map(Some);
         }
         Ok(None)
     }
 
     fn current(&mut self) -> PairResult<T> {
         // Get current position from iterator
-        if self.iterator.valid() {
-            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                return Self::decode_key_value(key, value).map(Some);
-            }
+        if self.iterator.valid() &&
+            let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            return Self::decode_key_value(key, value).map(Some);
         }
         Ok(None)
     }
@@ -293,12 +293,12 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
 
     fn delete_current(&mut self) -> Result<(), DatabaseError> {
         // Get current key from iterator
-        if self.iterator.valid() {
-            if let Some(key) = self.iterator.key() {
-                let cf_handle = get_cf_handle::<T>(&self.db)?;
-                let mut batch = self.batch.lock();
-                batch.delete_cf(cf_handle, key);
-            }
+        if self.iterator.valid() &&
+            let Some(key) = self.iterator.key()
+        {
+            let cf_handle = get_cf_handle::<T>(&self.db)?;
+            let mut batch = self.batch.lock();
+            batch.delete_cf(cf_handle, key);
         }
         Ok(())
     }
@@ -330,14 +330,12 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
                 );
                 let mut keys_to_delete = Vec::new();
 
-                for result in iter {
-                    if let Ok((composite_key, _)) = result {
-                        let found_main_key = Self::extract_main_key(&composite_key)?;
-                        if found_main_key == main_key {
-                            keys_to_delete.push(composite_key.to_vec());
-                        } else {
-                            break;
-                        }
+                for (composite_key, _) in iter.flatten() {
+                    let found_main_key = Self::extract_main_key(&composite_key)?;
+                    if found_main_key == main_key {
+                        keys_to_delete.push(composite_key.to_vec());
+                    } else {
+                        break;
                     }
                 }
 
@@ -386,12 +384,12 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
 
         // Move to next and check if it's still the same main key
         self.iterator.next();
-        if self.iterator.valid() {
-            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                let main_key = Self::extract_main_key(key)?;
-                if main_key == &current_main_key {
-                    return Self::decode_key_value(key, value).map(Some);
-                }
+        if self.iterator.valid() &&
+            let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            let main_key = Self::extract_main_key(key)?;
+            if main_key == current_main_key {
+                return Self::decode_key_value(key, value).map(Some);
             }
         }
         Ok(None)
@@ -429,10 +427,10 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
 
         // Seek to the incremented key
         self.iterator.seek(&next_key);
-        if self.iterator.valid() {
-            if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                return Self::decode_key_value(key, value).map(Some);
-            }
+        if self.iterator.valid() &&
+            let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            return Self::decode_key_value(key, value).map(Some);
         }
         Ok(None)
     }
@@ -448,14 +446,14 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
 
         // Position iterator at the exact composite key
         self.iterator.seek(&composite_key);
-        if self.iterator.valid() {
-            if let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                let main_key = Self::extract_main_key(found_key)?;
-                if main_key == encoded_key.as_ref() {
-                    let decompressed_value =
-                        T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?;
-                    return Ok(Some(decompressed_value));
-                }
+        if self.iterator.valid() &&
+            let (Some(found_key), Some(value)) = (self.iterator.key(), self.iterator.value())
+        {
+            let main_key = Self::extract_main_key(found_key)?;
+            if main_key == encoded_key.as_ref() {
+                let decompressed_value =
+                    T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?;
+                return Ok(Some(decompressed_value));
             }
         }
         Ok(None)
@@ -489,12 +487,11 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
             (None, Some(subkey)) => {
                 if let Some((key, _)) = self.first()? {
                     return self.walk_dup(Some(key), Some(subkey));
-                } else {
-                    Some(Err(DatabaseError::Read(DatabaseErrorInfo {
-                        message: "Not Found".into(),
-                        code: -1,
-                    })))
                 }
+                Some(Err(DatabaseError::Read(DatabaseErrorInfo {
+                    message: "Not Found".into(),
+                    code: -1,
+                })))
             }
             (None, None) => self.first().transpose(),
         };
@@ -506,12 +503,12 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
 impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
     fn delete_current_duplicates(&mut self) -> Result<(), DatabaseError> {
         // Get current main key from iterator position
-        if self.iterator.valid() {
-            if let Some(current_composite_key) = self.iterator.key() {
-                let main_key = Self::extract_main_key(current_composite_key)?;
-                let key = T::Key::decode(main_key).map_err(|_| DatabaseError::Decode)?;
-                self.delete_by_key(key)?;
-            }
+        if self.iterator.valid() &&
+            let Some(current_composite_key) = self.iterator.key()
+        {
+            let main_key = Self::extract_main_key(current_composite_key)?;
+            let key = T::Key::decode(main_key).map_err(|_| DatabaseError::Decode)?;
+            self.delete_by_key(key)?;
         }
         Ok(())
     }

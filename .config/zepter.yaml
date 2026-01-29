@@ -19,6 +19,7 @@ workflows:
 
         "--left-side-outside-workspace=ignore",
         # Auxiliary flags:
+        "--ignore-missing-propagate=reth-evm-ethereum/test-utils:grevm/test-utils",
         "--offline",
         "--locked",
         "--show-path",

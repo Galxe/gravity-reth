@@ -1,9 +1,12 @@
 use alloc::vec::Vec;
 use alloy_primitives::{Address, Bytes, B256};
+#[cfg(feature = "db-api")]
 use reth_db_api::DatabaseError;
 use reth_storage_errors::provider::ProviderResult;
+#[cfg(feature = "db-api")]
+use reth_trie_common::updates::TrieUpdatesV2;
 use reth_trie_common::{
-    updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesV2},
+    updates::{StorageTrieUpdates, TrieUpdates},
     AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
     StorageProof, TrieInput,
 };
@@ -114,6 +117,7 @@ pub trait StorageTrieWriter: Send + Sync {
 }
 
 /// Trie writer for nested trie
+#[cfg(feature = "db-api")]
 pub trait TrieWriterV2 {
     /// Write trie updates for nested trie
     fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError>;

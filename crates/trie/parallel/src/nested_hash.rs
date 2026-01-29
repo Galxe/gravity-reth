@@ -200,7 +200,7 @@ where
     ///
     /// # Workflow
     ///
-    /// **Step 1**: Obtain a RocksDB snapshot that guarantees account trie and storage trie
+    /// **Step 1**: Obtain a `RocksDB` snapshot that guarantees account trie and storage trie
     /// are at the same height H with complete data. Read the trie checkpoint to get height H.
     ///
     /// **Step 2**: Construct `reverted_state` by reading `AccountChangeSets` and
@@ -209,7 +209,7 @@ where
     ///
     /// **Step 3**: Apply `reverted_state` to rollback the trie from H to N and collect proofs.
     ///
-    /// # Why reverted_state Construction is Correct
+    /// # Why `reverted_state` Construction is Correct
     ///
     /// The change set tables (`AccountChangeSets`, `StorageChangeSets`) use block number as
     /// key prefix. Even if block production continues and height advances beyond H, reading
@@ -221,17 +221,17 @@ where
     /// # Current TODO Status
     ///
     /// This function contains `todo!()` placeholders because **Step 1** is not yet implemented.
-    /// The current RocksDB storage design has consistency challenges:
+    /// The current `RocksDB` storage design has consistency challenges:
     ///
     /// 1. **Trie tables only store latest state**: While `multiproof` is called, block production
     ///    continues, so trie height may have advanced to H+1, H+2, etc.
     ///
-    /// 2. **No block-level transaction guarantee**: RocksDB writes don't guarantee atomicity at the
-    ///    block level. Storage trie might be at H while account trie is at H+1.
+    /// 2. **No block-level transaction guarantee**: `RocksDB` writes don't guarantee atomicity at
+    ///    the block level. Storage trie might be at H while account trie is at H+1.
     ///
     /// ## Required Changes for Implementation
     ///
-    /// To use RocksDB's snapshot interface for an immutable read-only view:
+    /// To use `RocksDB`'s snapshot interface for an immutable read-only view:
     /// 1. **Single database**: Cannot use separate DBs, otherwise unable to get a consistent
     ///    snapshot across all trie tables
     /// 2. **Atomic writes**: Account trie and storage trie updates must be in the same `WriteBatch`
@@ -293,16 +293,16 @@ where
                             };
                             if let Some(account) = account {
                                 let storage = hashed_storages.get(&hashed_address).cloned();
-                                if let Some(storage) = &storage {
-                                    if storage.wiped {
-                                        let account = account.into_trie_account(EMPTY_ROOT_HASH);
-                                        updated_account_nodes.push((
-                                            path,
-                                            Some(Node::ValueNode(alloy_rlp::encode(account))),
-                                        ));
-                                        deleted_storage();
-                                        continue;
-                                    }
+                                if let Some(storage) = &storage &&
+                                    storage.wiped
+                                {
+                                    let account = account.into_trie_account(EMPTY_ROOT_HASH);
+                                    updated_account_nodes.push((
+                                        path,
+                                        Some(Node::ValueNode(alloy_rlp::encode(account))),
+                                    ));
+                                    deleted_storage();
+                                    continue;
                                 }
                                 if account.get_bytecode_hash() == KECCAK256_EMPTY && pipe_mode {
                                     let account = account.into_trie_account(EMPTY_ROOT_HASH);
@@ -374,7 +374,7 @@ where
                                             )
                                             .is_none());
                                     }
-                                } else if let Some(..) = targets.get(&hashed_address) {
+                                } else if targets.get(&hashed_address).is_some() {
                                     todo!("update storage proofs");
                                 }
                             } else {

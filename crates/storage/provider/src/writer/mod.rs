@@ -172,6 +172,7 @@ where
             #[cfg(not(feature = "pipe_test"))]
             self.database()
                 .insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
+            self.database().tx_ref().commit_view()?;
             // Write state and changesets to the database.
             // Must be written after blocks because of the receipt lookup.
             self.database().write_state(
@@ -179,14 +180,17 @@ where
                 OriginalValuesKnown::No,
                 StorageLocation::StaticFiles,
             )?;
+            self.database().tx_ref().commit_view()?;
 
             // insert hashes and intermediate merkle nodes
             self.database()
                 .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
+            self.database().tx_ref().commit_view()?;
             self.database().write_trie_updates(
                 trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
             )?;
             let _ = self.database().write_trie_updatesv2(triev2.as_ref())?;
+            self.database().tx_ref().commit_view()?;
         }
 
         // update history indices
@@ -364,9 +368,11 @@ mod tests {
         assert!(plain_state.storage.is_empty());
         assert!(plain_state.contracts.is_empty());
         provider.write_state_changes(plain_state).expect("Could not write plain state to DB");
+        provider.commit_view().unwrap();
 
         assert_eq!(reverts.storage, [[]]);
         provider.write_state_reverts(reverts, 1).expect("Could not write reverts to DB");
+        provider.commit_view().unwrap();
 
         let reth_account_a = account_a.into();
         let reth_account_b = account_b.into();
@@ -427,12 +433,14 @@ mod tests {
         );
         assert!(plain_state.contracts.is_empty());
         provider.write_state_changes(plain_state).expect("Could not write plain state to DB");
+        provider.commit_view().unwrap();
 
         assert_eq!(
             reverts.storage,
             [[PlainStorageRevert { address: address_b, wiped: true, storage_revert: vec![] }]]
         );
         provider.write_state_reverts(reverts, 2).expect("Could not write reverts to DB");
+        provider.commit_view().unwrap();
 
         // Check new plain state for account B
         assert_eq!(
@@ -440,6 +448,12 @@ mod tests {
             None,
             "Account B should be deleted"
         );
+
+        // Rocksdb's cursor should recreate to touch new view
+        let mut changeset_cursor = provider
+            .tx_ref()
+            .cursor_dup_read::<tables::AccountChangeSets>()
+            .expect("Could not open changeset cursor");
 
         // Check change set
         assert_eq!(
@@ -513,6 +527,7 @@ mod tests {
         provider
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
             .expect("Could not write bundle state to DB");
+        provider.commit_view().unwrap();
 
         // Check plain storage state
         let mut storage_cursor = provider
@@ -613,12 +628,25 @@ mod tests {
         provider
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
             .expect("Could not write bundle state to DB");
+        provider.commit_view().unwrap();
+
+        // Rocksdb's cursor should recreate to touch new view
+        let mut storage_cursor = provider
+            .tx_ref()
+            .cursor_dup_read::<tables::PlainStorageState>()
+            .expect("Could not open plain storage state cursor");
 
         assert_eq!(
             storage_cursor.seek_exact(address_a).unwrap(),
             None,
             "Account A should have no storage slots after deletion"
         );
+
+        // Rocksdb's cursor should recreate to touch new view
+        let mut changeset_cursor = provider
+            .tx_ref()
+            .cursor_dup_read::<tables::StorageChangeSets>()
+            .expect("Could not open storage changeset cursor");
 
         assert_eq!(
             changeset_cursor.seek_exact(BlockNumberAddress((2, address_a))).unwrap(),
@@ -681,6 +709,7 @@ mod tests {
         provider
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
             .expect("Could not write bundle state to DB");
+        provider.commit_view().unwrap();
 
         let mut state = State::builder().with_bundle_update().build();
         state.insert_account_with_storage(
@@ -840,6 +869,7 @@ mod tests {
         provider
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
             .expect("Could not write bundle state to DB");
+        provider.commit_view().unwrap();
 
         let mut storage_changeset_cursor = provider
             .tx_ref()
@@ -1006,6 +1036,7 @@ mod tests {
         provider
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
             .expect("Could not write bundle state to DB");
+        provider.commit_view().unwrap();
 
         let mut state = State::builder().with_bundle_update().build();
         state.insert_account_with_storage(
@@ -1055,6 +1086,7 @@ mod tests {
         provider
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
             .expect("Could not write bundle state to DB");
+        provider.commit_view().unwrap();
 
         let mut storage_changeset_cursor = provider
             .tx_ref()
@@ -1141,6 +1173,7 @@ mod tests {
 
         let (_, updates) = StateRoot::from_tx(tx).root_with_updates().unwrap();
         provider_rw.write_trie_updates(&updates).unwrap();
+        provider_rw.commit_view().unwrap();
 
         let mut state = State::builder().with_bundle_update().build();
 
@@ -1345,6 +1378,7 @@ mod tests {
         let mut state = HashedPostState::default();
         state.storages.insert(hashed_address, init_storage.clone());
         provider_rw.write_hashed_state(&state.clone().into_sorted()).unwrap();
+        provider_rw.commit_view().unwrap();
 
         // calculate database storage root and write intermediate storage nodes.
         let StorageRootProgress::Complete(storage_root, _, storage_updates) =
@@ -1360,6 +1394,7 @@ mod tests {
         provider_rw
             .write_storage_trie_updates(core::iter::once((&hashed_address, &storage_updates)))
             .unwrap();
+        provider_rw.commit_view().unwrap();
 
         // destroy the storage and re-create with new slots
         let updated_storage = HashedStorage::from_iter(
@@ -1374,6 +1409,7 @@ mod tests {
         let mut state = HashedPostState::default();
         state.storages.insert(hashed_address, updated_storage.clone());
         provider_rw.write_hashed_state(&state.clone().into_sorted()).unwrap();
+        provider_rw.commit_view().unwrap();
 
         // re-calculate database storage root
         let storage_root = StorageRoot::overlay_root(tx, address, updated_storage.clone()).unwrap();

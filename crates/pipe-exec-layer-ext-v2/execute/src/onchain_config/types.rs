@@ -189,7 +189,7 @@ sol! {
 }
 
 /// RSA JWK fields for BCS serialization - matches gravity-aptos struct order
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct GaptosRsaJwk {
     pub kid: String,
     pub kty: String,
