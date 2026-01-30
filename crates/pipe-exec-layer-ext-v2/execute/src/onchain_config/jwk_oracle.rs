@@ -9,7 +9,7 @@
 
 use super::{
     new_system_call_txn,
-    types::{convert_oracle_rsa_to_api_jwk, GaptosRsaJwk, OracleRSA_JWK, SOURCE_TYPE_JWK},
+    types::{GaptosRsaJwk, OracleRSA_JWK, SOURCE_TYPE_JWK},
     NATIVE_ORACLE_ADDR,
 };
 use alloy_primitives::{keccak256, Bytes, U256};

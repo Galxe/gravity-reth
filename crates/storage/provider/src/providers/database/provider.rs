@@ -810,6 +810,11 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
         Ok(self.tx.commit()?)
     }
 
+    /// Commit data to let other readers read.
+    pub fn commit_view(&self) -> ProviderResult<bool> {
+        Ok(self.tx.commit_view()?)
+    }
+
     /// Load shard and remove it. If list is empty, last shard was full or
     /// there are no shards at all.
     #[allow(dead_code)]
@@ -2599,6 +2604,22 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HistoryWriter for DatabaseProvi
             .collect::<Vec<_>>();
         last_indices.sort_by_key(|(a, _)| *a);
 
+        // Deduplicate by address, keeping only the minimum block number for each address.
+        // This is important for RocksDB where the cursor iterator cannot see uncommitted
+        // WriteBatch data. Processing the same address multiple times would cause each
+        // subsequent seek_exact to find stale data from the DB instead of the updated
+        // data in the WriteBatch.
+        last_indices.dedup_by(|a, b| {
+            let dedup = a.0 == b.0;
+            if dedup && a.1 < b.1 {
+                // Keep the smaller index (b is kept, a is removed)
+                // Since we sorted by address, indices for same address are adjacent
+                // We want to keep the minimum index
+                b.1 = a.1;
+            }
+            dedup
+        });
+
         // Unwind the account history index.
         let mut cursor = self.tx.cursor_write::<tables::AccountsHistory>()?;
         for &(address, rem_index) in &last_indices {
@@ -2654,6 +2675,20 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HistoryWriter for DatabaseProvi
             .map(|(BlockNumberAddress((bn, address)), storage)| (address, storage.key, bn))
             .collect::<Vec<_>>();
         storage_changesets.sort_by_key(|(address, key, _)| (*address, *key));
+
+        // Deduplicate by (address, storage_key), keeping only the minimum block number.
+        // This is important for RocksDB where the cursor iterator cannot see uncommitted
+        // WriteBatch data. Processing the same (address, key) multiple times would cause
+        // each subsequent seek_exact to find stale data from the DB instead of the updated
+        // data in the WriteBatch.
+        storage_changesets.dedup_by(|a, b| {
+            let dedup = a.0 == b.0 && a.1 == b.1;
+            // Keep the smaller block number (b is kept, a is removed)
+            if dedup && a.2 < b.2 {
+                b.2 = a.2;
+            }
+            dedup
+        });
 
         let mut cursor = self.tx.cursor_write::<tables::StoragesHistory>()?;
         for &(address, storage_key, rem_index) in &storage_changesets {
@@ -3051,10 +3086,12 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider + 'static> BlockWrite
         // Insert the blocks
         for block in blocks {
             self.insert_block(block, StorageLocation::Database)?;
+            self.commit_view()?;
             durations_recorder.record_relative(metrics::Action::InsertBlock);
         }
 
         self.write_state(execution_outcome, OriginalValuesKnown::No, StorageLocation::Database)?;
+        self.commit_view()?;
         durations_recorder.record_relative(metrics::Action::InsertState);
 
         // insert hashes and intermediate merkle nodes
@@ -3217,9 +3254,11 @@ mod tests {
                 crate::StorageLocation::Database,
             )
             .unwrap();
+        provider_rw.commit_view().unwrap();
         provider_rw
             .insert_block(data.blocks[0].0.clone(), crate::StorageLocation::Database)
             .unwrap();
+        provider_rw.commit_view().unwrap();
         provider_rw
             .write_state(
                 &data.blocks[0].1,
@@ -3227,7 +3266,7 @@ mod tests {
                 crate::StorageLocation::Database,
             )
             .unwrap();
-        provider_rw.commit().unwrap();
+        provider_rw.commit_view().unwrap();
 
         let provider = factory.provider().unwrap();
         let result = provider.receipts_by_block_range(1..=1).unwrap();
@@ -3250,10 +3289,12 @@ mod tests {
                 crate::StorageLocation::Database,
             )
             .unwrap();
+        provider_rw.commit_view().unwrap();
         for i in 0..3 {
             provider_rw
                 .insert_block(data.blocks[i].0.clone(), crate::StorageLocation::Database)
                 .unwrap();
+            provider_rw.commit_view().unwrap();
             provider_rw
                 .write_state(
                     &data.blocks[i].1,
@@ -3261,8 +3302,8 @@ mod tests {
                     crate::StorageLocation::Database,
                 )
                 .unwrap();
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().unwrap();
 
         let provider = factory.provider().unwrap();
         let result = provider.receipts_by_block_range(1..=3).unwrap();
@@ -3287,12 +3328,14 @@ mod tests {
                 crate::StorageLocation::Database,
             )
             .unwrap();
+        provider_rw.commit_view().unwrap();
 
         // insert blocks 1-3 with receipts
         for i in 0..3 {
             provider_rw
                 .insert_block(data.blocks[i].0.clone(), crate::StorageLocation::Database)
                 .unwrap();
+            provider_rw.commit_view().unwrap();
             provider_rw
                 .write_state(
                     &data.blocks[i].1,
@@ -3300,8 +3343,8 @@ mod tests {
                     crate::StorageLocation::Database,
                 )
                 .unwrap();
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().unwrap();
 
         let provider = factory.provider().unwrap();
         let result = provider.receipts_by_block_range(1..=3).unwrap();
@@ -3325,10 +3368,12 @@ mod tests {
                 crate::StorageLocation::Database,
             )
             .unwrap();
+        provider_rw.commit_view().unwrap();
         for i in 0..3 {
             provider_rw
                 .insert_block(data.blocks[i].0.clone(), crate::StorageLocation::Database)
                 .unwrap();
+            provider_rw.commit_view().unwrap();
             provider_rw
                 .write_state(
                     &data.blocks[i].1,
@@ -3336,8 +3381,8 @@ mod tests {
                     crate::StorageLocation::Database,
                 )
                 .unwrap();
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().unwrap();
 
         let provider = factory.provider().unwrap();
 
@@ -3373,8 +3418,8 @@ mod tests {
             provider_rw
                 .insert_block(block.try_recover().unwrap(), crate::StorageLocation::Database)
                 .unwrap();
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().unwrap();
 
         let provider = factory.provider().unwrap();
         let result = provider.receipts_by_block_range(1..=3).unwrap();
@@ -3397,10 +3442,12 @@ mod tests {
                 crate::StorageLocation::Database,
             )
             .unwrap();
+        provider_rw.commit_view().unwrap();
         for i in 0..3 {
             provider_rw
                 .insert_block(data.blocks[i].0.clone(), crate::StorageLocation::Database)
                 .unwrap();
+            provider_rw.commit_view().unwrap();
             provider_rw
                 .write_state(
                     &data.blocks[i].1,
@@ -3408,8 +3455,8 @@ mod tests {
                     crate::StorageLocation::Database,
                 )
                 .unwrap();
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().unwrap();
 
         let provider = factory.provider().unwrap();
 

@@ -1,4 +1,4 @@
-//! RocksDB implementation for the database.
+//! `RocksDB` implementation for the database.
 
 use crate::{DatabaseError, TableSet};
 use metrics::Label;
@@ -39,12 +39,12 @@ impl DatabaseEnvKind {
 /// CLI/config input.
 pub type ShardingDirectories = &'static str;
 
-/// Database arguments for RocksDB.
+/// Database arguments for `RocksDB`.
 #[derive(Debug, Clone)]
 pub struct DatabaseArguments {
     /// Client version - used for version tracking.
     pub client_version: ClientVersion,
-    /// Log level - currently not used in RocksDB implementation.
+    /// Log level - currently not used in `RocksDB` implementation.
     pub log_level: Option<LogLevel>,
     /// Block cache size in bytes (default: 8GB).
     /// This is the LRU cache for uncompressed blocks, critical for read performance.
@@ -73,7 +73,7 @@ pub struct DatabaseArguments {
     /// Bytes to write before background sync (default: 4MB).
     /// Larger values reduce I/O overhead but may affect durability guarantees.
     pub bytes_per_sync: Option<u64>,
-    /// Semicolon separated RocksDB sharding directories.
+    /// Semicolon separated `RocksDB` sharding directories.
     /// If set, must contain 2 or 3 paths. See `DatabaseEnv::open` for routing rules.
     pub sharding_directories: Option<ShardingDirectories>,
 }
@@ -99,7 +99,7 @@ impl DatabaseArguments {
     pub const DEFAULT_BYTES_PER_SYNC: u64 = 4 * 1024 * 1024;
 
     /// Creates a new instance of [`DatabaseArguments`].
-    pub fn new(client_version: ClientVersion) -> Self {
+    pub const fn new(client_version: ClientVersion) -> Self {
         Self {
             client_version,
             log_level: None,
@@ -117,73 +117,73 @@ impl DatabaseArguments {
     }
 
     /// Set the log level.
-    pub fn with_log_level(mut self, log_level: Option<LogLevel>) -> Self {
+    pub const fn with_log_level(mut self, log_level: Option<LogLevel>) -> Self {
         self.log_level = log_level;
         self
     }
 
     /// Set the block cache size in bytes.
-    pub fn with_block_cache_size(mut self, size: Option<usize>) -> Self {
+    pub const fn with_block_cache_size(mut self, size: Option<usize>) -> Self {
         self.block_cache_size = size;
         self
     }
 
     /// Set the write buffer size in bytes.
-    pub fn with_write_buffer_size(mut self, size: Option<usize>) -> Self {
+    pub const fn with_write_buffer_size(mut self, size: Option<usize>) -> Self {
         self.write_buffer_size = size;
         self
     }
 
     /// Set the maximum number of background jobs.
-    pub fn with_max_background_jobs(mut self, jobs: Option<i32>) -> Self {
+    pub const fn with_max_background_jobs(mut self, jobs: Option<i32>) -> Self {
         self.max_background_jobs = jobs;
         self
     }
 
     /// Set the maximum number of open files.
-    pub fn with_max_open_files(mut self, files: Option<i32>) -> Self {
+    pub const fn with_max_open_files(mut self, files: Option<i32>) -> Self {
         self.max_open_files = files;
         self
     }
 
     /// Set the maximum number of write buffers.
-    pub fn with_max_write_buffer_number(mut self, num: Option<i32>) -> Self {
+    pub const fn with_max_write_buffer_number(mut self, num: Option<i32>) -> Self {
         self.max_write_buffer_number = num;
         self
     }
 
     /// Set the compaction readahead size in bytes.
-    pub fn with_compaction_readahead_size(mut self, size: Option<usize>) -> Self {
+    pub const fn with_compaction_readahead_size(mut self, size: Option<usize>) -> Self {
         self.compaction_readahead_size = size;
         self
     }
 
     /// Set the L0 file num compaction trigger.
-    pub fn with_level0_file_num_compaction_trigger(mut self, num: Option<i32>) -> Self {
+    pub const fn with_level0_file_num_compaction_trigger(mut self, num: Option<i32>) -> Self {
         self.level0_file_num_compaction_trigger = num;
         self
     }
 
     /// Set the maximum bytes for level base.
-    pub fn with_max_bytes_for_level_base(mut self, bytes: Option<u64>) -> Self {
+    pub const fn with_max_bytes_for_level_base(mut self, bytes: Option<u64>) -> Self {
         self.max_bytes_for_level_base = bytes;
         self
     }
 
     /// Set the bytes per sync.
-    pub fn with_bytes_per_sync(mut self, bytes: Option<u64>) -> Self {
+    pub const fn with_bytes_per_sync(mut self, bytes: Option<u64>) -> Self {
         self.bytes_per_sync = bytes;
         self
     }
 
-    /// Set sharding directories for RocksDB (semicolon separated paths).
-    pub fn with_sharding_directories(mut self, dirs: Option<ShardingDirectories>) -> Self {
+    /// Set sharding directories for `RocksDB` (semicolon separated paths).
+    pub const fn with_sharding_directories(mut self, dirs: Option<ShardingDirectories>) -> Self {
         self.sharding_directories = dirs;
         self
     }
 
     /// Get the client version.
-    pub fn client_version(&self) -> &ClientVersion {
+    pub const fn client_version(&self) -> &ClientVersion {
         &self.client_version
     }
 
@@ -234,7 +234,7 @@ impl DatabaseArguments {
     }
 
     /// Get sharding directories if configured.
-    pub fn sharding_directories(&self) -> Option<&str> {
+    pub const fn sharding_directories(&self) -> Option<&str> {
         self.sharding_directories
     }
 }
@@ -245,14 +245,14 @@ impl Default for DatabaseArguments {
     }
 }
 
-/// RocksDB database environment.
+/// `RocksDB` database environment.
 #[derive(Debug)]
 pub struct DatabaseEnv {
-    /// RocksDB database for state and history tables.
+    /// `RocksDB` database for state and history tables.
     pub(crate) state_db: Arc<DB>,
-    /// RocksDB database for account trie tables.
+    /// `RocksDB` database for account trie tables.
     pub(crate) account_db: Arc<DB>,
-    /// RocksDB database for storage trie tables.
+    /// `RocksDB` database for storage trie tables.
     pub(crate) storage_db: Arc<DB>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
@@ -289,7 +289,7 @@ impl DatabaseEnv {
     }
 
     /// Resolve shard paths based on configuration.
-    /// Always returns 3 distinct (or aliased) paths for state, account_trie, storage_trie.
+    /// Always returns 3 distinct (or aliased) paths for state, `account_trie`, `storage_trie`.
     fn resolve_shard_paths(
         base_path: &Path,
         sharding_config: Option<&str>,
@@ -314,7 +314,7 @@ impl DatabaseEnv {
                         let dir1 = PathBuf::from(parts[0]);
                         let dir2 = PathBuf::from(parts[1]);
                         let dir3 = PathBuf::from(parts[2]);
-                        Ok((dir1.clone(), dir2.clone(), dir3.clone()))
+                        Ok((dir1, dir2, dir3))
                     }
                     other => Err(DatabaseError::Other(format!(
                         "db.sharding-directories expects 2 or 3 ';' separated paths, got {}",
@@ -333,7 +333,7 @@ impl DatabaseEnv {
         }
     }
 
-    /// Create optimized RocksDB options for 3-db architecture.
+    /// Create optimized `RocksDB` options for 3-db architecture.
     fn create_db_options(args: &DatabaseArguments) -> Options {
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -341,7 +341,7 @@ impl DatabaseEnv {
 
         // === Parallelism Configuration ===
         opts.set_max_background_jobs(args.max_background_jobs());
-        let parallelism = (args.max_background_jobs() + 2).max(4) as i32;
+        let parallelism = (args.max_background_jobs() + 2).max(4);
         opts.increase_parallelism(parallelism);
         opts.set_max_open_files(args.max_open_files());
 
@@ -379,7 +379,7 @@ impl DatabaseEnv {
 
         // === Write Configuration ===
         opts.set_enable_pipelined_write(true);
-        opts.set_max_total_wal_size(1 * 1024 * 1024 * 1024); // 1GB max WAL per DB
+        opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1GB max WAL per DB
         opts.set_wal_bytes_per_sync(4 * 1024 * 1024);
 
         // === Compression Configuration ===
@@ -419,13 +419,13 @@ impl DatabaseEnv {
         tables_by_path
     }
 
-    /// Open RocksDB instances for all unique shard paths.
+    /// Open `RocksDB` instances for all unique shard paths.
     fn open_rocksdb_instances(
         opts: &Options,
         tables_by_path: HashMap<PathBuf, Vec<String>>,
     ) -> Result<HashMap<PathBuf, Arc<DB>>, DatabaseError> {
         let mut dbs: HashMap<PathBuf, Arc<DB>> = HashMap::new();
-        for (db_path, cf_names) in tables_by_path.iter() {
+        for (db_path, cf_names) in &tables_by_path {
             let db = DB::open_cf(opts, db_path, cf_names).map_err(|e| {
                 DatabaseError::Other(format!(
                     "Failed to open RocksDB at {}: {}",
@@ -440,17 +440,17 @@ impl DatabaseEnv {
     }
 
     /// Returns `true` if the database is read-only.
-    pub fn is_read_only(&self) -> bool {
+    pub const fn is_read_only(&self) -> bool {
         matches!(self.kind, DatabaseEnvKind::RO)
     }
 
     /// Creates tables for the given table set.
-    pub fn create_tables(&self) -> Result<(), DatabaseError> {
+    pub const fn create_tables(&self) -> Result<(), DatabaseError> {
         self.create_tables_for::<Tables>()
     }
 
     /// Creates tables for the given table set.
-    pub fn create_tables_for<TS: TableSet>(&self) -> Result<(), DatabaseError> {
+    pub const fn create_tables_for<TS: TableSet>(&self) -> Result<(), DatabaseError> {
         Ok(())
     }
 
@@ -495,10 +495,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Check num_files_at_level0 and estimate_pending_compaction_bytes
         // - Increase max_background_jobs (currently 14)
         // - Increase delayed_write_rate limit (currently 64MB/s)
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.actual-delayed-write-rate") {
-            if let Ok(rate) = value.parse::<u64>() {
-                metrics.push(("rocksdb.actual_delayed_write_rate", rate as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.actual-delayed-write-rate") &&
+            let Ok(rate) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.actual_delayed_write_rate", rate as f64, vec![]));
         }
 
         // 2. rocksdb.is-write-stopped
@@ -509,10 +509,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Or pending_compaction_bytes >= 512GB (hard limit)
         // - Increase level_zero_stop_writes_trigger above 50
         // - Increase hard_pending_compaction_bytes_limit above 512GB
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.is-write-stopped") {
-            if let Ok(stopped) = value.parse::<u64>() {
-                metrics.push(("rocksdb.is_write_stopped", stopped as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.is-write-stopped") &&
+            let Ok(stopped) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.is_write_stopped", stopped as f64, vec![]));
         }
 
         // 3. rocksdb.num-immutable-mem-table
@@ -522,10 +522,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Increase max_background_jobs for more flush threads
         // - Reduce write_buffer_size (currently 256MB) to flush more frequently
         // - Increase max_write_buffer_number above 6 for more buffer
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-immutable-mem-table") {
-            if let Ok(num) = value.parse::<u64>() {
-                metrics.push(("rocksdb.num_immutable_mem_table", num as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-immutable-mem-table") &&
+            let Ok(num) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.num_immutable_mem_table", num as f64, vec![]));
         }
 
         // 4. rocksdb.mem-table-flush-pending
@@ -533,10 +533,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // Threshold: 0 = healthy, 1 = flush in progress or queued
         // Action: If sustained at 1 with high num_immutable_mem_table
         // - Same actions as num_immutable_mem_table
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.mem-table-flush-pending") {
-            if let Ok(pending) = value.parse::<u64>() {
-                metrics.push(("rocksdb.mem_table_flush_pending", pending as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.mem-table-flush-pending") &&
+            let Ok(pending) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.mem_table_flush_pending", pending as f64, vec![]));
         }
 
         // 5. rocksdb.num-files-at-level0
@@ -551,10 +551,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - >=50: Writes stopped, immediate action needed
         //   - Increase level_zero_stop_writes_trigger above 50
         //   - Reduce write throughput temporarily
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-files-at-level0") {
-            if let Ok(num) = value.parse::<u64>() {
-                metrics.push(("rocksdb.num_files_at_level0", num as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-files-at-level0") &&
+            let Ok(num) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.num_files_at_level0", num as f64, vec![]));
         }
 
         // 6. rocksdb.estimate-pending-compaction-bytes
@@ -570,11 +570,10 @@ impl DatabaseMetrics for DatabaseEnv {
         //   - Increase hard_pending_compaction_bytes_limit above 512GB
         //   - Add more CPU cores to max_background_jobs
         if let Ok(Some(value)) =
-            self.state_db.property_value("rocksdb.estimate-pending-compaction-bytes")
+            self.state_db.property_value("rocksdb.estimate-pending-compaction-bytes") &&
+            let Ok(bytes) = value.parse::<u64>()
         {
-            if let Ok(bytes) = value.parse::<u64>() {
-                metrics.push(("rocksdb.estimate_pending_compaction_bytes", bytes as f64, vec![]));
-            }
+            metrics.push(("rocksdb.estimate_pending_compaction_bytes", bytes as f64, vec![]));
         }
 
         // 7. rocksdb.cur-size-all-mem-tables
@@ -583,10 +582,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // Action: If approaching 8GB with high num_immutable_mem_table
         // - Flush is bottlenecked, same actions as num_immutable_mem_table
         // - May increase db_write_buffer_size if memory available
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.cur-size-all-mem-tables") {
-            if let Ok(size) = value.parse::<u64>() {
-                metrics.push(("rocksdb.cur_size_all_mem_tables", size as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.cur-size-all-mem-tables") &&
+            let Ok(size) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.cur_size_all_mem_tables", size as f64, vec![]));
         }
 
         // 8. rocksdb.num-running-compactions
@@ -595,10 +594,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // Action: If consistently at max (14) with pending_compaction_bytes growing
         // - Increase max_background_jobs above 14 (if CPU available)
         // - Check disk I/O is not saturated (30000 IOPS available)
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-running-compactions") {
-            if let Ok(num) = value.parse::<u64>() {
-                metrics.push(("rocksdb.num_running_compactions", num as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-running-compactions") &&
+            let Ok(num) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.num_running_compactions", num as f64, vec![]));
         }
 
         // 9. rocksdb.num-running-flushes
@@ -608,10 +607,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // - Check disk write bandwidth (may be saturated)
         // - Reduce write_buffer_size (256MB) for faster individual flushes
         // - Increase max_background_jobs for more flush threads
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-running-flushes") {
-            if let Ok(num) = value.parse::<u64>() {
-                metrics.push(("rocksdb.num_running_flushes", num as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.num-running-flushes") &&
+            let Ok(num) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.num_running_flushes", num as f64, vec![]));
         }
 
         // 10. rocksdb.compaction-pending
@@ -620,10 +619,10 @@ impl DatabaseMetrics for DatabaseEnv {
         // Action: If 1 with high estimate_pending_compaction_bytes
         // - See estimate_pending_compaction_bytes actions
         // - Indicates compaction scheduler is active
-        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.compaction-pending") {
-            if let Ok(pending) = value.parse::<u64>() {
-                metrics.push(("rocksdb.compaction_pending", pending as f64, vec![]));
-            }
+        if let Ok(Some(value)) = self.state_db.property_value("rocksdb.compaction-pending") &&
+            let Ok(pending) = value.parse::<u64>()
+        {
+            metrics.push(("rocksdb.compaction_pending", pending as f64, vec![]));
         }
 
         metrics
@@ -637,18 +636,16 @@ impl DatabaseMetrics for DatabaseEnv {
                 tables::StoragesTrieV2::NAME => &self.storage_db,
                 _ => &self.state_db,
             };
-            if let Some(cf_handle) = db.cf_handle(table) {
-                if let Ok(Some(value)) =
-                    db.property_value_cf(cf_handle, "rocksdb.estimate-num-keys")
-                {
-                    if let Ok(entries) = value.parse::<usize>() {
-                        metrics.push((
-                            "db.table_entries",
-                            entries as f64,
-                            vec![Label::new("table", table)],
-                        ));
-                    }
-                }
+            if let Some(cf_handle) = db.cf_handle(table) &&
+                let Ok(Some(value)) =
+                    db.property_value_cf(cf_handle, "rocksdb.estimate-num-keys") &&
+                let Ok(entries) = value.parse::<usize>()
+            {
+                metrics.push((
+                    "db.table_entries",
+                    entries as f64,
+                    vec![Label::new("table", table)],
+                ));
             }
         }
         metrics
@@ -669,12 +666,12 @@ impl reth_db_api::database::Database for DatabaseEnv {
     }
 }
 
-/// Convert RocksDB error to DatabaseErrorInfo
+/// Convert `RocksDB` error to `DatabaseErrorInfo`
 fn to_error_info(e: rocksdb::Error) -> DatabaseErrorInfo {
     DatabaseErrorInfo { message: e.to_string().into(), code: -1 }
 }
 
-/// Create a read error from RocksDB error
+/// Create a read error from `RocksDB` error
 fn read_error(e: rocksdb::Error) -> DatabaseError {
     DatabaseError::Read(to_error_info(e))
 }

@@ -4,14 +4,14 @@
 [advisories]
 yanked = "warn"
 ignore = [
-    # https://rustsec.org/advisories/RUSTSEC-2024-0384 used by sse example
-    "RUSTSEC-2024-0384",
     # https://rustsec.org/advisories/RUSTSEC-2024-0436 paste! is unmaintained
     "RUSTSEC-2024-0436",
     # https://rustsec.org/advisories/RUSTSEC-2024-0320 yaml-rust is unmaintained
     # Pulled transitively via `api-types` (gravity-aptos) -> `serde_yaml` -> `yaml-rust`.
     # Upstream has no safe upgrade as of now; will revisit when serde_yaml migrates to yaml-rust2.
     "RUSTSEC-2024-0320",
+    # https://rustsec.org/advisories/RUSTSEC-2025-0141 bincode is unmaintained
+    "RUSTSEC-2025-0141",
 ]
 
 # This section is considered when running `cargo deny check bans`.

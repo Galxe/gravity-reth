@@ -38,6 +38,7 @@ async fn test_history_imports_from_fresh_state_successfully() {
     let mut hash_collector = Collector::new(4096, folder);
 
     let expected_block_number = 8191;
+    // should turn on proxy to visit `https://era.ithaca.xyz/era1/checksums.txt`
     let actual_block_number = import(stream, &pf, &mut hash_collector).unwrap();
 
     assert_eq!(actual_block_number, expected_block_number);

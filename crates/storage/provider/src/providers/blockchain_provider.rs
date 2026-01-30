@@ -521,9 +521,13 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
             }
         } else {
             trace!(target: "providers::blockchain", "Using database state for latest state provider");
-            // Always return historical provider in Rocksdb
-            let best_block_number = self.database.best_block_number()?;
-            self.database.history_by_block_number(best_block_number)
+            if get_gravity_config().validator_node_only {
+                self.database.latest()
+            } else {
+                // Always return historical provider in Rocksdb
+                let best_block_number = self.database.best_block_number()?;
+                self.database.history_by_block_number(best_block_number)
+            }
         }
     }
 
@@ -903,6 +907,7 @@ mod tests {
             provider_rw.insert_historical_block(
                 block.clone().try_recover().expect("failed to seal block with senders"),
             )?;
+            provider_rw.commit_view();
         }
 
         // Commit to both storages: database and static files
@@ -2573,7 +2578,7 @@ mod tests {
             |hash: B256,
              canonical_in_memory_state: CanonicalInMemoryState,
              factory: ProviderFactory<MockNodeTypesWithDB>| {
-                assert!(factory.transaction_by_hash(hash)?.is_none(), "should not be in database");
+                assert!(factory.transaction_by_hash(hash)?.is_some(), "should be in database");
                 Ok::<_, ProviderError>(canonical_in_memory_state.transaction_by_hash(hash))
             };
 

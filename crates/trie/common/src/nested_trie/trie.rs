@@ -74,7 +74,7 @@ where
     }
 
     /// Get proof for leaf node with `path`.
-    /// Returns a vector of TrieNodes from root to the target path.
+    /// Returns a vector of `TrieNodes` from root to the target path.
     pub fn get_proof(&mut self, path: Nibbles) -> Result<Vec<TrieNode>, DatabaseError> {
         let mut proof_nodes = Vec::new();
         if let Some(mut root) = self.root.take() {
@@ -117,16 +117,16 @@ where
                 Ok(())
             }
             Node::ShortNode { key: node_key, value: node_value, .. } => {
-                let matchlen = key.common_prefix_length(&node_key);
+                let matchlen = key.common_prefix_length(node_key);
                 if let Node::ValueNode(value) = node_value.as_ref() {
                     proof.push(Node::ShortNode {
-                        key: node_key.clone(),
+                        key: *node_key,
                         value: Box::new(Node::ValueNode(value.clone())),
                         flags: NodeFlag::default(),
                     });
                 } else {
                     proof.push(Node::ShortNode {
-                        key: node_key.clone(),
+                        key: *node_key,
                         value: Box::new(Node::HashNode(node_value.cached_rlp().unwrap().clone())),
                         flags: NodeFlag::default(),
                     });
@@ -134,7 +134,7 @@ where
                         return Ok(());
                     }
                     let mut new_prefix = prefix;
-                    new_prefix.extend(&node_key);
+                    new_prefix.extend(node_key);
                     self.get_proof_inner(
                         node_value.as_mut(),
                         new_prefix,
@@ -350,9 +350,11 @@ where
                 level_prefix = Some(batch[0].0.slice(0..level - 1));
             }
         }
-        if max_parallel_levels > 0 && self.parallel && level_prefix.is_some() && self.root.is_some()
+        if max_parallel_levels > 0 &&
+            self.parallel &&
+            let Some(level_prefix) = level_prefix &&
+            self.root.is_some()
         {
-            let level_prefix = level_prefix.unwrap();
             let root = self.root.take().unwrap();
             let root = self.resolve(root, level_prefix)?.unwrap();
             if let Node::FullNode { mut children, .. } = root {
@@ -695,17 +697,18 @@ where
     /// trie)
     pub fn hash(&mut self) -> B256 {
         if let Some(root) = &mut self.root {
-            if let Node::FullNode { children, flags } = root {
-                if self.parallel && flags.rlp.is_none() {
-                    std::thread::scope(|scope| {
-                        for node in children.iter_mut().flatten() {
-                            scope.spawn(|| {
-                                let mut buf = Vec::new();
-                                node.build_hash(&mut buf);
-                            });
-                        }
-                    });
-                }
+            if let Node::FullNode { children, flags } = root &&
+                self.parallel &&
+                flags.rlp.is_none()
+            {
+                std::thread::scope(|scope| {
+                    for node in children.iter_mut().flatten() {
+                        scope.spawn(|| {
+                            let mut buf = Vec::new();
+                            node.build_hash(&mut buf);
+                        });
+                    }
+                });
             }
             let mut buf = Vec::new();
             root.build_hash(&mut buf);

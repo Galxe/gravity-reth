@@ -7,6 +7,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[package.metadata.zepter.propagate-feature]
+ignore = ["grevm"]
+
 [lints]
 workspace = true
 

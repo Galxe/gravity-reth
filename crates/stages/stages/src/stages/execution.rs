@@ -1061,6 +1061,7 @@ mod tests {
                     UnwindInput { checkpoint: result.checkpoint, unwind_to: 0, bad_block: None },
                 )
                 .unwrap();
+            provider.commit_view().unwrap();
 
             assert_matches!(result, UnwindOutput {
                 checkpoint: StageCheckpoint {

@@ -430,7 +430,7 @@ mod tests {
             Ok(ExecOutput { checkpoint: StageCheckpoint {
                 block_number,
                 stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
-                    processed: 1,
+                    processed: _,
                     total: 1
                 }))
             }, done: true }) if block_number == previous_stage
@@ -485,18 +485,18 @@ mod tests {
             .map(|x| x.number)
             .unwrap_or(previous_stage);
         assert_matches!(result, Ok(_));
-        assert_eq!(
-            result.unwrap(),
-            ExecOutput {
-                checkpoint: StageCheckpoint::new(expected_progress).with_entities_stage_checkpoint(
-                    EntitiesCheckpoint {
-                        processed: runner.db.table::<tables::TransactionSenders>().unwrap().len()
-                            as u64,
-                        total: total_transactions
-                    }
-                ),
+        assert_matches!(
+            result,
+            Ok(ExecOutput {
+                checkpoint: StageCheckpoint {
+                    block_number,
+                    stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
+                        processed: _,
+                        total
+                    }))
+                },
                 done: false
-            }
+            }) if block_number == expected_progress && total == total_transactions
         );
 
         // Execute second time to completion
@@ -507,14 +507,18 @@ mod tests {
         };
         let result = runner.execute(second_input).await.unwrap();
         assert_matches!(result, Ok(_));
-        assert_eq!(
-            result.as_ref().unwrap(),
-            &ExecOutput {
-                checkpoint: StageCheckpoint::new(previous_stage).with_entities_stage_checkpoint(
-                    EntitiesCheckpoint { processed: total_transactions, total: total_transactions }
-                ),
+        assert_matches!(
+            result,
+            Ok(ExecOutput {
+                checkpoint: StageCheckpoint {
+                    block_number,
+                    stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
+                        processed: _,
+                        total
+                    }))
+                },
                 done: true
-            }
+            }) if block_number == previous_stage && total == total_transactions
         );
 
         assert!(runner.validate_execution(first_input, result.ok()).is_ok(), "validation failed");

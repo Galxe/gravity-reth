@@ -229,7 +229,11 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 .unwrap_or_default();
             while current_max_block < max_block {
                 current_max_block = max_block.min(current_max_block + SYNC_BATCH_SIZE);
-                self.run_batch(Some(current_max_block)).await?;
+                let result = self.run_batch(Some(current_max_block)).await?;
+                // If an unwind occurred, return immediately so the outer loop can handle it
+                if result.is_unwind() {
+                    return Ok(result)
+                }
             }
             Ok(self.progress.next_ctrl())
         } else {

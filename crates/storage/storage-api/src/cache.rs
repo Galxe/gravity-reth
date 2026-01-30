@@ -239,6 +239,11 @@ impl PersistBlockCache {
         Self(inner)
     }
 
+    /// For test
+    pub fn reset(&self) {
+        self.persist_block_number.lock().unwrap().take();
+    }
+
     /// Wait if there's a large gap between executed block and persist block
     ///
     /// # Arguments
@@ -319,11 +324,11 @@ impl PersistBlockCache {
 
     /// Get storage slot from cache
     pub fn storage(&self, address: &Address, slot: &U256) -> Option<Option<U256>> {
-        if let Some(account) = self.accounts.get(address) {
-            if account.value.is_none() {
-                self.metrics.block_cache_hit_record.hit();
-                return Some(None);
-            }
+        if let Some(account) = self.accounts.get(address) &&
+            account.value.is_none()
+        {
+            self.metrics.block_cache_hit_record.hit();
+            return Some(None);
         }
         if let Some(storage) = self.storage.get(address) {
             if let Some(value) = storage.get(slot) {
@@ -406,7 +411,12 @@ impl PersistBlockCache {
         self.metrics.persist_block_number.store(block_number, Ordering::Relaxed);
         let mut guard = self.persist_block_number.lock().unwrap();
         if let Some(ref mut persist_block_number) = *guard {
-            assert!(block_number > *persist_block_number);
+            assert!(
+                block_number > *persist_block_number,
+                "Pesist block {} should be greater than: {}",
+                block_number,
+                *persist_block_number
+            );
             *persist_block_number = block_number;
         } else {
             *guard = Some(block_number);

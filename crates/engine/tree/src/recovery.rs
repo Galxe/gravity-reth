@@ -23,7 +23,7 @@ use tracing::info;
 
 /// Helper for recovering storage state after interrupted block writes.
 ///
-/// This helper is designed to work with RocksDB's WriteBatch model, where each stage
+/// This helper is designed to work with `RocksDB`'s `WriteBatch` model, where each stage
 /// commits independently. When a block write is interrupted, this helper can recover
 /// the incomplete stages by checking the stage checkpoints and rebuilding the missing data.
 #[derive(Debug)]
@@ -48,8 +48,8 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     /// ## Detection: Checkpoint Comparison
     ///
     /// We compare two critical checkpoints:
-    /// - `recover_block_number`: The execution checkpoint from state_db, indicating the last block
-    ///   whose state commit completed successfully
+    /// - `recover_block_number`: The execution checkpoint from `state_db`, indicating the last
+    ///   block whose state commit completed successfully
     /// - `best_block_number`: The highest block number that has been fully executed
     ///
     /// If these don't match, it means execution progressed beyond the last successful
@@ -57,15 +57,15 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     ///
     /// ## Why Interruption Happens: Partial Commit Failures
     ///
-    /// During parallel execution (state_handle + trie_handle in persistence.rs), several
+    /// During parallel execution (`state_handle` + `trie_handle` in persistence.rs), several
     /// failure scenarios can leave orphaned data:
     ///
     /// 1. **State commit succeeds, trie commit fails**: No orphaned data, but trie is incomplete.
     ///    Stages need to be re-executed.
     ///
     /// 2. **Trie commits succeed, state commit fails**: Account and storage trie data is written to
-    ///    disk, but no checkpoint is recorded in state_db (since state_batch is committed last in
-    ///    Tx::commit). This leaves orphaned trie data.
+    ///    disk, but no checkpoint is recorded in `state_db` (since `state_batch` is committed last
+    ///    in `Tx::commit`). This leaves orphaned trie data.
     ///
     /// 3. **Partial trie commit**: Account trie succeeds but storage trie fails (or vice versa).
     ///    State commit never happens, so no checkpoint is written. Leaves partial orphaned trie
@@ -76,27 +76,27 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     /// We recover by re-executing stages in dependency order, using each stage's checkpoint
     /// to determine what needs to be rebuilt:
     ///
-    /// 1. **AccountHashing**: Rebuild hashed account/storage state from plain state.
+    /// 1. **`AccountHashing`**: Rebuild hashed account/storage state from plain state.
     ///    - Reads changed accounts/storages from history indices
     ///    - Idempotent: re-hashing the same data produces identical hashes
     ///
-    /// 2. **MerkleExecute**: Rebuild account and storage trie nodes.
-    ///    - Reads hashed state from AccountHashing stage
+    /// 2. **`MerkleExecute`**: Rebuild account and storage trie nodes.
+    ///    - Reads hashed state from `AccountHashing` stage
     ///    - **Idempotent**: Writing the same trie node data overwrites orphaned data with identical
     ///      content, producing a consistent trie structure
     ///
-    /// 3. **IndexAccountHistory**: Rebuild history indices for changed accounts/storages.
+    /// 3. **`IndexAccountHistory`**: Rebuild history indices for changed accounts/storages.
     ///    - Reads account/storage changes from plain state
     ///    - Idempotent: re-indexing the same changes produces identical indices
     ///
     /// ## Why This Works: Checkpoint-Driven Idempotency
     ///
-    /// Each stage checks its own checkpoint (stored in state_db) to determine if it needs
-    /// to re-execute. Since all checkpoints are in state_db and state_batch is committed
-    /// last (see Tx::commit), the checkpoint accurately reflects which stages completed:
+    /// Each stage checks its own checkpoint (stored in `state_db`) to determine if it needs
+    /// to re-execute. Since all checkpoints are in `state_db` and `state_batch` is committed
+    /// last (see `Tx::commit`), the checkpoint accurately reflects which stages completed:
     ///
     /// - If a stage's checkpoint is behind `recover_block_number`, it means the stage's data commit
-    ///   may have succeeded but the checkpoint write (in state_batch) failed.
+    ///   may have succeeded but the checkpoint write (in `state_batch`) failed.
     /// - Re-executing the stage is safe because all stage operations are idempotent.
     /// - Orphaned trie data from failed commits is harmlessly overwritten with identical data
     ///   during recovery.
@@ -141,7 +141,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         Ok(())
     }
 
-    /// Recover AccountHashing stage if needed.
+    /// Recover `AccountHashing` stage if needed.
     fn recover_hashing(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
         let ck = provider_rw
@@ -177,7 +177,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         Ok(())
     }
 
-    /// Recover MerkleExecute stage if needed.
+    /// Recover `MerkleExecute` stage if needed.
     fn recover_merkle(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
         let ck = provider_rw
@@ -208,7 +208,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         Ok(())
     }
 
-    /// Recover IndexAccountHistory stage if needed.
+    /// Recover `IndexAccountHistory` stage if needed.
     fn recover_history_indices(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
         let ck = provider_rw

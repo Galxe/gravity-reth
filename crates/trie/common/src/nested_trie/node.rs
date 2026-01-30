@@ -66,7 +66,7 @@ pub enum Node {
     /// Branch Node
     FullNode {
         /// Children of each branch + Current node value(always None for ethereum)
-        children: [Option<Box<Node>>; 17],
+        children: [Option<Box<Self>>; 17],
         /// Node flag to mark dirty and cache node hash
         flags: NodeFlag,
     },
@@ -75,7 +75,7 @@ pub enum Node {
         /// shared prefix(Extension Node), or key end(Leaf Node)
         key: Nibbles,
         /// next node(Extension Node), or leaf value(Leaf Node)
-        value: Box<Node>,
+        value: Box<Self>,
         /// node flag
         flags: NodeFlag,
     },
@@ -183,7 +183,7 @@ impl reth_codecs::Compact for StorageNodeEntry {
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
         let encoded_len = buf[0];
-        let odd = encoded_len % 2 == 0;
+        let odd = encoded_len.is_multiple_of(2);
         let pack_len = (encoded_len / 2) as usize;
         let mut nibbles = Nibbles::unpack(&buf[1..1 + pack_len]);
         if odd {
@@ -328,17 +328,17 @@ impl From<Node> for TrieNode {
                         }
                     }
                 }
-                TrieNode::Branch(BranchNode::new(stack, state_mask))
+                Self::Branch(BranchNode::new(stack, state_mask))
             }
             Node::ShortNode { key, value, .. } => {
                 match *value {
                     Node::ValueNode(v) => {
                         // Leaf node
-                        TrieNode::Leaf(LeafNode::new(key, v))
+                        Self::Leaf(LeafNode::new(key, v))
                     }
                     Node::HashNode(rlp) => {
                         // Extension node
-                        TrieNode::Extension(ExtensionNode::new(key, rlp))
+                        Self::Extension(ExtensionNode::new(key, rlp))
                     }
                     _ => panic!(
                         "ShortNode value should be ValueNode or HashNode for proof conversion"

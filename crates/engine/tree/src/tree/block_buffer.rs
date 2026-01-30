@@ -73,10 +73,10 @@ impl<B: Block> BlockBuffer<B> {
         // Add block to FIFO queue and handle eviction if needed
         if self.block_queue.len() >= self.max_blocks {
             // Evict oldest block if limit is hit
-            if let Some(evicted_hash) = self.block_queue.pop_front() {
-                if let Some(evicted_block) = self.remove_block(&evicted_hash) {
-                    self.remove_from_parent(evicted_block.parent_hash(), &evicted_hash);
-                }
+            if let Some(evicted_hash) = self.block_queue.pop_front() &&
+                let Some(evicted_block) = self.remove_block(&evicted_hash)
+            {
+                self.remove_from_parent(evicted_block.parent_hash(), &evicted_hash);
             }
         }
         self.block_queue.push_back(hash);

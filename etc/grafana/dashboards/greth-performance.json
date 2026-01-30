@@ -1421,7 +1421,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "reth_pipe_exec_layer_cache_accout_state{instance=\"$instance\", quantile=\"$quantile\"}",
+          "expr": "reth_pipe_exec_layer_cache_account_state{instance=\"$instance\", quantile=\"$quantile\"}",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,

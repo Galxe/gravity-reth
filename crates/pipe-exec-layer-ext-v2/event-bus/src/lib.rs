@@ -18,8 +18,8 @@ pub fn get_pipe_exec_layer_event_bus<N: NodePrimitives>() -> &'static PipeExecLa
         let event_bus = PIPE_EXEC_LAYER_EVENT_BUS
             .get()
             .map(|ext| ext.downcast_ref::<PipeExecLayerEventBus<N>>().unwrap());
-        if event_bus.is_some() {
-            break event_bus.unwrap();
+        if let Some(event_bus) = event_bus {
+            break event_bus;
         } else if wait_time % 5 == 0 {
             info!("Wait PipeExecLayerEventBus ready...");
         }

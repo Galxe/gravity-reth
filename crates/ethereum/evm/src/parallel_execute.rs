@@ -299,13 +299,13 @@ fn insert_post_block_withdrawals_balance_increments(
     balance_increments: &mut HashMap<Address, u128>,
 ) {
     // Process withdrawals
-    if spec.is_shanghai_active_at_timestamp(block_timestamp) {
-        if let Some(withdrawals) = withdrawals {
-            for withdrawal in withdrawals {
-                if withdrawal.amount > 0 {
-                    *balance_increments.entry(withdrawal.address).or_default() +=
-                        withdrawal.amount_wei().to::<u128>();
-                }
+    if spec.is_shanghai_active_at_timestamp(block_timestamp) &&
+        let Some(withdrawals) = withdrawals
+    {
+        for withdrawal in withdrawals {
+            if withdrawal.amount > 0 {
+                *balance_increments.entry(withdrawal.address).or_default() +=
+                    withdrawal.amount_wei().to::<u128>();
             }
         }
     }
