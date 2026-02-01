@@ -17,7 +17,7 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use gravity_api_types::on_chain_config::jwks::{JWKStruct, ProviderJWKs};
 use reth_ethereum_primitives::TransactionSigned;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Default callback gas limit for oracle updates
 const CALLBACK_GAS_LIMIT: u64 = 500_000;
@@ -59,6 +59,7 @@ fn is_rsa_jwk(jwk: &JWKStruct) -> bool {
 /// Checks for sourceType string (0, 1, 2, etc.) instead of fixed type_name
 fn is_unsupported_jwk(jwk: &JWKStruct) -> bool {
     // Check if type_name is a numeric string (sourceType)
+    // TODO(gravity): check if it should be "0x1::jwks::UNSUPPORTED_JWK"
     jwk.type_name.parse::<u32>().is_ok()
 }
 
@@ -75,46 +76,66 @@ fn parse_rsa_jwk_from_bcs(data: &[u8]) -> Option<OracleRSA_JWK> {
 }
 
 /// Parse chain_id from issuer URI
-/// Format: gravity://{chain_id}/events?...
+/// Format: gravity://{source_type}/{chain_id}/{task_type}?...
 fn parse_chain_id_from_issuer(issuer: &[u8]) -> Option<u64> {
     let issuer_str = String::from_utf8_lossy(issuer);
     if issuer_str.starts_with("gravity://") {
         let after_protocol = &issuer_str[10..];
-        if let Some(slash_pos) = after_protocol.find('/') {
-            let chain_id_str = &after_protocol[..slash_pos];
-            return chain_id_str.parse().ok();
-        }
+        // Skip source_type (first segment), get chain_id (second segment)
+        // Format: {source_type}/{chain_id}/{task_type}?...
+        let mut parts = after_protocol.split('/');
+        let _source_type = parts.next()?; // Skip source_type
+        let chain_id_str = parts.next()?;
+        return chain_id_str.parse().ok();
     }
     None
 }
 
-/// Extract nonce from ABI-encoded event payload
-/// Payload format: abi.encode(address, bytes32[], bytes, uint64 block_number, uint64 log_index)
-/// Returns block_number * 1000 + log_index as unique nonce
-fn extract_nonce_from_payload(payload: &[u8]) -> Option<u128> {
-    // ABI-encoded payload structure:
-    // - address (32 bytes padded)
-    // - offset to topics array (32 bytes)
-    // - offset to data bytes (32 bytes)
-    // - block_number (32 bytes as uint64)
-    // - log_index (32 bytes as uint64)
-    // Then dynamic data...
-
-    if payload.len() < 160 {
-        // Minimum: 5 * 32 bytes for fixed parts
+/// Extract nonce and inner payload from ABI-encoded event data
+/// Payload format: alloy's abi_encode(&(u128, &[u8]))
+///
+/// alloy encodes (u128, &[u8]) as a dynamic tuple with structure:
+/// - bytes 0-31:   offset to tuple data (always 32 = 0x20)
+/// - bytes 32-63:  nonce (uint128, right-aligned, so nonce is at bytes 48-63)
+/// - bytes 64-95:  offset to bytes data (relative to tuple start at byte 32)
+/// - bytes 96-127: payload length
+/// - bytes 128+:   payload data
+///
+/// Returns (nonce, inner_payload)
+fn extract_nonce_and_payload(data: &[u8]) -> Option<(u128, Vec<u8>)> {
+    // Minimum: 32 (tuple offset) + 32 (nonce) + 32 (bytes offset) + 32 (length) = 128 bytes
+    if data.len() < 128 {
+        warn!(
+            target: "gravity::onchain_config::jwk_oracle",
+            data_len = data.len(),
+            "Data too short for ABI decoding"
+        );
         return None;
     }
 
-    // block_number is at offset 96 (3 * 32)
-    let block_number_bytes = &payload[96..128];
-    let block_number = U256::from_be_slice(&block_number_bytes[..32]);
+    // nonce is at bytes 32-63, right-aligned u128 so actual value is at bytes 48-63
+    let nonce_bytes = &data[48..64];
+    let nonce = u128::from_be_bytes(nonce_bytes.try_into().ok()?);
 
-    // log_index is at offset 128 (4 * 32)
-    let log_index_bytes = &payload[128..160];
-    let log_index = U256::from_be_slice(&log_index_bytes[..32]);
+    // Payload length is at bytes 96-127 (right-aligned u256)
+    let length_bytes = &data[96..128];
+    let payload_len = u64::from_be_bytes(length_bytes[24..32].try_into().ok()?) as usize;
 
-    let nonce = block_number.saturating_to::<u128>() * 1000 + log_index.saturating_to::<u128>();
-    Some(nonce)
+    // Check we have enough data for the payload
+    if data.len() < 128 + payload_len {
+        warn!(
+            target: "gravity::onchain_config::jwk_oracle",
+            data_len = data.len(),
+            payload_len = payload_len,
+            "Not enough data for payload"
+        );
+        return None;
+    }
+
+    // Extract the inner payload starting at byte 128
+    let inner_payload = data[128..128 + payload_len].to_vec();
+
+    Some((nonce, inner_payload))
 }
 
 // =============================================================================
@@ -150,6 +171,7 @@ pub fn construct_oracle_record_transaction(
         // Blockchain/oracle events - use recordBatch for ALL logs
         construct_blockchain_batch_transaction(provider_jwks, nonce, gas_price)
     } else {
+        warn!(target: "gravity::onchain_config::jwk_oracle", "Unknown JWK type '{}' for issuer: {}", first_jwk.type_name, issuer_str);
         Err(format!("Unknown JWK type '{}' for issuer: {}", first_jwk.type_name, issuer_str))
     }
 }
@@ -209,6 +231,7 @@ fn construct_blockchain_batch_transaction(
     // Parse chain_id from issuer
     let chain_id = parse_chain_id_from_issuer(issuer)
         .ok_or_else(|| format!("Failed to parse chain_id from issuer: {:?}", issuer))?;
+    info!(target: "gravity::onchain_config::jwk_oracle", "jwk chain_id: {}, len {:?}", chain_id, jwks.len());
 
     // All JWKs are guaranteed to be unsupported type when entering this function
     if jwks.is_empty() {
@@ -216,10 +239,7 @@ fn construct_blockchain_batch_transaction(
     }
 
     // Parse sourceType from first JWK's type_name (all have same type)
-    let source_type: u32 = jwks[0]
-        .type_name
-        .parse()
-        .map_err(|_| format!("Invalid sourceType: {}", jwks[0].type_name))?;
+    let source_type: u32 = 0;
 
     // Build batch arrays
     let mut nonces: Vec<u128> = Vec::with_capacity(jwks.len());
@@ -227,21 +247,32 @@ fn construct_blockchain_batch_transaction(
     let mut gas_limits: Vec<U256> = Vec::with_capacity(jwks.len());
 
     for (idx, jwk) in jwks.iter().enumerate() {
-        // Extract nonce from the ABI-encoded payload
-        let event_nonce = extract_nonce_from_payload(&jwk.data)
-            .ok_or_else(|| format!("Failed to extract nonce from payload at index {}", idx))?;
+        // Extract nonce and inner payload from ABI-encoded (nonce, payload)
+        let (event_nonce, inner_payload) = match extract_nonce_and_payload(&jwk.data) {
+            Some((nonce, payload)) => (nonce, payload),
+            None => {
+                warn!(
+                    target: "gravity::onchain_config::jwk_oracle",
+                    idx = idx,
+                    payload_len = jwk.data.len(),
+                    payload_hex = %hex::encode(&jwk.data),
+                    "Failed to extract nonce and payload"
+                );
+                return Err(format!("Failed to extract nonce and payload at index {}", idx));
+            }
+        };
 
         nonces.push(event_nonce);
-        // Pass payload through UNCHANGED - this is critical for comparison matching
-        // The relayer already ABI-encoded the data, we just store it as-is
-        payloads.push(jwk.data.clone().into());
+        // Use the inner payload (the original MessageSent.payload)
+        // This is what the user put in and what gets passed to the callback
+        payloads.push(inner_payload.into());
         gas_limits.push(U256::from(CALLBACK_GAS_LIMIT));
 
         debug!(
             idx = idx,
             event_nonce = event_nonce,
-            payload_len = jwk.data.len(),
-            "Added event to batch (pass-through)"
+            inner_payload_len = payloads.last().map(|p: &Bytes| p.len()).unwrap_or(0),
+            "Added event to batch"
         );
     }
 
