@@ -72,8 +72,7 @@ use crate::{
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
-        observed_jwk::convert_into_api_provider_jwks, 
-        types::ObservedJWKsUpdated,
+        types::DataRecorded,
         transact_system_txn, SystemTxnResult, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
 };
@@ -684,6 +683,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         for (index, extra_data) in sorted_extra_data.iter().enumerate() {
             let is_dkg = matches!(extra_data, ExtraDataType::DKG(_));
+            // TODO(gravity_lightman): should not panic
             let txn = construct_validator_txn_from_extra_data(extra_data, current_nonce, gas_price)
                 .expect("Failed to construct validator transaction");
             current_nonce += 1;
@@ -692,6 +692,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 index=?index,
                 nonce=?current_nonce,
                 is_dkg=?is_dkg,
+                block_number=?block_number,
                 "executing validator transaction one by one"
             );
 
@@ -732,7 +733,9 @@ impl<Storage: GravityStorage> Core<Storage> {
 
             info!(target: "execute_ordered_block",
                 index=?index,
+                is_dkg=?is_dkg,
                 gas_used=?validator_result.result.gas_used(),
+                block_number=?block_number,
                 "validator transaction executed successfully"
             );
 
@@ -776,14 +779,21 @@ impl<Storage: GravityStorage> Core<Storage> {
     }
 
     /// Extract gravity events from execution receipts
-    /// Returns (gravity_events, epoch_change_result) where epoch_change_result is Some((new_epoch,
-    /// validators)) if epoch changed
+    /// Returns gravity_events containing DKG events and ObservedJWKsUpdated from DataRecorded events
+    /// TODO(gravity): Currently, it executes the entire block and then parses all logs from the whole block.
+    /// Theoretically, it could only parse metadata and validator transactions.
     fn extract_gravity_events_from_receipts(
         &self,
         receipts: &[Receipt],
         block_number: u64,
+        epoch: u64,
     ) -> Vec<GravityEvent> {
+        use std::collections::HashMap;
+        use gravity_api_types::on_chain_config::jwks::ProviderJWKs;
+
         let mut gravity_events = vec![];
+        // Map from (sourceType, sourceId) to latest nonce
+        let mut data_records: HashMap<(u32, alloy_primitives::U256), u128> = HashMap::new();
 
         for receipt in receipts {
             debug!(target: "execute_ordered_block",
@@ -792,21 +802,28 @@ impl<Storage: GravityStorage> Core<Storage> {
                 "extract gravity events from receipt"
             );
             for log in &receipt.logs {
-                if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
+                // Parse DataRecorded events from NativeOracle
+                if let Ok(event) = DataRecorded::decode_log(&log) {
                     info!(target: "execute_ordered_block",
                         number=?block_number,
-                        "observed jwks updated"
+                        source_type=?event.sourceType,
+                        source_id=?event.sourceId,
+                        nonce=?event.nonce,
+                        "data recorded event"
                     );
-                    let api_jwks = event
-                        .jwks
-                        .iter()
-                        .map(|jwk| convert_into_api_provider_jwks(jwk.clone()))
-                        .collect::<Vec<_>>();
-                    gravity_events.push(GravityEvent::ObservedJWKsUpdated(
-                        event.epoch.try_into().unwrap(),
-                        api_jwks,
-                    ));
+                    // Keep only the latest nonce for each (sourceType, sourceId)
+                    let key = (event.sourceType, event.sourceId);
+                    data_records
+                        .entry(key)
+                        .and_modify(|existing_nonce| {
+                            if event.nonce > *existing_nonce {
+                                *existing_nonce = event.nonce;
+                            }
+                        })
+                        .or_insert(event.nonce);
                 }
+
+                // Parse DKG events (unchanged)
                 if let Ok(event) = DKGStartEvent::decode_log(&log) {
                     info!(target: "execute_ordered_block",
                         number=?block_number,
@@ -817,6 +834,32 @@ impl<Storage: GravityStorage> Core<Storage> {
                 }
             }
         }
+
+        // Convert collected DataRecorded events to ProviderJWKs
+        if !data_records.is_empty() {
+            let api_jwks: Vec<ProviderJWKs> = data_records
+                .into_iter()
+                .map(|((source_type, source_id), nonce)| {
+                    // issuer format: "gravity://sourceType/sourceId"
+                    let issuer = format!("gravity://{}/{}", source_type, source_id);
+                    ProviderJWKs {
+                        issuer: issuer.into_bytes(),
+                        version: nonce as u64,  // nonce as version
+                        jwks: vec![],           // return empty jwks
+                    }
+                })
+                .collect();
+
+            info!(target: "execute_ordered_block",
+                number=?block_number,
+                epoch=?epoch,
+                provider_count=?api_jwks.len(),
+                "constructed ProviderJWKs from DataRecorded events"
+            );
+
+            gravity_events.push(GravityEvent::ObservedJWKsUpdated(epoch, api_jwks));
+        }
+
         gravity_events
     }
 
@@ -937,6 +980,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let gravity_events = self.extract_gravity_events_from_receipts(
             &result.execution_output.receipts,
             result.block.number,
+            epoch,
         );
 
         result.gravity_events.extend(gravity_events);

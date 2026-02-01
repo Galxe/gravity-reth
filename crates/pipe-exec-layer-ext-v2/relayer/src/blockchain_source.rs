@@ -6,7 +6,7 @@ use crate::{
     data_source::{source_types, OracleData, OracleDataSource},
     eth_client::EthHttpCli,
 };
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_rpc_types::Filter;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolEvent;
@@ -312,17 +312,24 @@ impl OracleDataSource for BlockchainEventSource {
                 continue;
             }
 
-            let payload = log.data().data.clone();
+            let raw_payload = log.data().data.clone();
+
+            // ABI encode the entire event (nonce, payload) together
+            // This preserves the nonce when passing through JWKStruct
+            // Format: abi.encode(uint128 nonce, bytes payload)
+            let encoded_payload =
+                alloy_sol_types::SolValue::abi_encode(&(nonce, raw_payload.as_ref()));
 
             debug!(
                 target: "blockchain_source",
                 chain_id = self.chain_id,
                 nonce = nonce,
-                payload_len = payload.len(),
-                "Found new MessageSent event"
+                raw_payload_len = raw_payload.len(),
+                encoded_payload_len = encoded_payload.len(),
+                "Found new MessageSent event - ABI encoded"
             );
 
-            results.push(OracleData { nonce, payload: Bytes::from(payload.to_vec()) });
+            results.push(OracleData { nonce, payload: Bytes::from(encoded_payload) });
         }
 
         // Update cursor
