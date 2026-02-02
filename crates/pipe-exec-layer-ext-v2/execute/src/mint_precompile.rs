@@ -47,6 +47,10 @@ const MINT_BASE_GAS: u64 = 21000;
 pub fn create_mint_token_precompile<DB: ParallelDatabase + Send + Sync + 'static>(
     state: Arc<Mutex<ParallelState<DB>>>,
 ) -> DynPrecompile {
+    info!(
+        target: "evm::precompile::mint_token",
+        "Creating mint token precompile"
+    );
     let precompile_id = PrecompileId::custom("mint_token");
 
     (precompile_id, move |input: PrecompileInput<'_>| -> PrecompileResult {
@@ -88,6 +92,14 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
     input: PrecompileInput<'_>,
     state: Arc<Mutex<ParallelState<DB>>>,
 ) -> PrecompileResult {
+    // Log immediately when precompile is called
+    info!(
+        target: "evm::precompile::mint_token",
+        caller = ?input.caller,
+        data_len = input.data.len(),
+        "PRECOMPILE CALLED - mint_token_handler entry"
+    );
+    
     // 1. Validate caller address
     if !AUTHORIZED_CALLERS.contains(&input.caller) {
         warn!(
