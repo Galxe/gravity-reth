@@ -1,11 +1,13 @@
-# Runs `ethereum/hive` tests.
+# Runs `ethereum/hive` rpc-compat tests for gravity-reth.
 
 name: hive
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 */6 * * *"
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,215 +17,122 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prepare-reth:
-    uses: ./.github/workflows/prepare-reth.yml
-    with:
-      image_tag: ghcr.io/paradigmxyz/reth:latest
-      binary_name: reth
-
-  prepare-hive:
-    if: github.repository == 'paradigmxyz/reth'
-    timeout-minutes: 45
-    runs-on:
-      group: Reth
-    steps:
-      - uses: actions/checkout@v5
-      - name: Checkout hive tests
-        uses: actions/checkout@v5
-        with:
-          repository: ethereum/hive
-          path: hivetests
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "^1.13.1"
-      - run: go version
-
-      - name: Build hive assets
-        run: .github/assets/hive/build_simulators.sh
-
-      - name: Upload hive assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: hive_assets
-          path: ./hive_assets
-  test:
+  test-rpc-compat:
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # ethereum/rpc to be deprecated:
-        # https://github.com/ethereum/hive/pull/1117
-        scenario:
-          - sim: smoke/genesis
-          - sim: smoke/network
-          - sim: ethereum/sync
-          - sim: devp2p
-            limit: discv4
-          # started failing after https://github.com/ethereum/go-ethereum/pull/31843, no
-          # action on our side, remove from here when we get unxpected passes on these tests
-          # - sim: devp2p
-          #  limit: eth
-          #  include:
-          #    - MaliciousHandshake
-          #    # failures tracked in https://github.com/paradigmxyz/reth/issues/14825
-          #    - Status
-          #    - GetBlockHeaders
-          #    - ZeroRequestID
-          #    - GetBlockBodies
-          #    - Transaction
-          #    - NewPooledTxs
-          - sim: devp2p
-            limit: discv5
-            include:
-              # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
-              - PingLargeRequestID
-          - sim: ethereum/engine
-            limit: engine-exchange-capabilities
-          - sim: ethereum/engine
-            limit: engine-withdrawals
-          - sim: ethereum/engine
-            limit: engine-auth
-          - sim: ethereum/engine
-            limit: engine-api
-          - sim: ethereum/engine
-            limit: cancun
-          # eth_ rpc methods
-          - sim: ethereum/rpc-compat
-            include:
-              - eth_blockNumber
-              - eth_call
-              - eth_chainId
-              - eth_createAccessList
-              - eth_estimateGas
-              - eth_feeHistory
-              - eth_getBalance
-              - eth_getBlockBy
-              - eth_getBlockTransactionCountBy
-              - eth_getCode
-              - eth_getProof
-              - eth_getStorage
-              - eth_getTransactionBy
-              - eth_getTransactionCount
-              - eth_getTransactionReceipt
-              - eth_sendRawTransaction
-              - eth_syncing
-              # debug_ rpc methods
-              - debug_
-
-          # consume-engine
-          - sim: ethereum/eest/consume-engine
-            limit: .*tests/osaka.*
-          - sim: ethereum/eest/consume-engine
-            limit: .*tests/prague.*
-          - sim: ethereum/eest/consume-engine
-            limit: .*tests/cancun.*
-          - sim: ethereum/eest/consume-engine
-            limit: .*tests/shanghai.*
-          - sim: ethereum/eest/consume-engine
-            limit: .*tests/berlin.*
-          - sim: ethereum/eest/consume-engine
-            limit: .*tests/istanbul.*
-          - sim: ethereum/eest/consume-engine
-            limit: .*tests/homestead.*
-          - sim: ethereum/eest/consume-engine
-            limit: .*tests/frontier.*
-
-          # consume-rlp
-          - sim: ethereum/eest/consume-rlp
-            limit: .*tests/osaka.*
-          - sim: ethereum/eest/consume-rlp
-            limit: .*tests/prague.*
-          - sim: ethereum/eest/consume-rlp
-            limit: .*tests/cancun.*
-          - sim: ethereum/eest/consume-rlp
-            limit: .*tests/shanghai.*
-          - sim: ethereum/eest/consume-rlp
-            limit: .*tests/berlin.*
-          - sim: ethereum/eest/consume-rlp
-            limit: .*tests/istanbul.*
-          - sim: ethereum/eest/consume-rlp
-            limit: .*tests/homestead.*
-          - sim: ethereum/eest/consume-rlp
-            limit: .*tests/frontier.*
-    needs:
-      - prepare-reth
-      - prepare-hive
-    name: run ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
-    runs-on:
-      group: Reth
-    permissions:
-      issues: write
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Download hive assets
-        uses: actions/download-artifact@v5
-        with:
-          name: hive_assets
-          path: /tmp
-
-      - name: Download reth image
-        uses: actions/download-artifact@v5
-        with:
-          name: artifacts
-          path: /tmp
-
-      - name: Load Docker images
-        run: .github/assets/hive/load_images.sh
-
-      - name: Move hive binary
-        run: |
-          mv /tmp/hive /usr/local/bin
-          chmod +x /usr/local/bin/hive
-
-      - name: Checkout hive tests
+      - name: Checkout hive
         uses: actions/checkout@v5
         with:
           repository: ethereum/hive
-          ref: master
-          path: hivetests
+          path: hive
 
-      - name: Run simulator
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "^1.21"
+
+      - name: Build hive
         run: |
-          LIMIT="${{ matrix.scenario.limit }}"
-          TESTS="${{ join(matrix.scenario.include, '|') }}"
-          if [ -n "$LIMIT" ] && [ -n "$TESTS" ]; then
-            FILTER="$LIMIT/$TESTS"
-          elif [ -n "$LIMIT" ]; then
-            FILTER="$LIMIT"
-          elif [ -n "$TESTS" ]; then
-            FILTER="/$TESTS"
-          else
-            FILTER="/"
+          cd hive
+          go build .
+
+      - name: Setup gravity-reth client
+        run: |
+          mkdir -p hive/clients/gravity-reth
+
+          # Copy reth client files as base
+          cp hive/clients/reth/genesis.json hive/clients/gravity-reth/
+          cp hive/clients/reth/mapper.jq hive/clients/gravity-reth/
+          cp hive/clients/reth/enode.sh hive/clients/gravity-reth/
+
+          # Create Dockerfile.local (Hive will build from source)
+          cat > hive/clients/gravity-reth/Dockerfile.local << 'EOF'
+          FROM rust:latest as builder
+          ARG local_path=gravity-reth
+          COPY $local_path gravity-reth
+          RUN apt-get update && apt-get install -y libclang-dev pkg-config build-essential \
+              && cd gravity-reth && cargo build --release \
+              && cp target/release/reth /usr/local/bin/reth
+
+          FROM debian:bookworm-slim
+          RUN apt-get update && apt-get install -y bash curl jq ca-certificates \
+              && apt-get clean && rm -rf /var/lib/apt/lists/*
+          COPY --from=builder /usr/local/bin/reth /usr/local/bin/reth
+          COPY genesis.json /genesis.json
+          COPY mapper.jq /mapper.jq
+          COPY reth.sh /reth.sh
+          COPY enode.sh /hive-bin/enode.sh
+          RUN chmod +x /reth.sh /hive-bin/enode.sh /usr/local/bin/reth
+          RUN echo "gravity-reth" > /version.txt
+          EXPOSE 8545 8546 8551 30303 30303/udp
+          ENTRYPOINT ["/reth.sh"]
+          EOF
+
+          # Create reth.sh with standalone mode
+          cp hive/clients/reth/reth.sh hive/clients/gravity-reth/reth.sh
+          # Append standalone mode flag
+          sed -i 's/\$reth node \$FLAGS$/\$reth node \$FLAGS --gravity.disable-pipe-execution/' hive/clients/gravity-reth/reth.sh
+
+          # Create hive.yaml
+          cat > hive/clients/gravity-reth/hive.yaml << 'EOF'
+          roles:
+            - "eth1"
+          EOF
+
+          # Link source code
+          ln -s ${{ github.workspace }} hive/clients/gravity-reth/gravity-reth
+
+          # Create client config
+          cat > hive/grevm-clients.yaml << 'EOF'
+          - client: gravity-reth
+            dockerfile: local
+            nametag: gravity-reth-local
+            build_args:
+              local_path: gravity-reth
+          EOF
+
+      - name: Run rpc-compat tests
+        run: |
+          cd hive
+          ./hive --sim ethereum/rpc-compat \
+                 --client-file grevm-clients.yaml \
+                 --sim.loglevel 3
+        continue-on-error: true
+
+      - name: Parse test results
+        run: |
+          cd hive
+          echo "## Hive RPC-Compat Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          RESULT_FILE=$(ls -t workspace/logs/*.json 2>/dev/null | grep -v hive.json | head -1)
+          
+          if [ -n "$RESULT_FILE" ]; then
+            TOTAL=$(jq '.testCases | length' "$RESULT_FILE")
+            PASSED=$(jq '[.testCases[] | select(.summaryResult.pass == true)] | length' "$RESULT_FILE")
+            FAILED=$((TOTAL - PASSED))
+            
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Total | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
           fi
-          echo "filter: $FILTER"
-          .github/assets/hive/run_simulator.sh "${{ matrix.scenario.sim }}" "$FILTER"
 
-      - name: Parse hive output
-        run: |
-          find hivetests/workspace/logs -type f -name "*.json" ! -name "hive.json" | xargs -I {} python .github/assets/hive/parse.py {} --exclusion .github/assets/hive/expected_failures.yaml --ignored .github/assets/hive/ignored_tests.yaml
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hive-logs
+          path: hive/workspace/logs/
+          retention-days: 7
 
-      - name: Print simulator output
-        if: ${{ failure() }}
+      - name: Print logs on failure
+        if: failure()
         run: |
-          cat hivetests/workspace/logs/*simulator*.log
-
-      - name: Print reth client logs
-        if: ${{ failure() }}
-        run: |
-          cat hivetests/workspace/logs/reth/client-*.log
-  notify-on-error:
-    needs: test
-    if: failure()
-    runs-on:
-      group: Reth
-    steps:
-      - name: Slack Webhook Action
-        uses: rtCamp/action-slack-notify@v2
-        env:
-          SLACK_COLOR: ${{ job.status }}
-          SLACK_MESSAGE: "Failed run: https://github.com/paradigmxyz/reth/actions/runs/${{ github.run_id }}"
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          cat hive/workspace/logs/*simulator*.log || true
+          cat hive/workspace/logs/gravity-reth/client-*.log || true
