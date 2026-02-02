@@ -1,6 +1,6 @@
 //! Mint Token Precompile Contract
 //!
-//! This precompile allows authorized callers (JWK Manager) to mint tokens
+//! This precompile allows authorized callers to mint native tokens
 //! directly to specified recipient addresses.
 
 use alloy_primitives::{address, map::HashMap, Address, Bytes, U256};
@@ -12,15 +12,22 @@ use reth_evm::{
 };
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-/// Authorized caller address (JWK Manager at 0x2018)
+/// Authorized caller addresses
 ///
-/// Only this address is allowed to call the mint precompile.
-pub const AUTHORIZED_CALLER: Address = address!("0x0000000000000000000000000000000000002018");
+/// These addresses are allowed to call the mint precompile:
+/// - JWK Manager (0x2018) - legacy support
+/// - GBridgeReceiver - deployed via genesis, address from validator_genesis.json
+const AUTHORIZED_CALLERS: [Address; 1] = [
+    address!("0x595475934ed7d9faa7fca28341c2ce583904a44e"),    // GBridgeReceiver (genesis)
+];
 
-/// Function ID for mint operation
-const FUNC_MINT: u8 = 0x01;
+/// Function selector for mint(address,uint256) - standard Solidity ABI
+const MINT_SELECTOR: [u8; 4] = [0x40, 0xc1, 0x0f, 0x19];
+
+/// Legacy function ID for mint operation (custom format)
+const FUNC_MINT_LEGACY: u8 = 0x01;
 
 /// Base gas cost for mint operation
 const MINT_BASE_GAS: u64 = 21000;
@@ -52,75 +59,98 @@ pub fn create_mint_token_precompile<DB: ParallelDatabase + Send + Sync + 'static
 ///
 /// # Security
 ///
-/// - Only JWK Manager (0x2018) is allowed to call this precompile
+/// - Only authorized addresses can call this precompile
 /// - Calls from other addresses will be rejected with an error
 ///
-/// # Parameter format (53 bytes)
+/// # Supported formats
 ///
+/// ## Standard ABI format (68 bytes) - mint(address,uint256)
+/// | Offset | Size | Description |
+/// |--------|------|-------------|
+/// | 0      | 4    | Function selector (0x40c10f19) |
+/// | 4      | 32   | Recipient address (padded) |
+/// | 36     | 32   | Amount (U256) |
+///
+/// ## Legacy custom format (53 bytes)
 /// | Offset | Size | Description |
 /// |--------|------|-------------|
 /// | 0      | 1    | Function ID (0x01) |
 /// | 1      | 20   | Recipient address |
-/// | 21     | 32   | Amount (U256, big-endian) |
+/// | 21     | 32   | Amount (U256) |
 ///
 /// # Errors
 ///
-/// - `Unauthorized caller` - Caller is not the authorized JWK Manager
-/// - `Invalid input length` - Input data is less than 53 bytes
-/// - `Invalid function ID` - Function ID is not 0x01
-/// - `Invalid or zero amount` - Amount is zero or exceeds u128::MAX
+/// - `Unauthorized caller` - Caller is not in the authorized list
+/// - `Invalid input length` - Input data is too short
+/// - `Invalid function selector` - Unrecognized function
+/// - `Zero amount` - Amount is zero
 fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
     input: PrecompileInput<'_>,
     state: Arc<Mutex<ParallelState<DB>>>,
 ) -> PrecompileResult {
     // 1. Validate caller address
-    if input.caller != AUTHORIZED_CALLER {
+    if !AUTHORIZED_CALLERS.contains(&input.caller) {
         warn!(
             target: "evm::precompile::mint_token",
             caller = ?input.caller,
-            authorized = ?AUTHORIZED_CALLER,
+            authorized = ?AUTHORIZED_CALLERS,
             "Unauthorized caller"
         );
         return Err(PrecompileError::Other("Unauthorized caller".into()));
     }
 
-    // 2. Parameter length check (1 + 20 + 32 = 53 bytes)
-    const EXPECTED_LEN: usize = 1 + 20 + 32;
-    if input.data.len() < EXPECTED_LEN {
-        warn!(
-            target: "evm::precompile::mint_token",
-            input_len = input.data.len(),
-            expected = EXPECTED_LEN,
-            "Invalid input length"
-        );
-        return Err(PrecompileError::Other(
-            format!("Invalid input length: {}, expected {}", input.data.len(), EXPECTED_LEN).into(),
-        ));
-    }
+    info!(
+        target: "evm::precompile::mint_token",
+        caller = ?input.caller,
+        data_len = input.data.len(),
+        data_hex = %hex::encode(&input.data),
+        "Mint precompile called"
+    );
 
-    // 3. Parse and validate function ID
-    if input.data[0] != FUNC_MINT {
-        warn!(
-            target: "evm::precompile::mint_token",
-            func_id = input.data[0],
-            expected = FUNC_MINT,
-            "Invalid function ID"
-        );
-        return Err(PrecompileError::Other(
-            format!("Invalid function ID: {:#x}, expected {:#x}", input.data[0], FUNC_MINT).into(),
-        ));
-    }
-
-    // 4. Parse recipient address (bytes 1-20)
-    let recipient = Address::from_slice(&input.data[1..21]);
-
-    // 5. Parse amount (bytes 21-52)
-    let amount_u256 = U256::from_be_slice(&input.data[21..53]);
-    let amount: u128 = amount_u256.try_into().map_err(|_| {
-        warn!(
+    // 2. Parse input based on format
+    let (recipient, amount) = if input.data.len() >= 68 && input.data[0..4] == MINT_SELECTOR {
+        // Standard ABI format: selector(4) + recipient(32, last 20 bytes) + amount(32)
+        let recipient = Address::from_slice(&input.data[16..36]); // Skip 4 bytes selector + 12 bytes padding
+        let amount_u256 = U256::from_be_slice(&input.data[36..68]);
+        info!(
             target: "evm::precompile::mint_token",
             ?recipient,
             amount = ?amount_u256,
+            "Parsed standard ABI format"
+        );
+        (recipient, amount_u256)
+    } else if input.data.len() >= 53 && input.data[0] == FUNC_MINT_LEGACY {
+        // Legacy custom format: funcId(1) + recipient(20) + amount(32)
+        let recipient = Address::from_slice(&input.data[1..21]);
+        let amount_u256 = U256::from_be_slice(&input.data[21..53]);
+        info!(
+            target: "evm::precompile::mint_token",
+            ?recipient,
+            amount = ?amount_u256,
+            "Parsed legacy format"
+        );
+        (recipient, amount_u256)
+    } else {
+        warn!(
+            target: "evm::precompile::mint_token",
+            data_len = input.data.len(),
+            first_bytes = ?&input.data.get(0..4),
+            "Invalid input format"
+        );
+        return Err(PrecompileError::Other(
+            format!(
+                "Invalid input: len={}, expected ABI (68+ bytes with selector 0x40c10f19) or legacy (53+ bytes with 0x01)",
+                input.data.len()
+            ).into(),
+        ));
+    };
+
+    // 3. Validate amount
+    let amount: u128 = amount.try_into().map_err(|_| {
+        warn!(
+            target: "evm::precompile::mint_token",
+            ?recipient,
+            amount = ?amount,
             "Amount exceeds u128::MAX"
         );
         PrecompileError::Other("Amount exceeds u128::MAX".into())
@@ -131,7 +161,7 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
         return Err(PrecompileError::Other("Zero amount not allowed".into()));
     }
 
-    // 6. Execute mint operation
+    // 4. Execute mint operation
     let mut state_guard = state.lock();
     if let Err(e) = state_guard.increment_balances(HashMap::from([(recipient, amount)])) {
         warn!(
