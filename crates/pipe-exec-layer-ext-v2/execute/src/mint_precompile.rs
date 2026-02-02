@@ -17,7 +17,7 @@ use tracing::{info, warn};
 /// Authorized caller address (JWK Manager at 0x2018)
 ///
 /// Only this address is allowed to call the mint precompile.
-pub const AUTHORIZED_CALLER: Address = address!("0x0000000000000000000000000000000000002018");
+pub const AUTHORIZED_CALLER: Address = address!("0x595475934ed7d9faa7fca28341c2ce583904a44e");
 
 /// Function ID for mint operation
 const FUNC_MINT: u8 = 0x01;
