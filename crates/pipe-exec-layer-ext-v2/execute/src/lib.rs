@@ -618,6 +618,12 @@ impl<Storage: GravityStorage> Core<Storage> {
         let precompile = create_mint_token_precompile(state_for_precompile);
         evm.precompiles_mut()
             .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(precompile));
+        
+        info!(
+            target: "execute_ordered_block",
+            precompile_addr = ?NATIVE_MINT_PRECOMPILE_ADDR,
+            "Registered NATIVE_MINT_PRECOMPILE"
+        );
 
         // Get system caller nonce and gas price for constructing all system transactions
         let system_call_account =
