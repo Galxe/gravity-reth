@@ -376,10 +376,10 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
             if let Some(current_key) = self.iterator.key() {
                 Self::extract_main_key(current_key)?.to_vec()
             } else {
-                return self.first();
+                return Ok(None);
             }
         } else {
-            return self.first();
+            return Ok(None);
         };
 
         // Move to next and check if it's still the same main key
@@ -401,10 +401,10 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
             if let Some(current_key) = self.iterator.key() {
                 Self::extract_main_key(current_key)?.to_vec()
             } else {
-                return self.first();
+                return Ok(None);
             }
         } else {
-            return self.first();
+            return Ok(None);
         };
 
         // Increment the key to find the next different key
@@ -466,12 +466,21 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
     ) -> Result<reth_db_api::cursor::DupWalker<'_, T, Self>, DatabaseError> {
         let start = match (key, subkey) {
             (Some(key), Some(subkey)) => {
+                let encoded_key = key.encode();
                 let composite_key =
-                    Self::encode_dupsort_key(key.encode().as_ref(), subkey.encode().as_ref());
+                    Self::encode_dupsort_key(encoded_key.as_ref(), subkey.encode().as_ref());
                 self.iterator.seek(&composite_key);
                 let result = if self.iterator.valid() {
-                    if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
-                        Self::decode_key_value(key, value).map(Some)
+                    if let (Some(found_key), Some(value)) =
+                        (self.iterator.key(), self.iterator.value())
+                    {
+                        // Check if main key matches (like MDBX's get_both_range behavior)
+                        let main_key = Self::extract_main_key(found_key)?;
+                        if main_key == encoded_key.as_ref() {
+                            Self::decode_key_value(found_key, value).map(Some)
+                        } else {
+                            Ok(None)
+                        }
                     } else {
                         Ok(None)
                     }
@@ -481,8 +490,25 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
                 result.transpose()
             }
             (Some(key), None) => {
-                // Seek to first entry of this key
-                self.seek(key).transpose()
+                let encoded_key = key.encode();
+                self.iterator.seek(encoded_key.as_ref());
+                let result = if self.iterator.valid() {
+                    if let (Some(found_key), Some(value)) =
+                        (self.iterator.key(), self.iterator.value())
+                    {
+                        let main_key = Self::extract_main_key(found_key)?;
+                        if main_key == encoded_key.as_ref() {
+                            Self::decode_key_value(found_key, value).map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                };
+                result.transpose()
             }
             (None, Some(subkey)) => {
                 if let Some((key, _)) = self.first()? {
@@ -496,7 +522,9 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
             (None, None) => self.first().transpose(),
         };
 
-        Ok(reth_db_api::cursor::DupWalker { cursor: self, start })
+        // If start is None, mark as done so iterator returns empty
+        let is_done = start.is_none();
+        Ok(reth_db_api::cursor::DupWalker { cursor: self, start, is_done })
     }
 }
 

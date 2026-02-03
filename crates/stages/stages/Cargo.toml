@@ -37,6 +37,7 @@ reth-storage-errors.workspace = true
 reth-revm.workspace = true
 reth-stages-api.workspace = true
 reth-static-file-types.workspace = true
+reth-trie = { workspace = true, optional = true }
 reth-trie-parallel = { workspace = true, optional = true }
 
 reth-testing-utils = { workspace = true, optional = true }
@@ -94,7 +95,7 @@ criterion = { workspace = true, features = ["async_tokio"] }
 
 [features]
 default = ["reth-trie-parallel"]
-reth-trie-parallel = ["dep:reth-trie-parallel"]
+reth-trie-parallel = ["dep:reth-trie-parallel", "dep:reth-trie"]
 test-utils = [
     "dep:reth-chainspec",
     "reth-network-p2p/test-utils",
