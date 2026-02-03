@@ -49,6 +49,9 @@ jobs:
           cp hive/clients/reth/mapper.jq hive/clients/gravity-reth/
           cp hive/clients/reth/enode.sh hive/clients/gravity-reth/
 
+          # Create standard Dockerfile (required for hive to recognize the client)
+          cp hive/clients/reth/Dockerfile hive/clients/gravity-reth/Dockerfile
+
           # Create Dockerfile.local (Hive will build from source)
           cat > hive/clients/gravity-reth/Dockerfile.local << 'EOF'
           FROM rust:latest as builder
