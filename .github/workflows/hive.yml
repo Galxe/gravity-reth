@@ -86,8 +86,8 @@ jobs:
             - "eth1"
           EOF
 
-          # Link source code
-          ln -s ${{ github.workspace }} hive/clients/gravity-reth/gravity-reth
+          # Copy source code (symlinks don't work in Docker build context)
+          cp -r ${{ github.workspace }} hive/clients/gravity-reth/gravity-reth
 
           # Create client config
           cat > hive/grevm-clients.yaml << 'EOF'
