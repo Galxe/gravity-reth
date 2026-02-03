@@ -24,7 +24,6 @@ use revm::{
     state::EvmState,
     Database,
 };
-use tracing::error;
 use std::fmt::Debug;
 
 /// NIL proposer index constant (from Blocker.sol)
@@ -198,9 +197,9 @@ pub fn transact_system_txn(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
 
-    // TODO(gravity_lightman): filter error
+    // Log any execution errors with appropriate severity
     if !result.result.is_success() {
-        error!("Failed to execute system transaction: {:?}", result.result);
+        super::errors::log_execution_error(&result.result);
     }
 
     (SystemTxnResult { result: result.result, txn }, result.state)

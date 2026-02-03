@@ -6,6 +6,7 @@ pub mod base;
 pub mod consensus_config;
 pub mod dkg;
 pub mod epoch;
+pub mod errors;
 pub mod jwk_consensus_config;
 pub mod jwk_oracle;
 pub mod metadata_txn;
@@ -18,9 +19,7 @@ pub mod validator_set;
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
 pub use consensus_config::ConsensusConfigFetcher;
 pub use epoch::EpochFetcher;
-pub use metadata_txn::{
-    construct_metadata_txn, transact_system_txn, SystemTxnResult,
-};
+pub use metadata_txn::{construct_metadata_txn, transact_system_txn, SystemTxnResult};
 pub use types::{
     convert_active_validators_to_bcs, convert_validator_consensus_info, ValidatorConsensusInfo,
     ValidatorStatus,
