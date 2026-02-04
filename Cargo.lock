@@ -1032,7 +1032,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=7b2d7949583169cc5c997856b4a0d17fec56ebf6#7b2d7949583169cc5c997856b4a0d17fec56ebf6"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=ee73eef#ee73eefa89cbd557820595511abbfc5a20c9fa8a"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9987,9 +9987,11 @@ dependencies = [
  "eyre",
  "gravity-primitives",
  "gravity-storage",
+ "grevm",
  "hex",
  "metrics",
  "once_cell",
+ "parking_lot",
  "rand 0.9.2",
  "rayon",
  "reth-chain-state",
@@ -14803,3 +14805,8 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "alloy-tx-macros"
+version = "1.0.37"
+source = "git+https://github.com/alloy-rs/alloy?tag=v1.0.37#8f6c1489f89e90649dac378008d8913e3b8a4c98"

@@ -29,6 +29,7 @@ reth-rpc-eth-api.workspace = true
 revm-primitives.workspace = true
 gravity-storage.workspace = true
 gravity-primitives.workspace = true
+grevm.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
@@ -43,6 +44,7 @@ revm.workspace = true
 
 # misc
 tracing.workspace = true
+parking_lot.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true
 serde_json.workspace = true

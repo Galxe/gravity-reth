@@ -31,16 +31,29 @@ use std::fmt::Debug;
 pub const NIL_PROPOSER_INDEX: u64 = u64::MAX;
 
 /// Result of a metadata transaction execution
+/// Merge new state changes into accumulated state changes
+///
+/// This is a helper function to accumulate state changes from multiple
+/// sequential transaction executions.
+pub fn merge_state_changes(accumulated: &mut EvmState, new_changes: EvmState) {
+    for (addr, account) in new_changes {
+        accumulated.insert(addr, account);
+    }
+}
+
+/// Result of a system transaction execution (metadata, DKG, or JWK)
+/// This is a unified structure for all system-level transactions that are executed before
+/// the parallel executor.
 #[derive(Debug)]
-pub struct MetadataTxnResult {
-    /// Result of the metadata transaction execution
+pub struct SystemTxnResult {
+    /// Result of the system transaction execution
     pub result: ExecutionResult,
-    /// The metadata transaction
+    /// The system transaction
     pub txn: TransactionSigned,
 }
 
-impl MetadataTxnResult {
-    /// Check if the transaction emitted a `NewEpochEvent` event
+impl SystemTxnResult {
+    /// Check if the transaction emitted a `NewEpoch` event
     pub fn emit_new_epoch(&self) -> Option<(u64, Bytes)> {
         for log in self.result.logs() {
             match NewEpochEvent::decode_log(log) {
@@ -55,7 +68,8 @@ impl MetadataTxnResult {
         None
     }
 
-    /// Convert the metadata transaction result into a full executed block result
+    /// Convert the system transaction result into a full executed block result
+    /// Used when new epoch is triggered and the block needs to be discarded.
     pub(crate) fn into_executed_ordered_block_result(
         self,
         chain_spec: &ChainSpec,
@@ -122,29 +136,73 @@ impl MetadataTxnResult {
         }
     }
 
-    /// Insert this metadata transaction into an existing executed block result
+    /// Insert this system transaction into an existing executed block result at the specified
+    /// position Position 0 is reserved for metadata tx, positions 1+ are for validator
+    /// transactions
     pub(crate) fn insert_to_executed_ordered_block_result(
         self,
-        result: &mut ExecuteOrderedBlockResult,
+        result: &mut crate::ExecuteOrderedBlockResult,
+        insert_position: usize,
     ) {
         let gas_used = self.result.gas_used();
         result.block.header.gas_used += gas_used;
         result.execution_output.gas_used += gas_used;
-        result.execution_output.receipts.iter_mut().for_each(|receipt| {
+
+        // Calculate cumulative_gas_used for this system transaction:
+        // It should be the cumulative gas of the previous transaction (at insert_position - 1)
+        // plus this transaction's gas_used
+        let cumulative_gas_used = if insert_position == 0 {
+            // First transaction, cumulative equals its own gas_used
+            gas_used
+        } else {
+            // Get cumulative from the previous receipt and add this tx's gas
+            result
+                .execution_output
+                .receipts
+                .get(insert_position - 1)
+                .map(|prev| prev.cumulative_gas_used + gas_used)
+                .unwrap_or(gas_used)
+        };
+
+        // Update all receipts AFTER insert_position to add this tx's gas
+        for receipt in result.execution_output.receipts.iter_mut().skip(insert_position) {
             receipt.cumulative_gas_used += gas_used;
-        });
+        }
+
         result.execution_output.receipts.insert(
-            0,
+            insert_position,
             Receipt {
                 tx_type: self.txn.tx_type(),
                 success: true,
-                cumulative_gas_used: gas_used,
+                cumulative_gas_used,
                 logs: self.result.into_logs(),
             },
         );
-        result.block.body.transactions.insert(0, self.txn);
-        result.senders.insert(0, SYSTEM_CALLER);
+        result.block.body.transactions.insert(insert_position, self.txn);
+        result.senders.insert(insert_position, SYSTEM_CALLER);
     }
+}
+
+/// Execute a single system transaction (metadata, DKG, or JWK)
+///
+/// This is the unified entry point for executing all system-level transactions.
+/// These transactions are executed one by one before the parallel executor.
+pub fn transact_system_txn(
+    evm: &mut impl Evm<DB = impl Database, Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
+    txn: TransactionSigned,
+) -> (SystemTxnResult, EvmState) {
+    use reth_evm::IntoTxEnv;
+    use reth_primitives::Recovered;
+
+    let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
+    let result = evm.transact_raw(tx_env).unwrap();
+
+    // Log any execution errors with appropriate severity
+    if !result.result.is_success() {
+        super::errors::log_execution_error(&result.result);
+    }
+
+    (SystemTxnResult { result: result.result, txn }, result.state)
 }
 
 /// Create a new system call transaction
@@ -178,11 +236,12 @@ fn new_system_call_txn(
 ///
 /// @param proposer_index Index of the proposer in the active validator set,
 ///        or None for NIL blocks (will use NIL_PROPOSER_INDEX = u64::MAX)
-pub fn transact_metadata_contract_call(
-    evm: &mut impl Evm<DB = impl Database, Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
+pub fn construct_metadata_txn(
+    nonce: u64,
+    gas_price: u128,
     timestamp_us: u64,
     proposer_index: Option<u64>,
-) -> (MetadataTxnResult, EvmState) {
+) -> TransactionSigned {
     // For NIL blocks, use NIL_PROPOSER_INDEX (type(uint64).max in Solidity)
     let proposer_idx = proposer_index.unwrap_or(NIL_PROPOSER_INDEX);
 
@@ -193,18 +252,5 @@ pub fn transact_metadata_contract_call(
     };
     let input: Bytes = call.abi_encode().into();
 
-    let system_call_account =
-        evm.db_mut().basic(SYSTEM_CALLER).unwrap().expect("SYSTEM_CALLER not exists");
-    let txn = new_system_call_txn(
-        BLOCK_ADDR,
-        system_call_account.nonce,
-        evm.block().basefee as u128,
-        input,
-    );
-    let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
-    let result = evm.transact_raw(tx_env).unwrap();
-
-    assert!(result.result.is_success(), "Failed to execute onBlockStart: {:?}", result.result);
-
-    (MetadataTxnResult { result: result.result, txn }, result.state)
+    new_system_call_txn(BLOCK_ADDR, nonce, gas_price, input)
 }

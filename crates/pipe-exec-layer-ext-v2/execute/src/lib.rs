@@ -2,6 +2,7 @@
 #[macro_use]
 mod channel;
 mod metrics;
+pub mod mint_precompile;
 pub mod onchain_config;
 use alloy_sol_types::SolEvent;
 
@@ -23,11 +24,12 @@ use alloy_primitives::{
 };
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_primitives::get_gravity_config;
+use grevm::ParallelState;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
-use reth_evm::{ConfigureEvm, NextBlockEnvAttributes, ParallelDatabase};
+use reth_evm::{ConfigureEvm, Evm, NextBlockEnvAttributes, ParallelDatabase};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_pipe_exec_layer_event_bus::{
@@ -44,7 +46,7 @@ use reth_rpc_eth_api::RpcTypes;
 use revm::{
     database::{states::bundle_state::BundleRetention, State},
     state::AccountInfo,
-    DatabaseCommit,
+    Database, DatabaseCommit,
 };
 use std::{
     collections::BTreeMap,
@@ -56,7 +58,7 @@ use std::{
 };
 
 use gravity_storage::GravityStorage;
-use onchain_config::{transact_metadata_contract_call, OnchainConfigFetcher};
+use onchain_config::OnchainConfigFetcher;
 use reth_rpc_eth_api::helpers::EthCall;
 use reth_trie::{HashedPostState, KeccakKeyHasher};
 use tokio::sync::{
@@ -65,12 +67,15 @@ use tokio::sync::{
 };
 use tracing::*;
 
-use crate::onchain_config::{
-    construct_validator_txns_envelope,
-    dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
-    observed_jwk::convert_into_api_provider_jwks,
-    types::ObservedJWKsUpdated,
-    SYSTEM_CALLER,
+use crate::{
+    mint_precompile::create_mint_token_precompile,
+    onchain_config::{
+        construct_metadata_txn, construct_validator_txn_from_extra_data,
+        dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
+        transact_system_txn,
+        types::DataRecorded,
+        SystemTxnResult, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+    },
 };
 
 /// Metadata about an executed block
@@ -274,6 +279,21 @@ struct ExecuteOrderedBlockResult {
     txs_info: Vec<TxInfo>,
     gravity_events: Vec<GravityEvent>,
     epoch: u64,
+}
+
+/// Result of system transaction execution
+///
+/// System transactions may trigger an epoch change, which requires early return.
+/// This enum represents both outcomes.
+enum SystemTxnExecutionOutcome {
+    /// Normal execution completed, continue with block processing
+    Continue {
+        metadata_result: SystemTxnResult,
+        accumulated_state_changes: revm::state::EvmState,
+        validator_results: Vec<SystemTxnResult>,
+    },
+    /// Epoch changed, return early with the result
+    EpochChanged(ExecuteOrderedBlockResult),
 }
 
 impl<Storage: GravityStorage> Core<Storage> {
@@ -566,16 +586,216 @@ impl<Storage: GravityStorage> Core<Storage> {
         (RecoveredBlock::new_unhashed(block, senders), txs_info)
     }
 
+    /// Execute all system transactions (metadata, DKG, JWK) sequentially
+    ///
+    /// This function encapsulates the execution of all system-level transactions
+    /// that must be processed before the parallel user transaction execution.
+    ///
+    /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
+    /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
+    fn execute_system_transactions(
+        evm_config: &EthEvmConfig,
+        chain_spec: &ChainSpec,
+        state: &Arc<Storage::StateView>,
+        evm_env: reth_evm::EvmEnv,
+        ordered_block: &OrderedBlock,
+        base_fee: u64,
+        epoch: u64,
+        block_id: B256,
+        parent_id: B256,
+        block_number: u64,
+    ) -> SystemTxnExecutionOutcome {
+        let mut inner_state =
+            State::builder().with_database_ref(state).with_bundle_update().build();
+        let mut evm = evm_config.evm_with_env(&mut inner_state, evm_env);
+
+        // Create shared state for precompile - keep a reference so we can extract changes later
+        let state_for_precompile = {
+            let report_db_metrics = get_gravity_config().report_db_metrics;
+            let parallel_state = ParallelState::new(state.clone(), true, report_db_metrics);
+            Arc::new(parking_lot::Mutex::new(parallel_state))
+        };
+        let state_for_precompile_ref = state_for_precompile.clone();
+        let precompile = create_mint_token_precompile(state_for_precompile);
+        evm.precompiles_mut()
+            .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(precompile));
+
+        // Get system caller nonce and gas price for constructing all system transactions
+        let system_call_account =
+            evm.db_mut().basic(SYSTEM_CALLER).unwrap().expect("SYSTEM_CALLER not exists");
+        let gas_price = evm.block().basefee as u128;
+        let mut current_nonce = system_call_account.nonce;
+        // Construct and execute metadata transaction using unified entry point
+        let metadata_txn = construct_metadata_txn(
+            current_nonce,
+            gas_price,
+            ordered_block.timestamp_us,
+            ordered_block.proposer_index,
+        );
+        current_nonce = metadata_txn.nonce() + 1;
+
+        let (metadata_txn_result, metadata_state_changes) =
+            transact_system_txn(&mut evm, metadata_txn);
+
+        // Commit metadata state changes immediately so subsequent txns see nonce update
+        evm.db_mut().commit(metadata_state_changes.clone());
+
+        // Accumulate state changes for returning to executor
+        let mut accumulated_state_changes = metadata_state_changes;
+
+        // Check for epoch change
+        if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
+            drop(evm);
+            assert_eq!(new_epoch, epoch + 1);
+            info!(target: "execute_ordered_block",
+                id=?block_id,
+                parent_id=?parent_id,
+                number=?block_number,
+                new_epoch=?new_epoch,
+                "emit new epoch, discard the block"
+            );
+            inner_state.merge_transitions(BundleRetention::Reverts);
+            return SystemTxnExecutionOutcome::EpochChanged(
+                metadata_txn_result.into_executed_ordered_block_result(
+                    chain_spec,
+                    ordered_block,
+                    base_fee,
+                    inner_state.take_bundle(),
+                    validators,
+                ),
+            );
+        }
+
+        debug!(target: "execute_ordered_block",
+            metadata_txn_result=?metadata_txn_result,
+            "metadata transaction result"
+        );
+
+        // Execute validator transactions (DKG and JWK) one by one
+        // DKG transactions are executed first since they may trigger epoch changes
+        let mut validator_txn_results: Vec<SystemTxnResult> = Vec::new();
+
+        // Sort extra_data: DKG first, then JWK
+        let mut sorted_extra_data: Vec<_> = ordered_block.extra_data.iter().collect();
+        sorted_extra_data.sort_by_key(|data| match data {
+            ExtraDataType::DKG(_) => 0, // DKG comes first
+            ExtraDataType::JWK(_) => 1, // JWK comes second
+        });
+
+        for (index, extra_data) in sorted_extra_data.iter().enumerate() {
+            let is_dkg = matches!(extra_data, ExtraDataType::DKG(_));
+            // TODO(gravity_lightman): should not panic
+            let txn = construct_validator_txn_from_extra_data(extra_data, current_nonce, gas_price)
+                .expect("Failed to construct validator transaction");
+            current_nonce += 1;
+
+            debug!(target: "execute_ordered_block",
+                index=?index,
+                nonce=?current_nonce,
+                is_dkg=?is_dkg,
+                block_number=?block_number,
+                "executing validator transaction one by one"
+            );
+
+            let (validator_result, validator_state_changes) = transact_system_txn(&mut evm, txn);
+
+            // Commit state changes immediately so subsequent txns see nonce update
+            evm.db_mut().commit(validator_state_changes.clone());
+
+            // Merge state changes into accumulated changes
+            for (addr, account) in validator_state_changes {
+                accumulated_state_changes.insert(addr, account);
+            }
+
+            // DKG transactions may trigger epoch change
+            if is_dkg {
+                if let Some((new_epoch, validators)) = validator_result.emit_new_epoch() {
+                    drop(evm);
+                    assert_eq!(new_epoch, epoch + 1);
+                    info!(target: "execute_ordered_block",
+                        id=?block_id,
+                        parent_id=?parent_id,
+                        number=?block_number,
+                        new_epoch=?new_epoch,
+                        "DKG triggered new epoch, discard the block"
+                    );
+                    inner_state.merge_transitions(BundleRetention::Reverts);
+                    return SystemTxnExecutionOutcome::EpochChanged(
+                        validator_result.into_executed_ordered_block_result(
+                            chain_spec,
+                            ordered_block,
+                            base_fee,
+                            inner_state.take_bundle(),
+                            validators,
+                        ),
+                    );
+                }
+            }
+
+            info!(target: "execute_ordered_block",
+                index=?index,
+                is_dkg=?is_dkg,
+                gas_used=?validator_result.result.gas_used(),
+                block_number=?block_number,
+                "validator transaction executed successfully"
+            );
+
+            validator_txn_results.push(validator_result);
+        }
+
+        drop(evm);
+
+        // Extract changes from precompile state and merge into accumulated_state_changes
+        {
+            let mut precompile_state = state_for_precompile_ref.lock();
+            precompile_state.merge_transitions(BundleRetention::Reverts);
+            let precompile_bundle = precompile_state.take_bundle();
+
+            // Convert BundleState to EvmState and merge
+            for (address, account) in precompile_bundle.state {
+                if let Some(info) = account.info {
+                    use revm::state::{Account, AccountStatus, EvmStorageSlot};
+                    accumulated_state_changes.insert(
+                        address,
+                        Account {
+                            info,
+                            storage: account
+                                .storage
+                                .into_iter()
+                                .map(|(k, v)| (k, EvmStorageSlot::new(v.present_value, 0)))
+                                .collect(),
+                            status: AccountStatus::Touched,
+                            transaction_id: 0,
+                        },
+                    );
+                }
+            }
+        }
+
+        SystemTxnExecutionOutcome::Continue {
+            metadata_result: metadata_txn_result,
+            accumulated_state_changes,
+            validator_results: validator_txn_results,
+        }
+    }
+
     /// Extract gravity events from execution receipts
-    /// Returns (gravity_events, epoch_change_result) where epoch_change_result is Some((new_epoch,
-    /// validators)) if epoch changed
+    /// Returns gravity_events containing DKG events and ObservedJWKsUpdated from DataRecorded
+    /// events TODO(gravity): Currently, it executes the entire block and then parses all logs
+    /// from the whole block. Theoretically, it could only parse metadata and validator
+    /// transactions.
     fn extract_gravity_events_from_receipts(
         &self,
         receipts: &[Receipt],
         block_number: u64,
-    ) -> (Vec<GravityEvent>, Option<(u64, Bytes)>) {
+        epoch: u64,
+    ) -> Vec<GravityEvent> {
+        use gravity_api_types::on_chain_config::jwks::ProviderJWKs;
+        use std::collections::HashMap;
+
         let mut gravity_events = vec![];
-        let mut epoch_change_result = None;
+        // Map from (sourceType, sourceId) to latest nonce
+        let mut data_records: HashMap<(u32, alloy_primitives::U256), u128> = HashMap::new();
 
         for receipt in receipts {
             debug!(target: "execute_ordered_block",
@@ -584,35 +804,28 @@ impl<Storage: GravityStorage> Core<Storage> {
                 "extract gravity events from receipt"
             );
             for log in &receipt.logs {
-                // Check for NewEpochEvent event (epoch change)
-                if let Ok(event) = crate::onchain_config::types::NewEpochEvent::decode_log(log) {
-                    debug!(target: "execute_ordered_block",
-                        number=?block_number,
-                        new_epoch=?event.newEpoch,
-                        "detected epoch change from NewEpochEvent"
-                    );
-                    let validator_bytes =
-                        crate::onchain_config::types::convert_active_validators_to_bcs(
-                            &event.validatorSet,
-                        );
-                    epoch_change_result = Some((event.newEpoch, validator_bytes));
-                }
-
-                if let Ok(event) = ObservedJWKsUpdated::decode_log(&log) {
+                // Parse DataRecorded events from NativeOracle
+                if let Ok(event) = DataRecorded::decode_log(&log) {
                     info!(target: "execute_ordered_block",
                         number=?block_number,
-                        "observed jwks updated"
+                        source_type=?event.sourceType,
+                        source_id=?event.sourceId,
+                        nonce=?event.nonce,
+                        "data recorded event"
                     );
-                    let api_jwks = event
-                        .jwks
-                        .iter()
-                        .map(|jwk| convert_into_api_provider_jwks(jwk.clone()))
-                        .collect::<Vec<_>>();
-                    gravity_events.push(GravityEvent::ObservedJWKsUpdated(
-                        event.epoch.try_into().unwrap(),
-                        api_jwks,
-                    ));
+                    // Keep only the latest nonce for each (sourceType, sourceId)
+                    let key = (event.sourceType, event.sourceId);
+                    data_records
+                        .entry(key)
+                        .and_modify(|existing_nonce| {
+                            if event.nonce > *existing_nonce {
+                                *existing_nonce = event.nonce;
+                            }
+                        })
+                        .or_insert(event.nonce);
                 }
+
+                // Parse DKG events (unchanged)
                 if let Ok(event) = DKGStartEvent::decode_log(&log) {
                     info!(target: "execute_ordered_block",
                         number=?block_number,
@@ -623,7 +836,33 @@ impl<Storage: GravityStorage> Core<Storage> {
                 }
             }
         }
-        (gravity_events, epoch_change_result)
+
+        // Convert collected DataRecorded events to ProviderJWKs
+        if !data_records.is_empty() {
+            let api_jwks: Vec<ProviderJWKs> = data_records
+                .into_iter()
+                .map(|((source_type, source_id), nonce)| {
+                    // issuer format: "gravity://sourceType/sourceId"
+                    let issuer = format!("gravity://{}/{}", source_type, source_id);
+                    ProviderJWKs {
+                        issuer: issuer.into_bytes(),
+                        version: nonce as u64, // nonce as version
+                        jwks: vec![],          // return empty jwks
+                    }
+                })
+                .collect();
+
+            info!(target: "execute_ordered_block",
+                number=?block_number,
+                epoch=?epoch,
+                provider_count=?api_jwks.len(),
+                "constructed ProviderJWKs from DataRecorded events"
+            );
+
+            gravity_events.push(GravityEvent::ObservedJWKsUpdated(epoch, api_jwks));
+        }
+
+        gravity_events
     }
 
     fn execute_ordered_block(
@@ -637,7 +876,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         assert_eq!(block_number, parent_header.number + 1);
         let epoch = ordered_block.epoch;
 
-        let state = self.storage.get_state_view().unwrap();
+        let state = Arc::new(self.storage.get_state_view().unwrap());
 
         let evm_env = self
             .evm_config
@@ -658,69 +897,51 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number=?block_number,
         );
         let base_fee = evm_env.block_env.basefee;
+        //             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
+        //  evm apply precompile
+        // for xx in xx {  evm.execute_transaction(tx) }
+        // cases
 
-        let (metadata_txn_result, state_changes) = {
-            let mut state = State::builder().with_database_ref(&state).with_bundle_update().build();
-            let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
-            let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
-                &mut evm,
-                ordered_block.timestamp_us,
-                ordered_block.proposer_index,
-            );
-            drop(evm);
+        // Execute system transactions (metadata, DKG, JWK) sequentially
+        let (metadata_txn_result, accumulated_state_changes, validator_txn_results) =
+            match Self::execute_system_transactions(
+                &self.evm_config,
+                &self.chain_spec,
+                &state,
+                evm_env,
+                &ordered_block,
+                base_fee,
+                epoch,
+                block_id,
+                parent_id,
+                block_number,
+            ) {
+                SystemTxnExecutionOutcome::EpochChanged(result) => return result,
+                SystemTxnExecutionOutcome::Continue {
+                    metadata_result,
+                    accumulated_state_changes,
+                    validator_results,
+                } => (metadata_result, accumulated_state_changes, validator_results),
+            };
 
-            if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
-                // New epoch triggered, advance epoch and discard the block.
-                assert_eq!(new_epoch, epoch + 1);
-                info!(target: "execute_ordered_block",
-                    id=?block_id,
-                    parent_id=?parent_id,
-                    number=?block_number,
-                    new_epoch=?new_epoch,
-                    "emit new epoch, discard the block"
-                );
-                state.commit(state_changes);
-                state.merge_transitions(BundleRetention::Reverts);
-                return metadata_txn_result.into_executed_ordered_block_result(
-                    &self.chain_spec,
-                    &ordered_block,
-                    base_fee,
-                    state.take_bundle(),
-                    validators,
-                );
-            }
-            debug!(target: "execute_ordered_block",
-                metadata_txn_result=?metadata_txn_result,
-                "metadata transaction result"
-            );
-            (metadata_txn_result, state_changes)
-        };
-
-        let validator_txns = if !ordered_block.extra_data.is_empty() {
-            construct_validator_txns_envelope(
-                &ordered_block.extra_data,
-                metadata_txn_result.txn.nonce(),
-                metadata_txn_result.txn.gas_price().expect("metadata txn gas price is not set"),
-            )
-            .unwrap()
-        } else {
-            vec![]
-        };
-
+        // No longer pass validator_txns to create_block_for_executor since they are executed
+        // separately
         let (block, txs_info) =
-            self.create_block_for_executor(ordered_block, base_fee, &state, validator_txns);
+            self.create_block_for_executor(ordered_block, base_fee, &state, vec![]);
 
         info!(target: "execute_ordered_block",
             id=?block_id,
             parent_id=?parent_id,
             number=?block_number,
             num_txs=?block.transaction_count(),
+            validator_txn_count=?validator_txn_results.len(),
             "ready to execute block"
         );
 
         let mut executor = self.evm_config.parallel_executor(state);
-        // Apply metadata transaction result to executor state
-        executor.commit_changes(state_changes);
+        // Apply all pre-executed transaction state changes (metadata + validator txns) to executor
+        // state
+        executor.commit_changes(accumulated_state_changes);
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
             serde_json::to_writer_pretty(
                 std::io::BufWriter::new(std::fs::File::create(format!("{block_id}.json")).unwrap()),
@@ -747,33 +968,22 @@ impl<Storage: GravityStorage> Core<Storage> {
             gravity_events: vec![],
             epoch,
         };
-        metadata_txn_result.insert_to_executed_ordered_block_result(&mut result);
+        metadata_txn_result.insert_to_executed_ordered_block_result(&mut result, 0);
+        // Insert validator transaction results one by one after the metadata transaction
+        // Position 1 is right after the metadata transaction at position 0
+        for (index, validator_result) in validator_txn_results.into_iter().enumerate() {
+            validator_result.insert_to_executed_ordered_block_result(&mut result, 1 + index);
+        }
         debug!(target: "execute_ordered_block",
             number=?result.block.number,
             receipts_len=?result.execution_output.receipts.len(),
-            "insert metadata transaction result to executed ordered block result"
+            "insert metadata and validator transaction results to executed ordered block result"
         );
-        let (mut gravity_events, epoch_change_result) = self.extract_gravity_events_from_receipts(
+        let gravity_events = self.extract_gravity_events_from_receipts(
             &result.execution_output.receipts,
             result.block.number,
+            epoch,
         );
-
-        // Check if any transaction (including JWK transactions) triggered a new epoch
-        // TODO(gravity_lightman): We need further more tests to test this branch
-        if let Some((new_epoch, validators)) = epoch_change_result {
-            // New epoch triggered, advance epoch and discard the block.
-            assert_eq!(new_epoch, epoch + 1);
-            info!(target: "execute_ordered_block",
-                id=?block_id,
-                parent_id=?parent_id,
-                number=?block_number,
-                new_epoch=?new_epoch,
-                "emit new epoch from transaction execution, discard the block"
-            );
-            // Add NewEpoch event to gravity_events
-            gravity_events.push(GravityEvent::NewEpoch(new_epoch, validators.into()));
-            result.epoch = new_epoch;
-        }
 
         result.gravity_events.extend(gravity_events);
         result
