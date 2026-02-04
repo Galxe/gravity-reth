@@ -44,139 +44,117 @@ jobs:
         run: |
           mkdir -p hive/clients/gravity-reth
 
-          # Copy reth client files as base (genesis.json, mapper.jq will be overwritten by hive)
+          # Copy reth client files as base
           cp hive/clients/reth/genesis.json hive/clients/gravity-reth/
           cp hive/clients/reth/mapper.jq hive/clients/gravity-reth/
 
           # Create enode.sh
-          cat > hive/clients/gravity-reth/enode.sh << 'EOF'
-#!/bin/bash
-set -e
-TARGET_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"admin_nodeInfo","params":[],"id":1}' "127.0.0.1:8545")
-TARGET_ENODE=$(echo ${TARGET_RESPONSE}| jq -r '.result.enode')
-echo "$TARGET_ENODE"
-EOF
+          cat > hive/clients/gravity-reth/enode.sh << 'ENODE_EOF'
+          #!/bin/bash
+          set -e
+          TARGET_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"admin_nodeInfo","params":[],"id":1}' "127.0.0.1:8545")
+          TARGET_ENODE=$(echo ${TARGET_RESPONSE}| jq -r '.result.enode')
+          echo "$TARGET_ENODE"
+          ENODE_EOF
+          sed -i 's/^          //' hive/clients/gravity-reth/enode.sh
 
-          # Create reth.sh with standalone mode (key: set GRETH_DISABLE_PIPE_EXECUTION=1)
-          cat > hive/clients/gravity-reth/reth.sh << 'RETH_SCRIPT'
-#!/bin/bash
-set -ex
-
-# Enable standalone mode (disable GCEI/pipe execution)
-export GRETH_DISABLE_PIPE_EXECUTION=1
-export RUST_LOG_STYLE=never
-
-reth=/usr/local/bin/reth
-
-case "$HIVE_LOGLEVEL" in
-    0|1) FLAGS="$FLAGS -v" ;;
-    2)   FLAGS="$FLAGS -vv" ;;
-    3)   FLAGS="$FLAGS -vvv" ;;
-    4)   FLAGS="$FLAGS -vvvv" ;;
-    5)   FLAGS="$FLAGS -vvvvv" ;;
-esac
-
-DATADIR="/reth-hive-datadir"
-mkdir $DATADIR
-FLAGS="$FLAGS --datadir $DATADIR"
-
-# Configure the chain
-mv /genesis.json /genesis-input.json
-jq -f /mapper.jq /genesis-input.json > /genesis.json
-
-echo "Supplied genesis state:"
-cat /genesis.json
-
-echo "Initializing database with genesis state..."
-$reth init $FLAGS --chain /genesis.json
-FLAGS="$FLAGS --chain /genesis.json"
-
-set +ex
-
-# Load the test chain if present
-if [ -f /chain.rlp ]; then
-    RUST_LOG=info $reth import $FLAGS /chain.rlp
-fi
-
-# Load remaining blocks
-if [ -d /blocks ]; then
-    for block in /blocks/*.rlp; do
-        [ -f "$block" ] && $reth import $FLAGS "$block"
-    done
-fi
-
-# Boot nodes
-if [ "$HIVE_BOOTNODE" != "" ]; then
-    FLAGS="$FLAGS --bootnodes=$HIVE_BOOTNODE"
-fi
-
-# Clique/dev mode
-if [ -n "${HIVE_CLIQUE_PRIVATEKEY}" ] || [ -n "${HIVE_CLIQUE_PERIOD}" ]; then
-  FLAGS="$FLAGS --auto-mine"
-  if [ -n "${HIVE_CLIQUE_PERIOD}" ]; then
-    FLAGS="$FLAGS --dev.block-time ${HIVE_CLIQUE_PERIOD}s"
-  fi
-fi
-
-# Configure RPC
-FLAGS="$FLAGS --http --http.addr=0.0.0.0 --http.api=admin,debug,trace,eth,net,web3"
-FLAGS="$FLAGS --ws --ws.addr=0.0.0.0 --ws.api=admin,debug,trace,eth,net,web3"
-
-if [ "$HIVE_TERMINAL_TOTAL_DIFFICULTY" != "" ]; then
-    JWT_SECRET="7365637265747365637265747365637265747365637265747365637265747365"
-    echo -n $JWT_SECRET > /jwt.secret
-    FLAGS="$FLAGS --authrpc.addr=0.0.0.0 --authrpc.jwtsecret=/jwt.secret"
-fi
-
-FLAGS="$FLAGS --nat none --block-interval 500000"
-
-echo "Running reth with flags: $FLAGS"
-RUST_LOG=info $reth node $FLAGS --gravity.disable-pipe-execution
-RETH_SCRIPT
+          # Create reth.sh with standalone mode
+          cat > hive/clients/gravity-reth/reth.sh << 'RETH_EOF'
+          #!/bin/bash
+          set -ex
+          export GRETH_DISABLE_PIPE_EXECUTION=1
+          export RUST_LOG_STYLE=never
+          reth=/usr/local/bin/reth
+          case "$HIVE_LOGLEVEL" in
+              0|1) FLAGS="$FLAGS -v" ;;
+              2)   FLAGS="$FLAGS -vv" ;;
+              3)   FLAGS="$FLAGS -vvv" ;;
+              4)   FLAGS="$FLAGS -vvvv" ;;
+              5)   FLAGS="$FLAGS -vvvvv" ;;
+          esac
+          DATADIR="/reth-hive-datadir"
+          mkdir $DATADIR
+          FLAGS="$FLAGS --datadir $DATADIR"
+          mv /genesis.json /genesis-input.json
+          jq -f /mapper.jq /genesis-input.json > /genesis.json
+          echo "Supplied genesis state:"
+          cat /genesis.json
+          echo "Initializing database with genesis state..."
+          $reth init $FLAGS --chain /genesis.json
+          FLAGS="$FLAGS --chain /genesis.json"
+          set +ex
+          if [ -f /chain.rlp ]; then
+              RUST_LOG=info $reth import $FLAGS /chain.rlp
+          fi
+          if [ -d /blocks ]; then
+              for block in /blocks/*.rlp; do
+                  [ -f "$block" ] && $reth import $FLAGS "$block"
+              done
+          fi
+          if [ "$HIVE_BOOTNODE" != "" ]; then
+              FLAGS="$FLAGS --bootnodes=$HIVE_BOOTNODE"
+          fi
+          if [ -n "${HIVE_CLIQUE_PRIVATEKEY}" ] || [ -n "${HIVE_CLIQUE_PERIOD}" ]; then
+            FLAGS="$FLAGS --auto-mine"
+            if [ -n "${HIVE_CLIQUE_PERIOD}" ]; then
+              FLAGS="$FLAGS --dev.block-time ${HIVE_CLIQUE_PERIOD}s"
+            fi
+          fi
+          FLAGS="$FLAGS --http --http.addr=0.0.0.0 --http.api=admin,debug,trace,eth,net,web3"
+          FLAGS="$FLAGS --ws --ws.addr=0.0.0.0 --ws.api=admin,debug,trace,eth,net,web3"
+          if [ "$HIVE_TERMINAL_TOTAL_DIFFICULTY" != "" ]; then
+              JWT_SECRET="7365637265747365637265747365637265747365637265747365637265747365"
+              echo -n $JWT_SECRET > /jwt.secret
+              FLAGS="$FLAGS --authrpc.addr=0.0.0.0 --authrpc.jwtsecret=/jwt.secret"
+          fi
+          FLAGS="$FLAGS --nat none --block-interval 500000"
+          echo "Running reth with flags: $FLAGS"
+          RUST_LOG=info $reth node $FLAGS --gravity.disable-pipe-execution
+          RETH_EOF
+          sed -i 's/^          //' hive/clients/gravity-reth/reth.sh
 
           # Create Dockerfile.local
-          cat > hive/clients/gravity-reth/Dockerfile.local << 'EOF'
-FROM rust:latest as builder
-ARG local_path=gravity-reth
-COPY $local_path gravity-reth
-RUN apt-get update && apt-get install -y libclang-dev pkg-config build-essential \
-    && cd gravity-reth && cargo build --release \
-    && cp target/release/reth /usr/local/bin/reth
+          cat > hive/clients/gravity-reth/Dockerfile.local << 'DOCKER_EOF'
+          FROM rust:latest as builder
+          ARG local_path=gravity-reth
+          COPY $local_path gravity-reth
+          RUN apt-get update && apt-get install -y libclang-dev pkg-config build-essential \
+              && cd gravity-reth && cargo build --release \
+              && cp target/release/reth /usr/local/bin/reth
+          FROM debian:latest
+          RUN apt-get update && apt-get install -y bash curl jq \
+              && apt-get clean && rm -rf /var/lib/apt/lists/*
+          COPY --from=builder /usr/local/bin/reth /usr/local/bin/reth
+          COPY genesis.json /genesis.json
+          COPY mapper.jq /mapper.jq
+          COPY reth.sh /reth.sh
+          COPY enode.sh /hive-bin/enode.sh
+          RUN chmod +x /reth.sh /hive-bin/enode.sh /usr/local/bin/reth
+          RUN echo "gravity-reth-local" > /version.txt
+          EXPOSE 8545 8546 8551 30303 30303/udp
+          ENTRYPOINT ["/reth.sh"]
+          DOCKER_EOF
+          sed -i 's/^          //' hive/clients/gravity-reth/Dockerfile.local
 
-FROM debian:latest
-RUN apt-get update && apt-get install -y bash curl jq \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /usr/local/bin/reth /usr/local/bin/reth
-COPY genesis.json /genesis.json
-COPY mapper.jq /mapper.jq
-COPY reth.sh /reth.sh
-COPY enode.sh /hive-bin/enode.sh
-RUN chmod +x /reth.sh /hive-bin/enode.sh /usr/local/bin/reth
-RUN echo "gravity-reth-local" > /version.txt
-EXPOSE 8545 8546 8551 30303 30303/udp
-ENTRYPOINT ["/reth.sh"]
-EOF
-
-          # Create standard Dockerfile (required for hive)
+          # Create standard Dockerfile
           cp hive/clients/reth/Dockerfile hive/clients/gravity-reth/Dockerfile
 
           # Create hive.yaml
-          cat > hive/clients/gravity-reth/hive.yaml << 'EOF'
-roles:
-  - "eth1"
-EOF
+          echo 'roles:' > hive/clients/gravity-reth/hive.yaml
+          echo '  - "eth1"' >> hive/clients/gravity-reth/hive.yaml
 
           # Copy source code
           rsync -a --exclude='hive' ${{ github.workspace }}/ hive/clients/gravity-reth/gravity-reth/
 
           # Create client config
-          cat > hive/grevm-clients.yaml << 'EOF'
-- client: gravity-reth
-  dockerfile: local
-  nametag: gravity-reth-local
-  build_args:
-    local_path: gravity-reth
-EOF
+          cat > hive/grevm-clients.yaml << 'CLIENT_EOF'
+          - client: gravity-reth
+            dockerfile: local
+            nametag: gravity-reth-local
+            build_args:
+              local_path: gravity-reth
+          CLIENT_EOF
+          sed -i 's/^          //' hive/grevm-clients.yaml
 
       - name: Run rpc-compat tests
         run: |
