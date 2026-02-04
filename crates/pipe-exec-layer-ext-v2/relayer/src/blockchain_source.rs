@@ -454,7 +454,8 @@ mod tests {
     /// - bytes 96-127: length of bytes data
     /// - bytes 128+:   raw PortalMessage data
     fn decode_portal_message(payload: &[u8]) -> Option<(Address, u128, Vec<u8>)> {
-        // Minimum: tuple offset (32) + nonce (32) + bytes offset (32) + length (32) + min data (36) = 164
+        // Minimum: tuple offset (32) + nonce (32) + bytes offset (32) + length (32) + min data (36)
+        // = 164
         if payload.len() < 164 {
             return None;
         }

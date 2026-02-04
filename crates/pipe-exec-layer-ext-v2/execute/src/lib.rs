@@ -72,8 +72,9 @@ use crate::{
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
+        transact_system_txn,
         types::DataRecorded,
-        transact_system_txn, SystemTxnResult, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
 };
 
@@ -779,17 +780,18 @@ impl<Storage: GravityStorage> Core<Storage> {
     }
 
     /// Extract gravity events from execution receipts
-    /// Returns gravity_events containing DKG events and ObservedJWKsUpdated from DataRecorded events
-    /// TODO(gravity): Currently, it executes the entire block and then parses all logs from the whole block.
-    /// Theoretically, it could only parse metadata and validator transactions.
+    /// Returns gravity_events containing DKG events and ObservedJWKsUpdated from DataRecorded
+    /// events TODO(gravity): Currently, it executes the entire block and then parses all logs
+    /// from the whole block. Theoretically, it could only parse metadata and validator
+    /// transactions.
     fn extract_gravity_events_from_receipts(
         &self,
         receipts: &[Receipt],
         block_number: u64,
         epoch: u64,
     ) -> Vec<GravityEvent> {
-        use std::collections::HashMap;
         use gravity_api_types::on_chain_config::jwks::ProviderJWKs;
+        use std::collections::HashMap;
 
         let mut gravity_events = vec![];
         // Map from (sourceType, sourceId) to latest nonce
@@ -844,8 +846,8 @@ impl<Storage: GravityStorage> Core<Storage> {
                     let issuer = format!("gravity://{}/{}", source_type, source_id);
                     ProviderJWKs {
                         issuer: issuer.into_bytes(),
-                        version: nonce as u64,  // nonce as version
-                        jwks: vec![],           // return empty jwks
+                        version: nonce as u64, // nonce as version
+                        jwks: vec![],          // return empty jwks
                     }
                 })
                 .collect();
