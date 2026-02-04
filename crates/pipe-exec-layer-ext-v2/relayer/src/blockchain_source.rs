@@ -6,7 +6,7 @@ use crate::{
     data_source::{source_types, OracleData, OracleDataSource},
     eth_client::EthHttpCli,
 };
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_rpc_types::Filter;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolEvent;
@@ -23,6 +23,40 @@ use tracing::{debug, info, warn};
 sol! {
     /// MessageSent(uint128 indexed nonce, bytes payload)
     event MessageSent(uint128 indexed nonce, bytes payload);
+}
+
+/// Decode ABI-encoded `bytes` from Solidity event log data
+///
+/// Solidity encodes `bytes` in events as:
+/// - bytes 0-31:  offset to data (typically 0x20 = 32)
+/// - bytes 32-63: length of data
+/// - bytes 64+:   actual data
+///
+/// Returns the raw bytes without the ABI encoding wrapper.
+fn decode_abi_bytes(data: &[u8]) -> Option<Vec<u8>> {
+    // Minimum: offset (32) + length (32) = 64 bytes
+    if data.len() < 64 {
+        return None;
+    }
+
+    // Read offset (last 8 bytes of first 32-byte word, as it's right-aligned)
+    let offset = u64::from_be_bytes(data[24..32].try_into().ok()?) as usize;
+
+    // Offset should point to the length word
+    if offset + 32 > data.len() {
+        return None;
+    }
+
+    // Read length (last 8 bytes of the length word)
+    let length = u64::from_be_bytes(data[offset + 24..offset + 32].try_into().ok()?) as usize;
+
+    // Data starts after the length word
+    let data_start = offset + 32;
+    if data_start + length > data.len() {
+        return None;
+    }
+
+    Some(data[data_start..data_start + length].to_vec())
 }
 
 /// Blockchain event source for monitoring GravityPortal.MessageSent events
@@ -312,17 +346,43 @@ impl OracleDataSource for BlockchainEventSource {
                 continue;
             }
 
-            let payload = log.data().data.clone();
+            let log_data = log.data().data.clone();
+
+            // log.data is ABI-encoded `bytes payload` from Solidity event
+            // Format: offset (32 bytes) || length (32 bytes) || data (variable)
+            // We need to extract the raw PortalMessage bytes before re-encoding
+            let raw_payload = match decode_abi_bytes(&log_data) {
+                Some(payload) => payload,
+                None => {
+                    warn!(
+                        target: "blockchain_source",
+                        chain_id = self.chain_id,
+                        nonce = nonce,
+                        log_data_len = log_data.len(),
+                        "Failed to decode ABI bytes from log.data, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            // ABI encode (nonce, raw_payload) together
+            // This preserves the nonce when passing through JWKStruct
+            // Format: abi.encode(uint128 nonce, bytes payload)
+            // Now raw_payload is the actual PortalMessage (sender || messageNonce || message)
+            let encoded_payload =
+                alloy_sol_types::SolValue::abi_encode(&(nonce, raw_payload.as_slice()));
 
             debug!(
                 target: "blockchain_source",
                 chain_id = self.chain_id,
                 nonce = nonce,
-                payload_len = payload.len(),
-                "Found new MessageSent event"
+                log_data_len = log_data.len(),
+                raw_payload_len = raw_payload.len(),
+                encoded_payload_len = encoded_payload.len(),
+                "Found new MessageSent event - decoded and re-encoded"
             );
 
-            results.push(OracleData { nonce, payload: Bytes::from(payload.to_vec()) });
+            results.push(OracleData { nonce, payload: Bytes::from(encoded_payload) });
         }
 
         // Update cursor
@@ -382,44 +442,45 @@ mod tests {
     /// Local Anvil chain ID
     const ANVIL_CHAIN_ID: u64 = 31337;
 
-    /// PortalMessage format decoder
-    /// Payload format: sender (20 bytes) || nonce (16 bytes) || message (variable)
+    /// PortalMessage format decoder for relayer output
+    ///
+    /// Relayer output format: abi.encode((uint128 nonce, bytes raw_portal_message))
+    /// Where raw_portal_message is: sender (20 bytes) || messageNonce (16 bytes) || message
+    ///
+    /// ABI encoding structure:
+    /// - bytes 0-31:   tuple offset (0x20)
+    /// - bytes 32-63:  nonce (uint128, right-aligned, actual value at bytes 48-63)
+    /// - bytes 64-95:  offset to bytes data (relative to tuple start)
+    /// - bytes 96-127: length of bytes data
+    /// - bytes 128+:   raw PortalMessage data
     fn decode_portal_message(payload: &[u8]) -> Option<(Address, u128, Vec<u8>)> {
-        if payload.len() < 36 {
+        // Minimum: tuple offset (32) + nonce (32) + bytes offset (32) + length (32) + min data (36)
+        // = 164
+        if payload.len() < 164 {
             return None;
         }
 
-        // The payload is ABI-encoded as `bytes`, so first decode the outer wrapper
-        // ABI encoding: offset (32 bytes) || length (32 bytes) || data
-        if payload.len() < 64 {
+        // Extract the raw PortalMessage from ABI-encoded (nonce, bytes) tuple
+        // Length is at bytes 96-127 (right-aligned)
+        let length = u64::from_be_bytes(payload[120..128].try_into().ok()?) as usize;
+
+        // PortalMessage data starts at byte 128
+        if payload.len() < 128 + length {
             return None;
         }
 
-        // Read offset and length
-        let offset = u64::from_be_bytes(payload[24..32].try_into().ok()?) as usize;
-        if offset + 32 > payload.len() {
+        let portal_message = &payload[128..128 + length];
+
+        // Now parse PortalMessage: sender (20) || messageNonce (16) || message
+        if portal_message.len() < 36 {
             return None;
         }
 
-        let length =
-            u64::from_be_bytes(payload[offset + 24..offset + 32].try_into().ok()?) as usize;
-        let data_start = offset + 32;
-        if data_start + length > payload.len() {
-            return None;
-        }
+        let sender = Address::from_slice(&portal_message[0..20]);
+        let message_nonce = u128::from_be_bytes(portal_message[20..36].try_into().ok()?);
+        let message = portal_message[36..].to_vec();
 
-        let inner_data = &payload[data_start..data_start + length];
-
-        // Now parse PortalMessage: sender (20) || nonce (16) || message
-        if inner_data.len() < 36 {
-            return None;
-        }
-
-        let sender = Address::from_slice(&inner_data[0..20]);
-        let nonce = u128::from_be_bytes(inner_data[20..36].try_into().ok()?);
-        let message = inner_data[36..].to_vec();
-
-        Some((sender, nonce, message))
+        Some((sender, message_nonce, message))
     }
 
     /// Decode bridge message: abi.encode(amount, recipient)

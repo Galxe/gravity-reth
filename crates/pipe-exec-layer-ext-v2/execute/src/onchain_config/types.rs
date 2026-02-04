@@ -188,6 +188,21 @@ sol! {
     event ObservedJWKsUpdated(uint256 indexed epoch, OracleProviderJWKs[] jwks);
 }
 
+sol! {
+    /// DataRecorded event from NativeOracle contract
+    /// Emitted when data is recorded by the consensus engine via SYSTEM_CALLER
+    /// @param sourceType The source type (0 = BLOCKCHAIN, 1 = JWK, etc.)
+    /// @param sourceId The source identifier (e.g., chain ID for blockchains)
+    /// @param nonce The nonce (block height, timestamp, etc.)
+    /// @param dataLength Length of the stored data
+    event DataRecorded(
+        uint32 indexed sourceType,
+        uint256 indexed sourceId,
+        uint128 nonce,
+        uint256 dataLength
+    );
+}
+
 /// RSA JWK fields for BCS serialization - matches gravity-aptos struct order
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct GaptosRsaJwk {
