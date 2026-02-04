@@ -77,8 +77,8 @@ jobs:
 
           # Create reth.sh with standalone mode
           cp hive/clients/reth/reth.sh hive/clients/gravity-reth/reth.sh
-          # Append standalone mode flag
-          sed -i 's/\$reth node \$FLAGS$/\$reth node \$FLAGS --gravity.disable-pipe-execution/' hive/clients/gravity-reth/reth.sh
+          # Append standalone mode flag to the reth node command
+          sed -i 's|\$reth node \$FLAGS|\$reth node \$FLAGS --gravity.disable-pipe-execution|' hive/clients/gravity-reth/reth.sh
 
           # Create hive.yaml
           cat > hive/clients/gravity-reth/hive.yaml << 'EOF'
