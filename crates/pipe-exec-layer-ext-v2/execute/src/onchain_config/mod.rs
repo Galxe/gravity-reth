@@ -11,6 +11,7 @@ pub mod jwk_consensus_config;
 pub mod jwk_oracle;
 pub mod metadata_txn;
 pub mod observed_jwk;
+pub mod oracle_state;
 pub mod oracle_task_helpers;
 pub mod types;
 pub mod validator_set;

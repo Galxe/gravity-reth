@@ -21,8 +21,8 @@ use tracing::{debug, info, warn};
 
 // GravityPortal.MessageSent event signature
 sol! {
-    /// MessageSent(uint128 indexed nonce, bytes payload)
-    event MessageSent(uint128 indexed nonce, bytes payload);
+    /// MessageSent(uint128 indexed nonce, uint256 indexed blockNumber, bytes payload)
+    event MessageSent(uint128 indexed nonce, uint256 indexed blockNumber, bytes payload);
 }
 
 /// Decode ABI-encoded `bytes` from Solidity event log data
@@ -79,185 +79,44 @@ pub struct BlockchainEventSource {
 
     /// Last nonce we returned to caller (for exactly-once tracking)
     last_returned_nonce: Mutex<u128>,
+
+    /// Block number where last_returned_nonce was emitted (for persistence)
+    last_nonce_block: AtomicU64,
 }
 
 impl BlockchainEventSource {
     /// Maximum blocks to poll in one request
     const MAX_BLOCKS_PER_POLL: u64 = 100;
 
-    /// Chunk size for backward search (stays within RPC limits)
-    const DISCOVERY_CHUNK_SIZE: u64 = 500;
-
-    /// Create a new BlockchainEventSource with auto-discovery
+    /// Create with a known cursor position (for fast restart from persisted state)
     ///
-    /// # Arguments
-    /// * `chain_id` - The EVM chain ID
-    /// * `rpc_url` - RPC endpoint URL
-    /// * `portal_address` - GravityPortal contract address
-    /// * `config_start_block` - Static start block from config (fallback)
-    /// * `latest_onchain_nonce` - The latest nonce recorded on Gravity chain
-    pub async fn new_with_discovery(
+    /// Skips discovery and uses the provided cursor directly.
+    pub async fn new_with_cursor(
         chain_id: u64,
         rpc_url: &str,
         portal_address: Address,
-        config_start_block: u64,
+        cursor: u64,
         latest_onchain_nonce: u128,
     ) -> Result<Self> {
         let rpc_client = Arc::new(EthHttpCli::new(rpc_url)?);
-
-        // Auto-discover start block based on latest_onchain_nonce
-        let start_block = if latest_onchain_nonce > 0 {
-            match Self::discover_start_block(
-                &rpc_client,
-                portal_address,
-                latest_onchain_nonce,
-                config_start_block,
-            )
-            .await
-            {
-                Ok(block) => {
-                    info!(
-                        target: "blockchain_source",
-                        chain_id,
-                        latest_nonce = latest_onchain_nonce,
-                        discovered_block = block,
-                        "Auto-discovered start block from event log"
-                    );
-                    block
-                }
-                Err(e) => {
-                    // Fallback to config_start_block if discovery fails
-                    warn!(
-                        target: "blockchain_source",
-                        chain_id,
-                        error = ?e,
-                        config_start_block,
-                        "Failed to discover start block, using config start block"
-                    );
-                    config_start_block
-                }
-            }
-        } else {
-            // Cold start (nonce 0): use config
-            info!(
-                target: "blockchain_source",
-                chain_id,
-                config_start_block,
-                "Cold start (nonce 0), using config start block"
-            );
-            config_start_block
-        };
 
         info!(
             target: "blockchain_source",
             chain_id = chain_id,
             portal_address = ?portal_address,
-            final_start_block = start_block,
+            cursor = cursor,
             latest_onchain_nonce = latest_onchain_nonce,
-            "Created BlockchainEventSource"
+            "Created BlockchainEventSource with persisted cursor (fast restart)"
         );
 
         Ok(Self {
             chain_id,
             rpc_client,
             portal_address,
-            cursor: AtomicU64::new(start_block),
+            cursor: AtomicU64::new(cursor),
             last_returned_nonce: Mutex::new(latest_onchain_nonce),
+            last_nonce_block: AtomicU64::new(cursor),
         })
-    }
-
-    /// Discover the block number where the event with `target_nonce` occurred
-    ///
-    /// Uses chunked backward search from finalized block to config_start_block.
-    /// Each query is limited to DISCOVERY_CHUNK_SIZE blocks to stay within RPC limits.
-    async fn discover_start_block(
-        client: &EthHttpCli,
-        address: Address,
-        target_nonce: u128,
-        config_start_block: u64,
-    ) -> Result<u64> {
-        let finalized = client.get_finalized_block_number().await?;
-
-        if finalized <= config_start_block {
-            return Err(anyhow!(
-                "Finalized block {} <= config_start_block {}",
-                finalized,
-                config_start_block
-            ));
-        }
-
-        let nonce_topic = U256::from(target_nonce);
-        let mut to_block = finalized;
-        let mut chunks_searched = 0u32;
-
-        // Search backwards in chunks
-        while to_block > config_start_block {
-            let from_block =
-                to_block.saturating_sub(Self::DISCOVERY_CHUNK_SIZE).max(config_start_block);
-
-            let filter = Filter::new()
-                .address(address)
-                .event_signature(MessageSent::SIGNATURE_HASH)
-                .topic1(nonce_topic)
-                .from_block(from_block)
-                .to_block(to_block);
-
-            match client.get_logs(&filter).await {
-                Ok(logs) => {
-                    if let Some(log) = logs.first() {
-                        if let Some(block_number) = log.block_number {
-                            info!(
-                                target: "blockchain_source",
-                                target_nonce,
-                                block_number,
-                                chunks_searched,
-                                "Found target nonce in event log"
-                            );
-                            return Ok(block_number);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        target: "blockchain_source",
-                        from_block,
-                        to_block,
-                        error = ?e,
-                        "RPC get_logs failed, continuing search"
-                    );
-                }
-            }
-
-            to_block = from_block;
-            chunks_searched += 1;
-
-            // Log progress for long searches
-            if chunks_searched % 10 == 0 {
-                debug!(
-                    target: "blockchain_source",
-                    chunks_searched,
-                    current_block = to_block,
-                    "Still searching for nonce..."
-                );
-            }
-        }
-
-        Err(anyhow!(
-            "Event with nonce {} not found in range [{}, {}]",
-            target_nonce,
-            config_start_block,
-            finalized
-        ))
-    }
-
-    /// Legacy new method for compatibility (will call new_with_discovery with nonce 0)
-    pub async fn new(
-        chain_id: u64,
-        rpc_url: &str,
-        portal_address: Address,
-        start_block: u64,
-    ) -> Result<Self> {
-        Self::new_with_discovery(chain_id, rpc_url, portal_address, start_block, 0).await
     }
 
     /// Create from config (legacy)
@@ -270,7 +129,7 @@ impl BlockchainEventSource {
         let (rpc_url, portal_address, start_block) = decoded;
         let chain_id = source_id.try_into().map_err(|_| anyhow!("Chain ID too large"))?;
 
-        Self::new(chain_id, &rpc_url, portal_address, start_block).await
+        Self::new_with_cursor(chain_id, &rpc_url, portal_address, start_block, 0).await
     }
 
     /// Get the current block cursor position
@@ -291,6 +150,26 @@ impl BlockchainEventSource {
     /// Set the last nonce (used when initializing from on-chain state)
     pub async fn set_last_nonce(&self, nonce: u128) {
         *self.last_returned_nonce.lock().await = nonce;
+    }
+
+    /// Get the block number where last_nonce was emitted
+    pub async fn last_nonce_block(&self) -> Option<u64> {
+        let block = self.last_nonce_block.load(Ordering::Relaxed);
+        if block > 0 {
+            Some(block)
+        } else {
+            None
+        }
+    }
+
+    /// Get the chain ID
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Set the cursor position (used for onchain state reconciliation)
+    pub fn set_cursor(&self, block: u64) {
+        self.cursor.store(block, Ordering::Relaxed);
     }
 }
 
@@ -341,6 +220,12 @@ impl OracleDataSource for BlockchainEventSource {
                 continue;
             };
 
+            let block_number = if let Some(block_number_topic) = log.topics().get(2) {
+                U256::from_be_slice(block_number_topic.as_slice())
+            } else {
+                continue;
+            };
+
             // Strictly monotonic check: ignore events we've already processed
             if nonce <= last_nonce {
                 continue;
@@ -369,8 +254,11 @@ impl OracleDataSource for BlockchainEventSource {
             // This preserves the nonce when passing through JWKStruct
             // Format: abi.encode(uint128 nonce, bytes payload)
             // Now raw_payload is the actual PortalMessage (sender || messageNonce || message)
-            let encoded_payload =
-                alloy_sol_types::SolValue::abi_encode(&(nonce, raw_payload.as_slice()));
+            let encoded_payload = alloy_sol_types::SolValue::abi_encode(&(
+                nonce,
+                block_number,
+                raw_payload.as_slice(),
+            ));
 
             debug!(
                 target: "blockchain_source",
@@ -392,6 +280,8 @@ impl OracleDataSource for BlockchainEventSource {
         if !results.is_empty() {
             let max_nonce = results.iter().map(|d| d.nonce).max().unwrap();
             *self.last_returned_nonce.lock().await = max_nonce;
+            // Store the block where we found events (to_block is the cursor we polled up to)
+            self.last_nonce_block.store(to_block, Ordering::Relaxed);
         }
 
         let current_last_nonce = self.last_nonce().await;
@@ -423,7 +313,7 @@ mod tests {
     //   - Nonce 2: GBridgeSender  -> 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
     //
     // To run this test:
-    //   1. cd /home/jingyue/projects/gravity_chain_core_contracts
+    //   1. cd gravity_chain_core_contracts
     //   2. ./scripts/start_anvil.sh   # Deploy contracts
     //   3. ./scripts/bridge_test.sh   # Generate MessageSent event
     //   4. cargo test --package reth-pipe-exec-layer-relayer test_poll_anvil_events -- --ignored
@@ -431,16 +321,16 @@ mod tests {
     // =========================================================================
 
     /// GravityPortal address on local Anvil (deterministic, nonce 1)
-    const ANVIL_PORTAL_ADDRESS: &str = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
+    const ANVIL_PORTAL_ADDRESS: &str = "0x0f761B1B3c1aC9232C9015A7276692560aD6a05F";
 
     /// GBridgeSender address on local Anvil (deterministic, nonce 2)
-    const ANVIL_SENDER_ADDRESS: &str = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
+    const ANVIL_SENDER_ADDRESS: &str = "0x3fc870008B1cc26f3614F14a726F8077227CA2c3";
 
     /// Anvil RPC URL
-    const ANVIL_RPC_URL: &str = "http://localhost:8546";
+    const ANVIL_RPC_URL: &str = "https://sepolia.drpc.org";
 
     /// Local Anvil chain ID
-    const ANVIL_CHAIN_ID: u64 = 31337;
+    const ANVIL_CHAIN_ID: u64 = 11155111;
 
     /// PortalMessage format decoder for relayer output
     ///
@@ -519,11 +409,12 @@ mod tests {
         }
 
         // Create source with cold start (nonce 0)
-        let source = BlockchainEventSource::new(
+        let source = BlockchainEventSource::new_with_cursor(
             ANVIL_CHAIN_ID,
             ANVIL_RPC_URL,
             portal_address,
-            0, // start from block 0
+            10195203, // start from block 0
+            0,        // latest nonce
         )
         .await
         .expect("Failed to create BlockchainEventSource");
@@ -589,8 +480,14 @@ mod tests {
     async fn test_source_creation() {
         let portal_address: Address = ANVIL_PORTAL_ADDRESS.parse().unwrap();
 
-        let source =
-            BlockchainEventSource::new(ANVIL_CHAIN_ID, ANVIL_RPC_URL, portal_address, 0).await;
+        let source = BlockchainEventSource::new_with_cursor(
+            ANVIL_CHAIN_ID,
+            ANVIL_RPC_URL,
+            portal_address,
+            0,
+            0,
+        )
+        .await;
 
         assert!(source.is_ok(), "Should create source successfully");
 

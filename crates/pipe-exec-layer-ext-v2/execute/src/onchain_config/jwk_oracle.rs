@@ -32,6 +32,7 @@ sol! {
         uint32 sourceType,
         uint256 sourceId,
         uint128 nonce,
+        uint256 blockNumber,
         bytes calldata payload,
         uint256 callbackGasLimit
     ) external;
@@ -41,6 +42,7 @@ sol! {
         uint32 sourceType,
         uint256 sourceId,
         uint128[] calldata nonces,
+        uint256[] calldata blockNumbers,
         bytes[] calldata payloads,
         uint256[] calldata callbackGasLimits
     ) external;
@@ -91,20 +93,20 @@ fn parse_chain_id_from_issuer(issuer: &[u8]) -> Option<u64> {
     None
 }
 
-/// Extract nonce and inner payload from ABI-encoded event data
-/// Payload format: alloy's abi_encode(&(u128, &[u8]))
+/// Extract nonce, block_number, and inner payload from ABI-encoded event data
+/// Payload format: alloy's abi_encode(&(u128, U256, &[u8]))
 ///
-/// alloy encodes (u128, &[u8]) as a dynamic tuple with structure:
+/// alloy encodes (u128, U256, &[u8]) as a dynamic tuple with structure:
 /// - bytes 0-31:   offset to tuple data (always 32 = 0x20)
 /// - bytes 32-63:  nonce (uint128, right-aligned, so nonce is at bytes 48-63)
-/// - bytes 64-95:  offset to bytes data (relative to tuple start at byte 32)
-/// - bytes 96-127: payload length
-/// - bytes 128+:   payload data
+/// - bytes 64-95:  block_number (uint256)
+/// - bytes 96-127: offset to bytes data (relative to tuple start at byte 32)
+/// - bytes 128-159: payload length
+/// - bytes 160+:   payload data
 ///
-/// Returns (nonce, inner_payload)
-fn extract_nonce_and_payload(data: &[u8]) -> Option<(u128, Vec<u8>)> {
-    // Minimum: 32 (tuple offset) + 32 (nonce) + 32 (bytes offset) + 32 (length) = 128 bytes
-    if data.len() < 128 {
+/// Returns (nonce, block_number, inner_payload)
+fn extract_nonce_block_and_payload(data: &[u8]) -> Option<(u128, U256, Vec<u8>)> {
+    if data.len() < 160 {
         warn!(
             target: "gravity::onchain_config::jwk_oracle",
             data_len = data.len(),
@@ -117,12 +119,15 @@ fn extract_nonce_and_payload(data: &[u8]) -> Option<(u128, Vec<u8>)> {
     let nonce_bytes = &data[48..64];
     let nonce = u128::from_be_bytes(nonce_bytes.try_into().ok()?);
 
-    // Payload length is at bytes 96-127 (right-aligned u256)
-    let length_bytes = &data[96..128];
+    // block_number is at bytes 64-95 (full U256)
+    let block_number = U256::from_be_slice(&data[64..96]);
+
+    // Payload length is at bytes 128-159 (right-aligned u256)
+    let length_bytes = &data[128..160];
     let payload_len = u64::from_be_bytes(length_bytes[24..32].try_into().ok()?) as usize;
 
     // Check we have enough data for the payload
-    if data.len() < 128 + payload_len {
+    if data.len() < 160 + payload_len {
         warn!(
             target: "gravity::onchain_config::jwk_oracle",
             data_len = data.len(),
@@ -132,10 +137,10 @@ fn extract_nonce_and_payload(data: &[u8]) -> Option<(u128, Vec<u8>)> {
         return None;
     }
 
-    // Extract the inner payload starting at byte 128
-    let inner_payload = data[128..128 + payload_len].to_vec();
+    // Extract the inner payload starting at byte 160
+    let inner_payload = data[160..160 + payload_len].to_vec();
 
-    Some((nonce, inner_payload))
+    Some((nonce, block_number, inner_payload))
 }
 
 // =============================================================================
@@ -207,6 +212,7 @@ fn construct_jwk_record_transaction(
         sourceType: SOURCE_TYPE_JWK,
         sourceId: source_id,
         nonce: nonce as u128,
+        blockNumber: U256::ZERO, // JWK records don't have a source block number
         payload: payload.into(),
         callbackGasLimit: U256::from(CALLBACK_GAS_LIMIT),
     };
@@ -243,26 +249,31 @@ fn construct_blockchain_batch_transaction(
 
     // Build batch arrays
     let mut nonces: Vec<u128> = Vec::with_capacity(jwks.len());
+    let mut block_numbers: Vec<U256> = Vec::with_capacity(jwks.len());
     let mut payloads: Vec<Bytes> = Vec::with_capacity(jwks.len());
     let mut gas_limits: Vec<U256> = Vec::with_capacity(jwks.len());
 
     for (idx, jwk) in jwks.iter().enumerate() {
-        // Extract nonce and inner payload from ABI-encoded (nonce, payload)
-        let (event_nonce, inner_payload) = match extract_nonce_and_payload(&jwk.data) {
-            Some((nonce, payload)) => (nonce, payload),
-            None => {
-                warn!(
-                    target: "gravity::onchain_config::jwk_oracle",
-                    idx = idx,
-                    payload_len = jwk.data.len(),
-                    payload_hex = %hex::encode(&jwk.data),
-                    "Failed to extract nonce and payload"
-                );
-                return Err(format!("Failed to extract nonce and payload at index {}", idx));
-            }
-        };
+        let (event_nonce, block_number, inner_payload) =
+            match extract_nonce_block_and_payload(&jwk.data) {
+                Some((nonce, block_num, payload)) => (nonce, block_num, payload),
+                None => {
+                    warn!(
+                        target: "gravity::onchain_config::jwk_oracle",
+                        idx = idx,
+                        payload_len = jwk.data.len(),
+                        payload_hex = %hex::encode(&jwk.data),
+                        "Failed to extract nonce, block_number, and payload"
+                    );
+                    return Err(format!(
+                        "Failed to extract nonce, block_number, and payload at index {}",
+                        idx
+                    ));
+                }
+            };
 
         nonces.push(event_nonce);
+        block_numbers.push(block_number);
         // Use the inner payload (the original MessageSent.payload)
         // This is what the user put in and what gets passed to the callback
         payloads.push(inner_payload.into());
@@ -271,6 +282,7 @@ fn construct_blockchain_batch_transaction(
         debug!(
             idx = idx,
             event_nonce = event_nonce,
+            ?block_number,
             inner_payload_len = payloads.last().map(|p: &Bytes| p.len()).unwrap_or(0),
             "Added event to batch"
         );
@@ -289,6 +301,7 @@ fn construct_blockchain_batch_transaction(
         sourceType: source_type,
         sourceId: U256::from(chain_id),
         nonces,
+        blockNumbers: block_numbers,
         payloads,
         callbackGasLimits: gas_limits,
     };

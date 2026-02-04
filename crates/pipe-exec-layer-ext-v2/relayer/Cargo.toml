@@ -32,6 +32,12 @@ tracing.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls"] }
 url.workspace = true
 
+# Persistence
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
 [dev-dependencies]
 alloy-sol-types.workspace = true
 hex = "0.4"
+tempfile = "3"
