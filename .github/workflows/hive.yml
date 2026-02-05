@@ -185,6 +185,7 @@ jobs:
           fi
 
       - name: Upload test logs
+        id: upload-logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -192,8 +193,11 @@ jobs:
           path: hive/workspace/logs/
           retention-days: 7
 
-      - name: Print logs on failure
-        if: failure()
+      - name: Verify artifact uploaded
         run: |
-          cat hive/workspace/logs/*simulator*.log || true
-          cat hive/workspace/logs/gravity-reth/client-*.log || true
+          if [ -z "${{ steps.upload-logs.outputs.artifact-url }}" ]; then
+            echo "ERROR: Artifact URL not generated!"
+            exit 1
+          fi
+          echo "✅ Artifact URL: ${{ steps.upload-logs.outputs.artifact-url }}"
+          echo "Workflow succeeded - artifact uploaded successfully"
