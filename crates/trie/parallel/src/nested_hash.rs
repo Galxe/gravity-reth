@@ -143,8 +143,7 @@ where
                 }
                 let hashed_slot = keccak256(entry.key);
                 let slot_value = storage_cursor
-                    .seek_by_key_subkey(hashed_address, hashed_slot)?
-                    .filter(|s| s.key == hashed_slot)
+                    .get_by_key_subkey(hashed_address, hashed_slot)?
                     .map(|s| s.value)
                     .unwrap_or(U256::ZERO);
                 storages.entry(hashed_address).or_default().storage.insert(hashed_slot, slot_value);
@@ -158,7 +157,7 @@ where
             }
 
             let mut storage_cursor = tx.cursor_dup_read::<tables::HashedStorages>()?;
-            let storage_walker = storage_cursor.walk_dup(None, None)?;
+            let storage_walker = storage_cursor.walk(None)?;
             for storage in storage_walker {
                 let (hashed_address, entry) = storage?;
                 storages.entry(hashed_address).or_default().storage.insert(entry.key, entry.value);

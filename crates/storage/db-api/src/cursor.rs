@@ -352,6 +352,8 @@ pub struct DupWalker<'cursor, T: DupSort, CURSOR: DbDupCursorRO<T>> {
     pub cursor: &'cursor mut CURSOR,
     /// Value where to start the walk.
     pub start: IterPairResult<T>,
+    /// Flag indicating the iterator is done (key not found or exhausted).
+    pub is_done: bool,
 }
 
 impl<T, CURSOR> fmt::Debug for DupWalker<'_, T, CURSOR>
@@ -363,6 +365,7 @@ where
         f.debug_struct("DupWalker")
             .field("cursor", &self.cursor)
             .field("start", &self.start)
+            .field("is_done", &self.is_done)
             .finish()
     }
 }
@@ -378,6 +381,9 @@ impl<T: DupSort, CURSOR: DbCursorRW<T> + DbDupCursorRO<T>> DupWalker<'_, T, CURS
 impl<T: DupSort, CURSOR: DbDupCursorRO<T>> Iterator for DupWalker<'_, T, CURSOR> {
     type Item = Result<TableRow<T>, DatabaseError>;
     fn next(&mut self) -> Option<Self::Item> {
+        if self.is_done {
+            return None
+        }
         let start = self.start.take();
         if start.is_some() {
             return start

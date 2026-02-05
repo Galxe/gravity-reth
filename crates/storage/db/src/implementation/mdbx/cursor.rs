@@ -257,7 +257,9 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
             (None, None) => self.first().transpose(),
         };
 
-        Ok(DupWalker::<'_, T, Self> { cursor: self, start })
+        // If start is None, mark as done so iterator returns empty
+        let is_done = start.is_none();
+        Ok(DupWalker::<'_, T, Self> { cursor: self, start, is_done })
     }
 }
 

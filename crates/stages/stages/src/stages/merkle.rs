@@ -3,6 +3,7 @@ use alloy_primitives::{BlockNumber, Sealable, B256};
 use reth_codecs::Compact;
 use reth_consensus::ConsensusError;
 use reth_db_api::{
+    cursor::DbCursorRO,
     tables,
     transaction::{DbTx, DbTxMut},
 };
@@ -15,6 +16,7 @@ use reth_stages_api::{
     BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
+use reth_trie::{HashedPostState, HashedStorage, EMPTY_ROOT_HASH};
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use std::fmt::Debug;
 use tracing::*;
@@ -173,13 +175,22 @@ where
 
     /// Execute the stage.
     fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
-        if matches!(self, Self::Unwind) {
-            info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
-            return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
-        }
+        let (threshold, incremental_threshold) = match self {
+            Self::Unwind => {
+                info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
+                return Ok(ExecOutput::done(StageCheckpoint::new(input.target())))
+            }
+            Self::Execution { rebuild_threshold, incremental_threshold } => {
+                (*rebuild_threshold, *incremental_threshold)
+            }
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::Both { rebuild_threshold, incremental_threshold } => {
+                (*rebuild_threshold, *incremental_threshold)
+            }
+        };
 
         let range = input.next_block_range();
-        let (_from_block, to_block) = range.clone().into_inner();
+        let (from_block, to_block) = range.clone().into_inner();
         let current_block_number = input.checkpoint().block_number;
 
         let target_block = provider
@@ -189,16 +200,114 @@ where
 
         let (trie_root, entities_checkpoint) = if range.is_empty() {
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
-        } else {
-            debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
-            // Use optimized nested hash algorithm for state root calculation
-            // Create a read-only transaction for parallel trie calculation
-            let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
-            // Read the hashed state from database for the specified range
-            let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
-            let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
-            provider.write_trie_updatesv2(&trie_updates_v2)?;
+        } else if to_block - from_block > threshold || from_block == 1 {
+            info!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Rebuilding trie from hashed state");
+            // if there are more blocks than threshold it is faster to rebuild the trie
+            provider.tx_ref().clear::<tables::AccountsTrieV2>()?;
+            provider.tx_ref().clear::<tables::StoragesTrieV2>()?;
+            provider.tx_ref().commit_view()?;
 
+            // Rebuild trie by processing HashedAccounts and HashedStorages in chunks
+            // to avoid loading the entire state into memory, 256 kv entries for a block
+            let chunk_entries_threshold = incremental_threshold as usize * 256;
+            let mut final_root = None;
+            let total_accounts = provider.count_entries::<tables::HashedAccounts>()?;
+            let mut account_cursor = provider.tx_ref().cursor_read::<tables::HashedAccounts>()?;
+            let mut storage_cursor =
+                provider.tx_ref().cursor_dup_read::<tables::HashedStorages>()?;
+
+            let mut hashed_state = HashedPostState::default();
+            let mut processed_num_accounts: usize = 0;
+            let mut chunk_num_entries: usize = 0;
+
+            for account_entry in account_cursor.walk(None)? {
+                let (hashed_address, account) = account_entry?;
+                processed_num_accounts += 1;
+                chunk_num_entries += 1;
+
+                // Collect storage entries for this account using seek + next with key comparison
+                let mut storage = HashedStorage::default();
+                let mut storage_entry = storage_cursor.seek(hashed_address)?;
+                while let Some((found_key, entry)) = storage_entry {
+                    if found_key != hashed_address {
+                        break;
+                    }
+                    if !entry.value.is_zero() {
+                        storage.storage.insert(entry.key, entry.value);
+                        chunk_num_entries += 1;
+                    }
+                    storage_entry = storage_cursor.next()?
+                }
+
+                // Insert account and storage into hashed state
+                hashed_state.accounts.insert(hashed_address, Some(account));
+                if !storage.storage.is_empty() {
+                    hashed_state.storages.insert(hashed_address, storage);
+                }
+
+                // Check if we've reached the chunk threshold
+                if chunk_num_entries >= chunk_entries_threshold {
+                    // Calculate state root for this chunk and update trie
+                    let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
+                    let (root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+                    provider.write_trie_updatesv2(&trie_updates_v2)?;
+                    provider.tx_ref().commit_view()?;
+                    final_root = Some(root);
+
+                    info!(
+                        target: "sync::stages::merkle::exec",
+                        chunk_entries = chunk_num_entries,
+                        progress = %format!("{:.2}%", (processed_num_accounts as f64 / total_accounts as f64) * 100.0),
+                        "Processing merkle by rebuilding chunk"
+                    );
+                    chunk_num_entries = 0;
+                    hashed_state.clear();
+                }
+            }
+
+            // Process remaining entries
+            if chunk_num_entries > 0 {
+                let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
+                let (root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+                provider.write_trie_updatesv2(&trie_updates_v2)?;
+                provider.tx_ref().commit_view()?;
+                final_root = Some(root);
+            }
+
+            let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
+                provider.count_entries::<tables::HashedStorages>()?)
+                as u64;
+
+            let entities_checkpoint =
+                EntitiesCheckpoint { processed: total_hashed_entries, total: total_hashed_entries };
+
+            (final_root.unwrap_or(EMPTY_ROOT_HASH), entities_checkpoint)
+        } else {
+            info!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Incremental updating trie in chunks");
+            let mut final_root = None;
+            let mut start_block = from_block;
+            while start_block <= to_block {
+                let chunk_to = std::cmp::min(start_block + incremental_threshold, to_block);
+                let chunk_range = start_block..=chunk_to;
+                info!(
+                    target: "sync::stages::merkle::exec",
+                    current = current_block_number,
+                    target = to_block,
+                    incremental_threshold,
+                    chunk_range = ?chunk_range,
+                    "Processing merkle by updating chunk"
+                );
+                // Use optimized nested hash algorithm for state root calculation
+                // Create a read-only transaction for parallel trie calculation
+                let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
+                // Read the hashed state from database for the specified range
+                let hashed_state = nested_state_root.read_hashed_state(Some(chunk_range))?;
+                let (root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+                provider.write_trie_updatesv2(&trie_updates_v2)?;
+                provider.tx_ref().commit_view()?;
+                final_root = Some(root);
+                start_block = chunk_to + 1;
+            }
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
                 provider.count_entries::<tables::HashedStorages>()?)
                 as u64;
@@ -211,7 +320,7 @@ where
                 total: total_hashed_entries,
             };
             // Save the checkpoint
-            (final_root, entities_checkpoint)
+            (final_root.unwrap(), entities_checkpoint)
         };
 
         // Reset the checkpoint
