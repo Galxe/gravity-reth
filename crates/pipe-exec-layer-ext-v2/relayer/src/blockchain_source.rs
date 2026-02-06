@@ -362,7 +362,7 @@ mod tests {
     const ANVIL_RPC_URL: &str = "https://sepolia.drpc.org";
 
     /// Local Anvil chain ID
-    const ANVIL_CHAIN_ID: u64 = 11155111;
+    const ANVIL_CHAIN_ID: u64 = 10201262;
 
     /// PortalMessage format decoder for relayer output
     ///
