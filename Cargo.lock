@@ -1032,7 +1032,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=ee73eef#ee73eefa89cbd557820595511abbfc5a20c9fa8a"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=a94549a#a94549a8bb11ea6e2dbbe2b3b47ce9673bbe7877"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10043,8 +10043,12 @@ dependencies = [
  "anyhow",
  "api-types",
  "async-trait",
+ "chrono",
  "hex",
  "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "url",

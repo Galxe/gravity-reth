@@ -32,6 +32,9 @@ pub mod uri_parser;
 /// Ethereum HTTP client functionality
 pub mod eth_client;
 
+/// State persistence for fast restart
+pub mod persistence;
+
 // ============================================================
 // Re-exports
 // ============================================================

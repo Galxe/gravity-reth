@@ -100,6 +100,7 @@ where
             epoch::EpochFetcher,
             jwk_consensus_config::JwkConsensusConfigFetcher,
             observed_jwk::ObservedJwkFetcher,
+            oracle_state::OracleStateFetcher,
             validator_set::ValidatorSetFetcher,
         };
 
@@ -137,6 +138,10 @@ where
             }
             OnChainConfig::RandomnessConfig => {
                 let fetcher = RandomnessConfigFetcher::new(self);
+                fetcher.fetch(block_id).map(|bytes| bytes.0.into())
+            }
+            OnChainConfig::OracleState => {
+                let fetcher = OracleStateFetcher::new(self);
                 fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             _ => todo!("Implement fetching for other config types"),
