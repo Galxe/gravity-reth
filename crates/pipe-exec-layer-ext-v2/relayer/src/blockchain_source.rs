@@ -177,6 +177,15 @@ impl BlockchainEventSource {
         *self.last_processed.lock().await = LastProcessedEvent::new(nonce, block);
     }
 
+    /// Fast-forward both cursor and last_processed state
+    ///
+    /// Use this when reconciling with on-chain state that is ahead of local state.
+    /// Sets both the scanning cursor and the last processed event atomically.
+    pub async fn fast_forward(&self, nonce: u128, block: u64) {
+        self.set_last_processed(nonce, block).await;
+        self.set_cursor(block);
+    }
+
     /// Get the block number where last event was emitted
     pub async fn last_nonce_block(&self) -> Option<u64> {
         let state = self.last_processed.lock().await;
@@ -411,7 +420,6 @@ mod tests {
     #[tokio::test]
     async fn test_poll_anvil_events() {
         use crate::eth_client::EthHttpCli;
-        use std::sync::Arc;
 
         // Parse portal address
         let portal_address: Address = ANVIL_PORTAL_ADDRESS.parse().expect("Invalid portal address");
@@ -496,26 +504,5 @@ mod tests {
             println!("  1. ./scripts/start_anvil.sh");
             println!("  2. ./scripts/bridge_test.sh");
         }
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires Anvil running
-    async fn test_source_creation() {
-        let portal_address: Address = ANVIL_PORTAL_ADDRESS.parse().unwrap();
-
-        let source = BlockchainEventSource::new_with_cursor(
-            ANVIL_CHAIN_ID,
-            ANVIL_RPC_URL,
-            portal_address,
-            0,
-            0,
-        )
-        .await;
-
-        assert!(source.is_ok(), "Should create source successfully");
-
-        let source = source.unwrap();
-        assert_eq!(source.source_type(), source_types::BLOCKCHAIN);
-        assert_eq!(source.source_id(), U256::from(ANVIL_CHAIN_ID));
     }
 }

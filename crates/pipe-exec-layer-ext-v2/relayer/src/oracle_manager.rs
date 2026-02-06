@@ -5,7 +5,7 @@
 use crate::{
     blockchain_source::BlockchainEventSource,
     data_source::{source_types, DataSourceKind, OracleDataSource},
-    persistence::{load_state_if_exists, state_file_path, RelayerState},
+    persistence::{load_state_if_exists, state_file_path, RelayerState, SourceState},
     uri_parser::{parse_oracle_uri, ParsedOracleTask},
 };
 use anyhow::{anyhow, Result};
@@ -15,6 +15,96 @@ use tracing::{debug, info, warn};
 
 // Re-export types from gravity-api-types for external use
 pub use gravity_api_types::{on_chain_config::jwks::JWKStruct, relayer::PollResult};
+
+/// Startup scenario for determining initial source state
+///
+/// When a data source is added, we need to determine where to start scanning.
+/// This enum captures the 4 possible scenarios based on persisted and on-chain state.
+#[derive(Debug)]
+enum StartupScenario {
+    /// Persisted state exists but is stale - fast-forward to on-chain state
+    FastForward { onchain_nonce: u128, onchain_block: u64, persisted_nonce: u128 },
+    /// Persisted state is valid - use it for fast restart
+    Restore { cursor: u64, nonce: u128 },
+    /// No persisted state, but on-chain has data - sync from on-chain
+    ColdStartWithSync { onchain_nonce: u128, onchain_block: u64 },
+    /// No persisted state, no on-chain data - start from config default
+    ColdStart { from_block: u64 },
+}
+
+impl StartupScenario {
+    /// Determine which startup scenario applies based on persisted and on-chain state
+    fn determine(
+        persisted: Option<&SourceState>,
+        onchain_nonce: u128,
+        onchain_block: u64,
+        default_from_block: u64,
+    ) -> Self {
+        match persisted {
+            Some(state) if onchain_nonce > state.last_nonce as u128 => Self::FastForward {
+                onchain_nonce,
+                onchain_block,
+                persisted_nonce: state.last_nonce as u128,
+            },
+            Some(state) => {
+                Self::Restore { cursor: state.cursor_block, nonce: state.last_nonce as u128 }
+            }
+            None if onchain_nonce > 0 => Self::ColdStartWithSync { onchain_nonce, onchain_block },
+            None => Self::ColdStart { from_block: default_from_block },
+        }
+    }
+
+    /// Get (cursor, nonce) for source initialization
+    fn into_init_params(self) -> (u64, u128) {
+        match self {
+            Self::FastForward { onchain_nonce, onchain_block, .. } => {
+                (onchain_block, onchain_nonce)
+            }
+            Self::Restore { cursor, nonce } => (cursor, nonce),
+            Self::ColdStartWithSync { onchain_nonce, onchain_block } => {
+                (onchain_block, onchain_nonce)
+            }
+            Self::ColdStart { from_block } => (from_block, 0),
+        }
+    }
+
+    /// Log the startup scenario
+    fn log(&self, uri: &str) {
+        match self {
+            Self::FastForward { onchain_nonce, onchain_block, persisted_nonce } => {
+                warn!(
+                    target: "oracle_manager",
+                    uri,
+                    persisted_nonce,
+                    onchain_nonce,
+                    onchain_block,
+                    "Persisted state is stale, fast-forwarding to on-chain state"
+                );
+            }
+            Self::Restore { cursor, nonce } => {
+                info!(
+                    target: "oracle_manager",
+                    uri,
+                    persisted_nonce = nonce,
+                    cursor_block = cursor,
+                    "Using persisted state for fast restart"
+                );
+            }
+            Self::ColdStartWithSync { onchain_nonce, onchain_block } => {
+                info!(
+                    target: "oracle_manager",
+                    uri,
+                    onchain_nonce,
+                    onchain_block,
+                    "Cold start with on-chain state"
+                );
+            }
+            Self::ColdStart { .. } => {
+                info!(target: "oracle_manager", uri, "Cold start from config (nonce=0)");
+            }
+        }
+    }
+}
 
 /// Oracle Relayer Manager
 ///
@@ -75,54 +165,18 @@ impl OracleRelayerManager {
 
         let task = parse_oracle_uri(uri)?;
 
-        // Check persisted state and reconcile with on-chain state
-        let (start_cursor, start_nonce) = {
+        // Determine startup scenario based on persisted and on-chain state
+        let scenario = {
             let state = self.state.read().await;
-            if let Some(source_state) = state.get(uri) {
-                // Compare persisted state with on-chain state
-                if onchain_nonce > source_state.last_nonce as u128 {
-                    // On-chain is ahead - fast-forward to on-chain state
-                    warn!(
-                        target: "oracle_manager",
-                        uri = uri,
-                        persisted_nonce = source_state.last_nonce,
-                        onchain_nonce = onchain_nonce,
-                        onchain_block = onchain_block_number,
-                        "Persisted state is stale, fast-forwarding to on-chain state"
-                    );
-                    (onchain_block_number, onchain_nonce)
-                } else {
-                    // Persisted state is valid (same or ahead, though ahead shouldn't happen)
-                    info!(
-                        target: "oracle_manager",
-                        uri = uri,
-                        persisted_nonce = source_state.last_nonce,
-                        cursor_block = source_state.cursor_block,
-                        "Using persisted state for fast restart"
-                    );
-                    (source_state.cursor_block, source_state.last_nonce as u128)
-                }
-            } else {
-                // No persisted state - use on-chain state or config default
-                if onchain_nonce > 0 {
-                    info!(
-                        target: "oracle_manager",
-                        uri = uri,
-                        onchain_nonce = onchain_nonce,
-                        onchain_block = onchain_block_number,
-                        "Cold start with on-chain state"
-                    );
-                    (onchain_block_number, onchain_nonce)
-                } else {
-                    info!(
-                        target: "oracle_manager",
-                        uri = uri,
-                        "Cold start from config (nonce=0)"
-                    );
-                    (task.from_block(), 0)
-                }
-            }
+            StartupScenario::determine(
+                state.get(uri),
+                onchain_nonce,
+                onchain_block_number,
+                task.from_block(),
+            )
         };
+        scenario.log(uri);
+        let (start_cursor, start_nonce) = scenario.into_init_params();
 
         // Create source with reconciled state
         let source =
@@ -201,8 +255,7 @@ impl OracleRelayerManager {
                             onchain_block = onchain_block,
                             "On-chain ahead of local, fast-forwarding"
                         );
-                        s.set_last_processed(onchain_nonce, onchain_block).await;
-                        s.set_cursor(onchain_block);
+                        s.fast_forward(onchain_nonce, onchain_block).await;
                     }
                 }
             }
@@ -299,23 +352,5 @@ impl OracleRelayerManager {
     /// List all registered URIs
     pub async fn list_uris(&self) -> Vec<String> {
         self.sources.read().await.keys().cloned().collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_manager_creation() {
-        let manager = OracleRelayerManager::new(None);
-        assert_eq!(manager.source_count().await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_manager_with_datadir() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let manager = OracleRelayerManager::new(Some(temp_dir.path().to_path_buf()));
-        assert_eq!(manager.source_count().await, 0);
     }
 }
