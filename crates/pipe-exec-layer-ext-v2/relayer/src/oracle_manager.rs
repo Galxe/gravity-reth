@@ -201,7 +201,7 @@ impl OracleRelayerManager {
                             onchain_block = onchain_block,
                             "On-chain ahead of local, fast-forwarding"
                         );
-                        s.set_last_nonce(onchain_nonce).await;
+                        s.set_last_processed(onchain_nonce, onchain_block).await;
                         s.set_cursor(onchain_block);
                     }
                 }

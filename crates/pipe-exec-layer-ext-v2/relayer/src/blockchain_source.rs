@@ -59,10 +59,34 @@ fn decode_abi_bytes(data: &[u8]) -> Option<Vec<u8>> {
     Some(data[data_start..data_start + length].to_vec())
 }
 
+/// Represents the state of the last successfully processed event
+///
+/// This struct bundles the nonce and block number together to ensure
+/// atomic updates and consistent state for persistence and recovery.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LastProcessedEvent {
+    /// The nonce of the last processed event (0 means no event processed yet)
+    pub nonce: u128,
+    /// The block number where this event was emitted
+    pub block: u64,
+}
+
+impl LastProcessedEvent {
+    /// Create a new LastProcessedEvent
+    pub fn new(nonce: u128, block: u64) -> Self {
+        Self { nonce, block }
+    }
+
+    /// Check if any event has been processed
+    pub fn is_initialized(&self) -> bool {
+        self.nonce > 0
+    }
+}
+
 /// Blockchain event source for monitoring GravityPortal.MessageSent events
 ///
 /// This is the primary data source for cross-chain message bridging.
-/// Tracks `last_returned_nonce` to ensure exactly-once consumption semantics.
+/// Tracks `last_processed` to ensure exactly-once consumption semantics.
 #[derive(Debug)]
 pub struct BlockchainEventSource {
     /// Chain ID (sourceId in Oracle terms)
@@ -77,11 +101,8 @@ pub struct BlockchainEventSource {
     /// Current block cursor for polling
     cursor: AtomicU64,
 
-    /// Last nonce we returned to caller (for exactly-once tracking)
-    last_returned_nonce: Mutex<u128>,
-
-    /// Block number where last_returned_nonce was emitted (for persistence)
-    last_nonce_block: AtomicU64,
+    /// Last event we returned to caller (for exactly-once tracking and persistence)
+    last_processed: Mutex<LastProcessedEvent>,
 }
 
 impl BlockchainEventSource {
@@ -114,8 +135,7 @@ impl BlockchainEventSource {
             rpc_client,
             portal_address,
             cursor: AtomicU64::new(cursor),
-            last_returned_nonce: Mutex::new(latest_onchain_nonce),
-            last_nonce_block: AtomicU64::new(cursor),
+            last_processed: Mutex::new(LastProcessedEvent::new(latest_onchain_nonce, cursor)),
         })
     }
 
@@ -137,26 +157,31 @@ impl BlockchainEventSource {
         self.cursor.load(Ordering::Relaxed)
     }
 
+    /// Get the last processed event state
+    pub async fn last_processed(&self) -> LastProcessedEvent {
+        *self.last_processed.lock().await
+    }
+
     /// Get the last nonce we returned (for exactly-once tracking)
     pub async fn last_nonce(&self) -> Option<u128> {
-        let n = *self.last_returned_nonce.lock().await;
-        if n > 0 {
-            Some(n)
+        let state = self.last_processed.lock().await;
+        if state.is_initialized() {
+            Some(state.nonce)
         } else {
             None
         }
     }
 
-    /// Set the last nonce (used when initializing from on-chain state)
-    pub async fn set_last_nonce(&self, nonce: u128) {
-        *self.last_returned_nonce.lock().await = nonce;
+    /// Set the last processed event (used when initializing from on-chain state)
+    pub async fn set_last_processed(&self, nonce: u128, block: u64) {
+        *self.last_processed.lock().await = LastProcessedEvent::new(nonce, block);
     }
 
-    /// Get the block number where last_nonce was emitted
+    /// Get the block number where last event was emitted
     pub async fn last_nonce_block(&self) -> Option<u64> {
-        let block = self.last_nonce_block.load(Ordering::Relaxed);
-        if block > 0 {
-            Some(block)
+        let state = self.last_processed.lock().await;
+        if state.is_initialized() {
+            Some(state.block)
         } else {
             None
         }
@@ -209,8 +234,8 @@ impl OracleDataSource for BlockchainEventSource {
         let logs = self.rpc_client.get_logs(&filter).await?;
         let mut results = Vec::with_capacity(logs.len());
 
-        // Filter events strictly greater than last_returned_nonce
-        let last_nonce = *self.last_returned_nonce.lock().await;
+        // Filter events strictly greater than last processed nonce
+        let last_nonce = self.last_processed.lock().await.nonce;
 
         for log in logs {
             let nonce = if let Some(nonce_topic) = log.topics().get(1) {
@@ -276,12 +301,10 @@ impl OracleDataSource for BlockchainEventSource {
         // Update cursor
         self.cursor.store(to_block, Ordering::Relaxed);
 
-        // Track max nonce for exactly-once semantics
+        // Track max nonce for exactly-once semantics (atomic update of nonce + block)
         if !results.is_empty() {
             let max_nonce = results.iter().map(|d| d.nonce).max().unwrap();
-            *self.last_returned_nonce.lock().await = max_nonce;
-            // Store the block where we found events (to_block is the cursor we polled up to)
-            self.last_nonce_block.store(to_block, Ordering::Relaxed);
+            *self.last_processed.lock().await = LastProcessedEvent::new(max_nonce, to_block);
         }
 
         let current_last_nonce = self.last_nonce().await;
