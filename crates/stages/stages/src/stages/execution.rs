@@ -168,7 +168,7 @@ where
         // We can only prune changesets if we're not executing MerkleStage from scratch (by
         // threshold or first-sync)
         Ok(max_block - start_block > self.external_clean_threshold ||
-            provider.count_entries::<tables::AccountsTrie>()?.is_zero())
+            provider.count_entries::<tables::AccountsTrieV2>()?.is_zero())
     }
 
     /// Performs consistency check on static files.
