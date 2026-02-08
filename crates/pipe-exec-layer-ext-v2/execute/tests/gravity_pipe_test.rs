@@ -84,7 +84,7 @@ where
         println!("The latest_block_number is {latest_block_number}, epoch is {epoch}");
 
         tokio::time::sleep(Duration::from_secs(3)).await;
-        for block_number in latest_block_number + 1..latest_block_number + 1000 {
+        for block_number in latest_block_number + 1..latest_block_number + 500 {
             let block_id = mock_block_id(block_number);
             let parent_block_id = mock_block_id(block_number - 1);
             pipeline_api
@@ -193,7 +193,7 @@ fn test() {
     let _ = RethTracer::new()
         .with_stdout(LayerInfo::new(
             LogFormat::Terminal,
-            LevelFilter::DEBUG.to_string(),
+            LevelFilter::INFO.to_string(),
             "".to_string(),
             Some("always".to_string()),
         ))

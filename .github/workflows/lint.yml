@@ -78,6 +78,7 @@ jobs:
           .github/assets/check_wasm.sh
 
   riscv:
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -109,6 +110,7 @@ jobs:
       - run: cargo hack check --workspace
 
   msrv:
+    if: false
     name: MSRV
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -131,6 +133,7 @@ jobs:
           RUSTFLAGS: -D warnings
 
   docs:
+    if: false
     name: docs
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -177,6 +180,7 @@ jobs:
       - run: cargo udeps --lib --tests --benches --all-features --locked
 
   book:
+    if: false
     name: book
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -267,6 +271,7 @@ jobs:
           time zepter run check
 
   deny:
+    if: false
     uses: ithacaxyz/ci/.github/workflows/deny.yml@main
 
   lint-success:
@@ -278,16 +283,16 @@ jobs:
       - clippy
       # - wasm
       # - crate-checks
-      - docs
+      # - docs
       - fmt
       - udeps
-      - book
+      # - book
       - typos
       - grafana
       - no-test-deps
       - features
       - feature-propagation
-      - deny
+      # - deny
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed

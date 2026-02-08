@@ -9,6 +9,7 @@ crates=(
     -p reth-trie
     -p reth-trie-common
     -p reth-trie-sparse
+    -p reth-stages
 )
 
 "${cmd[@]}" --features test-utils "${crates[@]}"

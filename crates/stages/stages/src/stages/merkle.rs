@@ -451,8 +451,8 @@ mod tests {
     // stage_test_suite_ext!(MerkleTestRunner, merkle);
 
     /// Execute from genesis so as to merkelize whole state
-    #[ignore = "todo fix"]
     #[tokio::test]
+    #[ignore = "todo fix"]
     async fn execute_clean_merkle() {
         let (previous_stage, stage_progress) = (500, 0);
 

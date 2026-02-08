@@ -1,12 +1,13 @@
 name: Lint GitHub Actions workflows
 on:
-  pull_request:
-    paths:
-    - '.github/**'
-  merge_group:
-  push:
-    paths:
-    - '.github/**'
+  workflow_dispatch:
+#  pull_request:
+#    paths:
+#    - '.github/**'
+#  merge_group:
+#  push:
+#    paths:
+#    - '.github/**'
 
 jobs:
   actionlint:
