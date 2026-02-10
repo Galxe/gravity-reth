@@ -11129,7 +11129,6 @@ dependencies = [
  "alloy-rlp",
  "codspeed-criterion-compat",
  "derive_more",
- "gravity-primitives",
  "itertools 0.14.0",
  "metrics",
  "once_cell",
@@ -14809,8 +14808,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "alloy-tx-macros"
-version = "1.0.37"
-source = "git+https://github.com/alloy-rs/alloy?tag=v1.0.37#8f6c1489f89e90649dac378008d8913e3b8a4c98"
