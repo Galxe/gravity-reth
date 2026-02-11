@@ -518,12 +518,13 @@ where
         let block_number = block.recovered_block.number();
         let block_hash = block.recovered_block.hash();
 
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.validate_block(block.recovered_block()).unwrap_or_else(|err| {
-                panic!(
-                    "Failed to validate block, block_number={block_number} block_hash={block_hash:?}: {err}",
-                )
-            });
+            panic!(
+                "Failed to validate block. error: {err:?}\n{:?}",
+                block.recovered_block().header()
+            );
+        });
 
         self.state.tree_state.insert_executed(block);
 
