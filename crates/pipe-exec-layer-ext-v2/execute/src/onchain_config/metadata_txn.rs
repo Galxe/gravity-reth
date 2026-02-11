@@ -83,7 +83,7 @@ impl SystemTxnResult {
         let mut block = Block {
             header: Header {
                 beneficiary: ordered_block.coinbase,
-                timestamp: ordered_block.timestamp_us,
+                timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,

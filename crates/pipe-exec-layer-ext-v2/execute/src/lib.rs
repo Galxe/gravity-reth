@@ -296,6 +296,40 @@ enum SystemTxnExecutionOutcome {
     EpochChanged(ExecuteOrderedBlockResult),
 }
 
+#[cfg(debug_assertions)]
+fn validate_execution_output(
+    block: &Block,
+    execution_output: &BlockExecutionOutput<Receipt>,
+) -> Result<(), String> {
+    if block.gas_limit() < block.gas_used() {
+        return Err(format!("gas_limit({}) < gas_used({})", block.gas_limit(), block.gas_used()));
+    }
+    let expected_gas_used =
+        execution_output.receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0);
+    if block.gas_used() != expected_gas_used {
+        return Err(format!(
+            "block gas_used({}) != last receipt cumulative_gas_used({})",
+            block.gas_used(),
+            expected_gas_used
+        ));
+    }
+    if execution_output.gas_used != block.gas_used {
+        return Err(format!(
+            "execution_output.gas_used({}) != block.gas_used({})",
+            execution_output.gas_used, block.gas_used
+        ));
+    }
+    let now_secs =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    if block.timestamp() > now_secs * 2 {
+        return Err(format!(
+            "block timestamp({}) is not in seconds, likely in milliseconds or microseconds",
+            block.timestamp()
+        ));
+    }
+    Ok(())
+}
+
 impl<Storage: GravityStorage> Core<Storage> {
     fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
@@ -377,16 +411,12 @@ impl<Storage: GravityStorage> Core<Storage> {
                 self.execute_history_block(*recovered_block)
             }
         };
-        debug_assert!(
-            block.gas_limit() >= block.gas_used(),
-            "gas_limit({}) < gas_used({})",
-            block.gas_limit(),
-            block.gas_used()
-        );
-        debug_assert_eq!(
-            block.gas_used(),
-            execution_output.receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0)
-        );
+
+        #[cfg(debug_assertions)]
+        validate_execution_output(&block, &execution_output).unwrap_or_else(|e| {
+            panic!("validate_execution_output failed. error: {e:?}\n{:?}", block.header());
+        });
+
         let write_start = Instant::now();
         self.cache.write_state_changes(
             block_number,
@@ -408,11 +438,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         self.metrics.execute_duration.record(elapsed);
         self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
-        debug_assert_eq!(
-            execution_output.gas_used, block.gas_used,
-            "gas_used mismatch, block_number: {}",
-            block.number,
-        );
+
         if epoch > block_epoch {
             info!(target: "PipeExecService.process",
                 block_number=?block_number,
