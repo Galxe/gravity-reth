@@ -1,7 +1,7 @@
 //! Traits for parallel execution of EVM blocks.
 
 use core::marker::PhantomData;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::execute::Executor;
 use alloy_evm::{precompiles::DynPrecompile, Database};
@@ -56,7 +56,7 @@ pub trait ParallelExecutor {
     /// the standard Ethereum precompiles. This is a no-op by default.
     fn apply_custom_precompiles(
         &mut self,
-        _custom_precompiles: Arc<HashMap<Address, DynPrecompile>>,
+        _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
     ) {
     }
 }

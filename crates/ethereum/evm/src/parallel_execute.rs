@@ -31,7 +31,6 @@ use revm::{
     state::{Account, AccountStatus, EvmState},
     DatabaseCommit,
 };
-use std::collections::HashMap as StdHashMap;
 
 /// EVM executor using Grevm that executes blocks in parallel.
 #[derive(Debug)]
@@ -45,7 +44,7 @@ pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
     /// System caller for executing system calls.
     system_caller: SystemCaller<Arc<ChainSpec>>,
     /// Custom precompiled contracts to inject into the EVM.
-    custom_precompiles: Option<Arc<StdHashMap<Address, DynPrecompile>>>,
+    custom_precompiles: Option<Arc<Vec<(Address, DynPrecompile)>>>,
 }
 
 impl<DB, EvmConfig, ChainSpec> GrevmExecutor<DB, EvmConfig, ChainSpec>
@@ -263,10 +262,7 @@ where
         state.commit(changes);
     }
 
-    fn apply_custom_precompiles(
-        &mut self,
-        custom_precompiles: Arc<StdHashMap<Address, DynPrecompile>>,
-    ) {
+    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
         self.custom_precompiles = Some(custom_precompiles);
     }
 }

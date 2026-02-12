@@ -476,7 +476,7 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types", default-features = false }
 reth-revm = { path = "crates/revm", default-features = false }
-grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", rev = "fc114a3e72dc1acb9c0f1ef86766d71a2685aabe" }
+grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", rev = "6998d8b43d63f72e40e936b90d8ca71ccc294a07" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }

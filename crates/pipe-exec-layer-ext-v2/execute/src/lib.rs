@@ -1,6 +1,7 @@
 //! Pipeline execution layer extension
 #[macro_use]
 mod channel;
+pub mod bls_precompile;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
@@ -68,13 +69,14 @@ use tokio::sync::{
 use tracing::*;
 
 use crate::{
+    bls_precompile::create_bls_pop_verify_precompile,
     mint_precompile::create_mint_token_precompile,
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         transact_system_txn,
         types::DataRecorded,
-        SystemTxnResult, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
 };
 
@@ -645,6 +647,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         let precompile = create_mint_token_precompile(state_for_precompile);
         evm.precompiles_mut()
             .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(precompile));
+
+        // Register BLS12-381 PoP verification precompile (stateless)
+        let bls_precompile = create_bls_pop_verify_precompile();
+        evm.precompiles_mut().apply_precompile(&BLS_PRECOMPILE_ADDR, move |_| Some(bls_precompile));
 
         // Get system caller nonce and gas price for constructing all system transactions
         let system_call_account =
