@@ -7,7 +7,8 @@ use reth_e2e_test_utils::testsuite::{
     actions::{
         CaptureBlock, CompareNodeChainTips, CreateFork, ExpectFcuStatus, MakeCanonical,
         ProduceBlocks, ProduceBlocksLocally, ProduceInvalidBlocks, ReorgTo, SelectActiveNode,
-        SendNewPayloads, UpdateBlockInfo, ValidateCanonicalTag, WaitForSync,
+        SendNewPayloads, UpdateBlockInfo, ValidateCanonicalTag, ValidateSafeAndFinalizedBlocks,
+        WaitForSync,
     },
     setup::{NetworkSetup, Setup},
     TestBuilder,
@@ -327,6 +328,27 @@ async fn test_engine_tree_live_sync_transition_eventually_canonical_e2e() -> Res
         .with_action(WaitForSync::new(0, 1).with_timeout(60))
         // Verify both nodes end up with the same canonical chain
         .with_action(CompareNodeChainTips::expect_same(0, 1));
+
+    test.run::<EthereumNode>().await?;
+
+    Ok(())
+}
+
+/// Test that verifies safe and finalized blocks are correctly set via RPC after forkchoice update.
+/// This is critical for Gravity Chain where deterministic consensus means canonical blocks
+/// are immediately safe and finalized.
+#[tokio::test]
+async fn test_engine_tree_safe_and_finalized_blocks_e2e() -> Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let test = TestBuilder::new()
+        .with_setup(default_engine_tree_setup())
+        // produce 5 blocks
+        .with_action(ProduceBlocks::<EthEngineTypes>::new(5))
+        // make the latest block canonical (this should also set safe/finalized)
+        .with_action(MakeCanonical::new())
+        // validate that safe and finalized blocks are correctly set via RPC
+        .with_action(ValidateSafeAndFinalizedBlocks::at_block(5));
 
     test.run::<EthereumNode>().await?;
 

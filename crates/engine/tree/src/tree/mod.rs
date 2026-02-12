@@ -517,6 +517,7 @@ where
     fn make_executed_block_canonical(&mut self, block: ExecutedBlockWithTrieUpdates<N>) {
         let block_number = block.recovered_block.number();
         let block_hash = block.recovered_block.hash();
+        let sealed_header = block.recovered_block.clone_sealed_header();
 
         #[cfg(debug_assertions)]
         self.validate_block(block.recovered_block()).unwrap_or_else(|err| {
@@ -542,6 +543,10 @@ where
                 "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
             )
         });
+
+        // deterministic consensus means canonical block is immediately safe and finalized
+        self.canonical_in_memory_state.set_safe(sealed_header.clone());
+        self.canonical_in_memory_state.set_finalized(sealed_header);
     }
 
     /// Returns a new [`Sender`] to send messages to this type.

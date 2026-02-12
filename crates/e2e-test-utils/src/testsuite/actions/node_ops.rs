@@ -380,3 +380,134 @@ where
         })
     }
 }
+
+/// Action to verify safe and finalized blocks are correctly set via RPC.
+/// This is critical for Gravity Chain where deterministic consensus means
+/// canonical blocks are immediately safe and finalized.
+#[derive(Debug)]
+pub struct ValidateSafeAndFinalizedBlocks {
+    /// Expected block number for safe block (None means any non-null value is OK)
+    pub expected_safe_number: Option<u64>,
+    /// Expected block number for finalized block (None means any non-null value is OK)
+    pub expected_finalized_number: Option<u64>,
+    /// Node index to check (None means active node)
+    pub node_idx: Option<usize>,
+}
+
+impl ValidateSafeAndFinalizedBlocks {
+    /// Create a new action expecting safe and finalized to be at a specific block number
+    pub const fn at_block(block_number: u64) -> Self {
+        Self {
+            expected_safe_number: Some(block_number),
+            expected_finalized_number: Some(block_number),
+            node_idx: None,
+        }
+    }
+
+    /// Create a new action expecting safe and finalized to be non-null
+    pub const fn are_set() -> Self {
+        Self { expected_safe_number: None, expected_finalized_number: None, node_idx: None }
+    }
+
+    /// Set the target node index
+    pub const fn with_node_idx(mut self, idx: usize) -> Self {
+        self.node_idx = Some(idx);
+        self
+    }
+}
+
+impl<Engine> Action<Engine> for ValidateSafeAndFinalizedBlocks
+where
+    Engine: EngineTypes,
+{
+    fn execute<'a>(&'a mut self, env: &'a mut Environment<Engine>) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let node_idx = self.node_idx.unwrap_or(env.active_node_idx);
+            if node_idx >= env.node_count() {
+                return Err(eyre::eyre!("Node index {node_idx} out of bounds"));
+            }
+
+            let node_client = &env.node_clients[node_idx];
+
+            // Query safe block via RPC (eth_getBlockByNumber("safe"))
+            let safe_block = EthApiClient::<
+                TransactionRequest,
+                Transaction,
+                Block,
+                Receipt,
+                Header,
+            >::block_by_number(&node_client.rpc, alloy_eips::BlockNumberOrTag::Safe, false)
+            .await?;
+
+            // Query finalized block via RPC (eth_getBlockByNumber("finalized"))
+            let finalized_block = EthApiClient::<
+                TransactionRequest,
+                Transaction,
+                Block,
+                Receipt,
+                Header,
+            >::block_by_number(
+                &node_client.rpc,
+                alloy_eips::BlockNumberOrTag::Finalized,
+                false,
+            )
+            .await?;
+
+            // Validate safe block
+            match (&safe_block, self.expected_safe_number) {
+                (None, _) => {
+                    return Err(eyre::eyre!(
+                        "Node {node_idx}: Safe block is None, expected it to be set"
+                    ));
+                }
+                (Some(block), Some(expected)) if block.header.number != expected => {
+                    return Err(eyre::eyre!(
+                        "Node {node_idx}: Safe block number mismatch. Expected {expected}, got {}",
+                        block.header.number
+                    ));
+                }
+                (Some(block), _) => {
+                    debug!(
+                        "Node {node_idx}: Safe block verified at {} (hash: {})",
+                        block.header.number, block.header.hash
+                    );
+                }
+            }
+
+            // Validate finalized block
+            match (&finalized_block, self.expected_finalized_number) {
+                (None, _) => {
+                    return Err(eyre::eyre!(
+                        "Node {node_idx}: Finalized block is None, expected it to be set"
+                    ));
+                }
+                (Some(block), Some(expected)) if block.header.number != expected => {
+                    return Err(eyre::eyre!(
+                        "Node {node_idx}: Finalized block number mismatch. Expected {expected}, got {}",
+                        block.header.number
+                    ));
+                }
+                (Some(block), _) => {
+                    debug!(
+                        "Node {node_idx}: Finalized block verified at {} (hash: {})",
+                        block.header.number, block.header.hash
+                    );
+                }
+            }
+
+            // For Gravity Chain, safe and finalized should be the same as canonical
+            if let (Some(safe), Some(finalized)) = (&safe_block, &finalized_block) &&
+                safe.header.hash != finalized.header.hash
+            {
+                debug!(
+                    "Node {node_idx}: Note: Safe block ({}) differs from finalized block ({})",
+                    safe.header.number, finalized.header.number
+                );
+            }
+
+            debug!("Node {node_idx}: Safe and finalized blocks validated successfully");
+
+            Ok(())
+        })
+    }
+}
