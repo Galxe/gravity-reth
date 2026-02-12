@@ -1147,3 +1147,200 @@ fn test_on_new_payload_malformed_payload() {
         );
     }
 }
+
+/// Test that `make_executed_block_canonical` correctly sets safe and finalized blocks.
+/// This is critical for Gravity Chain where deterministic consensus means
+/// canonical blocks are immediately safe and finalized.
+#[test]
+fn test_make_executed_block_canonical_sets_safe_and_finalized() {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = MAINNET.clone();
+    let mut test_harness = TestHarness::new(chain_spec.clone());
+
+    // Get genesis hash from the current canonical head
+    let genesis_hash = test_harness.tree.state.tree_state.current_canonical_head.hash;
+
+    // Generate a block with genesis as parent
+    let mut test_block_builder = TestBlockBuilder::eth().with_chain_spec((*chain_spec).clone());
+    let block = test_block_builder.get_executed_block_with_number(1, genesis_hash);
+    let block_hash = block.recovered_block.hash();
+
+    // Initially, safe and finalized should be None
+    assert!(
+        test_harness.tree.canonical_in_memory_state.get_safe_num_hash().is_none(),
+        "Safe block should be None initially"
+    );
+    assert!(
+        test_harness.tree.canonical_in_memory_state.get_finalized_num_hash().is_none(),
+        "Finalized block should be None initially"
+    );
+
+    // Call make_executed_block_canonical
+    test_harness.tree.make_executed_block_canonical(block.clone());
+
+    // Verify safe block is set correctly
+    let safe_num_hash = test_harness.tree.canonical_in_memory_state.get_safe_num_hash();
+    assert!(
+        safe_num_hash.is_some(),
+        "Safe block should be set after make_executed_block_canonical"
+    );
+    assert_eq!(
+        safe_num_hash.unwrap().hash,
+        block_hash,
+        "Safe block hash should match the canonical block"
+    );
+
+    // Verify finalized block is set correctly
+    let finalized_num_hash = test_harness.tree.canonical_in_memory_state.get_finalized_num_hash();
+    assert!(
+        finalized_num_hash.is_some(),
+        "Finalized block should be set after make_executed_block_canonical"
+    );
+    assert_eq!(
+        finalized_num_hash.unwrap().hash,
+        block_hash,
+        "Finalized block hash should match the canonical block"
+    );
+
+    // Verify forkchoice_state_tracker is also set
+    let forkchoice_state = test_harness.tree.state.forkchoice_state_tracker.last_valid_state();
+    assert!(forkchoice_state.is_some(), "Forkchoice state should be set");
+    let state = forkchoice_state.unwrap();
+    assert_eq!(state.safe_block_hash, block_hash, "Forkchoice safe_block_hash should match");
+    assert_eq!(
+        state.finalized_block_hash, block_hash,
+        "Forkchoice finalized_block_hash should match"
+    );
+}
+
+/// End-to-end test for Gravity Chain's deterministic consensus flow.
+/// This test simulates the complete flow from pipe exec layer through to RPC-style queries:
+/// 1. Processes multiple consecutive blocks via `make_executed_block_canonical`
+/// 2. Verifies safe/finalized are updated correctly at each step
+/// 3. Validates that RPC-style queries (`get_safe_header`, `get_finalized_header`) return correct
+///    data
+#[test]
+fn test_gravity_chain_make_canonical_e2e_flow() {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = MAINNET.clone();
+    let mut test_harness = TestHarness::new(chain_spec.clone());
+    let mut test_block_builder = TestBlockBuilder::eth().with_chain_spec((*chain_spec).clone());
+
+    // Get genesis hash from the current canonical head
+    let genesis_hash = test_harness.tree.state.tree_state.current_canonical_head.hash;
+
+    // Process multiple blocks sequentially (simulating Gravity Chain's deterministic consensus)
+    let num_blocks = 5;
+    let mut parent_hash = genesis_hash;
+    let mut blocks = Vec::new();
+
+    for block_num in 1..=num_blocks {
+        let block = test_block_builder.get_executed_block_with_number(block_num, parent_hash);
+        let block_hash = block.recovered_block.hash();
+        let block_number = block.recovered_block.number();
+
+        // Process the block through make_executed_block_canonical
+        test_harness.tree.make_executed_block_canonical(block.clone());
+
+        // Verify canonical head is updated
+        let canonical_head = test_harness.tree.canonical_in_memory_state.get_canonical_head();
+        assert_eq!(
+            canonical_head.hash(),
+            block_hash,
+            "Block {block_num}: canonical head hash mismatch"
+        );
+        assert_eq!(
+            canonical_head.number(),
+            block_number,
+            "Block {block_num}: canonical head number mismatch"
+        );
+
+        // Verify safe block is updated (RPC path: eth_getBlockByNumber("safe"))
+        let safe_header = test_harness.tree.canonical_in_memory_state.get_safe_header();
+        assert!(safe_header.is_some(), "Block {block_num}: safe header should be set");
+        let safe_header = safe_header.unwrap();
+        assert_eq!(
+            safe_header.hash(),
+            block_hash,
+            "Block {block_num}: safe block hash should match canonical"
+        );
+        assert_eq!(
+            safe_header.number(),
+            block_number,
+            "Block {block_num}: safe block number should match canonical"
+        );
+
+        // Verify finalized block is updated (RPC path: eth_getBlockByNumber("finalized"))
+        let finalized_header = test_harness.tree.canonical_in_memory_state.get_finalized_header();
+        assert!(finalized_header.is_some(), "Block {block_num}: finalized header should be set");
+        let finalized_header = finalized_header.unwrap();
+        assert_eq!(
+            finalized_header.hash(),
+            block_hash,
+            "Block {block_num}: finalized block hash should match canonical"
+        );
+        assert_eq!(
+            finalized_header.number(),
+            block_number,
+            "Block {block_num}: finalized block number should match canonical"
+        );
+
+        // Verify num_hash accessors (used by BlockchainProvider for RPC)
+        let safe_num_hash = test_harness.tree.canonical_in_memory_state.get_safe_num_hash();
+        assert!(safe_num_hash.is_some(), "Block {block_num}: safe num_hash should be set");
+        assert_eq!(
+            safe_num_hash.unwrap(),
+            alloy_eips::BlockNumHash { number: block_number, hash: block_hash },
+            "Block {block_num}: safe num_hash mismatch"
+        );
+
+        let finalized_num_hash =
+            test_harness.tree.canonical_in_memory_state.get_finalized_num_hash();
+        assert!(
+            finalized_num_hash.is_some(),
+            "Block {block_num}: finalized num_hash should be set"
+        );
+        assert_eq!(
+            finalized_num_hash.unwrap(),
+            alloy_eips::BlockNumHash { number: block_number, hash: block_hash },
+            "Block {block_num}: finalized num_hash mismatch"
+        );
+
+        // Verify forkchoice state tracker is consistent
+        let forkchoice_state = test_harness.tree.state.forkchoice_state_tracker.last_valid_state();
+        assert!(forkchoice_state.is_some(), "Block {block_num}: forkchoice state should be set");
+        let state = forkchoice_state.unwrap();
+        assert_eq!(
+            state.head_block_hash, block_hash,
+            "Block {block_num}: forkchoice head_block_hash mismatch"
+        );
+        assert_eq!(
+            state.safe_block_hash, block_hash,
+            "Block {block_num}: forkchoice safe_block_hash mismatch"
+        );
+        assert_eq!(
+            state.finalized_block_hash, block_hash,
+            "Block {block_num}: forkchoice finalized_block_hash mismatch"
+        );
+
+        blocks.push(block.clone());
+        parent_hash = block_hash;
+    }
+
+    // Final verification: all blocks should be in tree state
+    assert_eq!(
+        test_harness.tree.state.tree_state.blocks_by_hash.len(),
+        num_blocks as usize,
+        "All blocks should be in tree state"
+    );
+
+    // Verify the final canonical head matches the last block
+    let last_block = blocks.last().unwrap();
+    assert_eq!(
+        test_harness.tree.state.tree_state.current_canonical_head.hash,
+        last_block.recovered_block.hash(),
+        "Final canonical head should be the last block"
+    );
+}

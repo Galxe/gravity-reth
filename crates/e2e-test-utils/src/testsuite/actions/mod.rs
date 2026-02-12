@@ -21,7 +21,7 @@ pub use engine_api::{ExpectedPayloadStatus, SendNewPayload, SendNewPayloads};
 pub use fork::{CreateFork, ForkBase, SetForkBase, SetForkBaseFromBlockInfo, ValidateFork};
 pub use node_ops::{
     AssertChainTip, CaptureBlockOnNode, CompareNodeChainTips, SelectActiveNode, ValidateBlockTag,
-    WaitForSync,
+    ValidateSafeAndFinalizedBlocks, WaitForSync,
 };
 pub use produce_blocks::{
     AssertMineBlock, BroadcastLatestForkchoice, BroadcastNextNewPayload, CheckPayloadAccepted,
