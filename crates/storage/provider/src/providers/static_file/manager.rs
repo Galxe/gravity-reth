@@ -746,6 +746,25 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
     {
         if !get_gravity_config().disable_pipe_execution {
+            // In pipe execution mode, we still need to heal NippyJar file-level
+            // inconsistencies that may result from a crash during block persistence
+            // (e.g., uncommitted data appended to data/offsets files).
+            // Without this healing, the static file reader may return incorrect data,
+            // causing "the hash for the latest block is missing" errors on restart.
+            //
+            // We skip the full consistency check (ensure_invariants) and pipeline unwind
+            // because pipe execution mode uses StorageRecoveryHelper instead.
+            if !self.access.is_read_only() {
+                for segment in StaticFileSegment::iter() {
+                    if has_receipt_pruning && segment.is_receipts() {
+                        continue;
+                    }
+                    // Only heal segments that have existing static files
+                    if self.get_highest_static_file_block(segment).is_some() {
+                        self.latest_writer(segment)?;
+                    }
+                }
+            }
             return Ok(None)
         }
         // OVM historical import is broken and does not work with this check. It's importing
