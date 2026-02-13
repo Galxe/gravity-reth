@@ -1,6 +1,7 @@
 //! Pipeline execution layer extension
 #[macro_use]
 mod channel;
+pub mod bls_precompile;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
@@ -20,7 +21,7 @@ use alloy_consensus::{
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{
     map::{HashMap, HashSet},
-    Address, Bytes, TxHash, B256, U256,
+    Address, TxHash, B256, U256,
 };
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_primitives::get_gravity_config;
@@ -29,7 +30,9 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
-use reth_evm::{ConfigureEvm, Evm, NextBlockEnvAttributes, ParallelDatabase};
+use reth_evm::{
+    precompiles::DynPrecompile, ConfigureEvm, Evm, NextBlockEnvAttributes, ParallelDatabase,
+};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_pipe_exec_layer_event_bus::{
@@ -68,13 +71,14 @@ use tokio::sync::{
 use tracing::*;
 
 use crate::{
+    bls_precompile::create_bls_pop_verify_precompile,
     mint_precompile::create_mint_token_precompile,
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         transact_system_txn,
         types::DataRecorded,
-        SystemTxnResult, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
 };
 
@@ -223,6 +227,7 @@ struct Core<Storage: GravityStorage> {
     storage: Arc<Storage>,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
+    custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
@@ -646,6 +651,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         evm.precompiles_mut()
             .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(precompile));
 
+        // Register BLS12-381 PoP verification precompile (stateless)
+        let bls_precompile = create_bls_pop_verify_precompile();
+        evm.precompiles_mut().apply_precompile(&BLS_PRECOMPILE_ADDR, move |_| Some(bls_precompile));
+
         // Get system caller nonce and gas price for constructing all system transactions
         let system_call_account =
             evm.db_mut().basic(SYSTEM_CALLER).unwrap().expect("SYSTEM_CALLER not exists");
@@ -978,6 +987,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
 
         let mut executor = self.evm_config.parallel_executor(state);
+        executor.apply_custom_precompiles(self.custom_precompiles.clone());
         // Apply all pre-executed transaction state changes (metadata + validator txns) to executor
         // state
         executor.commit_changes(accumulated_state_changes);
@@ -1384,6 +1394,10 @@ where
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
+            custom_precompiles: Arc::new(vec![(
+                BLS_PRECOMPILE_ADDR,
+                create_bls_pop_verify_precompile(),
+            )]),
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
                 (epoch, latest_block_number),

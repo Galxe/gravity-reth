@@ -1,9 +1,11 @@
 //! Traits for parallel execution of EVM blocks.
 
 use core::marker::PhantomData;
+use std::sync::Arc;
 
 use crate::execute::Executor;
-use alloy_evm::Database;
+use alloy_evm::{precompiles::DynPrecompile, Database};
+use alloy_primitives::Address;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
 use revm::{database::BundleState, state::EvmState};
@@ -47,6 +49,16 @@ pub trait ParallelExecutor {
 
     /// Commits the changes to the executor state.
     fn commit_changes(&mut self, changes: EvmState);
+
+    /// Applies custom precompiled contracts to the executor.
+    ///
+    /// These precompiles will be available during transaction execution alongside
+    /// the standard Ethereum precompiles. This is a no-op by default.
+    fn apply_custom_precompiles(
+        &mut self,
+        _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+    ) {
+    }
 }
 
 /// Wraps a [`Executor`] to provide a [`ParallelExecutor`] implementation.

@@ -7,6 +7,7 @@ use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
 use alloy_evm::{
     block::{calc, StateChangePostBlockSource, StateChangeSource, SystemCaller},
     eth::{dao_fork, eip6110, spec::EthExecutorSpec, EthBlockExecutorFactory},
+    precompiles::DynPrecompile,
     EvmEnv,
 };
 use alloy_primitives::{map::HashMap, Address};
@@ -42,6 +43,8 @@ pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
     state: Option<ParallelState<DB>>,
     /// System caller for executing system calls.
     system_caller: SystemCaller<Arc<ChainSpec>>,
+    /// Custom precompiled contracts to inject into the EVM.
+    custom_precompiles: Option<Arc<Vec<(Address, DynPrecompile)>>>,
 }
 
 impl<DB, EvmConfig, ChainSpec> GrevmExecutor<DB, EvmConfig, ChainSpec>
@@ -63,6 +66,7 @@ where
             chain_spec,
             evm_config: evm_config.clone(),
             system_caller,
+            custom_precompiles: None,
         }
     }
 
@@ -99,7 +103,14 @@ where
 
         let (results, state) = {
             let EvmEnv { cfg_env, block_env } = evm_env;
-            let executor = Scheduler::new(cfg_env, block_env, txs, state, false);
+            let executor = Scheduler::new(
+                cfg_env,
+                block_env,
+                txs,
+                state,
+                false,
+                self.custom_precompiles.clone(),
+            );
             executor.parallel_execute(None).map_err(|e| {
                 BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
                     hash: block
@@ -249,6 +260,10 @@ where
             state.load_mut_cache_account(*address).unwrap();
         }
         state.commit(changes);
+    }
+
+    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
+        self.custom_precompiles = Some(custom_precompiles);
     }
 }
 
