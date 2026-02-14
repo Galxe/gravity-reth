@@ -746,26 +746,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
     {
         if !get_gravity_config().disable_pipe_execution {
-            // In pipe execution mode, we still need to heal NippyJar file-level
-            // inconsistencies that may result from a crash during block persistence
-            // (e.g., uncommitted data appended to data/offsets files).
-            // Without this healing, the static file reader may return incorrect data,
-            // causing "the hash for the latest block is missing" errors on restart.
-            //
-            // We skip the full consistency check (ensure_invariants) and pipeline unwind
-            // because pipe execution mode uses StorageRecoveryHelper instead.
-            if !self.access.is_read_only() {
-                for segment in StaticFileSegment::iter() {
-                    if has_receipt_pruning && segment.is_receipts() {
-                        continue;
-                    }
-                    // Only heal segments that have existing static files
-                    if self.get_highest_static_file_block(segment).is_some() {
-                        self.latest_writer(segment)?;
-                    }
-                }
-            }
-            return Ok(None)
+            return self.check_consistency_pipe_execution(provider, has_receipt_pruning);
         }
         // OVM historical import is broken and does not work with this check. It's importing
         // duplicated receipts resulting in having more receipts than the expected transaction
@@ -981,7 +962,6 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             }
         }
 
-        let highest_static_file_entry = highest_static_file_entry.unwrap_or_default();
         let highest_static_file_block = highest_static_file_block.unwrap_or_default();
 
         // If static file entry is ahead of the database entries, then ensure the checkpoint block
@@ -1011,31 +991,117 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         // static files on executing a stage, or the reverse on unwinding a stage.
         // All we need to do is to prune the extra static file rows.
         if checkpoint_block_number < highest_static_file_block {
-            info!(
-                target: "reth::providers",
-                ?segment,
-                from = highest_static_file_block,
-                to = checkpoint_block_number,
-                "Unwinding static file segment."
-            );
-            let mut writer = self.latest_writer(segment)?;
-            if segment.is_headers() {
-                // TODO(joshie): is_block_meta
-                writer.prune_headers(highest_static_file_block - checkpoint_block_number)?;
-            } else if let Some(block) = provider.block_body_indices(checkpoint_block_number)? {
-                // todo joshie: is querying block_body_indices a potential issue once bbi is moved
-                // to sf as well
-                let number = highest_static_file_entry - block.last_tx_num();
-                if segment.is_receipts() {
-                    writer.prune_receipts(number, checkpoint_block_number)?;
-                } else {
-                    writer.prune_transactions(number, checkpoint_block_number)?;
-                }
-            }
-            writer.commit()?;
+            self.prune_segment_to(
+                provider,
+                segment,
+                checkpoint_block_number,
+                highest_static_file_block,
+            )?;
         }
 
         Ok(None)
+    }
+
+    /// Consistency check for pipe execution mode.
+    ///
+    /// In pipe execution mode, the pipeline is not used, so `ensure_invariants` and pipeline
+    /// unwind are not applicable. Instead, we perform two operations:
+    ///
+    /// 1. **Heal `NippyJar` files**: A crash during block persistence may leave uncommitted data in
+    ///    data/offsets files. Opening the writer triggers [`NippyJarChecker::ensure_consistency`]
+    ///    which truncates such dirty data to match the committed config. Without this, the static
+    ///    file reader may return incorrect data (e.g., `block_hash` returns `None`), causing
+    ///    startup failures.
+    ///
+    /// 2. **Truncate static files ahead of the database**: The commit order in `on_save_blocks` is
+    ///    `static_file_provider.commit()` then `provider_rw.commit()`. If a crash occurs after the
+    ///    static file commit but before the DB commit, static files will contain committed data
+    ///    ahead of the database's `Execution` checkpoint. We prune the extra rows to restore
+    ///    consistency. All segments use [`StageId::Execution`] as the reference checkpoint (unlike
+    ///    pipeline mode which uses per-segment stage IDs like [`StageId::Headers`] /
+    ///    [`StageId::Bodies`]).
+    fn check_consistency_pipe_execution<Provider>(
+        &self,
+        provider: &Provider,
+        has_receipt_pruning: bool,
+    ) -> ProviderResult<Option<PipelineTarget>>
+    where
+        Provider: DBProvider + BlockReader + StageCheckpointReader,
+    {
+        if self.access.is_read_only() {
+            return Ok(None);
+        }
+
+        info!(target: "reth::cli", "Verifying storage consistency (pipe execution mode).");
+
+        // Phase 1: Heal NippyJar file-level inconsistencies.
+        for segment in StaticFileSegment::iter() {
+            if has_receipt_pruning && segment.is_receipts() {
+                continue;
+            }
+            if self.get_highest_static_file_block(segment).is_some() {
+                self.latest_writer(segment)?;
+            }
+        }
+
+        // Phase 2: Truncate static files that are ahead of the Execution checkpoint.
+        let checkpoint_block_number =
+            provider.get_stage_checkpoint(StageId::Execution)?.unwrap_or_default().block_number;
+
+        for segment in StaticFileSegment::iter() {
+            if has_receipt_pruning && segment.is_receipts() {
+                continue;
+            }
+            if let Some(highest_static_file_block) = self.get_highest_static_file_block(segment) &&
+                checkpoint_block_number < highest_static_file_block
+            {
+                self.prune_segment_to(
+                    provider,
+                    segment,
+                    checkpoint_block_number,
+                    highest_static_file_block,
+                )?;
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Prunes a static file segment so its highest block matches `target_block`.
+    ///
+    /// This is used when static files are ahead of the database after a crash
+    /// (static file commit succeeded but DB commit did not).
+    fn prune_segment_to<Provider>(
+        &self,
+        provider: &Provider,
+        segment: StaticFileSegment,
+        target_block: BlockNumber,
+        highest_static_file_block: BlockNumber,
+    ) -> ProviderResult<()>
+    where
+        Provider: DBProvider + BlockReader,
+    {
+        info!(
+            target: "reth::providers",
+            ?segment,
+            from = highest_static_file_block,
+            to = target_block,
+            "Pruning static file segment to target block."
+        );
+        let mut writer = self.latest_writer(segment)?;
+        if segment.is_headers() {
+            writer.prune_headers(highest_static_file_block - target_block)?;
+        } else if let Some(block) = provider.block_body_indices(target_block)? {
+            let highest_tx = self.get_highest_static_file_tx(segment).unwrap_or_default();
+            let to_delete = highest_tx - block.last_tx_num();
+            if segment.is_receipts() {
+                writer.prune_receipts(to_delete, target_block)?;
+            } else {
+                writer.prune_transactions(to_delete, target_block)?;
+            }
+        }
+        writer.commit()?;
+        Ok(())
     }
 
     /// Returns the earliest available block number that has not been expired and is still
