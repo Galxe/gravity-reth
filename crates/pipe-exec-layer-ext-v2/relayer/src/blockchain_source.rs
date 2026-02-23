@@ -7,7 +7,7 @@ use crate::{
     eth_client::EthHttpCli,
 };
 use alloy_primitives::{hex, Address, Bytes, B256, U256};
-use alloy_rpc_types::Filter;
+use alloy_rpc_types::{Filter, Log};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolEvent;
 use anyhow::{anyhow, Result};
@@ -211,6 +211,85 @@ impl BlockchainEventSource {
     pub fn set_cursor(&self, block: u64) {
         self.cursor.store(block, Ordering::Relaxed);
     }
+
+    /// Cross-verify event logs against block receipts (GRETH-011).
+    ///
+    /// Groups logs by block number, fetches receipts for each block via a separate
+    /// RPC call, and retains only logs that appear verbatim (address + topics + data)
+    /// in the canonical receipt list. Logs whose receipts cannot be fetched are
+    /// dropped (fail-closed). This detects a compromised RPC server that forges
+    /// `eth_getLogs` responses without corresponding `eth_getBlockReceipts` entries.
+    async fn verify_logs_against_receipts(&self, logs: Vec<Log>) -> Vec<Log> {
+        use std::collections::HashMap;
+
+        if logs.is_empty() {
+            return logs;
+        }
+
+        // Group log indices by block number for batched receipt fetching.
+        let mut by_block: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (i, log) in logs.iter().enumerate() {
+            if let Some(bn) = log.block_number {
+                by_block.entry(bn).or_default().push(i);
+            }
+            // Logs without block_number are kept as-is (can't verify; shouldn't
+            // happen for finalized blocks but handled defensively).
+        }
+
+        // Start by assuming every log is kept; mark failures as dropped.
+        let mut keep = vec![true; logs.len()];
+
+        for (block_number, indices) in &by_block {
+            match self.rpc_client.get_block_receipts(*block_number).await {
+                Ok(receipts) => {
+                    for &idx in indices {
+                        let log = &logs[idx];
+                        let mut found = false;
+                        'receipt_search: for receipt in &receipts {
+                            for receipt_log in receipt.logs() {
+                                if receipt_log.address() == log.address()
+                                    && receipt_log.data().topics() == log.topics()
+                                    && receipt_log.data().data == log.data().data
+                                {
+                                    found = true;
+                                    break 'receipt_search;
+                                }
+                            }
+                        }
+                        if !found {
+                            warn!(
+                                target: "blockchain_source",
+                                chain_id = self.chain_id,
+                                block_number = block_number,
+                                log_address = ?log.address(),
+                                "GRETH-011: Log not found in block receipts — \
+                                 possible RPC manipulation, dropping log"
+                            );
+                            keep[idx] = false;
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Fail-closed: drop all logs from this block if receipts are
+                    // unavailable so fabricated logs are never silently accepted.
+                    warn!(
+                        target: "blockchain_source",
+                        chain_id = self.chain_id,
+                        block_number = block_number,
+                        error = ?e,
+                        logs_dropped = indices.len(),
+                        "GRETH-011: Failed to fetch block receipts for verification, \
+                         dropping logs from block"
+                    );
+                    for &idx in indices {
+                        keep[idx] = false;
+                    }
+                }
+            }
+        }
+
+        logs.into_iter().zip(keep).filter(|(_, k)| *k).map(|(log, _)| log).collect()
+    }
 }
 
 #[async_trait]
@@ -292,7 +371,12 @@ impl OracleDataSource for BlockchainEventSource {
             "Polling for MessageSent events"
         );
 
-        let logs = self.rpc_client.get_logs(&filter).await?;
+        let raw_logs = self.rpc_client.get_logs(&filter).await?;
+
+        // GRETH-011: Receipt proof verification — cross-check each returned log against
+        // the block receipts from a second RPC call to detect RPC server manipulation.
+        let logs = self.verify_logs_against_receipts(raw_logs).await;
+
         let mut results = Vec::with_capacity(logs.len());
 
         // Filter events strictly greater than last processed nonce
