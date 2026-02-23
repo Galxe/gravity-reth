@@ -253,7 +253,7 @@
 | GRETH-008 | Low | Recovery trusts canonical tip state root without re-verification | 📝 Design decision — documented `14b6ce5152` |
 | GRETH-009 | Low | Every block immediately marked safe+finalized | 📝 Design decision — documented `14b6ce5152` (BFT guarantee) |
 | GRETH-010 | High | Oracle events extracted from all receipts incl. user txns | ✅ Fixed `f16d356915` (slice to system receipts only) |
-| GRETH-011 | High | Relayer log parsing without topic[0] / address check | ✅ Fixed `14b6ce5152` |
+| GRETH-011 | High | Relayer log parsing without receipt proof verification | ✅ Fixed `14b6ce5152` (topic[0]/address filter) + `b7ef203525` (receipt proof: cross-verify every log against `eth_getBlockReceipts`) |
 | GRETH-012 | Medium | Relayer has no reorg detection at finalized cursor | ✅ Fixed `f16d356915` (block hash check on every poll) |
 | GRETH-013 | Medium | Transaction pool discard loop unbounded O(n) | ✅ Fixed `14b6ce5152` (MAX_DISCARD_PER_BATCH=1000) |
 | GRETH-014 | Low | RocksDB WriteBatch read-your-writes limitation undocumented | 📝 Documented `14b6ce5152` |
@@ -276,7 +276,7 @@ Before sharing code with external auditors, confirm:
 - [x] GRAV-002 / GSDK-003 fixed — `a0bf499`
 - [x] GRAV-003 / GSDK-004 fixed (sentinel SSRF) — `a0bf499`
 - [x] GRAV-004 fixed — `a0bf499`
-- [x] GRETH-001–019 addressed — `cbccf02ff2`, `14b6ce5152`, `f16d356915`
+- [x] GRETH-001–019 addressed — `cbccf02ff2`, `14b6ce5152`, `f16d356915`, `b7ef203525`
 - [ ] Audit scope document updated with PR links: `docs/audit-scope-gravity-testnet-v1.0.0.md`
 - [ ] This checklist with fix commit hashes committed to `docs/`
 
@@ -312,7 +312,7 @@ Before sharing code with external auditors, confirm:
 | GRETH-008 | `14b6ce5152` (gravity-reth `bugfix/security-fixes`) | Design doc | Claude | — | 2026-02-23 |
 | GRETH-009 | `14b6ce5152` (gravity-reth `bugfix/security-fixes`) | Design doc | Claude | — | 2026-02-23 |
 | GRETH-010 | `f16d356915` (gravity-reth `bugfix/security-fixes`) | Code fix | Claude | — | 2026-02-23 |
-| GRETH-011 | `14b6ce5152` (gravity-reth `bugfix/security-fixes`) | Code fix | Claude | — | 2026-02-23 |
+| GRETH-011 | `14b6ce5152` + `b7ef203525` (gravity-reth `bugfix/security-fixes`) | Code fix | Claude | — | 2026-02-23 |
 | GRETH-012 | `f16d356915` (gravity-reth `bugfix/security-fixes`) | Code fix | Claude | — | 2026-02-23 |
 | GRETH-013 | `14b6ce5152` (gravity-reth `bugfix/security-fixes`) | Code fix | Claude | — | 2026-02-23 |
 | GRETH-014 | `14b6ce5152` (gravity-reth `bugfix/security-fixes`) | Design doc | Claude | — | 2026-02-23 |
