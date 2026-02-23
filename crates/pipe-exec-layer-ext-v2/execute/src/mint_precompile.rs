@@ -3,7 +3,7 @@
 //! This precompile allows authorized callers (JWK Manager) to mint tokens
 //! directly to specified recipient addresses.
 
-use alloy_primitives::{address, map::HashMap, Address, Bytes, U256};
+use alloy_primitives::{map::HashMap, Address, Bytes, U256};
 use grevm::ParallelState;
 use parking_lot::Mutex;
 use reth_evm::{
@@ -14,10 +14,12 @@ use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, Precompi
 use std::sync::Arc;
 use tracing::{info, warn};
 
-/// Authorized caller address (JWK Manager at 0x2018)
+use crate::onchain_config::JWK_MANAGER_ADDR;
+
+/// Authorized caller address — must be the canonical JWK Manager system address.
 ///
 /// Only this address is allowed to call the mint precompile.
-pub const AUTHORIZED_CALLER: Address = address!("0x595475934ed7d9faa7fca28341c2ce583904a44e");
+pub const AUTHORIZED_CALLER: Address = JWK_MANAGER_ADDR;
 
 /// Function ID for mint operation
 const FUNC_MINT: u8 = 0x01;
@@ -153,4 +155,18 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
     );
 
     Ok(PrecompileOutput { gas_used: MINT_BASE_GAS, bytes: Bytes::new(), reverted: false })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorized_caller_matches_jwk_manager() {
+        assert_eq!(
+            AUTHORIZED_CALLER,
+            JWK_MANAGER_ADDR,
+            "Mint precompile authorized caller must equal JWK_MANAGER_ADDR"
+        );
+    }
 }

@@ -519,7 +519,6 @@ where
         let block_hash = block.recovered_block.hash();
         let sealed_header = block.recovered_block.clone_sealed_header();
 
-        #[cfg(debug_assertions)]
         self.validate_block(block.recovered_block()).unwrap_or_else(|err| {
             panic!(
                 "Failed to validate block. error: {err:?}\n{:?}",

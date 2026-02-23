@@ -56,9 +56,21 @@ macro_rules! compress_to_buf_or_ref {
 
 /// `RocksDB` cursor with `RawIterator` caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
-    db: Arc<DB>,
-    /// Iterator for cursor operations - always ready to use
+    /// Iterator for cursor operations - always ready to use.
+    ///
+    /// # SAFETY: Drop order
+    /// This field **must** be declared before `db` so that Rust's field-declaration
+    /// drop order ensures `iterator` is dropped before the `Arc<DB>`.  If `db` were
+    /// dropped first and this `Cursor` was the last `Arc` holder, the underlying
+    /// `rocksdb::DB` object would be freed while the iterator still held a raw
+    /// reference to it, causing use-after-free.
+    ///
+    /// The `'static` lifetime is a soundness compromise: the borrow-checker cannot
+    /// express "outlives the `db` field in the same struct".  The invariant is
+    /// maintained by the field ordering and by the `Arc<DB>` keeping the database
+    /// alive for the entire lifetime of this cursor.
     iterator: rocksdb::DBRawIterator<'static>,
+    db: Arc<DB>,
     /// Cache buffer that receives compressed values.
     batch: Arc<Mutex<rocksdb::WriteBatch>>,
     buf: Vec<u8>,
@@ -85,15 +97,24 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
     ) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&db)?;
 
-        // Create iterator at construction time - always ready to use
+        // Create iterator at construction time - always ready to use.
+        //
+        // SAFETY: The iterator borrows from `db`, but we transmute the lifetime to
+        // `'static` because Rust cannot express "lifetime tied to a sibling field".
+        // Soundness is maintained by:
+        //   1. `Arc<DB>` in the `db` field keeps the database alive for the cursor's lifetime.
+        //   2. The `iterator` field is declared *before* `db` in the struct, so Rust's
+        //      field-declaration drop order drops the iterator before decrementing the Arc.
+        //   This guarantees the iterator always accesses valid memory.
         let iterator = unsafe {
-            // SAFETY: We ensure the DB outlives the iterator by holding Arc<DB>
             std::mem::transmute::<rocksdb::DBRawIterator<'_>, rocksdb::DBRawIterator<'static>>(
                 db.raw_iterator_cf(cf_handle),
             )
         };
 
-        Ok(Self { db, iterator, batch, buf: Vec::new(), _phantom: PhantomData })
+        // Field order must match the struct declaration (iterator before db) to make the
+        // drop-order invariant obvious to readers.
+        Ok(Self { iterator, db, batch, buf: Vec::new(), _phantom: PhantomData })
     }
 
     /// Encode `DupSort` composite key: key + subkey
