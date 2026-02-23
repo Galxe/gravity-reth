@@ -380,6 +380,19 @@ pub(crate) fn construct_dkg_transaction(
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
 
+    // Validate transcript size before constructing system transaction (GRETH-019)
+    const MAX_DKG_TRANSCRIPT_BYTES: usize = 512 * 1024; // 512 KB
+    if dkg_transcript.transcript_bytes.is_empty() {
+        return Err("DKG transcript is empty".into());
+    }
+    if dkg_transcript.transcript_bytes.len() > MAX_DKG_TRANSCRIPT_BYTES {
+        return Err(format!(
+            "DKG transcript too large: {} bytes (max {})",
+            dkg_transcript.transcript_bytes.len(),
+            MAX_DKG_TRANSCRIPT_BYTES
+        ));
+    }
+
     let call = finishTransitionCall { dkgResult: dkg_transcript.transcript_bytes.into() };
     let input: Bytes = call.abi_encode().into();
 

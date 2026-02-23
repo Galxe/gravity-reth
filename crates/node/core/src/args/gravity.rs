@@ -15,7 +15,7 @@ pub struct GravityArgs {
     pub disable_grevm: bool,
 
     /// The gas limit for pipe block. default `1_000_000_000`.
-    #[arg(long = "gravity.pipe-block-gas-limit", default_value_t = 1_000_000_000)]
+    #[arg(long = "gravity.pipe-block-gas-limit", default_value_t = 1_000_000_000, value_parser = clap::value_parser!(u64).range(1_000_000..=500_000_000_000))]
     pub pipe_block_gas_limit: u64,
 
     /// The max block height between merged and pesist block height.
@@ -23,7 +23,7 @@ pub struct GravityArgs {
     pub cache_max_persist_gap: u64,
 
     /// The max size of cached items
-    #[arg(long = "gravity.cache.capacity", default_value_t = 2_000_000)]
+    #[arg(long = "gravity.cache.capacity", default_value_t = 2_000_000, value_parser = clap::value_parser!(u64).range(1_000..=100_000_000))]
     pub cache_capacity: u64,
 
     /// Report db metrics. default false.
@@ -31,7 +31,7 @@ pub struct GravityArgs {
     pub report_db_metrics: bool,
 
     /// Max parallel level in nested hash
-    #[arg(long = "gravity.trie.parallel-level", default_value_t = 1)]
+    #[arg(long = "gravity.trie.parallel-level", default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=64))]
     pub trie_parallel_levels: u64,
 
     /// Worker as a validator node only, not supply history service.

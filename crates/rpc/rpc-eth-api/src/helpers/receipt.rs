@@ -71,7 +71,7 @@ pub trait LoadReceipt:
                 .convert_receipts(vec![ConvertReceiptInput {
                     tx: tx
                         .try_to_recovered_ref_unchecked()
-                        .unwrap_or_else(|_| Recovered::new_unchecked(&tx, Address::ZERO)),
+                        .unwrap_or_else(|_| Recovered::new_unchecked(&tx, alloy_primitives::address!("00000000000000000000000000000001625f0000"))),
                     gas_used: receipt.cumulative_gas_used() - gas_used,
                     receipt,
                     next_log_index,

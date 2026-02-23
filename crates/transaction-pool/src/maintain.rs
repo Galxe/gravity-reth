@@ -185,8 +185,20 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
             let mut discard_txs_rx =
                 get_pipe_exec_layer_event_bus::<N>().discard_txs.lock().await.take().unwrap();
             while let Some(discard_txs) = discard_txs_rx.recv().await {
-                debug!(target: "txpool", count=%discard_txs.len(), "discarding transactions");
-                pool.remove_transactions(discard_txs);
+                // GRETH-013: Limit batch size to prevent a single message from emptying the entire mempool.
+                const MAX_DISCARD_PER_BATCH: usize = 1_000;
+                let count = discard_txs.len();
+                if count > MAX_DISCARD_PER_BATCH {
+                    warn!(
+                        target: "txpool",
+                        count = count,
+                        limit = MAX_DISCARD_PER_BATCH,
+                        "pipe-exec discard batch exceeds limit, truncating"
+                    );
+                }
+                let truncated: Vec<_> = discard_txs.into_iter().take(MAX_DISCARD_PER_BATCH).collect();
+                debug!(target: "txpool", count=%truncated.len(), "discarding transactions from pipe-exec layer");
+                pool.remove_transactions(truncated);
             }
         });
     }

@@ -537,8 +537,11 @@ pub trait LoadTransaction: SpawnBlocking + FullEthApiTypes + RpcNodeCoreExt {
                             // Note: we assume this transaction is valid, because it's mined (or
                             // part of pending block) and already. We don't need to
                             // check for pre EIP-2 because this transaction could be pre-EIP-2.
-                            // FIXME: Hardcoded for meta txns with empty signature
-                            let signer = tx.recover_signer_unchecked().unwrap_or(Address::ZERO);
+                            // FIXME: System transactions with empty signatures need explicit type-checking.
+                            // For now, use a named constant instead of silently defaulting to zero address.
+                            // See GRETH-001.
+                            let signer = tx.recover_signer_unchecked()
+                                .unwrap_or_else(|_| alloy_primitives::address!("00000000000000000000000000000001625f0000"));
                             let transaction = Recovered::new_unchecked(tx, signer);
 
                             let tx = TransactionSource::Block {

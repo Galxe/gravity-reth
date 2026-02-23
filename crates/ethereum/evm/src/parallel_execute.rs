@@ -239,6 +239,15 @@ where
                 BundleRetention::Reverts,
             );
         }
+        // TODO (GRETH-007): The state root computed by Grevm is not verified against
+        // block.header().state_root() here. State root verification happens in the
+        // Gravity pipeline's merklization and verification stages. If Grevm produces
+        // a different state root than sequential execution (e.g., due to a parallel
+        // dependency detection bug), the discrepancy will only be caught at the
+        // verification stage, not immediately at execution time.
+        //
+        // Mitigation: The pipeline's verification stage should compare the computed
+        // state root against the expected value before marking the block as canonical.
         Ok(BlockExecutionResult { receipts, gas_used, requests })
     }
 

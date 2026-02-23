@@ -32,6 +32,10 @@ pub struct SourceState {
     pub cursor_block: u64,
     /// ISO 8601 timestamp of last update
     pub updated_at: String,
+    /// Block hash at the last confirmed processed block, used for reorg detection (GRETH-012).
+    /// If this hash changes on the next poll, a chain reorganization has occurred.
+    #[serde(default)]
+    pub last_confirmed_block_hash: Option<String>,
 }
 
 /// Root structure for persisted relayer state

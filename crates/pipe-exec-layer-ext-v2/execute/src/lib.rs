@@ -845,6 +845,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Map from (sourceType, sourceId) to latest nonce
         let mut data_records: HashMap<(u32, alloy_primitives::U256), u128> = HashMap::new();
 
+        // FIXME (GRETH-010): Oracle events (DataRecorded) are extracted from ALL transaction
+        // receipts, including user transactions. If NativeOracle.record() is callable without
+        // SYSTEM_CALLER access control, a user transaction could inject oracle data.
+        // Mitigation: ensure NativeOracle.record() is restricted to SYSTEM_CALLER on-chain,
+        // and/or filter oracle events here to only accept those from SYSTEM_CALLER transactions.
         for receipt in receipts {
             debug!(target: "execute_ordered_block",
                 number=?block_number,
@@ -1181,7 +1186,15 @@ impl<Storage: GravityStorage> Core<Storage> {
     }
 }
 
-/// Return the invalid transaction indexes.
+/// Performance-only pre-filter for invalid transactions.
+///
+/// **This is NOT a security boundary.** Cross-sender dependencies are not
+/// visible during parallel per-sender validation because each sender's account
+/// state is a local copy of the pre-block state. Invalid transactions that
+/// slip through will be definitively rejected during EVM execution.
+///
+/// The purpose of this filter is to avoid feeding obviously-invalid transactions
+/// (wrong nonce, insufficient balance) to the parallel EVM, reducing wasted work.
 fn filter_invalid_txs<DB: ParallelDatabase>(
     db: DB,
     txs: &[TransactionSigned],

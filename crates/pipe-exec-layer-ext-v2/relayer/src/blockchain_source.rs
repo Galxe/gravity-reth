@@ -220,6 +220,10 @@ impl OracleDataSource for BlockchainEventSource {
     async fn poll(&self) -> Result<Vec<OracleData>> {
         let cursor = self.cursor.load(Ordering::Relaxed);
         let finalized_block = self.rpc_client.get_finalized_block_number().await?;
+        // GRETH-012: TODO — fetch block hash at finalized_block and compare with
+        // self.state.last_confirmed_block_hash. If they differ, a reorg has occurred
+        // past the "finalized" marker and the operator must be alerted.
+        // This requires the RPC client to support get_block_hash(block_number).
         let to_block = std::cmp::min(cursor + Self::MAX_BLOCKS_PER_POLL, finalized_block);
 
         if to_block <= cursor {
@@ -247,6 +251,16 @@ impl OracleDataSource for BlockchainEventSource {
         let last_nonce = self.last_processed.lock().await.nonce;
 
         for log in logs {
+            // GRETH-011: Re-verify event signature locally — don't trust RPC filter alone.
+            if log.topics().first() != Some(&MessageSent::SIGNATURE_HASH) {
+                warn!(target: "relayer::blockchain_source", "Unexpected event signature in log, skipping");
+                continue;
+            }
+            // Re-verify contract address.
+            if log.address() != self.portal_address {
+                warn!(target: "relayer::blockchain_source", "Log from unexpected address {:?}, skipping", log.address());
+                continue;
+            }
             let nonce = if let Some(nonce_topic) = log.topics().get(1) {
                 let nonce_bytes = &nonce_topic.as_slice()[16..32];
                 u128::from_be_bytes(nonce_bytes.try_into().unwrap_or_default())

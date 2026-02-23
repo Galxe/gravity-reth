@@ -543,7 +543,15 @@ where
             )
         });
 
-        // deterministic consensus means canonical block is immediately safe and finalized
+        // ARCHITECTURAL NOTE (GRETH-009): Gravity's deterministic BFT consensus (AptosBFT with
+        // 2/3+ quorum) provides finality guarantees equivalent to Ethereum's finalized state.
+        // Blocks are only delivered via push_ordered_block() after achieving BFT consensus,
+        // so immediate finalization is the correct behavior for this consensus model.
+        //
+        // SECURITY ASSUMPTION: The gravity-sdk consensus layer is trusted to only deliver
+        // committed blocks. If a bug in gravity-sdk delivers an invalid block, it becomes
+        // immediately irrevocable from the execution layer's perspective.
+        // Defense: validate_block() (called above) provides a secondary check on block structure.
         self.canonical_in_memory_state.set_safe(sealed_header.clone());
         self.canonical_in_memory_state.set_finalized(sealed_header);
     }

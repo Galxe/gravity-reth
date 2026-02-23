@@ -59,7 +59,7 @@ fn bls_pop_verify_handler(input: PrecompileInput<'_>) -> PrecompileResult {
 /// Separated from the `PrecompileInput` wrapper to facilitate unit testing.
 fn bls_pop_verify_handler_raw(data: &[u8]) -> PrecompileResult {
     // 1. Validate input length
-    if data.len() < EXPECTED_INPUT_LEN {
+    if data.len() != EXPECTED_INPUT_LEN {
         warn!(
             target: "evm::precompile::bls_pop_verify",
             input_len = data.len(),
@@ -67,7 +67,7 @@ fn bls_pop_verify_handler_raw(data: &[u8]) -> PrecompileResult {
             "Invalid input length"
         );
         return Err(PrecompileError::Other(
-            format!("Invalid input length: {}, expected {}", data.len(), EXPECTED_INPUT_LEN).into(),
+            format!("expected exactly {} bytes, got {}", EXPECTED_INPUT_LEN, data.len()).into(),
         ));
     }
 

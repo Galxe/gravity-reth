@@ -341,8 +341,30 @@ where
                         .record(start.elapsed());
                         Ok(())
                     });
-                    state_handle.join().unwrap()?;
-                    trie_handle.join().unwrap()
+                    // GRETH-005: The two write stages (state and trie) are idempotent via per-stage
+                    // checkpoints (StageId::Execution, StageId::MerkleExecute, etc.), so if one
+                    // succeeds and the other fails, the failed stage will be retried on the next
+                    // attempt. However, cross-DB atomicity is not guaranteed at the OS level.
+                    // If the process crashes mid-write, recovery will redo only the incomplete stage.
+                    if let Err(e) = state_handle.join().unwrap() {
+                        error!(target: "persistence::save_block",
+                            block_number = block_number,
+                            error = ?e,
+                            "State write failed — trie write may have already committed; \
+                             next startup will re-run only incomplete stages via checkpoint recovery"
+                        );
+                        return Err(e);
+                    }
+                    if let Err(e) = trie_handle.join().unwrap() {
+                        error!(target: "persistence::save_block",
+                            block_number = block_number,
+                            error = ?e,
+                            "Trie write failed — state write already committed; \
+                             next startup will re-run trie stage from checkpoint"
+                        );
+                        return Err(e);
+                    }
+                    Ok(())
                 })?;
                 PERSIST_BLOCK_CACHE.persist_tip(block_number);
             }

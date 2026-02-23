@@ -218,6 +218,15 @@ fn parse_sharding_directories(raw: &str) -> Result<ShardingDirectories, String> 
     if trimmed.is_empty() {
         return Err("Sharding directories cannot be empty".to_string());
     }
+    for part in trimmed.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let p = std::path::Path::new(part);
+        if !p.is_absolute() {
+            return Err(format!("Shard path must be absolute, got: '{part}'"));
+        }
+        if p.components().any(|c| c == std::path::Component::ParentDir) {
+            return Err(format!("Shard path must not contain '..': '{part}'"));
+        }
+    }
     // Leak once to obtain a static str; acceptable because values are process-scoped config.
     Ok(Box::leak(trimmed.to_owned().into_boxed_str()))
 }

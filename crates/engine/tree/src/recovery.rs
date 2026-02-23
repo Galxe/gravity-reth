@@ -138,6 +138,12 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         provider_rw.update_pipeline_stages(recover_block_number, false)?;
         provider_rw.commit()?;
         info!(target: "engine::recovery", recover_block_number = ?recover_block_number, "Recovery completed successfully");
+        // GRETH-008 NOTE: This recovery trusts that the persisted execution state at
+        // recover_block_number is consistent with the canonical block's expected state_root.
+        // If blocks were accepted without state root validation (see GRETH-007), corrupted
+        // state can be re-committed here. A future improvement should verify:
+        //   actual_state_root == canonical_block.header.state_root
+        // before accepting the recovered state.
         Ok(())
     }
 
