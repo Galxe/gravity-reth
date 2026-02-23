@@ -2,6 +2,7 @@
 //!
 //! Persists nonce and block cursor state to disk for fast restart.
 
+use alloy_primitives::keccak256;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -36,6 +37,57 @@ pub struct SourceState {
     /// If this hash changes on the next poll, a chain reorganization has occurred.
     #[serde(default)]
     pub last_confirmed_block_hash: Option<String>,
+
+    /// keccak256 checksum over the core state fields (GRETH-017).
+    ///
+    /// Detects accidental file corruption. Computed on every write and verified
+    /// on load. Note: a determined attacker with write access could recompute this
+    /// checksum; HMAC with a node-specific key would provide stronger guarantees.
+    #[serde(default)]
+    pub checksum: Option<String>,
+}
+
+impl SourceState {
+    /// Compute the integrity checksum for this entry.
+    ///
+    /// Covers all mutable state fields so that any accidental modification
+    /// (bit flip, partial write, truncation) is detected on next load.
+    fn compute_checksum(&self) -> String {
+        let data = format!(
+            "v1:{}:{}:{}:{}:{}:{}:{}",
+            self.source_type,
+            self.source_id,
+            self.last_nonce,
+            self.last_nonce_block,
+            self.cursor_block,
+            self.updated_at,
+            self.last_confirmed_block_hash.as_deref().unwrap_or(""),
+        );
+        let hash = keccak256(data.as_bytes());
+        format!("{hash:x}")
+    }
+
+    /// Verify the stored checksum matches a freshly computed one.
+    ///
+    /// Returns `Ok(())` when no checksum is stored (backward compatibility)
+    /// or when the checksum matches. Returns an error on mismatch.
+    pub fn verify_checksum(&self) -> Result<()> {
+        if let Some(stored) = &self.checksum {
+            let expected = self.compute_checksum();
+            if stored != &expected {
+                anyhow::bail!(
+                    "State integrity check failed for source {}:{}: \
+                     checksum mismatch (expected {}, got {}). \
+                     The state file may be corrupted.",
+                    self.source_type,
+                    self.source_id,
+                    expected,
+                    stored
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Root structure for persisted relayer state
@@ -66,6 +118,23 @@ impl RelayerState {
                 "State file version {} differs from current version {}",
                 state.version, SCHEMA_VERSION
             );
+        }
+
+        // GRETH-017: verify per-source checksums to detect file corruption.
+        for (uri, source) in &state.sources {
+            if let Err(e) = source.verify_checksum() {
+                warn!(
+                    target: "relayer::persistence",
+                    uri = %uri,
+                    error = %e,
+                    "State file integrity check failed — treating as corrupted and refusing to use"
+                );
+                anyhow::bail!(
+                    "State file integrity check failed for '{}': {}",
+                    path.display(),
+                    e
+                );
+            }
         }
 
         debug!("Loaded relayer state with {} sources from {}", state.sources.len(), path.display());
@@ -112,17 +181,19 @@ impl RelayerState {
         cursor_block: u64,
     ) {
         let now = chrono::Utc::now().to_rfc3339();
-        self.sources.insert(
-            uri.to_string(),
-            SourceState {
-                source_type,
-                source_id,
-                last_nonce,
-                last_nonce_block,
-                cursor_block,
-                updated_at: now,
-            },
-        );
+        let mut state = SourceState {
+            source_type,
+            source_id,
+            last_nonce,
+            last_nonce_block,
+            cursor_block,
+            updated_at: now,
+            last_confirmed_block_hash: None,
+            checksum: None,
+        };
+        // GRETH-017: compute and store integrity checksum on every write.
+        state.checksum = Some(state.compute_checksum());
+        self.sources.insert(uri.to_string(), state);
     }
 }
 
@@ -174,5 +245,35 @@ mod tests {
         let source = loaded.get("gravity://0/31337/events").unwrap();
         assert_eq!(source.last_nonce, 42);
         assert_eq!(source.cursor_block, 12345);
+        // Checksum must be present and valid after round-trip
+        assert!(source.checksum.is_some(), "checksum should be set after update()");
+        source.verify_checksum().expect("checksum should be valid after round-trip");
+    }
+
+    #[test]
+    fn test_corrupted_state_fails_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("relayer_state.json");
+
+        let mut state = RelayerState::new();
+        state.update("gravity://0/31337/events", 0, 31337, 42, 12340, 12345);
+        state.save(&path).unwrap();
+
+        // Tamper with the file by changing last_nonce without updating the checksum.
+        // to_string_pretty uses "last_nonce": 42 (space after colon).
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("42"), "state file must contain the nonce value");
+        // Replace the nonce value (handles both compact and pretty JSON)
+        let tampered = content
+            .replace("\"last_nonce\": 42", "\"last_nonce\": 999")
+            .replace("\"last_nonce\":42", "\"last_nonce\":999");
+        assert!(tampered.contains("999"), "tamper must have taken effect");
+        std::fs::write(&path, tampered).unwrap();
+
+        // Load should fail due to checksum mismatch
+        let result = RelayerState::load(&path);
+        assert!(result.is_err(), "loading a tampered state file should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("integrity check failed"), "error should mention integrity: {err}");
     }
 }

@@ -6,7 +6,7 @@ use crate::{
     data_source::{source_types, OracleData, OracleDataSource},
     eth_client::EthHttpCli,
 };
-use alloy_primitives::{hex, Address, Bytes, U256};
+use alloy_primitives::{hex, Address, Bytes, B256, U256};
 use alloy_rpc_types::Filter;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolEvent;
@@ -17,7 +17,7 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 // GravityPortal.MessageSent event signature
 sol! {
@@ -103,6 +103,11 @@ pub struct BlockchainEventSource {
 
     /// Last event we returned to caller (for exactly-once tracking and persistence)
     last_processed: Mutex<LastProcessedEvent>,
+
+    /// Block hash at the cursor position from the previous poll (GRETH-012).
+    /// On each poll we verify the stored cursor block still has the same hash.
+    /// A mismatch means a chain reorganization has occurred past the finalized marker.
+    confirmed_cursor_hash: Mutex<Option<B256>>,
 }
 
 impl BlockchainEventSource {
@@ -136,6 +141,7 @@ impl BlockchainEventSource {
             portal_address,
             cursor: AtomicU64::new(cursor),
             last_processed: Mutex::new(LastProcessedEvent::new(latest_onchain_nonce, cursor)),
+            confirmed_cursor_hash: Mutex::new(None),
         })
     }
 
@@ -220,10 +226,52 @@ impl OracleDataSource for BlockchainEventSource {
     async fn poll(&self) -> Result<Vec<OracleData>> {
         let cursor = self.cursor.load(Ordering::Relaxed);
         let finalized_block = self.rpc_client.get_finalized_block_number().await?;
-        // GRETH-012: TODO — fetch block hash at finalized_block and compare with
-        // self.state.last_confirmed_block_hash. If they differ, a reorg has occurred
-        // past the "finalized" marker and the operator must be alerted.
-        // This requires the RPC client to support get_block_hash(block_number).
+
+        // GRETH-012: Reorg detection — verify the cursor block hash hasn't changed
+        // since the last poll. A change means the chain reorganized past the block
+        // we previously considered finalized, which requires operator intervention.
+        if cursor > 0 {
+            match self.rpc_client.get_block_hash_at(cursor).await {
+                Ok(current_hash) => {
+                    let mut stored = self.confirmed_cursor_hash.lock().await;
+                    match *stored {
+                        Some(prev_hash) if prev_hash != current_hash => {
+                            error!(
+                                target: "blockchain_source",
+                                chain_id = self.chain_id,
+                                cursor_block = cursor,
+                                prev_hash = ?prev_hash,
+                                current_hash = ?current_hash,
+                                "REORG DETECTED: cursor block hash changed — \
+                                 chain reorganization past finalized block; \
+                                 operator intervention required"
+                            );
+                            return Err(anyhow::anyhow!(
+                                "Chain reorg detected at block {} for chain {}: \
+                                 hash changed from {:?} to {:?}",
+                                cursor,
+                                self.chain_id,
+                                prev_hash,
+                                current_hash
+                            ));
+                        }
+                        _ => {
+                            *stored = Some(current_hash);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        target: "blockchain_source",
+                        chain_id = self.chain_id,
+                        cursor_block = cursor,
+                        error = ?e,
+                        "Failed to fetch cursor block hash for reorg check, skipping"
+                    );
+                }
+            }
+        }
+
         let to_block = std::cmp::min(cursor + Self::MAX_BLOCKS_PER_POLL, finalized_block);
 
         if to_block <= cursor {
@@ -323,6 +371,24 @@ impl OracleDataSource for BlockchainEventSource {
 
         // Update cursor
         self.cursor.store(to_block, Ordering::Relaxed);
+
+        // GRETH-012: Store the new cursor's block hash so the next poll can detect reorgs.
+        if to_block > cursor {
+            match self.rpc_client.get_block_hash_at(to_block).await {
+                Ok(hash) => {
+                    *self.confirmed_cursor_hash.lock().await = Some(hash);
+                }
+                Err(e) => {
+                    warn!(
+                        target: "blockchain_source",
+                        chain_id = self.chain_id,
+                        to_block = to_block,
+                        error = ?e,
+                        "Failed to store cursor block hash for reorg detection"
+                    );
+                }
+            }
+        }
 
         // Track max nonce for exactly-once semantics (atomic update of nonce + block)
         if !results.is_empty() {

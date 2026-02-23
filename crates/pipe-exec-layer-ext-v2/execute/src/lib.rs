@@ -530,8 +530,28 @@ impl<Storage: GravityStorage> Core<Storage> {
         let executed_block_hash = execution_result.block_hash;
         self.execution_result_tx.send(execution_result).ok()?;
         let block_hash = self.verified_block_hash_rx.wait(block_id).await?;
-        if let Some(block_hash) = block_hash {
-            assert_eq!(executed_block_hash, block_hash);
+        match block_hash {
+            Some(verified_hash) => {
+                // Consensus confirmed the block hash — this also verifies the state root
+                // embedded in the block header (GRETH-007).
+                assert_eq!(
+                    executed_block_hash, verified_hash,
+                    "Block hash mismatch: Grevm parallel execution produced a different result \
+                     than consensus expected — possible state root discrepancy (GRETH-007)"
+                );
+            }
+            None => {
+                // Consensus did not supply a verification hash for this block.
+                // State root integrity is unconfirmed (GRETH-007: verification skipped).
+                warn!(
+                    target: "PipeExecService.process",
+                    block_number = ?block_number,
+                    block_id = ?block_id,
+                    block_hash = ?executed_block_hash,
+                    "GRETH-007: consensus did not provide a verification hash — \
+                     state root integrity unconfirmed for this block"
+                );
+            }
         }
         let elapsed = start_time.elapsed();
         self.metrics.verify_duration.record(elapsed);
@@ -845,11 +865,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Map from (sourceType, sourceId) to latest nonce
         let mut data_records: HashMap<(u32, alloy_primitives::U256), u128> = HashMap::new();
 
-        // FIXME (GRETH-010): Oracle events (DataRecorded) are extracted from ALL transaction
-        // receipts, including user transactions. If NativeOracle.record() is callable without
-        // SYSTEM_CALLER access control, a user transaction could inject oracle data.
-        // Mitigation: ensure NativeOracle.record() is restricted to SYSTEM_CALLER on-chain,
-        // and/or filter oracle events here to only accept those from SYSTEM_CALLER transactions.
+        // Only process logs from system transaction receipts — the caller passes a slice
+        // that excludes user transaction receipts (GRETH-010 fix, see call site in
+        // execute_ordered_block). This prevents a user-controlled log from injecting
+        // oracle data even if NativeOracle.record() lacks on-chain access control.
         for receipt in receipts {
             debug!(target: "execute_ordered_block",
                 number=?block_number,
@@ -1033,8 +1052,14 @@ impl<Storage: GravityStorage> Core<Storage> {
             receipts_len=?result.execution_output.receipts.len(),
             "insert metadata and validator transaction results to executed ordered block result"
         );
+        // GRETH-010: Only extract gravity events from system transaction receipts.
+        // System txns (metadata + validators) are inserted at the front of the receipts
+        // slice by insert_to_executed_ordered_block_result; user txns follow at the back.
+        // Passing only system receipts prevents user logs from injecting oracle data.
+        let n_user_txns = result.block.body.transactions.len();
+        let n_system_receipts = result.execution_output.receipts.len().saturating_sub(n_user_txns);
         let gravity_events = self.extract_gravity_events_from_receipts(
-            &result.execution_output.receipts,
+            &result.execution_output.receipts[..n_system_receipts],
             result.block.number,
             epoch,
         );
