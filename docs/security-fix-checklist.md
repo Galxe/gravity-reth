@@ -270,7 +270,7 @@
 Before sharing code with external auditors, confirm:
 
 - [x] GRAV-001 fixed, tested (**blocker**) — `cbccf02ff2`
-- [ ] GRAV-005 fixed, tested, contracts redeployed (**blocker**) — pending contracts agent
+- [x] GRAV-005 fixed, tested (**blocker**) — `f4c8325` in `Galxe/gravity_chain_core_contracts` `bugfix/security-fixes`
 - [x] GSDK-001 fixed — `/set_failpoint` inaccessible externally — `a0bf499`
 - [x] GSDK-002 fixed — `/mem_prof` inaccessible externally — `a0bf499`
 - [x] GRAV-002 / GSDK-003 fixed — `a0bf499`
@@ -292,7 +292,7 @@ Before sharing code with external auditors, confirm:
 | GRAV-002 | `a0bf499` (gravity-sdk `bugfix/security-fixes`) | Claude | — | 2026-02-23 |
 | GRAV-003 | `a0bf499` (gravity-sdk `bugfix/security-fixes`) | Claude | — | 2026-02-23 |
 | GRAV-004 | `a0bf499` (gravity-sdk `bugfix/security-fixes`) | Claude | — | 2026-02-23 |
-| GRAV-005 | — (contracts repo, separate agent) | — | — | — |
+| GRAV-005 | `f4c8325` (gravity_chain_core_contracts `bugfix/security-fixes`) | Claude | — | 2026-02-23 |
 | GSDK-001 | `a0bf499` (gravity-sdk `bugfix/security-fixes`) | Claude | — | 2026-02-23 |
 | GSDK-002 | `a0bf499` (gravity-sdk `bugfix/security-fixes`) | Claude | — | 2026-02-23 |
 | GSDK-003 | `a0bf499` (gravity-sdk `bugfix/security-fixes`) | Claude | — | 2026-02-23 |
