@@ -3,6 +3,7 @@ name: Claude Security Review
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,8 +11,7 @@ permissions:
 
 jobs:
   security-review:
-    # Only run after maintainer approval for external PRs
-    if: github.event.pull_request.draft == false
+    if: github.event.pull_request.draft == false || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -19,7 +19,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Run Claude Security Review
         uses: anthropics/claude-code-security-review@main
@@ -27,4 +27,5 @@ jobs:
           claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
           claude-model: claude-sonnet-4-6
           claudecode-timeout: 25
+          run-every-commit: true
           exclude-directories: "docs,tests,benches,.github"
