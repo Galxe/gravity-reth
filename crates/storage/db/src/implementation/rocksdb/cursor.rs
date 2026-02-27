@@ -274,7 +274,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     ///
     /// Writes are buffered in a `WriteBatch` and are **not visible to subsequent
     /// read operations** (`seek`, `current`, `get`) on the same cursor within the
-    /// same transaction. Reads always query the live RocksDB state, which does not
+    /// same transaction. Reads always query the live `RocksDB` state, which does not
     /// include uncommitted batch writes.
     ///
     /// Callers must not rely on read-your-writes semantics within a single cursor.
