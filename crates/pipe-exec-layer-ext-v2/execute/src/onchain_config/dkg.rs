@@ -380,6 +380,32 @@ pub(crate) fn construct_dkg_transaction(
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
 
+    // Validate transcript size before constructing system transaction
+    //
+    // IMPORTANT: MAX_DKG_TRANSCRIPT_BYTES is a consensus-critical parameter.
+    // Changing this value affects which transcripts are accepted by the execution layer.
+    // - Increasing this limit requires a coordinated hardfork: all nodes must upgrade before a
+    //   larger transcript is submitted, otherwise non-upgraded nodes will reject the transcript and
+    //   fork.
+    // - Decreasing this limit is NOT safe: it could cause previously valid on-chain transcripts to
+    //   be rejected during re-execution / sync, breaking consensus.
+    // - The current value (100 MB) is generous. The weighted transcript size is approximately 336 *
+    //   W bytes (3×G1 + 2×G2 per weight unit = 3×48 + 2×96 = 336 bytes/weight). With equal weights
+    //   (W=n), 100 MB supports ~312K validators; with average weight ~20 per validator (as in
+    //   mainnet benchmarks), it supports ~15K validators. See gravity-aptos
+    //   pvss::das::WeightedTranscript for size analysis.
+    const MAX_DKG_TRANSCRIPT_BYTES: usize = 100 * 1024 * 1024; // 100 MB
+    if dkg_transcript.transcript_bytes.is_empty() {
+        return Err("DKG transcript is empty".into());
+    }
+    if dkg_transcript.transcript_bytes.len() > MAX_DKG_TRANSCRIPT_BYTES {
+        return Err(format!(
+            "DKG transcript too large: {} bytes (max {})",
+            dkg_transcript.transcript_bytes.len(),
+            MAX_DKG_TRANSCRIPT_BYTES
+        ));
+    }
+
     let call = finishTransitionCall { dkgResult: dkg_transcript.transcript_bytes.into() };
     let input: Bytes = call.abi_encode().into();
 
