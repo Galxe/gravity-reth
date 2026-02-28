@@ -10,6 +10,8 @@ Date: 2026-02-23
 
 **Files:** `crates/storage/db/src/implementation/rocksdb/cursor.rs`
 
+**Review Comments** reviewer: neko; state: accepted; comments: Accepted.
+
 ## GRETH-015: BLS Precompile Over-Length Input Accepted
 
 **Problem:** BLS PoP verification precompile checks `data.len() < EXPECTED_INPUT_LEN` (144 bytes) but allows arbitrarily long input. Extra trailing bytes silently ignored. Could serve as covert channel.
@@ -17,6 +19,8 @@ Date: 2026-02-23
 **Fix:** Changed to strict equality: `data.len() != EXPECTED_INPUT_LEN`. Returns `PrecompileError::Other` with descriptive message including expected and actual lengths.
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/bls_precompile.rs`
+
+**Review Comments** reviewer: neko; state: accepted; comments: Accepted.
 
 ## GRETH-016: filter_invalid_txs Parallel Pre-Filter (Documentation)
 
@@ -26,6 +30,8 @@ Date: 2026-02-23
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
 
+**Review Comments** reviewer: neko; state: rejected; comments: The statement "each sender's account state is a local copy of the pre-block state" does not lead to invalid transactions slipping through. On the contrary, it may cause false positives — transactions that would actually be valid during EVM execution (due to cross-sender incoming transfers) are incorrectly marked as invalid by this pre-filter. The documentation comment should be corrected to: "Cross-sender dependencies (e.g. incoming transfers from other senders in the same block) are not visible during parallel per-sender validation because each sender's account state is a local copy of the pre-block state. This means the filter may produce false positives (marking valid transactions as invalid) but will not produce false negatives (letting truly invalid transactions through)."
+
 ## GRETH-017: Relayer State File No Integrity Protection
 
 **Problem:** Relayer state (last nonce, cursor position) persisted as plain JSON with no checksum. A filesystem-level attacker can roll back `last_nonce` to cause duplicate oracle writes or advance it to skip events.
@@ -33,6 +39,8 @@ Date: 2026-02-23
 **Fix:** Added keccak256 checksum. On save, compute `keccak256(content)` and append as hex string field. On load, verify checksum matches content. Reject state file if checksum is missing or invalid, forcing fresh sync.
 
 **Files:** `crates/pipe-exec-layer-ext-v2/relayer/src/persistence.rs`
+
+**Review Comments** reviewer: neko; state: rejected; comments: (1) Defense against attackers is invalid — keccak256(content) is a keyless public algorithm and the code is open source. Any attacker with filesystem write access can modify last_nonce and recompute a valid checksum. Defending against a real attacker requires at minimum HMAC with a node-exclusive secret key. (2) Defense against process crashes is redundant — save() already uses a write-temp-then-rename atomic write pattern, so abnormal process exit will not produce half-written files. The checksum adds no incremental value in this scenario. (3) Defense against disk bit rot is theoretically valid but practically negligible — modern hardware ECC, mainstream filesystems (ZFS/Btrfs have data checksums; even ext4 without them), and cloud block storage end-to-end verification make the probability of "a bit flip that changes a numeric value while keeping the JSON structurally valid" approach zero.
 
 ## GRETH-018: Gravity CLI Args Accept Out-of-Range Values
 
@@ -44,6 +52,8 @@ Date: 2026-02-23
 - `trie.parallel-level`: 1..=64
 
 **Files:** `crates/node/core/src/args/gravity.rs`
+
+**Review Comments** reviewer: neko; state: accepted; comments: Accepted.
 
 ## GRETH-019: DKG Transcript Not Size-Validated
 

@@ -60,6 +60,8 @@ Date: 2026-02-23
 
 **Files:** `crates/pipe-exec-layer-ext-v2/relayer/src/blockchain_source.rs`, `crates/pipe-exec-layer-ext-v2/relayer/src/eth_client.rs`
 
+**Review Comments** reviewer: neko; state: rejected; comments: Currently verify_logs_against_receipts uses self.rpc_client.get_block_receipts() to cross-verify logs returned by eth_getLogs. However, both RPC calls go through the same rpc_client (i.e., the same RPC endpoint). If the RPC node is fully compromised, an attacker can forge both eth_getLogs and eth_getBlockReceipts responses to be consistent with each other, rendering the cross-verification ineffective.
+
 ## GRETH-012: Relayer Has No Reorg Detection
 
 **Problem:** Relayer polls up to "finalized" block from RPC but does not verify the block hash remains stable across polls. A source chain reorg past finality could cause already-relayed events to be undone.
@@ -68,6 +70,8 @@ Date: 2026-02-23
 
 **Files:** `crates/pipe-exec-layer-ext-v2/relayer/src/blockchain_source.rs`
 
+**Review Comments** reviewer: neko; state: rejected; comments: Unnecessary. The eth_getLogs requests only query up to the finalized block number, so reorg detection is not needed.
+
 ## GRETH-013: Transaction Pool Discard Unbounded
 
 **Problem:** `discard_txs` event bus can remove unlimited transactions in a single message. Any crate with event bus access can drain the entire mempool.
@@ -75,3 +79,5 @@ Date: 2026-02-23
 **Fix:** Added `MAX_DISCARD_PER_BATCH = 1000` limit. Batches exceeding the limit are truncated with `warn!` logging. Each discard operation logged at warn level with transaction count and sample hashes.
 
 **Files:** `crates/transaction-pool/src/maintain.rs`
+
+**Review Comments** reviewer: neko; state: rejected; comments: The proposed change alters semantics. The current behavior intentionally discards all specified transactions, and truncating to MAX_DISCARD_PER_BATCH would leave stale transactions in the pool. All discard_txs must be fully processed, not partially truncated.
