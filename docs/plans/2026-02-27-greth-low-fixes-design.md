@@ -18,6 +18,8 @@ Date: 2026-02-27
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
 
+**Review Comments** reviewer: neko; state: pending; comments: @lightman The current implementation maintains two separate state tracks (EVM `inner_state` + precompile `ParallelState`) and merges them with `HashMap::insert`, which is fragile. The root cause is that the `DynPrecompile` interface cannot access the EVM's internal state, forcing the mint precompile to use a side-channel `ParallelState`. This dual-state design is too tricky and the shallow merge is a latent bug. Needs further discussion on whether we can unify the state path (e.g., via `StatefulPrecompile` or restructuring the mint logic outside the precompile interface).
+
 ## GRETH-027: GRETH-011 Cross-Verification Uses Same RPC Endpoint (Informational)
 
 **Problem:** This is a reiteration of reviewer neko's existing rejection on GRETH-011. Both `eth_getLogs` and `eth_getBlockReceipts` calls in `blockchain_source.rs` go through the same `self.rpc_client` (same RPC endpoint). A fully compromised RPC can forge both responses to be mutually consistent, making the cross-verification ineffective against a compromised-RPC threat model.
