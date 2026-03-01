@@ -10,6 +10,8 @@ Date: 2026-02-27
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
 
+**Review Comments** reviewer: neko; state: rejected; comments: The checks cover critical logic bugs that should only be detected in the test environment. There is no need to enable them in production builds.
+
 ## GRETH-025: System Transaction Failure Silently Continues Block Execution
 
 **Problem:** In `transact_system_txn` (`metadata_txn.rs:L198–L203`), when a system transaction execution fails (reverts), only `log_execution_error()` is called — execution continues normally. The caller in `lib.rs:L692–L696` proceeds to commit state changes from the failed transaction via `evm.db_mut().commit(metadata_state_changes.clone())` and checks its logs for epoch-change events. A reverted metadata transaction would have empty/invalid logs, causing the epoch-change check to silently skip. Additionally, `into_executed_ordered_block_result` (`metadata_txn.rs:L123–L128`) hardcodes `success: true` in the receipt regardless of actual execution outcome, making failed system transactions indistinguishable from successful ones on-chain.
