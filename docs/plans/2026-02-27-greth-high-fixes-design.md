@@ -19,3 +19,5 @@ Date: 2026-02-27
 **Fix:** Either (a) assert that system transactions always succeed — `assert!(result.result.is_success(), "system txn must succeed: {result:?}")` — or (b) propagate the failure as an `Err` and halt block processing. Set `receipt.success` from `result.is_success()` instead of hardcoding `true`.
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/metadata_txn.rs`, `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
+
+**Review Comments** reviewer: neko; state: pending; comments: @lightman Fix implemented: (1) `transact_system_txn` now asserts success instead of silently logging errors — a reverted system txn indicates corrupted chain state and must halt the node. (2) Receipt `success` field now derives from `result.is_success()` instead of hardcoding `true`, making failed system txns observable on-chain. Please review whether assert-and-panic is acceptable for production, or if we should propagate `Err` and halt block processing gracefully instead.

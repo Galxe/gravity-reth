@@ -122,7 +122,8 @@ impl SystemTxnResult {
                 result: BlockExecutionResult {
                     receipts: vec![Receipt {
                         tx_type,
-                        success: true,
+                        // GRETH-025: use actual execution result instead of hardcoding true
+                        success: self.result.is_success(),
                         cumulative_gas_used: gas_used,
                         logs: self.result.into_logs(),
                     }],
@@ -173,7 +174,8 @@ impl SystemTxnResult {
             insert_position,
             Receipt {
                 tx_type: self.txn.tx_type(),
-                success: true,
+                // GRETH-025: use actual execution result instead of hardcoding true
+                success: self.result.is_success(),
                 cumulative_gas_used,
                 logs: self.result.into_logs(),
             },
@@ -197,10 +199,13 @@ pub fn transact_system_txn(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
 
-    // Log any execution errors with appropriate severity
-    if !result.result.is_success() {
-        super::errors::log_execution_error(&result.result);
-    }
+    // GRETH-025: System transactions MUST succeed — a revert indicates corrupted
+    // chain state. Halt immediately instead of silently continuing.
+    assert!(
+        result.result.is_success(),
+        "system transaction must succeed but got: {:?}",
+        result.result
+    );
 
     (SystemTxnResult { result: result.result, txn }, result.state)
 }
