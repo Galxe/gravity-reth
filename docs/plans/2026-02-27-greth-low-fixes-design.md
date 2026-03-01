@@ -26,6 +26,8 @@ Date: 2026-02-27
 
 **Files:** `crates/pipe-exec-layer-ext-v2/relayer/src/blockchain_source.rs`
 
+**Review Comments** reviewer: neko; state: rejected; comments: Acknowledged as an architectural limitation. No adjustment planned at this time.
+
 ## GRETH-028: Block Timestamp Sanity Check Debug-Only (Subset of GRETH-021)
 
 **Problem:** The timestamp sanity check at `lib.rs:L327–L334` detects when a block timestamp is in milliseconds or microseconds instead of seconds (by checking `timestamp > now_secs * 2`). This is critical for catching bugs in the `timestamp_us / 1_000_000` conversion (L579, L958), but is compiled out in release builds as part of the `#[cfg(debug_assertions)]` block described in GRETH-021.
@@ -33,3 +35,5 @@ Date: 2026-02-27
 **Fix:** Addressed as part of GRETH-021. When the `#[cfg(debug_assertions)]` guard is removed, this check will automatically run in production.
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
+
+**Review Comments** reviewer: neko; state: rejected; comments: Same rationale as GRETH-021 — the checks cover critical logic bugs that should only be detected in the test environment. There is no need to enable them in production builds.
