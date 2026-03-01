@@ -88,7 +88,8 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
 
     // 2. Parameter length check (1 + 20 + 32 = 53 bytes)
     const EXPECTED_LEN: usize = 1 + 20 + 32;
-    if input.data.len() < EXPECTED_LEN {
+    // GRETH-020: strict equality check — reject trailing bytes
+    if input.data.len() != EXPECTED_LEN {
         warn!(
             target: "evm::precompile::mint_token",
             input_len = input.data.len(),
@@ -164,8 +165,7 @@ mod tests {
     #[test]
     fn authorized_caller_matches_jwk_manager() {
         assert_eq!(
-            AUTHORIZED_CALLER,
-            JWK_MANAGER_ADDR,
+            AUTHORIZED_CALLER, JWK_MANAGER_ADDR,
             "Mint precompile authorized caller must equal JWK_MANAGER_ADDR"
         );
     }

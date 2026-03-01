@@ -10,6 +10,8 @@ Date: 2026-02-27
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/mint_precompile.rs`
 
+**Review Comments** reviewer: neko; state: accepted; comments: Straightforward fix. Changed `<` to `!=` on the input length check, consistent with the BLS precompile fix in GRETH-015.
+
 ## GRETH-022: Unsafe `Send` Impl on MutexGuard Wrapper in Channel
 
 **Problem:** `channel.rs:L57–L58` defines `struct SendMutexGuard<'a, T>(MutexGuard<'a, T>)` with `unsafe impl<'a, T> Send for SendMutexGuard<'a, T> {}`. The safety comment claims `.await` will not occur within the critical zone, but this invariant is not compiler-enforced. `MutexGuard` is deliberately `!Send` because holding a lock across `.await` points can cause deadlocks (the tokio runtime may resume the task on a different thread). A future refactor that adds `.await` while the guard is held would silently compile but introduce undefined behavior or deadlocks.
