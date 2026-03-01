@@ -29,3 +29,5 @@ Date: 2026-02-27
 **Fix:** Either (a) change the parameter type to `PathBuf` (removing the `Option`) and fix all call sites including `Default`, or (b) handle `None` gracefully by defaulting to a temporary directory or disabling persistence.
 
 **Files:** `crates/pipe-exec-layer-ext-v2/relayer/src/oracle_manager.rs`
+
+**Review Comments** reviewer: neko; state: pending; comments: @AlexYue `OracleRelayerManager` currently has zero external call sites — it is exported via `pub use` but never constructed anywhere in the codebase. The `Default` impl calls `Self::new(None)` which unconditionally panics at `datadir.unwrap()`. Recommend Plan (a): change parameter type from `Option<PathBuf>` to `PathBuf`, remove the `Default` impl entirely (no sensible default exists), so the compiler forces future callers to provide a valid `datadir`. Please confirm whether this module is planned for integration and if there are any downstream consumers we are not seeing.
