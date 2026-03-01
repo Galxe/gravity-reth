@@ -20,6 +20,8 @@ Date: 2026-02-27
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/channel.rs`
 
+**Review Comments** reviewer: neko; state: accepted; comments: Adopted Plan B — removed `unsafe impl Send` for `SendMutexGuard` and used block scoping to constrain `MutexGuard` lifetime before `.await`. This is compiler-enforced safety with zero call-site changes and no async lock overhead.
+
 ## GRETH-023: OracleRelayerManager::new Panics on None Datadir
 
 **Problem:** `oracle_manager.rs:L134` calls `datadir.unwrap()` on an `Option<PathBuf>` parameter. The function signature `fn new(datadir: Option<PathBuf>) -> Self` advertises that `datadir` is optional, but the implementation panics if `None` is passed. This can crash the node at startup if the relayer is configured without a data directory. The `Default` impl at L122–L126 calls `Self::new(None)`, guaranteeing a panic.
