@@ -119,19 +119,12 @@ pub struct OracleRelayerManager {
     state: RwLock<RelayerState>,
 }
 
-impl Default for OracleRelayerManager {
-    fn default() -> Self {
-        Self::new(None)
-    }
-}
-
 impl OracleRelayerManager {
     /// Create a new OracleRelayerManager with optional persistence
     ///
     /// # Arguments
     /// * `datadir` - Optional path to data directory for state persistence
-    pub fn new(datadir: Option<PathBuf>) -> Self {
-        let datadir = datadir.unwrap();
+    pub fn new(datadir: PathBuf) -> Self {
         let state = load_state_if_exists(&datadir).unwrap_or_else(RelayerState::new);
 
         Self { sources: RwLock::new(HashMap::new()), datadir, state: RwLock::new(state) }
