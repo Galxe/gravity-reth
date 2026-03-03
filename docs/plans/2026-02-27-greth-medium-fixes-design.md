@@ -10,6 +10,8 @@ Date: 2026-02-27
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/mint_precompile.rs`
 
+**Review Comments** reviewer: neko; state: accepted; comments: Straightforward fix. Changed `<` to `!=` on the input length check, consistent with the BLS precompile fix in GRETH-015.
+
 ## GRETH-022: Unsafe `Send` Impl on MutexGuard Wrapper in Channel
 
 **Problem:** `channel.rs:L57–L58` defines `struct SendMutexGuard<'a, T>(MutexGuard<'a, T>)` with `unsafe impl<'a, T> Send for SendMutexGuard<'a, T> {}`. The safety comment claims `.await` will not occur within the critical zone, but this invariant is not compiler-enforced. `MutexGuard` is deliberately `!Send` because holding a lock across `.await` points can cause deadlocks (the tokio runtime may resume the task on a different thread). A future refactor that adds `.await` while the guard is held would silently compile but introduce undefined behavior or deadlocks.
@@ -18,6 +20,8 @@ Date: 2026-02-27
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/channel.rs`
 
+**Review Comments** reviewer: neko; state: accepted; comments: Adopted Plan B — removed `unsafe impl Send` for `SendMutexGuard` and used block scoping to constrain `MutexGuard` lifetime before `.await`. This is compiler-enforced safety with zero call-site changes and no async lock overhead.
+
 ## GRETH-023: OracleRelayerManager::new Panics on None Datadir
 
 **Problem:** `oracle_manager.rs:L134` calls `datadir.unwrap()` on an `Option<PathBuf>` parameter. The function signature `fn new(datadir: Option<PathBuf>) -> Self` advertises that `datadir` is optional, but the implementation panics if `None` is passed. This can crash the node at startup if the relayer is configured without a data directory. The `Default` impl at L122–L126 calls `Self::new(None)`, guaranteeing a panic.
@@ -25,3 +29,5 @@ Date: 2026-02-27
 **Fix:** Either (a) change the parameter type to `PathBuf` (removing the `Option`) and fix all call sites including `Default`, or (b) handle `None` gracefully by defaulting to a temporary directory or disabling persistence.
 
 **Files:** `crates/pipe-exec-layer-ext-v2/relayer/src/oracle_manager.rs`
+
+**Review Comments** reviewer: AlexYue; state: accepted; comments: Adopted Plan A `OracleRelayerManager` currently has zero external call sites — it is exported via `pub use` but never constructed anywhere in the codebase. The `Default` impl calls `Self::new(None)` which unconditionally panics at `datadir.unwrap()`. Recommend Plan (a): change parameter type from `Option<PathBuf>` to `PathBuf`, remove the `Default` impl entirely (no sensible default exists), so the compiler forces future callers to provide a valid `datadir`. Please confirm whether this module is planned for integration and if there are any downstream consumers we are not seeing.
