@@ -10,7 +10,7 @@ use alloy_evm::{
     precompiles::DynPrecompile,
     EvmEnv,
 };
-use alloy_primitives::{map::HashMap, Address};
+use alloy_primitives::{keccak256, map::HashMap, Address, Bytes};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
@@ -25,6 +25,7 @@ use reth_evm::{
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction};
 use revm::{
+    bytecode::Bytecode,
     database::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
@@ -187,6 +188,24 @@ where
             *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
                 drained_balance;
         }
+
+        // Gravity TestNetV1_1 hardfork: upgrade Staking contract code
+        if self.chain_spec.testnet_v1_1_transitions_at_block(block.number()) {
+            use crate::gravity_hardfork::{STAKING_ADDRESS, STAKING_V1_1_RUNTIME_BYTECODE};
+            let new_bytecode = Bytecode::new_raw(Bytes::from_static(STAKING_V1_1_RUNTIME_BYTECODE));
+            let code_hash = keccak256(STAKING_V1_1_RUNTIME_BYTECODE);
+
+            let mut account = state
+                .load_mut_cache_account(STAKING_ADDRESS)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+            if let Some(ref mut info) = account.account {
+                info.code_hash = code_hash;
+                info.code = Some(new_bytecode.clone());
+            }
+            // Also update the contracts cache so the new code is used for subsequent calls
+            state.cache.contracts.insert(code_hash, new_bytecode);
+        }
+
         // increment balances
         state
             .increment_balances(balance_increments.clone())
@@ -273,9 +292,15 @@ fn post_block_balance_increments<ChainSpec, Block>(
     block: &RecoveredBlock<Block>,
 ) -> HashMap<Address, u128>
 where
-    ChainSpec: EthereumHardforks,
+    ChainSpec: EthereumHardforks + EthChainSpec,
     Block: reth_primitives_traits::Block,
 {
+    // After TestNetV1_1 hardfork, skip all post-block balance increments
+    // (disables PoW block rewards and DAO fork irregularities)
+    if chain_spec.is_testnet_v1_1_active_at_block_number(block.header().number()) {
+        return HashMap::default();
+    }
+
     let mut balance_increments = HashMap::default();
 
     // Add block rewards if they are enabled.

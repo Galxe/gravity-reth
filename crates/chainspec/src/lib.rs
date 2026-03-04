@@ -16,6 +16,8 @@ mod constants;
 pub use constants::*;
 
 mod api;
+/// Gravity-specific hardforks module.
+mod gravity;
 /// The chain info module.
 mod info;
 /// The chain spec module.
@@ -26,6 +28,7 @@ pub use alloy_chains::{Chain, ChainKind, NamedChain};
 pub use reth_ethereum_forks::*;
 
 pub use api::EthChainSpec;
+pub use gravity::GravityHardfork;
 pub use info::ChainInfo;
 #[cfg(any(test, feature = "test-utils"))]
 pub use spec::test_fork_ids;

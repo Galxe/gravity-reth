@@ -65,6 +65,7 @@ pub mod execute {
     pub type EthExecutorProvider = EthEvmConfig;
 }
 
+pub mod gravity_hardfork;
 pub mod parallel_execute;
 
 mod build;
