@@ -189,9 +189,14 @@ where
                 drained_balance;
         }
 
-        // Gravity TestNetV1_1 hardfork: upgrade Staking contract code
+        // Gravity TestNetV1_1 hardfork: upgrade Staking and StakePool contract code
         if self.chain_spec.testnet_v1_1_transitions_at_block(block.number()) {
-            use crate::gravity_hardfork::{STAKING_ADDRESS, STAKING_V1_1_RUNTIME_BYTECODE};
+            use crate::gravity_hardfork::{
+                STAKEPOOL_ADDRESSES, STAKEPOOL_V1_1_RUNTIME_BYTECODE, STAKING_ADDRESS,
+                STAKING_V1_1_RUNTIME_BYTECODE,
+            };
+
+            // Upgrade Staking contract
             let new_bytecode = Bytecode::new_raw(Bytes::from_static(STAKING_V1_1_RUNTIME_BYTECODE));
             let code_hash = keccak256(STAKING_V1_1_RUNTIME_BYTECODE);
 
@@ -202,8 +207,23 @@ where
                 info.code_hash = code_hash;
                 info.code = Some(new_bytecode.clone());
             }
-            // Also update the contracts cache so the new code is used for subsequent calls
             state.cache.contracts.insert(code_hash, new_bytecode);
+
+            // Upgrade all StakePool contracts
+            let pool_bytecode =
+                Bytecode::new_raw(Bytes::from_static(STAKEPOOL_V1_1_RUNTIME_BYTECODE));
+            let pool_code_hash = keccak256(STAKEPOOL_V1_1_RUNTIME_BYTECODE);
+
+            for pool_address in STAKEPOOL_ADDRESSES {
+                let mut pool_account = state
+                    .load_mut_cache_account(pool_address)
+                    .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+                if let Some(ref mut info) = pool_account.account {
+                    info.code_hash = pool_code_hash;
+                    info.code = Some(pool_bytecode.clone());
+                }
+            }
+            state.cache.contracts.insert(pool_code_hash, pool_bytecode);
         }
 
         // increment balances
