@@ -203,17 +203,22 @@ where
             let code_hash = keccak256(STAKING_V1_1_RUNTIME_BYTECODE);
 
             {
-                let staking_account = state
+                let mut staking_account = state
                     .load_mut_cache_account(STAKING_ADDRESS)
                     .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-                if let Some(ref info) = staking_account.account {
-                    let mut new_info = info.clone();
-                    new_info.code_hash = code_hash;
-                    new_info.code = Some(new_bytecode.clone());
+                if let Some(ref mut info) = staking_account.account {
+                    let new_info = info.clone();
+                    // Update cache directly so EVM reads new bytecode
+                    info.code_hash = code_hash;
+                    info.code = Some(new_bytecode.clone());
+                    // Also record change for persistence
+                    let mut changed_info = new_info;
+                    changed_info.code_hash = code_hash;
+                    changed_info.code = Some(new_bytecode.clone());
                     hardfork_changes.insert(
                         STAKING_ADDRESS,
                         Account {
-                            info: new_info,
+                            info: changed_info,
                             storage: Default::default(),
                             status: AccountStatus::Touched,
                             transaction_id: 0,
@@ -229,28 +234,34 @@ where
             let pool_code_hash = keccak256(STAKEPOOL_V1_1_RUNTIME_BYTECODE);
 
             for pool_address in STAKEPOOL_ADDRESSES {
-                let pool_account = state
-                    .load_mut_cache_account(pool_address)
-                    .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-                if let Some(ref info) = pool_account.account {
-                    let mut new_info = info.clone();
-                    new_info.code_hash = pool_code_hash;
-                    new_info.code = Some(pool_bytecode.clone());
-                    hardfork_changes.insert(
-                        pool_address,
-                        Account {
-                            info: new_info,
-                            storage: Default::default(),
-                            status: AccountStatus::Touched,
-                            transaction_id: 0,
-                        },
-                    );
+                {
+                    let mut pool_account = state
+                        .load_mut_cache_account(pool_address)
+                        .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+                    if let Some(ref mut info) = pool_account.account {
+                        let new_info = info.clone();
+                        // Update cache directly so EVM reads new bytecode
+                        info.code_hash = pool_code_hash;
+                        info.code = Some(pool_bytecode.clone());
+                        // Also record change for persistence
+                        let mut changed_info = new_info;
+                        changed_info.code_hash = pool_code_hash;
+                        changed_info.code = Some(pool_bytecode.clone());
+                        hardfork_changes.insert(
+                            pool_address,
+                            Account {
+                                info: changed_info,
+                                storage: Default::default(),
+                                status: AccountStatus::Touched,
+                                transaction_id: 0,
+                            },
+                        );
+                    }
                 }
             }
             state.cache.contracts.insert(pool_code_hash, pool_bytecode);
 
-            // Commit changes through the proper state transition mechanism
-            // to ensure they are tracked and persisted to the database
+            // Commit changes to create transitions for database persistence
             state.commit(hardfork_changes);
         }
 
