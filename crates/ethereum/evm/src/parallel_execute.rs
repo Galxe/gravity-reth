@@ -190,21 +190,21 @@ where
         }
 
         // Gravity TestNetV1_1 hardfork: upgrade Staking contract code
-        // if self.chain_spec.testnet_v1_1_transitions_at_block(block.number()) {
-        //     use crate::gravity_hardfork::{STAKING_ADDRESS, STAKING_V1_1_RUNTIME_BYTECODE};
-        //     let new_bytecode = Bytecode::new_raw(Bytes::from_static(STAKING_V1_1_RUNTIME_BYTECODE));
-        //     let code_hash = keccak256(STAKING_V1_1_RUNTIME_BYTECODE);
+        if self.chain_spec.testnet_v1_1_transitions_at_block(block.number()) {
+            use crate::gravity_hardfork::{STAKING_ADDRESS, STAKING_V1_1_RUNTIME_BYTECODE};
+            let new_bytecode = Bytecode::new_raw(Bytes::from_static(STAKING_V1_1_RUNTIME_BYTECODE));
+            let code_hash = keccak256(STAKING_V1_1_RUNTIME_BYTECODE);
 
-        //     let mut account = state
-        //         .load_mut_cache_account(STAKING_ADDRESS)
-        //         .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-        //     if let Some(ref mut info) = account.account {
-        //         info.code_hash = code_hash;
-        //         info.code = Some(new_bytecode.clone());
-        //     }
-        //     // Also update the contracts cache so the new code is used for subsequent calls
-        //     state.cache.contracts.insert(code_hash, new_bytecode);
-        // }
+            let mut account = state
+                .load_mut_cache_account(STAKING_ADDRESS)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+            if let Some(ref mut info) = account.account {
+                info.code_hash = code_hash;
+                info.code = Some(new_bytecode.clone());
+            }
+            // Also update the contracts cache so the new code is used for subsequent calls
+            state.cache.contracts.insert(code_hash, new_bytecode);
+        }
 
         // increment balances
         state
