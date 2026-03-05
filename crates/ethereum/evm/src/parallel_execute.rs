@@ -191,10 +191,6 @@ where
 
         // Gravity TestNetV1_1 hardfork: upgrade Staking and StakePool contract code
         if self.chain_spec.testnet_v1_1_transitions_at_block(block.number()) {
-            println!(
-                "\n[HARDFORK DEBUG] APPLYING TESTNET V1.1 HARDFORK BYTECODE CHANGES at block {}",
-                block.number()
-            );
             use crate::gravity_hardfork::{
                 STAKEPOOL_ADDRESSES, STAKEPOOL_V1_1_RUNTIME_BYTECODE, STAKING_ADDRESS,
                 STAKING_V1_1_RUNTIME_BYTECODE,
