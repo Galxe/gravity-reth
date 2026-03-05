@@ -86,7 +86,7 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
 
     // 2. Parameter length check (1 + 20 + 32 = 53 bytes)
     const EXPECTED_LEN: usize = 1 + 20 + 32;
-    if input.data.len() < EXPECTED_LEN {
+    if input.data.len() != EXPECTED_LEN {
         warn!(
             target: "evm::precompile::mint_token",
             input_len = input.data.len(),
