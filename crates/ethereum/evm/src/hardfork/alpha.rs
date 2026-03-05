@@ -13,7 +13,7 @@ pub const STAKEPOOL_ADDRESSES: [Address; 4] = [
     address!("ce128222bd84d67672f863424a03d114cd1253c5"),
     address!("78f595fb25d03a742338fb32acfd544bdc63d814"),
     address!("891299fe364088ead65aba911ea17dd5d968cd81"),
-    address!("f5871dcc1aa6fdaa9fed4ce2a8a34f9d5c438f23"),
+    address!("b99aa922eb5cae399b79adc87621e72f66d5a976"),
 ];
 
 /// New Staking contract runtime bytecode for Alpha hardfork.

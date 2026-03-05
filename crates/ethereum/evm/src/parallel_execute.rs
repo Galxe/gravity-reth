@@ -190,7 +190,7 @@ where
         }
         // Gravity Alpha hardfork: upgrade Staking and StakePool contract code
         if self.chain_spec.alpha_transitions_at_block(block.number()) {
-            use crate::gravity_hardfork::{
+            use crate::hardfork::alpha::{
                 STAKEPOOL_ADDRESSES, STAKEPOOL_ALPHA_RUNTIME_BYTECODE, STAKING_ADDRESS,
                 STAKING_ALPHA_RUNTIME_BYTECODE,
             };
