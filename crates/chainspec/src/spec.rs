@@ -735,9 +735,9 @@ impl From<Genesis> for ChainSpec {
         // Gravity-specific hardforks from extra_fields
         let mut gravity_hardforks = ChainHardforks::default();
         if let Some(block_num) =
-            genesis.config.extra_fields.get("testnetV1_1Block").and_then(|v| v.as_u64())
+            genesis.config.extra_fields.get("alphaBlock").and_then(|v| v.as_u64())
         {
-            gravity_hardforks.insert(GravityHardfork::TestNetV1_1, ForkCondition::Block(block_num));
+            gravity_hardforks.insert(GravityHardfork::Alpha, ForkCondition::Block(block_num));
         }
 
         Self {
@@ -2667,13 +2667,13 @@ Post-merge hard forks (timestamp based):
     }
 
     #[test]
-    fn test_gravity_testnet_v1_1_hardfork() {
-        // Test 1: Default ChainSpec should not have testnet hardfork active
+    fn test_gravity_alpha_hardfork() {
+        // Test 1: Default ChainSpec should not have Alpha hardfork active
         let spec = ChainSpec::default();
-        assert!(!spec.is_testnet_v1_1_active_at_block_number(0));
-        assert!(!spec.is_testnet_v1_1_active_at_block_number(u64::MAX));
+        assert!(!spec.is_alpha_active_at_block_number(0));
+        assert!(!spec.is_alpha_active_at_block_number(u64::MAX));
 
-        // Test 2: Parse genesis with testnetV1_1Block from extra_fields
+        // Test 2: Parse genesis with alphaBlock from extra_fields
         let genesis_json = r#"{
             "config": {
                 "chainId": 1625,
@@ -2690,7 +2690,7 @@ Post-merge hard forks (timestamp based):
                 "terminalTotalDifficulty": 0,
                 "shanghaiTime": 0,
                 "cancunTime": 0,
-                "testnetV1_1Block": 1000
+                "alphaBlock": 1000
             },
             "alloc": {}
         }"#;
@@ -2698,24 +2698,24 @@ Post-merge hard forks (timestamp based):
         let spec = ChainSpec::from(genesis);
 
         // Before activation block: should return false
-        assert!(!spec.is_testnet_v1_1_active_at_block_number(999));
+        assert!(!spec.is_alpha_active_at_block_number(999));
 
         // At activation block: should return true
-        assert!(spec.is_testnet_v1_1_active_at_block_number(1000));
+        assert!(spec.is_alpha_active_at_block_number(1000));
 
         // After activation block: should return true
-        assert!(spec.is_testnet_v1_1_active_at_block_number(1001));
-        assert!(spec.is_testnet_v1_1_active_at_block_number(u64::MAX));
+        assert!(spec.is_alpha_active_at_block_number(1001));
+        assert!(spec.is_alpha_active_at_block_number(u64::MAX));
 
         // transitions_at_block: only true at the exact block
-        assert!(!spec.testnet_v1_1_transitions_at_block(999));
-        assert!(spec.testnet_v1_1_transitions_at_block(1000));
-        assert!(!spec.testnet_v1_1_transitions_at_block(1001));
+        assert!(!spec.alpha_transitions_at_block(999));
+        assert!(spec.alpha_transitions_at_block(1000));
+        assert!(!spec.alpha_transitions_at_block(1001));
     }
 
     #[test]
-    fn test_gravity_testnet_v1_1_not_configured() {
-        // Genesis without testnetV1_1Block should not activate the hardfork
+    fn test_gravity_alpha_not_configured() {
+        // Genesis without alphaBlock should not activate the hardfork
         let genesis_json = r#"{
             "config": {
                 "chainId": 1625,
@@ -2728,7 +2728,7 @@ Post-merge hard forks (timestamp based):
         let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
         let spec = ChainSpec::from(genesis);
 
-        assert!(!spec.is_testnet_v1_1_active_at_block_number(0));
-        assert!(!spec.is_testnet_v1_1_active_at_block_number(u64::MAX));
+        assert!(!spec.is_alpha_active_at_block_number(0));
+        assert!(!spec.is_alpha_active_at_block_number(u64::MAX));
     }
 }

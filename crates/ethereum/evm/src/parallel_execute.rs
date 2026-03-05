@@ -188,19 +188,19 @@ where
             *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
                 drained_balance;
         }
-
-        // Gravity TestNetV1_1 hardfork: upgrade Staking and StakePool contract code
-        if self.chain_spec.testnet_v1_1_transitions_at_block(block.number()) {
+        // Gravity Alpha hardfork: upgrade Staking and StakePool contract code
+        if self.chain_spec.alpha_transitions_at_block(block.number()) {
             use crate::gravity_hardfork::{
-                STAKEPOOL_ADDRESSES, STAKEPOOL_V1_1_RUNTIME_BYTECODE, STAKING_ADDRESS,
-                STAKING_V1_1_RUNTIME_BYTECODE,
+                STAKEPOOL_ADDRESSES, STAKEPOOL_ALPHA_RUNTIME_BYTECODE, STAKING_ADDRESS,
+                STAKING_ALPHA_RUNTIME_BYTECODE,
             };
 
             let mut hardfork_changes: EvmState = EvmState::default();
 
             // Upgrade Staking contract
-            let new_bytecode = Bytecode::new_raw(Bytes::from_static(STAKING_V1_1_RUNTIME_BYTECODE));
-            let code_hash = keccak256(STAKING_V1_1_RUNTIME_BYTECODE);
+            let new_bytecode =
+                Bytecode::new_raw(Bytes::from_static(STAKING_ALPHA_RUNTIME_BYTECODE));
+            let code_hash = keccak256(STAKING_ALPHA_RUNTIME_BYTECODE);
 
             {
                 let staking_account = state
@@ -225,8 +225,8 @@ where
 
             // Upgrade all StakePool contracts
             let pool_bytecode =
-                Bytecode::new_raw(Bytes::from_static(STAKEPOOL_V1_1_RUNTIME_BYTECODE));
-            let pool_code_hash = keccak256(STAKEPOOL_V1_1_RUNTIME_BYTECODE);
+                Bytecode::new_raw(Bytes::from_static(STAKEPOOL_ALPHA_RUNTIME_BYTECODE));
+            let pool_code_hash = keccak256(STAKEPOOL_ALPHA_RUNTIME_BYTECODE);
 
             for pool_address in STAKEPOOL_ADDRESSES {
                 {
@@ -344,9 +344,9 @@ where
     ChainSpec: EthereumHardforks + EthChainSpec,
     Block: reth_primitives_traits::Block,
 {
-    // After TestNetV1_1 hardfork, skip all post-block balance increments
+    // After Alpha hardfork, skip all post-block balance increments
     // (disables PoW block rewards and DAO fork irregularities)
-    if chain_spec.is_testnet_v1_1_active_at_block_number(block.header().number()) {
+    if chain_spec.is_alpha_active_at_block_number(block.header().number()) {
         return HashMap::default();
     }
 

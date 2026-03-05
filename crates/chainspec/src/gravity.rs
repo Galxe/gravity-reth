@@ -5,7 +5,7 @@ use reth_ethereum_forks::hardfork;
 hardfork!(
     /// Gravity hardforks.
     GravityHardfork {
-        /// TestNet hardfork
-        TestNetV1_1,
+        /// Alpha hardfork: upgrade Staking/StakePool contracts and disable PoW rewards
+        Alpha,
     }
 );
