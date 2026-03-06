@@ -160,6 +160,8 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
 
+**Review Comments** reviewer: neko; state: accepted; comments: Semaphore-based concurrency limit is a clean approach. Combines well with GRETH-044's JoinSet. MAX_CONCURRENT_PROCESS_TASKS = 16 is reasonable given the barrier-based ordering guarantees.
+
 ## GRETH-046: Non-Atomic Trie Cache Writes
 
 **Problem:** `write_trie_updates()` in `cache.rs:525-579` performs individual `DashMap` insert/remove operations in parallel (`par_iter`) without transactional semantics. A concurrent reader could observe a partially-applied trie update: some nodes removed but their replacements not yet inserted.
