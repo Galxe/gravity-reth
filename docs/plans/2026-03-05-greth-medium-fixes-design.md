@@ -421,7 +421,7 @@ for (addr, new_account) in validator_state_changes {
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
 
-**Review Comments** reviewer: neko; state: pending; comments: Same root cause as GRETH-026 (shallow `HashMap::insert` overwrites instead of deep-merging). GRETH-026 covers the precompile→accumulated merge at L823-840; this covers the validator_txn→accumulated merge at L766-768. GRETH-026 was rejected by lightman on the basis that overlapping addresses won't occur in practice. The same argument likely applies here — two different validator system txns targeting the same address is not expected. Pending confirmation: should both be rejected on the same rationale, or should we apply deep-merge defensively at both sites?
+**Review Comments** reviewer: neko; state: rejected; comments: Same root cause as GRETH-026 (shallow `HashMap::insert` overwrites instead of deep-merging). GRETH-026 covers the precompile→accumulated merge at L823-840; this covers the validator_txn→accumulated merge at L766-768. Rejected on the same rationale as lightman's rejection of GRETH-026: overlapping addresses between different validator system txns won't occur in practice.
 
 ## GRETH-052: Block Hash Verification Bypassed with None
 
@@ -553,6 +553,8 @@ Some(verified_hash) => {
 ```
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
+
+**Review Comments** reviewer: neko; state: accepted; comments:
 
 ## GRETH-054: wait_for_block_persistence Blocks Indefinitely
 

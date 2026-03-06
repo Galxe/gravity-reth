@@ -1083,7 +1083,7 @@ pub struct OracleSourceState {
 - `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/jwk_consensus_config.rs` (line 110)
 - Long-term: `gravity_api_types` crate (`OracleSourceState`, `OIDCProvider` type definitions)
 
-**Review Comments** reviewer: neko; state: pending; comments: @AlexYue The `oracle_manager.rs` truncation point overlaps with GRETH-024 (already accepted in the low-fixes doc), which recommends widening `PollResult.nonce` to `u128` upstream in `gravity_api_types`. If the `u128` widening is adopted for GRETH-024, the `oracle_manager.rs` change here becomes redundant. The `oracle_state.rs` and `jwk_consensus_config.rs` truncation points are new findings not covered by GRETH-024 — these should either adopt the same `u128` widening approach (preferred, to eliminate truncation entirely) or keep the `u64::try_from` checked conversion as a stopgap. Please confirm whether the `gravity_api_types` `OracleSourceState.latest_nonce` and `OIDCProvider.onchain_nonce` fields can be widened to `u128`.
+**Review Comments** reviewer: neko; state: accepted; comments: Accepted the u128 widening approach: widen `OracleSourceState.latest_nonce` and `OIDCProvider.onchain_nonce` to `u128` in `gravity_api_types`, consistent with GRETH-024's accepted approach for `PollResult.nonce`. This eliminates all truncation sites (`oracle_state.rs`, `oracle_manager.rs`, `jwk_consensus_config.rs`) at the root. The current `u64::try_from` checked conversions should be reverted once the upstream type changes land. The `oracle_manager.rs` change overlaps with GRETH-024 — consolidate under a single upstream PR to `gravity_api_types`.
 
 ---
 
