@@ -10,7 +10,7 @@ use alloy_evm::{
     precompiles::DynPrecompile,
     EvmEnv,
 };
-use alloy_primitives::{map::HashMap, Address};
+use alloy_primitives::{keccak256, map::HashMap, Address, Bytes};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
@@ -29,6 +29,7 @@ use revm::{
         result::{ExecutionResult, HaltReason},
         TxEnv,
     },
+    bytecode::Bytecode,
     database::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
@@ -191,6 +192,73 @@ where
             *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
                 drained_balance;
         }
+        // Gravity Alpha hardfork: upgrade Staking and StakePool contract code
+        if self.chain_spec.alpha_transitions_at_block(block.number()) {
+            use crate::hardfork::alpha::{
+                STAKEPOOL_ADDRESSES, STAKEPOOL_ALPHA_RUNTIME_BYTECODE, STAKING_ADDRESS,
+                STAKING_ALPHA_RUNTIME_BYTECODE,
+            };
+
+            let mut hardfork_changes: EvmState = EvmState::default();
+
+            // Upgrade Staking contract
+            let new_bytecode =
+                Bytecode::new_raw(Bytes::from_static(STAKING_ALPHA_RUNTIME_BYTECODE));
+            let code_hash = keccak256(STAKING_ALPHA_RUNTIME_BYTECODE);
+
+            {
+                let staking_account = state
+                    .load_mut_cache_account(STAKING_ADDRESS)
+                    .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+                if let Some(ref info) = staking_account.account {
+                    let mut new_info = info.clone();
+                    new_info.code_hash = code_hash;
+                    new_info.code = Some(new_bytecode.clone());
+                    hardfork_changes.insert(
+                        STAKING_ADDRESS,
+                        Account {
+                            info: new_info,
+                            storage: Default::default(),
+                            status: AccountStatus::Touched,
+                            transaction_id: 0,
+                        },
+                    );
+                }
+            }
+            state.cache.contracts.insert(code_hash, new_bytecode);
+
+            // Upgrade all StakePool contracts
+            let pool_bytecode =
+                Bytecode::new_raw(Bytes::from_static(STAKEPOOL_ALPHA_RUNTIME_BYTECODE));
+            let pool_code_hash = keccak256(STAKEPOOL_ALPHA_RUNTIME_BYTECODE);
+
+            for pool_address in STAKEPOOL_ADDRESSES {
+                {
+                    let pool_account = state
+                        .load_mut_cache_account(pool_address)
+                        .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+                    if let Some(ref info) = pool_account.account {
+                        let mut new_info = info.clone();
+                        new_info.code_hash = pool_code_hash;
+                        new_info.code = Some(pool_bytecode.clone());
+                        hardfork_changes.insert(
+                            pool_address,
+                            Account {
+                                info: new_info,
+                                storage: Default::default(),
+                                status: AccountStatus::Touched,
+                                transaction_id: 0,
+                            },
+                        );
+                    }
+                }
+            }
+            state.cache.contracts.insert(pool_code_hash, pool_bytecode);
+
+            // Commit changes to create transitions for database persistence
+            state.commit(hardfork_changes);
+        }
+
         // increment balances
         state
             .increment_balances(balance_increments.clone())
@@ -289,9 +357,15 @@ fn post_block_balance_increments<ChainSpec, Block>(
     block: &RecoveredBlock<Block>,
 ) -> HashMap<Address, u128>
 where
-    ChainSpec: EthereumHardforks,
+    ChainSpec: EthereumHardforks + EthChainSpec,
     Block: reth_primitives_traits::Block,
 {
+    // After Alpha hardfork, skip all post-block balance increments
+    // (disables PoW block rewards and DAO fork irregularities)
+    if chain_spec.is_alpha_active_at_block_number(block.header().number()) {
+        return HashMap::default();
+    }
+
     let mut balance_increments = HashMap::default();
 
     // Add block rewards if they are enabled.

@@ -1,4 +1,4 @@
-use crate::{ChainSpec, DepositContract};
+use crate::{ChainSpec, DepositContract, GravityHardfork};
 use alloc::{boxed::Box, vec::Vec};
 use alloy_chains::Chain;
 use alloy_consensus::Header;
@@ -63,6 +63,16 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
 
     /// Returns the final total difficulty if the Paris hardfork is known.
     fn final_paris_total_difficulty(&self) -> Option<U256>;
+
+    /// Returns `true` if Alpha hardfork is active at the given block number.
+    fn is_alpha_active_at_block_number(&self, _block_number: u64) -> bool {
+        false
+    }
+
+    /// Returns `true` if Alpha hardfork transitions exactly at the given block number.
+    fn alpha_transitions_at_block(&self, _block_number: u64) -> bool {
+        false
+    }
 
     /// See [`calc_next_block_base_fee`].
     fn next_block_base_fee(&self, parent: &Self::Header, target_timestamp: u64) -> Option<u64> {
@@ -134,5 +144,13 @@ impl EthChainSpec for ChainSpec {
 
     fn final_paris_total_difficulty(&self) -> Option<U256> {
         self.paris_block_and_final_difficulty.map(|(_, final_difficulty)| final_difficulty)
+    }
+
+    fn is_alpha_active_at_block_number(&self, block_number: u64) -> bool {
+        self.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, block_number)
+    }
+
+    fn alpha_transitions_at_block(&self, block_number: u64) -> bool {
+        self.gravity_hardforks.fork(GravityHardfork::Alpha).transitions_at_block(block_number)
     }
 }

@@ -3,6 +3,7 @@ use alloy_evm::eth::spec::EthExecutorSpec;
 
 use crate::{
     constants::{MAINNET_DEPOSIT_CONTRACT, MAINNET_PRUNE_DELETE_LIMIT},
+    gravity::GravityHardfork,
     holesky, hoodi, mainnet, sepolia, EthChainSpec,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -112,6 +113,7 @@ pub static MAINNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (mainnet::MAINNET_BPO1_TIMESTAMP, BlobParams::bpo1()),
             (mainnet::MAINNET_BPO2_TIMESTAMP, BlobParams::bpo2()),
         ]),
+        gravity_hardforks: ChainHardforks::default(),
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -144,6 +146,7 @@ pub static SEPOLIA: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (sepolia::SEPOLIA_BPO1_TIMESTAMP, BlobParams::bpo1()),
             (sepolia::SEPOLIA_BPO2_TIMESTAMP, BlobParams::bpo2()),
         ]),
+        gravity_hardforks: ChainHardforks::default(),
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -174,6 +177,7 @@ pub static HOLESKY: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (holesky::HOLESKY_BPO1_TIMESTAMP, BlobParams::bpo1()),
             (holesky::HOLESKY_BPO2_TIMESTAMP, BlobParams::bpo2()),
         ]),
+        gravity_hardforks: ChainHardforks::default(),
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -206,6 +210,7 @@ pub static HOODI: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (hoodi::HOODI_BPO1_TIMESTAMP, BlobParams::bpo1()),
             (hoodi::HOODI_BPO2_TIMESTAMP, BlobParams::bpo2()),
         ]),
+        gravity_hardforks: ChainHardforks::default(),
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -310,6 +315,9 @@ pub struct ChainSpec {
 
     /// The settings passed for blob configurations for specific hardforks.
     pub blob_params: BlobScheduleBlobParams,
+
+    /// Gravity-specific hardforks
+    pub gravity_hardforks: ChainHardforks,
 }
 
 impl Default for ChainSpec {
@@ -324,6 +332,7 @@ impl Default for ChainSpec {
             base_fee_params: BaseFeeParamsKind::Constant(BaseFeeParams::ethereum()),
             prune_delete_limit: MAINNET_PRUNE_DELETE_LIMIT,
             blob_params: Default::default(),
+            gravity_hardforks: Default::default(),
         }
     }
 }
@@ -723,6 +732,14 @@ impl From<Genesis> for ChainSpec {
 
         let hardforks = ChainHardforks::new(ordered_hardforks);
 
+        // Gravity-specific hardforks from extra_fields
+        let mut gravity_hardforks = ChainHardforks::default();
+        if let Some(block_num) =
+            genesis.config.extra_fields.get("alphaBlock").and_then(|v| v.as_u64())
+        {
+            gravity_hardforks.insert(GravityHardfork::Alpha, ForkCondition::Block(block_num));
+        }
+
         Self {
             chain: genesis.config.chain_id.into(),
             genesis_header: SealedHeader::new_unhashed(make_genesis_header(&genesis, &hardforks)),
@@ -731,6 +748,7 @@ impl From<Genesis> for ChainSpec {
             paris_block_and_final_difficulty,
             deposit_contract,
             blob_params,
+            gravity_hardforks,
             ..Default::default()
         }
     }
@@ -2646,5 +2664,71 @@ Post-merge hard forks (timestamp based):
             ..Default::default()
         };
         assert_eq!(hardfork_params, expected);
+    }
+
+    #[test]
+    fn test_gravity_alpha_hardfork() {
+        // Test 1: Default ChainSpec should not have Alpha hardfork active
+        let spec = ChainSpec::default();
+        assert!(!spec.is_alpha_active_at_block_number(0));
+        assert!(!spec.is_alpha_active_at_block_number(u64::MAX));
+
+        // Test 2: Parse genesis with alphaBlock from extra_fields
+        let genesis_json = r#"{
+            "config": {
+                "chainId": 1625,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "alphaBlock": 1000
+            },
+            "alloc": {}
+        }"#;
+        let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
+        let spec = ChainSpec::from(genesis);
+
+        // Before activation block: should return false
+        assert!(!spec.is_alpha_active_at_block_number(999));
+
+        // At activation block: should return true
+        assert!(spec.is_alpha_active_at_block_number(1000));
+
+        // After activation block: should return true
+        assert!(spec.is_alpha_active_at_block_number(1001));
+        assert!(spec.is_alpha_active_at_block_number(u64::MAX));
+
+        // transitions_at_block: only true at the exact block
+        assert!(!spec.alpha_transitions_at_block(999));
+        assert!(spec.alpha_transitions_at_block(1000));
+        assert!(!spec.alpha_transitions_at_block(1001));
+    }
+
+    #[test]
+    fn test_gravity_alpha_not_configured() {
+        // Genesis without alphaBlock should not activate the hardfork
+        let genesis_json = r#"{
+            "config": {
+                "chainId": 1625,
+                "homesteadBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "shanghaiTime": 0
+            },
+            "alloc": {}
+        }"#;
+        let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
+        let spec = ChainSpec::from(genesis);
+
+        assert!(!spec.is_alpha_active_at_block_number(0));
+        assert!(!spec.is_alpha_active_at_block_number(u64::MAX));
     }
 }
