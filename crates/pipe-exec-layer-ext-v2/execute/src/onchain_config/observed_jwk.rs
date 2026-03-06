@@ -91,7 +91,10 @@ where
             .map(|(uri, nonce)| ProviderJWKs {
                 issuer: uri.into_bytes(),
                 version: nonce as u64,
-                jwks: vec![], // Empty - only use version for comparison
+                jwks: vec![JWKStruct {
+                    type_name: "nonce".to_string(),
+                    data: nonce.to_be_bytes().to_vec(),
+                }],
             })
             .collect()
     }
