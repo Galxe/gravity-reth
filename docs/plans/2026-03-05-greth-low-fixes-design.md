@@ -27,6 +27,8 @@ const POP_VERIFY_GAS: u64 = 150_000;
 **Files:**
 - `crates/pipe-exec-layer-ext-v2/execute/src/bls_precompile.rs`
 
+**Review Comments** reviewer: neko; state: pending; comments: Gas repricing is a hardfork-level consensus-breaking change and the exact value needs careful justification. The proposed 150,000 is derived from EIP-2537 component costs (~176,600 total for 2-pairing + hash-to-curve + cofactor clearing), but the native `blst` implementation shares final exponentiation across pairings and fuses subgroup checks, making it ~60-70% of the EIP-2537 equivalent cost. Need to run a `criterion` benchmark of `verify_pop` on target hardware and convert to gas using the Ethereum gas-to-time ratio (~1 gas ≈ 1ns, calibrated against EcRecover: 3000 gas ≈ ~3μs) before committing to a final value.
+
 ---
 
 ## GRETH-066: Mint Precompile Gas Underpricing
