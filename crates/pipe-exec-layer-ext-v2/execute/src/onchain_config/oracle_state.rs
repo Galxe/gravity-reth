@@ -145,7 +145,7 @@ where
             results.push(OracleSourceState {
                 source_type: SOURCE_TYPE_BLOCKCHAIN,
                 source_id: source_id.try_into().unwrap_or(0),
-                latest_nonce: latest_nonce as u64,
+                latest_nonce,
                 latest_record,
             });
         }
@@ -171,7 +171,7 @@ where
         OracleSourceState {
             source_type,
             source_id: source_id.try_into().unwrap_or(0),
-            latest_nonce: latest_nonce as u64,
+            latest_nonce,
             latest_record,
         }
     }
