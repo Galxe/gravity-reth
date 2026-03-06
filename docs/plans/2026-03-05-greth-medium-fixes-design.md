@@ -325,6 +325,8 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/mint_precompile.rs`, `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs` (precompile initialization)
 
+**Review Comments** reviewer: neko; state: pending; comments: @lightman The concept of adding supply caps is sound, but the proposed implementation raises questions: (1) MAX_TOTAL_SUPPLY and MAX_PER_BLOCK_MINT are hardcoded constants — should these be configurable via gravity_config or on-chain governance? (2) The AtomicU128 total_minted tracker is in-memory only and resets on restart — how do we persist and recover the cumulative minted amount? (3) The fetch_add + check + fetch_sub pattern is not truly atomic and could race under concurrent precompile invocations within parallel EVM execution. Please clarify the intended supply cap parameters and persistence strategy.
+
 ## GRETH-050: Precompile State Merge Loses Original Storage Values
 
 **Problem:** When merging precompile `BundleState` into `accumulated_state_changes` at line 818-825, storage slots are constructed with `EvmStorageSlot::new(v.present_value, 0)`, discarding the `original_value`. This means if the precompile modifies an existing storage slot, the original value (needed for gas refund calculations and state revert) is lost, replaced with a zero.
@@ -418,6 +420,8 @@ for (addr, new_account) in validator_state_changes {
 ```
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
+
+**Review Comments** reviewer: neko; state: pending; comments: Same root cause as GRETH-026 (shallow `HashMap::insert` overwrites instead of deep-merging). GRETH-026 covers the precompile→accumulated merge at L823-840; this covers the validator_txn→accumulated merge at L766-768. GRETH-026 was rejected by lightman on the basis that overlapping addresses won't occur in practice. The same argument likely applies here — two different validator system txns targeting the same address is not expected. Pending confirmation: should both be rejected on the same rationale, or should we apply deep-merge defensively at both sites?
 
 ## GRETH-052: Block Hash Verification Bypassed with None
 
