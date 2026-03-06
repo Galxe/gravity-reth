@@ -781,6 +781,8 @@ fn is_unsupported_jwk(jwk: &JWKStruct) -> bool {
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/jwk_oracle.rs`
 
+**Review Comments** reviewer: neko; state: pending; comments: @AlexYue
+
 ## GRETH-060: expect()/unwrap() on ABI Decode in Config Fetchers
 
 **Problem:** Multiple on-chain config fetchers use `expect()` on ABI decode results: `epoch.rs:65`, `dkg.rs:134`, `validator_set.rs:54-55,72-73,92-93`. If the on-chain contract returns malformed data (due to contract upgrade, misconfiguration, or RPC corruption), the node panics instead of gracefully handling the error.

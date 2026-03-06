@@ -470,6 +470,8 @@ let to_delete = match highest_tx.checked_sub(block.last_tx_num()) {
 **Files:**
 - `crates/storage/provider/src/providers/static_file/manager.rs`
 
+**Review Comments** reviewer: neko; state: accepted; comments: @Ashin Gau Straightforward checked_sub fix to prevent arithmetic underflow after crash recovery. Already covered by the combined GRETH-071 fix but worth tracking separately for clarity.
+
 ---
 
 ## GRETH-074: filter_invalid_txs Uses Effective Gas Price Instead of Max Fee
@@ -582,3 +584,5 @@ pub fn load(path: &Path) -> Result<Self> {
 
 **Files:**
 - `crates/pipe-exec-layer-ext-v2/relayer/src/persistence.rs`
+
+**Review Comments** reviewer: neko; state: pending; comments: @AlexYue Please review — resetting state on version mismatch will cause the relayer to re-sync from its configured starting points. Need to confirm this is acceptable for production deployments and that no critical cursor state would be irreversibly lost.
