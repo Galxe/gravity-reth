@@ -271,28 +271,11 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
                 "new ordered block"
             );
 
-            // GRETH-029: Track JoinHandle, detect panics, close barriers on failure
             let core = self.core.clone();
-            let handle = tokio::spawn(async move {
+            tokio::spawn(async move {
                 let start_time = Instant::now();
                 core.process(block).await;
                 core.metrics.process_block_duration.record(start_time.elapsed());
-            });
-
-            // Spawn a lightweight watcher that detects panics
-            let core_ref = self.core.clone();
-            tokio::spawn(async move {
-                if let Err(join_err) = handle.await {
-                    error!(
-                        target: "PipeExecService.run",
-                        error = %join_err,
-                        "process() task panicked — closing all barriers to prevent deadlock"
-                    );
-                    core_ref.execute_block_barrier.close();
-                    core_ref.merklize_barrier.close();
-                    core_ref.seal_barrier.close();
-                    core_ref.make_canonical_barrier.close();
-                }
             });
         }
     }
@@ -524,29 +507,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let execution_outcome = self.calculate_roots(&mut block, execution_output);
 
         // Merkling the state trie
-        // GRETH-029: Use wait_timeout with stall detection instead of bare .wait()
-        {
-            const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
-            const MAX_RETRIES: u32 = 60;
-            let mut succeeded = false;
-            for attempt in 0..MAX_RETRIES {
-                if let Some(()) = self.merklize_barrier.wait_timeout(block_number - 1, BARRIER_TIMEOUT).await {
-                    succeeded = true;
-                    break;
-                }
-                warn!(
-                    target: "PipeExecService.process",
-                    block_number, attempt, "merklize barrier timeout — retrying"
-                );
-            }
-            if !succeeded {
-                error!(
-                    target: "PipeExecService.process",
-                    block_number, "merklize barrier stalled after {MAX_RETRIES} retries"
-                );
-                return;
-            }
-        }
+        self.merklize_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
         let (state_root, trie_updates) = self.storage.state_root(&hashed_state).unwrap();
         let write_start = Instant::now();
@@ -566,32 +527,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         block.header.difficulty = randomness;
 
         // Seal the block
-        // GRETH-029: Use wait_timeout with stall detection instead of bare .wait()
-        let parent_hash = {
-            const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
-            const MAX_RETRIES: u32 = 60;
-            let mut result = None;
-            for attempt in 0..MAX_RETRIES {
-                if let Some(hash) = self.seal_barrier.wait_timeout(block_number - 1, BARRIER_TIMEOUT).await {
-                    result = Some(hash);
-                    break;
-                }
-                warn!(
-                    target: "PipeExecService.process",
-                    block_number, attempt, "seal barrier timeout — retrying"
-                );
-            }
-            match result {
-                Some(hash) => hash,
-                None => {
-                    error!(
-                        target: "PipeExecService.process",
-                        block_number, "seal barrier stalled after {MAX_RETRIES} retries"
-                    );
-                    return;
-                }
-            }
-        };
+        let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
         block.header.parent_hash = parent_hash;
         let sealed_block = block.seal_slow();
@@ -662,9 +598,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                         block_hash = ?executed_block_hash,
                         "CRITICAL: Consensus did not provide verification hash for post-genesis block"
                     );
-                    panic!(
-                        "Missing consensus verification hash for block {block_number}"
-                    );
+                    panic!("Missing consensus verification hash for block {block_number}");
                 } else {
                     info!(
                         target: "PipeExecService.process",
@@ -955,7 +889,10 @@ impl<Storage: GravityStorage> Core<Storage> {
                     // GRETH-032: Merge any precompile state before returning
                     {
                         let mut precompile_changes = revm::state::EvmState::default();
-                        Self::merge_precompile_state(&state_for_precompile_ref, &mut precompile_changes);
+                        Self::merge_precompile_state(
+                            &state_for_precompile_ref,
+                            &mut precompile_changes,
+                        );
                         inner_state.commit(precompile_changes);
                     }
 
@@ -1003,10 +940,13 @@ impl<Storage: GravityStorage> Core<Storage> {
                                 .storage
                                 .into_iter()
                                 .map(|(k, v)| {
-                                    (k, EvmStorageSlot::new_changed(
-                                        v.previous_or_original_value,
-                                        v.present_value,
-                                    ))
+                                    (
+                                        k,
+                                        EvmStorageSlot::new_changed(
+                                            v.previous_or_original_value,
+                                            v.present_value,
+                                        ),
+                                    )
                                 })
                                 .collect(),
                             status: AccountStatus::Touched,
@@ -1296,32 +1236,8 @@ impl<Storage: GravityStorage> Core<Storage> {
     async fn make_canonical(&self, block_id: &B256, executed_block: ExecutedBlockWithTrieUpdates) {
         let block_number = executed_block.recovered_block.number();
         let block_hash = executed_block.recovered_block.hash();
-        // GRETH-029: Use wait_timeout with stall detection instead of bare .wait()
-        let prev_finish_commit_time = {
-            const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
-            const MAX_RETRIES: u32 = 60;
-            let mut result = None;
-            for attempt in 0..MAX_RETRIES {
-                if let Some(t) = self.make_canonical_barrier.wait_timeout(block_number - 1, BARRIER_TIMEOUT).await {
-                    result = Some(t);
-                    break;
-                }
-                warn!(
-                    target: "PipeExecService.process",
-                    block_number, attempt, "make_canonical barrier timeout — retrying"
-                );
-            }
-            match result {
-                Some(t) => t,
-                None => {
-                    error!(
-                        target: "PipeExecService.process",
-                        block_number, "make_canonical barrier stalled after {MAX_RETRIES} retries"
-                    );
-                    return;
-                }
-            }
-        };
+        let prev_finish_commit_time =
+            self.make_canonical_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
         let (tx, rx) = oneshot::channel();
         self.event_tx
@@ -1373,9 +1289,9 @@ impl<Storage: GravityStorage> Core<Storage> {
             (txs, senders, txs_info)
         } else {
             // GRETH-036: Bounded channel — use try_send for sync context
-            let _ = self
-                .discard_txs_tx
-                .try_send(invalid_idxs.iter().map(|&idx| txs[idx].hash()).copied().collect::<Vec<_>>());
+            let _ = self.discard_txs_tx.try_send(
+                invalid_idxs.iter().map(|&idx| txs[idx].hash()).copied().collect::<Vec<_>>(),
+            );
 
             let mut filtered_txs = Vec::with_capacity(txs.len() - invalid_idxs.len());
             let mut filtered_senders = Vec::with_capacity(filtered_txs.capacity());
@@ -1461,8 +1377,7 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
         // The EVM reserves max_fee_per_gas * gas_limit, not effective_gas_price * gas_limit.
         // For legacy transactions, max_fee_per_gas == gas_price.
         let max_fee = tx.max_fee_per_gas();
-        let gas_reserved = U256::from(max_fee)
-            .saturating_mul(U256::from(tx.gas_limit()));
+        let gas_reserved = U256::from(max_fee).saturating_mul(U256::from(tx.gas_limit()));
         let total_spent = gas_reserved.saturating_add(tx.value());
         if account.balance < total_spent {
             warn!(target: "filter_invalid_txs",
