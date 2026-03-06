@@ -906,6 +906,8 @@ pub fn construct_metadata_txn(
 - `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/metadata_txn.rs` (remove lines 210-229)
 - `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/mod.rs` (keep lines 175-193, add allowlist from GRETH-040)
 
+**Review Comments** reviewer: neko; state: accepted; comments: Straightforward deduplication. Remove the private copy in metadata_txn.rs, keep the pub(crate) definition in mod.rs, and import via `use super::new_system_call_txn`.
+
 ---
 
 ## GRETH-042: failedProposerIndices Always Empty
