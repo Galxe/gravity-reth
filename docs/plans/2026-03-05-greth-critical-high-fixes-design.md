@@ -117,6 +117,8 @@ tokio::spawn(async move {
 - `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs` (lines ~269, 472, 492, 1115)
 - `crates/pipe-exec-layer-ext-v2/execute/src/channel.rs` (no changes needed; `wait_timeout` already exists)
 
+**Review Comments** reviewer: neko; state: rejected; comments: The problem statement is invalid. greth is used as a crate by gravity_node, which calls `gaptos::aptos_crash_handler::setup_panic_handler()` at startup — any panic (including inside a `tokio::spawn` task) triggers process exit, so the "task panics → downstream barriers never notified → permanent deadlock" scenario cannot occur. Furthermore, the proposed `wait_timeout` + retry loop + early-return fix introduces logic errors: if a barrier times out and `process()` returns early, it never calls `notify(block_number, ...)` on downstream barriers (merklize, seal, make_canonical), causing all subsequent blocks to cascade-timeout and silently stop processing — a worse failure mode than the original code.
+
 ---
 
 ## GRETH-030: Cache Eviction of Unpersisted Trie Nodes
@@ -371,6 +373,8 @@ evm.db_mut().commit(validator_state_changes.clone());
 **Files:**
 - `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs` (lines ~639-840)
 - `crates/pipe-exec-layer-ext-v2/execute/src/mint_precompile.rs` (no code change, but verify the precompile writes to the shared `ParallelState`)
+
+**Review Comments** reviewer: neko; state: rejected; comments: Duplicate of GRETH-026 (Precompile State Merge Overwrites Instead of Deep Merging) in the LOW fixes design doc. Both describe the same root cause — the mint precompile writes to a separate `ParallelState` invisible to the EVM's `inner_state`, and the merge uses shallow `HashMap::insert`. GRETH-026 already has a rejection from lightman stating overlapping addresses won't occur in practice. Consolidate discussion under GRETH-026.
 
 ---
 
@@ -638,6 +642,8 @@ pub fn get_pipe_exec_layer_event_bus() -> &'static PipeExecLayerEventBus<EthPrim
 **Files:**
 - `crates/pipe-exec-layer-ext-v2/event-bus/src/lib.rs` (lines 12-29)
 - All call sites of `get_pipe_exec_layer_event_bus::<N>()` must remove the generic parameter
+
+**Review Comments** reviewer: neko; state: accepted; comments: The typed `OnceLock<PipeExecLayerEventBus<EthPrimitives>>` fix in event-bus is correct and eliminates the downcast. However, the call site in `tree/mod.rs` L593-596 uses `std::mem::transmute` to bridge `Receiver<PipeExecLayerEvent<EthPrimitives>>` to `Receiver<PipeExecLayerEvent<N>>`, which trades a deterministic panic (from the old Any downcast) for potential silent UB if N ever differs from EthPrimitives. Recommend adding a `TypeId` assertion before the transmute as a runtime safety guard: `assert_eq!(std::any::TypeId::of::<N>(), std::any::TypeId::of::<EthPrimitives>(), "GRETH-037: pipe_run_inner requires N = EthPrimitives")`. This is feasible because `NodePrimitives` already has a `'static` bound (see `crates/primitives-traits/src/node.rs` L13), and it does not pollute the generic signature chain, keeping the reth upstream diff minimal.
 
 ---
 

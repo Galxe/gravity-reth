@@ -25,6 +25,7 @@ use reth_engine_primitives::{
     ForkchoiceStateTracker, ForkchoiceStatus, OnForkChoiceUpdated,
 };
 use reth_errors::{ConsensusError, ProviderResult};
+use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::{ConfigureEvm, OnStateHook};
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{
@@ -587,9 +588,15 @@ where
 
     fn pipe_run_inner(mut self) {
         // GRETH-037: Event bus is now typed as EthPrimitives.
-        // Safety: gravity-reth always instantiates N = EthPrimitives.
-        // The transmute is sound because PipeExecLayerEvent<EthPrimitives> and
-        // PipeExecLayerEvent<N> have identical layout when N = EthPrimitives.
+        // Runtime guard: verify N == EthPrimitives before transmute to prevent silent UB.
+        // This is feasible because NodePrimitives requires 'static.
+        assert_eq!(
+            std::any::TypeId::of::<N>(),
+            std::any::TypeId::of::<EthPrimitives>(),
+            "GRETH-037: pipe_run_inner requires N = EthPrimitives"
+        );
+        // Safety: The assert above guarantees N == EthPrimitives at runtime,
+        // so PipeExecLayerEvent<EthPrimitives> and PipeExecLayerEvent<N> are the same type.
         let pipe_event_rx: std::sync::mpsc::Receiver<PipeExecLayerEvent<N>> = unsafe {
             let eth_rx = get_pipe_exec_layer_event_bus().event_rx.lock().unwrap().take().unwrap();
             std::mem::transmute(eth_rx)
