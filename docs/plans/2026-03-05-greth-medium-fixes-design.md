@@ -672,6 +672,8 @@ assert_eq!(self.execute_height.fetch_add(1, Ordering::SeqCst), block_number - 1)
 
 **Files:** `crates/pipe-exec-layer-ext-v2/execute/src/lib.rs`
 
+**Review Comments** reviewer: neko; state: rejected; comments: The original code does not have a cross-variable ordering problem. The `execute_block_barrier` Channel (backed by `Mutex<Inner>`) enforces strict serial execution: block N's `process()` cannot proceed past `wait((epoch, N-1))` until block N-1 has completed and called `notify((epoch, N-1), ...)`. Since the `epoch` and `execute_height` stores at L492-495 sit inside this serialized critical section (between `wait` returning and `notify` being called), there is only ever a single writer — no concurrent writer can interleave. The only concurrent readers are in the timeout branch at L411 (`self.epoch()` / `self.execute_height()`), which merely check for stale/duplicate blocks; a slightly stale read there causes a harmless retry of the wait loop, not an inconsistent state. The Atomics are purely an optimization to avoid wrapping these two scalars in their own Mutex; a Mutex would itself only provide acquire-release semantics, identical to the original `Ordering::Release` stores + `Ordering::Acquire` loads. Upgrading to `SeqCst` is harmless but unnecessary — it does not fix a real bug.
+
 ## GRETH-058: No TLS Certificate Pinning for RPC Connections
 
 **Problem:** `EthHttpCli::new()` at `eth_client.rs:58` uses `ClientBuilder::new().no_proxy().use_rustls_tls()` without any certificate pinning. The HTTP client trusts the system CA store, meaning a compromised CA could MITM the connection between the relayer and external RPC endpoints, injecting forged oracle data.
