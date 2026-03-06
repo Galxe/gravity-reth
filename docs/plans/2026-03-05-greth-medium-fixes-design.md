@@ -921,9 +921,7 @@ pub fn from_block(&self) -> Result<u64> {
         .params
         .get("fromBlock")
         .ok_or_else(|| anyhow!(
-            "Missing required 'fromBlock' parameter in oracle URI. \
-             Defaulting to block 0 would scan entire chain history. \
-             Specify the deployment block of the portal contract."
+            "Missing required 'fromBlock' parameter in oracle URI"
         ))?;
     value_str
         .parse::<u64>()
@@ -932,6 +930,8 @@ pub fn from_block(&self) -> Result<u64> {
 ```
 
 **Files:** `crates/pipe-exec-layer-ext-v2/relayer/src/uri_parser.rs` and all call sites of `from_block()`
+
+**Review Comments** reviewer: neko; state: accepted; comments: Fix is correct — making `fromBlock` a required parameter avoids the dangerous default-to-0 scan. Simplified the error message to a concise `"Missing required 'fromBlock' parameter in oracle URI"` (applied to both source code and reference code above).
 
 ## GRETH-064: Voting Power Conversion Precision Loss
 

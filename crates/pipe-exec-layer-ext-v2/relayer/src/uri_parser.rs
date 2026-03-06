@@ -56,11 +56,7 @@ impl ParsedOracleTask {
         let value_str = self
             .params
             .get("fromBlock")
-            .ok_or_else(|| anyhow!(
-                "Missing required 'fromBlock' parameter in oracle URI. \
-                 Defaulting to block 0 would scan entire chain history. \
-                 Specify the deployment block of the portal contract."
-            ))?;
+            .ok_or_else(|| anyhow!("Missing required 'fromBlock' parameter in oracle URI"))?;
         value_str
             .parse::<u64>()
             .map_err(|e| anyhow!("Invalid 'fromBlock' value '{}': {}", value_str, e))
