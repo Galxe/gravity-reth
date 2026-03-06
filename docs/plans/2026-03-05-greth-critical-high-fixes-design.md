@@ -788,6 +788,8 @@ async fn poll_events(&self, /* ... */) -> Result<Vec<OracleData>> {
 - `crates/pipe-exec-layer-ext-v2/relayer/src/blockchain_source.rs` (line ~243, struct definition)
 - `crates/pipe-exec-layer-ext-v2/relayer/src/oracle_manager.rs` (pass additional RPC clients when constructing `BlockchainSource`)
 
+**Review Comments** reviewer: neko; state: rejected; comments: Duplicate of GRETH-011 and GRETH-027. All three findings describe the same root cause: the relayer trusts RPC-returned logs without independent verification. The multi-RPC cross-checking approach proposed here was already suggested in GRETH-027's Recommendation and rejected as "architectural limitation, no adjustment planned at this time." Consolidate discussion under GRETH-011.
+
 ---
 
 ## GRETH-040: Zero-Signature System Transactions Bypass All Validation
