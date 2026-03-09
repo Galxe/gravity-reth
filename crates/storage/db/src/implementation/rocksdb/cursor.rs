@@ -270,7 +270,7 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
 impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     /// Insert or update a key-value pair in the database.
     ///
-    /// # Read-Your-Writes Limitation (GRETH-014)
+    /// # Read-Your-Writes Limitation
     ///
     /// Writes are buffered in a `WriteBatch` and are **not visible to subsequent
     /// read operations** (`seek`, `current`, `get`) on the same cursor within the

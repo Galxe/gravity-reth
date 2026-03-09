@@ -197,7 +197,10 @@ pub fn transact_system_txn(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
 
-    // Log any execution errors with appropriate severity
+    // DESIGN: System transaction failures are intentionally logged, not asserted.
+    // DKG and JWK system transactions can legitimately fail or revert, so a hard
+    // assert would crash the node on valid failure scenarios. Graceful handling
+    // (logging + continuing) is the correct behavior here.
     if !result.result.is_success() {
         super::errors::log_execution_error(&result.result);
     }

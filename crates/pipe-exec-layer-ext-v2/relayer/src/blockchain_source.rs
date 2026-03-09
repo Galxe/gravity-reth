@@ -87,6 +87,12 @@ impl LastProcessedEvent {
 ///
 /// This is the primary data source for cross-chain message bridging.
 /// Tracks `last_processed` to ensure exactly-once consumption semantics.
+///
+/// DESIGN: All RPC calls (`eth_getLogs`, `eth_getBlockReceipts`) use the
+/// same `rpc_client` endpoint. This is an acknowledged architectural limitation — a
+/// fully compromised RPC could forge mutually consistent responses. The current threat
+/// model assumes the RPC endpoint is trusted. Multi-endpoint or Merkle-proof
+/// verification may be added in the future if the threat model changes.
 #[derive(Debug)]
 pub struct BlockchainEventSource {
     /// Chain ID (sourceId in Oracle terms)
