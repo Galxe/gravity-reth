@@ -13,9 +13,9 @@ use gravity_api_types::events::contract_event::GravityEvent;
 use gravity_primitives::get_gravity_config;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
-use reth_evm::{Evm, IntoTxEnv};
+use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
-use reth_primitives::{Receipt, Recovered};
+use reth_primitives::Receipt;
 use reth_provider::BlockExecutionResult;
 use revm::{
     context::TxEnv,

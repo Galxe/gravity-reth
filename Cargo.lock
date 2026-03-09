@@ -9972,8 +9972,8 @@ name = "reth-pipe-exec-layer-event-bus"
 version = "1.8.3"
 dependencies = [
  "alloy-primitives",
- "once_cell",
  "reth-chain-state",
+ "reth-ethereum-primitives",
  "reth-primitives",
  "tokio",
  "tracing",
