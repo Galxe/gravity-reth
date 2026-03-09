@@ -260,7 +260,7 @@ impl OracleRelayerManager {
         let (nonce, last_nonce_block, max_block_number, source_type, source_id) =
             match source.as_ref() {
                 DataSourceKind::Blockchain(s) => (
-                    s.last_nonce().await.map(|n| n as u64),
+                    s.last_nonce().await,
                     s.last_nonce_block().await,
                     s.cursor(),
                     source_types::BLOCKCHAIN,
@@ -293,7 +293,7 @@ impl OracleRelayerManager {
                 uri,
                 source_type,
                 source_id,
-                n as u128,
+                n,
                 last_nonce_block.unwrap_or(0),
                 max_block_number,
             )
