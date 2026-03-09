@@ -235,6 +235,21 @@ struct Core<Storage: GravityStorage> {
     make_canonical_barrier: Channel<u64 /* block number */, Instant>,
     discard_txs_tx: UnboundedSender<Vec<TxHash>>,
     cache: PersistBlockCache,
+    // Ordering rationale: `Ordering::Release` (stores) / `Ordering::Acquire` (loads) is
+    // sufficient — `SeqCst` is unnecessary. The `execute_block_barrier` Channel (backed by
+    // `Mutex<Inner>`) enforces strict serial block execution: block N's `process()` cannot
+    // proceed past `wait((epoch, N-1))` until block N-1 has completed and called
+    // `notify((epoch, N-1), ...)`. Both stores sit inside this serialized critical section,
+    // so there is only ever a single writer — no concurrent writer can interleave.
+    //
+    // The only concurrent readers are in the timeout branch below (`self.epoch()` /
+    // `self.execute_height()`), which merely check for stale/duplicate blocks. Each
+    // individual Acquire load sees the latest Release store (no staleness); the two
+    // reads are simply not atomic *with respect to each other*, so at worst a concurrent
+    // update between the two loads causes one extra wait-loop iteration, never an
+    // incorrect discard. Note that even `SeqCst` would not help here — two separate
+    // loads are never atomic as a pair regardless of ordering; only an `AtomicU128`
+    // or a lock could provide an atomic snapshot, but neither is needed.
     epoch: AtomicU64,
     execute_height: AtomicU64,
     metrics: PipeExecLayerMetrics,
@@ -374,7 +389,11 @@ impl<Storage: GravityStorage> Core<Storage> {
                 .await
             {
                 Some(parent) => break parent,
-                // Make sure the ordered blocks are idempotent
+                // Make sure the ordered blocks are idempotent.
+                // NOTE: Each Acquire load below sees the latest Release
+                // store to its respective atomic. The two reads are not mutually
+                // atomic, but a concurrent update between them at worst causes one
+                // extra wait-loop iteration, never an incorrect discard.
                 None => {
                     if block_epoch < self.epoch() || block_number <= self.execute_height() {
                         warn!(target: "PipeExecService.process",
@@ -456,8 +475,12 @@ impl<Storage: GravityStorage> Core<Storage> {
                 new_epoch=?epoch,
                 "new epoch"
             );
+            // SAFETY: Release ordering is sufficient here — see comment on field
+            // declarations.
             assert_eq!(self.epoch.fetch_max(epoch, Ordering::Release), block_epoch);
         }
+        // SAFETY: Release ordering is sufficient — the execute_block_barrier
+        // serializes writers; only the timeout branch reads these concurrently (harmlessly).
         assert_eq!(self.execute_height.fetch_add(1, Ordering::Release), block_number - 1);
         self.execute_block_barrier
             .notify(
