@@ -74,6 +74,16 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
         false
     }
 
+    /// Returns `true` if Beta hardfork is active at the given block number.
+    fn is_beta_active_at_block_number(&self, _block_number: u64) -> bool {
+        false
+    }
+
+    /// Returns `true` if Beta hardfork transitions exactly at the given block number.
+    fn beta_transitions_at_block(&self, _block_number: u64) -> bool {
+        false
+    }
+
     /// See [`calc_next_block_base_fee`].
     fn next_block_base_fee(&self, parent: &Self::Header, target_timestamp: u64) -> Option<u64> {
         Some(calc_next_block_base_fee(
@@ -152,5 +162,13 @@ impl EthChainSpec for ChainSpec {
 
     fn alpha_transitions_at_block(&self, block_number: u64) -> bool {
         self.gravity_hardforks.fork(GravityHardfork::Alpha).transitions_at_block(block_number)
+    }
+
+    fn is_beta_active_at_block_number(&self, block_number: u64) -> bool {
+        self.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Beta, block_number)
+    }
+
+    fn beta_transitions_at_block(&self, block_number: u64) -> bool {
+        self.gravity_hardforks.fork(GravityHardfork::Beta).transitions_at_block(block_number)
     }
 }
