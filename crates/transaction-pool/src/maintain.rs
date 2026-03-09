@@ -183,7 +183,7 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
         let pool = pool.clone();
         tokio::spawn(async move {
             let mut discard_txs_rx =
-                get_pipe_exec_layer_event_bus::<N>().discard_txs.lock().await.take().unwrap();
+                get_pipe_exec_layer_event_bus().discard_txs.lock().await.take().unwrap();
             while let Some(discard_txs) = discard_txs_rx.recv().await {
                 debug!(target: "txpool", count=%discard_txs.len(), "discarding transactions");
                 pool.remove_transactions(discard_txs);

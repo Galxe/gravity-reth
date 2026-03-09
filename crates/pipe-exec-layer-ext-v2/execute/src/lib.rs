@@ -1444,11 +1444,9 @@ where
     };
     tokio::spawn(service.run());
 
-    PIPE_EXEC_LAYER_EVENT_BUS.get_or_init(|| {
-        Box::new(PipeExecLayerEventBus {
-            event_rx: std::sync::Mutex::new(Some(event_rx)),
-            discard_txs: tokio::sync::Mutex::new(Some(discard_txs_rx)),
-        })
+    PIPE_EXEC_LAYER_EVENT_BUS.get_or_init(|| PipeExecLayerEventBus {
+        event_rx: std::sync::Mutex::new(Some(event_rx)),
+        discard_txs: tokio::sync::Mutex::new(Some(discard_txs_rx)),
     });
 
     PipeExecLayerApi {
