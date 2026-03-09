@@ -1,18 +1,19 @@
 //! Metadata transaction execution
 
 use super::{
+    new_system_call_txn,
     types::{convert_active_validators_to_bcs, onBlockStartCall, NewEpochEvent},
     SYSTEM_CALLER,
 };
 use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
-use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
+use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
-use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
 use gravity_primitives::get_gravity_config;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
-use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
+use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
 use reth_primitives::Receipt;
@@ -206,27 +207,6 @@ pub fn transact_system_txn(
     }
 
     (SystemTxnResult { result: result.result, txn }, result.state)
-}
-
-/// Create a new system call transaction
-fn new_system_call_txn(
-    contract: Address,
-    nonce: u64,
-    gas_price: u128,
-    input: Bytes,
-) -> TransactionSigned {
-    TransactionSigned::new_unhashed(
-        Transaction::Legacy(TxLegacy {
-            chain_id: None,
-            nonce,
-            gas_price,
-            gas_limit: 30_000_000,
-            to: TxKind::Call(contract),
-            value: U256::ZERO,
-            input,
-        }),
-        Signature::new(U256::ZERO, U256::ZERO, false),
-    )
 }
 
 /// Execute a metadata contract call (onBlockStart from Blocker.sol)
