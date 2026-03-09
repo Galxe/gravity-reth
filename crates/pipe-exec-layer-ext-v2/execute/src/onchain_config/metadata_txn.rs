@@ -197,7 +197,7 @@ pub fn transact_system_txn(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
 
-    // DESIGN(GRETH-025): System transaction failures are intentionally logged, not asserted.
+    // DESIGN: System transaction failures are intentionally logged, not asserted.
     // DKG and JWK system transactions can legitimately fail or revert, so a hard
     // assert would crash the node on valid failure scenarios. Graceful handling
     // (logging + continuing) is the correct behavior here.

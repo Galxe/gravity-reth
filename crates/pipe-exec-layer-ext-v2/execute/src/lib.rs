@@ -301,7 +301,7 @@ enum SystemTxnExecutionOutcome {
     EpochChanged(ExecuteOrderedBlockResult),
 }
 
-// DESIGN(GRETH-021, GRETH-028): This validation is intentionally debug-only.
+// DESIGN: This validation is intentionally debug-only.
 // These checks (gas overflow, gas accounting consistency, timestamp-unit sanity)
 // detect logic bugs during development and testing. They are not needed in
 // production and use `panic!` which is inappropriate for release builds.
@@ -815,7 +815,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             precompile_state.merge_transitions(BundleRetention::Reverts);
             let precompile_bundle = precompile_state.take_bundle();
 
-            // DESIGN(GRETH-026): Using `insert` (shallow merge) is intentional here.
+            // DESIGN: Using `insert` (shallow merge) is intentional here.
             // The mint precompile only modifies regular user accounts (mint recipients),
             // which are disjoint from accounts touched by system transactions
             // (SYSTEM_CALLER, on-chain config contracts). The two state domains are
