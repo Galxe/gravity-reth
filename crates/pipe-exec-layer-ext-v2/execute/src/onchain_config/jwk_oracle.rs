@@ -58,11 +58,8 @@ fn is_rsa_jwk(jwk: &JWKStruct) -> bool {
 }
 
 /// Check if a JWKStruct is an UnsupportedJWK (blockchain/other oracle data)
-/// Checks for sourceType string (0, 1, 2, etc.) instead of fixed type_name
 fn is_unsupported_jwk(jwk: &JWKStruct) -> bool {
-    // Check if type_name is a numeric string (sourceType)
-    // TODO(gravity): check if it should be "0x1::jwks::UNSUPPORTED_JWK"
-    jwk.type_name.parse::<u32>().is_ok()
+    jwk.type_name == "0x1::jwks::Unsupported_JWK"
 }
 
 /// Parse RSA JWK from BCS-encoded data
