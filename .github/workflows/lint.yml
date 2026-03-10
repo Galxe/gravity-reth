@@ -24,8 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@clippy
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-01
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -46,8 +47,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-01
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -140,7 +142,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-01
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -158,8 +162,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-01
           components: rustfmt
       - name: Run fmt
         run: cargo fmt --all --check
@@ -171,7 +176,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-01
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -187,7 +194,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-01
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -244,7 +253,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@clippy
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-01
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true

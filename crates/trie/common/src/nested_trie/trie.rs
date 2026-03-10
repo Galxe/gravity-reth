@@ -361,7 +361,7 @@ where
                 let removed_nodes: Mutex<HashSet<Nibbles>> = Default::default();
                 let abort = OnceCell::new();
                 rayon::scope(|scope| {
-                    for (child, batch) in children.iter_mut().zip(batches.into_iter()) {
+                    for (child, batch) in children.iter_mut().zip(batches) {
                         if batch.is_empty() {
                             continue;
                         }

@@ -5,6 +5,7 @@
 //! is interrupted, this helper can recover the incomplete stages by checking the stage
 //! checkpoints and rebuilding the missing data.
 
+use alloy_consensus::BlockHeader;
 use alloy_primitives::BlockNumber;
 use gravity_primitives::get_gravity_config;
 use reth_db::{
@@ -12,14 +13,16 @@ use reth_db::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_errors::ProviderError;
+use reth_primitives_traits::GotExpected;
 use reth_provider::{
-    providers::ProviderNodeTypes, AccountExtReader, BlockNumReader, DatabaseProviderFactory,
-    HashingWriter, HistoryWriter, ProviderFactory, ProviderResult, StageCheckpointWriter,
-    StorageReader, TrieWriterV2,
+    providers::ProviderNodeTypes, AccountExtReader, BlockHashReader, BlockNumReader,
+    DatabaseProviderFactory, HashingWriter, HeaderProvider, HistoryWriter, ProviderFactory,
+    ProviderResult, StageCheckpointWriter, StorageReader, TrieWriterV2,
 };
 use reth_stages_api::{StageCheckpoint, StageId};
+use reth_storage_errors::provider::RootMismatch;
 use reth_trie_parallel::nested_hash::NestedStateRoot;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Helper for recovering storage state after interrupted block writes.
 ///
@@ -191,7 +194,28 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
             let nested_state_root = NestedStateRoot::new(provider_rw.tx_ref(), None);
             let hashed_state =
                 nested_state_root.read_hashed_state(Some(ck.block_number + 1..=block_number))?;
-            let (_final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+            let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
+
+            if let Some(header) = provider_rw.header_by_number(block_number)? {
+                let expected_root = header.state_root();
+                if final_root != expected_root {
+                    let block_hash = provider_rw
+                        .block_hash(block_number)?
+                        .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?;
+                    return Err(ProviderError::StateRootMismatch(Box::new(RootMismatch {
+                        root: GotExpected { got: final_root, expected: expected_root },
+                        block_number,
+                        block_hash,
+                    })));
+                }
+            } else {
+                warn!(target: "engine::recovery",
+                    checkpoint = ?ck.block_number,
+                    block_number = ?block_number,
+                    final_root = ?final_root,
+                    "Header not found");
+            }
+
             provider_rw.write_trie_updatesv2(&trie_updates_v2).map_err(ProviderError::Database)?;
 
             provider_rw

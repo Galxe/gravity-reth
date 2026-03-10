@@ -56,9 +56,10 @@ macro_rules! compress_to_buf_or_ref {
 
 /// `RocksDB` cursor with `RawIterator` caching for performance.
 pub struct Cursor<K: TransactionKind, T: Table> {
-    db: Arc<DB>,
     /// Iterator for cursor operations - always ready to use
     iterator: rocksdb::DBRawIterator<'static>,
+    /// db should drop after iterator
+    db: Arc<DB>,
     /// Cache buffer that receives compressed values.
     batch: Arc<Mutex<rocksdb::WriteBatch>>,
     buf: Vec<u8>,
@@ -68,8 +69,8 @@ pub struct Cursor<K: TransactionKind, T: Table> {
 impl<K: TransactionKind, T: Table> std::fmt::Debug for Cursor<K, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cursor")
-            .field("db", &self.db)
             .field("iterator", &"<DBRawIterator>")
+            .field("db", &self.db)
             .field("batch", &"<WriteBatch>")
             .field("_phantom", &self._phantom)
             .finish()
@@ -93,7 +94,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
             )
         };
 
-        Ok(Self { db, iterator, batch, buf: Vec::new(), _phantom: PhantomData })
+        Ok(Self { iterator, db, batch, buf: Vec::new(), _phantom: PhantomData })
     }
 
     /// Encode `DupSort` composite key: key + subkey
@@ -267,6 +268,18 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
 }
 
 impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
+    /// Insert or update a key-value pair in the database.
+    ///
+    /// # Read-Your-Writes Limitation
+    ///
+    /// Writes are buffered in a `WriteBatch` and are **not visible to subsequent
+    /// read operations** (`seek`, `current`, `get`) on the same cursor within the
+    /// same transaction. Reads always query the live `RocksDB` state, which does not
+    /// include uncommitted batch writes.
+    ///
+    /// Callers must not rely on read-your-writes semantics within a single cursor.
+    /// If you write a key and then immediately seek to it, you will observe the
+    /// **old value** (or "not found") until the batch is committed.
     fn upsert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&self.db)?;
         let encoded_key = key.encode();

@@ -25,7 +25,6 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
-use revm_primitives::hex;
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -84,7 +83,7 @@ where
         println!("The latest_block_number is {latest_block_number}, epoch is {epoch}");
 
         tokio::time::sleep(Duration::from_secs(3)).await;
-        for block_number in latest_block_number + 1..latest_block_number + 500 {
+        for block_number in latest_block_number + 1..latest_block_number + 1000 {
             let block_id = mock_block_id(block_number);
             let parent_block_id = mock_block_id(block_number - 1);
             pipeline_api
@@ -129,7 +128,7 @@ where
                 }
             }
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 }
@@ -207,7 +206,7 @@ fn test() {
         "--with-unused-ports",
         "--dev",
         "--datadir",
-        "gravity_test_data",
+        "data/gravity_pipe_test",
     ])
     .unwrap();
 
@@ -221,4 +220,9 @@ fn test() {
             )
         })
         .unwrap();
+
+    // Give background threads (EngineApiTreeHandler) time to detect channel disconnects
+    // and exit cleanly. This prevents "pthread lock: Invalid argument" (SIGABRT)
+    // which happens if threads are still running during process teardown.
+    std::thread::sleep(Duration::from_secs(2));
 }

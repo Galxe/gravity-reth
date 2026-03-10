@@ -87,6 +87,7 @@ pub const ORACLE_REQUEST_QUEUE_ADDR: Address = address!("00000000000000000000000
 // Precompiles (0x1625F5xxx)
 pub const NATIVE_MINT_PRECOMPILE_ADDR: Address =
     address!("00000000000000000000000000000001625f5000");
+pub const BLS_PRECOMPILE_ADDR: Address = address!("00000000000000000000000000000001625f5001");
 
 // Legacy aliases (for backward compatibility)
 pub const SYSTEM_CONTRACT_ADDRESS: Address = SYSTEM_CALLER;
@@ -101,7 +102,7 @@ use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Bytes, Signature, U256};
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use revm_primitives::TxKind;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Construct validator transactions envelope (JWK updates and DKG transcripts)
 ///

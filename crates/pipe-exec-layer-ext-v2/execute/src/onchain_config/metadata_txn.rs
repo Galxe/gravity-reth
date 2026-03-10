@@ -1,21 +1,22 @@
 //! Metadata transaction execution
 
 use super::{
+    new_system_call_txn,
     types::{convert_active_validators_to_bcs, onBlockStartCall, NewEpochEvent},
     SYSTEM_CALLER,
 };
 use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
-use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, TxLegacy, EMPTY_OMMER_ROOT_HASH};
+use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
-use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
 use gravity_primitives::get_gravity_config;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
-use reth_ethereum_primitives::{Block, BlockBody, Transaction, TransactionSigned};
-use reth_evm::{Evm, IntoTxEnv};
+use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
+use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
-use reth_primitives::{Receipt, Recovered};
+use reth_primitives::Receipt;
 use reth_provider::BlockExecutionResult;
 use revm::{
     context::TxEnv,
@@ -83,7 +84,7 @@ impl SystemTxnResult {
         let mut block = Block {
             header: Header {
                 beneficiary: ordered_block.coinbase,
-                timestamp: ordered_block.timestamp_us,
+                timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,
@@ -197,33 +198,15 @@ pub fn transact_system_txn(
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();
 
-    // Log any execution errors with appropriate severity
+    // DESIGN: System transaction failures are intentionally logged, not asserted.
+    // DKG and JWK system transactions can legitimately fail or revert, so a hard
+    // assert would crash the node on valid failure scenarios. Graceful handling
+    // (logging + continuing) is the correct behavior here.
     if !result.result.is_success() {
         super::errors::log_execution_error(&result.result);
     }
 
     (SystemTxnResult { result: result.result, txn }, result.state)
-}
-
-/// Create a new system call transaction
-fn new_system_call_txn(
-    contract: Address,
-    nonce: u64,
-    gas_price: u128,
-    input: Bytes,
-) -> TransactionSigned {
-    TransactionSigned::new_unhashed(
-        Transaction::Legacy(TxLegacy {
-            chain_id: None,
-            nonce,
-            gas_price,
-            gas_limit: 30_000_000,
-            to: TxKind::Call(contract),
-            value: U256::ZERO,
-            input,
-        }),
-        Signature::new(U256::ZERO, U256::ZERO, false),
-    )
 }
 
 /// Execute a metadata contract call (onBlockStart from Blocker.sol)

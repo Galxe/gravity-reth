@@ -46,6 +46,16 @@ Our evaluation demonstrates that Gravity Reth achieves ~41,000 TPS in a standard
 `Reth 1.4.8`'s 9,800 TPS on identical hardware. We believe Gravity Reth represents the fastest open-source EVM execution
 client to date and offer our architecture and results as a blueprint for future high-performance blockchain systems.
 
+### Deterministic Consensus and Finality
+
+Gravity Reth is designed to run behind a deterministic consensus layer (for example, the Gravity BFT-style consensus used
+in production deployments). In this model, the consensus layer presents the execution client with a single, strictly
+ordered sequence of blocks and never rolls back previously committed blocks. As a result, the usual Ethereum distinctions
+between "latest", "safe", and "finalized" blocks collapse: once a block is accepted by Gravity Reth it is immediately
+safe and finalized, and no chain reorgs or rollbacks occur at the execution layer. Throughout this document, any mentions
+of reorgs, fork choice rules, or divergent branches refer to upstream Reth running under standard Ethereum consensus;
+they do not apply to Gravity Reth's default deterministic-consensus configuration.
+
 ## Architectural Innovations
 
 Gravity Reth's performance gains stem from a holistic redesign of the core components of an EVM client. We detail each

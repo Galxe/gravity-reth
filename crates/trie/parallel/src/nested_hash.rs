@@ -5,10 +5,9 @@ use core::ops::RangeInclusive;
 use alloy_primitives::{
     keccak256,
     map::{hash_map, B256Map, HashMap},
-    BlockNumber, B256, KECCAK256_EMPTY, U256,
+    BlockNumber, B256, U256,
 };
 use alloy_rlp::encode_fixed_size;
-use gravity_primitives::get_gravity_config;
 use once_cell::sync::OnceCell;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
@@ -257,7 +256,6 @@ where
         targets: MultiProofTargets,
     ) -> ProviderResult<(B256, TrieUpdatesV2, B256Map<AccountProof>)> {
         let need_update = targets.is_empty();
-        let pipe_mode = !get_gravity_config().disable_pipe_execution;
         let trie_update = Mutex::new(TrieUpdatesV2::default());
         let proofs: Mutex<B256Map<AccountProof>> = Default::default();
         let updated_account_nodes: [Mutex<Vec<(Nibbles, Option<Node>)>>; 16] = Default::default();
@@ -301,14 +299,6 @@ where
                                         Some(Node::ValueNode(alloy_rlp::encode(account))),
                                     ));
                                     deleted_storage();
-                                    continue;
-                                }
-                                if account.get_bytecode_hash() == KECCAK256_EMPTY && pipe_mode {
-                                    let account = account.into_trie_account(EMPTY_ROOT_HASH);
-                                    updated_account_nodes.push((
-                                        path,
-                                        Some(Node::ValueNode(alloy_rlp::encode(account))),
-                                    ));
                                     continue;
                                 }
 

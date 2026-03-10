@@ -2465,8 +2465,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HashingWriter for DatabaseProvi
         for (hashed_address, account) in &hashed_accounts {
             if let Some(account) = account {
                 hashed_accounts_cursor.upsert(*hashed_address, account)?;
-            } else if hashed_accounts_cursor.seek_exact(*hashed_address)?.is_some() {
-                hashed_accounts_cursor.delete_current()?;
+            } else {
+                hashed_accounts_cursor.delete_by_key(*hashed_address)?;
             }
         }
 
@@ -2521,15 +2521,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HashingWriter for DatabaseProvi
         let mut hashed_storage = self.tx.cursor_dup_write::<tables::HashedStorages>()?;
         for (hashed_address, key, value) in hashed_storages.into_iter().rev() {
             hashed_storage_keys.entry(hashed_address).or_default().insert(key);
-
-            if hashed_storage
-                .seek_by_key_subkey(hashed_address, key)?
-                .filter(|entry| entry.key == key)
-                .is_some()
-            {
-                hashed_storage.delete_current()?;
-            }
-
+            hashed_storage.delete_by_key_subkey(hashed_address, key)?;
             if !value.is_zero() {
                 hashed_storage.upsert(hashed_address, &StorageEntry { key, value })?;
             }

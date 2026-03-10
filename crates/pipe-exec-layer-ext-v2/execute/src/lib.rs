@@ -1,6 +1,7 @@
 //! Pipeline execution layer extension
 #[macro_use]
 mod channel;
+pub mod bls_precompile;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
@@ -20,7 +21,7 @@ use alloy_consensus::{
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{
     map::{HashMap, HashSet},
-    Address, Bytes, TxHash, B256, U256,
+    Address, TxHash, B256, U256,
 };
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_primitives::get_gravity_config;
@@ -29,7 +30,9 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
-use reth_evm::{ConfigureEvm, Evm, NextBlockEnvAttributes, ParallelDatabase};
+use reth_evm::{
+    precompiles::DynPrecompile, ConfigureEvm, Evm, NextBlockEnvAttributes, ParallelDatabase,
+};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_pipe_exec_layer_event_bus::{
@@ -68,13 +71,14 @@ use tokio::sync::{
 use tracing::*;
 
 use crate::{
+    bls_precompile::create_bls_pop_verify_precompile,
     mint_precompile::create_mint_token_precompile,
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         transact_system_txn,
         types::DataRecorded,
-        SystemTxnResult, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
 };
 
@@ -223,6 +227,7 @@ struct Core<Storage: GravityStorage> {
     storage: Arc<Storage>,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
+    custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
@@ -230,6 +235,21 @@ struct Core<Storage: GravityStorage> {
     make_canonical_barrier: Channel<u64 /* block number */, Instant>,
     discard_txs_tx: UnboundedSender<Vec<TxHash>>,
     cache: PersistBlockCache,
+    // Ordering rationale: `Ordering::Release` (stores) / `Ordering::Acquire` (loads) is
+    // sufficient — `SeqCst` is unnecessary. The `execute_block_barrier` Channel (backed by
+    // `Mutex<Inner>`) enforces strict serial block execution: block N's `process()` cannot
+    // proceed past `wait((epoch, N-1))` until block N-1 has completed and called
+    // `notify((epoch, N-1), ...)`. Both stores sit inside this serialized critical section,
+    // so there is only ever a single writer — no concurrent writer can interleave.
+    //
+    // The only concurrent readers are in the timeout branch below (`self.epoch()` /
+    // `self.execute_height()`), which merely check for stale/duplicate blocks. Each
+    // individual Acquire load sees the latest Release store (no staleness); the two
+    // reads are simply not atomic *with respect to each other*, so at worst a concurrent
+    // update between the two loads causes one extra wait-loop iteration, never an
+    // incorrect discard. Note that even `SeqCst` would not help here — two separate
+    // loads are never atomic as a pair regardless of ordering; only an `AtomicU128`
+    // or a lock could provide an atomic snapshot, but neither is needed.
     epoch: AtomicU64,
     execute_height: AtomicU64,
     metrics: PipeExecLayerMetrics,
@@ -296,6 +316,44 @@ enum SystemTxnExecutionOutcome {
     EpochChanged(ExecuteOrderedBlockResult),
 }
 
+// DESIGN: This validation is intentionally debug-only.
+// These checks (gas overflow, gas accounting consistency, timestamp-unit sanity)
+// detect logic bugs during development and testing. They are not needed in
+// production and use `panic!` which is inappropriate for release builds.
+#[cfg(debug_assertions)]
+fn validate_execution_output(
+    block: &Block,
+    execution_output: &BlockExecutionOutput<Receipt>,
+) -> Result<(), String> {
+    if block.gas_limit() < block.gas_used() {
+        return Err(format!("gas_limit({}) < gas_used({})", block.gas_limit(), block.gas_used()));
+    }
+    let expected_gas_used =
+        execution_output.receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0);
+    if block.gas_used() != expected_gas_used {
+        return Err(format!(
+            "block gas_used({}) != last receipt cumulative_gas_used({})",
+            block.gas_used(),
+            expected_gas_used
+        ));
+    }
+    if execution_output.gas_used != block.gas_used {
+        return Err(format!(
+            "execution_output.gas_used({}) != block.gas_used({})",
+            execution_output.gas_used, block.gas_used
+        ));
+    }
+    let now_secs =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    if block.timestamp() > now_secs * 2 {
+        return Err(format!(
+            "block timestamp({}) is not in seconds, likely in milliseconds or microseconds",
+            block.timestamp()
+        ));
+    }
+    Ok(())
+}
+
 impl<Storage: GravityStorage> Core<Storage> {
     fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
@@ -331,7 +389,11 @@ impl<Storage: GravityStorage> Core<Storage> {
                 .await
             {
                 Some(parent) => break parent,
-                // Make sure the ordered blocks are idempotent
+                // Make sure the ordered blocks are idempotent.
+                // NOTE: Each Acquire load below sees the latest Release
+                // store to its respective atomic. The two reads are not mutually
+                // atomic, but a concurrent update between them at worst causes one
+                // extra wait-loop iteration, never an incorrect discard.
                 None => {
                     if block_epoch < self.epoch() || block_number <= self.execute_height() {
                         warn!(target: "PipeExecService.process",
@@ -377,16 +439,12 @@ impl<Storage: GravityStorage> Core<Storage> {
                 self.execute_history_block(*recovered_block)
             }
         };
-        debug_assert!(
-            block.gas_limit() >= block.gas_used(),
-            "gas_limit({}) < gas_used({})",
-            block.gas_limit(),
-            block.gas_used()
-        );
-        debug_assert_eq!(
-            block.gas_used(),
-            execution_output.receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0)
-        );
+
+        #[cfg(debug_assertions)]
+        validate_execution_output(&block, &execution_output).unwrap_or_else(|e| {
+            panic!("validate_execution_output failed. error: {e:?}\n{:?}", block.header());
+        });
+
         let write_start = Instant::now();
         self.cache.write_state_changes(
             block_number,
@@ -408,11 +466,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         self.metrics.execute_duration.record(elapsed);
         self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
-        debug_assert_eq!(
-            execution_output.gas_used, block.gas_used,
-            "gas_used mismatch, block_number: {}",
-            block.number,
-        );
+
         if epoch > block_epoch {
             info!(target: "PipeExecService.process",
                 block_number=?block_number,
@@ -421,8 +475,12 @@ impl<Storage: GravityStorage> Core<Storage> {
                 new_epoch=?epoch,
                 "new epoch"
             );
+            // SAFETY: Release ordering is sufficient here — see comment on field
+            // declarations.
             assert_eq!(self.epoch.fetch_max(epoch, Ordering::Release), block_epoch);
         }
+        // SAFETY: Release ordering is sufficient — the execute_block_barrier
+        // serializes writers; only the timeout branch reads these concurrently (harmlessly).
         assert_eq!(self.execute_height.fetch_add(1, Ordering::Release), block_number - 1);
         self.execute_block_barrier
             .notify(
@@ -499,8 +557,20 @@ impl<Storage: GravityStorage> Core<Storage> {
         let executed_block_hash = execution_result.block_hash;
         self.execution_result_tx.send(execution_result).ok()?;
         let block_hash = self.verified_block_hash_rx.wait(block_id).await?;
-        if let Some(block_hash) = block_hash {
-            assert_eq!(executed_block_hash, block_hash);
+        match block_hash {
+            Some(verified_hash) => {
+                assert_eq!(executed_block_hash, verified_hash, "Block hash mismatch");
+            }
+            None => {
+                // Consensus did not supply a verification hash for this block.
+                warn!(
+                    target: "PipeExecService.process",
+                    block_number = ?block_number,
+                    block_id = ?block_id,
+                    block_hash = ?executed_block_hash,
+                    "consensus did not provide a verification hash for this block"
+                );
+            }
         }
         let elapsed = start_time.elapsed();
         self.metrics.verify_duration.record(elapsed);
@@ -619,6 +689,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         let precompile = create_mint_token_precompile(state_for_precompile);
         evm.precompiles_mut()
             .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(precompile));
+
+        // Register BLS12-381 PoP verification precompile (stateless)
+        let bls_precompile = create_bls_pop_verify_precompile();
+        evm.precompiles_mut().apply_precompile(&BLS_PRECOMPILE_ADDR, move |_| Some(bls_precompile));
 
         // Get system caller nonce and gas price for constructing all system transactions
         let system_call_account =
@@ -764,7 +838,12 @@ impl<Storage: GravityStorage> Core<Storage> {
             precompile_state.merge_transitions(BundleRetention::Reverts);
             let precompile_bundle = precompile_state.take_bundle();
 
-            // Convert BundleState to EvmState and merge
+            // DESIGN: Using `insert` (shallow merge) is intentional here.
+            // The mint precompile only modifies regular user accounts (mint recipients),
+            // which are disjoint from accounts touched by system transactions
+            // (SYSTEM_CALLER, on-chain config contracts). The two state domains are
+            // architecturally separated: precompiles use `ParallelState` while system
+            // txns use the EVM's `inner_state`, so address overlap does not occur.
             for (address, account) in precompile_bundle.state {
                 if let Some(info) = account.info {
                     use revm::state::{Account, AccountStatus, EvmStorageSlot};
@@ -952,6 +1031,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
 
         let mut executor = self.evm_config.parallel_executor(state);
+        executor.apply_custom_precompiles(self.custom_precompiles.clone());
         // Apply all pre-executed transaction state changes (metadata + validator txns) to executor
         // state
         executor.commit_changes(accumulated_state_changes);
@@ -981,6 +1061,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             gravity_events: vec![],
             epoch,
         };
+        let n_system_receipts = 1 + validator_txn_results.len();
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result, 0);
         // Insert validator transaction results one by one after the metadata transaction
         // Position 1 is right after the metadata transaction at position 0
@@ -992,8 +1073,9 @@ impl<Storage: GravityStorage> Core<Storage> {
             receipts_len=?result.execution_output.receipts.len(),
             "insert metadata and validator transaction results to executed ordered block result"
         );
+        // Only extract gravity events from system transaction receipts.
         let gravity_events = self.extract_gravity_events_from_receipts(
-            &result.execution_output.receipts,
+            &result.execution_output.receipts[..n_system_receipts],
             result.block.number,
             epoch,
         );
@@ -1358,6 +1440,10 @@ where
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
+            custom_precompiles: Arc::new(vec![(
+                BLS_PRECOMPILE_ADDR,
+                create_bls_pop_verify_precompile(),
+            )]),
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
                 (epoch, latest_block_number),
@@ -1381,11 +1467,9 @@ where
     };
     tokio::spawn(service.run());
 
-    PIPE_EXEC_LAYER_EVENT_BUS.get_or_init(|| {
-        Box::new(PipeExecLayerEventBus {
-            event_rx: std::sync::Mutex::new(Some(event_rx)),
-            discard_txs: tokio::sync::Mutex::new(Some(discard_txs_rx)),
-        })
+    PIPE_EXEC_LAYER_EVENT_BUS.get_or_init(|| PipeExecLayerEventBus {
+        event_rx: std::sync::Mutex::new(Some(event_rx)),
+        discard_txs: tokio::sync::Mutex::new(Some(discard_txs_rx)),
     });
 
     PipeExecLayerApi {

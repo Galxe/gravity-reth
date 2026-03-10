@@ -1009,7 +1009,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1020,7 +1020,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1032,7 +1032,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=a94549a#a94549a8bb11ea6e2dbbe2b3b47ce9673bbe7877"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=6c778c7#6c778c77dfbdc73bac1eeaeb9f8202eab3da7ceb"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2918,7 +2918,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d162beedaa69905488a8da94f5ac3edb4dd4788b732fadb7bd120b2625c1976"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.111",
 ]
 
 [[package]]
@@ -3099,7 +3099,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3379,7 +3379,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4369,7 +4369,7 @@ dependencies = [
 [[package]]
 name = "grevm"
 version = "2.2.2"
-source = "git+https://github.com/Galxe/grevm?tag=v2.2.3#93e131670d481b78a66e5bb7f0b70cc584af4fef"
+source = "git+https://github.com/Galxe/grevm?tag=v2.2.4#26b586cff564a0815c422bb2a2ac0b5a28e5dce0"
 dependencies = [
  "ahash",
  "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
@@ -4531,6 +4531,12 @@ checksum = "5313b072ce3c597065a808dbf612c4c8e8590bdbf8b579508bf7a762c5eae6cd"
 dependencies = [
  "arrayvec",
 ]
+
+[[package]]
+name = "hex-literal"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
 
 [[package]]
 name = "hickory-proto"
@@ -5213,7 +5219,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6165,7 +6171,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8354,6 +8360,7 @@ dependencies = [
  "reth-stages",
  "reth-stages-api",
  "reth-static-file",
+ "reth-storage-errors",
  "reth-tasks",
  "reth-testing-utils",
  "reth-tracing",
@@ -9965,8 +9972,8 @@ name = "reth-pipe-exec-layer-event-bus"
 version = "1.8.3"
 dependencies = [
  "alloy-primitives",
- "once_cell",
  "reth-chain-state",
+ "reth-ethereum-primitives",
  "reth-primitives",
  "tokio",
  "tracing",
@@ -9984,11 +9991,14 @@ dependencies = [
  "alloy-sol-types",
  "api-types",
  "bcs 0.1.6",
+ "blst",
+ "codspeed-criterion-compat",
  "eyre",
  "gravity-primitives",
  "gravity-storage",
  "grevm",
  "hex",
+ "hex-literal",
  "metrics",
  "once_cell",
  "parking_lot",
@@ -11129,7 +11139,6 @@ dependencies = [
  "alloy-rlp",
  "codspeed-criterion-compat",
  "derive_more",
- "gravity-primitives",
  "itertools 0.14.0",
  "metrics",
  "once_cell",
@@ -11862,7 +11871,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12758,7 +12767,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.2",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13965,7 +13974,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14809,8 +14818,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "alloy-tx-macros"
-version = "1.0.37"
-source = "git+https://github.com/alloy-rs/alloy?tag=v1.0.37#8f6c1489f89e90649dac378008d8913e3b8a4c98"

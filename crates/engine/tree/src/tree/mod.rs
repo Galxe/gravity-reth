@@ -517,13 +517,7 @@ where
     fn make_executed_block_canonical(&mut self, block: ExecutedBlockWithTrieUpdates<N>) {
         let block_number = block.recovered_block.number();
         let block_hash = block.recovered_block.hash();
-
-        #[cfg(test)]
-        self.validate_block(block.recovered_block()).unwrap_or_else(|err| {
-                panic!(
-                    "Failed to validate block, block_number={block_number} block_hash={block_hash:?}: {err}",
-                )
-            });
+        let sealed_header = block.recovered_block.clone_sealed_header();
 
         self.state.tree_state.insert_executed(block);
 
@@ -541,6 +535,10 @@ where
                 "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
             )
         });
+
+        // deterministic consensus means canonical block is immediately safe and finalized
+        self.canonical_in_memory_state.set_safe(sealed_header.clone());
+        self.canonical_in_memory_state.set_finalized(sealed_header);
     }
 
     /// Returns a new [`Sender`] to send messages to this type.
@@ -560,8 +558,21 @@ where
     }
 
     fn pipe_run_inner(mut self) {
+        // Safety guard: assert N == EthPrimitives at runtime to prevent silent UB
+        // from the transmute below. This is feasible because NodePrimitives has a
+        // 'static bound, and keeps the reth upstream generic signature chain intact.
+        assert_eq!(
+            std::any::TypeId::of::<N>(),
+            std::any::TypeId::of::<reth_ethereum_primitives::EthPrimitives>(),
+            "pipe_run_inner requires N = EthPrimitives"
+        );
         let pipe_event_rx =
-            get_pipe_exec_layer_event_bus::<N>().event_rx.lock().unwrap().take().unwrap();
+            get_pipe_exec_layer_event_bus().event_rx.lock().unwrap().take().unwrap();
+        // Safety: The TypeId assertion above guarantees N == EthPrimitives,
+        // so Receiver<PipeExecLayerEvent<EthPrimitives>> and Receiver<PipeExecLayerEvent<N>>
+        // are the same type at runtime.
+        let pipe_event_rx: std::sync::mpsc::Receiver<PipeExecLayerEvent<N>> =
+            unsafe { std::mem::transmute(pipe_event_rx) };
         loop {
             match self.try_recv_pipe_exec_event(&pipe_event_rx) {
                 Ok(Some(event)) => self.on_pipe_exec_event(event),

@@ -17,7 +17,7 @@ use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
-use gravity_api_types::on_chain_config::jwks::ProviderJWKs;
+use gravity_api_types::on_chain_config::jwks::{JWKStruct, ProviderJWKs};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use std::fmt::Debug;
 use tracing::{debug, info};
@@ -91,7 +91,10 @@ where
             .map(|(uri, nonce)| ProviderJWKs {
                 issuer: uri.into_bytes(),
                 version: nonce as u64,
-                jwks: vec![], // Empty - only use version for comparison
+                jwks: vec![JWKStruct {
+                    type_name: "nonce".to_string(),
+                    data: nonce.to_be_bytes().to_vec(),
+                }],
             })
             .collect()
     }
