@@ -23,14 +23,13 @@ pub fn get_pipe_exec_layer_event_bus() -> &'static PipeExecLayerEventBus<EthPrim
         if let Some(event_bus) = PIPE_EXEC_LAYER_EVENT_BUS.get() {
             return event_bus;
         }
-        if start.elapsed().as_secs() >= MAX_WAIT_SECS {
-            panic!(
-                "PipeExecLayerEventBus not initialized after {}s — \
-                 likely a startup ordering bug",
-                MAX_WAIT_SECS
-            );
-        }
-        if start.elapsed().as_secs() % 5 == 0 {
+        assert!(
+            start.elapsed().as_secs() < MAX_WAIT_SECS,
+            "PipeExecLayerEventBus not initialized after {}s — \
+             likely a startup ordering bug",
+            MAX_WAIT_SECS
+        );
+        if start.elapsed().as_secs().is_multiple_of(5) {
             info!("Wait PipeExecLayerEventBus ready...");
         }
         sleep(Duration::from_secs(1));
