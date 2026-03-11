@@ -123,7 +123,7 @@ impl SystemTxnResult {
                 result: BlockExecutionResult {
                     receipts: vec![Receipt {
                         tx_type,
-                        success: true,
+                        success: self.result.is_success(),
                         cumulative_gas_used: gas_used,
                         logs: self.result.into_logs(),
                     }],
@@ -170,11 +170,13 @@ impl SystemTxnResult {
             receipt.cumulative_gas_used += gas_used;
         }
 
+        let is_success = self.result.is_success();
+
         result.execution_output.receipts.insert(
             insert_position,
             Receipt {
                 tx_type: self.txn.tx_type(),
-                success: true,
+                success: is_success,
                 cumulative_gas_used,
                 logs: self.result.into_logs(),
             },
