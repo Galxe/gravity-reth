@@ -7,6 +7,7 @@ use alloy_eips::eip2718::WithEncoded;
 pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory};
 use alloy_evm::{
     block::{CommitChanges, ExecutableTx},
+    precompiles::DynPrecompile,
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
 };
 use alloy_primitives::{Address, B256};
@@ -22,10 +23,11 @@ use reth_storage_api::StateProvider;
 pub use reth_storage_errors::provider::ProviderError;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::{
-    context::result::ExecutionResult,
+    context::{
+        result::{ExecutionResult, HaltReason},
+        TxEnv,
+    },
     database::{states::bundle_state::BundleRetention, BundleState, State},
-    state::EvmState,
-    DatabaseCommit,
 };
 
 /// A type that knows how to execute a block. It is assumed to operate on a
@@ -135,8 +137,14 @@ pub trait Executor<DB: Database>: Sized {
     /// This is used to optimize DB commits depending on the size of the state.
     fn size_hint(&self) -> usize;
 
-    /// Commits the changes to the executor state.
-    fn commit_changes(&mut self, changes: EvmState);
+    /// Executes a single system transaction on the executor's own internal state and commits
+    /// the resulting state changes immediately.
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error>;
 }
 
 /// Helper type for the output of executing a block.
@@ -590,8 +598,6 @@ where
             .with_state_hook(Some(Box::new(state_hook)))
             .execute_block(block.transactions_recovered())?;
 
-        self.db.merge_transitions(BundleRetention::Reverts);
-
         Ok(result)
     }
 
@@ -600,19 +606,21 @@ where
     }
 
     fn take_bundle(&mut self) -> BundleState {
+        self.db.merge_transitions(BundleRetention::Reverts);
         self.db.take_bundle()
-    }
-
-    fn commit_changes(&mut self, changes: EvmState) {
-        // Load all accounts in the changes map to ensure they are cached before committing.
-        for address in changes.keys() {
-            self.db.load_cache_account(*address).unwrap();
-        }
-        self.db.commit(changes);
     }
 
     fn size_hint(&self) -> usize {
         self.db.bundle_state.size_hint()
+    }
+
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        self.strategy_factory.transact_system_txn(&mut self.db, evm_env, precompiles, tx_env)
     }
 }
 
@@ -712,12 +720,17 @@ mod tests {
             unreachable!()
         }
 
-        fn commit_changes(&mut self, _changes: EvmState) {
-            unreachable!()
-        }
-
         fn size_hint(&self) -> usize {
             0
+        }
+
+        fn transact_system_txn(
+            &mut self,
+            _evm_env: EvmEnv,
+            _precompiles: Vec<(Address, DynPrecompile)>,
+            _tx_env: TxEnv,
+        ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+            unreachable!()
         }
     }
 

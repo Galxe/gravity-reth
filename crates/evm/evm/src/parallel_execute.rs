@@ -4,11 +4,15 @@ use core::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::execute::Executor;
-use alloy_evm::{precompiles::DynPrecompile, Database};
+use alloy_evm::{precompiles::DynPrecompile, Database, EvmEnv};
 use alloy_primitives::Address;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
-use revm::{database::BundleState, state::EvmState};
+use revm::{
+    context::TxEnv,
+    context_interface::result::{ExecutionResult, HaltReason},
+    database::BundleState,
+};
 
 /// The `ParallelExecutor` trait defines the interface for executing EVM blocks in parallel.
 pub trait ParallelExecutor {
@@ -47,18 +51,28 @@ pub trait ParallelExecutor {
         Ok(BlockExecutionOutput { state: self.take_bundle(), result })
     }
 
-    /// Commits the changes to the executor state.
-    fn commit_changes(&mut self, changes: EvmState);
+    /// Executes a single system transaction on the executor's own internal state and commits
+    /// the resulting state changes immediately.
+    ///
+    /// The EVM is constructed internally using the executor's `ParallelState` as the DB,
+    /// so there is only ONE source of truth. State changes are committed immediately after
+    /// execution. The next call will see updated nonces, balances, and storage without any
+    /// external bridging.
+    ///
+    /// `precompiles` allows callers to inject custom precompiles (e.g. mint, BLS) for this
+    /// specific transaction, in addition to any executor-level custom precompiles.
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error>;
 
     /// Applies custom precompiled contracts to the executor.
     ///
     /// These precompiles will be available during transaction execution alongside
     /// the standard Ethereum precompiles. This is a no-op by default.
-    fn apply_custom_precompiles(
-        &mut self,
-        _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
-    ) {
-    }
+    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>);
 }
 
 /// Wraps a [`Executor`] to provide a [`ParallelExecutor`] implementation.
@@ -96,7 +110,20 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
     }
 
     #[inline]
-    fn commit_changes(&mut self, changes: EvmState) {
-        self.0.commit_changes(changes);
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        self.0.transact_system_txn(evm_env, precompiles, tx_env)
+    }
+
+    #[inline]
+    fn apply_custom_precompiles(
+        &mut self,
+        _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+    ) {
+        // TODO(Ashin Gau): How does basic executor handle custom precompiles
     }
 }

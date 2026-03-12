@@ -18,15 +18,16 @@
 extern crate alloc;
 
 use crate::parallel_execute::GrevmExecutor;
-use alloc::{borrow::Cow, boxed::Box, sync::Arc};
+use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header};
 use alloy_eips::Decodable2718;
 pub use alloy_evm::EthEvm;
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
+    precompiles::DynPrecompile,
     EthEvmFactory,
 };
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_engine::ExecutionData;
 use core::{convert::Infallible, fmt::Debug};
 use gravity_primitives::get_gravity_config;
@@ -43,17 +44,21 @@ use reth_primitives_traits::{
 };
 use reth_storage_errors::any::AnyError;
 use revm::{
-    context::{BlockEnv, CfgEnv},
+    context::{
+        result::{ExecutionResult, HaltReason},
+        BlockEnv, CfgEnv,
+    },
     context_interface::block::BlobExcessGasAndPrice,
-    database::WrapDatabaseRef,
+    database::{State, WrapDatabaseRef},
     primitives::hardfork::SpecId,
 };
 
 mod config;
 use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip7840::BlobParams};
-use alloy_evm::eth::spec::EthExecutorSpec;
+use alloy_evm::{eth::spec::EthExecutorSpec, Database, Evm};
 pub use config::{revm_spec, revm_spec_by_timestamp_and_block_number};
 use reth_ethereum_forks::{EthereumHardfork, Hardforks};
+use revm::{context::TxEnv, DatabaseCommit};
 
 /// Helper type with backwards compatible methods to obtain Ethereum executor
 /// providers.
@@ -295,6 +300,27 @@ where
         } else {
             Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
         }
+    }
+
+    fn transact_system_txn<DB: Database>(
+        &self,
+        db: &mut State<DB>,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
+        let (execution_result, evm_state) = {
+            let mut evm = self.evm_with_env(&mut *db, evm_env);
+            for (addr, precompile) in precompiles {
+                Evm::precompiles_mut(&mut evm).apply_precompile(&addr, move |_| Some(precompile));
+            }
+            let result = Evm::transact_raw(&mut evm, tx_env).map_err(|e| {
+                BlockExecutionError::msg(alloc::format!("system txn execution failed: {e:?}"))
+            })?;
+            (result.result, result.state)
+        };
+        db.commit(evm_state);
+        Ok(execution_result)
     }
 }
 

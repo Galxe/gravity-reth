@@ -25,13 +25,13 @@ use alloy_primitives::{
 };
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_primitives::get_gravity_config;
-use grevm::ParallelState;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
-    precompiles::DynPrecompile, ConfigureEvm, Evm, NextBlockEnvAttributes, ParallelDatabase,
+    execute::BlockExecutionError, precompiles::DynPrecompile, ConfigureEvm, IntoTxEnv,
+    NextBlockEnvAttributes, ParallelDatabase,
 };
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
@@ -39,18 +39,14 @@ use reth_pipe_exec_layer_event_bus::{
     MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus, WaitForPersistenceEvent,
     PIPE_EXEC_LAYER_EVENT_BUS,
 };
-use reth_primitives::EthPrimitives;
+use reth_primitives::{EthPrimitives, Recovered};
 use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
 };
 use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
 use reth_rpc_eth_api::RpcTypes;
-use revm::{
-    database::{states::bundle_state::BundleRetention, State},
-    state::AccountInfo,
-    Database, DatabaseCommit,
-};
+use revm::{state::AccountInfo, DatabaseRef};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -62,6 +58,7 @@ use std::{
 
 use gravity_storage::GravityStorage;
 use onchain_config::OnchainConfigFetcher;
+use reth_evm::parallel_execute::ParallelExecutor;
 use reth_rpc_eth_api::helpers::EthCall;
 use reth_trie::{HashedPostState, KeccakKeyHasher};
 use tokio::sync::{
@@ -76,7 +73,6 @@ use crate::{
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
-        transact_system_txn,
         types::DataRecorded,
         SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
@@ -307,11 +303,7 @@ struct ExecuteOrderedBlockResult {
 /// This enum represents both outcomes.
 enum SystemTxnExecutionOutcome {
     /// Normal execution completed, continue with block processing
-    Continue {
-        metadata_result: SystemTxnResult,
-        accumulated_state_changes: revm::state::EvmState,
-        validator_results: Vec<SystemTxnResult>,
-    },
+    Continue { metadata_result: SystemTxnResult, validator_results: Vec<SystemTxnResult> },
     /// Epoch changed, return early with the result
     EpochChanged(ExecuteOrderedBlockResult),
 }
@@ -664,9 +656,11 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
     /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
     fn execute_system_transactions(
-        evm_config: &EthEvmConfig,
+        executor: &mut dyn ParallelExecutor<
+            Primitives = EthPrimitives,
+            Error = BlockExecutionError,
+        >,
         chain_spec: &ChainSpec,
-        state: &Arc<Storage::StateView>,
         evm_env: reth_evm::EvmEnv,
         ordered_block: &OrderedBlock,
         base_fee: u64,
@@ -674,52 +668,38 @@ impl<Storage: GravityStorage> Core<Storage> {
         block_id: B256,
         parent_id: B256,
         block_number: u64,
+        initial_nonce: u64,
     ) -> SystemTxnExecutionOutcome {
-        let mut inner_state =
-            State::builder().with_database_ref(state).with_bundle_update().build();
-        let mut evm = evm_config.evm_with_env(&mut inner_state, evm_env);
-
-        // Create shared state for precompile - keep a reference so we can extract changes later
-        let state_for_precompile = {
-            let report_db_metrics = get_gravity_config().report_db_metrics;
-            let parallel_state = ParallelState::new(state.clone(), true, report_db_metrics);
-            Arc::new(parking_lot::Mutex::new(parallel_state))
-        };
-        let state_for_precompile_ref = state_for_precompile.clone();
-        let precompile = create_mint_token_precompile(state_for_precompile);
-        evm.precompiles_mut()
-            .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(precompile));
-
-        // Register BLS12-381 PoP verification precompile (stateless)
+        let mint_precompile = create_mint_token_precompile();
         let bls_precompile = create_bls_pop_verify_precompile();
-        evm.precompiles_mut().apply_precompile(&BLS_PRECOMPILE_ADDR, move |_| Some(bls_precompile));
+        let system_precompiles: Vec<(Address, DynPrecompile)> = vec![
+            (NATIVE_MINT_PRECOMPILE_ADDR, mint_precompile),
+            (BLS_PRECOMPILE_ADDR, bls_precompile),
+        ];
 
-        // Get system caller nonce and gas price for constructing all system transactions
-        let system_call_account =
-            evm.db_mut().basic(SYSTEM_CALLER).unwrap().expect("SYSTEM_CALLER not exists");
-        let gas_price = evm.block().basefee as u128;
-        let mut current_nonce = system_call_account.nonce;
-        // Construct and execute metadata transaction using unified entry point
+        let mut current_nonce = initial_nonce;
+        // -----------------------------------------------------------------------
+        // Metadata transaction (onBlockStart)
+        // -----------------------------------------------------------------------
         let metadata_txn = construct_metadata_txn(
             current_nonce,
-            gas_price,
+            base_fee as u128,
             ordered_block.timestamp_us,
             ordered_block.proposer_index,
         );
         current_nonce = metadata_txn.nonce() + 1;
 
-        let (metadata_txn_result, metadata_state_changes) =
-            transact_system_txn(&mut evm, metadata_txn);
+        let metadata_tx_env =
+            Recovered::new_unchecked(metadata_txn.clone(), SYSTEM_CALLER).into_tx_env();
+        let metadata_execution_result = executor
+            .transact_system_txn(evm_env.clone(), system_precompiles.clone(), metadata_tx_env)
+            .unwrap_or_else(|e| panic!("metadata txn execution failed: {e:?}"));
 
-        // Commit metadata state changes immediately so subsequent txns see nonce update
-        evm.db_mut().commit(metadata_state_changes.clone());
+        let metadata_txn_result =
+            SystemTxnResult { result: metadata_execution_result, txn: metadata_txn };
 
-        // Accumulate state changes for returning to executor
-        let mut accumulated_state_changes = metadata_state_changes;
-
-        // Check for epoch change
+        // Check for epoch change from metadata txn
         if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
-            drop(evm);
             assert_eq!(new_epoch, epoch + 1);
             info!(target: "execute_ordered_block",
                 id=?block_id,
@@ -728,13 +708,15 @@ impl<Storage: GravityStorage> Core<Storage> {
                 new_epoch=?new_epoch,
                 "emit new epoch, discard the block"
             );
-            inner_state.merge_transitions(BundleRetention::Reverts);
+            // merge_transitions was already called inside transact_system_txn,
+            // so take_bundle() returns the complete bundle with all system-txn changes.
+            let bundle = executor.take_bundle();
             return SystemTxnExecutionOutcome::EpochChanged(
                 metadata_txn_result.into_executed_ordered_block_result(
                     chain_spec,
                     ordered_block,
                     base_fee,
-                    inner_state.take_bundle(),
+                    bundle,
                     validators,
                 ),
             );
@@ -745,35 +727,36 @@ impl<Storage: GravityStorage> Core<Storage> {
             "metadata transaction result"
         );
 
-        // Execute validator transactions (DKG and JWK) one by one
-        // DKG transactions are executed first since they may trigger epoch changes
+        // -----------------------------------------------------------------------
+        // Validator transactions (DKG and JWK) — sorted: DKG first, JWK second
+        // -----------------------------------------------------------------------
         let mut validator_txn_results: Vec<SystemTxnResult> = Vec::new();
 
-        // Sort extra_data: DKG first, then JWK
         let mut sorted_extra_data: Vec<_> = ordered_block.extra_data.iter().collect();
         sorted_extra_data.sort_by_key(|data| match data {
-            ExtraDataType::DKG(_) => 0, // DKG comes first
-            ExtraDataType::JWK(_) => 1, // JWK comes second
+            ExtraDataType::DKG(_) => 0,
+            ExtraDataType::JWK(_) => 1,
         });
 
         for (index, extra_data) in sorted_extra_data.iter().enumerate() {
             let is_dkg = matches!(extra_data, ExtraDataType::DKG(_));
-            // Try to construct validator transaction, skip if failed
-            let txn =
-                match construct_validator_txn_from_extra_data(extra_data, current_nonce, gas_price)
-                {
-                    Ok(txn) => txn,
-                    Err(e) => {
-                        error!(target: "execute_ordered_block",
-                            index=?index,
-                            is_dkg=?is_dkg,
-                            block_number=?block_number,
-                            error=?e,
-                            "Failed to construct validator transaction, skipping"
-                        );
-                        continue;
-                    }
-                };
+            let txn = match construct_validator_txn_from_extra_data(
+                extra_data,
+                current_nonce,
+                base_fee as u128,
+            ) {
+                Ok(txn) => txn,
+                Err(e) => {
+                    error!(target: "execute_ordered_block",
+                        index=?index,
+                        is_dkg=?is_dkg,
+                        block_number=?block_number,
+                        error=?e,
+                        "Failed to construct validator transaction, skipping"
+                    );
+                    continue;
+                }
+            };
             current_nonce += 1;
 
             debug!(target: "execute_ordered_block",
@@ -784,20 +767,16 @@ impl<Storage: GravityStorage> Core<Storage> {
                 "executing validator transaction one by one"
             );
 
-            let (validator_result, validator_state_changes) = transact_system_txn(&mut evm, txn);
+            let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
+            let execution_result = executor
+                .transact_system_txn(evm_env.clone(), system_precompiles.clone(), tx_env)
+                .unwrap_or_else(|e| panic!("validator txn execution failed: {e:?}"));
 
-            // Commit state changes immediately so subsequent txns see nonce update
-            evm.db_mut().commit(validator_state_changes.clone());
-
-            // Merge state changes into accumulated changes
-            for (addr, account) in validator_state_changes {
-                accumulated_state_changes.insert(addr, account);
-            }
+            let validator_result = SystemTxnResult { result: execution_result, txn };
 
             // DKG transactions may trigger epoch change
             if is_dkg {
                 if let Some((new_epoch, validators)) = validator_result.emit_new_epoch() {
-                    drop(evm);
                     assert_eq!(new_epoch, epoch + 1);
                     info!(target: "execute_ordered_block",
                         id=?block_id,
@@ -806,13 +785,13 @@ impl<Storage: GravityStorage> Core<Storage> {
                         new_epoch=?new_epoch,
                         "DKG triggered new epoch, discard the block"
                     );
-                    inner_state.merge_transitions(BundleRetention::Reverts);
+                    let bundle = executor.take_bundle();
                     return SystemTxnExecutionOutcome::EpochChanged(
                         validator_result.into_executed_ordered_block_result(
                             chain_spec,
                             ordered_block,
                             base_fee,
-                            inner_state.take_bundle(),
+                            bundle,
                             validators,
                         ),
                     );
@@ -830,43 +809,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             validator_txn_results.push(validator_result);
         }
 
-        drop(evm);
-
-        // Extract changes from precompile state and merge into accumulated_state_changes
-        {
-            let mut precompile_state = state_for_precompile_ref.lock();
-            precompile_state.merge_transitions(BundleRetention::Reverts);
-            let precompile_bundle = precompile_state.take_bundle();
-
-            // DESIGN: Using `insert` (shallow merge) is intentional here.
-            // The mint precompile only modifies regular user accounts (mint recipients),
-            // which are disjoint from accounts touched by system transactions
-            // (SYSTEM_CALLER, on-chain config contracts). The two state domains are
-            // architecturally separated: precompiles use `ParallelState` while system
-            // txns use the EVM's `inner_state`, so address overlap does not occur.
-            for (address, account) in precompile_bundle.state {
-                if let Some(info) = account.info {
-                    use revm::state::{Account, AccountStatus, EvmStorageSlot};
-                    accumulated_state_changes.insert(
-                        address,
-                        Account {
-                            info,
-                            storage: account
-                                .storage
-                                .into_iter()
-                                .map(|(k, v)| (k, EvmStorageSlot::new(v.present_value, 0)))
-                                .collect(),
-                            status: AccountStatus::Touched,
-                            transaction_id: 0,
-                        },
-                    );
-                }
-            }
-        }
-
         SystemTxnExecutionOutcome::Continue {
             metadata_result: metadata_txn_result,
-            accumulated_state_changes,
             validator_results: validator_txn_results,
         }
     }
@@ -968,7 +912,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         assert_eq!(block_number, parent_header.number + 1);
         let epoch = ordered_block.epoch;
 
-        let state = Arc::new(self.storage.get_state_view().unwrap());
+        let state = self.storage.get_state_view().unwrap();
 
         let evm_env = self
             .evm_config
@@ -989,37 +933,46 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number=?block_number,
         );
         let base_fee = evm_env.block_env.basefee;
-        //             let mut evm = self.evm_config.evm_with_env(&mut state, evm_env);
-        //  evm apply precompile
-        // for xx in xx {  evm.execute_transaction(tx) }
-        // cases
 
-        // Execute system transactions (metadata, DKG, JWK) sequentially
-        let (metadata_txn_result, accumulated_state_changes, validator_txn_results) =
-            match Self::execute_system_transactions(
-                &self.evm_config,
-                &self.chain_spec,
-                &state,
-                evm_env,
-                &ordered_block,
-                base_fee,
-                epoch,
-                block_id,
-                parent_id,
-                block_number,
-            ) {
-                SystemTxnExecutionOutcome::EpochChanged(result) => return result,
-                SystemTxnExecutionOutcome::Continue {
-                    metadata_result,
-                    accumulated_state_changes,
-                    validator_results,
-                } => (metadata_result, accumulated_state_changes, validator_results),
-            };
+        // Read SYSTEM_CALLER nonce and gas price from state BEFORE moving state into executor.
+        // ParallelDatabase (Storage::StateView) implements DatabaseRef, so we can read directly.
+        let initial_nonce = state
+            .basic_ref(SYSTEM_CALLER)
+            .expect("failed to read SYSTEM_CALLER account from state")
+            .map(|a| a.nonce)
+            .unwrap_or(0);
 
-        // No longer pass validator_txns to create_block_for_executor since they are executed
-        // separately
+        // Create executor with state. System transactions will commit directly to its
+        // ParallelState, so there is a single source of truth for both system and user txns.
+        let mut executor = self.evm_config.parallel_executor(state);
+        executor.apply_custom_precompiles(self.custom_precompiles.clone());
+
+        // Execute system transactions (metadata, DKG, JWK) sequentially.
+        // State changes are committed directly into executor's ParallelState.
+        let (metadata_txn_result, validator_txn_results) = match Self::execute_system_transactions(
+            &mut *executor,
+            &self.chain_spec,
+            evm_env,
+            &ordered_block,
+            base_fee,
+            epoch,
+            block_id,
+            parent_id,
+            block_number,
+            initial_nonce,
+        ) {
+            SystemTxnExecutionOutcome::EpochChanged(result) => return result,
+            SystemTxnExecutionOutcome::Continue { metadata_result, validator_results } => {
+                (metadata_result, validator_results)
+            }
+        };
+
+        // State was moved into executor above. Get a fresh snapshot view for block construction.
+        // filter_invalid_txs only reads from storage (not the in-memory ParallelState cache),
+        // so both views see the same committed on-chain data.
+        let state_for_block = self.storage.get_state_view().unwrap();
         let (block, txs_info) =
-            self.create_block_for_executor(ordered_block, base_fee, &state, vec![]);
+            self.create_block_for_executor(ordered_block, base_fee, &state_for_block, vec![]);
 
         info!(target: "execute_ordered_block",
             id=?block_id,
@@ -1030,11 +983,6 @@ impl<Storage: GravityStorage> Core<Storage> {
             "ready to execute block"
         );
 
-        let mut executor = self.evm_config.parallel_executor(state);
-        executor.apply_custom_precompiles(self.custom_precompiles.clone());
-        // Apply all pre-executed transaction state changes (metadata + validator txns) to executor
-        // state
-        executor.commit_changes(accumulated_state_changes);
         let outcome = executor.execute(&block).unwrap_or_else(|err| {
             serde_json::to_writer_pretty(
                 std::io::BufWriter::new(std::fs::File::create(format!("{block_id}.json")).unwrap()),

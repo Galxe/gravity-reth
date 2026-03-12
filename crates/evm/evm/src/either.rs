@@ -2,11 +2,18 @@
 
 use crate::{execute::Executor, Database, OnStateHook};
 
-// re-export Either
+use alloy_evm::{precompiles::DynPrecompile, EvmEnv};
+use alloy_primitives::Address;
 pub use futures_util::future::Either;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
-use revm::{database::BundleState, state::EvmState};
+use revm::{
+    context::{
+        result::{ExecutionResult, HaltReason},
+        TxEnv,
+    },
+    database::BundleState,
+};
 
 impl<A, B, DB> Executor<DB> for Either<A, B>
 where
@@ -88,10 +95,15 @@ where
         }
     }
 
-    fn commit_changes(&mut self, changes: EvmState) {
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
         match self {
-            Self::Left(a) => a.commit_changes(changes),
-            Self::Right(b) => b.commit_changes(changes),
+            Self::Left(a) => a.transact_system_txn(evm_env, precompiles, tx_env),
+            Self::Right(b) => b.transact_system_txn(evm_env, precompiles, tx_env),
         }
     }
 }
