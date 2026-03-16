@@ -1032,7 +1032,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=a5cea29#a5cea29dd5947b56ac8103f3a5c9c6c3b232bac4"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=26b925bfedec52ba03380b3ce3d989d49365b23c#26b925bfedec52ba03380b3ce3d989d49365b23c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4369,7 +4369,7 @@ dependencies = [
 [[package]]
 name = "grevm"
 version = "2.2.2"
-source = "git+https://github.com/Galxe/grevm?tag=v2.2.4#26b586cff564a0815c422bb2a2ac0b5a28e5dce0"
+source = "git+https://github.com/Galxe/grevm?tag=v2.2.5#7c2aeb0c6439a5b65b8d88e9664ac543eea20d7b"
 dependencies = [
  "ahash",
  "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
@@ -4389,6 +4389,7 @@ dependencies = [
  "revm-inspector 10.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
  "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
  "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "tracing",
 ]
 
 [[package]]
