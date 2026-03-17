@@ -25,11 +25,11 @@ use reth_evm::{
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction};
 use revm::{
+    bytecode::Bytecode,
     context::{
         result::{ExecutionResult, HaltReason},
         TxEnv,
     },
-    bytecode::Bytecode,
     database::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
