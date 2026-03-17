@@ -283,6 +283,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 #[inline]
 fn post_block_balance_increments<ChainSpec, Block>(
     chain_spec: &ChainSpec,
@@ -322,6 +323,7 @@ where
     balance_increments
 }
 
+#[allow(dead_code)]
 #[inline]
 fn insert_post_block_withdrawals_balance_increments(
     spec: impl EthereumHardforks,
