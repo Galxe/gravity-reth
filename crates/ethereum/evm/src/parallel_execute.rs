@@ -205,6 +205,12 @@ where
         state
             .increment_balances(balance_increments.clone())
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+
+        // Gravity Gamma hardfork: upgrade system contract bytecodes
+        if self.chain_spec.gamma_transitions_at_block(block.number()) {
+            Self::apply_gamma(state)?;
+        }
+
         // call state hook with changes due to balance increments.
         self.system_caller.try_on_state_with(|| {
             balance_increment_state(&balance_increments, state).map(|state| {
@@ -218,7 +224,7 @@ where
         Ok(requests)
     }
 
-    /// Apply Alpha hardfork: upgrade Staking and StakePool contract bytecodes.
+    /// Apply Alpha hardfork: upgrade Staking and `StakePool` contract bytecodes.
     fn apply_alpha(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
         use crate::hardfork::alpha::{
             STAKEPOOL_ADDRESSES, STAKEPOOL_ALPHA_RUNTIME_BYTECODE, STAKING_ADDRESS,
@@ -279,7 +285,7 @@ where
         Ok(())
     }
 
-    /// Apply Beta hardfork: upgrade StakePool contract bytecodes only.
+    /// Apply Beta hardfork: upgrade `StakePool` contract bytecodes only.
     fn apply_beta(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
         use crate::hardfork::beta::{STAKEPOOL_ADDRESSES, STAKEPOOL_BETA_RUNTIME_BYTECODE};
 
@@ -308,6 +314,100 @@ where
         }
         state.cache.contracts.insert(pool_code_hash, pool_bytecode);
 
+        state.commit(hardfork_changes);
+        Ok(())
+    }
+
+    /// Apply Gamma hardfork: upgrade 11 system contracts + all `StakePool` instances.
+    ///
+    /// This function replaces the runtime bytecode of each system contract at its fixed address,
+    /// then replaces all `StakePool` instances with new bytecode and initializes their
+    /// `ReentrancyGuard` storage slot.
+    fn apply_gamma(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
+        use crate::hardfork::gamma::{
+            GAMMA_SYSTEM_UPGRADES, REENTRANCY_GUARD_NOT_ENTERED, REENTRANCY_GUARD_SLOT,
+            STAKEPOOL_ADDRESSES, STAKEPOOL_BYTECODE,
+        };
+        use alloy_primitives::{keccak256, Bytes};
+        use revm::bytecode::Bytecode;
+
+        let mut hardfork_changes: EvmState = EvmState::default();
+
+        // 1. Upgrade all system contracts
+        for (addr, bytecode_bytes) in GAMMA_SYSTEM_UPGRADES {
+            let new_bytecode = Bytecode::new_raw(Bytes::from_static(bytecode_bytes));
+            let code_hash = keccak256(bytecode_bytes);
+            {
+                let account = state
+                    .load_mut_cache_account(*addr)
+                    .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+                if let Some(ref info) = account.account {
+                    let mut new_info = info.clone();
+                    new_info.code_hash = code_hash;
+                    new_info.code = Some(new_bytecode.clone());
+                    hardfork_changes.insert(
+                        *addr,
+                        Account {
+                            info: new_info,
+                            storage: Default::default(),
+                            status: AccountStatus::Touched,
+                            transaction_id: 0,
+                        },
+                    );
+                }
+            }
+            state.cache.contracts.insert(code_hash, new_bytecode);
+        }
+
+        // 2. Upgrade all StakePool instances
+        if !STAKEPOOL_ADDRESSES.is_empty() {
+            let pool_bytecode = Bytecode::new_raw(Bytes::from_static(STAKEPOOL_BYTECODE));
+            let pool_code_hash = keccak256(STAKEPOOL_BYTECODE);
+            for pool_address in STAKEPOOL_ADDRESSES {
+                let pool_account = state
+                    .load_mut_cache_account(*pool_address)
+                    .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+                if let Some(ref info) = pool_account.account {
+                    let mut new_info = info.clone();
+                    new_info.code_hash = pool_code_hash;
+                    new_info.code = Some(pool_bytecode.clone());
+                    hardfork_changes.insert(
+                        *pool_address,
+                        Account {
+                            info: new_info,
+                            storage: Default::default(),
+                            status: AccountStatus::Touched,
+                            transaction_id: 0,
+                        },
+                    );
+                }
+            }
+            state.cache.contracts.insert(pool_code_hash, pool_bytecode);
+        }
+
+        // 3. Initialize ReentrancyGuard storage for all StakePool instances
+        // The bytecode replacement doesn't run constructors, so the ERC-7201
+        // namespaced slot is uninitialized (0). We must set it to NOT_ENTERED (1).
+        let guard_slot = alloy_primitives::U256::from_be_bytes(REENTRANCY_GUARD_SLOT);
+        let guard_value = alloy_primitives::U256::from(REENTRANCY_GUARD_NOT_ENTERED);
+        for pool_address in STAKEPOOL_ADDRESSES {
+            state
+                .load_mut_cache_account(*pool_address)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+            // Set the storage slot directly in the account's storage changes
+            if let Some(entry) = hardfork_changes.get_mut(pool_address) {
+                entry.storage.insert(
+                    guard_slot,
+                    revm::state::EvmStorageSlot::new_changed(
+                        alloy_primitives::U256::ZERO,
+                        guard_value,
+                        0,
+                    ),
+                );
+            }
+        }
+
+        // Commit all changes to create transitions for database persistence
         state.commit(hardfork_changes);
         Ok(())
     }
