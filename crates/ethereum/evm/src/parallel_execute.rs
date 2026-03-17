@@ -175,7 +175,7 @@ where
             Requests::default()
         };
 
-        let mut balance_increments = post_block_balance_increments(&self.chain_spec, block);
+        let mut balance_increments = HashMap::default();
         let state = self.state.as_mut().unwrap();
 
         // Irregular state change at Ethereum DAO hardfork
