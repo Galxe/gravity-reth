@@ -744,6 +744,11 @@ impl From<Genesis> for ChainSpec {
         {
             gravity_hardforks.insert(GravityHardfork::Beta, ForkCondition::Block(block_num));
         }
+        if let Some(block_num) =
+            genesis.config.extra_fields.get("gammaBlock").and_then(|v| v.as_u64())
+        {
+            gravity_hardforks.insert(GravityHardfork::Gamma, ForkCondition::Block(block_num));
+        }
 
         Self {
             chain: genesis.config.chain_id.into(),
