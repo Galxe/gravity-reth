@@ -4,4 +4,6 @@
 //! on the corresponding release branch. The `common` module provides shared
 //! traits and types that all hardfork modules implement.
 
+pub mod alpha;
+pub mod beta;
 pub mod common;
