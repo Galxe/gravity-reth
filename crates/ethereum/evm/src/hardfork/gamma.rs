@@ -12,48 +12,63 @@ use alloy_primitives::{address, Address};
 
 /// `StakingConfig` runtime bytecode (1608 bytes)
 pub const STAKING_CONFIG_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/staking_config.bin");
+/// `StakingConfig` system address
 pub const STAKING_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625F1001");
 
 /// `ValidatorConfig` runtime bytecode (2266 bytes)
 pub const VALIDATOR_CONFIG_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/validator_config.bin");
+/// `ValidatorConfig` system address
 pub const VALIDATOR_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625F1002");
 
 /// `GovernanceConfig` runtime bytecode (1575 bytes)
-pub const GOVERNANCE_CONFIG_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/governance_config.bin");
+pub const GOVERNANCE_CONFIG_BYTECODE: &[u8] =
+    include_bytes!("bytecodes/gamma/governance_config.bin");
+/// `GovernanceConfig` system address
 pub const GOVERNANCE_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625f1004");
 
 /// `Staking` runtime bytecode (11054 bytes)
 pub const STAKING_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/staking.bin");
+/// `Staking` system address
 pub const STAKING_ADDRESS: Address = address!("00000000000000000000000000000001625F2000");
 
 /// `ValidatorManagement` runtime bytecode (16427 bytes)
-pub const VALIDATOR_MANAGEMENT_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/validator_management.bin");
+pub const VALIDATOR_MANAGEMENT_BYTECODE: &[u8] =
+    include_bytes!("bytecodes/gamma/validator_management.bin");
+/// `ValidatorManagement` system address
 pub const VALIDATOR_MANAGEMENT_ADDRESS: Address =
     address!("00000000000000000000000000000001625F2001");
 
 /// `Reconfiguration` runtime bytecode (5721 bytes)
 pub const RECONFIGURATION_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/reconfiguration.bin");
+/// `Reconfiguration` system address
 pub const RECONFIGURATION_ADDRESS: Address = address!("00000000000000000000000000000001625F2003");
 
 /// `Blocker` runtime bytecode (1858 bytes)
 pub const BLOCKER_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/blocker.bin");
+/// `Blocker` system address
 pub const BLOCKER_ADDRESS: Address = address!("00000000000000000000000000000001625F2004");
 
 /// `PerformanceTracker` runtime bytecode (1742 bytes)
-pub const PERFORMANCE_TRACKER_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/performance_tracker.bin");
+pub const PERFORMANCE_TRACKER_BYTECODE: &[u8] =
+    include_bytes!("bytecodes/gamma/performance_tracker.bin");
+/// `PerformanceTracker` system address
 pub const PERFORMANCE_TRACKER_ADDRESS: Address =
     address!("00000000000000000000000000000001625F2005");
 
 /// `Governance` runtime bytecode (8552 bytes)
 pub const GOVERNANCE_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/governance.bin");
+/// `Governance` system address
 pub const GOVERNANCE_ADDRESS: Address = address!("00000000000000000000000000000001625F3000");
 
 /// `NativeOracle` runtime bytecode (4578 bytes)
 pub const NATIVE_ORACLE_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/native_oracle.bin");
+/// `NativeOracle` system address
 pub const NATIVE_ORACLE_ADDRESS: Address = address!("00000000000000000000000000000001625f4000");
 
 /// `OracleRequestQueue` runtime bytecode (3522 bytes)
-pub const ORACLE_REQUEST_QUEUE_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/oracle_request_queue.bin");
+pub const ORACLE_REQUEST_QUEUE_BYTECODE: &[u8] =
+    include_bytes!("bytecodes/gamma/oracle_request_queue.bin");
+/// `OracleRequestQueue` system address
 pub const ORACLE_REQUEST_QUEUE_ADDRESS: Address =
     address!("00000000000000000000000000000001625F4002");
 
