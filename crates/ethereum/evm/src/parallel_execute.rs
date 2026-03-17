@@ -10,7 +10,7 @@ use alloy_evm::{
     precompiles::DynPrecompile,
     EvmEnv,
 };
-use alloy_primitives::{map::HashMap, Address};
+use alloy_primitives::{keccak256, map::HashMap, Address, Bytes};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
@@ -25,6 +25,7 @@ use reth_evm::{
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction};
 use revm::{
+    bytecode::Bytecode,
     context::{
         result::{ExecutionResult, HaltReason},
         TxEnv,
@@ -191,6 +192,15 @@ where
             *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
                 drained_balance;
         }
+        // Gravity Alpha hardfork: upgrade Staking and StakePool contract code
+        if self.chain_spec.alpha_transitions_at_block(block.number()) {
+            Self::apply_alpha(state)?;
+        }
+        // Gravity Beta hardfork: upgrade StakePool contract code only
+        if self.chain_spec.beta_transitions_at_block(block.number()) {
+            Self::apply_beta(state)?;
+        }
+
         // increment balances
         state
             .increment_balances(balance_increments.clone())
@@ -206,6 +216,100 @@ where
         })?;
 
         Ok(requests)
+    }
+
+    /// Apply Alpha hardfork: upgrade Staking and StakePool contract bytecodes.
+    fn apply_alpha(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
+        use crate::hardfork::alpha::{
+            STAKEPOOL_ADDRESSES, STAKEPOOL_ALPHA_RUNTIME_BYTECODE, STAKING_ADDRESS,
+            STAKING_ALPHA_RUNTIME_BYTECODE,
+        };
+
+        let mut hardfork_changes: EvmState = EvmState::default();
+
+        // Upgrade Staking contract
+        let new_bytecode = Bytecode::new_raw(Bytes::from_static(STAKING_ALPHA_RUNTIME_BYTECODE));
+        let code_hash = keccak256(STAKING_ALPHA_RUNTIME_BYTECODE);
+        {
+            let staking_account = state
+                .load_mut_cache_account(STAKING_ADDRESS)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+            if let Some(ref info) = staking_account.account {
+                let mut new_info = info.clone();
+                new_info.code_hash = code_hash;
+                new_info.code = Some(new_bytecode.clone());
+                hardfork_changes.insert(
+                    STAKING_ADDRESS,
+                    Account {
+                        info: new_info,
+                        storage: Default::default(),
+                        status: AccountStatus::Touched,
+                        transaction_id: 0,
+                    },
+                );
+            }
+        }
+        state.cache.contracts.insert(code_hash, new_bytecode);
+
+        // Upgrade all StakePool contracts
+        let pool_bytecode = Bytecode::new_raw(Bytes::from_static(STAKEPOOL_ALPHA_RUNTIME_BYTECODE));
+        let pool_code_hash = keccak256(STAKEPOOL_ALPHA_RUNTIME_BYTECODE);
+        for pool_address in STAKEPOOL_ADDRESSES {
+            let pool_account = state
+                .load_mut_cache_account(pool_address)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+            if let Some(ref info) = pool_account.account {
+                let mut new_info = info.clone();
+                new_info.code_hash = pool_code_hash;
+                new_info.code = Some(pool_bytecode.clone());
+                hardfork_changes.insert(
+                    pool_address,
+                    Account {
+                        info: new_info,
+                        storage: Default::default(),
+                        status: AccountStatus::Touched,
+                        transaction_id: 0,
+                    },
+                );
+            }
+        }
+        state.cache.contracts.insert(pool_code_hash, pool_bytecode);
+
+        state.commit(hardfork_changes);
+        Ok(())
+    }
+
+    /// Apply Beta hardfork: upgrade StakePool contract bytecodes only.
+    fn apply_beta(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
+        use crate::hardfork::beta::{STAKEPOOL_ADDRESSES, STAKEPOOL_BETA_RUNTIME_BYTECODE};
+
+        let mut hardfork_changes: EvmState = EvmState::default();
+
+        let pool_bytecode = Bytecode::new_raw(Bytes::from_static(STAKEPOOL_BETA_RUNTIME_BYTECODE));
+        let pool_code_hash = keccak256(STAKEPOOL_BETA_RUNTIME_BYTECODE);
+        for pool_address in STAKEPOOL_ADDRESSES {
+            let pool_account = state
+                .load_mut_cache_account(pool_address)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+            if let Some(ref info) = pool_account.account {
+                let mut new_info = info.clone();
+                new_info.code_hash = pool_code_hash;
+                new_info.code = Some(pool_bytecode.clone());
+                hardfork_changes.insert(
+                    pool_address,
+                    Account {
+                        info: new_info,
+                        storage: Default::default(),
+                        status: AccountStatus::Touched,
+                        transaction_id: 0,
+                    },
+                );
+            }
+        }
+        state.cache.contracts.insert(pool_code_hash, pool_bytecode);
+
+        state.commit(hardfork_changes);
+        Ok(())
     }
 }
 
@@ -289,9 +393,15 @@ fn post_block_balance_increments<ChainSpec, Block>(
     block: &RecoveredBlock<Block>,
 ) -> HashMap<Address, u128>
 where
-    ChainSpec: EthereumHardforks,
+    ChainSpec: EthereumHardforks + EthChainSpec,
     Block: reth_primitives_traits::Block,
 {
+    // After Alpha hardfork, skip all post-block balance increments
+    // (disables PoW block rewards and DAO fork irregularities)
+    if chain_spec.is_alpha_active_at_block_number(block.header().number()) {
+        return HashMap::default();
+    }
+
     let mut balance_increments = HashMap::default();
 
     // Add block rewards if they are enabled.

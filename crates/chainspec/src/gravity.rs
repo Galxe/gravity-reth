@@ -9,9 +9,5 @@ hardfork!(
         Alpha,
         /// Beta hardfork: upgrade StakePool contracts with correct FACTORY immutable
         Beta,
-        /// Gamma hardfork: audit fixes, precompile changes, 12 contract bytecode upgrades
-        Gamma,
-        /// Delta hardfork: activate Governance contract by setting Ownable._owner
-        Delta,
     }
 );
