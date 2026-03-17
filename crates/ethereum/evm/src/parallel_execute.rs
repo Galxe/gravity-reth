@@ -224,7 +224,7 @@ where
         Ok(requests)
     }
 
-    /// Apply Alpha hardfork: upgrade Staking and StakePool contract bytecodes.
+    /// Apply Alpha hardfork: upgrade Staking and `StakePool` contract bytecodes.
     fn apply_alpha(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
         use crate::hardfork::alpha::{
             STAKEPOOL_ADDRESSES, STAKEPOOL_ALPHA_RUNTIME_BYTECODE, STAKING_ADDRESS,
@@ -285,7 +285,7 @@ where
         Ok(())
     }
 
-    /// Apply Beta hardfork: upgrade StakePool contract bytecodes only.
+    /// Apply Beta hardfork: upgrade `StakePool` contract bytecodes only.
     fn apply_beta(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
         use crate::hardfork::beta::{STAKEPOOL_ADDRESSES, STAKEPOOL_BETA_RUNTIME_BYTECODE};
 

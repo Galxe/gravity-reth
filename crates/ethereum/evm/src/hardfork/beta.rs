@@ -1,11 +1,11 @@
 //! Gravity Beta hardfork state changes.
 //!
-//! Contains constants and bytecode for StakePool contract upgrade during Beta hardfork.
-//! The StakePool bytecode includes the correct FACTORY immutable (SystemAddresses.STAKING).
+//! Contains constants and bytecode for `StakePool` contract upgrade during Beta hardfork.
+//! The `StakePool` bytecode includes the correct FACTORY immutable (SystemAddresses.STAKING).
 
 use alloy_primitives::{address, Address};
 
-/// StakePool addresses that need bytecode upgrades during Beta hardfork.
+/// `StakePool` addresses that need bytecode upgrades during Beta hardfork.
 pub const STAKEPOOL_ADDRESSES: [Address; 4] = [
     address!("ce128222bd84d67672f863424a03d114cd1253c5"),
     address!("78f595fb25d03a742338fb32acfd544bdc63d814"),
@@ -13,7 +13,7 @@ pub const STAKEPOOL_ADDRESSES: [Address; 4] = [
     address!("b99aa922eb5cae399b79adc87621e72f66d5a976"),
 ];
 
-/// New StakePool contract runtime bytecode for Beta hardfork.
+/// New `StakePool` contract runtime bytecode for Beta hardfork.
 /// Extracted from deployed contract via cast code (includes correct FACTORY immutable).
 /// Bytecode size: 6824 bytes.
 pub const STAKEPOOL_BETA_RUNTIME_BYTECODE: &[u8] = &[
