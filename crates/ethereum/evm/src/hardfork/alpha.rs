@@ -8,7 +8,7 @@ use alloy_primitives::{address, Address};
 /// Staking contract address (SystemAddresses.STAKING)
 pub const STAKING_ADDRESS: Address = address!("00000000000000000000000000000001625F2000");
 
-/// StakePool addresses that need bytecode upgrades during Alpha hardfork.
+/// `StakePool` addresses that need bytecode upgrades during Alpha hardfork.
 pub const STAKEPOOL_ADDRESSES: [Address; 4] = [
     address!("ce128222bd84d67672f863424a03d114cd1253c5"),
     address!("78f595fb25d03a742338fb32acfd544bdc63d814"),
@@ -702,7 +702,7 @@ pub const STAKING_ALPHA_RUNTIME_BYTECODE: &[u8] = &[
     0x1e, 0x00, 0x33,
 ];
 
-/// New StakePool contract runtime bytecode for Alpha hardfork.
+/// New `StakePool` contract runtime bytecode for Alpha hardfork.
 /// Extracted from forge deployedBytecode.
 /// Bytecode size: 6824 bytes.
 pub const STAKEPOOL_ALPHA_RUNTIME_BYTECODE: &[u8] = &[
