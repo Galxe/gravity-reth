@@ -70,6 +70,7 @@ pub mod execute {
     pub type EthExecutorProvider = EthEvmConfig;
 }
 
+pub mod hardfork;
 pub mod parallel_execute;
 
 mod build;
