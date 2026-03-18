@@ -51,6 +51,7 @@ where
                     );
                 })
                 .ok()?;
+            // Design Intent (GRETH-060): Same as epoch.rs — panic on ABI decode failure.
             getActiveValidatorsCall::abi_decode_returns(&result)
                 .expect("Failed to decode getActiveValidators return value")
         };

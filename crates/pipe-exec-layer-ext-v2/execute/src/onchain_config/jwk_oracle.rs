@@ -59,6 +59,10 @@ fn is_rsa_jwk(jwk: &JWKStruct) -> bool {
 
 /// Check if a JWKStruct is an UnsupportedJWK (blockchain/other oracle data)
 /// Checks for sourceType string (0, 1, 2, etc.) instead of fixed type_name
+// Design Intent (GRETH-059): Using parse::<u32>() as a type discriminator is
+// intentional. The consensus layer assigns numeric strings as type_name for
+// oracle data sources. All known source types are enumerated. Unknown string
+// types are rejected in the else branch of construct_oracle_record_transaction().
 fn is_unsupported_jwk(jwk: &JWKStruct) -> bool {
     // Check if type_name is a numeric string (sourceType)
     // TODO(gravity): check if it should be "0x1::jwks::UNSUPPORTED_JWK"

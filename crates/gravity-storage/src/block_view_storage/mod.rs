@@ -56,6 +56,12 @@ where
     }
 
     fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        // Design Intent (GRETH-034, GRETH-035): The DB transaction here reflects the
+        // persist frontier (height P), while the cache overlay contains data up to the
+        // current execution height M > P. In normal operation, the cache always provides
+        // the most recent data. DB fallback only occurs on cache misses, which are rare
+        // for recently-touched accounts. The three-database sharding (state/account/storage)
+        // also lacks cross-DB snapshot coordination, but the cache overlay dominates reads.
         let tx = self.client.database_provider_ro()?.into_tx();
         let nested_hash = NestedStateRoot::new(&tx, Some(self.cache.clone()));
         nested_hash.calculate(hashed_state)
@@ -147,6 +153,11 @@ impl<Tx: DbTx> DatabaseRef for RawBlockViewProvider<Tx> {
             .unwrap_or_default())
     }
 
+    // TODO(GRETH-031): BLOCKHASH opcode (0x40) is unimplemented. Any user transaction
+    // calling BLOCKHASH triggers a panic, which — combined with GRETH-029 (no barrier
+    // timeout) — causes permanent pipeline deadlock. Implement using the
+    // block_number_to_id BTreeMap maintained by BlockViewStorage::update_canonical(),
+    // which already stores the last BLOCK_HASH_HISTORY block hashes.
     fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
         unimplemented!("not support block_hash_ref in BlockViewProvider")
     }
@@ -207,6 +218,11 @@ impl DatabaseRef for BlockViewProvider {
         self.db.storage_ref(address, index)
     }
 
+    // TODO(GRETH-031): BLOCKHASH opcode (0x40) is unimplemented. Any user transaction
+    // calling BLOCKHASH triggers a panic, which — combined with GRETH-029 (no barrier
+    // timeout) — causes permanent pipeline deadlock. Implement using the
+    // block_number_to_id BTreeMap maintained by BlockViewStorage::update_canonical(),
+    // which already stores the last BLOCK_HASH_HISTORY block hashes.
     fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
         unimplemented!("not support block_hash_ref in BlockViewProvider")
     }

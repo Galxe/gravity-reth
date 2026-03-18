@@ -19,6 +19,9 @@ const BLS_POP_LEN: usize = 96;
 const EXPECTED_INPUT_LEN: usize = BLS_PUBKEY_LEN + BLS_POP_LEN;
 
 /// Gas cost for PoP verification (2 bilinear pairings + hash-to-curve)
+// TODO(GRETH-065): POP_VERIFY_GAS = 45,000 is ~23% of EIP-2537 equivalent
+// (~193,000 gas). Benchmark actual CPU cost on target hardware and adjust
+// to prevent computational DoS via repeated PoP verification calls.
 const POP_VERIFY_GAS: u64 = 45_000;
 
 /// Domain separation tag for BLS PoP verification

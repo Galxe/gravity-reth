@@ -23,6 +23,9 @@ pub const AUTHORIZED_CALLER: Address = address!("0x595475934ed7d9faa7fca28341c2c
 const FUNC_MINT: u8 = 0x01;
 
 /// Base gas cost for mint operation
+// TODO(GRETH-066): MINT_BASE_GAS = 21,000 matches a simple transfer but this
+// precompile performs additional work (mutex lock, state DB load, balance
+// modification). Benchmark actual CPU cost and adjust upward to prevent DoS.
 const MINT_BASE_GAS: u64 = 21000;
 
 /// Creates a mint token precompile contract instance with state access.
@@ -74,6 +77,11 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
     state: Arc<Mutex<ParallelState<DB>>>,
 ) -> PrecompileResult {
     // 1. Validate caller address
+    // Design Intent (GRETH-039-old / DELEGATECALL semantics):
+    // `input.caller` preserves the original `msg.sender` across DELEGATECALL. This is
+    // safe because AUTHORIZED_CALLER is a protocol-level pre-deploy (JWK Manager) that
+    // does not contain untrusted DELEGATECALL logic. An attacker cannot relay calls
+    // through it to impersonate the authorized caller.
     if input.caller != AUTHORIZED_CALLER {
         warn!(
             target: "evm::precompile::mint_token",
@@ -130,6 +138,9 @@ fn mint_token_handler<DB: ParallelDatabase + Send + Sync>(
         warn!(target: "evm::precompile::mint_token", ?recipient, "Zero amount");
         return Err(PrecompileError::Other("Zero amount not allowed".into()));
     }
+    // TODO(GRETH-049): No cumulative total supply cap enforced. Individual mints are
+    // capped at u128::MAX but there is no global supply limit. Consider adding a
+    // configurable maximum total supply and rejecting mints that would exceed it.
 
     // 6. Execute mint operation
     let mut state_guard = state.lock();

@@ -61,6 +61,11 @@ where
                 })
                 .ok()?;
 
+            // Design Intent (GRETH-060): expect() is deliberate here. The execution
+            // layer is strictly coupled to protocol contracts. ABI decode failure
+            // indicates a catastrophic state desync (wrong contract ABI, corrupted
+            // state, or incompatible deployment). Panicking and halting the node is
+            // safer than proceeding with potentially wrong epoch data.
             let epoch = Reconfiguration::currentEpochCall::abi_decode_returns(&result)
                 .expect("Failed to decode currentEpoch return value");
 

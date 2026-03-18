@@ -206,12 +206,20 @@ pub fn transact_system_txn(
 }
 
 /// Create a new system call transaction
+// TODO(GRETH-041): This function is duplicated in mod.rs. Consolidate to a
+// single definition (preferably in mod.rs) and have this module use
+// `super::new_system_call_txn()` to avoid divergence during future refactors.
 fn new_system_call_txn(
     contract: Address,
     nonce: u64,
     gas_price: u128,
     input: Bytes,
 ) -> TransactionSigned {
+    // Design Intent (GRETH-040): Zero-signature system transactions are
+    // intentional. Security relies on the on-chain SystemAccessControl
+    // modifier in protocol contracts, not on transaction-level signatures.
+    // The SYSTEM_CALLER address is a protocol constant that can only
+    // originate transactions through this code path.
     TransactionSigned::new_unhashed(
         Transaction::Legacy(TxLegacy {
             chain_id: None,
@@ -247,6 +255,10 @@ pub fn construct_metadata_txn(
 
     let call = onBlockStartCall {
         proposerIndex: proposer_idx,
+        // TODO(GRETH-042): failedProposerIndices is always empty. If
+        // Blocker.sol uses this for slashing or reward redistribution, the
+        // functionality is completely non-operative. Implement proposer
+        // tracking to populate this field from consensus layer data.
         failedProposerIndices: vec![],
         timestampMicros: timestamp_us,
     };

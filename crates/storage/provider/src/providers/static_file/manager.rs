@@ -1092,7 +1092,14 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         if segment.is_headers() {
             writer.prune_headers(highest_static_file_block - target_block)?;
         } else if let Some(block) = provider.block_body_indices(target_block)? {
+            // TODO(GRETH-071): If `block_body_indices` returns `None` (which can happen
+            // during crash recovery), pruning for transaction-based segments is silently
+            // skipped, leaving static files out of sync.
             let highest_tx = self.get_highest_static_file_tx(segment).unwrap_or_default();
+            
+            // TODO(GRETH-073): `highest_tx - block.last_tx_num()` could underflow if
+            // the database indices are ahead of static files during a complex crash,
+            // producing astronomically large prune counts.
             let to_delete = highest_tx - block.last_tx_num();
             if segment.is_receipts() {
                 writer.prune_receipts(to_delete, target_block)?;

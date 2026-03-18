@@ -9,10 +9,21 @@ use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::info;
 
 /// A static instance of `PipeExecLayerEventBus` used for dispatching events.
+// Design Intent (GRETH-037): The type-erased Box<dyn Any> is used because Rust's
+// static globals cannot be generic. Type safety is enforced at node startup: the
+// generic parameter N is consistent across the single binary entry point. A
+// mismatched downcast would panic at initialization, before any blocks are processed.
 pub static PIPE_EXEC_LAYER_EVENT_BUS: OnceCell<Box<dyn Any + Send + Sync>> = OnceCell::new();
 
 /// Get a reference to the global `PipeExecLayerEventBus` instance.
 pub fn get_pipe_exec_layer_event_bus<N: NodePrimitives>() -> &'static PipeExecLayerEventBus<N> {
+    // Design Intent (GRETH-038): The busy-wait loop with thread::sleep is used
+    // because this is called during node startup, before the async runtime is fully
+    // initialized. The event bus is always set during normal startup sequence, so this
+    // loop terminates quickly (typically 0-2 iterations). In abnormal conditions
+    // (initialization bug), the loop serves as a diagnostic via the log message.
+    // TODO: Consider adding a maximum iteration count to avoid hanging in truly broken
+    // deployments where the event bus is never initialized.
     let mut wait_time = 0;
     loop {
         let event_bus = PIPE_EXEC_LAYER_EVENT_BUS

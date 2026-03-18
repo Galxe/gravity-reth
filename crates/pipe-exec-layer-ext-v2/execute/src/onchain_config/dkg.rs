@@ -130,7 +130,7 @@ where
             })
             .ok()?;
 
-        // Decode the Solidity DKG state
+        // Design Intent (GRETH-060): Same as epoch.rs — panic on ABI decode failure.
         let solidity_dkg_state = getDKGStateCall::abi_decode_returns(&result)
             .expect("Failed to decode getDKGState return value");
         Some(convert_dkg_state_to_bcs(&solidity_dkg_state))
@@ -182,7 +182,7 @@ where
             })
             .ok()?;
 
-        // Decode the Solidity RandomnessConfig
+        // Design Intent (GRETH-060): Same as epoch.rs — panic on ABI decode failure.
         let solidity_config = getCurrentConfigCall::abi_decode_returns(&result)
             .expect("Failed to decode getCurrentConfig return value");
         Some(convert_randomness_config_to_bcs(&solidity_config))
@@ -261,7 +261,10 @@ fn convert_validator(
     gravity_api_types::on_chain_config::dkg::ValidatorConsensusInfo {
         addr: gravity_api_types::account::ExternalAccountAddress::new(addr_bytes),
         pk_bytes: validator.consensusPubkey.to_vec(),
-        // Convert wei to tokens by dividing by 10^18
+        // Design Intent (GRETH-064): Truncating sub-ether voting power is intentional.
+        // The protocol requires validators to stake whole tokens; wei fractions are
+        // ignored. unwrap_or(u64::MAX) handles the theoretical edge case where total
+        // stake exceeds u64::MAX ethers (~18B tokens), which is unreachable in practice.
         voting_power: (validator.votingPower /
             alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(18)))
         .try_into()

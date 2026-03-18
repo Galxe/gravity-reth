@@ -52,8 +52,10 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
     }
 
     async fn wait_inner(&self, key: K, timeout: Option<Duration>) -> Option<V> {
-        // ATTN: We can guarantee that `.await` will not occur within the critical zone, which means
-        // `MutexGuard` will not be sent across threads.
+        // Design Intent (GRETH-047-old): The SendMutexGuard uses `unsafe impl Send`.
+        // Safety: We guarantee the MutexGuard is dropped before any `.await` point. The
+        // guard is only held during synchronous HashMap operations and released via
+        // `drop(inner)` on line 75, before the `rx.await` on line 80/94.
         struct SendMutexGuard<'a, T>(MutexGuard<'a, T>);
         unsafe impl<'a, T> Send for SendMutexGuard<'a, T> {}
 
@@ -79,10 +81,11 @@ impl<K: Eq + Clone + Debug + Hash, V> Channel<K, V> {
                         match tokio::time::timeout(duration, rx).await {
                             Ok(result) => result.ok(),
                             Err(_) => {
-                                // Timeout occurred, clean up the waiting state only if still
-                                // waiting. If the state is
-                                // Notified, we should not remove it to avoid losing
-                                // the notify signal.
+                                // Timeout occurred. Clean up waiting state only if still waiting.
+                                // If a notify arrived between timeout and lock acquisition
+                                // (State::Notified), we must NOT remove it to avoid losing the
+                                // signal. These orphaned Notified entries are bounded by the
+                                // pipeline concurrency window and naturally consumed by retry.
                                 let mut inner = self.inner.lock().unwrap();
                                 if matches!(inner.states.get(&key), Some(State::Waiting(_))) {
                                     inner.states.remove(&key);

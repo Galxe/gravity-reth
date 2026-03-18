@@ -49,6 +49,9 @@ impl ParsedOracleTask {
     }
 
     /// Get fromBlock parameter
+    // TODO(GRETH-063): Missing fromBlock defaults to 0, causing the relayer to scan
+    // from genesis (potentially millions of blocks). Either require the parameter
+    // explicitly or default to a recent finalized block.
     pub fn from_block(&self) -> u64 {
         self.params.get("fromBlock").and_then(|s| s.parse().ok()).unwrap_or(0)
     }

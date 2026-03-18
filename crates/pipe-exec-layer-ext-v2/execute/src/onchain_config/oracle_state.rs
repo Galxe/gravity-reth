@@ -145,6 +145,9 @@ where
             results.push(OracleSourceState {
                 source_type: SOURCE_TYPE_BLOCKCHAIN,
                 source_id: source_id.try_into().unwrap_or(0),
+                // TODO(GRETH-043): Silent truncation from u128 to u64. Values above
+                // u64::MAX wrap around, potentially causing the relayer to re-process
+                // already-committed events. Use u128 consistently or add overflow check.
                 latest_nonce: latest_nonce as u64,
                 latest_record,
             });

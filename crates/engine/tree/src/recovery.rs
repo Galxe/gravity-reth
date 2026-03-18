@@ -111,6 +111,14 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     /// - History indices correctly track all state changes
     /// - All checkpoints are synchronized at `recover_block_number`
     pub fn check_and_recover(&self) -> ProviderResult<()> {
+        // Design Intent (GRETH-008): Recovery trusts the canonical tip state root
+        // without re-verification. This is acceptable because the only way a corrupted
+        // checkpoint can exist is via hardware failure or external data corruption,
+        // which would require manual intervention regardless.
+        // TODO(GRETH-070): Recovery uses StageId::Execution checkpoint as ground truth.
+        // If this checkpoint is corrupted (e.g., by partial write or disk corruption),
+        // recovery operates at the wrong block number. Consider adding a cross-check
+        // against block headers stored in static files.
         let provider_ro = self.factory.database_provider_ro()?;
         let recover_block_number = provider_ro.recover_block_number()?;
         let best_block_number = provider_ro.best_block_number()?;

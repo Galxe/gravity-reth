@@ -230,11 +230,22 @@ struct Core<Storage: GravityStorage> {
     custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
+    // TODO(GRETH-029): merklize/seal/make_canonical barriers lack timeouts. If a process()
+    // task panics, downstream barriers wait forever. Add wait_timeout to all barriers and
+    // implement a circuit breaker for graceful shutdown on task failure.
     merklize_barrier: Channel<u64 /* block number */, ()>,
     seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
     make_canonical_barrier: Channel<u64 /* block number */, Instant>,
+    // TODO(GRETH-036): All inter-layer channels are unbounded. Under sustained load or
+    // adversarial block conditions, blocks accumulate without bound. Replace with
+    // bounded_channel(32-64) to provide backpressure from execution to consensus.
     discard_txs_tx: UnboundedSender<Vec<TxHash>>,
     cache: PersistBlockCache,
+    // Design Intent (GRETH-057): `epoch` and `execute_height` are two independent AtomicU64
+    // values. Cross-variable ordering is guaranteed by the `execute_block_barrier` Channel
+    // (backed by Mutex<Inner>), which serializes block processing: block N cannot proceed
+    // past wait((epoch, N-1)) until block N-1 completes. Release/Acquire ordering on each
+    // individual atomic is sufficient; SeqCst is unnecessary.
     epoch: AtomicU64,
     execute_height: AtomicU64,
     metrics: PipeExecLayerMetrics,
@@ -266,6 +277,11 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
             );
 
             let core = self.core.clone();
+            // TODO(GRETH-044): JoinHandle is discarded — panics in process() are silently
+            // swallowed by the tokio runtime. Monitor the JoinHandle to detect and propagate
+            // task failures, triggering graceful shutdown instead of silent deadlock.
+            // TODO(GRETH-045): No concurrency limit on spawned process() tasks. Each waiting
+            // task holds its ReceivedBlock in memory. Add a semaphore or task queue.
             tokio::spawn(async move {
                 let start_time = Instant::now();
                 core.process(block).await;
@@ -398,7 +414,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         }
         self.storage.insert_block_id(block_number, block_id);
 
-        // Wait for persist gap with a reasonable timeout (2 seconds)
+        // Design Intent (GRETH-038-old / wait_persist_gap timeout):
+        // The 2000ms timeout is intentional. We deliberately allow execution to proceed
+        // when persistence lags, preventing consensus halts. The resulting cache growth
+        // is managed by the eviction daemon (see cache.rs). Blocking indefinitely here
+        // would halt consensus whenever disk I/O is temporarily slow.
         self.cache.wait_persist_gap(Some(2000));
         let start_time = Instant::now();
         let ExecuteOrderedBlockResult {
@@ -530,7 +550,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         let executed_block_hash = execution_result.block_hash;
         self.execution_result_tx.send(execution_result).ok()?;
         let block_hash = self.verified_block_hash_rx.wait(block_id).await?;
+        // TODO(GRETH-052): When block_hash is None, verification is skipped entirely.
+        // The None path exists for genesis/bootstrap but has no guard preventing it for
+        // post-genesis blocks. Add an explicit check that None is only valid at genesis.
         if let Some(block_hash) = block_hash {
+            // Design Intent (GRETH-053): Deliberate panic on hash mismatch. This is the
+            // correct behavior for consensus safety — a mismatch means non-deterministic
+            // execution, which must halt the node rather than silently diverge.
             assert_eq!(executed_block_hash, block_hash);
         }
         let elapsed = start_time.elapsed();
@@ -752,6 +778,10 @@ impl<Storage: GravityStorage> Core<Storage> {
 
             // Merge state changes into accumulated changes
             for (addr, account) in validator_state_changes {
+                // TODO(GRETH-051): `HashMap::insert` replaces the entire account entry.
+                // If a precompile modifies an account that is also touched by a system
+                // transaction, the updates from the system transaction are lost.
+                // Replace with deep-merge semantics (merge storage maps, take latest AccountInfo).
                 accumulated_state_changes.insert(addr, account);
             }
 
@@ -803,6 +833,9 @@ impl<Storage: GravityStorage> Core<Storage> {
             for (address, account) in precompile_bundle.state {
                 if let Some(info) = account.info {
                     use revm::state::{Account, AccountStatus, EvmStorageSlot};
+                    // TODO(GRETH-051): Same as above, replacing `insert` with deep-merge
+                    // to avoid losing precompile state updates if the account was already
+                    // modified by a metadata or validator transaction.
                     accumulated_state_changes.insert(
                         address,
                         Account {
@@ -1213,6 +1246,12 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
         sender_idx.entry(sender).or_default().push(i);
     }
 
+    // Design Intent (GRETH-074 / GRETH-016): This is a performance-only pre-filter,
+    // NOT a security boundary. It uses effective_gas_price (which is <= max_fee_per_gas)
+    // making the filter less strict than EVM validation. This is intentional: the filter
+    // may produce false negatives (letting some insufficient-balance txns through) but
+    // the EVM will catch them during actual execution. The purpose is to reduce wasted
+    // parallel EVM work on obviously-invalid transactions.
     let is_tx_valid = |tx: &TransactionSigned, sender: &Address, account: &mut AccountInfo| {
         if account.nonce != tx.nonce() {
             warn!(target: "filter_invalid_txs",
@@ -1329,6 +1368,9 @@ impl<Storage: GravityStorage, EthApi> PipeExecLayerApi<Storage, EthApi> {
 
     /// Wait for the block with the given block number to be persisted in the storage.
     /// Returns `None` if the channel has been closed.
+    // TODO(GRETH-054): rx.await has no timeout. If persistence never completes (disk
+    // full, I/O error), the commit loop stalls permanently and consensus hangs. Add a
+    // timeout and trigger graceful shutdown on expiry.
     pub async fn wait_for_block_persistence(&self, block_number: u64) -> Option<()> {
         let (tx, rx) = oneshot::channel();
         self.event_tx
@@ -1366,6 +1408,8 @@ where
     EthApi: EthCall,
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
+    // TODO(GRETH-036): All channels below are unbounded. Replace with bounded channels
+    // (capacity 32-64) to provide backpressure from execution to consensus layer.
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (execution_result_tx, execution_result_rx) = tokio::sync::mpsc::unbounded_channel();
     let verified_block_hash_ch = Arc::new(Channel::new());

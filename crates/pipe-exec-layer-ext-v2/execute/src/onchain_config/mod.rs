@@ -172,12 +172,19 @@ pub fn construct_validator_txn_from_extra_data(
 /// Create a new system call transaction
 ///
 /// Helper function used by both JWK and DKG transaction construction
+// TODO(GRETH-041): This function is duplicated in metadata_txn.rs. Keep this as
+// the canonical definition and make metadata_txn.rs use super::new_system_call_txn().
 pub(crate) fn new_system_call_txn(
     contract: Address,
     nonce: u64,
     gas_price: u128,
     input: Bytes,
 ) -> TransactionSigned {
+    // Design Intent (GRETH-040): Zero-signature (r=0, s=0) system transactions are
+    // intentional. Security relies on the on-chain SystemAccessControl modifier in
+    // protocol contracts, not on transaction-level signatures. The SYSTEM_CALLER
+    // address is a protocol constant that can only originate transactions through
+    // this privileged code path.
     TransactionSigned::new_unhashed(
         Transaction::Legacy(TxLegacy {
             chain_id: None,

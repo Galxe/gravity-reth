@@ -222,6 +222,11 @@ where
                 // and storage_db internally. For fault tolerance, stage checkpoints ensure
                 // idempotency - each stage's checkpoint is verified before writing, guaranteeing
                 // exactly-once execution even if the process crashes mid-block.
+                // Design Intent (GRETH-069): State and trie writes happen in separate
+                // threads with separate commits. If trie commits before state, another
+                // thread may transiently observe new trie nodes but old state data. This
+                // is acceptable because the cache overlay always provides consistent data
+                // for merklization, and readers only fall back to DB on cache miss.
                 thread::scope(|scope| -> Result<(), PersistenceError> {
                     let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
                         let start = Instant::now();
@@ -281,6 +286,11 @@ where
                         )
                         .record(start.elapsed());
 
+                        // Design Intent (GRETH-072): Validator nodes skip history index
+                        // writes because they are not RPC servers and do not serve
+                        // historical queries. Note: historical RPC queries against a
+                        // validator node may return empty/incorrect results without
+                        // explicit error, since no guard rejects them.
                         if !get_gravity_config().validator_node_only {
                             let start = Instant::now();
                             let provider_rw = inner_provider.database_provider_rw()?;

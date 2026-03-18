@@ -99,6 +99,10 @@ pub struct BlockchainEventSource {
     portal_address: Address,
 
     /// Current block cursor for polling
+    // Design Intent (GRETH-062): Ordering::Relaxed is used for cursor because it is
+    // only ever accessed from a single async task (the poll loop). The true
+    // synchronization point is the `last_processed` Mutex, which provides the
+    // happens-before relationship needed for nonce monotonicity.
     cursor: AtomicU64,
 
     /// Last event we returned to caller (for exactly-once tracking and persistence)
@@ -240,6 +244,12 @@ impl OracleDataSource for BlockchainEventSource {
             "Polling for MessageSent events"
         );
 
+        // TODO(GRETH-039): Oracle data from eth_getLogs is trusted without cryptographic
+        // proof of log inclusion. A compromised RPC provider could serve internally-consistent
+        // but fabricated cross-chain messages. If validators share an RPC provider and it is
+        // compromised, fake messages could be finalized by quorum. Consider:
+        // (1) Multi-RPC cross-checking, (2) Merkle proof via eth_getProof,
+        // (3) Source chain light client verification.
         let logs = self.rpc_client.get_logs(&filter).await?;
         let mut results = Vec::with_capacity(logs.len());
 

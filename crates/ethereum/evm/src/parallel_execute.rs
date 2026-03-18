@@ -78,6 +78,13 @@ where
         let state_clear_flag = self.chain_spec.is_spurious_dragon_active_at_block(block.number);
         let state = self.state.as_mut().unwrap();
         state.set_state_clear_flag(state_clear_flag);
+        // Design Intent (GRETH-058-old / WrapDatabaseRef state boundary):
+        // WrapDatabaseRef provides a read-only database interface to the EVM, but
+        // apply_pre_execution_changes() operates through system call hooks that write
+        // directly to the underlying ParallelState (e.g., beacon root contract calls).
+        // The state changes are not lost — they are committed via the ParallelState
+        // reference that WrapDatabaseRef wraps. This is consistent with upstream Reth's
+        // execution model where pre-execution changes are applied in-place.
         let mut evm =
             self.evm_config.evm_for_block(WrapDatabaseRef(state), block.header()).map_err(|e| {
                 BlockExecutionError::Internal(InternalBlockExecutionError::Other(Box::new(e)))

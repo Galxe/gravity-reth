@@ -538,13 +538,19 @@ where
             ForkchoiceStatus::Valid,
         );
 
+        // TODO(GRETH-068): Panic on make_canonical failure. Any error (including
+        // transient RocksDB I/O errors) causes immediate node crash with no retry
+        // mechanism. Consider adding retry logic for transient errors.
         self.make_canonical(block_hash).unwrap_or_else(|err| {
             panic!(
                 "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
             )
         });
 
-        // deterministic consensus means canonical block is immediately safe and finalized
+        // Design Intent (GRETH-009): In Gravity's BFT consensus model, every block
+        // that passes consensus is immediately considered safe and finalized. There is
+        // no concept of probabilistic finality or confirmation depth. This is by design
+        // and matches the deterministic consensus guarantees.
         self.canonical_in_memory_state.set_safe(sealed_header.clone());
         self.canonical_in_memory_state.set_finalized(sealed_header);
     }

@@ -58,6 +58,10 @@ impl RelayerState {
             .with_context(|| format!("Failed to parse state file: {}", path.display()))?;
 
         if state.version != SCHEMA_VERSION {
+            // TODO(GRETH-075): Mismatched schema version only produces a warning.
+            // Incompatible state data is loaded regardless, potentially causing
+            // incorrect cursor/nonce restoration. Reject incompatible versions or
+            // implement migration logic.
             warn!(
                 "State file version {} differs from current version {}",
                 state.version, SCHEMA_VERSION

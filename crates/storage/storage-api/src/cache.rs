@@ -206,6 +206,11 @@ impl PersistBlockCache {
                         last_contract_eviction_height = eviction_height;
                     }
                     // check and eviction account and trie state
+                    // TODO(GRETH-030): eviction_height can exceed persist_height when
+                    // last_state_eviction_height > persist_height from a prior cycle.
+                    // This evicts trie/state entries not yet persisted to DB, causing
+                    // silent state root divergence. Fix: cap with
+                    //   eviction_height = min(midpoint, persist_height)
                     if num_items > cache_capacity {
                         let eviction_height = if last_state_eviction_height == 0 {
                             persist_height.saturating_sub(512).max(persist_height / 2)
@@ -521,6 +526,10 @@ impl PersistBlockCache {
         })
     }
 
+    // Design Intent (GRETH-046): Individual DashMap operations are per-shard atomic
+    // (sharded locking). Concurrent readers may observe partial trie updates mid-write
+    // (some nodes removed, new nodes not yet inserted), but this cannot cause data
+    // corruption. The cache overlay ensures merklization always sees consistent data.
     /// Write trie updates.
     pub fn write_trie_updates(&self, input: &TrieUpdatesV2, block_number: u64) {
         input.removed_nodes.par_iter().for_each(|path| {

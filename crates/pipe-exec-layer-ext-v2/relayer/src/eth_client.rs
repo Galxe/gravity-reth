@@ -55,6 +55,11 @@ impl EthHttpCli {
         let url =
             Url::parse(rpc_url).with_context(|| format!("Failed to parse RPC URL: {}", rpc_url))?;
 
+        // Design Intent (GRETH-058): Standard TLS (via rustls) is used without
+        // certificate pinning. This is acceptable for the current threat model: the RPC
+        // provider is a trusted infrastructure partner, and pinning would complicate
+        // certificate rotation. The real security boundary is the on-chain quorum
+        // (see GRETH-039 in blockchain_source.rs).
         let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
         let client = client_builder.build().with_context(|| "Failed to build HTTP client")?;
 
