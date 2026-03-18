@@ -939,7 +939,7 @@ mod tests {
                 Account { balance: U256::ZERO, nonce: 0x00, bytecode_hash: Some(code_hash) };
             let account2 = address!("0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba");
             let account2_info = Account {
-                balance: U256::from(0x1bc16d674ece94bau128),
+                balance: U256::from(0x694bau128),
                 nonce: 0x00,
                 bytecode_hash: None,
             };
@@ -1186,7 +1186,7 @@ mod tests {
                     beneficiary_address,
                     Account {
                         nonce: 0,
-                        balance: U256::from(0x1bc16d674eca30a0u64),
+                        balance: U256::from(0x230a0u64),
                         bytecode_hash: None
                     }
                 ),
