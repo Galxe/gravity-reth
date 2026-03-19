@@ -355,8 +355,14 @@ impl<Storage: GravityStorage> Core<Storage> {
         self.execute_height.load(Ordering::Acquire)
     }
 
+    /// DESIGN: All `.unwrap()` calls on barrier wait/notify, state root, and
+    /// `verify_executed_block_hash` in this function are intentional. In the gravity-sdk
+    /// integration the panic handler is configured to abort the process (via
+    /// `std::process::exit`), so a panic terminates the entire node rather than
+    /// silently killing a single tokio task. Downstream barrier deadlocks therefore
+    /// cannot occur, and a full process restart is the correct recovery strategy.
     async fn process(&self, block: ReceivedBlock) {
-        // Wait untile there's no large gap between cache and db
+        // Wait until there's no large gap between cache and db
         let block_number = block.number();
         let block_id = block.id();
         let (randomness, block_epoch) = if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
@@ -655,6 +661,11 @@ impl<Storage: GravityStorage> Core<Storage> {
     ///
     /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
     /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
+    ///
+    /// DESIGN: The `unwrap_or_else(|e| panic!(...))` calls on system transaction
+    /// execution are intentional. These are unrecoverable failures; in the gravity-sdk
+    /// integration the panic handler aborts the process, preventing partial-state
+    /// corruption.
     fn execute_system_transactions(
         executor: &mut dyn ParallelExecutor<
             Primitives = EthPrimitives,

@@ -485,6 +485,10 @@ where
         }
     }
 
+    /// DESIGN: The `.expect()` calls on oneshot sends below are intentional. In
+    /// the gravity-sdk integration the panic handler is configured to abort the
+    /// process (via `std::process::exit`), so a dropped receiver terminates the
+    /// node rather than silently leaving a broken engine tree running.
     fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent<N>) {
         match event {
             PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }) => {
