@@ -26,7 +26,7 @@ pub const GOVERNANCE_CONFIG_BYTECODE: &[u8] =
 /// `GovernanceConfig` system address
 pub const GOVERNANCE_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625f1004");
 
-/// `Staking` runtime bytecode (11054 bytes)
+/// `Staking` runtime bytecode (11062 bytes)
 pub const STAKING_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/staking.bin");
 /// `Staking` system address
 pub const STAKING_ADDRESS: Address = address!("00000000000000000000000000000001625F2000");
@@ -74,14 +74,16 @@ pub const ORACLE_REQUEST_QUEUE_ADDRESS: Address =
 
 // ─── StakePool ───────────────────────────────────────────────────────────────
 
-/// `StakePool` runtime bytecode (6909 bytes)
+/// `StakePool` runtime bytecode (6917 bytes)
 pub const STAKEPOOL_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/stakepool.bin");
 
 /// `StakePool` contract addresses to upgrade during Gamma hardfork.
-/// These must be updated with all pool addresses from the live chain before deployment.
+/// Queried from `Staking.getAllPools()` on the live chain.
 pub const STAKEPOOL_ADDRESSES: &[Address] = &[
-    // StakePool created by Genesis.initialize for the initial validator
-    address!("33f4ee289578b2ff35ac3ffa46ea2e97557da32c"),
+    address!("b6135aecd7A5671CAAfAF2684FFaFEa194e7ecAf"),
+    address!("3Ae4cC22e8385748722c6d2247824ee0e3C39451"),
+    address!("2fEc74cdfEB32dbbE862C70A810F83361bD98Ce1"),
+    address!("3E3521dA1fDF1bc9A3a6773b2C17e9f248143eA6"),
 ];
 
 // ─── Upgrade table & ReentrancyGuard ─────────────────────────────────────────
