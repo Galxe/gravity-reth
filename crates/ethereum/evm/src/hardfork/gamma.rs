@@ -80,10 +80,10 @@ pub const STAKEPOOL_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/stakepool.
 /// `StakePool` contract addresses to upgrade during Gamma hardfork.
 /// Queried from `Staking.getAllPools()` on the live chain.
 pub const STAKEPOOL_ADDRESSES: &[Address] = &[
-    address!("b6135aecd7A5671CAAfAF2684FFaFEa194e7ecAf"),
-    address!("3Ae4cC22e8385748722c6d2247824ee0e3C39451"),
-    address!("2fEc74cdfEB32dbbE862C70A810F83361bD98Ce1"),
-    address!("3E3521dA1fDF1bc9A3a6773b2C17e9f248143eA6"),
+    address!("ce128222bd84d67672f863424a03d114cd1253c5"),
+    address!("78f595fb25d03a742338fb32acfd544bdc63d814"),
+    address!("891299fe364088ead65aba911ea17dd5d968cd81"),
+    address!("b99aa922eb5cae399b79adc87621e72f66d5a976"),
 ];
 
 // ─── Upgrade table & ReentrancyGuard ─────────────────────────────────────────
