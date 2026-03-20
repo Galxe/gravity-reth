@@ -978,9 +978,23 @@ impl<Storage: GravityStorage> Core<Storage> {
             }
         };
 
-        // State was moved into executor above. Get a fresh snapshot view for block construction.
-        // filter_invalid_txs only reads from storage (not the in-memory ParallelState cache),
-        // so both views see the same committed on-chain data.
+        // DESIGN: `filter_invalid_txs` reads from storage, not the executor's in-memory
+        // ParallelState cache, so it sees the pre-system-transaction state. This means that if
+        // a system transaction (e.g. mint precompile) credits an EOA, a user transaction from
+        // that EOA depending on the newly minted balance will be filtered out as invalid in this
+        // block and must be resubmitted in the next block.
+        //
+        // This is an intentional, accepted trade-off:
+        //   1. System txn sender is always SYSTEM_CALLER, so user nonces are never affected.
+        //   2. Only balance changes from mint are relevant; the one-block delay is negligible for
+        //      reward-style minting and users do not rely on same-block spending.
+        //   3. Discarded transactions are sent to `discard_txs_tx` for pool cleanup.
+        //
+        // If same-block spending of minted balance is ever required, the fix is:
+        //   - Add a `basic_ref(&self, Address) -> Option<AccountInfo>` method to the
+        //     `ParallelExecutor` trait.
+        //   - Before calling `filter_invalid_txs`, query each sender's account via
+        //     `executor.basic_ref(sender)` and collect overrides into a HashMap.
         let state_for_block = self.storage.get_state_view().unwrap();
         let (block, txs_info) =
             self.create_block_for_executor(ordered_block, base_fee, &state_for_block, vec![]);
