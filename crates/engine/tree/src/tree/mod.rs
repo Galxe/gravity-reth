@@ -518,6 +518,14 @@ where
         }
     }
 
+    /// DESIGN: `insert_executed` → `make_canonical` runs synchronously within
+    /// a single `pipe_run_inner` loop iteration (see its doc comment). Because
+    /// `advance_persistence` only runs after this function returns, no pruning
+    /// can remove the parent block from `blocks_by_hash` between insertion and
+    /// the `on_new_head` walk-back inside `make_canonical`. Additionally,
+    /// `on_new_head` only checks `current_canonical_head.hash` (a plain
+    /// `BlockNumHash` value) — it does not require the parent to still exist in
+    /// `blocks_by_hash` for the normal sequential extension case.
     fn make_executed_block_canonical(&mut self, block: ExecutedBlockWithTrieUpdates<N>) {
         let block_number = block.recovered_block.number();
         let block_hash = block.recovered_block.hash();
@@ -561,6 +569,13 @@ where
         }
     }
 
+    /// DESIGN: This is a **single-threaded event loop**. `on_pipe_exec_event`
+    /// (which calls `make_executed_block_canonical`) runs **synchronously** and
+    /// completes entirely before `advance_persistence` is invoked. This ordering
+    /// guarantees that `advance_persistence` cannot prune in-memory blocks
+    /// between `insert_executed` and `on_new_head` within the same
+    /// `make_executed_block_canonical` call — the two steps are atomic with
+    /// respect to pruning.
     fn pipe_run_inner(mut self) {
         // Safety guard: assert N == EthPrimitives at runtime to prevent silent UB
         // from the transmute below. This is feasible because NodePrimitives has a

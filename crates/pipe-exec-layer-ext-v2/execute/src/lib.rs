@@ -1113,6 +1113,14 @@ impl<Storage: GravityStorage> Core<Storage> {
         execution_outcome
     }
 
+    /// DESIGN: The three operations here — (1) engine tree `MakeCanonical`
+    /// event (updates in-memory `TreeState`), (2) `storage.update_canonical`
+    /// (reclaims in-memory caches), and (3) `advance_persistence` (writes to
+    /// reth DB, triggered later in the engine tree event loop) — are **all
+    /// in-memory** except for (3). `GravityStorage` performs no disk I/O, so on
+    /// crash and restart the reth DB is the sole source of truth. There is no
+    /// "split-brain" risk between `GravityStorage` and the reth DB because
+    /// `GravityStorage` state does not survive a restart.
     async fn make_canonical(&self, block_id: &B256, executed_block: ExecutedBlockWithTrieUpdates) {
         let block_number = executed_block.recovered_block.number();
         let block_hash = executed_block.recovered_block.hash();
