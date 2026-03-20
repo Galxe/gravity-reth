@@ -827,11 +827,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         epoch: u64,
     ) -> Vec<GravityEvent> {
         use gravity_api_types::on_chain_config::jwks::ProviderJWKs;
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
 
         let mut gravity_events = vec![];
         // Map from (sourceType, sourceId) to latest nonce
-        let mut data_records: HashMap<(u32, alloy_primitives::U256), u128> = HashMap::new();
+        let mut data_records: BTreeMap<(u32, alloy_primitives::U256), u128> = BTreeMap::new();
 
         for receipt in receipts {
             debug!(target: "execute_ordered_block",
