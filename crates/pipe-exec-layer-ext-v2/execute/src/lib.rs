@@ -560,8 +560,11 @@ impl<Storage: GravityStorage> Core<Storage> {
                 assert_eq!(executed_block_hash, verified_hash, "Block hash mismatch");
             }
             None => {
-                // Consensus did not supply a verification hash for this block.
-                warn!(
+                // EXPECTED: commit_ledger() batches multiple blocks but LedgerInfo
+                // only carries the tip block's hash, so non-tip blocks arrive with
+                // None. Safe because every block is fully executed/merklized/sealed
+                // and the tip hash transitively validates the batch via parent_hash.
+                info!(
                     target: "PipeExecService.process",
                     block_number = ?block_number,
                     block_id = ?block_id,
