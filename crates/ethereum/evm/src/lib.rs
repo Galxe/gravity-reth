@@ -71,6 +71,7 @@ pub mod execute {
 }
 
 pub mod parallel_execute;
+pub mod hardfork;
 
 mod build;
 pub use build::EthBlockAssembler;
