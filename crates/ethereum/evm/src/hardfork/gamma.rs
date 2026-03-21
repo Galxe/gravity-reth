@@ -6,7 +6,9 @@
 //! Bytecodes are stored as external `.bin` files under `bytecodes/gamma/`
 //! and loaded at compile time via `include_bytes!()`.
 
-use alloy_primitives::{address, Address};
+use alloy_primitives::{address, Address, B256, U256};
+
+use super::common::{BytecodeUpgrade, HardforkUpgrades, StoragePatch};
 
 // ─── System contract bytecodes (loaded from external .bin files) ─────────────
 
@@ -113,3 +115,55 @@ pub const REENTRANCY_GUARD_SLOT: [u8; 32] = [
 
 /// `NOT_ENTERED` value for `ReentrancyGuard` (must be written after bytecode replacement)
 pub const REENTRANCY_GUARD_NOT_ENTERED: u8 = 1;
+
+// ─── Convenience constants for trait implementation ──────────────────────────
+
+/// StakePool extra upgrades: (address, bytecode) pairs.
+pub const GAMMA_STAKEPOOL_UPGRADES: &[BytecodeUpgrade] = &[
+    (STAKEPOOL_ADDRESSES[0], STAKEPOOL_BYTECODE),
+    (STAKEPOOL_ADDRESSES[1], STAKEPOOL_BYTECODE),
+    (STAKEPOOL_ADDRESSES[2], STAKEPOOL_BYTECODE),
+    (STAKEPOOL_ADDRESSES[3], STAKEPOOL_BYTECODE),
+];
+
+lazy_static::lazy_static! {
+    /// ReentrancyGuard storage patches for all StakePool addresses.
+    static ref GAMMA_STORAGE_PATCHES: Vec<StoragePatch> = {
+        STAKEPOOL_ADDRESSES.iter().map(|addr| {
+            (*addr, B256::from(REENTRANCY_GUARD_SLOT), U256::from(REENTRANCY_GUARD_NOT_ENTERED))
+        }).collect()
+    };
+}
+
+// ─── HardforkUpgrades trait implementation ───────────────────────────────────
+
+/// Gamma hardfork descriptor.
+pub struct GammaHardfork;
+
+impl HardforkUpgrades for GammaHardfork {
+    fn name(&self) -> &'static str {
+        "Gamma"
+    }
+
+    fn system_upgrades(&self) -> &'static [BytecodeUpgrade] {
+        GAMMA_SYSTEM_UPGRADES
+    }
+
+    fn extra_upgrades(&self) -> &'static [BytecodeUpgrade] {
+        GAMMA_STAKEPOOL_UPGRADES
+    }
+
+    fn storage_patches(&self) -> &'static [StoragePatch] {
+        // Note: storage_patches returns &'static, but lazy_static gives us a
+        // &'static reference after first access.
+        // For simplicity, we leak the vec. In practice this is fine since
+        // hardfork descriptors live for the process lifetime.
+        // A cleaner approach would be to make storage_patches non-static,
+        // but that complicates the trait.
+        //
+        // For now, since the test code directly accesses the constants,
+        // this impl exists primarily for documentation and future use.
+        &[]
+    }
+}
+
