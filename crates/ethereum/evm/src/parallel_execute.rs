@@ -211,6 +211,11 @@ where
             Self::apply_gamma(state)?;
         }
 
+        // Gravity Delta hardfork: activate Governance contract (set owner)
+        if self.chain_spec.delta_transitions_at_block(block.number()) {
+            Self::apply_delta(state)?;
+        }
+
         // call state hook with changes due to balance increments.
         self.system_caller.try_on_state_with(|| {
             balance_increment_state(&balance_increments, state).map(|state| {
@@ -408,6 +413,57 @@ where
         }
 
         // Commit all changes to create transitions for database persistence
+        state.commit(hardfork_changes);
+        Ok(())
+    }
+
+    /// Apply Delta hardfork: set Governance contract owner.
+    ///
+    /// The Governance contract was deployed via BSC-style bytecode placement which skips
+    /// the constructor. This writes the `Ownable._owner` storage slot (slot 0) to restore
+    /// the full governance lifecycle (addExecutor → execute proposals).
+    fn apply_delta(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
+        use crate::hardfork::delta::{
+            GOVERNANCE_ADDRESS, GOVERNANCE_OWNER, GOVERNANCE_OWNER_SLOT,
+        };
+        use revm::state::EvmStorageSlot;
+
+        let mut hardfork_changes: EvmState = EvmState::default();
+
+        // Load the Governance account (must exist from genesis/gamma)
+        {
+            let account = state
+                .load_mut_cache_account(GOVERNANCE_ADDRESS)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+
+            if let Some(ref info) = account.account {
+                let new_info = info.clone();
+                let owner_slot = alloy_primitives::U256::from_be_bytes(GOVERNANCE_OWNER_SLOT);
+                let owner_value =
+                    alloy_primitives::U256::from_be_bytes(GOVERNANCE_OWNER.into_word().0);
+
+                let mut storage = revm::state::EvmStorage::default();
+                storage.insert(
+                    owner_slot,
+                    EvmStorageSlot::new_changed(
+                        alloy_primitives::U256::ZERO,
+                        owner_value,
+                        0,
+                    ),
+                );
+
+                hardfork_changes.insert(
+                    GOVERNANCE_ADDRESS,
+                    Account {
+                        info: new_info,
+                        storage,
+                        status: AccountStatus::Touched,
+                        transaction_id: 0,
+                    },
+                );
+            }
+        }
+
         state.commit(hardfork_changes);
         Ok(())
     }
