@@ -24,6 +24,9 @@ use reth_evm_ethereum::hardfork::gamma::{
     GAMMA_SYSTEM_UPGRADES, REENTRANCY_GUARD_NOT_ENTERED, REENTRANCY_GUARD_SLOT,
     STAKEPOOL_ADDRESSES, STAKEPOOL_BYTECODE,
 };
+use reth_evm_ethereum::hardfork::delta::{
+    GOVERNANCE_ADDRESS, GOVERNANCE_OWNER, GOVERNANCE_OWNER_SLOT,
+};
 use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{
@@ -45,6 +48,9 @@ use std::{
 
 /// Block number at which Gamma hardfork activates (must match gravity_hardfork.json).
 const GAMMA_BLOCK: u64 = 20;
+
+/// Block number at which Delta hardfork activates (must match gravity_hardfork.json).
+const DELTA_BLOCK: u64 = 25;
 
 fn mock_block_id(block_number: u64) -> B256 {
     B256::left_padding_from(&block_number.to_be_bytes())
@@ -321,6 +327,17 @@ async fn run_pipe(
     );
     println!("[hardfork_test] ✅ ChainSpec correctly parsed gammaBlock={GAMMA_BLOCK}");
 
+    assert!(
+        chain_spec.delta_transitions_at_block(DELTA_BLOCK),
+        "delta_transitions_at_block({DELTA_BLOCK}) should be true"
+    );
+    assert!(
+        !chain_spec.delta_transitions_at_block(DELTA_BLOCK - 1),
+        "delta_transitions_at_block({}) should be false",
+        DELTA_BLOCK - 1
+    );
+    println!("[hardfork_test] ✅ ChainSpec correctly parsed deltaBlock={DELTA_BLOCK}");
+
     let eth_api = handle.node.rpc_registry.eth_api().clone();
     let provider = handle.node.provider;
 
@@ -352,6 +369,7 @@ async fn run_pipe(
     // After all blocks are pushed, verify bytecodes
     verify_bytecodes_not_upgraded_before(&provider);
     verify_bytecodes_upgraded(&provider);
+    verify_governance_owner_set(&provider);
 
     Ok(())
 }
@@ -400,4 +418,44 @@ fn test_gamma_hardfork() {
 
     // Give background threads time to exit cleanly
     std::thread::sleep(Duration::from_secs(2));
+}
+
+/// Verify that the Governance contract owner was set by the Delta hardfork.
+fn verify_governance_owner_set<P: StateProviderFactory>(provider: &P) {
+    println!("[hardfork_test] Verifying Governance owner storage at block {DELTA_BLOCK}...");
+
+    let state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK))
+        .expect("Failed to get state provider for delta hardfork block");
+
+    let owner_slot = alloy_primitives::B256::from(GOVERNANCE_OWNER_SLOT);
+    let owner_value = state
+        .storage(GOVERNANCE_ADDRESS, owner_slot)
+        .expect("Failed to read Governance owner storage");
+    let expected_value = U256::from_be_bytes(GOVERNANCE_OWNER.into_word().0);
+    assert_eq!(
+        owner_value,
+        Some(expected_value),
+        "Governance owner should be set to {GOVERNANCE_OWNER} after deltaBlock"
+    );
+    println!(
+        "[hardfork_test] ✅ Governance owner at block {DELTA_BLOCK}: {GOVERNANCE_OWNER}"
+    );
+
+    // Also verify owner was NOT set before delta block
+    let pre_state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK - 1))
+        .expect("Failed to get state provider for pre-delta block");
+    let pre_owner = pre_state
+        .storage(GOVERNANCE_ADDRESS, owner_slot)
+        .expect("Failed to read pre-delta Governance owner");
+    assert_ne!(
+        pre_owner,
+        Some(expected_value),
+        "Governance owner should NOT be set before deltaBlock"
+    );
+    println!(
+        "[hardfork_test] ✅ Governance owner at block {}: not yet set (as expected)",
+        DELTA_BLOCK - 1
+    );
 }
