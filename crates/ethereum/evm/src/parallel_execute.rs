@@ -417,20 +417,28 @@ where
         Ok(())
     }
 
-    /// Apply Delta hardfork: set Governance contract owner.
+    /// Apply Delta hardfork: set Governance contract owner and override GovernanceConfig.
     ///
     /// The Governance contract was deployed via BSC-style bytecode placement which skips
     /// the constructor. This writes the `Ownable._owner` storage slot (slot 0) to restore
     /// the full governance lifecycle (addExecutor → execute proposals).
+    ///
+    /// Additionally, overrides GovernanceConfig storage for E2E testing:
+    /// minimal thresholds and 10-second voting duration.
     fn apply_delta(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
         use crate::hardfork::delta::{
             GOVERNANCE_ADDRESS, GOVERNANCE_OWNER, GOVERNANCE_OWNER_SLOT,
+            GOVERNANCE_NEXT_PROPOSAL_ID_SLOT, GOVERNANCE_NEXT_PROPOSAL_ID_VALUE,
+            GOVERNANCE_CONFIG_ADDRESS,
+            GOV_CONFIG_SLOT_MIN_THRESHOLD, GOV_CONFIG_MIN_THRESHOLD,
+            GOV_CONFIG_SLOT_PROPOSER_STAKE, GOV_CONFIG_PROPOSER_STAKE,
+            GOV_CONFIG_SLOT_VOTING_DURATION, GOV_CONFIG_VOTING_DURATION,
         };
         use revm::state::EvmStorageSlot;
 
         let mut hardfork_changes: EvmState = EvmState::default();
 
-        // Load the Governance account (must exist from genesis/gamma)
+        // 1. Set Governance owner (slot 0) and nextProposalId (packed in slot 1 at offset 20)
         {
             let account = state
                 .load_mut_cache_account(GOVERNANCE_ADDRESS)
@@ -442,6 +450,9 @@ where
                 let owner_value =
                     alloy_primitives::U256::from_be_bytes(GOVERNANCE_OWNER.into_word().0);
 
+                let next_id_slot = alloy_primitives::U256::from_be_bytes(GOVERNANCE_NEXT_PROPOSAL_ID_SLOT);
+                let next_id_value = alloy_primitives::U256::from_be_bytes(GOVERNANCE_NEXT_PROPOSAL_ID_VALUE);
+
                 let mut storage = revm::state::EvmStorage::default();
                 storage.insert(
                     owner_slot,
@@ -451,9 +462,68 @@ where
                         0,
                     ),
                 );
+                storage.insert(
+                    next_id_slot,
+                    EvmStorageSlot::new_changed(
+                        alloy_primitives::U256::ZERO,
+                        next_id_value,
+                        0,
+                    ),
+                );
 
                 hardfork_changes.insert(
                     GOVERNANCE_ADDRESS,
+                    Account {
+                        info: new_info,
+                        storage,
+                        status: AccountStatus::Touched,
+                        transaction_id: 0,
+                    },
+                );
+            }
+        }
+
+        // 2. Override GovernanceConfig for E2E testing:
+        //    - minVotingThreshold = 1 (slot 0)
+        //    - requiredProposerStake = 1 (slot 1)
+        //    - votingDurationMicros = 10_000_000 / 10s (slot 2)
+        //    This bypasses the contract's MIN_VOTING_DURATION = 1h validation.
+        {
+            let config_account = state
+                .load_mut_cache_account(GOVERNANCE_CONFIG_ADDRESS)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+
+            if let Some(ref info) = config_account.account {
+                let new_info = info.clone();
+                let mut storage = revm::state::EvmStorage::default();
+
+                storage.insert(
+                    alloy_primitives::U256::from_be_bytes(GOV_CONFIG_SLOT_MIN_THRESHOLD),
+                    EvmStorageSlot::new_changed(
+                        alloy_primitives::U256::ZERO,
+                        alloy_primitives::U256::from(GOV_CONFIG_MIN_THRESHOLD),
+                        0,
+                    ),
+                );
+                storage.insert(
+                    alloy_primitives::U256::from_be_bytes(GOV_CONFIG_SLOT_PROPOSER_STAKE),
+                    EvmStorageSlot::new_changed(
+                        alloy_primitives::U256::ZERO,
+                        alloy_primitives::U256::from(GOV_CONFIG_PROPOSER_STAKE),
+                        0,
+                    ),
+                );
+                storage.insert(
+                    alloy_primitives::U256::from_be_bytes(GOV_CONFIG_SLOT_VOTING_DURATION),
+                    EvmStorageSlot::new_changed(
+                        alloy_primitives::U256::ZERO,
+                        alloy_primitives::U256::from(GOV_CONFIG_VOTING_DURATION),
+                        0,
+                    ),
+                );
+
+                hardfork_changes.insert(
+                    GOVERNANCE_CONFIG_ADDRESS,
                     Account {
                         info: new_info,
                         storage,
