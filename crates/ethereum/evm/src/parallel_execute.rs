@@ -13,7 +13,7 @@ use alloy_evm::{
 use alloy_primitives::{keccak256, map::HashMap, Address, Bytes};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
+use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
@@ -193,11 +193,11 @@ where
                 drained_balance;
         }
         // Gravity Alpha hardfork: upgrade Staking and StakePool contract code
-        if self.chain_spec.alpha_transitions_at_block(block.number()) {
+        if self.chain_spec.gravity_hardforks().fork(GravityHardfork::Alpha).transitions_at_block(block.number()) {
             Self::apply_alpha(state)?;
         }
         // Gravity Beta hardfork: upgrade StakePool contract code only
-        if self.chain_spec.beta_transitions_at_block(block.number()) {
+        if self.chain_spec.gravity_hardforks().fork(GravityHardfork::Beta).transitions_at_block(block.number()) {
             Self::apply_beta(state)?;
         }
 
@@ -207,12 +207,12 @@ where
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
         // Gravity Gamma hardfork: upgrade system contract bytecodes
-        if self.chain_spec.gamma_transitions_at_block(block.number()) {
+        if self.chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(block.number()) {
             Self::apply_gamma(state)?;
         }
 
         // Gravity Delta hardfork: activate Governance contract (set owner)
-        if self.chain_spec.delta_transitions_at_block(block.number()) {
+        if self.chain_spec.gravity_hardforks().fork(GravityHardfork::Delta).transitions_at_block(block.number()) {
             Self::apply_delta(state)?;
         }
 
@@ -624,7 +624,7 @@ where
 {
     // After Alpha hardfork, skip all post-block balance increments
     // (disables PoW block rewards and DAO fork irregularities)
-    if chain_spec.is_alpha_active_at_block_number(block.header().number()) {
+    if chain_spec.gravity_hardforks().is_fork_active_at_block(GravityHardfork::Alpha, block.header().number()) {
         return HashMap::default();
     }
 

@@ -15,7 +15,7 @@ use gravity_api_types::{
     events::contract_event::GravityEvent,
 };
 use gravity_storage::{block_view_storage::BlockViewStorage, GravityStorage};
-use reth_chainspec::{ChainSpec, EthChainSpec};
+use reth_chainspec::{ChainSpec, EthChainSpec, GravityHardfork};
 use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
@@ -40,6 +40,7 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
+use reth_ethereum_forks::Hardforks;
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -317,23 +318,23 @@ async fn run_pipe(
 
     // Verify gammaBlock is parsed correctly
     assert!(
-        chain_spec.gamma_transitions_at_block(GAMMA_BLOCK),
-        "gamma_transitions_at_block({GAMMA_BLOCK}) should be true"
+        chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(GAMMA_BLOCK),
+        "gamma transitions_at_block({GAMMA_BLOCK}) should be true"
     );
     assert!(
-        !chain_spec.gamma_transitions_at_block(GAMMA_BLOCK - 1),
-        "gamma_transitions_at_block({}) should be false",
+        !chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(GAMMA_BLOCK - 1),
+        "gamma transitions_at_block({}) should be false",
         GAMMA_BLOCK - 1
     );
     println!("[hardfork_test] ✅ ChainSpec correctly parsed gammaBlock={GAMMA_BLOCK}");
 
     assert!(
-        chain_spec.delta_transitions_at_block(DELTA_BLOCK),
-        "delta_transitions_at_block({DELTA_BLOCK}) should be true"
+        chain_spec.gravity_hardforks().fork(GravityHardfork::Delta).transitions_at_block(DELTA_BLOCK),
+        "delta transitions_at_block({DELTA_BLOCK}) should be true"
     );
     assert!(
-        !chain_spec.delta_transitions_at_block(DELTA_BLOCK - 1),
-        "delta_transitions_at_block({}) should be false",
+        !chain_spec.gravity_hardforks().fork(GravityHardfork::Delta).transitions_at_block(DELTA_BLOCK - 1),
+        "delta transitions_at_block({}) should be false",
         DELTA_BLOCK - 1
     );
     println!("[hardfork_test] ✅ ChainSpec correctly parsed deltaBlock={DELTA_BLOCK}");

@@ -2686,10 +2686,12 @@ Post-merge hard forks (timestamp based):
 
     #[test]
     fn test_gravity_alpha_hardfork() {
+        use crate::GravityHardfork;
+
         // Test 1: Default ChainSpec should not have Alpha hardfork active
         let spec = ChainSpec::default();
-        assert!(!spec.is_alpha_active_at_block_number(0));
-        assert!(!spec.is_alpha_active_at_block_number(u64::MAX));
+        assert!(!spec.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, 0));
+        assert!(!spec.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, u64::MAX));
 
         // Test 2: Parse genesis with alphaBlock from extra_fields
         let genesis_json = r#"{
@@ -2716,23 +2718,25 @@ Post-merge hard forks (timestamp based):
         let spec = ChainSpec::from(genesis);
 
         // Before activation block: should return false
-        assert!(!spec.is_alpha_active_at_block_number(999));
+        assert!(!spec.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, 999));
 
         // At activation block: should return true
-        assert!(spec.is_alpha_active_at_block_number(1000));
+        assert!(spec.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, 1000));
 
         // After activation block: should return true
-        assert!(spec.is_alpha_active_at_block_number(1001));
-        assert!(spec.is_alpha_active_at_block_number(u64::MAX));
+        assert!(spec.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, 1001));
+        assert!(spec.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, u64::MAX));
 
         // transitions_at_block: only true at the exact block
-        assert!(!spec.alpha_transitions_at_block(999));
-        assert!(spec.alpha_transitions_at_block(1000));
-        assert!(!spec.alpha_transitions_at_block(1001));
+        assert!(!spec.gravity_hardforks.fork(GravityHardfork::Alpha).transitions_at_block(999));
+        assert!(spec.gravity_hardforks.fork(GravityHardfork::Alpha).transitions_at_block(1000));
+        assert!(!spec.gravity_hardforks.fork(GravityHardfork::Alpha).transitions_at_block(1001));
     }
 
     #[test]
     fn test_gravity_alpha_not_configured() {
+        use crate::GravityHardfork;
+
         // Genesis without alphaBlock should not activate the hardfork
         let genesis_json = r#"{
             "config": {
@@ -2746,7 +2750,7 @@ Post-merge hard forks (timestamp based):
         let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
         let spec = ChainSpec::from(genesis);
 
-        assert!(!spec.is_alpha_active_at_block_number(0));
-        assert!(!spec.is_alpha_active_at_block_number(u64::MAX));
+        assert!(!spec.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, 0));
+        assert!(!spec.gravity_hardforks.is_fork_active_at_block(GravityHardfork::Alpha, u64::MAX));
     }
 }
