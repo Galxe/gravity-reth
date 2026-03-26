@@ -4,6 +4,24 @@
 //! The `StakePool` bytecode includes the correct FACTORY immutable (SystemAddresses.STAKING).
 
 use alloy_primitives::{address, Address};
+use super::common::{BytecodeUpgrade, HardforkUpgrades};
+
+/// Beta hardfork descriptor.
+pub struct BetaHardfork;
+
+/// Extra upgrades: StakePool contract bytecodes.
+static BETA_EXTRA_UPGRADES: &[BytecodeUpgrade] = &[
+    (STAKEPOOL_ADDRESSES[0], STAKEPOOL_BETA_RUNTIME_BYTECODE),
+    (STAKEPOOL_ADDRESSES[1], STAKEPOOL_BETA_RUNTIME_BYTECODE),
+    (STAKEPOOL_ADDRESSES[2], STAKEPOOL_BETA_RUNTIME_BYTECODE),
+    (STAKEPOOL_ADDRESSES[3], STAKEPOOL_BETA_RUNTIME_BYTECODE),
+];
+
+impl HardforkUpgrades for BetaHardfork {
+    fn name(&self) -> &'static str { "Beta" }
+    fn system_upgrades(&self) -> &'static [BytecodeUpgrade] { &[] }
+    fn extra_upgrades(&self) -> &'static [BytecodeUpgrade] { BETA_EXTRA_UPGRADES }
+}
 
 /// `StakePool` addresses that need bytecode upgrades during Beta hardfork.
 pub const STAKEPOOL_ADDRESSES: [Address; 4] = [

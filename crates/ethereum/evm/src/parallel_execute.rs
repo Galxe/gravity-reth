@@ -10,7 +10,7 @@ use alloy_evm::{
     precompiles::DynPrecompile,
     EvmEnv,
 };
-use alloy_primitives::{keccak256, map::HashMap, Address, Bytes};
+use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks};
@@ -25,7 +25,6 @@ use reth_evm::{
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{BlockBody, NodePrimitives, RecoveredBlock, SignedTransaction};
 use revm::{
-    bytecode::Bytecode,
     context::{
         result::{ExecutionResult, HaltReason},
         TxEnv,
@@ -192,13 +191,20 @@ where
             *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
                 drained_balance;
         }
-        // Gravity Alpha hardfork: upgrade Staking and StakePool contract code
-        if self.chain_spec.gravity_hardforks().fork(GravityHardfork::Alpha).transitions_at_block(block.number()) {
-            Self::apply_alpha(state)?;
-        }
-        // Gravity Beta hardfork: upgrade StakePool contract code only
-        if self.chain_spec.gravity_hardforks().fork(GravityHardfork::Beta).transitions_at_block(block.number()) {
-            Self::apply_beta(state)?;
+        // Gravity hardforks: apply bytecode upgrades and storage patches
+        {
+            use crate::hardfork::common::apply_hardfork_upgrades;
+            use crate::hardfork::{
+                alpha::AlphaHardfork, beta::BetaHardfork,
+            };
+
+            let hf = self.chain_spec.gravity_hardforks();
+            if hf.fork(GravityHardfork::Alpha).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&AlphaHardfork, state)?;
+            }
+            if hf.fork(GravityHardfork::Beta).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&BetaHardfork, state)?;
+            }
         }
 
         // increment balances
@@ -206,14 +212,17 @@ where
             .increment_balances(balance_increments.clone())
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
-        // Gravity Gamma hardfork: upgrade system contract bytecodes
-        if self.chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(block.number()) {
-            Self::apply_gamma(state)?;
-        }
+        {
+            use crate::hardfork::common::apply_hardfork_upgrades;
+            use crate::hardfork::{gamma::GammaHardfork, delta::DeltaHardfork};
 
-        // Gravity Delta hardfork: activate Governance contract (set owner)
-        if self.chain_spec.gravity_hardforks().fork(GravityHardfork::Delta).transitions_at_block(block.number()) {
-            Self::apply_delta(state)?;
+            let hf = self.chain_spec.gravity_hardforks();
+            if hf.fork(GravityHardfork::Gamma).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&GammaHardfork, state)?;
+            }
+            if hf.fork(GravityHardfork::Delta).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&DeltaHardfork, state)?;
+            }
         }
 
         // call state hook with changes due to balance increments.
@@ -229,314 +238,7 @@ where
         Ok(requests)
     }
 
-    /// Apply Alpha hardfork: upgrade Staking and `StakePool` contract bytecodes.
-    fn apply_alpha(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
-        use crate::hardfork::alpha::{
-            STAKEPOOL_ADDRESSES, STAKEPOOL_ALPHA_RUNTIME_BYTECODE, STAKING_ADDRESS,
-            STAKING_ALPHA_RUNTIME_BYTECODE,
-        };
 
-        let mut hardfork_changes: EvmState = EvmState::default();
-
-        // Upgrade Staking contract
-        let new_bytecode = Bytecode::new_raw(Bytes::from_static(STAKING_ALPHA_RUNTIME_BYTECODE));
-        let code_hash = keccak256(STAKING_ALPHA_RUNTIME_BYTECODE);
-        {
-            let staking_account = state
-                .load_mut_cache_account(STAKING_ADDRESS)
-                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-            if let Some(ref info) = staking_account.account {
-                let mut new_info = info.clone();
-                new_info.code_hash = code_hash;
-                new_info.code = Some(new_bytecode.clone());
-                hardfork_changes.insert(
-                    STAKING_ADDRESS,
-                    Account {
-                        info: new_info,
-                        storage: Default::default(),
-                        status: AccountStatus::Touched,
-                        transaction_id: 0,
-                    },
-                );
-            }
-        }
-        state.cache.contracts.insert(code_hash, new_bytecode);
-
-        // Upgrade all StakePool contracts
-        let pool_bytecode = Bytecode::new_raw(Bytes::from_static(STAKEPOOL_ALPHA_RUNTIME_BYTECODE));
-        let pool_code_hash = keccak256(STAKEPOOL_ALPHA_RUNTIME_BYTECODE);
-        for pool_address in STAKEPOOL_ADDRESSES {
-            let pool_account = state
-                .load_mut_cache_account(pool_address)
-                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-            if let Some(ref info) = pool_account.account {
-                let mut new_info = info.clone();
-                new_info.code_hash = pool_code_hash;
-                new_info.code = Some(pool_bytecode.clone());
-                hardfork_changes.insert(
-                    pool_address,
-                    Account {
-                        info: new_info,
-                        storage: Default::default(),
-                        status: AccountStatus::Touched,
-                        transaction_id: 0,
-                    },
-                );
-            }
-        }
-        state.cache.contracts.insert(pool_code_hash, pool_bytecode);
-
-        state.commit(hardfork_changes);
-        Ok(())
-    }
-
-    /// Apply Beta hardfork: upgrade `StakePool` contract bytecodes only.
-    fn apply_beta(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
-        use crate::hardfork::beta::{STAKEPOOL_ADDRESSES, STAKEPOOL_BETA_RUNTIME_BYTECODE};
-
-        let mut hardfork_changes: EvmState = EvmState::default();
-
-        let pool_bytecode = Bytecode::new_raw(Bytes::from_static(STAKEPOOL_BETA_RUNTIME_BYTECODE));
-        let pool_code_hash = keccak256(STAKEPOOL_BETA_RUNTIME_BYTECODE);
-        for pool_address in STAKEPOOL_ADDRESSES {
-            let pool_account = state
-                .load_mut_cache_account(pool_address)
-                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-            if let Some(ref info) = pool_account.account {
-                let mut new_info = info.clone();
-                new_info.code_hash = pool_code_hash;
-                new_info.code = Some(pool_bytecode.clone());
-                hardfork_changes.insert(
-                    pool_address,
-                    Account {
-                        info: new_info,
-                        storage: Default::default(),
-                        status: AccountStatus::Touched,
-                        transaction_id: 0,
-                    },
-                );
-            }
-        }
-        state.cache.contracts.insert(pool_code_hash, pool_bytecode);
-
-        state.commit(hardfork_changes);
-        Ok(())
-    }
-
-    /// Apply Gamma hardfork: upgrade 11 system contracts + all `StakePool` instances.
-    ///
-    /// This function replaces the runtime bytecode of each system contract at its fixed address,
-    /// then replaces all `StakePool` instances with new bytecode and initializes their
-    /// `ReentrancyGuard` storage slot.
-    fn apply_gamma(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
-        use crate::hardfork::gamma::{
-            GAMMA_SYSTEM_UPGRADES, REENTRANCY_GUARD_NOT_ENTERED, REENTRANCY_GUARD_SLOT,
-            STAKEPOOL_ADDRESSES, STAKEPOOL_BYTECODE,
-        };
-        use alloy_primitives::{keccak256, Bytes};
-        use revm::bytecode::Bytecode;
-
-        let mut hardfork_changes: EvmState = EvmState::default();
-
-        // 1. Upgrade all system contracts
-        for (addr, bytecode_bytes) in GAMMA_SYSTEM_UPGRADES {
-            let new_bytecode = Bytecode::new_raw(Bytes::from_static(bytecode_bytes));
-            let code_hash = keccak256(bytecode_bytes);
-            {
-                let account = state
-                    .load_mut_cache_account(*addr)
-                    .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-                if let Some(ref info) = account.account {
-                    let mut new_info = info.clone();
-                    new_info.code_hash = code_hash;
-                    new_info.code = Some(new_bytecode.clone());
-                    hardfork_changes.insert(
-                        *addr,
-                        Account {
-                            info: new_info,
-                            storage: Default::default(),
-                            status: AccountStatus::Touched,
-                            transaction_id: 0,
-                        },
-                    );
-                }
-            }
-            state.cache.contracts.insert(code_hash, new_bytecode);
-        }
-
-        // 2. Upgrade all StakePool instances
-        if !STAKEPOOL_ADDRESSES.is_empty() {
-            let pool_bytecode = Bytecode::new_raw(Bytes::from_static(STAKEPOOL_BYTECODE));
-            let pool_code_hash = keccak256(STAKEPOOL_BYTECODE);
-            for pool_address in STAKEPOOL_ADDRESSES {
-                let pool_account = state
-                    .load_mut_cache_account(*pool_address)
-                    .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-                if let Some(ref info) = pool_account.account {
-                    let mut new_info = info.clone();
-                    new_info.code_hash = pool_code_hash;
-                    new_info.code = Some(pool_bytecode.clone());
-                    hardfork_changes.insert(
-                        *pool_address,
-                        Account {
-                            info: new_info,
-                            storage: Default::default(),
-                            status: AccountStatus::Touched,
-                            transaction_id: 0,
-                        },
-                    );
-                }
-            }
-            state.cache.contracts.insert(pool_code_hash, pool_bytecode);
-        }
-
-        // 3. Initialize ReentrancyGuard storage for all StakePool instances
-        // The bytecode replacement doesn't run constructors, so the ERC-7201
-        // namespaced slot is uninitialized (0). We must set it to NOT_ENTERED (1).
-        let guard_slot = alloy_primitives::U256::from_be_bytes(REENTRANCY_GUARD_SLOT);
-        let guard_value = alloy_primitives::U256::from(REENTRANCY_GUARD_NOT_ENTERED);
-        for pool_address in STAKEPOOL_ADDRESSES {
-            state
-                .load_mut_cache_account(*pool_address)
-                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-            // Set the storage slot directly in the account's storage changes
-            if let Some(entry) = hardfork_changes.get_mut(pool_address) {
-                entry.storage.insert(
-                    guard_slot,
-                    revm::state::EvmStorageSlot::new_changed(
-                        alloy_primitives::U256::ZERO,
-                        guard_value,
-                        0,
-                    ),
-                );
-            }
-        }
-
-        // Commit all changes to create transitions for database persistence
-        state.commit(hardfork_changes);
-        Ok(())
-    }
-
-    /// Apply Delta hardfork: set Governance contract owner and override GovernanceConfig.
-    ///
-    /// The Governance contract was deployed via BSC-style bytecode placement which skips
-    /// the constructor. This writes the `Ownable._owner` storage slot (slot 0) to restore
-    /// the full governance lifecycle (addExecutor → execute proposals).
-    ///
-    /// Additionally, overrides GovernanceConfig storage for E2E testing:
-    /// minimal thresholds and 10-second voting duration.
-    fn apply_delta(state: &mut ParallelState<DB>) -> Result<(), BlockExecutionError> {
-        use crate::hardfork::delta::{
-            GOVERNANCE_ADDRESS, GOVERNANCE_OWNER, GOVERNANCE_OWNER_SLOT,
-            GOVERNANCE_NEXT_PROPOSAL_ID_SLOT, GOVERNANCE_NEXT_PROPOSAL_ID_VALUE,
-            GOVERNANCE_CONFIG_ADDRESS,
-            GOV_CONFIG_SLOT_MIN_THRESHOLD, GOV_CONFIG_MIN_THRESHOLD,
-            GOV_CONFIG_SLOT_PROPOSER_STAKE, GOV_CONFIG_PROPOSER_STAKE,
-            GOV_CONFIG_SLOT_VOTING_DURATION, GOV_CONFIG_VOTING_DURATION,
-        };
-        use revm::state::EvmStorageSlot;
-
-        let mut hardfork_changes: EvmState = EvmState::default();
-
-        // 1. Set Governance owner (slot 0) and nextProposalId (packed in slot 1 at offset 20)
-        {
-            let account = state
-                .load_mut_cache_account(GOVERNANCE_ADDRESS)
-                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-
-            if let Some(ref info) = account.account {
-                let new_info = info.clone();
-                let owner_slot = alloy_primitives::U256::from_be_bytes(GOVERNANCE_OWNER_SLOT);
-                let owner_value =
-                    alloy_primitives::U256::from_be_bytes(GOVERNANCE_OWNER.into_word().0);
-
-                let next_id_slot = alloy_primitives::U256::from_be_bytes(GOVERNANCE_NEXT_PROPOSAL_ID_SLOT);
-                let next_id_value = alloy_primitives::U256::from_be_bytes(GOVERNANCE_NEXT_PROPOSAL_ID_VALUE);
-
-                let mut storage = revm::state::EvmStorage::default();
-                storage.insert(
-                    owner_slot,
-                    EvmStorageSlot::new_changed(
-                        alloy_primitives::U256::ZERO,
-                        owner_value,
-                        0,
-                    ),
-                );
-                storage.insert(
-                    next_id_slot,
-                    EvmStorageSlot::new_changed(
-                        alloy_primitives::U256::ZERO,
-                        next_id_value,
-                        0,
-                    ),
-                );
-
-                hardfork_changes.insert(
-                    GOVERNANCE_ADDRESS,
-                    Account {
-                        info: new_info,
-                        storage,
-                        status: AccountStatus::Touched,
-                        transaction_id: 0,
-                    },
-                );
-            }
-        }
-
-        // 2. Override GovernanceConfig for E2E testing:
-        //    - minVotingThreshold = 1 (slot 0)
-        //    - requiredProposerStake = 1 (slot 1)
-        //    - votingDurationMicros = 10_000_000 / 10s (slot 2)
-        //    This bypasses the contract's MIN_VOTING_DURATION = 1h validation.
-        {
-            let config_account = state
-                .load_mut_cache_account(GOVERNANCE_CONFIG_ADDRESS)
-                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-
-            if let Some(ref info) = config_account.account {
-                let new_info = info.clone();
-                let mut storage = revm::state::EvmStorage::default();
-
-                storage.insert(
-                    alloy_primitives::U256::from_be_bytes(GOV_CONFIG_SLOT_MIN_THRESHOLD),
-                    EvmStorageSlot::new_changed(
-                        alloy_primitives::U256::ZERO,
-                        alloy_primitives::U256::from(GOV_CONFIG_MIN_THRESHOLD),
-                        0,
-                    ),
-                );
-                storage.insert(
-                    alloy_primitives::U256::from_be_bytes(GOV_CONFIG_SLOT_PROPOSER_STAKE),
-                    EvmStorageSlot::new_changed(
-                        alloy_primitives::U256::ZERO,
-                        alloy_primitives::U256::from(GOV_CONFIG_PROPOSER_STAKE),
-                        0,
-                    ),
-                );
-                storage.insert(
-                    alloy_primitives::U256::from_be_bytes(GOV_CONFIG_SLOT_VOTING_DURATION),
-                    EvmStorageSlot::new_changed(
-                        alloy_primitives::U256::ZERO,
-                        alloy_primitives::U256::from(GOV_CONFIG_VOTING_DURATION),
-                        0,
-                    ),
-                );
-
-                hardfork_changes.insert(
-                    GOVERNANCE_CONFIG_ADDRESS,
-                    Account {
-                        info: new_info,
-                        storage,
-                        status: AccountStatus::Touched,
-                        transaction_id: 0,
-                    },
-                );
-            }
-        }
-
-        state.commit(hardfork_changes);
-        Ok(())
-    }
 }
 
 impl<DB, EvmConfig, ChainSpec> ParallelExecutor for GrevmExecutor<DB, EvmConfig, ChainSpec>

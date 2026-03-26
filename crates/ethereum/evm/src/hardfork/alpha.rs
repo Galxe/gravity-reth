@@ -4,6 +4,28 @@
 //! similar to how Ethereum handles the DAO fork.
 
 use alloy_primitives::{address, Address};
+use super::common::{BytecodeUpgrade, HardforkUpgrades};
+
+/// Alpha hardfork descriptor.
+pub struct AlphaHardfork;
+
+/// System upgrade table: Staking contract bytecode.
+static ALPHA_SYSTEM_UPGRADES: &[BytecodeUpgrade] = &[
+    (STAKING_ADDRESS, STAKING_ALPHA_RUNTIME_BYTECODE),
+];
+/// Extra upgrades: StakePool contract bytecodes.
+static ALPHA_EXTRA_UPGRADES: &[BytecodeUpgrade] = &[
+    (STAKEPOOL_ADDRESSES[0], STAKEPOOL_ALPHA_RUNTIME_BYTECODE),
+    (STAKEPOOL_ADDRESSES[1], STAKEPOOL_ALPHA_RUNTIME_BYTECODE),
+    (STAKEPOOL_ADDRESSES[2], STAKEPOOL_ALPHA_RUNTIME_BYTECODE),
+    (STAKEPOOL_ADDRESSES[3], STAKEPOOL_ALPHA_RUNTIME_BYTECODE),
+];
+
+impl HardforkUpgrades for AlphaHardfork {
+    fn name(&self) -> &'static str { "Alpha" }
+    fn system_upgrades(&self) -> &'static [BytecodeUpgrade] { ALPHA_SYSTEM_UPGRADES }
+    fn extra_upgrades(&self) -> &'static [BytecodeUpgrade] { ALPHA_EXTRA_UPGRADES }
+}
 
 /// Staking contract address (SystemAddresses.STAKING)
 pub const STAKING_ADDRESS: Address = address!("00000000000000000000000000000001625F2000");

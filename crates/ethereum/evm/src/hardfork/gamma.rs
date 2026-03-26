@@ -6,7 +6,27 @@
 //! Bytecodes are stored as external `.bin` files under `bytecodes/gamma/`
 //! and loaded at compile time via `include_bytes!()`.
 
-use alloy_primitives::{address, Address};
+use alloy_primitives::{address, Address, B256, U256};
+use super::common::{BytecodeUpgrade, HardforkUpgrades, StoragePatch};
+
+/// Gamma hardfork descriptor.
+pub struct GammaHardfork;
+
+impl HardforkUpgrades for GammaHardfork {
+    fn name(&self) -> &'static str { "Gamma" }
+
+    fn system_upgrades(&self) -> &'static [BytecodeUpgrade] {
+        GAMMA_SYSTEM_UPGRADES
+    }
+
+    fn extra_upgrades(&self) -> &'static [BytecodeUpgrade] {
+        GAMMA_EXTRA_UPGRADES
+    }
+
+    fn storage_patches(&self) -> &'static [StoragePatch] {
+        GAMMA_STORAGE_PATCHES
+    }
+}
 
 // ─── System contract bytecodes (loaded from external .bin files) ─────────────
 
@@ -111,3 +131,24 @@ pub const REENTRANCY_GUARD_SLOT: [u8; 32] = [
 
 /// `NOT_ENTERED` value for `ReentrancyGuard` (must be written after bytecode replacement)
 pub const REENTRANCY_GUARD_NOT_ENTERED: u8 = 1;
+
+// ─── Trait-driven upgrade tables ─────────────────────────────────────────────
+
+/// StakePool extra upgrades for Gamma (dynamic addresses → same bytecode).
+static GAMMA_EXTRA_UPGRADES: &[BytecodeUpgrade] = &[
+    (STAKEPOOL_ADDRESSES_ARRAY[0], STAKEPOOL_BYTECODE),
+];
+
+/// Addresses as a fixed array for static table indexing.
+const STAKEPOOL_ADDRESSES_ARRAY: [Address; 1] = [
+    address!("33f4ee289578b2ff35ac3ffa46ea2e97557da32c"),
+];
+
+/// ReentrancyGuard storage patches for all StakePool contracts.
+static GAMMA_STORAGE_PATCHES: &[StoragePatch] = &[
+    (
+        STAKEPOOL_ADDRESSES_ARRAY[0],
+        B256::new(REENTRANCY_GUARD_SLOT),
+        U256::from_limbs([REENTRANCY_GUARD_NOT_ENTERED as u64, 0, 0, 0]),
+    ),
+];
