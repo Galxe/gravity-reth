@@ -8,6 +8,7 @@
 use super::common::{BytecodeUpgrade, HardforkUpgrades};
 
 /// Beta hardfork descriptor.
+#[derive(Debug)]
 pub struct BetaHardfork;
 
 impl HardforkUpgrades for BetaHardfork {

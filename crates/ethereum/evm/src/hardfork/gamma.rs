@@ -6,9 +6,10 @@
 //! the hardfork dispatch infrastructure compiles without changes.
 
 use super::common::{BytecodeUpgrade, HardforkUpgrades, StoragePatch};
-use alloy_primitives::{address, Address, B256, U256};
+use alloy_primitives::{address, Address};
 
 /// Gamma hardfork descriptor.
+#[derive(Debug)]
 pub struct GammaHardfork;
 
 impl HardforkUpgrades for GammaHardfork {

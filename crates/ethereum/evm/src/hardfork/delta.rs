@@ -9,16 +9,17 @@
 //! This hardfork writes the correct owner address to storage slot 0 of the Governance
 //! contract, restoring the full proposal execution lifecycle.
 //!
-//! Additionally, for E2E testing, it overrides GovernanceConfig storage to enable
+//! Additionally, for E2E testing, it overrides `GovernanceConfig` storage to enable
 //! fast governance proposals (10-second voting, minimal thresholds).
 
 use super::common::{BytecodeUpgrade, HardforkUpgrades, StoragePatch};
 use alloy_primitives::{address, Address, B256, U256};
 
 /// Delta hardfork descriptor.
+#[derive(Debug)]
 pub struct DeltaHardfork;
 
-/// Storage patches for Delta hardfork: Governance owner + GovernanceConfig E2E overrides.
+/// Storage patches for Delta hardfork: Governance owner + `GovernanceConfig` E2E overrides.
 static DELTA_STORAGE_PATCHES: &[StoragePatch] = &[
     // Set Governance._owner = GOVERNANCE_OWNER
     (
@@ -86,9 +87,9 @@ pub const GOVERNANCE_NEXT_PROPOSAL_ID_SLOT: [u8; 32] = {
     s[31] = 1; // slot 1
     s
 };
-/// nextProposalId=1, shifted left by 160 bits (20 bytes offset in packed storage).
-/// As [u8; 32]: 0x0000000000000001_000000000000000000000000_00000000
-///              ^^^^^^^^^^^^^^^^^^ nextProposalId=1 at bytes 20-27
+/// `nextProposalId`=1, shifted left by 160 bits (20 bytes offset in packed storage).
+/// As `[u8; 32]`: `0x0000000000000001_000000000000000000000000_00000000`
+///              ^^^^^^^^^^^^^^^^^^ `nextProposalId`=1 at bytes 20-27
 pub const GOVERNANCE_NEXT_PROPOSAL_ID_VALUE: [u8; 32] = {
     let mut v = [0u8; 32];
     // nextProposalId = 1 at offset 20 bytes from LSB
@@ -119,19 +120,21 @@ pub const GOVERNANCE_OWNER_U256: U256 = {
 
 // ── GovernanceConfig overrides for E2E testing ──────────────────────────
 
-/// GovernanceConfig contract system address
+/// `GovernanceConfig` contract system address
 pub const GOVERNANCE_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625F1004");
 
-/// GovernanceConfig storage layout (Solidity sequential packing):
-///   slot 0: minVotingThreshold    (uint128)
-///   slot 1: requiredProposerStake (uint256)
-///   slot 2: votingDurationMicros  (uint64)
+/// `GovernanceConfig` storage layout (Solidity sequential packing):
+///   slot 0: `minVotingThreshold`    (uint128)
+///   slot 1: `requiredProposerStake` (uint256)
+///   slot 2: `votingDurationMicros`  (uint64)
 pub const GOV_CONFIG_SLOT_MIN_THRESHOLD: [u8; 32] = [0u8; 32];
+/// Storage slot for `requiredProposerStake` (slot 1).
 pub const GOV_CONFIG_SLOT_PROPOSER_STAKE: [u8; 32] = {
     let mut s = [0u8; 32];
     s[31] = 1;
     s
 };
+/// Storage slot for `votingDurationMicros` (slot 2).
 pub const GOV_CONFIG_SLOT_VOTING_DURATION: [u8; 32] = {
     let mut s = [0u8; 32];
     s[31] = 2;
@@ -140,6 +143,7 @@ pub const GOV_CONFIG_SLOT_VOTING_DURATION: [u8; 32] = {
 
 /// Test values: 1 vote quorum, 1 wei proposer stake, 10-second voting period.
 pub const GOV_CONFIG_MIN_THRESHOLD: u128 = 1;
+/// Test value: 1 wei proposer stake.
 pub const GOV_CONFIG_PROPOSER_STAKE: u128 = 1;
 /// 10 seconds in microseconds
 pub const GOV_CONFIG_VOTING_DURATION: u64 = 10_000_000;

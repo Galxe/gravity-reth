@@ -8,6 +8,7 @@
 use super::common::{BytecodeUpgrade, HardforkUpgrades};
 
 /// Alpha hardfork descriptor.
+#[derive(Debug)]
 pub struct AlphaHardfork;
 
 impl HardforkUpgrades for AlphaHardfork {
