@@ -3,6 +3,7 @@ use alloy_evm::eth::spec::EthExecutorSpec;
 
 use crate::{
     constants::{MAINNET_DEPOSIT_CONTRACT, MAINNET_PRUNE_DELETE_LIMIT},
+    gravity::GravityHardfork,
     holesky, hoodi, mainnet, sepolia, EthChainSpec,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -112,6 +113,7 @@ pub static MAINNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (mainnet::MAINNET_BPO1_TIMESTAMP, BlobParams::bpo1()),
             (mainnet::MAINNET_BPO2_TIMESTAMP, BlobParams::bpo2()),
         ]),
+        gravity_hardforks: ChainHardforks::default(),
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -144,6 +146,7 @@ pub static SEPOLIA: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (sepolia::SEPOLIA_BPO1_TIMESTAMP, BlobParams::bpo1()),
             (sepolia::SEPOLIA_BPO2_TIMESTAMP, BlobParams::bpo2()),
         ]),
+        gravity_hardforks: ChainHardforks::default(),
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -174,6 +177,7 @@ pub static HOLESKY: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (holesky::HOLESKY_BPO1_TIMESTAMP, BlobParams::bpo1()),
             (holesky::HOLESKY_BPO2_TIMESTAMP, BlobParams::bpo2()),
         ]),
+        gravity_hardforks: ChainHardforks::default(),
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -206,6 +210,7 @@ pub static HOODI: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (hoodi::HOODI_BPO1_TIMESTAMP, BlobParams::bpo1()),
             (hoodi::HOODI_BPO2_TIMESTAMP, BlobParams::bpo2()),
         ]),
+        gravity_hardforks: ChainHardforks::default(),
     };
     spec.genesis.config.dao_fork_support = true;
     spec.into()
@@ -310,6 +315,9 @@ pub struct ChainSpec {
 
     /// The settings passed for blob configurations for specific hardforks.
     pub blob_params: BlobScheduleBlobParams,
+
+    /// Gravity-specific hardforks and their activation conditions.
+    pub gravity_hardforks: ChainHardforks,
 }
 
 impl Default for ChainSpec {
@@ -324,6 +332,7 @@ impl Default for ChainSpec {
             base_fee_params: BaseFeeParamsKind::Constant(BaseFeeParams::ethereum()),
             prune_delete_limit: MAINNET_PRUNE_DELETE_LIMIT,
             blob_params: Default::default(),
+            gravity_hardforks: Default::default(),
         }
     }
 }
@@ -723,6 +732,32 @@ impl From<Genesis> for ChainSpec {
 
         let hardforks = ChainHardforks::new(ordered_hardforks);
 
+        // Gravity-specific hardforks from genesis extra_fields
+        let gravity_hardfork_opts = [
+            (
+                GravityHardfork::Alpha.boxed(),
+                genesis.config.extra_fields.get("alphaBlock").and_then(|v| v.as_u64()),
+            ),
+            (
+                GravityHardfork::Beta.boxed(),
+                genesis.config.extra_fields.get("betaBlock").and_then(|v| v.as_u64()),
+            ),
+            (
+                GravityHardfork::Gamma.boxed(),
+                genesis.config.extra_fields.get("gammaBlock").and_then(|v| v.as_u64()),
+            ),
+            (
+                GravityHardfork::Delta.boxed(),
+                genesis.config.extra_fields.get("deltaBlock").and_then(|v| v.as_u64()),
+            ),
+        ];
+        let gravity_hardforks = ChainHardforks::new(
+            gravity_hardfork_opts
+                .into_iter()
+                .filter_map(|(fork, opt)| opt.map(|block| (fork, ForkCondition::Block(block))))
+                .collect(),
+        );
+
         Self {
             chain: genesis.config.chain_id.into(),
             genesis_header: SealedHeader::new_unhashed(make_genesis_header(&genesis, &hardforks)),
@@ -731,6 +766,7 @@ impl From<Genesis> for ChainSpec {
             paris_block_and_final_difficulty,
             deposit_contract,
             blob_params,
+            gravity_hardforks,
             ..Default::default()
         }
     }
