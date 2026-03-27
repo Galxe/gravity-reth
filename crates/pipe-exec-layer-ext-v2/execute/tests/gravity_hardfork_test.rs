@@ -20,12 +20,13 @@ use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
-use reth_evm_ethereum::hardfork::gamma::{
-    GAMMA_SYSTEM_UPGRADES, REENTRANCY_GUARD_NOT_ENTERED, REENTRANCY_GUARD_SLOT,
-    STAKEPOOL_ADDRESSES, STAKEPOOL_BYTECODE,
-};
-use reth_evm_ethereum::hardfork::delta::{
-    GOVERNANCE_ADDRESS, GOVERNANCE_OWNER, GOVERNANCE_OWNER_SLOT,
+use reth_ethereum_forks::Hardforks;
+use reth_evm_ethereum::hardfork::{
+    delta::{GOVERNANCE_ADDRESS, GOVERNANCE_OWNER, GOVERNANCE_OWNER_SLOT},
+    gamma::{
+        GAMMA_SYSTEM_UPGRADES, REENTRANCY_GUARD_NOT_ENTERED, REENTRANCY_GUARD_SLOT,
+        STAKEPOOL_ADDRESSES, STAKEPOOL_BYTECODE,
+    },
 };
 use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
@@ -40,7 +41,6 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
-use reth_ethereum_forks::Hardforks;
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -318,22 +318,34 @@ async fn run_pipe(
 
     // Verify gammaBlock is parsed correctly
     assert!(
-        chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(GAMMA_BLOCK),
+        chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::Gamma)
+            .transitions_at_block(GAMMA_BLOCK),
         "gamma transitions_at_block({GAMMA_BLOCK}) should be true"
     );
     assert!(
-        !chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(GAMMA_BLOCK - 1),
+        !chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::Gamma)
+            .transitions_at_block(GAMMA_BLOCK - 1),
         "gamma transitions_at_block({}) should be false",
         GAMMA_BLOCK - 1
     );
     println!("[hardfork_test] ✅ ChainSpec correctly parsed gammaBlock={GAMMA_BLOCK}");
 
     assert!(
-        chain_spec.gravity_hardforks().fork(GravityHardfork::Delta).transitions_at_block(DELTA_BLOCK),
+        chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::Delta)
+            .transitions_at_block(DELTA_BLOCK),
         "delta transitions_at_block({DELTA_BLOCK}) should be true"
     );
     assert!(
-        !chain_spec.gravity_hardforks().fork(GravityHardfork::Delta).transitions_at_block(DELTA_BLOCK - 1),
+        !chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::Delta)
+            .transitions_at_block(DELTA_BLOCK - 1),
         "delta transitions_at_block({}) should be false",
         DELTA_BLOCK - 1
     );
@@ -439,9 +451,7 @@ fn verify_governance_owner_set<P: StateProviderFactory>(provider: &P) {
         Some(expected_value),
         "Governance owner should be set to {GOVERNANCE_OWNER} after deltaBlock"
     );
-    println!(
-        "[hardfork_test] ✅ Governance owner at block {DELTA_BLOCK}: {GOVERNANCE_OWNER}"
-    );
+    println!("[hardfork_test] ✅ Governance owner at block {DELTA_BLOCK}: {GOVERNANCE_OWNER}");
 
     // Also verify owner was NOT set before delta block
     let pre_state = provider

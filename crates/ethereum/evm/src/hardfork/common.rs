@@ -59,8 +59,7 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
     let mut hardfork_changes: EvmState = EvmState::default();
 
     // 1. Apply all bytecode upgrades (system + extra)
-    let all_upgrades =
-        hardfork.system_upgrades().iter().chain(hardfork.extra_upgrades().iter());
+    let all_upgrades = hardfork.system_upgrades().iter().chain(hardfork.extra_upgrades().iter());
 
     for (addr, bytecode_bytes) in all_upgrades {
         let new_bytecode = Bytecode::new_raw(Bytes::from_static(bytecode_bytes));
@@ -121,4 +120,3 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
     state.commit(hardfork_changes);
     Ok(())
 }
-

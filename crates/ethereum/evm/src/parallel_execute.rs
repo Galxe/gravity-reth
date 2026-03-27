@@ -13,7 +13,9 @@ use alloy_evm::{
 use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks};
+use reth_chainspec::{
+    EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks,
+};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
@@ -193,9 +195,8 @@ where
         }
         // Gravity hardforks: apply bytecode upgrades and storage patches
         {
-            use crate::hardfork::common::apply_hardfork_upgrades;
             use crate::hardfork::{
-                alpha::AlphaHardfork, beta::BetaHardfork,
+                alpha::AlphaHardfork, beta::BetaHardfork, common::apply_hardfork_upgrades,
             };
 
             let hf = self.chain_spec.gravity_hardforks();
@@ -213,8 +214,9 @@ where
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
         {
-            use crate::hardfork::common::apply_hardfork_upgrades;
-            use crate::hardfork::{gamma::GammaHardfork, delta::DeltaHardfork};
+            use crate::hardfork::{
+                common::apply_hardfork_upgrades, delta::DeltaHardfork, gamma::GammaHardfork,
+            };
 
             let hf = self.chain_spec.gravity_hardforks();
             if hf.fork(GravityHardfork::Gamma).transitions_at_block(block.number()) {
@@ -237,8 +239,6 @@ where
 
         Ok(requests)
     }
-
-
 }
 
 impl<DB, EvmConfig, ChainSpec> ParallelExecutor for GrevmExecutor<DB, EvmConfig, ChainSpec>
@@ -326,7 +326,10 @@ where
 {
     // After Alpha hardfork, skip all post-block balance increments
     // (disables PoW block rewards and DAO fork irregularities)
-    if chain_spec.gravity_hardforks().is_fork_active_at_block(GravityHardfork::Alpha, block.header().number()) {
+    if chain_spec
+        .gravity_hardforks()
+        .is_fork_active_at_block(GravityHardfork::Alpha, block.header().number())
+    {
         return HashMap::default();
     }
 

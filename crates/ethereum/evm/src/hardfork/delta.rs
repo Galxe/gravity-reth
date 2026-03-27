@@ -12,8 +12,8 @@
 //! Additionally, for E2E testing, it overrides GovernanceConfig storage to enable
 //! fast governance proposals (10-second voting, minimal thresholds).
 
-use alloy_primitives::{address, Address, B256, U256};
 use super::common::{BytecodeUpgrade, HardforkUpgrades, StoragePatch};
+use alloy_primitives::{address, Address, B256, U256};
 
 /// Delta hardfork descriptor.
 pub struct DeltaHardfork;
@@ -54,9 +54,15 @@ static DELTA_STORAGE_PATCHES: &[StoragePatch] = &[
 ];
 
 impl HardforkUpgrades for DeltaHardfork {
-    fn name(&self) -> &'static str { "Delta" }
-    fn system_upgrades(&self) -> &'static [BytecodeUpgrade] { &[] }
-    fn storage_patches(&self) -> &'static [StoragePatch] { DELTA_STORAGE_PATCHES }
+    fn name(&self) -> &'static str {
+        "Delta"
+    }
+    fn system_upgrades(&self) -> &'static [BytecodeUpgrade] {
+        &[]
+    }
+    fn storage_patches(&self) -> &'static [StoragePatch] {
+        DELTA_STORAGE_PATCHES
+    }
 }
 
 /// Governance contract system address
@@ -66,7 +72,8 @@ pub const GOVERNANCE_ADDRESS: Address = address!("000000000000000000000000000000
 ///
 /// Storage layout (from `forge inspect Governance storage-layout`):
 ///   - slot 0: `_owner` (address, 20 bytes, offset 0)
-///   - slot 1: `_pendingOwner` (address, 20 bytes, offset 0) + `nextProposalId` (uint64, 8 bytes, offset 20)
+///   - slot 1: `_pendingOwner` (address, 20 bytes, offset 0) + `nextProposalId` (uint64, 8 bytes,
+///     offset 20)
 ///   - slot 2: `_proposals` mapping base
 pub const GOVERNANCE_OWNER_SLOT: [u8; 32] = [0u8; 32];
 
@@ -100,21 +107,20 @@ pub const GOVERNANCE_OWNER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cf
 /// Used in static table since `Address::into_word()` is not const.
 pub const GOVERNANCE_OWNER_U256: U256 = {
     let bytes = GOVERNANCE_OWNER.0 .0; // [u8; 20]
-    // Left-pad to 32 bytes in big-endian
+                                       // Left-pad 20-byte address into a 32-byte big-endian word (offset 12..32)
     let mut word = [0u8; 32];
-    word[12] = bytes[0]; word[13] = bytes[1]; word[14] = bytes[2]; word[15] = bytes[3];
-    word[16] = bytes[4]; word[17] = bytes[5]; word[18] = bytes[6]; word[19] = bytes[7];
-    word[20] = bytes[8]; word[21] = bytes[9]; word[22] = bytes[10]; word[23] = bytes[11];
-    word[24] = bytes[12]; word[25] = bytes[13]; word[26] = bytes[14]; word[27] = bytes[15];
-    word[28] = bytes[16]; word[29] = bytes[17]; word[30] = bytes[18]; word[31] = bytes[19];
+    let mut i = 0;
+    while i < 20 {
+        word[12 + i] = bytes[i];
+        i += 1;
+    }
     U256::from_be_bytes(word)
 };
 
 // ── GovernanceConfig overrides for E2E testing ──────────────────────────
 
 /// GovernanceConfig contract system address
-pub const GOVERNANCE_CONFIG_ADDRESS: Address =
-    address!("00000000000000000000000000000001625F1004");
+pub const GOVERNANCE_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625F1004");
 
 /// GovernanceConfig storage layout (Solidity sequential packing):
 ///   slot 0: minVotingThreshold    (uint128)
