@@ -4,7 +4,7 @@ use alloy_rpc_types::{Filter, Log};
 use anyhow::{Context as AnyhowContext, Result};
 use reqwest::ClientBuilder;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 
 /// Retry configuration
@@ -116,7 +116,7 @@ impl EthHttpCli {
                             ),
                             self.retry_config.max_delay,
                         );
-                        warn!(
+                        info!(
                             "EthHttpCli operation failed on attempt {}, retrying in {:?}: {:?}",
                             attempt + 1,
                             delay,
@@ -128,10 +128,12 @@ impl EthHttpCli {
             }
         }
 
-        Err(anyhow::anyhow!(
+        let err_msg = format!(
             "EthHttpCli operation failed after {} attempts. Last error: {:?}",
             self.retry_config.max_retries + 1,
             last_error
-        ))
+        );
+        warn!("{}", err_msg);
+        Err(anyhow::anyhow!(err_msg))
     }
 }
