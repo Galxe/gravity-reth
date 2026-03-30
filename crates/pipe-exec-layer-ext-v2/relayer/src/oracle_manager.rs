@@ -305,10 +305,11 @@ impl OracleRelayerManager {
 
     /// Update in-memory state and persist to disk.
     ///
-    /// Persists to disk first (via a temporary clone), and only commits the
-    /// update to in-memory state after the write succeeds.  This avoids a
-    /// window where the in-memory nonce advances beyond what is on disk —
-    /// a crash in that window would cause events to be replayed on restart.
+    /// Writes to disk first (via a temporary clone) so that on the success
+    /// path the on-disk state is never behind in-memory state.  If the disk
+    /// write fails, in-memory state is still advanced to avoid duplicate
+    /// delivery in the running process — only a subsequent crash would
+    /// replay events from the stale checkpoint.
     async fn update_and_save_state(
         &self,
         uri: &str,
@@ -326,20 +327,17 @@ impl OracleRelayerManager {
         candidate.update(uri, source_type, source_id, last_nonce, last_nonce_block, cursor_block);
 
         let path = state_file_path(&self.datadir);
-        match candidate.save(&path) {
-            Ok(()) => {
-                // Disk is now authoritative — commit to memory.
-                *state = candidate;
-            }
-            Err(e) => {
-                warn!(
-                    target: "oracle_manager",
-                    error = ?e,
-                    path = ?path,
-                    "Failed to persist relayer state; in-memory state NOT advanced"
-                );
-            }
+        if let Err(e) = candidate.save(&path) {
+            warn!(
+                target: "oracle_manager",
+                error = ?e,
+                path = ?path,
+                "Failed to persist relayer state; a crash may replay events from the last checkpoint"
+            );
         }
+
+        // Always commit to memory so the running process does not re-deliver.
+        *state = candidate;
     }
 
     /// Remove a source by URI
