@@ -117,7 +117,7 @@ impl EthHttpCli {
                             self.retry_config.max_delay,
                         );
                         warn!(
-                            "Operation failed on attempt {}, retrying in {:?}: {:?}",
+                            "EthHttpCli operation failed on attempt {}, retrying in {:?}: {:?}",
                             attempt + 1,
                             delay,
                             last_error
@@ -129,7 +129,7 @@ impl EthHttpCli {
         }
 
         Err(anyhow::anyhow!(
-            "Operation failed after {} attempts. Last error: {:?}",
+            "EthHttpCli operation failed after {} attempts. Last error: {:?}",
             self.retry_config.max_retries + 1,
             last_error
         ))

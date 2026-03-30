@@ -16,8 +16,8 @@ mod constants;
 pub use constants::*;
 
 mod api;
-/// Gravity-specific hardforks.
-pub mod gravity;
+/// Gravity-specific hardforks module.
+mod gravity;
 /// The chain info module.
 mod info;
 /// The chain spec module.

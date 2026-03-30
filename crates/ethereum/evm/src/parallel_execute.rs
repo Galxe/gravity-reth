@@ -13,7 +13,9 @@ use alloy_evm::{
 use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
+use reth_chainspec::{
+    EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks,
+};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
@@ -191,10 +193,40 @@ where
             *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
                 drained_balance;
         }
+        // Gravity hardforks: apply bytecode upgrades and storage patches
+        {
+            use crate::hardfork::{
+                alpha::AlphaHardfork, beta::BetaHardfork, common::apply_hardfork_upgrades,
+            };
+
+            let hf = self.chain_spec.gravity_hardforks();
+            if hf.fork(GravityHardfork::Alpha).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&AlphaHardfork, state)?;
+            }
+            if hf.fork(GravityHardfork::Beta).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&BetaHardfork, state)?;
+            }
+        }
+
         // increment balances
         state
             .increment_balances(balance_increments.clone())
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+
+        {
+            use crate::hardfork::{
+                common::apply_hardfork_upgrades, delta::DeltaHardfork, gamma::GammaHardfork,
+            };
+
+            let hf = self.chain_spec.gravity_hardforks();
+            if hf.fork(GravityHardfork::Gamma).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&GammaHardfork, state)?;
+            }
+            if hf.fork(GravityHardfork::Delta).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&DeltaHardfork, state)?;
+            }
+        }
+
         // call state hook with changes due to balance increments.
         self.system_caller.try_on_state_with(|| {
             balance_increment_state(&balance_increments, state).map(|state| {
@@ -289,9 +321,18 @@ fn post_block_balance_increments<ChainSpec, Block>(
     block: &RecoveredBlock<Block>,
 ) -> HashMap<Address, u128>
 where
-    ChainSpec: EthereumHardforks,
+    ChainSpec: EthereumHardforks + EthChainSpec,
     Block: reth_primitives_traits::Block,
 {
+    // After Alpha hardfork, skip all post-block balance increments
+    // (disables PoW block rewards and DAO fork irregularities)
+    if chain_spec
+        .gravity_hardforks()
+        .is_fork_active_at_block(GravityHardfork::Alpha, block.header().number())
+    {
+        return HashMap::default();
+    }
+
     let mut balance_increments = HashMap::default();
 
     // Add block rewards if they are enabled.

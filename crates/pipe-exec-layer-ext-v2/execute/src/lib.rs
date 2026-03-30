@@ -355,8 +355,14 @@ impl<Storage: GravityStorage> Core<Storage> {
         self.execute_height.load(Ordering::Acquire)
     }
 
+    /// DESIGN: All `.unwrap()` calls on barrier wait/notify, state root, and
+    /// `verify_executed_block_hash` in this function are intentional. In the gravity-sdk
+    /// integration the panic handler is configured to abort the process (via
+    /// `std::process::exit`), so a panic terminates the entire node rather than
+    /// silently killing a single tokio task. Downstream barrier deadlocks therefore
+    /// cannot occur, and a full process restart is the correct recovery strategy.
     async fn process(&self, block: ReceivedBlock) {
-        // Wait untile there's no large gap between cache and db
+        // Wait until there's no large gap between cache and db
         let block_number = block.number();
         let block_id = block.id();
         let (randomness, block_epoch) = if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
@@ -554,8 +560,11 @@ impl<Storage: GravityStorage> Core<Storage> {
                 assert_eq!(executed_block_hash, verified_hash, "Block hash mismatch");
             }
             None => {
-                // Consensus did not supply a verification hash for this block.
-                warn!(
+                // EXPECTED: commit_ledger() batches multiple blocks but LedgerInfo
+                // only carries the tip block's hash, so non-tip blocks arrive with
+                // None. Safe because every block is fully executed/merklized/sealed
+                // and the tip hash transitively validates the batch via parent_hash.
+                info!(
                     target: "PipeExecService.process",
                     block_number = ?block_number,
                     block_id = ?block_id,
@@ -655,6 +664,11 @@ impl<Storage: GravityStorage> Core<Storage> {
     ///
     /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
     /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
+    ///
+    /// DESIGN: The `unwrap_or_else(|e| panic!(...))` calls on system transaction
+    /// execution are intentional. These are unrecoverable failures; in the gravity-sdk
+    /// integration the panic handler aborts the process, preventing partial-state
+    /// corruption.
     fn execute_system_transactions(
         executor: &mut dyn ParallelExecutor<
             Primitives = EthPrimitives,
@@ -967,9 +981,23 @@ impl<Storage: GravityStorage> Core<Storage> {
             }
         };
 
-        // State was moved into executor above. Get a fresh snapshot view for block construction.
-        // filter_invalid_txs only reads from storage (not the in-memory ParallelState cache),
-        // so both views see the same committed on-chain data.
+        // DESIGN: `filter_invalid_txs` reads from storage, not the executor's in-memory
+        // ParallelState cache, so it sees the pre-system-transaction state. This means that if
+        // a system transaction (e.g. mint precompile) credits an EOA, a user transaction from
+        // that EOA depending on the newly minted balance will be filtered out as invalid in this
+        // block and must be resubmitted in the next block.
+        //
+        // This is an intentional, accepted trade-off:
+        //   1. System txn sender is always SYSTEM_CALLER, so user nonces are never affected.
+        //   2. Only balance changes from mint are relevant; the one-block delay is negligible for
+        //      reward-style minting and users do not rely on same-block spending.
+        //   3. Discarded transactions are sent to `discard_txs_tx` for pool cleanup.
+        //
+        // If same-block spending of minted balance is ever required, the fix is:
+        //   - Add a `basic_ref(&self, Address) -> Option<AccountInfo>` method to the
+        //     `ParallelExecutor` trait.
+        //   - Before calling `filter_invalid_txs`, query each sender's account via
+        //     `executor.basic_ref(sender)` and collect overrides into a HashMap.
         let state_for_block = self.storage.get_state_view().unwrap();
         let (block, txs_info) =
             self.create_block_for_executor(ordered_block, base_fee, &state_for_block, vec![]);
@@ -1088,6 +1116,14 @@ impl<Storage: GravityStorage> Core<Storage> {
         execution_outcome
     }
 
+    /// DESIGN: The three operations here — (1) engine tree `MakeCanonical`
+    /// event (updates in-memory `TreeState`), (2) `storage.update_canonical`
+    /// (reclaims in-memory caches), and (3) `advance_persistence` (writes to
+    /// reth DB, triggered later in the engine tree event loop) — are **all
+    /// in-memory** except for (3). `GravityStorage` performs no disk I/O, so on
+    /// crash and restart the reth DB is the sole source of truth. There is no
+    /// "split-brain" risk between `GravityStorage` and the reth DB because
+    /// `GravityStorage` state does not survive a restart.
     async fn make_canonical(&self, block_id: &B256, executed_block: ExecutedBlockWithTrieUpdates) {
         let block_number = executed_block.recovered_block.number();
         let block_hash = executed_block.recovered_block.hash();
