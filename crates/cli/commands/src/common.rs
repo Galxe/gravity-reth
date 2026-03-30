@@ -115,7 +115,7 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
                 .get_stage_checkpoint(StageId::Execution)
                 .ok()
                 .flatten()
-                .map_or(true, |ck| ck.block_number == 0);
+                .is_none_or(|ck| ck.block_number == 0);
             if should_init {
                 info!(target: "reth::cli", chain=%self.chain.chain(), genesis=?self.chain.genesis_hash(), "Initializing genesis");
                 init_genesis(&provider_factory)?;

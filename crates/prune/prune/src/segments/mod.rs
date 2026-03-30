@@ -6,9 +6,7 @@ mod user;
 use crate::{PruneLimiter, PrunerError};
 use alloy_primitives::{BlockNumber, TxNumber};
 use reth_provider::{errors::provider::ProviderResult, BlockReader, PruneCheckpointWriter};
-use reth_prune_types::{
-    PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, SegmentOutput, MINIMUM_PRUNING_DISTANCE,
-};
+use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, SegmentOutput};
 pub use set::SegmentSet;
 pub use static_file::{
     Headers as StaticFileHeaders, Receipts as StaticFileReceipts,
@@ -122,12 +120,12 @@ impl PruneInput {
     /// To get the range end: use block `to_block`.
     pub(crate) fn get_next_block_range(&self) -> Option<RangeInclusive<BlockNumber>> {
         let from_block = self.get_start_next_block_range();
-        if self.to_block <= from_block + MINIMUM_PRUNING_DISTANCE {
-            None
-        } else {
-            let end_block = self.to_block - MINIMUM_PRUNING_DISTANCE;
-            Some(from_block..=end_block)
+        let range = from_block..=self.to_block;
+        if range.is_empty() {
+            return None
         }
+
+        Some(range)
     }
 
     /// Returns the start of the next block range.
