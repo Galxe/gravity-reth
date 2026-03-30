@@ -16,13 +16,21 @@ workspace = true
 reth-primitives-traits.workspace = true
 reth-execution-errors.workspace = true
 reth-db-api.workspace = true
+reth-storage-api = { workspace = true, features = ["std"] }
+reth-storage-errors.workspace = true
 reth-trie.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
+alloy-rlp.workspace = true
 
 # tracing
 tracing.workspace = true
+
+# misc
+once_cell.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 # reth
@@ -46,6 +54,7 @@ proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
 serde_json.workspace = true
 similar-asserts.workspace = true
+rand.workspace = true
 
 [features]
 metrics = ["reth-trie/metrics"]
@@ -53,6 +62,9 @@ serde = [
     "similar-asserts/serde",
     "alloy-consensus/serde",
     "alloy-primitives/serde",
+    "parking_lot/serde",
+    "rand/serde",
+    "reth-storage-api/serde",
     "reth-trie/serde",
     "reth-trie-common/serde",
     "reth-primitives-traits/serde",
