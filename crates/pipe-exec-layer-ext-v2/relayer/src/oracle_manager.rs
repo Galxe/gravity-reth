@@ -303,7 +303,12 @@ impl OracleRelayerManager {
         Ok(PollResult { jwk_structs, max_block_number, nonce, updated })
     }
 
-    /// Update in-memory state and persist to disk
+    /// Update in-memory state and persist to disk.
+    ///
+    /// Persists to disk first (via a temporary clone), and only commits the
+    /// update to in-memory state after the write succeeds.  This avoids a
+    /// window where the in-memory nonce advances beyond what is on disk —
+    /// a crash in that window would cause events to be replayed on restart.
     async fn update_and_save_state(
         &self,
         uri: &str,
@@ -314,16 +319,26 @@ impl OracleRelayerManager {
         cursor_block: u64,
     ) {
         let mut state = self.state.write().await;
-        state.update(uri, source_type, source_id, last_nonce, last_nonce_block, cursor_block);
+
+        // Build a candidate state with the update applied, without mutating
+        // the live state yet.
+        let mut candidate = state.clone();
+        candidate.update(uri, source_type, source_id, last_nonce, last_nonce_block, cursor_block);
 
         let path = state_file_path(&self.datadir);
-        if let Err(e) = state.save(&path) {
-            warn!(
-                target: "oracle_manager",
-                error = ?e,
-                path = ?path,
-                "Failed to persist relayer state"
-            );
+        match candidate.save(&path) {
+            Ok(()) => {
+                // Disk is now authoritative — commit to memory.
+                *state = candidate;
+            }
+            Err(e) => {
+                warn!(
+                    target: "oracle_manager",
+                    error = ?e,
+                    path = ?path,
+                    "Failed to persist relayer state; in-memory state NOT advanced"
+                );
+            }
         }
     }
 
