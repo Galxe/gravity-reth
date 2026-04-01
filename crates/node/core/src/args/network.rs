@@ -1,9 +1,6 @@
 //! clap [Args](clap::Args) for network related arguments.
 
-<<<<<<< HEAD
-=======
 use alloy_eips::BlockNumHash;
->>>>>>> v1.11.3
 use alloy_primitives::B256;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
@@ -14,10 +11,7 @@ use std::{
 use crate::version::version_metadata;
 use clap::Args;
 use reth_chainspec::EthChainSpec;
-<<<<<<< HEAD
-=======
 use reth_cli_util::{get_secret_key, load_secret_key::SecretKeyError};
->>>>>>> v1.11.3
 use reth_config::Config;
 use reth_discv4::{NodeRecord, DEFAULT_DISCOVERY_ADDR, DEFAULT_DISCOVERY_PORT};
 use reth_discv5::{
@@ -28,11 +22,7 @@ use reth_net_banlist::IpFilter;
 use reth_net_nat::{NatResolver, DEFAULT_NET_IF_NAME};
 use reth_network::{
     transactions::{
-<<<<<<< HEAD
-        config::TransactionPropagationKind,
-=======
         config::{TransactionIngressPolicy, TransactionPropagationKind},
->>>>>>> v1.11.3
         constants::{
             tx_fetcher::{
                 DEFAULT_MAX_CAPACITY_CACHE_PENDING_FETCH, DEFAULT_MAX_COUNT_CONCURRENT_REQUESTS,
@@ -46,11 +36,7 @@ use reth_network::{
         DEFAULT_SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESP_ON_PACK_GET_POOLED_TRANSACTIONS_REQ,
         SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESPONSE,
     },
-<<<<<<< HEAD
-    HelloMessageWithProtocols, NetworkConfigBuilder, NetworkPrimitives, SessionsConfig,
-=======
     HelloMessageWithProtocols, NetworkConfigBuilder, NetworkPrimitives,
->>>>>>> v1.11.3
 };
 use reth_network_peers::{mainnet_nodes, TrustedPeer};
 use secp256k1::SecretKey;
@@ -199,15 +185,12 @@ pub struct NetworkArgs {
     #[arg(long = "tx-propagation-policy", default_value_t = TransactionPropagationKind::All)]
     pub tx_propagation_policy: TransactionPropagationKind,
 
-<<<<<<< HEAD
-=======
     /// Transaction ingress policy
     ///
     /// Determines which peers' transactions are accepted over P2P.
     #[arg(long = "tx-ingress-policy", default_value_t = TransactionIngressPolicy::All)]
     pub tx_ingress_policy: TransactionIngressPolicy,
 
->>>>>>> v1.11.3
     /// Disable transaction pool gossip
     ///
     /// Disables gossiping of transactions in the mempool to peers. This can be omitted for
@@ -226,12 +209,6 @@ pub struct NetworkArgs {
     )]
     pub propagation_mode: TransactionPropagationMode,
 
-<<<<<<< HEAD
-    /// Comma separated list of required block hashes.
-    /// Peers that don't have these blocks will be filtered out.
-    #[arg(long = "required-block-hashes", value_delimiter = ',')]
-    pub required_block_hashes: Vec<B256>,
-=======
     /// Comma separated list of required block hashes or block number=hash pairs.
     /// Peers that don't have these blocks will be filtered out.
     /// Format: hash or `block_number=hash` (e.g., 23115201=0x1234...)
@@ -258,7 +235,6 @@ pub struct NetworkArgs {
     /// networks that pollute the discovery table.
     #[arg(long)]
     pub enforce_enr_fork_id: bool,
->>>>>>> v1.11.3
 }
 
 impl NetworkArgs {
@@ -304,8 +280,6 @@ impl NetworkArgs {
         }
     }
 
-<<<<<<< HEAD
-=======
     /// Returns the max inbound peers (2:1 ratio).
     pub fn resolved_max_inbound_peers(&self) -> Option<usize> {
         if let Some(max_peers) = self.max_peers {
@@ -349,7 +323,6 @@ impl NetworkArgs {
         }
     }
 
->>>>>>> v1.11.3
     /// Build a [`NetworkConfigBuilder`] from a [`Config`] and a [`EthChainSpec`], in addition to
     /// the values in this option struct.
     ///
@@ -377,19 +350,6 @@ impl NetworkArgs {
         // Configure peer connections
         let ip_filter = self.ip_filter().unwrap_or_default();
         let peers_config = config
-<<<<<<< HEAD
-            .peers
-            .clone()
-            .with_max_inbound_opt(self.max_inbound_peers)
-            .with_max_outbound_opt(self.max_outbound_peers);
-
-        // Configure basic network stack
-        NetworkConfigBuilder::<N>::new(secret_key)
-            .peer_config(config.peers_config_with_basic_nodes_from_file(
-                self.persistent_peers_file(peers_file).as_deref(),
-            ))
-            .external_ip_resolver(self.nat)
-=======
             .peers_config_with_basic_nodes_from_file(
                 self.persistent_peers_file(peers_file).as_deref(),
             )
@@ -401,7 +361,6 @@ impl NetworkArgs {
         // Configure basic network stack
         NetworkConfigBuilder::<N>::new(secret_key)
             .external_ip_resolver(self.nat.clone())
->>>>>>> v1.11.3
             .sessions_config(
                 config.sessions.clone().with_upscaled_event_buffer(peers_config.max_peers()),
             )
@@ -433,10 +392,7 @@ impl NetworkArgs {
             ))
             .disable_tx_gossip(self.disable_tx_gossip)
             .required_block_hashes(self.required_block_hashes.clone())
-<<<<<<< HEAD
-=======
             .network_id(self.network_id)
->>>>>>> v1.11.3
     }
 
     /// If `no_persist_peers` is false then this returns the path to the persistent peers file path.
@@ -465,15 +421,12 @@ impl NetworkArgs {
         self
     }
 
-<<<<<<< HEAD
-=======
     /// Configures the [`NatResolver`]
     pub fn with_nat_resolver(mut self, nat: NatResolver) -> Self {
         self.nat = nat;
         self
     }
 
->>>>>>> v1.11.3
     /// Change networking port numbers based on the instance number, if provided.
     /// Ports are updated to `previous_value + instance - 1`
     ///
@@ -555,11 +508,6 @@ impl Default for NetworkArgs {
             max_capacity_cache_txns_pending_fetch: DEFAULT_MAX_CAPACITY_CACHE_PENDING_FETCH,
             net_if: None,
             tx_propagation_policy: TransactionPropagationKind::default(),
-<<<<<<< HEAD
-            disable_tx_gossip: false,
-            propagation_mode: TransactionPropagationMode::Sqrt,
-            required_block_hashes: vec![],
-=======
             tx_ingress_policy: TransactionIngressPolicy::default(),
             disable_tx_gossip: false,
             propagation_mode: TransactionPropagationMode::Sqrt,
@@ -567,7 +515,6 @@ impl Default for NetworkArgs {
             network_id: None,
             netrestrict: None,
             enforce_enr_fork_id: false,
->>>>>>> v1.11.3
         }
     }
 }
@@ -877,8 +824,6 @@ mod tests {
         assert!(args.disable_tx_gossip);
     }
 
-<<<<<<< HEAD
-=======
     #[test]
     fn parse_max_peers_flag() {
         let args = CommandParser::<NetworkArgs>::parse_from(["reth", "--max-peers", "90"]).args;
@@ -969,7 +914,6 @@ mod tests {
         assert_eq!(args.resolved_max_inbound_peers(), None);
     }
 
->>>>>>> v1.11.3
     #[test]
     fn network_args_default_sanity_test() {
         let default_args = NetworkArgs::default();
@@ -983,23 +927,11 @@ mod tests {
         let args = CommandParser::<NetworkArgs>::parse_from([
             "reth",
             "--required-block-hashes",
-<<<<<<< HEAD
-            "0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222",
-=======
             "0x1111111111111111111111111111111111111111111111111111111111111111,23115201=0x2222222222222222222222222222222222222222222222222222222222222222",
->>>>>>> v1.11.3
         ])
         .args;
 
         assert_eq!(args.required_block_hashes.len(), 2);
-<<<<<<< HEAD
-        assert_eq!(
-            args.required_block_hashes[0].to_string(),
-            "0x1111111111111111111111111111111111111111111111111111111111111111"
-        );
-        assert_eq!(
-            args.required_block_hashes[1].to_string(),
-=======
         // First hash without block number (should default to 0)
         assert_eq!(args.required_block_hashes[0].number, 0);
         assert_eq!(
@@ -1010,7 +942,6 @@ mod tests {
         assert_eq!(args.required_block_hashes[1].number, 23115201);
         assert_eq!(
             args.required_block_hashes[1].hash.to_string(),
->>>>>>> v1.11.3
             "0x2222222222222222222222222222222222222222222222222222222222222222"
         );
     }
@@ -1020,8 +951,6 @@ mod tests {
         let args = CommandParser::<NetworkArgs>::parse_from(["reth"]).args;
         assert!(args.required_block_hashes.is_empty());
     }
-<<<<<<< HEAD
-=======
 
     #[test]
     fn test_parse_block_num_hash() {
@@ -1193,5 +1122,4 @@ mod tests {
         // Cleanup
         let _ = fs::remove_file(&peers_file);
     }
->>>>>>> v1.11.3
 }

@@ -1,21 +1,11 @@
-<<<<<<< HEAD
-use super::{collect_history_indices, load_history_indices};
+use super::{collect_account_history_indices, collect_history_indices, load_history_indices};
 use alloy_primitives::Address;
 use reth_config::config::{EtlConfig, IndexHistoryConfig};
 use reth_db_api::{models::ShardedKey, table::Decode, tables, transaction::DbTxMut};
-use reth_provider::{DBProvider, HistoryWriter, PruneCheckpointReader, PruneCheckpointWriter};
-=======
-use super::collect_account_history_indices;
-use crate::stages::utils::{collect_history_indices, load_account_history};
-use reth_config::config::{EtlConfig, IndexHistoryConfig};
-#[cfg(all(unix, feature = "rocksdb"))]
-use reth_db_api::Tables;
-use reth_db_api::{models::ShardedKey, tables, transaction::DbTxMut};
 use reth_provider::{
-    DBProvider, EitherWriter, HistoryWriter, PruneCheckpointReader, PruneCheckpointWriter,
+    DBProvider, HistoryWriter, PruneCheckpointReader, PruneCheckpointWriter,
     RocksDBProviderFactory, StorageSettingsCache,
 };
->>>>>>> v1.11.3
 use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment};
 use reth_stages_api::{
     ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
@@ -144,7 +134,6 @@ where
         };
 
         info!(target: "sync::stages::index_account_history::exec", "Loading indices into database");
-<<<<<<< HEAD
         load_history_indices::<_, tables::AccountsHistory, _>(
             provider,
             collector,
@@ -153,21 +142,6 @@ where
             ShardedKey::<Address>::decode_owned,
             |key| key.key,
         )?;
-=======
-
-        provider.with_rocksdb_batch_auto_commit(|rocksdb_batch| {
-            let mut writer = EitherWriter::new_accounts_history(provider, rocksdb_batch)?;
-            load_account_history(collector, first_sync, &mut writer)
-                .map_err(|e| reth_provider::ProviderError::other(Box::new(e)))?;
-            Ok(((), writer.into_raw_rocksdb_batch()))
-        })?;
-
-        #[cfg(all(unix, feature = "rocksdb"))]
-        if use_rocksdb {
-            provider.commit_pending_rocksdb_batches()?;
-            provider.rocksdb_provider().flush(&[Tables::AccountsHistory.name()])?;
-        }
->>>>>>> v1.11.3
 
         Ok(ExecOutput { checkpoint: StageCheckpoint::new(*range.end()), done: true })
     }
@@ -195,11 +169,7 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, TestRunnerError,
         TestStageDB, UnwindStageTestRunner,
     };
-<<<<<<< HEAD
-    use alloy_primitives::{address, BlockNumber, B256};
-=======
     use alloy_primitives::{address, Address, BlockNumber, B256};
->>>>>>> v1.11.3
     use itertools::Itertools;
     use reth_db_api::{
         cursor::DbCursorRO,

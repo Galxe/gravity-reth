@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-use reth_db::transaction::DbTx;
-=======
->>>>>>> v1.11.3
 use reth_db_api::{table::Value, transaction::DbTxMut};
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
@@ -47,11 +43,6 @@ where
         + PruneCheckpointReader
         + PruneCheckpointWriter
         + BlockReader
-<<<<<<< HEAD
-        + StaticFileProviderFactory<
-            Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-        >,
-=======
         + ChainStateBlockReader
         + StageCheckpointReader
         + StaticFileProviderFactory<
@@ -60,7 +51,6 @@ where
         + ChangeSetReader
         + StorageChangeSetReader
         + RocksDBProviderFactory,
->>>>>>> v1.11.3
 {
     fn id(&self) -> StageId {
         StageId::Prune
@@ -162,11 +152,6 @@ where
         + PruneCheckpointReader
         + PruneCheckpointWriter
         + BlockReader
-<<<<<<< HEAD
-        + StaticFileProviderFactory<
-            Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-        >,
-=======
         + ChainStateBlockReader
         + StageCheckpointReader
         + StaticFileProviderFactory<
@@ -175,7 +160,6 @@ where
         + ChangeSetReader
         + StorageChangeSetReader
         + RocksDBProviderFactory,
->>>>>>> v1.11.3
 {
     fn id(&self) -> StageId {
         StageId::PruneSenderRecovery

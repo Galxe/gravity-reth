@@ -2,24 +2,15 @@
 
 use crate::{
     args::{
-<<<<<<< HEAD
         DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, GravityArgs, NetworkArgs,
-        PayloadBuilderArgs, PruningArgs, RpcServerArgs, TxPoolArgs,
-=======
-        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, NetworkArgs, PayloadBuilderArgs,
-        PruningArgs, RpcServerArgs, StaticFilesArgs, StorageArgs, TxPoolArgs,
->>>>>>> v1.11.3
+        PayloadBuilderArgs, PruningArgs, RpcServerArgs, StaticFilesArgs, StorageArgs, TxPoolArgs,
     },
     dirs::{ChainPath, DataDirPath},
     utils::get_single_header,
 };
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockHashOrNumber;
-<<<<<<< HEAD
-use alloy_primitives::{BlockNumber, B256};
-=======
 use alloy_primitives::{BlockNumber, B256, U256};
->>>>>>> v1.11.3
 use eyre::eyre;
 use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
 use reth_config::config::PruneConfig;
@@ -37,36 +28,20 @@ use reth_transaction_pool::TransactionPool;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     fs,
-<<<<<<< HEAD
-    net::SocketAddr,
-=======
->>>>>>> v1.11.3
+
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tracing::*;
 
-<<<<<<< HEAD
-use crate::args::EraArgs;
-pub use reth_engine_primitives::{
-    DEFAULT_MAX_PROOF_TASK_CONCURRENCY, DEFAULT_MEMORY_BLOCK_BUFFER_TARGET,
-    DEFAULT_RESERVED_CPU_CORES,
-};
-
-/// Triggers persistence when the number of canonical blocks in memory exceeds this threshold.
-pub const DEFAULT_PERSISTENCE_THRESHOLD: u64 = 2;
-
-/// Default size of cross-block cache in megabytes.
-pub const DEFAULT_CROSS_BLOCK_CACHE_SIZE_MB: u64 = 4 * 1024;
-=======
 use crate::args::{EraArgs, MetricArgs};
 pub use reth_engine_primitives::{
-    DEFAULT_MEMORY_BLOCK_BUFFER_TARGET, DEFAULT_PERSISTENCE_THRESHOLD, DEFAULT_RESERVED_CPU_CORES,
+    DEFAULT_MAX_PROOF_TASK_CONCURRENCY, DEFAULT_MEMORY_BLOCK_BUFFER_TARGET,
+    DEFAULT_PERSISTENCE_THRESHOLD, DEFAULT_RESERVED_CPU_CORES,
 };
 
 /// Default size of cross-block cache in megabytes.
 pub const DEFAULT_CROSS_BLOCK_CACHE_SIZE_MB: usize = 4 * 1024;
->>>>>>> v1.11.3
 
 /// This includes all necessary configuration to launch the node.
 /// The individual configuration options can be overwritten before launching the node.
@@ -176,16 +151,14 @@ pub struct NodeConfig<ChainSpec> {
     /// All ERA import related arguments with --era prefix
     pub era: EraArgs,
 
-<<<<<<< HEAD
     /// All gravity related arguments with --gravity prefix
     pub gravity: GravityArgs,
-=======
+
     /// All static files related arguments
     pub static_files: StaticFilesArgs,
 
     /// All storage related arguments with --storage prefix
     pub storage: StorageArgs,
->>>>>>> v1.11.3
 }
 
 impl NodeConfig<ChainSpec> {
@@ -203,11 +176,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
         Self {
             config: None,
             chain,
-<<<<<<< HEAD
-            metrics: None,
-=======
             metrics: MetricArgs::default(),
->>>>>>> v1.11.3
             instance: None,
             network: NetworkArgs::default(),
             rpc: RpcServerArgs::default(),
@@ -220,12 +189,9 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             datadir: DatadirArgs::default(),
             engine: EngineArgs::default(),
             era: EraArgs::default(),
-<<<<<<< HEAD
             gravity: GravityArgs::default(),
-=======
             static_files: StaticFilesArgs::default(),
             storage: StorageArgs::default(),
->>>>>>> v1.11.3
         }
     }
 
@@ -455,15 +421,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             .header_by_number(head)?
             .expect("the header for the latest block is missing, database is corrupt");
 
-<<<<<<< HEAD
-        let total_difficulty = provider
-            .header_td_by_number(head)?
-            // total difficulty is effectively deprecated, but still required in some places, e.g.
-            // p2p
-            .unwrap_or_default();
 
-=======
->>>>>>> v1.11.3
         let hash = provider
             .block_hash(head)?
             .expect("the hash for the latest block is missing, database is corrupt");
@@ -472,11 +430,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             number: head,
             hash,
             difficulty: header.difficulty(),
-<<<<<<< HEAD
-            total_difficulty,
-=======
             total_difficulty: U256::ZERO,
->>>>>>> v1.11.3
             timestamp: header.timestamp(),
         })
     }
@@ -550,15 +504,12 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
         self
     }
 
-<<<<<<< HEAD
-=======
     /// Disables all discovery services for the node.
     pub const fn with_disabled_discovery(mut self) -> Self {
         self.network.discovery.disable_discovery = true;
         self
     }
 
->>>>>>> v1.11.3
     /// Effectively disables the RPC state cache by setting the cache sizes to `0`.
     ///
     /// By setting the cache sizes to 0, caching of newly executed or fetched blocks will be
@@ -625,12 +576,9 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             pruning: self.pruning,
             engine: self.engine,
             era: self.era,
-<<<<<<< HEAD
             gravity: self.gravity,
-=======
             static_files: self.static_files,
             storage: self.storage,
->>>>>>> v1.11.3
         }
     }
 
@@ -671,12 +619,9 @@ impl<ChainSpec> Clone for NodeConfig<ChainSpec> {
             datadir: self.datadir.clone(),
             engine: self.engine.clone(),
             era: self.era.clone(),
-<<<<<<< HEAD
             gravity: self.gravity.clone(),
-=======
             static_files: self.static_files,
             storage: self.storage,
->>>>>>> v1.11.3
         }
     }
 }

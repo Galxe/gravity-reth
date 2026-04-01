@@ -19,10 +19,7 @@ use reth_downloaders::{
 use reth_exex::ExExManagerHandle;
 use reth_network::BlockDownloaderProvider;
 use reth_network_p2p::HeadersClient;
-<<<<<<< HEAD
-=======
 use reth_node_builder::common::metrics_hooks;
->>>>>>> v1.11.3
 use reth_node_core::{
     args::{NetworkArgs, StageEnum},
     version::version_metadata,
@@ -142,25 +139,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                 },
                 ChainSpecInfo { name: provider_factory.chain_spec().chain().to_string() },
                 ctx.task_executor,
-<<<<<<< HEAD
-                Hooks::builder()
-                    .with_hook({
-                        let db = provider_factory.db_ref().clone();
-                        move || db.report_metrics()
-                    })
-                    .with_hook({
-                        let sfp = provider_factory.static_file_provider();
-                        move || {
-                            if let Err(error) = sfp.report_metrics() {
-                                error!(%error, "Failed to report metrics from static file provider");
-                            }
-                        }
-                    })
-                    .build(),
-=======
                 metrics_hooks(&provider_factory),
                 data_dir.pprof_dumps(),
->>>>>>> v1.11.3
             );
 
             MetricServer::new(config).serve().await?;
@@ -361,11 +341,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                 }
 
                 if self.commit {
-<<<<<<< HEAD
                     UnifiedStorageWriter::commit_unwind(provider_rw)?;
-=======
-                    provider_rw.commit()?;
->>>>>>> v1.11.3
                     provider_rw = provider_factory.database_provider_rw()?;
                 }
             }
@@ -388,11 +364,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                 provider_rw.save_stage_checkpoint(exec_stage.id(), checkpoint)?;
             }
             if self.commit {
-<<<<<<< HEAD
                 UnifiedStorageWriter::commit(provider_rw)?;
-=======
-                provider_rw.commit()?;
->>>>>>> v1.11.3
                 provider_rw = provider_factory.database_provider_rw()?;
             }
 
@@ -411,8 +383,6 @@ impl<C: ChainSpecParser> Command<C> {
     pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
         Some(&self.env.chain)
     }
-<<<<<<< HEAD
-=======
 
     /// Returns whether or not the configured stage requires committing.
     ///
@@ -422,5 +392,4 @@ impl<C: ChainSpecParser> Command<C> {
     pub fn requires_commit(&self) -> bool {
         matches!(self.stage, StageEnum::Headers | StageEnum::Bodies | StageEnum::Execution)
     }
->>>>>>> v1.11.3
 }

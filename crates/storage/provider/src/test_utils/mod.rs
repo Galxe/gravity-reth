@@ -1,9 +1,5 @@
 use crate::{
-<<<<<<< HEAD
     providers::{ProviderNodeTypes, StaticFileProvider},
-=======
-    providers::{NodeTypesForProvider, ProviderNodeTypes, RocksDBBuilder, StaticFileProvider},
->>>>>>> v1.11.3
     HashingWriter, ProviderFactory, TrieWriter,
 };
 use alloy_primitives::B256;
@@ -11,11 +7,7 @@ use reth_chainspec::{ChainSpec, MAINNET};
 use reth_db::{test_utils::TempDatabase, DatabaseEnv};
 use reth_errors::ProviderResult;
 use reth_ethereum_engine_primitives::EthEngineTypes;
-<<<<<<< HEAD
 use reth_node_types::{NodeTypes, NodeTypesWithDBAdapter};
-=======
-use reth_node_types::NodeTypesWithDBAdapter;
->>>>>>> v1.11.3
 use reth_primitives_traits::{Account, StorageEntry};
 use reth_trie::StateRoot;
 use reth_trie_db::DatabaseStateRoot;
@@ -55,7 +47,6 @@ pub fn create_test_provider_factory_with_chain_spec(
 }
 
 /// Creates test provider factory with provided chain spec.
-<<<<<<< HEAD
 pub fn create_test_provider_factory_with_node_types<N: NodeTypes>(
     chain_spec: Arc<N::ChainSpec>,
 ) -> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<TempDatabase<DatabaseEnv>>>> {
@@ -65,33 +56,6 @@ pub fn create_test_provider_factory_with_node_types<N: NodeTypes>(
         db,
         chain_spec,
         StaticFileProvider::read_write(static_dir.keep()).expect("static file provider"),
-=======
-pub fn create_test_provider_factory_with_node_types<N: NodeTypesForProvider>(
-    chain_spec: Arc<N::ChainSpec>,
-) -> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<TempDatabase<DatabaseEnv>>>> {
-    // Create a single temp directory that contains all data dirs (db, static_files, rocksdb).
-    // TempDatabase will clean up the entire directory on drop.
-    let datadir_path = reth_db::test_utils::tempdir_path();
-
-    let static_files_path = datadir_path.join("static_files");
-    let rocksdb_path = datadir_path.join("rocksdb");
-
-    // Create static_files directory
-    std::fs::create_dir_all(&static_files_path).expect("failed to create static_files dir");
-
-    // Create database with the datadir path so TempDatabase cleans up everything on drop
-    let db = reth_db::test_utils::create_test_rw_db_with_datadir(&datadir_path);
-
-    ProviderFactory::new(
-        db,
-        chain_spec,
-        StaticFileProvider::read_write(static_files_path).expect("static file provider"),
-        RocksDBBuilder::new(&rocksdb_path)
-            .with_default_tables()
-            .build()
-            .expect("failed to create test RocksDB provider"),
-        reth_tasks::Runtime::test(),
->>>>>>> v1.11.3
     )
     .expect("failed to create test provider factory")
 }
@@ -121,16 +85,11 @@ pub fn insert_genesis<N: ProviderNodeTypes<ChainSpec = ChainSpec>>(
     provider.insert_storage_for_hashing(alloc_storage)?;
     provider.commit()?;
 
-<<<<<<< HEAD
     let provider = provider_factory.provider_rw()?;
     let (root, updates) = StateRoot::from_tx(provider.tx_ref())
         .root_with_updates()
         .map_err(reth_db::DatabaseError::from)?;
     provider.write_trie_updates(&updates).unwrap();
-=======
-    let (root, updates) = StateRoot::from_tx(provider.tx_ref()).root_with_updates()?;
-    provider.write_trie_updates(updates).unwrap();
->>>>>>> v1.11.3
 
     provider.commit()?;
 

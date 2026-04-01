@@ -38,14 +38,9 @@ reth-storage-errors.workspace = true
 reth-revm.workspace = true
 reth-stages-api.workspace = true
 reth-static-file-types.workspace = true
-<<<<<<< HEAD
-reth-trie = { workspace = true, optional = true }
-reth-trie-parallel = { workspace = true, optional = true }
-=======
 reth-tasks.workspace = true
 reth-trie = { workspace = true, features = ["metrics"] }
 reth-trie-db = { workspace = true, features = ["metrics"] }
->>>>>>> v1.11.3
 
 reth-testing-utils = { workspace = true, optional = true }
 
@@ -67,53 +62,31 @@ rayon.workspace = true
 num-traits.workspace = true
 tempfile = { workspace = true, optional = true }
 bincode.workspace = true
-<<<<<<< HEAD
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls-native-roots", "blocking"] }
-=======
 reqwest.workspace = true
->>>>>>> v1.11.3
 eyre.workspace = true
 
 [dev-dependencies]
 # reth
 reth-chainspec.workspace = true
-<<<<<<< HEAD
-reth-db = { workspace = true, features = ["test-utils"] }
-=======
 reth-db = { workspace = true, features = ["test-utils", "mdbx"] }
->>>>>>> v1.11.3
 reth-ethereum-primitives = { workspace = true, features = ["test-utils"] }
 reth-ethereum-consensus.workspace = true
 reth-evm-ethereum.workspace = true
 reth-consensus = { workspace = true, features = ["test-utils"] }
 reth-network-p2p = { workspace = true, features = ["test-utils"] }
-<<<<<<< HEAD
-reth-downloaders.workspace = true
-reth-static-file.workspace = true
-reth-stages-api = { workspace = true, features = ["test-utils"] }
-=======
 reth-downloaders = { workspace = true, features = ["file-client"] }
 reth-static-file.workspace = true
 reth-stages-api = { workspace = true, features = ["test-utils"] }
 reth-storage-api.workspace = true
->>>>>>> v1.11.3
 reth-testing-utils.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-network-peers.workspace = true
-<<<<<<< HEAD
-reth-tracing.workspace = true
-reth-trie = { workspace = true, features = ["test-utils"] }
-reth-trie-db = { workspace = true, features = ["test-utils"] }
-alloy-primitives = { workspace = true, features = ["getrandom", "rand"] }
-alloy-rlp.workspace = true
-=======
 
 alloy-genesis.workspace = true
 alloy-primitives = { workspace = true, features = ["getrandom", "rand"] }
 alloy-rlp.workspace = true
 reth-db-common.workspace = true
 reth-tracing.workspace = true
->>>>>>> v1.11.3
 
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 assert_matches.workspace = true
@@ -143,21 +116,13 @@ test-utils = [
     "reth-revm/test-utils",
     "reth-codecs/test-utils",
     "reth-db-api/test-utils",
-<<<<<<< HEAD
-    "reth-trie-parallel/test-utils",
-=======
     "reth-trie-db/test-utils",
->>>>>>> v1.11.3
     "reth-trie/test-utils",
     "reth-prune-types/test-utils",
     "dep:reth-ethereum-primitives",
     "reth-ethereum-primitives?/test-utils",
     "reth-evm-ethereum/test-utils",
-<<<<<<< HEAD
-    "reth-trie-db/test-utils",
-=======
     "reth-tasks/test-utils",
->>>>>>> v1.11.3
 ]
 rocksdb = ["reth-provider/rocksdb", "reth-db-common/rocksdb"]
 edge = ["rocksdb"]

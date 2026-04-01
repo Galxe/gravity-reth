@@ -37,7 +37,6 @@ pub use prune::*;
 pub use sender_recovery::*;
 pub use tx_lookup::*;
 
-mod era;
 mod utils;
 
 use utils::*;
@@ -52,10 +51,6 @@ mod tests {
     };
     use alloy_rlp::Decodable;
     use reth_chainspec::ChainSpecBuilder;
-<<<<<<< HEAD
-=======
-    use reth_db::mdbx::{cursor::Cursor, RW};
->>>>>>> v1.11.3
     use reth_db_api::{
         cursor::{DbCursorRO, DbCursorRW},
         table::Table,
@@ -71,15 +66,9 @@ mod tests {
     use reth_provider::{
         providers::{StaticFileProvider, StaticFileWriter},
         test_utils::MockNodeTypesWithDB,
-<<<<<<< HEAD
-        AccountExtReader, BlockBodyIndicesProvider, DatabaseProviderFactory, ProviderFactory,
-        ProviderResult, ReceiptProvider, StageCheckpointWriter, StaticFileProviderFactory,
-        StorageReader,
-=======
         AccountExtReader, BlockBodyIndicesProvider, BlockWriter, DatabaseProviderFactory,
         ProviderFactory, ProviderResult, ReceiptProvider, StageCheckpointWriter,
         StaticFileProviderFactory, StorageReader,
->>>>>>> v1.11.3
     };
     use reth_prune_types::{PruneMode, PruneModes};
     use reth_stages_api::{
@@ -103,14 +92,9 @@ mod tests {
         let genesis = SealedBlock::<Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
         let block = SealedBlock::<Block>::decode(&mut block_rlp).unwrap();
-<<<<<<< HEAD
-        provider_rw.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
-        provider_rw.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
-=======
         let mut head = block.hash();
         provider_rw.insert_block(&genesis.try_recover().unwrap()).unwrap();
         provider_rw.insert_block(&block.try_recover().unwrap()).unwrap();
->>>>>>> v1.11.3
 
         // Fill with bogus blocks to respect PruneMode distance.
         let mut rng = generators::rng();
@@ -121,11 +105,7 @@ mod tests {
                 generators::BlockParams { parent: Some(head), ..Default::default() },
             );
             head = nblock.hash();
-<<<<<<< HEAD
-            provider_rw.insert_historical_block(nblock.try_recover().unwrap()).unwrap();
-=======
             provider_rw.insert_block(&nblock.try_recover().unwrap()).unwrap();
->>>>>>> v1.11.3
         }
         provider_rw
             .static_file_provider()
@@ -345,11 +325,7 @@ mod tests {
         static_file_provider = StaticFileProvider::read_write(static_file_provider.path()).unwrap();
         assert!(matches!(
             static_file_provider
-<<<<<<< HEAD
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), is_full_node,),
-=======
                 .check_consistency(&db.factory.database_provider_ro().unwrap()),
->>>>>>> v1.11.3
             Ok(e) if e == expected
         ));
     }
@@ -371,11 +347,7 @@ mod tests {
         assert!(matches!(
             db.factory
                 .static_file_provider()
-<<<<<<< HEAD
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), false,),
-=======
-                .check_consistency(&db.factory.database_provider_ro().unwrap(),),
->>>>>>> v1.11.3
+                .check_consistency(&db.factory.database_provider_ro().unwrap()),
             Ok(e) if e == expected
         ));
     }
@@ -408,11 +380,7 @@ mod tests {
         assert!(matches!(
             db.factory
                 .static_file_provider()
-<<<<<<< HEAD
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), false),
-=======
                 .check_consistency(&db.factory.database_provider_ro().unwrap()),
->>>>>>> v1.11.3
             Ok(e) if e == expected
         ));
     }
@@ -423,11 +391,7 @@ mod tests {
         let db_provider = db.factory.database_provider_ro().unwrap();
 
         assert!(matches!(
-<<<<<<< HEAD
-            db.factory.static_file_provider().check_consistency(&db_provider, false),
-=======
             db.factory.static_file_provider().check_consistency(&db_provider),
->>>>>>> v1.11.3
             Ok(None)
         ));
     }

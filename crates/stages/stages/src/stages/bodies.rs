@@ -8,11 +8,7 @@ use reth_db_api::{
 use reth_network_p2p::bodies::{downloader::BodyDownloader, response::BlockResponse};
 use reth_provider::{
     providers::StaticFileWriter, BlockReader, BlockWriter, DBProvider, ProviderError,
-<<<<<<< HEAD
-    StaticFileProviderFactory, StatsReader, StorageLocation,
-=======
     StaticFileProviderFactory, StatsReader,
->>>>>>> v1.11.3
 };
 use reth_stages_api::{
     EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
@@ -206,16 +202,7 @@ where
 
         // Write bodies to database.
         provider.append_block_bodies(
-<<<<<<< HEAD
-            buffer
-                .into_iter()
-                .map(|response| (response.block_number(), response.into_body()))
-                .collect(),
-            // We are writing transactions directly to static files.
-            StorageLocation::StaticFiles,
-=======
             buffer.iter().map(|response| (response.block_number(), response.body())).collect(),
->>>>>>> v1.11.3
         )?;
 
         // The stage is "done" if:
@@ -238,11 +225,7 @@ where
         self.buffer.take();
 
         ensure_consistency(provider, Some(input.unwind_to))?;
-<<<<<<< HEAD
-        provider.remove_bodies_above(input.unwind_to, StorageLocation::Both)?;
-=======
         provider.remove_bodies_above(input.unwind_to)?;
->>>>>>> v1.11.3
 
         Ok(UnwindOutput {
             checkpoint: StageCheckpoint::new(input.unwind_to)
@@ -491,11 +474,7 @@ mod tests {
             },
         };
         use alloy_consensus::{BlockHeader, Header};
-<<<<<<< HEAD
-        use alloy_primitives::{BlockNumber, TxNumber, B256};
-=======
         use alloy_primitives::{map::B256Map, BlockNumber, TxNumber, B256};
->>>>>>> v1.11.3
         use futures_util::Stream;
         use reth_db::{static_file::HeaderWithHashMask, tables};
         use reth_db_api::{
@@ -596,11 +575,7 @@ mod tests {
                         ..Default::default()
                     },
                 );
-<<<<<<< HEAD
-                self.db.insert_headers_with_td(blocks.iter().map(|block| block.sealed_header()))?;
-=======
                 self.db.insert_headers(blocks.iter().map(|block| block.sealed_header()))?;
->>>>>>> v1.11.3
                 if let Some(progress) = blocks.get(start as usize) {
                     // Insert last progress data
                     {
@@ -792,14 +767,9 @@ mod tests {
                     *range.start()..*range.end() + 1,
                     |cursor, number| cursor.get_two::<HeaderWithHashMask<Header>>(number.into()),
                 )? {
-<<<<<<< HEAD
-                    let (header, hash) = header?;
-                    self.headers.push_back(SealedHeader::new(header, hash));
-=======
                     if let Some((header, hash)) = header? {
                         self.headers.push_back(SealedHeader::new(header, hash));
                     }
->>>>>>> v1.11.3
                 }
 
                 Ok(())

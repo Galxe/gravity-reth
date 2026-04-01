@@ -9,13 +9,7 @@ use reth_db_api::{
 };
 use reth_etl::Collector;
 use reth_primitives_traits::Account;
-<<<<<<< HEAD
 use reth_provider::{AccountExtReader, DBProvider, HashingWriter, StatsReader};
-=======
-use reth_provider::{
-    AccountExtReader, DBProvider, HashingWriter, StatsReader, StorageSettingsCache,
-};
->>>>>>> v1.11.3
 use reth_stages_api::{
     AccountHashingCheckpoint, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
     StageError, StageId, UnwindInput, UnwindOutput,
@@ -70,22 +64,14 @@ impl AccountHashingStage {
         opts: SeedOpts,
     ) -> Result<Vec<(alloy_primitives::Address, Account)>, StageError>
     where
-<<<<<<< HEAD
-        N::Primitives: reth_primitives_traits::FullNodePrimitives<
-=======
         N::Primitives: reth_primitives_traits::NodePrimitives<
->>>>>>> v1.11.3
             Block = reth_ethereum_primitives::Block,
             BlockHeader = reth_primitives_traits::Header,
         >,
     {
         use alloy_primitives::U256;
         use reth_db_api::models::AccountBeforeTx;
-<<<<<<< HEAD
-        use reth_provider::{StaticFileProviderFactory, StaticFileWriter};
-=======
         use reth_provider::{BlockWriter, StaticFileProviderFactory, StaticFileWriter};
->>>>>>> v1.11.3
         use reth_testing_utils::{
             generators,
             generators::{random_block_range, random_eoa_accounts, BlockRangeParams},
@@ -100,11 +86,7 @@ impl AccountHashingStage {
         );
 
         for block in blocks {
-<<<<<<< HEAD
-            provider.insert_historical_block(block.try_recover().unwrap()).unwrap();
-=======
             provider.insert_block(&block.try_recover().unwrap()).unwrap();
->>>>>>> v1.11.3
         }
         provider
             .static_file_provider()
@@ -274,10 +256,6 @@ where
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
-<<<<<<< HEAD
-        // Aggregate all transition changesets and make a list of accounts that have been changed.
-=======
->>>>>>> v1.11.3
         provider.unwind_account_hashing_range(range)?;
 
         let mut stage_checkpoint =
@@ -383,12 +361,8 @@ mod tests {
                 },
                 done: true,
             }) if block_number == previous_stage &&
-<<<<<<< HEAD
-                total == runner.db.table::<tables::PlainAccountState>().unwrap().len() as u64
-=======
                 processed == total &&
                 total == runner.db.count_entries::<tables::PlainAccountState>().unwrap() as u64
->>>>>>> v1.11.3
         );
 
         // Validate the stage execution

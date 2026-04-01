@@ -1,16 +1,9 @@
 use super::{collect_history_indices, collect_storage_history_indices};
 use crate::{stages::utils::load_storage_history, StageCheckpoint, StageId};
 use reth_config::config::{EtlConfig, IndexHistoryConfig};
-<<<<<<< HEAD
 use reth_db_api::{
     models::{storage_sharded_key::StorageShardedKey, AddressStorageKey, BlockNumberAddress},
     table::Decode,
-=======
-#[cfg(all(unix, feature = "rocksdb"))]
-use reth_db_api::Tables;
-use reth_db_api::{
-    models::{storage_sharded_key::StorageShardedKey, AddressStorageKey, BlockNumberAddress},
->>>>>>> v1.11.3
     tables,
     transaction::DbTxMut,
 };
@@ -146,7 +139,6 @@ where
         };
 
         info!(target: "sync::stages::index_storage_history::exec", "Loading indices into database");
-<<<<<<< HEAD
         load_history_indices::<_, tables::StoragesHistory, _>(
             provider,
             collector,
@@ -157,21 +149,6 @@ where
             StorageShardedKey::decode_owned,
             |key| AddressStorageKey((key.address, key.sharded_key.key)),
         )?;
-=======
-
-        provider.with_rocksdb_batch_auto_commit(|rocksdb_batch| {
-            let mut writer = EitherWriter::new_storages_history(provider, rocksdb_batch)?;
-            load_storage_history(collector, first_sync, &mut writer)
-                .map_err(|e| reth_provider::ProviderError::other(Box::new(e)))?;
-            Ok(((), writer.into_raw_rocksdb_batch()))
-        })?;
-
-        #[cfg(all(unix, feature = "rocksdb"))]
-        if use_rocksdb {
-            provider.commit_pending_rocksdb_batches()?;
-            provider.rocksdb_provider().flush(&[Tables::StoragesHistory.name()])?;
-        }
->>>>>>> v1.11.3
 
         Ok(ExecOutput { checkpoint: StageCheckpoint::new(*range.end()), done: true })
     }
@@ -185,11 +162,7 @@ where
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
-<<<<<<< HEAD
         provider.unwind_storage_history_indices_range(BlockNumberAddress::range(range))?;
-=======
-        provider.unwind_storage_history_indices_range(range)?;
->>>>>>> v1.11.3
 
         Ok(UnwindOutput { checkpoint: StageCheckpoint::new(unwind_progress) })
     }

@@ -22,15 +22,9 @@
 //! # use reth_config::config::StageConfig;
 //! # use reth_ethereum_primitives::EthPrimitives;
 //! # use std::sync::Arc;
-<<<<<<< HEAD
-//! # use reth_consensus::{FullConsensus, ConsensusError};
-//!
-//! # fn create(exec: impl ConfigureEvm<Primitives = EthPrimitives> + 'static, consensus: impl FullConsensus<EthPrimitives, Error = ConsensusError> + 'static) {
-=======
 //! # use reth_consensus::FullConsensus;
 //!
 //! # fn create(exec: impl ConfigureEvm<Primitives = EthPrimitives> + 'static, consensus: impl FullConsensus<EthPrimitives> + 'static) {
->>>>>>> v1.11.3
 //!
 //! let provider_factory = create_test_provider_factory();
 //! let static_file_producer =
@@ -53,11 +47,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use reth_config::config::StageConfig;
-<<<<<<< HEAD
-use reth_consensus::{ConsensusError, FullConsensus};
-=======
 use reth_consensus::FullConsensus;
->>>>>>> v1.11.3
 use reth_evm::ConfigureEvm;
 use reth_network_p2p::{bodies::downloader::BodyDownloader, headers::downloader::HeaderDownloader};
 use reth_primitives_traits::{Block, NodePrimitives};
@@ -103,11 +93,7 @@ where
     /// Executor factory needs for execution stage
     evm_config: E,
     /// Consensus instance
-<<<<<<< HEAD
-    consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
-=======
     consensus: Arc<dyn FullConsensus<E::Primitives>>,
->>>>>>> v1.11.3
     /// Configuration for each stage in the pipeline
     stages_config: StageConfig,
     /// Prune configuration for every segment that can be pruned
@@ -125,11 +111,7 @@ where
     pub fn new(
         provider: Provider,
         tip: watch::Receiver<B256>,
-<<<<<<< HEAD
-        consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
-=======
         consensus: Arc<dyn FullConsensus<E::Primitives>>,
->>>>>>> v1.11.3
         header_downloader: H,
         body_downloader: B,
         evm_config: E,
@@ -164,11 +146,7 @@ where
     pub fn add_offline_stages<Provider>(
         default_offline: StageSetBuilder<Provider>,
         evm_config: E,
-<<<<<<< HEAD
-        consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
-=======
         consensus: Arc<dyn FullConsensus<E::Primitives>>,
->>>>>>> v1.11.3
         stages_config: StageConfig,
         prune_modes: PruneModes,
     ) -> StageSetBuilder<Provider>
@@ -292,10 +270,6 @@ where
         Stage<Provider>,
 {
     fn builder(self) -> StageSetBuilder<Provider> {
-<<<<<<< HEAD
-        StageSetBuilder::default()
-            .add_stage(EraStage::new(self.era_import_source, self.stages_config.etl.clone()))
-=======
         let mut builder = StageSetBuilder::default();
 
         if self.era_import_source.is_some() {
@@ -304,7 +278,6 @@ where
         }
 
         builder
->>>>>>> v1.11.3
             .add_stage(HeaderStage::new(
                 self.provider,
                 self.header_downloader,
@@ -330,11 +303,7 @@ pub struct OfflineStages<E: ConfigureEvm> {
     /// Executor factory needs for execution stage
     evm_config: E,
     /// Consensus instance for validating blocks.
-<<<<<<< HEAD
-    consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
-=======
     consensus: Arc<dyn FullConsensus<E::Primitives>>,
->>>>>>> v1.11.3
     /// Configuration for each stage in the pipeline
     stages_config: StageConfig,
     /// Prune configuration for every segment that can be pruned
@@ -345,11 +314,7 @@ impl<E: ConfigureEvm> OfflineStages<E> {
     /// Create a new set of offline stages with default values.
     pub const fn new(
         evm_config: E,
-<<<<<<< HEAD
-        consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
-=======
         consensus: Arc<dyn FullConsensus<E::Primitives>>,
->>>>>>> v1.11.3
         stages_config: StageConfig,
         prune_modes: PruneModes,
     ) -> Self {
@@ -367,25 +332,6 @@ where
     PruneStage: Stage<Provider>,
 {
     fn builder(self) -> StageSetBuilder<Provider> {
-<<<<<<< HEAD
-        ExecutionStages::new(self.evm_config, self.consensus, self.stages_config.clone())
-            .builder()
-            // If sender recovery prune mode is set, add the prune sender recovery stage.
-            .add_stage_opt(self.prune_modes.sender_recovery.map(|prune_mode| {
-                PruneSenderRecoveryStage::new(prune_mode, self.stages_config.prune.commit_threshold)
-            }))
-            .add_set(HashingStages { stages_config: self.stages_config.clone() })
-            .add_set(HistoryIndexingStages {
-                stages_config: self.stages_config.clone(),
-                prune_modes: self.prune_modes.clone(),
-            })
-            // If any prune modes are set, add the prune stage.
-            .add_stage_opt(self.prune_modes.is_empty().not().then(|| {
-                // Prune stage should be added after all hashing stages, because otherwise it will
-                // delete
-                PruneStage::new(self.prune_modes.clone(), self.stages_config.prune.commit_threshold)
-            }))
-=======
         ExecutionStages::new(
             self.evm_config,
             self.consensus,
@@ -408,7 +354,6 @@ where
             self.prune_modes.clone(),
             self.stages_config.prune.commit_threshold,
         ))
->>>>>>> v1.11.3
     }
 }
 
@@ -419,35 +364,22 @@ pub struct ExecutionStages<E: ConfigureEvm> {
     /// Executor factory that will create executors.
     evm_config: E,
     /// Consensus instance for validating blocks.
-<<<<<<< HEAD
-    consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
-    /// Configuration for each stage in the pipeline
-    stages_config: StageConfig,
-=======
     consensus: Arc<dyn FullConsensus<E::Primitives>>,
     /// Configuration for each stage in the pipeline
     stages_config: StageConfig,
     /// Prune mode for sender recovery
     sender_recovery_prune_mode: Option<PruneMode>,
->>>>>>> v1.11.3
 }
 
 impl<E: ConfigureEvm> ExecutionStages<E> {
     /// Create a new set of execution stages with default values.
     pub const fn new(
         executor_provider: E,
-<<<<<<< HEAD
-        consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
-        stages_config: StageConfig,
-    ) -> Self {
-        Self { evm_config: executor_provider, consensus, stages_config }
-=======
         consensus: Arc<dyn FullConsensus<E::Primitives>>,
         stages_config: StageConfig,
         sender_recovery_prune_mode: Option<PruneMode>,
     ) -> Self {
         Self { evm_config: executor_provider, consensus, stages_config, sender_recovery_prune_mode }
->>>>>>> v1.11.3
     }
 }
 

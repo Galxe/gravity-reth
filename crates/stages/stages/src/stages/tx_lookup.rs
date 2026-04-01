@@ -2,21 +2,13 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{TxHash, TxNumber};
 use num_traits::Zero;
 use reth_config::config::{EtlConfig, TransactionLookupConfig};
-<<<<<<< HEAD
 use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW},
     table::Value,
     tables,
     transaction::DbTxMut,
     RawKey, RawValue,
-=======
-#[cfg(all(unix, feature = "rocksdb"))]
-use reth_db_api::Tables;
-use reth_db_api::{
-    table::{Decode, Decompress, Value},
-    tables,
-    transaction::DbTxMut,
->>>>>>> v1.11.3
+};
 };
 use reth_etl::Collector;
 use reth_primitives_traits::{NodePrimitives, SignedTransaction};
@@ -75,13 +67,7 @@ where
         + PruneCheckpointReader
         + StatsReader
         + StaticFileProviderFactory<Primitives: NodePrimitives<SignedTx: Value + SignedTransaction>>
-<<<<<<< HEAD
         + TransactionsProviderExt,
-=======
-        + TransactionsProviderExt
-        + StorageSettingsCache
-        + RocksDBProviderFactory,
->>>>>>> v1.11.3
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -168,7 +154,6 @@ where
             if range_output.is_final_range {
                 let total_hashes = hash_collector.len();
                 let interval = (total_hashes / 10).max(1);
-<<<<<<< HEAD
                 for (index, hash_to_number) in hash_collector.iter()?.enumerate() {
                     let (hash, number) = hash_to_number?;
                     if index > 0 && index.is_multiple_of(interval) {
@@ -187,42 +172,6 @@ where
                         txhash_cursor.insert(key, &RawValue::<TxNumber>::from_vec(number))?
                     }
                 }
-=======
-
-                // Use append mode when table is empty (first sync) - significantly faster
-                let append_only =
-                    provider.count_entries::<tables::TransactionHashNumbers>()?.is_zero();
-
-                // Auto-commits on threshold; consistency check heals any crash.
-                provider.with_rocksdb_batch_auto_commit(|rocksdb_batch| {
-                    let mut writer =
-                        EitherWriter::new_transaction_hash_numbers(provider, rocksdb_batch)?;
-
-                    let iter = hash_collector
-                        .iter()
-                        .map_err(|e| ProviderError::other(Box::new(e)))?;
-
-                    for (index, hash_to_number) in iter.enumerate() {
-                        let (hash_bytes, number_bytes) =
-                            hash_to_number.map_err(|e| ProviderError::other(Box::new(e)))?;
-                        if index > 0 && index.is_multiple_of(interval) {
-                            info!(
-                                target: "sync::stages::transaction_lookup",
-                                ?append_only,
-                                progress = %format!("{:.2}%", (index as f64 / total_hashes as f64) * 100.0),
-                                "Inserting hashes"
-                            );
-                        }
-
-                        // Decode from raw ETL bytes
-                        let hash = TxHash::decode(&hash_bytes)?;
-                        let tx_num = TxNumber::decompress(&number_bytes)?;
-                        writer.put_transaction_hash_number(hash, tx_num, append_only)?;
-                    }
-
-                    Ok(((), writer.into_raw_rocksdb_batch()))
-                })?;
->>>>>>> v1.11.3
 
                 trace!(target: "sync::stages::transaction_lookup",
                     total_hashes,
@@ -254,9 +203,8 @@ where
     ) -> Result<UnwindOutput, StageError> {
         let (range, unwind_to, _) = input.unwind_block_range_with_threshold(self.chunk_size);
 
-<<<<<<< HEAD
         // Cursor to unwind tx hash to number
-        let mut tx_hash_number_cursor = tx.cursor_write::<tables::TransactionHashNumbers>()?;
+        let mut tx_hash_number_cursor = provider.tx_ref().cursor_write::<tables::TransactionHashNumbers>()?;
         let static_file_provider = provider.static_file_provider();
         let rev_walker = provider
             .block_body_indices_range(range.clone())?
@@ -276,33 +224,9 @@ where
                     tx_hash_number_cursor.seek_exact(transaction.trie_hash())?.is_some()
                 {
                     tx_hash_number_cursor.delete_current()?;
-=======
-        provider.with_rocksdb_batch(|rocksdb_batch| {
-            let mut writer = EitherWriter::new_transaction_hash_numbers(provider, rocksdb_batch)?;
-
-            let static_file_provider = provider.static_file_provider();
-            let rev_walker = provider
-                .block_body_indices_range(range.clone())?
-                .into_iter()
-                .rev()
-                .zip(range.rev());
-
-            for (body, number) in rev_walker {
-                if number <= unwind_to {
-                    break;
-                }
-
-                // Delete all transactions that belong to this block
-                for transaction in
-                    static_file_provider.transactions_by_tx_range(body.tx_num_range())?
-                {
-                    writer.delete_transaction_hash_number(transaction.trie_hash())?;
->>>>>>> v1.11.3
                 }
             }
-
-            Ok(((), writer.into_raw_rocksdb_batch()))
-        })?;
+        };
 
         Ok(UnwindOutput {
             checkpoint: StageCheckpoint::new(unwind_to)
@@ -343,19 +267,12 @@ mod tests {
     };
     use alloy_primitives::{BlockNumber, B256};
     use assert_matches::assert_matches;
-<<<<<<< HEAD
-    use reth_db_api::transaction::DbTx;
-=======
     use reth_db_api::{cursor::DbCursorRO, transaction::DbTx};
->>>>>>> v1.11.3
     use reth_ethereum_primitives::Block;
     use reth_primitives_traits::SealedBlock;
     use reth_provider::{
         providers::StaticFileWriter, BlockBodyIndicesProvider, DatabaseProviderFactory,
-<<<<<<< HEAD
         StaticFileProviderFactory,
-=======
->>>>>>> v1.11.3
     };
     use reth_stages_api::StageUnitCheckpoint;
     use reth_testing_utils::generators::{
@@ -410,13 +327,8 @@ mod tests {
                     processed: _,
                     total
                 }))
-<<<<<<< HEAD
             }, done: true }) if block_number == previous_stage &&
                 total == runner.db.factory.static_file_provider().count_entries::<tables::Transactions>().unwrap() as u64
-=======
-            }, done: true }) if block_number == previous_stage && processed == total &&
-                total == runner.db.count_entries::<tables::Transactions>().unwrap() as u64
->>>>>>> v1.11.3
         );
 
         // Validate the stage execution
@@ -461,13 +373,8 @@ mod tests {
                     processed: _,
                     total
                 }))
-<<<<<<< HEAD
             }, done: true }) if block_number == previous_stage &&
                 total == runner.db.factory.static_file_provider().count_entries::<tables::Transactions>().unwrap() as u64
-=======
-            }, done: true }) if block_number == previous_stage && processed == total &&
-                total == runner.db.count_entries::<tables::Transactions>().unwrap() as u64
->>>>>>> v1.11.3
         );
 
         // Validate the stage execution

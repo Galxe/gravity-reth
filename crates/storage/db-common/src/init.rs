@@ -2,22 +2,6 @@
 
 use alloy_consensus::BlockHeader;
 use alloy_genesis::GenesisAccount;
-<<<<<<< HEAD
-use alloy_primitives::{keccak256, map::HashMap, Address, B256, U256};
-use reth_chainspec::EthChainSpec;
-use reth_codecs::Compact;
-use reth_config::config::EtlConfig;
-use reth_db_api::{tables, transaction::DbTxMut, DatabaseError};
-use reth_etl::Collector;
-use reth_execution_errors::StateRootError;
-use reth_primitives_traits::{Account, Bytecode, GotExpected, NodePrimitives, StorageEntry};
-use reth_provider::{
-    errors::provider::ProviderResult, providers::StaticFileWriter, writer::UnifiedStorageWriter,
-    BlockHashReader, BlockNumReader, BundleStateInit, ChainSpecProvider, DBProvider,
-    DatabaseProviderFactory, ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter,
-    OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader, StageCheckpointWriter,
-    StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter, TrieWriterV2,
-=======
 use alloy_primitives::{
     keccak256,
     map::{AddressMap, B256Map, HashMap},
@@ -38,34 +22,26 @@ use reth_primitives_traits::{
     Account, Bytecode, GotExpected, NodePrimitives, SealedHeader, StorageEntry,
 };
 use reth_provider::{
-    errors::provider::ProviderResult, providers::StaticFileWriter, BlockHashReader, BlockNumReader,
-    BundleStateInit, ChainSpecProvider, DBProvider, DatabaseProviderFactory, EitherWriter,
-    ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter, MetadataProvider,
-    MetadataWriter, NodePrimitivesProvider, OriginalValuesKnown, ProviderError, RevertsInit,
-    RocksDBProviderFactory, StageCheckpointReader, StageCheckpointWriter, StateWriteConfig,
-    StateWriter, StaticFileProviderFactory, StorageSettings, StorageSettingsCache, TrieWriter,
->>>>>>> v1.11.3
+    errors::provider::ProviderResult, providers::StaticFileWriter, writer::UnifiedStorageWriter,
+    BlockHashReader, BlockNumReader, BundleStateInit, ChainSpecProvider, DBProvider,
+    DatabaseProviderFactory, EitherWriter, ExecutionOutcome, HashingWriter, HeaderProvider,
+    HistoryWriter, NodePrimitivesProvider, OriginalValuesKnown, ProviderError, RevertsInit,
+    RocksDBProviderFactory, StageCheckpointReader, StageCheckpointWriter, StateWriter,
+    StaticFileProviderFactory, StorageLocation, StorageSettings, StorageSettingsCache, TrieWriter,
+    TrieWriterV2,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_trie::{
     prefix_set::{TriePrefixSets, TriePrefixSetsMut},
-<<<<<<< HEAD
     HashedPostState, HashedStorage, IntermediateStateRootState, Nibbles,
     StateRoot as StateRootComputer, StateRootProgress,
-=======
-    IntermediateStateRootState, Nibbles, StateRoot as StateRootComputer, StateRootProgress,
->>>>>>> v1.11.3
 };
 use reth_trie_db::DatabaseStateRoot;
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
-<<<<<<< HEAD
-use tracing::{debug, error, info, trace};
-=======
 use tracing::{debug, error, info, trace, warn};
->>>>>>> v1.11.3
 
 /// Default soft limit for number of bytes to read from state dump file, before inserting into
 /// database.
@@ -127,27 +103,16 @@ where
         + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
         + ChainSpecProvider
         + StageCheckpointReader
-<<<<<<< HEAD
-        + BlockHashReader,
-=======
-        + BlockNumReader
-        + MetadataProvider
+        + BlockHashReader
         + StorageSettingsCache,
->>>>>>> v1.11.3
     PF::ProviderRW: StaticFileProviderFactory<Primitives = PF::Primitives>
         + StageCheckpointWriter
         + HistoryWriter
         + HeaderProvider
         + HashingWriter
         + StateWriter
-<<<<<<< HEAD
         + TrieWriterV2
         + TrieWriter
-        + AsRef<PF::ProviderRW>,
-    PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
-=======
-        + TrieWriter
-        + MetadataWriter
         + ChainSpecProvider
         + StorageSettingsCache
         + RocksDBProviderFactory
@@ -168,8 +133,7 @@ where
         + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
         + ChainSpecProvider
         + StageCheckpointReader
-        + BlockNumReader
-        + MetadataProvider
+        + BlockHashReader
         + StorageSettingsCache,
     PF::ProviderRW: StaticFileProviderFactory<Primitives = PF::Primitives>
         + StageCheckpointWriter
@@ -177,15 +141,14 @@ where
         + HeaderProvider
         + HashingWriter
         + StateWriter
+        + TrieWriterV2
         + TrieWriter
-        + MetadataWriter
         + ChainSpecProvider
         + StorageSettingsCache
         + RocksDBProviderFactory
         + NodePrimitivesProvider
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
->>>>>>> v1.11.3
 {
     let chain = factory.chain_spec();
 
@@ -208,19 +171,6 @@ where
                     return Err(InitStorageError::UninitializedDatabase)
                 }
 
-<<<<<<< HEAD
-=======
-                let stored = factory.storage_settings()?.unwrap_or_else(StorageSettings::v1);
-                if stored != genesis_storage_settings {
-                    warn!(
-                        target: "reth::storage",
-                        ?stored,
-                        requested = ?genesis_storage_settings,
-                        "Storage settings mismatch detected"
-                    );
-                }
-
->>>>>>> v1.11.3
                 debug!("Genesis already written, skipping.");
                 return Ok(hash)
             }
@@ -245,34 +195,8 @@ where
 
     // use transaction to insert genesis header
     let provider_rw = factory.database_provider_rw()?;
-<<<<<<< HEAD
     insert_world_trie(&provider_rw, alloc.iter())?;
-=======
 
-    // Behaviour reserved only for new nodes should be set in the storage settings.
-    provider_rw.write_storage_settings(genesis_storage_settings)?;
-
-    // For non-zero genesis blocks, set expected_block_start BEFORE insert_genesis_state.
-    // When block_range is None, next_block_number() uses expected_block_start. By default,
-    // expected_block_start comes from find_fixed_range which returns the file range start (0),
-    // not the genesis block number. This would cause increment_block(N) to fail.
-    let static_file_provider = provider_rw.static_file_provider();
-    if genesis_block_number > 0 {
-        if genesis_storage_settings.storage_v2 {
-            static_file_provider
-                .get_writer(genesis_block_number, StaticFileSegment::AccountChangeSets)?
-                .user_header_mut()
-                .set_expected_block_start(genesis_block_number);
-        }
-        if genesis_storage_settings.storage_v2 {
-            static_file_provider
-                .get_writer(genesis_block_number, StaticFileSegment::StorageChangeSets)?
-                .user_header_mut()
-                .set_expected_block_start(genesis_block_number);
-        }
-    }
-
->>>>>>> v1.11.3
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
     insert_genesis_history(&provider_rw, alloc.iter())?;
 
@@ -284,27 +208,16 @@ where
     // compute state root to populate trie tables
     compute_state_root(&provider_rw, None)?;
 
-<<<<<<< HEAD
-    // insert sync stage
-=======
     // set stage checkpoint to genesis block number for all stages
     let checkpoint = StageCheckpoint::new(genesis_block_number);
->>>>>>> v1.11.3
     for stage in StageId::ALL {
         provider_rw.save_stage_checkpoint(stage, checkpoint)?;
     }
 
-<<<<<<< HEAD
-    let static_file_provider = provider_rw.static_file_provider();
-    // Static file segments start empty, so we need to initialize the genesis block.
-    let segment = StaticFileSegment::Receipts;
-    static_file_provider.latest_writer(segment)?.increment_block(0)?;
-=======
     // Static file segments start empty, so we need to initialize the block range.
     // For genesis blocks with non-zero block numbers, we use get_writer() instead of
     // latest_writer() and set_block_range() to ensure static files start at the correct block.
     let static_file_provider = provider_rw.static_file_provider();
->>>>>>> v1.11.3
 
     static_file_provider
         .get_writer(genesis_block_number, StaticFileSegment::Receipts)?
@@ -324,11 +237,7 @@ where
 
     // `commit_unwind`` will first commit the DB and then the static file provider, which is
     // necessary on `init_genesis`.
-<<<<<<< HEAD
     UnifiedStorageWriter::commit_unwind(provider_rw)?;
-=======
-    provider_rw.commit()?;
->>>>>>> v1.11.3
 
     Ok(hash)
 }
@@ -343,10 +252,7 @@ where
         + DBProvider<Tx: DbTxMut>
         + HeaderProvider
         + StateWriter
-<<<<<<< HEAD
-=======
         + ChainSpecProvider
->>>>>>> v1.11.3
         + AsRef<Provider>,
 {
     let genesis_block_number = provider.chain_spec().genesis_header().number();
@@ -368,18 +274,11 @@ where
 {
     let capacity = alloc.size_hint().1.unwrap_or(0);
     let mut state_init: BundleStateInit =
-<<<<<<< HEAD
-        HashMap::with_capacity_and_hasher(capacity, Default::default());
-    let mut reverts_init = HashMap::with_capacity_and_hasher(capacity, Default::default());
-    let mut contracts: HashMap<B256, Bytecode> =
-        HashMap::with_capacity_and_hasher(capacity, Default::default());
-=======
         AddressMap::with_capacity_and_hasher(capacity, Default::default());
     let mut reverts_init: AddressMap<_> =
         AddressMap::with_capacity_and_hasher(capacity, Default::default());
     let mut contracts: B256Map<Bytecode> =
         B256Map::with_capacity_and_hasher(capacity, Default::default());
->>>>>>> v1.11.3
 
     for (address, account) in alloc {
         let bytecode_hash = if let Some(code) = &account.code {
@@ -444,11 +343,7 @@ where
     provider.write_state(
         &execution_outcome,
         OriginalValuesKnown::Yes,
-<<<<<<< HEAD
         StorageLocation::Database,
-=======
-        StateWriteConfig::default(),
->>>>>>> v1.11.3
     )?;
 
     trace!(target: "reth::cli", "Inserted state");
@@ -615,15 +510,8 @@ where
         Ok(((), writer.into_raw_rocksdb_batch()))
     })?;
 
-<<<<<<< HEAD
-    let storage_transitions = alloc
-        .filter_map(|(addr, account)| account.storage.as_ref().map(|storage| (addr, storage)))
-        .flat_map(|(addr, storage)| storage.keys().map(|key| ((*addr, *key), [block])));
-    provider.insert_storage_history_index(storage_transitions)?;
-=======
     Ok(())
 }
->>>>>>> v1.11.3
 
 /// Inserts storage history indices at the given block.
 pub fn insert_storage_history<'a, 'b, Provider>(
@@ -668,13 +556,6 @@ where
     let (header, block_hash) = (chain.genesis_header(), chain.genesis_hash());
     let static_file_provider = provider.static_file_provider();
 
-<<<<<<< HEAD
-    match static_file_provider.block_hash(0) {
-        Ok(None) | Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 0)) => {
-            let (difficulty, hash) = (header.difficulty(), block_hash);
-            let mut writer = static_file_provider.latest_writer(StaticFileSegment::Headers)?;
-            writer.append_header(header, difficulty, &hash)?;
-=======
     // Get the actual genesis block number from the header
     let genesis_block_number = header.number();
 
@@ -682,24 +563,17 @@ where
         Ok(None) | Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, _)) => {
             let difficulty = header.difficulty();
 
-            // For genesis blocks with non-zero block numbers, we need to ensure they are stored
-            // in the correct static file range. We use get_writer() with the genesis block number
-            // to ensure the genesis block is stored in the correct static file range.
             let mut writer = static_file_provider
                 .get_writer(genesis_block_number, StaticFileSegment::Headers)?;
 
-            // For non-zero genesis blocks, we need to set block range to genesis_block_number and
-            // append header without increment block
             if genesis_block_number > 0 {
                 writer
                     .user_header_mut()
                     .set_block_range(genesis_block_number, genesis_block_number);
                 writer.append_header_direct(header, difficulty, &block_hash)?;
             } else {
-                // For zero genesis blocks, use normal append_header
                 writer.append_header(header, &block_hash)?;
             }
->>>>>>> v1.11.3
         }
         Ok(Some(_)) => {}
         Err(e) => return Err(e),
@@ -734,12 +608,9 @@ where
         + HashingWriter
         + TrieWriter
         + StateWriter
-<<<<<<< HEAD
-=======
         + StorageSettingsCache
         + RocksDBProviderFactory
         + NodePrimitivesProvider
->>>>>>> v1.11.3
         + AsRef<Provider>,
 {
     if etl_config.file_size == 0 {
@@ -747,15 +618,6 @@ where
     }
 
     let block = provider_rw.last_block_number()?;
-<<<<<<< HEAD
-    let hash = provider_rw
-        .block_hash(block)?
-        .ok_or_else(|| eyre::eyre!("Block hash not found for block {}", block))?;
-    let expected_state_root = provider_rw
-        .header_by_number(block)?
-        .ok_or_else(|| ProviderError::HeaderNotFound(block.into()))?
-        .state_root();
-=======
 
     let hash = provider_rw
         .block_hash(block)?
@@ -766,7 +628,6 @@ where
         .ok_or_else(|| ProviderError::HeaderNotFound(block.into()))?;
 
     let expected_state_root = header.state_root();
->>>>>>> v1.11.3
 
     // first line can be state root
     let dump_state_root = parse_state_root(&mut reader)?;
@@ -886,12 +747,9 @@ where
         + HashingWriter
         + HistoryWriter
         + StateWriter
-<<<<<<< HEAD
-=======
         + StorageSettingsCache
         + RocksDBProviderFactory
         + NodePrimitivesProvider
->>>>>>> v1.11.3
         + AsRef<Provider>,
 {
     let accounts_len = collector.len();

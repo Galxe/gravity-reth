@@ -66,7 +66,6 @@ pub use benchmark_args::BenchmarkArgs;
 
 /// EngineArgs for configuring the engine
 mod engine;
-<<<<<<< HEAD
 pub use engine::EngineArgs;
 
 /// GravityArgs for configuring gravity features
@@ -76,24 +75,10 @@ pub use gravity::GravityArgs;
 /// `RessArgs` for configuring ress subprotocol.
 mod ress_args;
 pub use ress_args::RessArgs;
-=======
-pub use engine::{DefaultEngineValues, EngineArgs};
->>>>>>> v1.11.3
 
 /// `EraArgs` for configuring ERA files import.
 mod era;
 pub use era::{DefaultEraHost, EraArgs, EraSourceArgs};
-<<<<<<< HEAD
-=======
-
-/// `StaticFilesArgs` for configuring static files.
-mod static_files;
-pub use static_files::{StaticFilesArgs, MINIMAL_BLOCKS_PER_FILE};
-
-/// `StorageArgs` for configuring storage settings.
-mod storage;
-pub use storage::StorageArgs;
->>>>>>> v1.11.3
 
 mod error;
 pub mod types;

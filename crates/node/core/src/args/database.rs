@@ -1,10 +1,6 @@
 //! clap [Args](clap::Args) for database configuration
 
-<<<<<<< HEAD
-use std::{fmt, str::FromStr};
-=======
 use std::{fmt, str::FromStr, time::Duration};
->>>>>>> v1.11.3
 
 use crate::version::default_client_version;
 use clap::{
@@ -26,61 +22,6 @@ pub struct DatabaseArgs {
     /// Database logging level. Levels higher than "notice" require a debug build.
     #[arg(long = "db.log-level", value_parser = LogLevelValueParser::default())]
     pub log_level: Option<LogLevel>,
-<<<<<<< HEAD
-    /// Block cache size in bytes (e.g., 8GB, 4096MB).
-    /// This is the LRU cache for uncompressed blocks. Higher values improve read performance.
-    /// Default: 8GB
-    #[arg(long = "db.block-cache-size", value_parser = parse_byte_size)]
-    pub block_cache_size: Option<usize>,
-    /// Write buffer size in bytes (e.g., 256MB, 512MB).
-    /// Larger values improve write performance but use more memory.
-    /// Default: 256MB
-    #[arg(long = "db.write-buffer-size", value_parser = parse_byte_size)]
-    pub write_buffer_size: Option<usize>,
-    /// Maximum number of background jobs for compaction and flush.
-    /// Higher values increase parallelism but use more CPU.
-    /// Default: 14
-    #[arg(long = "db.max-background-jobs")]
-    pub max_background_jobs: Option<i32>,
-    /// Maximum number of open files.
-    /// Lower values if you hit OS file descriptor limits.
-    /// Default: 10000
-    #[arg(long = "db.max-open-files")]
-    pub max_open_files: Option<i32>,
-    /// Maximum number of write buffers (memtables).
-    /// More buffers allow absorbing write spikes but use more memory.
-    /// Default: 6
-    #[arg(long = "db.max-write-buffer-number")]
-    pub max_write_buffer_number: Option<i32>,
-    /// Compaction readahead size in bytes (e.g., 4MB, 8MB).
-    /// Larger values improve compaction performance with sequential I/O.
-    /// Default: 4MB
-    #[arg(long = "db.compaction-readahead-size", value_parser = parse_byte_size)]
-    pub compaction_readahead_size: Option<usize>,
-    /// Number of L0 files to trigger compaction.
-    /// Lower values reduce read amplification but increase write amplification.
-    /// Default: 4
-    #[arg(long = "db.level0-file-num-compaction-trigger")]
-    pub level0_file_num_compaction_trigger: Option<i32>,
-    /// Maximum bytes for level 1 (e.g., 512MB, 1GB).
-    /// This controls the target size for L1, affecting LSM tree structure.
-    /// Default: 512MB
-    #[arg(long = "db.max-bytes-for-level-base", value_parser = parse_byte_size_u64)]
-    pub max_bytes_for_level_base: Option<u64>,
-    /// Bytes to write before background sync (e.g., 4MB, 8MB).
-    /// Larger values reduce I/O overhead but may affect durability.
-    /// Default: 4MB
-    #[arg(long = "db.bytes-per-sync", value_parser = parse_byte_size_u64)]
-    pub bytes_per_sync: Option<u64>,
-    /// Semicolon separated `RocksDB` sharding directories. Accepts 2 or 3 paths.
-    /// Always creates 3 databases (state, `account_trie`, `storage_trie`).
-    /// - 0 paths (default): Creates subdirs under --datadir: state/, `account_trie`/,
-    ///   `storage_trie`/
-    /// - 2 paths: First dir contains state + `account_trie`; second dir contains `storage_trie`
-    /// - 3 paths: First dir is state, second is `account_trie`, third is `storage_trie`
-    #[arg(long = "db.sharding-directories", value_parser = parse_sharding_directories)]
-    pub sharding_directories: Option<ShardingDirectories>,
-=======
     /// Open environment in exclusive/monopolistic mode. Makes it possible to open a database on an
     /// NFS volume.
     #[arg(long = "db.exclusive")]
@@ -120,31 +61,10 @@ pub struct DatabaseArgs {
         value_parser = value_parser!(SyncMode),
     )]
     pub sync_mode: Option<SyncMode>,
->>>>>>> v1.11.3
 }
 
 impl DatabaseArgs {
     /// Returns default database arguments with configured log level and client version.
-<<<<<<< HEAD
-    pub fn database_args(&self) -> DatabaseArguments {
-        self.get_database_args(default_client_version())
-    }
-
-    /// Returns the database arguments with configured parameters and client version.
-    pub const fn get_database_args(&self, client_version: ClientVersion) -> DatabaseArguments {
-        DatabaseArguments::new(client_version)
-            .with_log_level(self.log_level)
-            .with_block_cache_size(self.block_cache_size)
-            .with_write_buffer_size(self.write_buffer_size)
-            .with_max_background_jobs(self.max_background_jobs)
-            .with_max_open_files(self.max_open_files)
-            .with_max_write_buffer_number(self.max_write_buffer_number)
-            .with_compaction_readahead_size(self.compaction_readahead_size)
-            .with_level0_file_num_compaction_trigger(self.level0_file_num_compaction_trigger)
-            .with_max_bytes_for_level_base(self.max_bytes_for_level_base)
-            .with_bytes_per_sync(self.bytes_per_sync)
-            .with_sharding_directories(self.sharding_directories)
-=======
     pub fn database_args(&self) -> reth_db::mdbx::DatabaseArguments {
         self.get_database_args(default_client_version())
     }
@@ -170,7 +90,6 @@ impl DatabaseArgs {
             .with_growth_step(self.growth_step)
             .with_max_readers(self.max_readers)
             .with_sync_mode(self.sync_mode)
->>>>>>> v1.11.3
     }
 }
 
@@ -285,24 +204,6 @@ fn parse_byte_size(s: &str) -> Result<usize, String> {
     s.parse::<ByteSize>().map(Into::into)
 }
 
-<<<<<<< HEAD
-/// Value parser function for u64 byte sizes.
-fn parse_byte_size_u64(s: &str) -> Result<u64, String> {
-    s.parse::<ByteSize>().map(|b| b.0 as u64)
-}
-
-/// Value parser for sharding directories (semicolon separated).
-fn parse_sharding_directories(raw: &str) -> Result<ShardingDirectories, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("Sharding directories cannot be empty".to_string());
-    }
-    // Leak once to obtain a static str; acceptable because values are process-scoped config.
-    Ok(Box::leak(trimmed.to_owned().into_boxed_str()))
-}
-
-=======
->>>>>>> v1.11.3
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,25 +231,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-    fn test_command_parser_with_valid_block_cache_size() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.block-cache-size",
-            "4294967296",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.block_cache_size, Some(GIGABYTE * 4));
-    }
-
-    #[test]
-    fn test_command_parser_with_invalid_block_cache_size() {
-        let result = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.block-cache-size",
-            "invalid",
-        ]);
-=======
     fn test_command_parser_with_valid_max_size() {
         let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
             "reth",
@@ -381,56 +263,10 @@ mod tests {
     fn test_command_parser_with_invalid_growth_step() {
         let result =
             CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.growth-step", "invalid"]);
->>>>>>> v1.11.3
         assert!(result.is_err());
     }
 
     #[test]
-<<<<<<< HEAD
-    fn test_command_parser_with_valid_write_buffer_size() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.write-buffer-size",
-            "536870912",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.write_buffer_size, Some(MEGABYTE * 512));
-    }
-
-    #[test]
-    fn test_command_parser_with_invalid_write_buffer_size() {
-        let result = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.write-buffer-size",
-            "invalid",
-        ]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_command_parser_with_rocksdb_params_from_str() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.block-cache-size",
-            "16GB",
-            "--db.write-buffer-size",
-            "512MB",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.block_cache_size, Some(GIGABYTE * 16));
-        assert_eq!(cmd.args.write_buffer_size, Some(MEGABYTE * 512));
-
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.block-cache-size",
-            "4096MB",
-            "--db.write-buffer-size",
-            "256MB",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.block_cache_size, Some(MEGABYTE * 4096));
-        assert_eq!(cmd.args.write_buffer_size, Some(MEGABYTE * 256));
-=======
     fn test_command_parser_with_valid_max_size_and_growth_step_from_str() {
         let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
             "reth",
@@ -453,64 +289,10 @@ mod tests {
         .unwrap();
         assert_eq!(cmd.args.max_size, Some(MEGABYTE * 12));
         assert_eq!(cmd.args.growth_step, Some(KILOBYTE * 2));
->>>>>>> v1.11.3
 
         // with spaces
         let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
             "reth",
-<<<<<<< HEAD
-            "--db.block-cache-size",
-            "8 GB",
-            "--db.write-buffer-size",
-            "128 MB",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.block_cache_size, Some(GIGABYTE * 8));
-        assert_eq!(cmd.args.write_buffer_size, Some(MEGABYTE * 128));
-
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.block-cache-size",
-            "8589934592",
-            "--db.write-buffer-size",
-            "268435456",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.block_cache_size, Some(GIGABYTE * 8));
-        assert_eq!(cmd.args.write_buffer_size, Some(MEGABYTE * 256));
-    }
-
-    #[test]
-    fn test_command_parser_with_background_jobs_and_open_files() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.max-background-jobs",
-            "16",
-            "--db.max-open-files",
-            "1000",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.max_background_jobs, Some(16));
-        assert_eq!(cmd.args.max_open_files, Some(1000));
-
-        // Test unlimited open files (use = to avoid -1 being parsed as a flag)
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.max-open-files=-1"])
-            .unwrap();
-        assert_eq!(cmd.args.max_open_files, Some(-1));
-    }
-
-    #[test]
-    fn test_command_parser_byte_size_invalid_unit() {
-        let result = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.write-buffer-size",
-            "1 PB",
-        ]);
-        assert!(result.is_err());
-
-        let result =
-            CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.block-cache-size", "2PB"]);
-=======
             "--db.max-size",
             "12 MB",
             "--db.growth-step",
@@ -575,7 +357,6 @@ mod tests {
         // Invalid unit
         let result =
             CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.page-size", "7 ZB"]);
->>>>>>> v1.11.3
         assert!(result.is_err());
     }
 
@@ -631,91 +412,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-    fn test_command_parser_with_write_buffer_number() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.max-write-buffer-number",
-            "8",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.max_write_buffer_number, Some(8));
-    }
-
-    #[test]
-    fn test_command_parser_with_compaction_readahead() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.compaction-readahead-size",
-            "8MB",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.compaction_readahead_size, Some(MEGABYTE * 8));
-    }
-
-    #[test]
-    fn test_command_parser_with_level0_trigger() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.level0-file-num-compaction-trigger",
-            "6",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.level0_file_num_compaction_trigger, Some(6));
-    }
-
-    #[test]
-    fn test_command_parser_with_max_bytes_level_base() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.max-bytes-for-level-base",
-            "1GB",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.max_bytes_for_level_base, Some((GIGABYTE * 1) as u64));
-    }
-
-    #[test]
-    fn test_command_parser_with_bytes_per_sync() {
-        let cmd =
-            CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.bytes-per-sync", "8MB"])
-                .unwrap();
-        assert_eq!(cmd.args.bytes_per_sync, Some((MEGABYTE * 8) as u64));
-    }
-
-    #[test]
-    fn test_command_parser_with_all_advanced_options() {
-        let cmd = CommandParser::<DatabaseArgs>::try_parse_from([
-            "reth",
-            "--db.block-cache-size",
-            "16GB",
-            "--db.write-buffer-size",
-            "512MB",
-            "--db.max-background-jobs",
-            "16",
-            "--db.max-open-files=-1",
-            "--db.max-write-buffer-number",
-            "8",
-            "--db.compaction-readahead-size",
-            "8MB",
-            "--db.level0-file-num-compaction-trigger",
-            "6",
-            "--db.max-bytes-for-level-base",
-            "1GB",
-            "--db.bytes-per-sync",
-            "8MB",
-        ])
-        .unwrap();
-        assert_eq!(cmd.args.block_cache_size, Some(GIGABYTE * 16));
-        assert_eq!(cmd.args.write_buffer_size, Some(MEGABYTE * 512));
-        assert_eq!(cmd.args.max_background_jobs, Some(16));
-        assert_eq!(cmd.args.max_open_files, Some(-1));
-        assert_eq!(cmd.args.max_write_buffer_number, Some(8));
-        assert_eq!(cmd.args.compaction_readahead_size, Some(MEGABYTE * 8));
-        assert_eq!(cmd.args.level0_file_num_compaction_trigger, Some(6));
-        assert_eq!(cmd.args.max_bytes_for_level_base, Some((GIGABYTE * 1) as u64));
-        assert_eq!(cmd.args.bytes_per_sync, Some((MEGABYTE * 8) as u64));
-=======
     fn test_command_parser_with_valid_default_sync_mode() {
         let cmd = CommandParser::<DatabaseArgs>::try_parse_from(["reth"]).unwrap();
         assert!(cmd.args.sync_mode.is_none());
@@ -745,6 +441,5 @@ mod tests {
         let result =
             CommandParser::<DatabaseArgs>::try_parse_from(["reth", "--db.sync-mode", "ultra-fast"]);
         assert!(result.is_err());
->>>>>>> v1.11.3
     }
 }

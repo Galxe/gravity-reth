@@ -1,16 +1,10 @@
 //! Database debugging tool
 use crate::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
 use clap::Parser;
-<<<<<<< HEAD
 use itertools::Itertools;
 use reth_chainspec::EthChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_db::{static_file::iter_static_files, DatabaseError};
-=======
-use reth_chainspec::EthChainSpec;
-use reth_cli::chainspec::ChainSpecParser;
-use reth_db::{mdbx::tx::Tx, DatabaseError};
->>>>>>> v1.11.3
 use reth_db_api::{
     tables,
     transaction::{DbTx, DbTxMut},
@@ -25,12 +19,7 @@ use reth_db_common::{
 use reth_node_api::{HeaderTy, ReceiptTy, TxTy};
 use reth_node_core::args::StageEnum;
 use reth_provider::{
-<<<<<<< HEAD
     writer::UnifiedStorageWriter, DatabaseProviderFactory, StaticFileProviderFactory,
-=======
-    DBProvider, RocksDBProviderFactory, StaticFileProviderFactory, StaticFileWriter,
-    StorageSettingsCache,
->>>>>>> v1.11.3
 };
 use reth_prune::PruneSegment;
 use reth_stages::StageId;
@@ -114,21 +103,14 @@ impl<C: ChainSpecParser> Command<C> {
             }
         }
 
-<<<<<<< HEAD
         let provider_rw = tool.provider_factory.database_provider_rw()?;
-=======
-        let provider_rw = tool.provider_factory.unwind_provider_rw()?;
->>>>>>> v1.11.3
         let tx = provider_rw.tx_ref();
 
         match self.stage {
             StageEnum::Headers => {
                 tx.clear::<tables::CanonicalHeaders>()?;
                 tx.clear::<tables::Headers<HeaderTy<N>>>()?;
-<<<<<<< HEAD
                 tx.clear::<tables::HeaderTerminalDifficulties>()?;
-=======
->>>>>>> v1.11.3
                 tx.clear::<tables::HeaderNumbers>()?;
                 reset_stage_checkpoint(tx, StageId::Headers)?;
 
@@ -137,10 +119,7 @@ impl<C: ChainSpecParser> Command<C> {
             StageEnum::Bodies => {
                 tx.clear::<tables::BlockBodyIndices>()?;
                 tx.clear::<tables::Transactions<TxTy<N>>>()?;
-<<<<<<< HEAD
                 reset_prune_checkpoint(tx, PruneSegment::Transactions)?;
-=======
->>>>>>> v1.11.3
 
                 tx.clear::<tables::TransactionBlocks>()?;
                 tx.clear::<tables::BlockOmmers<HeaderTy<N>>>()?;
@@ -206,7 +185,6 @@ impl<C: ChainSpecParser> Command<C> {
                     None,
                 )?;
             }
-<<<<<<< HEAD
             StageEnum::AccountHistory | StageEnum::StorageHistory => {
                 tx.clear::<tables::AccountsHistory>()?;
                 tx.clear::<tables::StoragesHistory>()?;
@@ -218,51 +196,6 @@ impl<C: ChainSpecParser> Command<C> {
             }
             StageEnum::TxLookup => {
                 tx.clear::<tables::TransactionHashNumbers>()?;
-=======
-            StageEnum::AccountHistory => {
-                let settings = provider_rw.cached_storage_settings();
-                let rocksdb = tool.provider_factory.rocksdb_provider();
-
-                if settings.storage_v2 {
-                    rocksdb.clear::<tables::AccountsHistory>()?;
-                } else {
-                    tx.clear::<tables::AccountsHistory>()?;
-                }
-
-                reset_stage_checkpoint(tx, StageId::IndexAccountHistory)?;
-
-                insert_genesis_account_history(
-                    &provider_rw,
-                    self.env.chain.genesis().alloc.iter(),
-                )?;
-            }
-            StageEnum::StorageHistory => {
-                let settings = provider_rw.cached_storage_settings();
-                let rocksdb = tool.provider_factory.rocksdb_provider();
-
-                if settings.storage_v2 {
-                    rocksdb.clear::<tables::StoragesHistory>()?;
-                } else {
-                    tx.clear::<tables::StoragesHistory>()?;
-                }
-
-                reset_stage_checkpoint(tx, StageId::IndexStorageHistory)?;
-
-                insert_genesis_storage_history(
-                    &provider_rw,
-                    self.env.chain.genesis().alloc.iter(),
-                )?;
-            }
-            StageEnum::TxLookup => {
-                if provider_rw.cached_storage_settings().storage_v2 {
-                    tool.provider_factory
-                        .rocksdb_provider()
-                        .clear::<tables::TransactionHashNumbers>()?;
-                } else {
-                    tx.clear::<tables::TransactionHashNumbers>()?;
-                }
-
->>>>>>> v1.11.3
                 reset_prune_checkpoint(tx, PruneSegment::TransactionLookup)?;
 
                 reset_stage_checkpoint(tx, StageId::TransactionLookup)?;
@@ -272,11 +205,7 @@ impl<C: ChainSpecParser> Command<C> {
 
         tx.put::<tables::StageCheckpoints>(StageId::Finish.to_string(), Default::default())?;
 
-<<<<<<< HEAD
         UnifiedStorageWriter::commit_unwind(provider_rw)?;
-=======
-        provider_rw.commit()?;
->>>>>>> v1.11.3
 
         Ok(())
     }
@@ -286,13 +215,8 @@ impl<C: ChainSpecParser> Command<C> {
     }
 }
 
-<<<<<<< HEAD
 fn reset_prune_checkpoint<TX: DbTx + DbTxMut>(
     tx: &TX,
-=======
-fn reset_prune_checkpoint(
-    tx: &Tx<reth_db::mdbx::RW>,
->>>>>>> v1.11.3
     prune_segment: PruneSegment,
 ) -> Result<(), DatabaseError> {
     if let Some(mut prune_checkpoint) = tx.get::<tables::PruneCheckpoints>(prune_segment)? {
@@ -304,13 +228,8 @@ fn reset_prune_checkpoint(
     Ok(())
 }
 
-<<<<<<< HEAD
 fn reset_stage_checkpoint<TX: DbTx + DbTxMut>(
     tx: &TX,
-=======
-fn reset_stage_checkpoint(
-    tx: &Tx<reth_db::mdbx::RW>,
->>>>>>> v1.11.3
     stage_id: StageId,
 ) -> Result<(), DatabaseError> {
     tx.put::<tables::StageCheckpoints>(stage_id.to_string(), Default::default())?;

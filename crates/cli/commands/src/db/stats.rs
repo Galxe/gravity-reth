@@ -4,24 +4,13 @@ use comfy_table::{Cell, Row, Table as ComfyTable};
 use human_bytes::human_bytes;
 use itertools::Itertools;
 use reth_chainspec::EthereumHardforks;
-<<<<<<< HEAD
 use reth_db::{static_file::iter_static_files, DatabaseEnv};
-=======
-use reth_db::{mdbx, static_file::iter_static_files, DatabaseEnv};
->>>>>>> v1.11.3
 use reth_db_api::{database::Database, TableViewer, Tables};
 use reth_db_common::DbTool;
 use reth_fs_util as fs;
 use reth_node_builder::{NodePrimitives, NodeTypesWithDB, NodeTypesWithDBAdapter};
 use reth_node_core::dirs::{ChainPath, DataDirPath};
-<<<<<<< HEAD
 use reth_provider::providers::{ProviderNodeTypes, StaticFileProvider};
-=======
-use reth_provider::{
-    providers::{ProviderNodeTypes, StaticFileProvider},
-    RocksDBProviderFactory,
-};
->>>>>>> v1.11.3
 use reth_static_file_types::SegmentRangeInclusive;
 use std::time::Duration;
 
@@ -99,7 +88,6 @@ impl Command {
             db_tables.sort();
             let mut total_size = 0;
             for db_table in db_tables {
-<<<<<<< HEAD
                 // TODO: Implement open_db and db_stat for RocksDB
                 // let table_db = tx.open_db(Some(db_table)).wrap_err("Could not open db.")?;
                 // let stats = tx.db_stat(&table_db).wrap_err(format!("Could not find table:
@@ -110,22 +98,6 @@ impl Command {
                 let leaf_pages = 0;
                 let branch_pages = 0;
                 let overflow_pages = 0;
-=======
-                let table_db = tx.inner().open_db(Some(db_table)).wrap_err("Could not open db.")?;
-
-                let stats = tx
-                    .inner()
-                    .db_stat(table_db.dbi())
-                    .wrap_err(format!("Could not find table: {db_table}"))?;
-
-                // Defaults to 16KB right now but we should
-                // re-evaluate depending on the DB we end up using
-                // (e.g. REDB does not have these options as configurable intentionally)
-                let page_size = stats.page_size() as usize;
-                let leaf_pages = stats.leaf_pages();
-                let branch_pages = stats.branch_pages();
-                let overflow_pages = stats.overflow_pages();
->>>>>>> v1.11.3
                 let num_pages = leaf_pages + branch_pages + overflow_pages;
                 let table_size = page_size * num_pages;
 
@@ -156,7 +128,6 @@ impl Command {
                 .add_cell(Cell::new(human_bytes(total_size as f64)));
             table.add_row(row);
 
-<<<<<<< HEAD
             // TODO: Implement freelist for RocksDB
             // let freelist = tx.env().freelist()?;
             // let pagesize = tx.db_stat(&mdbx::Database::freelist_db())?.page_size() as usize;
@@ -164,12 +135,6 @@ impl Command {
             // Placeholder values for RocksDB
             let freelist = 0;
             let freelist_size = 0;
-=======
-            let freelist = tx.inner().env().freelist()?;
-            let pagesize =
-                tx.inner().db_stat(mdbx::Database::freelist_db().dbi())?.page_size() as usize;
-            let freelist_size = freelist * pagesize;
->>>>>>> v1.11.3
 
             let mut row = Row::new();
             row.add_cell(Cell::new("Freelist"))
@@ -186,73 +151,7 @@ impl Command {
         Ok(table)
     }
 
-<<<<<<< HEAD
-=======
-    fn rocksdb_stats_table<N: NodeTypesWithDB>(&self, tool: &DbTool<N>) -> ComfyTable {
-        let mut table = ComfyTable::new();
-        table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
-        table.set_header([
-            "RocksDB Table Name",
-            "# Entries",
-            "SST Size",
-            "Memtable Size",
-            "Total Size",
-            "Pending Compaction",
-        ]);
 
-        let stats = tool.provider_factory.rocksdb_provider().table_stats();
-        let mut total_sst: u64 = 0;
-        let mut total_memtable: u64 = 0;
-        let mut total_size: u64 = 0;
-        let mut total_pending: u64 = 0;
-
-        for stat in &stats {
-            total_sst += stat.sst_size_bytes;
-            total_memtable += stat.memtable_size_bytes;
-            total_size += stat.estimated_size_bytes;
-            total_pending += stat.pending_compaction_bytes;
-            let mut row = Row::new();
-            row.add_cell(Cell::new(&stat.name))
-                .add_cell(Cell::new(stat.estimated_num_keys))
-                .add_cell(Cell::new(human_bytes(stat.sst_size_bytes as f64)))
-                .add_cell(Cell::new(human_bytes(stat.memtable_size_bytes as f64)))
-                .add_cell(Cell::new(human_bytes(stat.estimated_size_bytes as f64)))
-                .add_cell(Cell::new(human_bytes(stat.pending_compaction_bytes as f64)));
-            table.add_row(row);
-        }
-
-        if !stats.is_empty() {
-            let max_widths = table.column_max_content_widths();
-            let mut separator = Row::new();
-            for width in max_widths {
-                separator.add_cell(Cell::new("-".repeat(width as usize)));
-            }
-            table.add_row(separator);
-
-            let mut row = Row::new();
-            row.add_cell(Cell::new("RocksDB Total"))
-                .add_cell(Cell::new(""))
-                .add_cell(Cell::new(human_bytes(total_sst as f64)))
-                .add_cell(Cell::new(human_bytes(total_memtable as f64)))
-                .add_cell(Cell::new(human_bytes(total_size as f64)))
-                .add_cell(Cell::new(human_bytes(total_pending as f64)));
-            table.add_row(row);
-
-            let wal_size = tool.provider_factory.rocksdb_provider().wal_size_bytes();
-            let mut row = Row::new();
-            row.add_cell(Cell::new("WAL"))
-                .add_cell(Cell::new(""))
-                .add_cell(Cell::new(""))
-                .add_cell(Cell::new(""))
-                .add_cell(Cell::new(human_bytes(wal_size as f64)))
-                .add_cell(Cell::new(""));
-            table.add_row(row);
-        }
-
-        table
-    }
-
->>>>>>> v1.11.3
     fn static_files_stats_table<N: NodePrimitives>(
         &self,
         data_dir: ChainPath<DataDirPath>,
@@ -381,19 +280,12 @@ impl Command {
                 let tx_range = {
                     let start = ranges
                         .iter()
-<<<<<<< HEAD
-                        .find_map(|(_, tx_range)| tx_range.map(|r| r.start()))
-                        .unwrap_or_default();
-                    let end =
-                        ranges.iter().rev().find_map(|(_, tx_range)| tx_range.map(|r| r.end()));
-=======
                         .find_map(|(_, header)| header.tx_range().map(|range| range.start()))
                         .unwrap_or_default();
                     let end = ranges
                         .iter()
                         .rev()
                         .find_map(|(_, header)| header.tx_range().map(|range| range.end()));
->>>>>>> v1.11.3
                     end.map(|end| SegmentRangeInclusive::new(start, end))
                 };
 

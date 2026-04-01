@@ -14,29 +14,18 @@ use reth_network_p2p::headers::{
     downloader::{HeaderDownloader, HeaderSyncGap, SyncTarget},
     error::HeadersDownloaderError,
 };
-<<<<<<< HEAD
-use reth_primitives_traits::{serde_bincode_compat, FullBlockHeader, NodePrimitives, SealedHeader};
-use reth_provider::{
-    providers::StaticFileWriter, BlockHashReader, DBProvider, HeaderProvider,
-    HeaderSyncGapProvider, StaticFileProviderFactory,
-=======
 use reth_primitives_traits::{
     serde_bincode_compat, FullBlockHeader, HeaderTy, NodePrimitives, SealedHeader,
 };
 use reth_provider::{
     providers::StaticFileWriter, BlockHashReader, DBProvider, HeaderSyncGapProvider,
     StaticFileProviderFactory,
->>>>>>> v1.11.3
 };
 use reth_stages_api::{
     CheckpointBlockRange, EntitiesCheckpoint, ExecInput, ExecOutput, HeadersCheckpoint, Stage,
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
-<<<<<<< HEAD
-use reth_storage_errors::provider::ProviderError;
-=======
->>>>>>> v1.11.3
 use std::task::{ready, Context, Poll};
 
 use tokio::sync::watch;
@@ -148,18 +137,9 @@ where
                 continue
             }
             last_header_number = header.number();
-<<<<<<< HEAD
-
-            // Increase total difficulty
-            td += header.difficulty();
-
-            // Append to Headers segment
-            writer.append_header(header, td, header_hash)?;
-=======
 
             // Append to Headers segment
             writer.append_header(header, header_hash)?;
->>>>>>> v1.11.3
         }
 
         info!(target: "sync::stages::headers", total = total_headers, "Writing headers hash index");
@@ -286,11 +266,7 @@ where
                 }
                 Some(Err(HeadersDownloaderError::DetachedHead { local_head, header, error })) => {
                     error!(target: "sync::stages::headers", %error, "Cannot attach header to head");
-<<<<<<< HEAD
-                    self.sync_gap = None;
-=======
                     self.clear_etl_state();
->>>>>>> v1.11.3
                     return Poll::Ready(Err(StageError::DetachedHead {
                         local_head: Box::new(local_head.block_with_parent()),
                         header: Box::new(header.block_with_parent()),
@@ -298,11 +274,7 @@ where
                     }))
                 }
                 None => {
-<<<<<<< HEAD
-                    self.sync_gap = None;
-=======
                     self.clear_etl_state();
->>>>>>> v1.11.3
                     return Poll::Ready(Err(StageError::ChannelClosed))
                 }
             }
@@ -428,19 +400,9 @@ mod tests {
     };
     use alloy_primitives::B256;
     use assert_matches::assert_matches;
-<<<<<<< HEAD
-    use reth_ethereum_primitives::BlockBody;
-    use reth_execution_types::ExecutionOutcome;
-    use reth_primitives_traits::{RecoveredBlock, SealedBlock};
-    use reth_provider::{BlockWriter, ProviderFactory, StaticFileProviderFactory};
-    use reth_stages_api::StageUnitCheckpoint;
-    use reth_testing_utils::generators::{self, random_header, random_header_range};
-    use reth_trie::HashedPostStateSorted;
-=======
     use reth_provider::{DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory};
     use reth_stages_api::StageUnitCheckpoint;
     use reth_testing_utils::generators::{self, random_header, random_header_range};
->>>>>>> v1.11.3
     use std::sync::Arc;
     use test_runner::HeadersTestRunner;
 
@@ -543,13 +505,6 @@ mod tests {
                             assert!(header.is_some());
                             let header = SealedHeader::seal_slow(header.unwrap());
                             assert_eq!(header.hash(), hash);
-<<<<<<< HEAD
-
-                            // validate the header total difficulty
-                            td += header.difficulty;
-                            assert_eq!(provider.header_td_by_number(block_num)?, Some(td));
-=======
->>>>>>> v1.11.3
                         }
                     }
                     _ => self.check_no_header_entry_above(initial_checkpoint)?,
@@ -664,28 +619,6 @@ mod tests {
             tip.hash(),
         );
 
-<<<<<<< HEAD
-        // make them sealed blocks with senders by converting them to empty blocks
-        let sealed_blocks = sealed_headers
-            .iter()
-            .map(|header| {
-                RecoveredBlock::new_sealed(
-                    SealedBlock::from_sealed_parts(header.clone(), BlockBody::default()),
-                    vec![],
-                )
-            })
-            .collect();
-
-        // append the blocks
-        let provider = runner.db().factory.provider_rw().unwrap();
-        provider
-            .append_blocks_with_state(
-                sealed_blocks,
-                &ExecutionOutcome::default(),
-                HashedPostStateSorted::default(),
-            )
-            .unwrap();
-=======
         let provider = runner.db().factory.database_provider_rw().unwrap();
         let static_file_provider = provider.static_file_provider();
         let mut writer = static_file_provider.latest_writer(StaticFileSegment::Headers).unwrap();
@@ -694,7 +627,6 @@ mod tests {
         }
         drop(writer);
 
->>>>>>> v1.11.3
         provider.commit().unwrap();
 
         // now we can unwind 10 blocks

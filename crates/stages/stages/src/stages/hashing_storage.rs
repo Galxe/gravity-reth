@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-use alloy_primitives::{bytes::BufMut, keccak256, B256};
-=======
 use alloy_primitives::{b256, bytes::BufMut, keccak256, Address, B256};
->>>>>>> v1.11.3
 use itertools::Itertools;
 use reth_config::config::{EtlConfig, HashingConfig};
 use reth_db_api::{
@@ -199,11 +195,7 @@ where
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
-<<<<<<< HEAD
-        provider.unwind_storage_hashing_range(BlockNumberAddress::range(range))?;
-=======
         provider.unwind_storage_hashing_range(range)?;
->>>>>>> v1.11.3
 
         let mut stage_checkpoint =
             input.checkpoint.storage_hashing_stage_checkpoint().unwrap_or_default();
@@ -315,14 +307,8 @@ mod tests {
                     Some(StorageHashingCheckpoint {
                         progress: EntitiesCheckpoint { processed: _, total: _ },
                         ..
-<<<<<<< HEAD
                     })
                 );
-=======
-                    }) if processed == total &&
-                        total == runner.db.count_entries::<tables::PlainStorageState>().unwrap() as u64);
-
->>>>>>> v1.11.3
                 // Validate the stage execution
                 assert!(
                     runner.validate_execution(input, Some(result)).is_ok(),
@@ -387,10 +373,7 @@ mod tests {
             );
 
             self.db.insert_headers(blocks.iter().map(|block| block.sealed_header()))?;
-<<<<<<< HEAD
-=======
             let mut tx_hash_numbers = Vec::new();
->>>>>>> v1.11.3
 
             let iter = blocks.iter();
             let mut next_tx_num = 0;
@@ -401,14 +384,7 @@ mod tests {
                 self.db.commit(|tx| {
                     progress.body().transactions.iter().try_for_each(
                         |transaction| -> Result<(), reth_db::DatabaseError> {
-<<<<<<< HEAD
-                            tx.put::<tables::TransactionHashNumbers>(
-                                *transaction.tx_hash(),
-                                next_tx_num,
-                            )?;
-=======
                             tx_hash_numbers.push((*transaction.tx_hash(), next_tx_num));
->>>>>>> v1.11.3
                             tx.put::<tables::Transactions>(next_tx_num, transaction.clone())?;
 
                             let (addr, _) = accounts

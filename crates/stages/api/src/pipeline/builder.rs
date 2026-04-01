@@ -34,19 +34,10 @@ impl<ProviderRW> PipelineBuilder<ProviderRW> {
     /// To customize the stages in the set (reorder, disable, insert a stage) call
     /// [`builder`][StageSet::builder] on the set which will convert it to a
     /// [`StageSetBuilder`][crate::StageSetBuilder].
-<<<<<<< HEAD
-    pub fn add_stages<Set: StageSet<ProviderRW>>(mut self, set: Set) -> Self {
-        let states = set.builder().build();
-        self.stages.reserve_exact(states.len());
-        for stage in states {
-            self.stages.push(stage);
-        }
-=======
     pub fn add_stages<Set: StageSet<Provider>>(mut self, set: Set) -> Self {
         let stages = set.builder().build();
         self.stages.reserve(stages.len());
         self.stages.extend(stages);
->>>>>>> v1.11.3
         self
     }
 

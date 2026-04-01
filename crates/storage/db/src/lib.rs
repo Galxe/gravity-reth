@@ -1,12 +1,7 @@
 //! Database implementations for reth's database abstraction layer.
 //!
-<<<<<<< HEAD
 //! This crate provides implementations of `reth-db-api` for multiple database backends,
 //! including MDBX and `RocksDB`.
-=======
-//! This crate is an implementation of `reth-db-api` for MDBX, as well as a few other common
-//! database types.
->>>>>>> v1.11.3
 //!
 //! # Overview
 //!
@@ -24,11 +19,6 @@ pub mod database;
 mod implementation;
 pub mod lockfile;
 pub mod static_file;
-<<<<<<< HEAD
-=======
-#[cfg(feature = "mdbx")]
-mod utils;
->>>>>>> v1.11.3
 pub mod version;
 
 // Backend-specific modules are now handled through the unified database module
@@ -36,11 +26,6 @@ pub mod version;
 pub mod generic;
 
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
-<<<<<<< HEAD
-=======
-#[cfg(feature = "mdbx")]
-pub use utils::is_database_empty;
->>>>>>> v1.11.3
 
 pub use generic::{create_db, init_db, open_db, open_db_read_only};
 
@@ -83,17 +68,11 @@ macro_rules! set_fail_point {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     use super::*;
-<<<<<<< HEAD
     use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
         database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
     };
-=======
-    use crate::mdbx::DatabaseArguments;
-    use parking_lot::RwLock;
-    use reth_db_api::{database::Database, database_metrics::DatabaseMetrics};
->>>>>>> v1.11.3
     use reth_fs_util;
     use std::{
         fmt::Formatter,
@@ -226,11 +205,7 @@ pub mod test_utils {
         let path = tempdir_path();
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
 
-<<<<<<< HEAD
         let db = init_db(&path, DatabaseArguments::new(ClientVersion::default())).expect(&emsg);
-=======
-        let db = init_db(&path, DatabaseArguments::test()).expect(&emsg);
->>>>>>> v1.11.3
 
         Arc::new(TempDatabase::new(db, path))
     }
@@ -239,40 +214,16 @@ pub mod test_utils {
     #[track_caller]
     pub fn create_test_rw_db_with_path<P: AsRef<Path>>(path: P) -> Arc<TempDatabase<DatabaseEnv>> {
         let path = path.as_ref().to_path_buf();
-<<<<<<< HEAD
-        let db = init_db(path.as_path(), DatabaseArguments::new(ClientVersion::default()))
-            .expect(ERROR_DB_CREATION);
-        Arc::new(TempDatabase::new(db, path))
-=======
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
-        let db = init_db(path.as_path(), DatabaseArguments::test()).expect(&emsg);
+        let db = init_db(path.as_path(), DatabaseArguments::new(ClientVersion::default()))
+            .expect(&emsg);
         Arc::new(TempDatabase::new(db, path))
-    }
-
-    /// Create read/write database for testing within a data directory.
-    ///
-    /// The database is created at `datadir/db`, and `TempDatabase` will clean up the entire
-    /// `datadir` on drop.
-    #[track_caller]
-    pub fn create_test_rw_db_with_datadir<P: AsRef<Path>>(
-        datadir: P,
-    ) -> Arc<TempDatabase<DatabaseEnv>> {
-        let datadir = datadir.as_ref().to_path_buf();
-        let db_path = datadir.join("db");
-        let emsg = format!("{ERROR_DB_CREATION}: {db_path:?}");
-        let db = init_db(&db_path, DatabaseArguments::test()).expect(&emsg);
-        Arc::new(TempDatabase::new(db, datadir))
->>>>>>> v1.11.3
     }
 
     /// Create read only database for testing
     #[track_caller]
     pub fn create_test_ro_db() -> Arc<TempDatabase<DatabaseEnv>> {
-<<<<<<< HEAD
         let args = DatabaseArguments::new(ClientVersion::default());
-=======
-        let args = DatabaseArguments::test();
->>>>>>> v1.11.3
 
         let path = tempdir_path();
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");

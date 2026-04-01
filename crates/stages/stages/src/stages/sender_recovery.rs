@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-use alloy_primitives::{Address, TxNumber};
-=======
 use alloy_primitives::{Address, BlockNumber, TxNumber};
->>>>>>> v1.11.3
 use reth_config::config::SenderRecoveryConfig;
 use reth_consensus::ConsensusError;
 use reth_db::static_file::TransactionMask;
@@ -11,11 +7,7 @@ use reth_db_api::{
     table::Value,
     tables,
     transaction::{DbTx, DbTxMut},
-<<<<<<< HEAD
-    DbTxUnwindExt, RawValue,
-=======
     RawValue,
->>>>>>> v1.11.3
 };
 use reth_primitives_traits::{GotExpected, NodePrimitives, SignedTransaction};
 use reth_provider::{
@@ -29,11 +21,7 @@ use reth_stages_api::{
     StageId, UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
-<<<<<<< HEAD
-use std::{fmt::Debug, ops::Range, sync::mpsc};
-=======
 use std::{fmt::Debug, ops::Range, sync::mpsc, time::Instant};
->>>>>>> v1.11.3
 use thiserror::Error;
 use tracing::*;
 
@@ -93,10 +81,6 @@ where
     /// Retrieve the range of transactions to iterate over by querying
     /// [`BlockBodyIndices`][reth_db_api::tables::BlockBodyIndices],
     /// collect transactions within that range, recover signer for each transaction and store
-<<<<<<< HEAD
-    /// entries in the [`TransactionSenders`][reth_db_api::tables::TransactionSenders] table.
-    fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
-=======
     /// entries in the [`TransactionSenders`][reth_db_api::tables::TransactionSenders] table or
     /// static files depending on configuration.
     fn execute(
@@ -138,7 +122,6 @@ where
             }
         }
 
->>>>>>> v1.11.3
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
         }
@@ -177,10 +160,6 @@ where
 
         let tx_batch_sender = setup_range_recovery(provider);
 
-<<<<<<< HEAD
-        for range in batch {
-            recover_range(range, provider, tx_batch_sender.clone(), &mut senders_cursor)?;
-=======
         let start = Instant::now();
         let block_body_indices =
             provider.block_body_indices_range(range_output.block_range.clone())?;
@@ -203,7 +182,6 @@ where
             let fold_elapsed = start.elapsed();
             debug!(target: "sync::stages::sender_recovery", ?block_body_indices_elapsed, ?fold_elapsed, len = block_numbers.len(), "Calculated block numbers");
             recover_range(range, block_numbers, provider, tx_batch_sender.clone(), &mut writer)?;
->>>>>>> v1.11.3
         }
 
         // Advance the static file header to the end of this range to account for empty blocks.
@@ -247,20 +225,12 @@ fn recover_range<Provider, CURSOR>(
     block_numbers: Vec<BlockNumber>,
     provider: &Provider,
     tx_batch_sender: mpsc::Sender<Vec<(Range<u64>, RecoveryResultSender)>>,
-<<<<<<< HEAD
     senders_cursor: &mut CURSOR,
-=======
-    writer: &mut EitherWriter<'_, CURSOR, Provider::Primitives>,
->>>>>>> v1.11.3
 ) -> Result<(), StageError>
 where
     Provider: DBProvider + HeaderProvider + TransactionsProvider + StaticFileProviderFactory,
     CURSOR: DbCursorRW<tables::TransactionSenders>,
 {
-<<<<<<< HEAD
-    debug!(target: "sync::stages::sender_recovery", ?tx_range, "Sending batch for processing");
-
-=======
     debug_assert_eq!(
         tx_range.clone().count(),
         block_numbers.len(),
@@ -269,7 +239,6 @@ where
 
     debug!(target: "sync::stages::sender_recovery", ?tx_range, "Sending batch for processing");
 
->>>>>>> v1.11.3
     // Preallocate channels for each chunks in the batch
     let (chunks, receivers): (Vec<_>, Vec<_>) = tx_range
         .clone()
@@ -327,16 +296,12 @@ where
                     }
                 }
             };
-<<<<<<< HEAD
-            senders_cursor.append(tx_id, &sender)?;
-=======
 
             let new_block_number = block_numbers
                 .next()
                 .expect("block numbers iterator has the same length as the number of transactions");
             writer.ensure_at_block(new_block_number)?;
             writer.append_sender(tx_id, &sender)?;
->>>>>>> v1.11.3
             processed_transactions += 1;
         }
     }
@@ -377,11 +342,7 @@ where
     //
     // However, using `std::thread::spawn` allows us to utilize the timeout grace
     // period to complete some work without throwing errors during the shutdown.
-<<<<<<< HEAD
-    std::thread::spawn(move || {
-=======
     reth_tasks::spawn_os_thread("sender-recovery", move || {
->>>>>>> v1.11.3
         while let Ok(chunks) = tx_receiver.recv() {
             for (chunk_range, recovered_senders_tx) in chunks {
                 // Read the raw value, and let the rayon worker to decompress & decode.
@@ -505,11 +466,7 @@ mod tests {
     };
     use alloy_primitives::{BlockNumber, B256};
     use assert_matches::assert_matches;
-<<<<<<< HEAD
     use reth_db_api::cursor::DbCursorRO;
-=======
-    use reth_db_api::{cursor::DbCursorRO, models::StorageSettings};
->>>>>>> v1.11.3
     use reth_ethereum_primitives::{Block, TransactionSigned};
     use reth_primitives_traits::{SealedBlock, SignerRecoverable};
     use reth_provider::{
@@ -518,10 +475,7 @@ mod tests {
     };
     use reth_prune_types::{PruneCheckpoint, PruneMode};
     use reth_stages_api::StageUnitCheckpoint;
-<<<<<<< HEAD
-=======
     use reth_static_file_types::StaticFileSegment;
->>>>>>> v1.11.3
     use reth_testing_utils::generators::{
         self, random_block, random_block_range, BlockParams, BlockRangeParams,
     };
@@ -666,18 +620,6 @@ mod tests {
             .map(|x| x.number)
             .unwrap_or(previous_stage);
         assert_matches!(result, Ok(_));
-<<<<<<< HEAD
-        assert_matches!(
-            result,
-            Ok(ExecOutput {
-                checkpoint: StageCheckpoint {
-                    block_number,
-                    stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
-                        processed: _,
-                        total
-                    }))
-                },
-=======
         assert_eq!(
             result.unwrap(),
             ExecOutput {
@@ -688,7 +630,6 @@ mod tests {
                         total: total_transactions
                     }
                 ),
->>>>>>> v1.11.3
                 done: false
             }) if block_number == expected_progress && total == total_transactions
         );

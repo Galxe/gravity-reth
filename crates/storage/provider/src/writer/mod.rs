@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 use crate::{
     providers::{StaticFileProvider, StaticFileWriter as SfWriter},
     BlockExecutionWriter, BlockWriter, HistoryWriter, StateWriter, StaticFileProviderFactory,
@@ -233,12 +232,11 @@ where
     }
 }
 
-=======
->>>>>>> v1.11.3
 #[cfg(test)]
 mod tests {
     use crate::{
-        test_utils::create_test_provider_factory, AccountReader, StorageTrieWriter, TrieWriter,
+        test_utils::create_test_provider_factory, AccountReader, StateWriter, StorageLocation,
+        StorageTrieWriter, TrieWriter,
     };
     use alloy_primitives::{keccak256, map::HashMap, Address, B256, U256};
     use reth_db_api::{
@@ -250,13 +248,7 @@ mod tests {
     use reth_ethereum_primitives::Receipt;
     use reth_execution_types::ExecutionOutcome;
     use reth_primitives_traits::{Account, StorageEntry};
-<<<<<<< HEAD
     use reth_storage_api::{DatabaseProviderFactory, HashedPostStateProvider};
-=======
-    use reth_storage_api::{
-        DatabaseProviderFactory, HashedPostStateProvider, StateWriteConfig, StateWriter,
-    };
->>>>>>> v1.11.3
     use reth_trie::{
         test_utils::{state_root, storage_root_prehashed},
         HashedPostState, HashedStorage, StateRoot, StorageRoot, StorageRootProgress,
@@ -266,11 +258,7 @@ mod tests {
         states::{
             bundle_state::BundleRetention, changes::PlainStorageRevert, PlainStorageChangeset,
         },
-<<<<<<< HEAD
-        BundleState, State,
-=======
         BundleState, OriginalValuesKnown, State,
->>>>>>> v1.11.3
     };
     use revm_database_interface::{DatabaseCommit, EmptyDB};
     use revm_state::{
@@ -383,12 +371,8 @@ mod tests {
         provider.commit_view().unwrap();
 
         assert_eq!(reverts.storage, [[]]);
-<<<<<<< HEAD
         provider.write_state_reverts(reverts, 1).expect("Could not write reverts to DB");
         provider.commit_view().unwrap();
-=======
-        provider.write_state_reverts(reverts, 1, StateWriteConfig::default()).expect("Could not write reverts to DB");
->>>>>>> v1.11.3
 
         let reth_account_a = account_a.into();
         let reth_account_b = account_b.into();
@@ -455,12 +439,8 @@ mod tests {
             reverts.storage,
             [[PlainStorageRevert { address: address_b, wiped: true, storage_revert: vec![] }]]
         );
-<<<<<<< HEAD
         provider.write_state_reverts(reverts, 2).expect("Could not write reverts to DB");
         provider.commit_view().unwrap();
-=======
-        provider.write_state_reverts(reverts, 2, StateWriteConfig::default()).expect("Could not write reverts to DB");
->>>>>>> v1.11.3
 
         // Check new plain state for account B
         assert_eq!(
@@ -545,11 +525,7 @@ mod tests {
 
         let outcome = ExecutionOutcome::new(state.take_bundle(), Default::default(), 1, Vec::new());
         provider
-<<<<<<< HEAD
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
-=======
-            .write_state(&outcome, OriginalValuesKnown::Yes, StateWriteConfig::default())
->>>>>>> v1.11.3
             .expect("Could not write bundle state to DB");
         provider.commit_view().unwrap();
 
@@ -650,11 +626,7 @@ mod tests {
         state.merge_transitions(BundleRetention::Reverts);
         let outcome = ExecutionOutcome::new(state.take_bundle(), Default::default(), 2, Vec::new());
         provider
-<<<<<<< HEAD
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
-=======
-            .write_state(&outcome, OriginalValuesKnown::Yes, StateWriteConfig::default())
->>>>>>> v1.11.3
             .expect("Could not write bundle state to DB");
         provider.commit_view().unwrap();
 
@@ -735,11 +707,7 @@ mod tests {
         let outcome =
             ExecutionOutcome::new(init_state.take_bundle(), Default::default(), 0, Vec::new());
         provider
-<<<<<<< HEAD
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
-=======
-            .write_state(&outcome, OriginalValuesKnown::Yes, StateWriteConfig::default())
->>>>>>> v1.11.3
             .expect("Could not write bundle state to DB");
         provider.commit_view().unwrap();
 
@@ -899,11 +867,7 @@ mod tests {
         let outcome: ExecutionOutcome =
             ExecutionOutcome::new(bundle, Default::default(), 1, Vec::new());
         provider
-<<<<<<< HEAD
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
-=======
-            .write_state(&outcome, OriginalValuesKnown::Yes, StateWriteConfig::default())
->>>>>>> v1.11.3
             .expect("Could not write bundle state to DB");
         provider.commit_view().unwrap();
 
@@ -1070,11 +1034,7 @@ mod tests {
         let outcome =
             ExecutionOutcome::new(init_state.take_bundle(), Default::default(), 0, Vec::new());
         provider
-<<<<<<< HEAD
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
-=======
-            .write_state(&outcome, OriginalValuesKnown::Yes, StateWriteConfig::default())
->>>>>>> v1.11.3
             .expect("Could not write bundle state to DB");
         provider.commit_view().unwrap();
 
@@ -1124,11 +1084,7 @@ mod tests {
         state.merge_transitions(BundleRetention::Reverts);
         let outcome = ExecutionOutcome::new(state.take_bundle(), Default::default(), 1, Vec::new());
         provider
-<<<<<<< HEAD
             .write_state(&outcome, OriginalValuesKnown::Yes, StorageLocation::Database)
-=======
-            .write_state(&outcome, OriginalValuesKnown::Yes, StateWriteConfig::default())
->>>>>>> v1.11.3
             .expect("Could not write bundle state to DB");
         provider.commit_view().unwrap();
 
@@ -1216,12 +1172,8 @@ mod tests {
         }
 
         let (_, updates) = StateRoot::from_tx(tx).root_with_updates().unwrap();
-<<<<<<< HEAD
         provider_rw.write_trie_updates(&updates).unwrap();
         provider_rw.commit_view().unwrap();
-=======
-        provider_rw.write_trie_updates(updates).unwrap();
->>>>>>> v1.11.3
 
         let mut state = State::builder().with_bundle_update().build();
 
@@ -1229,11 +1181,7 @@ mod tests {
             assert_eq!(
                 StateRoot::overlay_root(
                     tx,
-<<<<<<< HEAD
                     provider_factory.hashed_post_state(&state.bundle_state)
-=======
-                    &provider_factory.hashed_post_state(&state.bundle_state).into_sorted()
->>>>>>> v1.11.3
                 )
                 .unwrap(),
                 state_root(expected.clone().into_iter().map(|(address, (account, storage))| (
@@ -1444,14 +1392,7 @@ mod tests {
         assert_eq!(storage_root, storage_root_prehashed(init_storage.storage));
         assert!(!storage_updates.is_empty());
         provider_rw
-<<<<<<< HEAD
             .write_storage_trie_updates(core::iter::once((&hashed_address, &storage_updates)))
-=======
-            .write_storage_trie_updates_sorted(core::iter::once((
-                &hashed_address,
-                &storage_updates.into_sorted(),
-            )))
->>>>>>> v1.11.3
             .unwrap();
         provider_rw.commit_view().unwrap();
 

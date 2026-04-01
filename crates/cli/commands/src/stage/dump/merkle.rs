@@ -4,25 +4,15 @@ use super::setup;
 use alloy_primitives::{Address, BlockNumber};
 use eyre::Result;
 use reth_config::config::EtlConfig;
-<<<<<<< HEAD
 use reth_consensus::{ConsensusError, FullConsensus};
 use reth_db::DatabaseEnv;
 use reth_db_api::{database::Database, table::TableImporter, tables};
-=======
-use reth_consensus::FullConsensus;
-use reth_db::DatabaseEnv;
-use reth_db_api::{database::Database, models::BlockNumberAddress, table::TableImporter, tables};
->>>>>>> v1.11.3
 use reth_db_common::DbTool;
 use reth_evm::ConfigureEvm;
 use reth_exex::ExExManagerHandle;
 use reth_node_core::dirs::{ChainPath, DataDirPath};
 use reth_provider::{
-<<<<<<< HEAD
     providers::{ProviderNodeTypes, StaticFileProvider},
-=======
-    providers::{ProviderNodeTypes, RocksDBProvider, StaticFileProvider},
->>>>>>> v1.11.3
     DatabaseProviderFactory, ProviderFactory,
 };
 use reth_stages::{
@@ -41,17 +31,10 @@ pub(crate) async fn dump_merkle_stage<N>(
     output_datadir: ChainPath<DataDirPath>,
     should_run: bool,
     evm_config: impl ConfigureEvm<Primitives = N::Primitives>,
-<<<<<<< HEAD
     consensus: impl FullConsensus<N::Primitives, Error = ConsensusError> + 'static,
 ) -> Result<()>
 where
     N: ProviderNodeTypes<DB = Arc<DatabaseEnv>>,
-=======
-    consensus: impl FullConsensus<N::Primitives> + 'static,
-) -> Result<()>
-where
-    N: ProviderNodeTypes<DB = DatabaseEnv>,
->>>>>>> v1.11.3
 {
     let (output_db, tip_block_number) = setup(from, to, &output_datadir.db(), db_tool)?;
 
@@ -77,11 +60,7 @@ where
         let runtime = reth_tasks::Runtime::with_existing_handle(tokio::runtime::Handle::current())?;
         dry_run(
             ProviderFactory::<N>::new(
-<<<<<<< HEAD
                 Arc::new(output_db),
-=======
-                output_db,
->>>>>>> v1.11.3
                 db_tool.chain(),
                 StaticFileProvider::read_write(output_datadir.static_files())?,
                 RocksDBProvider::builder(output_datadir.rocksdb()).build()?,
@@ -102,11 +81,7 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
     tip_block_number: u64,
     output_db: &DatabaseEnv,
     evm_config: impl ConfigureEvm<Primitives = N::Primitives>,
-<<<<<<< HEAD
     consensus: impl FullConsensus<N::Primitives, Error = ConsensusError> + 'static,
-=======
-    consensus: impl FullConsensus<N::Primitives> + 'static,
->>>>>>> v1.11.3
 ) -> eyre::Result<()> {
     let (from, to) = range;
     let provider = db_tool.provider_factory.database_provider_rw()?;

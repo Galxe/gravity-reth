@@ -5,13 +5,9 @@ use alloy_primitives::BlockNumber;
 use criterion::{criterion_main, measurement::WallTime, BenchmarkGroup, Criterion};
 use reth_config::config::{EtlConfig, TransactionLookupConfig};
 use reth_db::{test_utils::TempDatabase, Database, DatabaseEnv};
-<<<<<<< HEAD
-use reth_provider::{test_utils::MockNodeTypesWithDB, DatabaseProvider, DatabaseProviderFactory};
-=======
 use reth_provider::{
     test_utils::MockNodeTypesWithDB, DBProvider, DatabaseProvider, DatabaseProviderFactory,
 };
->>>>>>> v1.11.3
 use reth_stages::{
     stages::{MerkleStage, SenderRecoveryStage, TransactionLookupStage},
     test_utils::TestStageDB,
@@ -152,14 +148,7 @@ fn measure_stage<F, S>(
     label: String,
 ) where
     S: Clone
-<<<<<<< HEAD
-        + Stage<
-            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>,
-            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TX, MockNodeTypesWithDB>,
-        >,
-=======
         + Stage<DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>>,
->>>>>>> v1.11.3
     F: Fn(S, &TestStageDB, StageRange),
 {
     let stage_range = (

@@ -1,23 +1,17 @@
 use crate::metrics::PersistenceMetrics;
-<<<<<<< HEAD
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
+use crossbeam_channel::Sender as CrossbeamSender;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
     set_fail_point, tables,
     transaction::{DbTx, DbTxMut},
 };
-=======
-use alloy_eips::BlockNumHash;
-use crossbeam_channel::Sender as CrossbeamSender;
-use reth_chain_state::ExecutedBlock;
->>>>>>> v1.11.3
 use reth_errors::ProviderError;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
-<<<<<<< HEAD
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockWriter,
     ChainStateBlockWriter, DatabaseProviderFactory, HistoryWriter, ProviderFactory,
     StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StaticFileWriter,
@@ -25,34 +19,19 @@ use reth_provider::{
 };
 use reth_prune::{PrunerError, PrunerOutput, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender, StageCheckpoint, StageId};
-use revm::database::OriginalValuesKnown;
-=======
-    providers::ProviderNodeTypes, BlockExecutionWriter, BlockHashReader, ChainStateBlockWriter,
-    DBProvider, DatabaseProviderFactory, ProviderFactory, SaveBlocksMode,
-};
-use reth_prune::{PrunerError, PrunerWithFactory};
-use reth_stages_api::{MetricEvent, MetricEventsSender};
 use reth_tasks::spawn_os_thread;
->>>>>>> v1.11.3
+use revm::database::OriginalValuesKnown;
 use std::{
     sync::{
         mpsc::{Receiver, SendError, Sender},
         Arc,
     },
-<<<<<<< HEAD
     thread,
-    time::Instant,
-};
-use thiserror::Error;
-use tokio::sync::oneshot;
-use tracing::{debug, error, info};
-=======
     thread::JoinHandle,
     time::Instant,
 };
 use thiserror::Error;
-use tracing::{debug, error, instrument};
->>>>>>> v1.11.3
+use tracing::{debug, error, info, instrument};
 
 /// Writes parts of reth's in memory tree state to the database and static files.
 ///
@@ -137,7 +116,6 @@ where
                         let _ = self
                             .sync_metrics_tx
                             .send(MetricEvent::SyncHeight { height: block_number });
-<<<<<<< HEAD
 
                         if self.pruner.is_pruning_needed(block_number) {
                             // We log `PrunerOutput` inside the `Pruner`
@@ -146,23 +124,10 @@ where
                     }
                 }
                 PersistenceAction::SaveFinalizedBlock(finalized_block) => {
-                    let provider = self.provider.database_provider_rw()?;
-                    provider.save_finalized_block_number(finalized_block)?;
-                    provider.commit()?;
-                }
-                PersistenceAction::SaveSafeBlock(safe_block) => {
-                    let provider = self.provider.database_provider_rw()?;
-                    provider.save_safe_block_number(safe_block)?;
-                    provider.commit()?;
-=======
-                    }
-                }
-                PersistenceAction::SaveFinalizedBlock(finalized_block) => {
                     self.pending_finalized_block = Some(finalized_block);
                 }
                 PersistenceAction::SaveSafeBlock(safe_block) => {
                     self.pending_safe_block = Some(safe_block);
->>>>>>> v1.11.3
                 }
             }
         }
@@ -179,20 +144,14 @@ where
         let provider_rw = self.provider.database_provider_rw()?;
 
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
-<<<<<<< HEAD
-        UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(new_tip_num)?;
+        UnifiedStorageWriter::from(&provider_rw, &self.provider.static_file_provider()).remove_blocks_above(new_tip_num)?;
         UnifiedStorageWriter::commit_unwind(provider_rw)?;
-=======
-        provider_rw.remove_block_and_execution_above(new_tip_num)?;
-        provider_rw.commit()?;
->>>>>>> v1.11.3
 
         debug!(target: "engine::persistence", ?new_tip_num, ?new_tip_hash, "Removed blocks from disk");
         self.metrics.remove_blocks_above_duration_seconds.record(start_time.elapsed());
         Ok(new_tip_hash.map(|hash| BlockNumHash { hash, number: new_tip_num }))
     }
 
-<<<<<<< HEAD
     fn get_checkpoint<TX: DbTx>(
         tx: &TX,
         stage_id: StageId,
@@ -404,51 +363,6 @@ where
             .save_duration_per_block_seconds
             .record(elapsed.as_secs_f64() / num_blocks as f64);
         Ok(last_block_hash_num)
-=======
-    #[instrument(level = "debug", target = "engine::persistence", skip_all, fields(block_count = blocks.len()))]
-    fn on_save_blocks(
-        &mut self,
-        blocks: Vec<ExecutedBlock<N::Primitives>>,
-    ) -> Result<Option<BlockNumHash>, PersistenceError> {
-        let first_block = blocks.first().map(|b| b.recovered_block.num_hash());
-        let last_block = blocks.last().map(|b| b.recovered_block.num_hash());
-        let block_count = blocks.len();
-
-        let pending_finalized = self.pending_finalized_block.take();
-        let pending_safe = self.pending_safe_block.take();
-
-        debug!(target: "engine::persistence", ?block_count, first=?first_block, last=?last_block, "Saving range of blocks");
-
-        let start_time = Instant::now();
-
-        if let Some(last) = last_block {
-            let provider_rw = self.provider.database_provider_rw()?;
-            provider_rw.save_blocks(blocks, SaveBlocksMode::Full)?;
-
-            if let Some(finalized) = pending_finalized {
-                provider_rw.save_finalized_block_number(finalized)?;
-            }
-            if let Some(safe) = pending_safe {
-                provider_rw.save_safe_block_number(safe)?;
-            }
-
-            if self.pruner.is_pruning_needed(last.number) {
-                debug!(target: "engine::persistence", block_num=?last.number, "Running pruner");
-                let prune_start = Instant::now();
-                let _ = self.pruner.run_with_provider(&provider_rw, last.number)?;
-                self.metrics.prune_before_duration_seconds.record(prune_start.elapsed());
-            }
-
-            provider_rw.commit()?;
-        }
-
-        debug!(target: "engine::persistence", first=?first_block, last=?last_block, "Saved range of blocks");
-
-        self.metrics.save_blocks_batch_size.record(block_count as f64);
-        self.metrics.save_blocks_duration_seconds.record(start_time.elapsed());
-
-        Ok(last_block)
->>>>>>> v1.11.3
     }
 }
 
@@ -472,11 +386,7 @@ pub enum PersistenceAction<N: NodePrimitives = EthPrimitives> {
     ///
     /// First, header, transaction, and receipt-related data should be written to static files.
     /// Then the execution history-related data will be written to the database.
-<<<<<<< HEAD
-    SaveBlocks(Vec<ExecutedBlockWithTrieUpdates<N>>, oneshot::Sender<Option<BlockNumHash>>),
-=======
-    SaveBlocks(Vec<ExecutedBlock<N>>, CrossbeamSender<Option<BlockNumHash>>),
->>>>>>> v1.11.3
+    SaveBlocks(Vec<ExecutedBlockWithTrieUpdates<N>>, CrossbeamSender<Option<BlockNumHash>>),
 
     /// Removes block data above the given block number from the database.
     ///
@@ -496,23 +406,13 @@ pub enum PersistenceAction<N: NodePrimitives = EthPrimitives> {
 pub struct PersistenceHandle<N: NodePrimitives = EthPrimitives> {
     /// The channel used to communicate with the persistence service
     sender: Sender<PersistenceAction<N>>,
-<<<<<<< HEAD
-=======
     /// Guard that joins the service thread when all handles are dropped.
     /// Uses `Arc` so the handle remains `Clone`.
     _service_guard: Arc<ServiceGuard>,
->>>>>>> v1.11.3
 }
 
 impl<T: NodePrimitives> PersistenceHandle<T> {
     /// Create a new [`PersistenceHandle`] from a [`Sender<PersistenceAction>`].
-<<<<<<< HEAD
-    pub const fn new(sender: Sender<PersistenceAction<T>>) -> Self {
-        Self { sender }
-    }
-
-    /// Create a new [`PersistenceHandle`], and spawn the persistence service.
-=======
     ///
     /// This is intended for testing purposes where you want to mock the persistence service.
     /// For production use, prefer [`spawn_service`](Self::spawn_service).
@@ -525,7 +425,6 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
     /// The returned handle can be cloned and shared. When all clones are dropped, the service
     /// thread will be joined, ensuring graceful shutdown before resources (like `RocksDB`) are
     /// released.
->>>>>>> v1.11.3
     pub fn spawn_service<N>(
         provider_factory: ProviderFactory<N>,
         pruner: PrunerWithFactory<ProviderFactory<N>>,
@@ -537,12 +436,6 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
         // create the initial channels
         let (db_service_tx, db_service_rx) = std::sync::mpsc::channel();
 
-<<<<<<< HEAD
-        // construct persistence handle
-        let persistence_handle = PersistenceHandle::new(db_service_tx);
-
-=======
->>>>>>> v1.11.3
         // spawn the persistence service
         let db_service =
             PersistenceService::new(provider_factory, db_service_rx, pruner, sync_metrics_tx);
@@ -577,25 +470,16 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
     /// If there are no blocks to persist, then `None` is sent in the sender.
     pub fn save_blocks(
         &self,
-<<<<<<< HEAD
         blocks: Vec<ExecutedBlockWithTrieUpdates<T>>,
-        tx: oneshot::Sender<Option<BlockNumHash>>,
-=======
-        blocks: Vec<ExecutedBlock<T>>,
         tx: CrossbeamSender<Option<BlockNumHash>>,
->>>>>>> v1.11.3
     ) -> Result<(), SendError<PersistenceAction<T>>> {
         self.send_action(PersistenceAction::SaveBlocks(blocks, tx))
     }
 
-<<<<<<< HEAD
-    /// Persists the finalized block number on disk.
-=======
     /// Queues the finalized block number to be persisted on disk.
     ///
     /// The update is deferred and will be committed together with the next [`Self::save_blocks`]
     /// call to avoid triggering a separate fsync for each update.
->>>>>>> v1.11.3
     pub fn save_finalized_block_number(
         &self,
         finalized_block: u64,
@@ -603,14 +487,10 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
         self.send_action(PersistenceAction::SaveFinalizedBlock(finalized_block))
     }
 
-<<<<<<< HEAD
-    /// Persists the finalized block number on disk.
-=======
     /// Queues the safe block number to be persisted on disk.
     ///
     /// The update is deferred and will be committed together with the next [`Self::save_blocks`]
     /// call to avoid triggering a separate fsync for each update.
->>>>>>> v1.11.3
     pub fn save_safe_block_number(
         &self,
         safe_block: u64,
@@ -626,12 +506,6 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
     pub fn remove_blocks_above(
         &self,
         block_num: u64,
-<<<<<<< HEAD
-        tx: oneshot::Sender<Option<BlockNumHash>>,
-    ) -> Result<(), SendError<PersistenceAction<T>>> {
-        self.send_action(PersistenceAction::RemoveBlocksAbove(block_num, tx))
-    }
-=======
         tx: CrossbeamSender<Option<BlockNumHash>>,
     ) -> Result<(), SendError<PersistenceAction<T>>> {
         self.send_action(PersistenceAction::RemoveBlocksAbove(block_num, tx))
@@ -657,7 +531,6 @@ impl Drop for ServiceGuard {
             let _ = join_handle.join();
         }
     }
->>>>>>> v1.11.3
 }
 
 #[cfg(test)]
@@ -728,11 +601,7 @@ mod tests {
         let mut test_block_builder = TestBlockBuilder::eth();
         let blocks = test_block_builder.get_executed_blocks(0..5).collect::<Vec<_>>();
         let last_hash = blocks.last().unwrap().recovered_block().hash();
-<<<<<<< HEAD
-        let (tx, rx) = oneshot::channel();
-=======
         let (tx, rx) = crossbeam_channel::bounded(1);
->>>>>>> v1.11.3
 
         handle.save_blocks(blocks, tx).unwrap();
         let BlockNumHash { hash: actual_hash, number: _ } = rx.recv().unwrap().unwrap();
@@ -749,11 +618,7 @@ mod tests {
         for range in ranges {
             let blocks = test_block_builder.get_executed_blocks(range).collect::<Vec<_>>();
             let last_hash = blocks.last().unwrap().recovered_block().hash();
-<<<<<<< HEAD
-            let (tx, rx) = oneshot::channel();
-=======
             let (tx, rx) = crossbeam_channel::bounded(1);
->>>>>>> v1.11.3
 
             handle.save_blocks(blocks, tx).unwrap();
 

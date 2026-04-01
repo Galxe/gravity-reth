@@ -320,8 +320,6 @@ pub trait StageExt<Provider>: Stage<Provider> {
 }
 
 impl<Provider, S: Stage<Provider> + ?Sized> StageExt<Provider> for S {}
-<<<<<<< HEAD
-=======
 
 #[cfg(test)]
 mod tests {
@@ -486,4 +484,3 @@ mod tests {
         }
     }
 }
->>>>>>> v1.11.3
