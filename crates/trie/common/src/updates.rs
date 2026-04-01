@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-use crate::{nested_trie::Node, BranchNodeCompact, HashBuilder, Nibbles};
-=======
 use crate::{
+    nested_trie::Node,
     utils::{extend_sorted_vec, kway_merge_sorted},
     BranchNodeCompact, HashBuilder, Nibbles,
 };
->>>>>>> v1.11.3
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
     vec::Vec,
@@ -15,7 +12,6 @@ use alloy_primitives::{
     FixedBytes, B256,
 };
 
-<<<<<<< HEAD
 /// The aggregation of nested trie updates
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct TrieUpdatesV2 {
@@ -49,8 +45,6 @@ impl StorageTrieUpdatesV2 {
     }
 }
 
-=======
->>>>>>> v1.11.3
 /// The aggregation of trie updates.
 #[derive(PartialEq, Eq, Clone, Default, Debug)]
 #[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
@@ -66,8 +60,6 @@ pub struct TrieUpdates {
 }
 
 impl TrieUpdates {
-<<<<<<< HEAD
-=======
     /// Creates a new `TrieUpdates` with pre-allocated capacity.
     pub fn with_capacity(account_nodes: usize, storage_tries: usize) -> Self {
         Self {
@@ -77,7 +69,6 @@ impl TrieUpdates {
         }
     }
 
->>>>>>> v1.11.3
     /// Returns `true` if the updates are empty.
     pub fn is_empty(&self) -> bool {
         self.account_nodes.is_empty() &&
@@ -128,8 +119,6 @@ impl TrieUpdates {
         self.account_nodes.retain(|nibbles, _| !other.removed_nodes.contains(nibbles));
     }
 
-<<<<<<< HEAD
-=======
     /// Extend trie updates with sorted data, converting directly into the unsorted `HashMap`
     /// representation. This is more efficient than first converting to `TrieUpdates` and
     /// then extending, as it avoids creating intermediate `HashMap` allocations.
@@ -168,7 +157,6 @@ impl TrieUpdates {
         }
     }
 
->>>>>>> v1.11.3
     /// Insert storage updates for a given hashed address.
     pub fn insert_storage_updates(
         &mut self,
@@ -204,7 +192,6 @@ impl TrieUpdates {
 
     /// Converts trie updates into [`TrieUpdatesSorted`].
     pub fn into_sorted(mut self) -> TrieUpdatesSorted {
-<<<<<<< HEAD
         self.drain_into_sorted()
     }
 
@@ -216,8 +203,6 @@ impl TrieUpdates {
     /// This allows us to reuse the allocated space. This allocates new space for the sorted
     /// updates, like `into_sorted`.
     pub fn drain_into_sorted(&mut self) -> TrieUpdatesSorted {
-=======
->>>>>>> v1.11.3
         let mut account_nodes = self
             .account_nodes
             .drain()
@@ -239,10 +224,6 @@ impl TrieUpdates {
         TrieUpdatesSorted { account_nodes, storage_tries }
     }
 
-<<<<<<< HEAD
-    /// Converts trie updates into [`TrieUpdatesSortedRef`].
-    pub fn into_sorted_ref<'a>(&'a self) -> TrieUpdatesSortedRef<'a> {
-=======
     /// Creates a sorted copy without consuming self.
     /// More efficient than `.clone().into_sorted()` as it avoids cloning `HashMap` metadata.
     pub fn clone_into_sorted(&self) -> TrieUpdatesSorted {
@@ -270,8 +251,7 @@ impl TrieUpdates {
     }
 
     /// Converts trie updates into [`TrieUpdatesSortedRef`].
-    pub fn into_sorted_ref(&self) -> TrieUpdatesSortedRef<'_> {
->>>>>>> v1.11.3
+    pub fn into_sorted_ref<'a>(&'a self) -> TrieUpdatesSortedRef<'a> {
         let mut account_nodes = self.account_nodes.iter().collect::<Vec<_>>();
         account_nodes.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
@@ -281,11 +261,7 @@ impl TrieUpdates {
             storage_tries: self
                 .storage_tries
                 .iter()
-<<<<<<< HEAD
                 .map(|m| (*m.0, m.1.into_sorted_ref().clone()))
-=======
-                .map(|m| (*m.0, m.1.into_sorted_ref()))
->>>>>>> v1.11.3
                 .collect(),
         }
     }
@@ -387,8 +363,6 @@ impl StorageTrieUpdates {
         self.storage_nodes.retain(|nibbles, _| !other.removed_nodes.contains(nibbles));
     }
 
-<<<<<<< HEAD
-=======
     /// Extend storage trie updates with sorted data, converting directly into the unsorted
     /// `HashMap` representation. This is more efficient than first converting to
     /// `StorageTrieUpdates` and then extending, as it avoids creating intermediate `HashMap`
@@ -421,7 +395,6 @@ impl StorageTrieUpdates {
         }
     }
 
->>>>>>> v1.11.3
     /// Finalize storage trie updates for by taking updates from walker and hash builder.
     pub fn finalize(&mut self, hash_builder: HashBuilder, removed_keys: HashSet<Nibbles>) {
         // Retrieve updated nodes from hash builder.
@@ -450,8 +423,6 @@ impl StorageTrieUpdates {
         StorageTrieUpdatesSorted { is_deleted: self.is_deleted, storage_nodes }
     }
 
-<<<<<<< HEAD
-=======
     /// Creates a sorted copy without consuming self.
     /// More efficient than `.clone().into_sorted()` as it avoids cloning `HashMap` metadata.
     pub fn clone_into_sorted(&self) -> StorageTrieUpdatesSorted {
@@ -473,7 +444,6 @@ impl StorageTrieUpdates {
         StorageTrieUpdatesSorted { is_deleted: self.is_deleted, storage_nodes }
     }
 
->>>>>>> v1.11.3
     /// Convert storage trie updates into [`StorageTrieUpdatesSortedRef`].
     pub fn into_sorted_ref(&self) -> StorageTrieUpdatesSortedRef<'_> {
         StorageTrieUpdatesSortedRef {
@@ -625,17 +595,9 @@ pub struct TrieUpdatesSortedRef<'a> {
 pub struct TrieUpdatesSorted {
     /// Sorted collection of updated state nodes with corresponding paths. None indicates that a
     /// node was removed.
-<<<<<<< HEAD
     pub account_nodes: Vec<(Nibbles, Option<BranchNodeCompact>)>,
     /// Storage tries stored by hashed address of the account the trie belongs to.
     pub storage_tries: B256Map<StorageTrieUpdatesSorted>,
-}
-
-impl TrieUpdatesSorted {
-=======
-    account_nodes: Vec<(Nibbles, Option<BranchNodeCompact>)>,
-    /// Storage tries stored by hashed address of the account the trie belongs to.
-    storage_tries: B256Map<StorageTrieUpdatesSorted>,
 }
 
 impl TrieUpdatesSorted {
@@ -667,7 +629,6 @@ impl TrieUpdatesSorted {
         self.account_nodes.is_empty() && self.storage_tries.is_empty()
     }
 
->>>>>>> v1.11.3
     /// Returns reference to updated account nodes.
     pub fn account_nodes_ref(&self) -> &[(Nibbles, Option<BranchNodeCompact>)] {
         &self.account_nodes
@@ -677,8 +638,6 @@ impl TrieUpdatesSorted {
     pub const fn storage_tries_ref(&self) -> &B256Map<StorageTrieUpdatesSorted> {
         &self.storage_tries
     }
-<<<<<<< HEAD
-=======
 
     /// Returns the total number of updates including account nodes and all storage updates.
     pub fn total_len(&self) -> usize {
@@ -812,7 +771,6 @@ impl From<TrieUpdatesSorted> for TrieUpdates {
 
         Self { account_nodes, removed_nodes, storage_tries }
     }
->>>>>>> v1.11.3
 }
 
 /// Sorted storage trie updates reference used for serializing to file.
@@ -848,8 +806,6 @@ impl StorageTrieUpdatesSorted {
     pub fn storage_nodes_ref(&self) -> &[(Nibbles, Option<BranchNodeCompact>)] {
         &self.storage_nodes
     }
-<<<<<<< HEAD
-=======
 
     /// Returns the total number of storage node updates.
     pub const fn len(&self) -> usize {
@@ -893,7 +849,6 @@ impl StorageTrieUpdatesSorted {
 
         Self { is_deleted: del_idx.is_some(), storage_nodes }
     }
->>>>>>> v1.11.3
 }
 
 /// Excludes empty nibbles from the given iterator.
@@ -908,8 +863,6 @@ fn exclude_empty_from_pair<V>(
     iter.into_iter().filter(|(n, _)| !n.is_empty())
 }
 
-<<<<<<< HEAD
-=======
 impl From<StorageTrieUpdatesSorted> for StorageTrieUpdates {
     fn from(sorted: StorageTrieUpdatesSorted) -> Self {
         let mut storage_nodes = HashMap::default();
@@ -1202,7 +1155,6 @@ mod tests {
     }
 }
 
->>>>>>> v1.11.3
 /// Bincode-compatible trie updates type serde implementations.
 #[cfg(feature = "serde-bincode-compat")]
 pub mod serde_bincode_compat {
@@ -1339,8 +1291,6 @@ pub mod serde_bincode_compat {
         }
     }
 
-<<<<<<< HEAD
-=======
     /// Bincode-compatible [`super::TrieUpdatesSorted`] serde implementation.
     ///
     /// Intended to use with the [`serde_with::serde_as`] macro in the following way:
@@ -1462,18 +1412,13 @@ pub mod serde_bincode_compat {
         }
     }
 
->>>>>>> v1.11.3
     #[cfg(test)]
     mod tests {
         use crate::{
             serde_bincode_compat,
-<<<<<<< HEAD
-            updates::{StorageTrieUpdates, TrieUpdates},
-=======
             updates::{
                 StorageTrieUpdates, StorageTrieUpdatesSorted, TrieUpdates, TrieUpdatesSorted,
             },
->>>>>>> v1.11.3
             BranchNodeCompact, Nibbles,
         };
         use alloy_primitives::B256;
@@ -1544,8 +1489,6 @@ pub mod serde_bincode_compat {
             let decoded: Data = bincode::deserialize(&encoded).unwrap();
             assert_eq!(decoded, data);
         }
-<<<<<<< HEAD
-=======
 
         #[test]
         fn test_trie_updates_sorted_bincode_roundtrip() {
@@ -1618,16 +1561,11 @@ pub mod serde_bincode_compat {
             let decoded: Data = bincode::deserialize(&encoded).unwrap();
             assert_eq!(decoded, data);
         }
->>>>>>> v1.11.3
     }
 }
 
 #[cfg(all(test, feature = "serde"))]
-<<<<<<< HEAD
-mod tests {
-=======
 mod serde_tests {
->>>>>>> v1.11.3
     use super::*;
 
     #[test]

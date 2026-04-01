@@ -6,13 +6,8 @@ use reth_db_api::{
     DatabaseError,
 };
 use reth_trie::{
-<<<<<<< HEAD
-    trie_cursor::{TrieCursor, TrieCursorFactory},
-    updates::StorageTrieUpdates,
-=======
     trie_cursor::{TrieCursor, TrieCursorFactory, TrieStorageCursor},
     updates::StorageTrieUpdatesSorted,
->>>>>>> v1.11.3
     BranchNodeCompact, Nibbles, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
 };
 
@@ -20,30 +15,13 @@ use reth_trie::{
 #[derive(Debug, Clone)]
 pub struct DatabaseTrieCursorFactory<T>(T);
 
-<<<<<<< HEAD
-impl<TX> Clone for DatabaseTrieCursorFactory<'_, TX> {
-    fn clone(&self) -> Self {
-        Self(self.0)
-    }
-}
-
-impl<'a, TX> DatabaseTrieCursorFactory<'a, TX> {
-=======
 impl<T> DatabaseTrieCursorFactory<T> {
->>>>>>> v1.11.3
     /// Create new [`DatabaseTrieCursorFactory`].
     pub const fn new(tx: T) -> Self {
         Self(tx)
     }
 }
 
-<<<<<<< HEAD
-/// Implementation of the trie cursor factory for a database transaction.
-impl<TX: DbTx> TrieCursorFactory for DatabaseTrieCursorFactory<'_, TX> {
-    type AccountTrieCursor = DatabaseAccountTrieCursor<<TX as DbTx>::Cursor<tables::AccountsTrie>>;
-    type StorageTrieCursor =
-        DatabaseStorageTrieCursor<<TX as DbTx>::DupCursor<tables::StoragesTrie>>;
-=======
 impl<TX> TrieCursorFactory for DatabaseTrieCursorFactory<&TX>
 where
     TX: DbTx,
@@ -52,7 +30,6 @@ where
         = DatabaseAccountTrieCursor<<TX as DbTx>::Cursor<tables::AccountsTrie>>
     where
         Self: 'a;
->>>>>>> v1.11.3
 
     type StorageTrieCursor<'a>
         = DatabaseStorageTrieCursor<<TX as DbTx>::DupCursor<tables::StoragesTrie>>

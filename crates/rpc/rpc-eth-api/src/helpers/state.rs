@@ -11,21 +11,14 @@ use alloy_serde::JsonStorageKey;
 use futures::Future;
 use reth_errors::RethError;
 use reth_evm::{ConfigureEvm, EvmEnvFor};
-<<<<<<< HEAD
-=======
 use reth_primitives_traits::SealedHeaderFor;
->>>>>>> v1.11.3
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_types::{
     error::FromEvmError, EthApiError, PendingBlockEnv, RpcInvalidTransactionError,
 };
 use reth_storage_api::{
-<<<<<<< HEAD
-    BlockIdReader, BlockNumReader, StateProvider, StateProviderBox, StateProviderFactory,
-=======
     BlockIdReader, BlockNumReader, BlockReaderIdExt, StateProvider, StateProviderBox,
     StateProviderFactory,
->>>>>>> v1.11.3
 };
 use reth_transaction_pool::TransactionPool;
 
@@ -293,23 +286,6 @@ pub trait LoadState:
                 let PendingBlockEnv { evm_env, origin } = self.pending_block_env_and_cfg()?;
                 Ok((evm_env, origin.state_block_id()))
             } else {
-<<<<<<< HEAD
-                // Use cached values if there is no pending block
-                let block_hash = RpcNodeCore::provider(self)
-                    .block_hash_for_id(at)
-                    .map_err(Self::Error::from_eth_err)?
-                    .ok_or(EthApiError::HeaderNotFound(at))?;
-
-                let header =
-                    self.cache().get_header(block_hash).await.map_err(Self::Error::from_eth_err)?;
-                let evm_env = self
-                    .evm_config()
-                    .evm_env(&header)
-                    .map_err(RethError::other)
-                    .map_err(Self::Error::from_eth_err)?;
-
-                Ok((evm_env, block_hash.into()))
-=======
                 // we can assume that the blockid will be predominantly `Latest` (e.g. for
                 // `eth_call`) and if requested by number or hash we can quickly fetch just the
                 // header
@@ -320,7 +296,6 @@ pub trait LoadState:
                 let evm_env = self.evm_env_for_header(&header)?;
 
                 Ok((evm_env, header.hash().into()))
->>>>>>> v1.11.3
             }
         }
     }

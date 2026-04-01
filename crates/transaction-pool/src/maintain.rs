@@ -5,14 +5,6 @@ use crate::{
     error::PoolError,
     metrics::MaintainPoolMetrics,
     traits::{CanonicalStateUpdate, EthPoolTransaction, TransactionPool, TransactionPoolExt},
-<<<<<<< HEAD
-    BlockInfo, PoolTransaction, PoolUpdateKind, TransactionOrigin,
-};
-use alloy_consensus::{transaction::TxHashRef, BlockHeader, Typed2718};
-use alloy_eips::{BlockNumberOrTag, Decodable2718, Encodable2718};
-use alloy_primitives::{Address, BlockHash, BlockNumber};
-use alloy_rlp::{Bytes, Encodable};
-=======
     AllPoolTransactions, BlobTransactionSidecarVariant, BlockInfo, PoolTransaction, PoolUpdateKind,
     TransactionOrigin,
 };
@@ -23,23 +15,19 @@ use alloy_primitives::{
     Address, BlockHash, BlockNumber, Bytes,
 };
 use alloy_rlp::Encodable;
->>>>>>> v1.11.3
 use futures_util::{
     future::{BoxFuture, Fuse, FusedFuture},
     FutureExt, Stream, StreamExt,
 };
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::CanonStateNotification;
-<<<<<<< HEAD
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_execution_types::ChangedAccount;
 use reth_fs_util::FsPathError;
 use reth_pipe_exec_layer_event_bus::get_pipe_exec_layer_event_bus;
-=======
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_execution_types::ChangedAccount;
 use reth_fs_util::FsPathError;
->>>>>>> v1.11.3
 use reth_primitives_traits::{
     transaction::signed::SignedTransaction, NodePrimitives, SealedHeader,
 };
@@ -123,14 +111,6 @@ where
     N: NodePrimitives,
     Client: StateProviderFactory
         + BlockReaderIdExt<Header = N::BlockHeader>
-<<<<<<< HEAD
-        + ChainSpecProvider<ChainSpec: EthChainSpec<Header = N::BlockHeader>>
-        + Clone
-        + 'static,
-    P: TransactionPoolExt<Transaction: PoolTransaction<Consensus = N::SignedTx>> + 'static,
-    St: Stream<Item = CanonStateNotification<N>> + Send + Unpin + 'static,
-    Tasks: TaskSpawner + 'static,
-=======
         + ChainSpecProvider<ChainSpec: EthChainSpec<Header = N::BlockHeader> + EthereumHardforks>
         + Clone
         + 'static,
@@ -138,7 +118,6 @@ where
         + 'static,
     St: Stream<Item = CanonStateNotification<N>> + Send + Unpin + 'static,
     Tasks: TaskSpawner + Clone + 'static,
->>>>>>> v1.11.3
 {
     async move {
         maintain_transaction_pool(client, pool, events, task_spawner, config).await;
@@ -159,14 +138,6 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
     N: NodePrimitives,
     Client: StateProviderFactory
         + BlockReaderIdExt<Header = N::BlockHeader>
-<<<<<<< HEAD
-        + ChainSpecProvider<ChainSpec: EthChainSpec<Header = N::BlockHeader>>
-        + Clone
-        + 'static,
-    P: TransactionPoolExt<Transaction: PoolTransaction<Consensus = N::SignedTx>> + 'static,
-    St: Stream<Item = CanonStateNotification<N>> + Send + Unpin + 'static,
-    Tasks: TaskSpawner + 'static,
-=======
         + ChainSpecProvider<ChainSpec: EthChainSpec<Header = N::BlockHeader> + EthereumHardforks>
         + Clone
         + 'static,
@@ -174,7 +145,6 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
         + 'static,
     St: Stream<Item = CanonStateNotification<N>> + Send + Unpin + 'static,
     Tasks: TaskSpawner + Clone + 'static,
->>>>>>> v1.11.3
 {
     let metrics = MaintainPoolMetrics::default();
     let MaintainPoolConfig { max_update_depth, max_reload_accounts, .. } = config;
@@ -217,7 +187,6 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
     // toggle for the first notification
     let mut first_event = true;
 
-<<<<<<< HEAD
     if !get_gravity_config().disable_pipe_execution {
         let pool = pool.clone();
         tokio::spawn(async move {
@@ -230,8 +199,6 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
         });
     }
 
-=======
->>>>>>> v1.11.3
     // The update loop that waits for new blocks and reorgs and performs pool updated
     // Listen for new chain events and derive the update action for the pool
     loop {
@@ -293,11 +260,7 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
             pool.delete_blobs(blobs);
             // and also do periodic cleanup
             let pool = pool.clone();
-<<<<<<< HEAD
-            task_spawner.spawn_blocking(Box::pin(async move {
-=======
             task_spawner.spawn_blocking_task(Box::pin(async move {
->>>>>>> v1.11.3
                 debug!(target: "txpool", finalized_block = %finalized, "cleaning up blob store");
                 pool.cleanup_blobs();
             }));
@@ -327,19 +290,6 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
                 }
             }
             _ = stale_eviction_interval.tick() => {
-<<<<<<< HEAD
-                let stale_txs: Vec<_> = pool
-                    .queued_transactions()
-                    .into_iter()
-                    .filter(|tx| {
-                        // filter stale transactions based on config
-                        (tx.origin.is_external() || config.no_local_exemptions) && tx.timestamp.elapsed() > config.max_tx_lifetime
-                    })
-                    .map(|tx| *tx.hash())
-                    .collect();
-                debug!(target: "txpool", count=%stale_txs.len(), "removing stale transactions");
-                pool.remove_transactions(stale_txs);
-=======
                 let queued = pool
                     .queued_transactions();
                 let mut stale_blobs = Vec::new();
@@ -360,7 +310,6 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
                 debug!(target: "txpool", count=%stale_txs.len(), "removing stale transactions");
                 pool.remove_transactions(stale_txs);
                 pool.delete_blobs(stale_blobs);
->>>>>>> v1.11.3
             }
         }
         // handle the result of the account reload
@@ -676,17 +625,10 @@ impl FinalizedBlockTracker {
     /// Updates the tracked finalized block and returns the new finalized block if it changed
     fn update(&mut self, finalized_block: Option<BlockNumber>) -> Option<BlockNumber> {
         let finalized = finalized_block?;
-<<<<<<< HEAD
-        self.last_finalized_block
-            .replace(finalized)
-            .is_none_or(|last| last < finalized)
-            .then_some(finalized)
-=======
         self.last_finalized_block.is_none_or(|last| last < finalized).then(|| {
             self.last_finalized_block = Some(finalized);
             finalized
         })
->>>>>>> v1.11.3
     }
 }
 
@@ -939,10 +881,7 @@ mod tests {
     use alloy_eips::eip2718::Decodable2718;
     use alloy_primitives::{hex, U256};
     use reth_ethereum_primitives::PooledTransactionVariant;
-<<<<<<< HEAD
-=======
     use reth_evm_ethereum::EthEvmConfig;
->>>>>>> v1.11.3
     use reth_fs_util as fs;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_tasks::Runtime;
@@ -966,22 +905,14 @@ mod tests {
             "02f87201830655c2808505ef61f08482565f94388c818ca8b9251b393131c08a736a67ccb192978801049e39c4b5b1f580c001a01764ace353514e8abdfb92446de356b260e3c1225b73fc4c8876a6258d12a129a04f02294aa61ca7676061cd99f29275491218b4754b46a0248e5e42bc5091f507"
         );
         let tx = PooledTransactionVariant::decode_2718(&mut &tx_bytes[..]).unwrap();
-<<<<<<< HEAD
-        let provider = MockEthProvider::default();
-=======
         let provider = MockEthProvider::default().with_genesis_block();
->>>>>>> v1.11.3
         let transaction = EthPooledTransaction::from_pooled(tx.try_into_recovered().unwrap());
         let tx_to_cmp = transaction.clone();
         let sender = hex!("1f9090aaE28b8a3dCeaDf281B0F12828e676c326").into();
         provider.add_account(sender, ExtendedAccount::new(42, U256::MAX));
         let blob_store = InMemoryBlobStore::default();
-<<<<<<< HEAD
-        let validator = EthTransactionValidatorBuilder::new(provider).build(blob_store.clone());
-=======
         let validator = EthTransactionValidatorBuilder::new(provider, EthEvmConfig::mainnet())
             .build(blob_store.clone());
->>>>>>> v1.11.3
 
         let txpool = Pool::new(
             validator,

@@ -13,11 +13,7 @@ jobs:
   actionlint:
     runs-on: ubuntu-latest
     steps:
-<<<<<<< HEAD
-      - uses: actions/checkout@v5
-=======
       - uses: actions/checkout@v6
->>>>>>> v1.11.3
       - name: Download actionlint
         id: get_actionlint
         run: bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)

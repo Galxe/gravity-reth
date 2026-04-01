@@ -43,11 +43,6 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-<<<<<<< HEAD
-reth-db = { workspace = true }
-reth-provider = { workspace = true, features = ["test-utils"] }
-alloy-consensus.workspace = true
-=======
 reth-db = { workspace = true, features = ["mdbx"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-tasks.workspace = true
@@ -55,7 +50,6 @@ reth-tasks.workspace = true
 [features]
 rocksdb = ["reth-db-api/rocksdb", "reth-provider/rocksdb"]
 edge = ["rocksdb"]
->>>>>>> v1.11.3
 
 [lints]
 workspace = true

@@ -6,19 +6,11 @@ use crate::{
 };
 use alloy_consensus::{transaction::TransactionMeta, BlockHeader};
 use alloy_eips::{BlockHashOrNumber, BlockNumHash};
-<<<<<<< HEAD
-use alloy_primitives::{map::HashMap, BlockNumber, TxHash, B256};
-use parking_lot::RwLock;
-use reth_chainspec::ChainInfo;
-use reth_ethereum_primitives::EthPrimitives;
-use reth_execution_types::{Chain, ExecutionOutcome};
-=======
 use alloy_primitives::{map::B256Map, BlockNumber, TxHash, B256};
 use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult, Chain, ExecutionOutcome};
->>>>>>> v1.11.3
 use reth_metrics::{metrics::Gauge, Metrics};
 use reth_primitives_traits::{
     BlockBody as _, IndexedTx, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
@@ -26,13 +18,8 @@ use reth_primitives_traits::{
 };
 use reth_storage_api::StateProviderBox;
 use reth_trie::{
-<<<<<<< HEAD
-    updates::{TrieUpdates, TrieUpdatesV2},
-    HashedPostState,
-=======
     updates::TrieUpdatesSorted, HashedPostStateSorted, LazyTrieData, SortedTrieData,
     TrieInputSorted,
->>>>>>> v1.11.3
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{broadcast, watch};
@@ -70,11 +57,7 @@ pub(crate) struct InMemoryStateMetrics {
 #[derive(Debug, Default)]
 pub(crate) struct InMemoryState<N: NodePrimitives = EthPrimitives> {
     /// All canonical blocks that are not on disk yet.
-<<<<<<< HEAD
-    blocks: RwLock<HashMap<B256, Arc<BlockState<N>>>>,
-=======
     blocks: RwLock<B256Map<Arc<BlockState<N>>>>,
->>>>>>> v1.11.3
     /// Mapping of block numbers to block hashes.
     numbers: RwLock<BTreeMap<u64, B256>>,
     /// The pending block that has not yet been made canonical.
@@ -85,11 +68,7 @@ pub(crate) struct InMemoryState<N: NodePrimitives = EthPrimitives> {
 
 impl<N: NodePrimitives> InMemoryState<N> {
     pub(crate) fn new(
-<<<<<<< HEAD
-        blocks: HashMap<B256, Arc<BlockState<N>>>,
-=======
         blocks: B256Map<Arc<BlockState<N>>>,
->>>>>>> v1.11.3
         numbers: BTreeMap<u64, B256>,
         pending: Option<BlockState<N>>,
     ) -> Self {
@@ -205,11 +184,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// Create a new in-memory state with the given blocks, numbers, pending state, and optional
     /// finalized header.
     pub fn new(
-<<<<<<< HEAD
-        blocks: HashMap<B256, Arc<BlockState<N>>>,
-=======
         blocks: B256Map<Arc<BlockState<N>>>,
->>>>>>> v1.11.3
         numbers: BTreeMap<u64, B256>,
         pending: Option<BlockState<N>>,
         finalized: Option<SealedHeader<N::BlockHeader>>,
@@ -234,11 +209,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
 
     /// Create an empty state.
     pub fn empty() -> Self {
-<<<<<<< HEAD
-        Self::new(HashMap::default(), BTreeMap::new(), None, None, None)
-=======
         Self::new(B256Map::default(), BTreeMap::new(), None, None, None)
->>>>>>> v1.11.3
     }
 
     /// Create a new in memory state with the given local head and finalized header
@@ -280,11 +251,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// Updates the pending block with the given block.
     ///
     /// Note: This assumes that the parent block of the pending block is canonical.
-<<<<<<< HEAD
-    pub fn set_pending_block(&self, pending: ExecutedBlockWithTrieUpdates<N>) {
-=======
     pub fn set_pending_block(&self, pending: ExecutedBlock<N>) {
->>>>>>> v1.11.3
         // fetch the state of the pending block's parent block
         let parent = self.state_by_hash(pending.recovered_block().parent_hash());
         let pending = BlockState::with_parent(pending, parent);
@@ -300,11 +267,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// them to their parent blocks.
     fn update_blocks<I, R>(&self, new_blocks: I, reorged: R)
     where
-<<<<<<< HEAD
-        I: IntoIterator<Item = ExecutedBlockWithTrieUpdates<N>>,
-=======
         I: IntoIterator<Item = ExecutedBlock<N>>,
->>>>>>> v1.11.3
         R: IntoIterator<Item = ExecutedBlock<N>>,
     {
         {
@@ -627,26 +590,14 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
 
 /// State after applying the given block, this block is part of the canonical chain that partially
 /// stored in memory and can be traced back to a canonical block on disk.
-<<<<<<< HEAD
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct BlockState<N: NodePrimitives = EthPrimitives> {
-    /// The executed block that determines the state after this block has been executed.
-    block: ExecutedBlockWithTrieUpdates<N>,
-=======
 #[derive(Debug, Clone)]
 pub struct BlockState<N: NodePrimitives = EthPrimitives> {
     /// The executed block that determines the state after this block has been executed.
     block: ExecutedBlock<N>,
->>>>>>> v1.11.3
     /// The block's parent block if it exists.
     parent: Option<Arc<Self>>,
 }
 
-<<<<<<< HEAD
-impl<N: NodePrimitives> BlockState<N> {
-    /// [`BlockState`] constructor.
-    pub const fn new(block: ExecutedBlockWithTrieUpdates<N>) -> Self {
-=======
 impl<N: NodePrimitives> PartialEq for BlockState<N> {
     fn eq(&self, other: &Self) -> bool {
         self.block == other.block && self.parent == other.parent
@@ -656,19 +607,11 @@ impl<N: NodePrimitives> PartialEq for BlockState<N> {
 impl<N: NodePrimitives> BlockState<N> {
     /// [`BlockState`] constructor.
     pub const fn new(block: ExecutedBlock<N>) -> Self {
->>>>>>> v1.11.3
         Self { block, parent: None }
     }
 
     /// [`BlockState`] constructor with parent.
-<<<<<<< HEAD
-    pub const fn with_parent(
-        block: ExecutedBlockWithTrieUpdates<N>,
-        parent: Option<Arc<Self>>,
-    ) -> Self {
-=======
     pub const fn with_parent(block: ExecutedBlock<N>, parent: Option<Arc<Self>>) -> Self {
->>>>>>> v1.11.3
         Self { block, parent }
     }
 
@@ -682,20 +625,12 @@ impl<N: NodePrimitives> BlockState<N> {
     }
 
     /// Returns the executed block that determines the state.
-<<<<<<< HEAD
-    pub fn block(&self) -> ExecutedBlockWithTrieUpdates<N> {
-=======
     pub fn block(&self) -> ExecutedBlock<N> {
->>>>>>> v1.11.3
         self.block.clone()
     }
 
     /// Returns a reference to the executed block that determines the state.
-<<<<<<< HEAD
-    pub const fn block_ref(&self) -> &ExecutedBlockWithTrieUpdates<N> {
-=======
     pub const fn block_ref(&self) -> &ExecutedBlock<N> {
->>>>>>> v1.11.3
         &self.block
     }
 
@@ -716,11 +651,7 @@ impl<N: NodePrimitives> BlockState<N> {
     }
 
     /// Returns the `Receipts` of executed block that determines the state.
-<<<<<<< HEAD
-    pub fn receipts(&self) -> &Vec<Vec<N::Receipt>> {
-=======
     pub fn receipts(&self) -> &Vec<N::Receipt> {
->>>>>>> v1.11.3
         &self.block.execution_outcome().receipts
     }
 
@@ -728,29 +659,6 @@ impl<N: NodePrimitives> BlockState<N> {
     /// We assume that the `Receipts` in the executed block `ExecutionOutcome`
     /// has only one element corresponding to the executed block associated to
     /// the state.
-<<<<<<< HEAD
-    pub fn executed_block_receipts(&self) -> Vec<N::Receipt> {
-        let receipts = self.receipts();
-
-        debug_assert!(
-            receipts.len() <= 1,
-            "Expected at most one block's worth of receipts, found {}",
-            receipts.len()
-        );
-
-        receipts.first().cloned().unwrap_or_default()
-    }
-
-    /// Returns a vector of __parent__ `BlockStates`.
-    ///
-    /// The block state order in the output vector is newest to oldest (highest to lowest):
-    /// `[5,4,3,2,1]`
-    ///
-    /// Note: This does not include self.
-    pub fn parent_state_chain(&self) -> Vec<&Self> {
-        let mut parents = Vec::new();
-        let mut current = self.parent.as_deref();
-=======
     ///
     /// This clones the vector of receipts. To avoid it, use [`Self::executed_block_receipts_ref`].
     pub fn executed_block_receipts(&self) -> Vec<N::Receipt> {
@@ -764,7 +672,6 @@ impl<N: NodePrimitives> BlockState<N> {
     pub fn executed_block_receipts_ref(&self) -> &[N::Receipt] {
         self.receipts()
     }
->>>>>>> v1.11.3
 
     /// Returns an iterator over __parent__ `BlockStates`.
     ///
@@ -842,46 +749,23 @@ impl<N: NodePrimitives> BlockState<N> {
 }
 
 /// Represents an executed block stored in-memory.
-<<<<<<< HEAD
-#[derive(Clone, Debug, PartialEq, Eq)]
-=======
 #[derive(Clone, Debug)]
->>>>>>> v1.11.3
 pub struct ExecutedBlock<N: NodePrimitives = EthPrimitives> {
     /// Recovered Block
     pub recovered_block: Arc<RecoveredBlock<N::Block>>,
     /// Block's execution outcome.
-<<<<<<< HEAD
-    pub execution_output: Arc<ExecutionOutcome<N::Receipt>>,
-    /// Block's hashed state.
-    pub hashed_state: Arc<HashedPostState>,
-=======
     pub execution_output: Arc<BlockExecutionOutput<N::Receipt>>,
     /// Deferred trie data produced by execution.
     ///
     /// This allows deferring the computation of the trie data which can be expensive.
     /// The data can be populated asynchronously after the block was validated.
     pub trie_data: DeferredTrieData,
->>>>>>> v1.11.3
 }
 
 impl<N: NodePrimitives> Default for ExecutedBlock<N> {
     fn default() -> Self {
         Self {
             recovered_block: Default::default(),
-<<<<<<< HEAD
-            execution_output: Default::default(),
-            hashed_state: Default::default(),
-        }
-    }
-}
-
-impl<N: NodePrimitives> ExecutedBlock<N> {
-    /// Returns a reference to an inner [`SealedBlock`]
-    #[inline]
-    pub fn sealed_block(&self) -> &SealedBlock<N::Block> {
-        self.recovered_block.sealed_block()
-=======
             execution_output: Arc::new(BlockExecutionOutput {
                 result: BlockExecutionResult {
                     receipts: Default::default(),
@@ -893,12 +777,9 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
             }),
             trie_data: DeferredTrieData::ready(ComputedTrieData::default()),
         }
->>>>>>> v1.11.3
     }
 }
 
-<<<<<<< HEAD
-=======
 impl<N: NodePrimitives> PartialEq for ExecutedBlock<N> {
     fn eq(&self, other: &Self) -> bool {
         // Trie data is computed asynchronously and doesn't define block identity.
@@ -948,7 +829,6 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
         self.recovered_block.sealed_block()
     }
 
->>>>>>> v1.11.3
     /// Returns a reference to [`RecoveredBlock`]
     #[inline]
     pub fn recovered_block(&self) -> &RecoveredBlock<N::Block> {
@@ -957,18 +837,6 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
 
     /// Returns a reference to the block's execution outcome
     #[inline]
-<<<<<<< HEAD
-    pub fn execution_outcome(&self) -> &ExecutionOutcome<N::Receipt> {
-        &self.execution_output
-    }
-
-    /// Returns a reference to the hashed state result of the execution outcome
-    #[inline]
-    pub fn hashed_state(&self) -> &HashedPostState {
-        &self.hashed_state
-    }
-
-=======
     pub fn execution_outcome(&self) -> &BlockExecutionOutput<N::Receipt> {
         &self.execution_output
     }
@@ -1024,124 +892,10 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
         self.trie_data().anchor_hash()
     }
 
->>>>>>> v1.11.3
     /// Returns a [`BlockNumber`] of the block.
     #[inline]
     pub fn block_number(&self) -> BlockNumber {
         self.recovered_block.header().number()
-<<<<<<< HEAD
-    }
-}
-
-/// Trie updates that result from calculating the state root for the block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExecutedTrieUpdates {
-    /// Trie updates present. State root was calculated, and the trie updates can be applied to the
-    /// database.
-    Present(Arc<TrieUpdates>),
-    /// Trie updates missing. State root was calculated, but the trie updates cannot be applied to
-    /// the current database state. To apply the updates, the state root must be recalculated, and
-    /// new trie updates must be generated.
-    ///
-    /// This can happen when processing fork chain blocks that are building on top of the
-    /// historical database state. Since we don't store the historical trie state, we cannot
-    /// generate the trie updates for it.
-    Missing,
-}
-
-impl ExecutedTrieUpdates {
-    /// Creates a [`ExecutedTrieUpdates`] with present but empty trie updates.
-    pub fn empty() -> Self {
-        Self::Present(Arc::default())
-    }
-
-    /// Sets the trie updates to the provided value as present.
-    pub fn set_present(&mut self, updates: Arc<TrieUpdates>) {
-        *self = Self::Present(updates);
-    }
-
-    /// Takes the present trie updates, leaving the state as missing.
-    pub fn take_present(&mut self) -> Option<Arc<TrieUpdates>> {
-        match self {
-            Self::Present(updates) => {
-                let updates = core::mem::take(updates);
-                *self = Self::Missing;
-                Some(updates)
-            }
-            Self::Missing => None,
-        }
-    }
-
-    /// Returns a reference to the trie updates if present.
-    #[allow(clippy::missing_const_for_fn)] // false positive
-    pub fn as_ref(&self) -> Option<&TrieUpdates> {
-        match self {
-            Self::Present(updates) => Some(updates),
-            Self::Missing => None,
-        }
-    }
-
-    /// Returns `true` if the trie updates are present.
-    pub const fn is_present(&self) -> bool {
-        matches!(self, Self::Present(_))
-    }
-
-    /// Returns `true` if the trie updates are missing.
-    pub const fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-}
-
-/// An [`ExecutedBlock`] with its [`TrieUpdates`].
-///
-/// We store it as separate type because [`TrieUpdates`] are only available for blocks stored in
-/// memory and can't be obtained for canonical persisted blocks.
-#[derive(
-    Clone, Debug, PartialEq, Eq, derive_more::Deref, derive_more::DerefMut, derive_more::Into,
-)]
-pub struct ExecutedBlockWithTrieUpdates<N: NodePrimitives = EthPrimitives> {
-    /// Inner [`ExecutedBlock`].
-    #[deref]
-    #[deref_mut]
-    #[into]
-    pub block: ExecutedBlock<N>,
-    /// Trie updates that result from calculating the state root for the block.
-    ///
-    /// If [`ExecutedTrieUpdates::Missing`], the trie updates should be computed when persisting
-    /// the block **on top of the canonical parent**.
-    pub trie: ExecutedTrieUpdates,
-    /// trie updates for nested trie
-    pub triev2: Arc<TrieUpdatesV2>,
-}
-
-impl<N: NodePrimitives> ExecutedBlockWithTrieUpdates<N> {
-    /// [`ExecutedBlock`] constructor.
-    pub const fn new(
-        recovered_block: Arc<RecoveredBlock<N::Block>>,
-        execution_output: Arc<ExecutionOutcome<N::Receipt>>,
-        hashed_state: Arc<HashedPostState>,
-        trie: ExecutedTrieUpdates,
-        triev2: Arc<TrieUpdatesV2>,
-    ) -> Self {
-        Self {
-            block: ExecutedBlock { recovered_block, execution_output, hashed_state },
-            trie,
-            triev2,
-        }
-    }
-
-    /// Returns a reference to the trie updates for the block, if present.
-    #[inline]
-    pub fn trie_updates(&self) -> Option<&TrieUpdates> {
-        self.trie.as_ref()
-    }
-
-    /// Converts the value into [`SealedBlock`].
-    pub fn into_sealed_block(self) -> SealedBlock<N::Block> {
-        let block = Arc::unwrap_or_clone(self.block.recovered_block);
-        block.into_sealed_block()
-=======
->>>>>>> v1.11.3
     }
 }
 
@@ -1151,27 +905,14 @@ pub enum NewCanonicalChain<N: NodePrimitives = EthPrimitives> {
     /// A simple append to the current canonical head
     Commit {
         /// all blocks that lead back to the canonical head
-<<<<<<< HEAD
-        new: Vec<ExecutedBlockWithTrieUpdates<N>>,
-=======
         new: Vec<ExecutedBlock<N>>,
->>>>>>> v1.11.3
     },
     /// A reorged chain consists of two chains that trace back to a shared ancestor block at which
     /// point they diverge.
     Reorg {
         /// All blocks of the _new_ chain
-<<<<<<< HEAD
-        new: Vec<ExecutedBlockWithTrieUpdates<N>>,
-        /// All blocks of the _old_ chain
-        ///
-        /// These are not [`ExecutedBlockWithTrieUpdates`] because we don't always have the trie
-        /// updates for the old canonical chain. For example, in case of node being restarted right
-        /// before the reorg [`TrieUpdates`] can't be fetched from database.
-=======
         new: Vec<ExecutedBlock<N>>,
         /// All blocks of the _old_ chain
->>>>>>> v1.11.3
         old: Vec<ExecutedBlock<N>>,
     },
 }
@@ -1196,18 +937,7 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
     pub fn to_chain_notification(&self) -> CanonStateNotification<N> {
         match self {
             Self::Commit { new } => {
-<<<<<<< HEAD
-                let new = Arc::new(new.iter().fold(Chain::default(), |mut chain, exec| {
-                    chain.append_block(
-                        exec.recovered_block().clone(),
-                        exec.execution_outcome().clone(),
-                    );
-                    chain
-                }));
-                CanonStateNotification::Commit { new }
-=======
                 CanonStateNotification::Commit { new: Arc::new(Self::blocks_to_chain(new)) }
->>>>>>> v1.11.3
             }
             Self::Reorg { new, old } => CanonStateNotification::Reorg {
                 new: Arc::new(Self::blocks_to_chain(new)),
@@ -1240,20 +970,6 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
                     let trie_data_handle = exec.trie_data_handle();
                     chain.append_block(
                         exec.recovered_block().clone(),
-<<<<<<< HEAD
-                        exec.execution_outcome().clone(),
-                    );
-                    chain
-                }));
-                let old = Arc::new(old.iter().fold(Chain::default(), |mut chain, exec| {
-                    chain.append_block(
-                        exec.recovered_block().clone(),
-                        exec.execution_outcome().clone(),
-                    );
-                    chain
-                }));
-                CanonStateNotification::Reorg { new, old }
-=======
                         ExecutionOutcome::from((
                             exec.execution_outcome().clone(),
                             exec.block_number(),
@@ -1268,7 +984,6 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
                     );
                 }
                 chain
->>>>>>> v1.11.3
             }
         }
     }
@@ -1301,13 +1016,8 @@ mod tests {
         StateProofProvider, StateProvider, StateRootProvider, StorageRootProvider,
     };
     use reth_trie::{
-<<<<<<< HEAD
-        AccountProof, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
-        StorageProof, TrieInput,
-=======
         updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
         MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
->>>>>>> v1.11.3
     };
 
     fn create_mock_state(
@@ -1353,8 +1063,6 @@ mod tests {
         }
     }
 
-<<<<<<< HEAD
-=======
         fn storage_by_hashed_key(
             &self,
             _address: Address,
@@ -1364,7 +1072,6 @@ mod tests {
         }
     }
 
->>>>>>> v1.11.3
     impl BytecodeReader for MockStateProvider {
         fn bytecode_by_hash(&self, _code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
             Ok(None)
@@ -1478,11 +1185,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_state_by_hash() {
-<<<<<<< HEAD
-        let mut state_by_hash = HashMap::default();
-=======
         let mut state_by_hash = B256Map::default();
->>>>>>> v1.11.3
         let number = rand::rng().random::<u64>();
         let mut test_block_builder: TestBlockBuilder = TestBlockBuilder::default();
         let state = Arc::new(create_mock_state(&mut test_block_builder, number, B256::random()));
@@ -1496,11 +1199,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_state_by_number() {
-<<<<<<< HEAD
-        let mut state_by_hash = HashMap::default();
-=======
         let mut state_by_hash = B256Map::default();
->>>>>>> v1.11.3
         let mut hash_by_number = BTreeMap::new();
 
         let number = rand::rng().random::<u64>();
@@ -1519,11 +1218,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_head_state() {
-<<<<<<< HEAD
-        let mut state_by_hash = HashMap::default();
-=======
         let mut state_by_hash = B256Map::default();
->>>>>>> v1.11.3
         let mut hash_by_number = BTreeMap::new();
         let mut test_block_builder: TestBlockBuilder = TestBlockBuilder::default();
         let state1 = Arc::new(create_mock_state(&mut test_block_builder, 1, B256::random()));
@@ -1551,11 +1246,7 @@ mod tests {
         let pending_hash = pending_state.hash();
 
         let in_memory_state =
-<<<<<<< HEAD
-            InMemoryState::new(HashMap::default(), BTreeMap::new(), Some(pending_state));
-=======
             InMemoryState::new(B256Map::default(), BTreeMap::new(), Some(pending_state));
->>>>>>> v1.11.3
 
         let result = in_memory_state.pending_state();
         assert!(result.is_some());
@@ -1567,11 +1258,7 @@ mod tests {
     #[test]
     fn test_in_memory_state_impl_no_pending_state() {
         let in_memory_state: InMemoryState =
-<<<<<<< HEAD
-            InMemoryState::new(HashMap::default(), BTreeMap::new(), None);
-=======
             InMemoryState::new(B256Map::default(), BTreeMap::new(), None);
->>>>>>> v1.11.3
 
         assert_eq!(in_memory_state.pending_state(), None);
     }
@@ -1702,11 +1389,7 @@ mod tests {
         let state2 = Arc::new(BlockState::with_parent(block2.clone(), Some(state1.clone())));
         let state3 = Arc::new(BlockState::with_parent(block3.clone(), Some(state2.clone())));
 
-<<<<<<< HEAD
-        let mut blocks = HashMap::default();
-=======
         let mut blocks = B256Map::default();
->>>>>>> v1.11.3
         blocks.insert(block1.recovered_block().hash(), state1);
         blocks.insert(block2.recovered_block().hash(), state2);
         blocks.insert(block3.recovered_block().hash(), state3);
@@ -1746,23 +1429,14 @@ mod tests {
     #[test]
     fn test_canonical_in_memory_state_canonical_chain_empty() {
         let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
-<<<<<<< HEAD
-        let chain: Vec<_> = state.canonical_chain().collect();
-        assert!(chain.is_empty());
-=======
         assert!(state.canonical_chain().next().is_none());
->>>>>>> v1.11.3
     }
 
     #[test]
     fn test_canonical_in_memory_state_canonical_chain_single_block() {
         let block = TestBlockBuilder::eth().get_executed_block_with_number(1, B256::random());
         let hash = block.recovered_block().hash();
-<<<<<<< HEAD
-        let mut blocks = HashMap::default();
-=======
         let mut blocks = B256Map::default();
->>>>>>> v1.11.3
         blocks.insert(hash, Arc::new(BlockState::new(block)));
         let mut numbers = BTreeMap::new();
         numbers.insert(1, hash);
@@ -1888,15 +1562,6 @@ mod tests {
             test_block_builder.get_executed_block_with_number(2, block1.recovered_block.hash());
         let block2a =
             test_block_builder.get_executed_block_with_number(2, block1.recovered_block.hash());
-<<<<<<< HEAD
-
-        let sample_execution_outcome = ExecutionOutcome {
-            receipts: vec![vec![], vec![]],
-            requests: vec![Requests::default(), Requests::default()],
-            ..Default::default()
-        };
-=======
->>>>>>> v1.11.3
 
         // Test commit notification
         let chain_commit = NewCanonicalChain::Commit { new: vec![block0.clone(), block1.clone()] };
@@ -1921,13 +1586,8 @@ mod tests {
             CanonStateNotification::Commit {
                 new: Arc::new(Chain::new(
                     vec![block0.recovered_block().clone(), block1.recovered_block().clone()],
-<<<<<<< HEAD
-                    sample_execution_outcome.clone(),
-                    None
-=======
                     commit_execution_outcome,
                     expected_trie_data,
->>>>>>> v1.11.3
                 ))
             }
         );
@@ -1964,15 +1624,6 @@ mod tests {
             CanonStateNotification::Reorg {
                 old: Arc::new(Chain::new(
                     vec![block1.recovered_block().clone(), block2.recovered_block().clone()],
-<<<<<<< HEAD
-                    sample_execution_outcome.clone(),
-                    None
-                )),
-                new: Arc::new(Chain::new(
-                    vec![block1a.recovered_block().clone(), block2a.recovered_block().clone()],
-                    sample_execution_outcome,
-                    None
-=======
                     reorg_execution_outcome.clone(),
                     old_trie_data,
                 )),
@@ -1980,7 +1631,6 @@ mod tests {
                     vec![block1a.recovered_block().clone(), block2a.recovered_block().clone()],
                     reorg_execution_outcome,
                     new_trie_data,
->>>>>>> v1.11.3
                 ))
             }
         );

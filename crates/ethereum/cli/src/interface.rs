@@ -8,11 +8,7 @@ use clap::{Parser, Subcommand};
 use reth_chainspec::{ChainSpec, EthChainSpec, Hardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::{
-<<<<<<< HEAD
-    common::{CliComponentsBuilder, CliHeader, CliNodeTypes},
-=======
     common::{CliComponentsBuilder, CliNodeTypes, HeaderMut},
->>>>>>> v1.11.3
     config_cmd, db, download, dump_genesis, export_era, import, import_era, init_cmd, init_state,
     launcher::FnLauncher,
     node::{self, NoArgs},
@@ -22,14 +18,6 @@ use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
 use reth_node_api::NodePrimitives;
 use reth_node_builder::{NodeBuilder, WithLaunchContext};
-<<<<<<< HEAD
-use reth_node_core::{args::LogArgs, version::version_metadata};
-use reth_node_metrics::recorder::install_prometheus_recorder;
-use reth_rpc_server_types::{DefaultRpcModuleValidator, RpcModuleValidator};
-use reth_tracing::FileWorkerGuard;
-use std::{ffi::OsString, fmt, future::Future, marker::PhantomData, sync::Arc};
-use tracing::info;
-=======
 use reth_node_core::{
     args::{LogArgs, OtlpInitStatus, OtlpLogsStatus, TraceArgs},
     version::version_metadata,
@@ -39,45 +27,30 @@ use reth_rpc_server_types::{DefaultRpcModuleValidator, RpcModuleValidator};
 use reth_tracing::{FileWorkerGuard, Layers};
 use std::{ffi::OsString, fmt, future::Future, marker::PhantomData, sync::Arc};
 use tracing::{info, warn};
->>>>>>> v1.11.3
 
 /// The main reth cli interface.
 ///
 /// This is the entrypoint to the executable.
 #[derive(Debug, Parser)]
-<<<<<<< HEAD
-#[command(author, version =version_metadata().short_version.as_ref(), long_version = version_metadata().long_version.as_ref(), about = "Reth", long_about = None)]
-=======
 #[command(author, name = version_metadata().name_client.as_ref(), version = version_metadata().short_version.as_ref(), long_version = version_metadata().long_version.as_ref(), about = "Reth", long_about = None)]
->>>>>>> v1.11.3
 pub struct Cli<
     C: ChainSpecParser = EthereumChainSpecParser,
     Ext: clap::Args + fmt::Debug = NoArgs,
     Rpc: RpcModuleValidator = DefaultRpcModuleValidator,
-<<<<<<< HEAD
-> {
-    /// The command to run
-    #[command(subcommand)]
-    pub command: Commands<C, Ext>,
-=======
     SubCmd: Subcommand + fmt::Debug = NoSubCmd,
 > {
     /// The command to run
     #[command(subcommand)]
     pub command: Commands<C, Ext, SubCmd>,
->>>>>>> v1.11.3
 
     /// The logging configuration for the CLI.
     #[command(flatten)]
     pub logs: LogArgs,
 
-<<<<<<< HEAD
-=======
     /// The tracing configuration for the CLI.
     #[command(flatten)]
     pub traces: TraceArgs,
 
->>>>>>> v1.11.3
     /// Type marker for the RPC module validator
     #[arg(skip)]
     pub _phantom: PhantomData<Rpc>,
@@ -99,9 +72,6 @@ impl Cli {
     }
 }
 
-<<<<<<< HEAD
-impl<C: ChainSpecParser, Ext: clap::Args + fmt::Debug, Rpc: RpcModuleValidator> Cli<C, Ext, Rpc> {
-=======
 impl<
         C: ChainSpecParser,
         Ext: clap::Args + fmt::Debug,
@@ -109,19 +79,11 @@ impl<
         SubCmd: crate::app::ExtendedCommand + Subcommand + fmt::Debug,
     > Cli<C, Ext, Rpc, SubCmd>
 {
->>>>>>> v1.11.3
     /// Configures the CLI and returns a [`CliApp`] instance.
     ///
     /// This method is used to prepare the CLI for execution by wrapping it in a
     /// [`CliApp`] that can be further configured before running.
-<<<<<<< HEAD
-    pub fn configure(self) -> CliApp<C, Ext, Rpc>
-    where
-        C: ChainSpecParser<ChainSpec = ChainSpec>,
-    {
-=======
     pub fn configure(self) -> CliApp<C, Ext, Rpc, SubCmd> {
->>>>>>> v1.11.3
         CliApp::new(self)
     }
 
@@ -130,11 +92,7 @@ impl<
     /// This accepts a closure that is used to launch the node via the
     /// [`NodeCommand`](node::NodeCommand).
     ///
-<<<<<<< HEAD
-    /// This command will be run on the [default tokio runtime](reth_cli_runner::tokio_runtime).
-=======
     /// This command will be run on the default tokio runtime.
->>>>>>> v1.11.3
     ///
     ///
     /// # Example
@@ -173,11 +131,7 @@ impl<
     /// ````
     pub fn run<L, Fut>(self, launcher: L) -> eyre::Result<()>
     where
-<<<<<<< HEAD
-        L: FnOnce(WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>, Ext) -> Fut,
-=======
         L: FnOnce(WithLaunchContext<NodeBuilder<DatabaseEnv, C::ChainSpec>>, Ext) -> Fut,
->>>>>>> v1.11.3
         Fut: Future<Output = eyre::Result<()>>,
         C: ChainSpecParser<ChainSpec = ChainSpec>,
     {
@@ -189,29 +143,17 @@ impl<
     /// This accepts a closure that is used to launch the node via the
     /// [`NodeCommand`](node::NodeCommand).
     ///
-<<<<<<< HEAD
-    /// This command will be run on the [default tokio runtime](reth_cli_runner::tokio_runtime).
-=======
     /// This command will be run on the default tokio runtime.
->>>>>>> v1.11.3
     pub fn run_with_components<N>(
         self,
         components: impl CliComponentsBuilder<N>,
         launcher: impl AsyncFnOnce(
-<<<<<<< HEAD
-            WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>,
-=======
             WithLaunchContext<NodeBuilder<DatabaseEnv, C::ChainSpec>>,
->>>>>>> v1.11.3
             Ext,
         ) -> eyre::Result<()>,
     ) -> eyre::Result<()>
     where
-<<<<<<< HEAD
-        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: CliHeader>, ChainSpec: Hardforks>,
-=======
         N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>,
->>>>>>> v1.11.3
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
     {
         self.with_runner_and_components(CliRunner::try_default_runtime()?, components, launcher)
@@ -238,11 +180,7 @@ impl<
     /// ```
     pub fn with_runner<L, Fut>(self, runner: CliRunner, launcher: L) -> eyre::Result<()>
     where
-<<<<<<< HEAD
-        L: FnOnce(WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>, Ext) -> Fut,
-=======
         L: FnOnce(WithLaunchContext<NodeBuilder<DatabaseEnv, C::ChainSpec>>, Ext) -> Fut,
->>>>>>> v1.11.3
         Fut: Future<Output = eyre::Result<()>>,
         C: ChainSpecParser<ChainSpec = ChainSpec>,
     {
@@ -258,20 +196,12 @@ impl<
         runner: CliRunner,
         components: impl CliComponentsBuilder<N>,
         launcher: impl AsyncFnOnce(
-<<<<<<< HEAD
-            WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>,
-=======
             WithLaunchContext<NodeBuilder<DatabaseEnv, C::ChainSpec>>,
->>>>>>> v1.11.3
             Ext,
         ) -> eyre::Result<()>,
     ) -> eyre::Result<()>
     where
-<<<<<<< HEAD
-        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: CliHeader>, ChainSpec: Hardforks>,
-=======
         N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>,
->>>>>>> v1.11.3
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
     {
         // Add network name if available to the logs dir
@@ -279,16 +209,6 @@ impl<
             self.logs.log_file_directory =
                 self.logs.log_file_directory.join(chain_spec.chain().to_string());
         }
-<<<<<<< HEAD
-        let _guard = self.init_tracing()?;
-        info!(target: "reth::cli", "Initialized tracing, debug log directory: {}", self.logs.log_file_directory);
-
-        // Install the prometheus recorder to be sure to record all metrics
-        let _ = install_prometheus_recorder();
-
-        // Use the shared standalone function to avoid duplication
-        run_commands_with::<C, Ext, Rpc, N>(self, runner, components, launcher)
-=======
         let _guard = self.init_tracing(&runner, Layers::new())?;
 
         // Install the prometheus recorder to be sure to record all metrics
@@ -296,17 +216,12 @@ impl<
 
         // Use the shared standalone function to avoid duplication
         run_commands_with::<C, Ext, Rpc, N, SubCmd>(self, runner, components, launcher)
->>>>>>> v1.11.3
     }
 
     /// Initializes tracing with the configured options.
     ///
     /// If file logging is enabled, this function returns a guard that must be kept alive to ensure
     /// that all logs are flushed to disk.
-<<<<<<< HEAD
-    pub fn init_tracing(&self) -> eyre::Result<Option<FileWorkerGuard>> {
-        let guard = self.logs.init_tracing()?;
-=======
     ///
     /// If an OTLP endpoint is specified, it will export traces and logs to the configured
     /// collector.
@@ -341,22 +256,17 @@ impl<
             OtlpLogsStatus::Disabled => {}
         }
 
->>>>>>> v1.11.3
         Ok(guard)
     }
 }
 
 /// Commands to be executed
 #[derive(Debug, Subcommand)]
-<<<<<<< HEAD
-pub enum Commands<C: ChainSpecParser, Ext: clap::Args + fmt::Debug> {
-=======
 pub enum Commands<
     C: ChainSpecParser,
     Ext: clap::Args + fmt::Debug,
     SubCmd: Subcommand + fmt::Debug = NoSubCmd,
 > {
->>>>>>> v1.11.3
     /// Start the node
     #[command(name = "node")]
     Node(Box<node::NodeCommand<C, Ext>>),
@@ -402,11 +312,6 @@ pub enum Commands<
     /// Re-execute blocks in parallel to verify historical sync correctness.
     #[command(name = "re-execute")]
     ReExecute(re_execute::Command<C>),
-<<<<<<< HEAD
-}
-
-impl<C: ChainSpecParser, Ext: clap::Args + fmt::Debug> Commands<C, Ext> {
-=======
     /// Extension subcommands provided by consumers.
     #[command(flatten)]
     Ext(SubCmd),
@@ -428,7 +333,6 @@ impl crate::app::ExtendedCommand for NoSubCmd {
 impl<C: ChainSpecParser, Ext: clap::Args + fmt::Debug, SubCmd: Subcommand + fmt::Debug>
     Commands<C, Ext, SubCmd>
 {
->>>>>>> v1.11.3
     /// Returns the underlying chain being used for commands
     pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
         match self {
@@ -448,10 +352,7 @@ impl<C: ChainSpecParser, Ext: clap::Args + fmt::Debug, SubCmd: Subcommand + fmt:
             Self::Config(_) => None,
             Self::Prune(cmd) => cmd.chain_spec(),
             Self::ReExecute(cmd) => cmd.chain_spec(),
-<<<<<<< HEAD
-=======
             Self::Ext(_) => None,
->>>>>>> v1.11.3
         }
     }
 }
@@ -461,10 +362,7 @@ mod tests {
     use super::*;
     use crate::chainspec::SUPPORTED_CHAINS;
     use clap::CommandFactory;
-<<<<<<< HEAD
-=======
     use reth_chainspec::SEPOLIA;
->>>>>>> v1.11.3
     use reth_node_core::args::ColorMode;
 
     #[test]
@@ -631,8 +529,6 @@ mod tests {
             err_msg
         );
     }
-<<<<<<< HEAD
-=======
 
     #[test]
     fn parse_unwind_chain() {
@@ -776,5 +672,4 @@ mod tests {
             assert!(EXECUTED.load(Ordering::SeqCst), "Custom command should have been executed");
         }
     }
->>>>>>> v1.11.3
 }

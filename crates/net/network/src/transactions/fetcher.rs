@@ -188,17 +188,7 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
         let TxFetchMetadata { fallback_peers, .. } =
             self.hashes_fetch_inflight_and_pending_fetch.peek(&hash)?;
 
-<<<<<<< HEAD
-        for peer_id in fallback_peers.iter() {
-            if self.is_idle(peer_id) {
-                return Some(peer_id)
-            }
-        }
-
-        None
-=======
         fallback_peers.iter().find(|peer_id| self.is_idle(peer_id))
->>>>>>> v1.11.3
     }
 
     /// Returns any idle peer for any hash pending fetch. If one is found, the corresponding
@@ -415,10 +405,6 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
             if let (_, Some(evicted_hash)) = self.hashes_pending_fetch.insert_and_get_evicted(hash)
             {
                 self.hashes_fetch_inflight_and_pending_fetch.remove(&evicted_hash);
-<<<<<<< HEAD
-                self.hashes_pending_fetch.remove(&evicted_hash);
-=======
->>>>>>> v1.11.3
             }
         }
     }
@@ -431,11 +417,7 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
         &mut self,
         peers: &HashMap<PeerId, PeerMetadata<N>>,
         has_capacity_wrt_pending_pool_imports: impl Fn(usize) -> bool,
-<<<<<<< HEAD
-    ) {
-=======
     ) -> bool {
->>>>>>> v1.11.3
         let mut hashes_to_request = RequestTxHashes::with_capacity(
             DEFAULT_MARGINAL_COUNT_HASHES_GET_POOLED_TRANSACTIONS_REQUEST,
         );

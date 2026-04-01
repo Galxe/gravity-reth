@@ -12,42 +12,25 @@ workspace = true
 
 [dependencies]
 # reth
-<<<<<<< HEAD
-reth-chain-state.workspace = true
-reth-chainspec = { workspace = true, optional = true }
-reth-consensus.workspace = true
-reth-db.workspace = true
-reth-engine-primitives.workspace = true
-=======
 reth-chain-state = { workspace = true, features = ["rayon"] }
 reth-chainspec = { workspace = true, optional = true }
 reth-consensus.workspace = true
 reth-db.workspace = true
 reth-engine-primitives = { workspace = true, features = ["std"] }
->>>>>>> v1.11.3
 reth-errors.workspace = true
 reth-execution-types.workspace = true
 reth-evm = { workspace = true, features = ["metrics"] }
 reth-network-p2p.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
-<<<<<<< HEAD
-reth-primitives-traits.workspace = true
-reth-ethereum-primitives.workspace = true
-reth-provider.workspace = true
-reth-prune.workspace = true
-reth-revm.workspace = true
-=======
 reth-primitives-traits = { workspace = true, features = ["rayon", "dashmap"] }
 reth-ethereum-primitives.workspace = true
 reth-provider.workspace = true
 reth-prune.workspace = true
 reth-revm = { workspace = true, features = ["optional-balance-check"] }
->>>>>>> v1.11.3
 reth-stages-api.workspace = true
 reth-storage-errors.workspace = true
 reth-tasks.workspace = true
-<<<<<<< HEAD
 reth-trie-db.workspace = true
 reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
@@ -55,22 +38,13 @@ reth-pipe-exec-layer-event-bus.workspace = true
 gravity-primitives.workspace = true
 reth-trie-sparse-parallel = { workspace = true, features = ["std"] }
 reth-trie.workspace = true
-=======
-reth-trie-parallel.workspace = true
-reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
-reth-trie.workspace = true
 reth-trie-common.workspace = true
-reth-trie-db.workspace = true
->>>>>>> v1.11.3
 
 # alloy
 alloy-evm.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
-<<<<<<< HEAD
-=======
 alloy-eip7928.workspace = true
->>>>>>> v1.11.3
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-engine.workspace = true
@@ -82,12 +56,8 @@ revm-primitives.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros"] }
-<<<<<<< HEAD
-mini-moka = { workspace = true, features = ["sync"] }
-=======
 fixed-cache.workspace = true
 moka = { workspace = true, features = ["sync"] }
->>>>>>> v1.11.3
 smallvec.workspace = true
 
 # metrics
@@ -100,10 +70,7 @@ rayon.workspace = true
 tracing.workspace = true
 derive_more.workspace = true
 parking_lot.workspace = true
-<<<<<<< HEAD
-=======
 crossbeam-channel.workspace = true
->>>>>>> v1.11.3
 
 # optional deps for test-utils
 reth-prune-types = { workspace = true, optional = true }
@@ -131,11 +98,7 @@ reth-tracing.workspace = true
 reth-node-ethereum.workspace = true
 reth-e2e-test-utils.workspace = true
 
-<<<<<<< HEAD
-# alloy
-=======
 # revm
->>>>>>> v1.11.3
 revm-state.workspace = true
 
 assert_matches.workspace = true
@@ -175,30 +138,16 @@ test-utils = [
     "reth-static-file",
     "reth-tracing",
     "reth-trie/test-utils",
-<<<<<<< HEAD
-    "reth-trie-sparse/test-utils",
-    "reth-prune-types?/test-utils",
-    "reth-trie-db/test-utils",
-=======
     "reth-trie-common/test-utils",
     "reth-trie-db/test-utils",
     "reth-trie-sparse/test-utils",
-    "reth-prune-types?/test-utils",
->>>>>>> v1.11.3
     "reth-trie-parallel/test-utils",
     "reth-ethereum-primitives/test-utils",
     "reth-node-ethereum/test-utils",
     "reth-evm-ethereum/test-utils",
-<<<<<<< HEAD
-]
-failpoints = ["fail/failpoints", "reth-db/failpoints"]
-
-[dependencies.fail]
-version = "0.5"
-optional = true
-=======
     "reth-tasks/test-utils",
 ]
+failpoints = ["fail/failpoints", "reth-db/failpoints", "rocksdb", "edge", "reth-tasks/test-utils", "test-utils"]
 rocksdb = [
     "reth-provider/rocksdb",
     "reth-prune/rocksdb",
@@ -206,7 +155,10 @@ rocksdb = [
     "reth-e2e-test-utils/rocksdb",
 ]
 edge = ["rocksdb"]
->>>>>>> v1.11.3
+
+[dependencies.fail]
+version = "0.5"
+optional = true
 
 [[test]]
 name = "e2e_testsuite"

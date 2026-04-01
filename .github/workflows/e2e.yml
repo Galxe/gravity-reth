@@ -11,11 +11,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SEED: rustethereumethereumrust
-<<<<<<< HEAD
   CARGO_INCREMENTAL: 0
-=======
   RUSTC_WRAPPER: "sccache"
->>>>>>> v1.11.3
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -24,33 +21,14 @@ concurrency:
 jobs:
   test:
     name: e2e-testsuite
-<<<<<<< HEAD
     runs-on: ubuntu-latest
-=======
-    runs-on: depot-ubuntu-latest-4
->>>>>>> v1.11.3
     env:
       RUST_BACKTRACE: 1
     timeout-minutes: 90
     steps:
-<<<<<<< HEAD
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: true
-      - uses: actions/checkout
-      - uses: dtolnay/rust-toolchain@stable
-=======
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
->>>>>>> v1.11.3
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
         with:
@@ -58,26 +36,18 @@ jobs:
       - name: Run e2e tests
         run: |
           cargo nextest run \
-<<<<<<< HEAD
-=======
             --no-fail-fast \
->>>>>>> v1.11.3
             --locked --features "asm-keccak" \
             --workspace \
             --exclude 'example-*' \
             --exclude 'exex-subscription' \
             --exclude 'reth-bench' \
             --exclude 'ef-tests' \
-<<<<<<< HEAD
             --exclude "op-reth" \
             --exclude "reth-op" \
             --exclude "reth-optimism-*" \
             --exclude 'reth' \
             --exclude 'reth-pipe-exec-layer-*' \
-            -E 'binary(e2e_testsuite)'
-
-=======
-            --exclude 'reth' \
             -E 'binary(e2e_testsuite)'
 
   rocksdb:
@@ -101,4 +71,3 @@ jobs:
             --locked --features "edge" \
             -p reth-e2e-test-utils \
             -E 'binary(rocksdb)'
->>>>>>> v1.11.3

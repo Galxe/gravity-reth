@@ -1,32 +1,19 @@
 use crate::{
-<<<<<<< HEAD
-    providers::state::macros::delegate_provider_impls, AccountReader, BlockHashReader,
-    HashedPostStateProvider, StateProvider, StateRootProvider,
-=======
     AccountReader, BlockHashReader, HashedPostStateProvider, StateProvider, StateRootProvider,
->>>>>>> v1.11.3
 };
 use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx};
 use reth_primitives_traits::{Account, Bytecode};
-<<<<<<< HEAD
-use reth_storage_api::{BytecodeReader, DBProvider, StateProofProvider, StorageRootProvider};
-=======
 use reth_storage_api::{
     BytecodeReader, DBProvider, StateProofProvider, StorageRootProvider, StorageSettingsCache,
 };
->>>>>>> v1.11.3
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_trie::{
     proof::{Proof, StorageProof},
     updates::TrieUpdates,
     witness::TrieWitness,
     AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher, MultiProof, MultiProofTargets,
-<<<<<<< HEAD
-    StateRoot, StorageMultiProof, StorageRoot, TrieInput,
-=======
     StateRoot, StorageMultiProof, StorageRoot, TrieInput, TrieInputSorted,
->>>>>>> v1.11.3
 };
 use reth_trie_db::{
     DatabaseProof, DatabaseStateRoot, DatabaseStorageProof, DatabaseStorageRoot,
@@ -47,15 +34,6 @@ impl<'b, Provider: DBProvider> LatestStateProviderRef<'b, Provider> {
 
     fn tx(&self) -> &Provider::Tx {
         self.0.tx_ref()
-<<<<<<< HEAD
-    }
-}
-
-impl<Provider: DBProvider> AccountReader for LatestStateProviderRef<'_, Provider> {
-    /// Get basic account information.
-    fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
-        self.tx().get_by_encoded_key::<tables::PlainAccountState>(address).map_err(Into::into)
-=======
     }
 
     fn hashed_storage_lookup(
@@ -84,7 +62,6 @@ impl<Provider: DBProvider + StorageSettingsCache> AccountReader
         } else {
             self.tx().get_by_encoded_key::<tables::PlainAccountState>(address).map_err(Into::into)
         }
->>>>>>> v1.11.3
     }
 }
 
@@ -103,17 +80,6 @@ impl<Provider: BlockHashReader> BlockHashReader for LatestStateProviderRef<'_, P
     }
 }
 
-<<<<<<< HEAD
-impl<Provider: DBProvider + Sync> StateRootProvider for LatestStateProviderRef<'_, Provider> {
-    fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
-        StateRoot::overlay_root(self.tx(), hashed_state)
-            .map_err(|err| ProviderError::Database(err.into()))
-    }
-
-    fn state_root_from_nodes(&self, input: TrieInput) -> ProviderResult<B256> {
-        StateRoot::overlay_root_from_nodes(self.tx(), input)
-            .map_err(|err| ProviderError::Database(err.into()))
-=======
 impl<Provider: DBProvider> StateRootProvider for LatestStateProviderRef<'_, Provider> {
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
         Ok(StateRoot::overlay_root(self.tx(), &hashed_state.into_sorted())?)
@@ -121,33 +87,19 @@ impl<Provider: DBProvider> StateRootProvider for LatestStateProviderRef<'_, Prov
 
     fn state_root_from_nodes(&self, input: TrieInput) -> ProviderResult<B256> {
         Ok(StateRoot::overlay_root_from_nodes(self.tx(), TrieInputSorted::from_unsorted(input))?)
->>>>>>> v1.11.3
     }
 
     fn state_root_with_updates(
         &self,
         hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-<<<<<<< HEAD
-        StateRoot::overlay_root_with_updates(self.tx(), hashed_state)
-            .map_err(|err| ProviderError::Database(err.into()))
-=======
         Ok(StateRoot::overlay_root_with_updates(self.tx(), &hashed_state.into_sorted())?)
->>>>>>> v1.11.3
     }
 
     fn state_root_from_nodes_with_updates(
         &self,
         input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-<<<<<<< HEAD
-        StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
-            .map_err(|err| ProviderError::Database(err.into()))
-    }
-}
-
-impl<Provider: DBProvider + Sync> StorageRootProvider for LatestStateProviderRef<'_, Provider> {
-=======
         Ok(StateRoot::overlay_root_from_nodes_with_updates(
             self.tx(),
             TrieInputSorted::from_unsorted(input),
@@ -156,7 +108,6 @@ impl<Provider: DBProvider + Sync> StorageRootProvider for LatestStateProviderRef
 }
 
 impl<Provider: DBProvider> StorageRootProvider for LatestStateProviderRef<'_, Provider> {
->>>>>>> v1.11.3
     fn storage_root(
         &self,
         address: Address,
@@ -187,23 +138,15 @@ impl<Provider: DBProvider> StorageRootProvider for LatestStateProviderRef<'_, Pr
     }
 }
 
-<<<<<<< HEAD
-impl<Provider: DBProvider + Sync> StateProofProvider for LatestStateProviderRef<'_, Provider> {
-=======
 impl<Provider: DBProvider> StateProofProvider for LatestStateProviderRef<'_, Provider> {
->>>>>>> v1.11.3
     fn proof(
         &self,
         input: TrieInput,
         address: Address,
         slots: &[B256],
     ) -> ProviderResult<AccountProof> {
-<<<<<<< HEAD
-        Proof::overlay_account_proof(self.tx(), input, address, slots).map_err(ProviderError::from)
-=======
         let proof = <Proof<_, _> as DatabaseProof>::from_tx(self.tx());
         proof.overlay_account_proof(input, address, slots).map_err(ProviderError::from)
->>>>>>> v1.11.3
     }
 
     fn multiproof(
@@ -211,12 +154,8 @@ impl<Provider: DBProvider> StateProofProvider for LatestStateProviderRef<'_, Pro
         input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
-<<<<<<< HEAD
-        Proof::overlay_multiproof(self.tx(), input, targets).map_err(ProviderError::from)
-=======
         let proof = <Proof<_, _> as DatabaseProof>::from_tx(self.tx());
         proof.overlay_multiproof(input, targets).map_err(ProviderError::from)
->>>>>>> v1.11.3
     }
 
     fn witness(&self, input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
@@ -226,39 +165,21 @@ impl<Provider: DBProvider> StateProofProvider for LatestStateProviderRef<'_, Pro
     }
 }
 
-<<<<<<< HEAD
-impl<Provider: DBProvider + Sync> HashedPostStateProvider for LatestStateProviderRef<'_, Provider> {
-=======
 impl<Provider: DBProvider> HashedPostStateProvider for LatestStateProviderRef<'_, Provider> {
->>>>>>> v1.11.3
     fn hashed_post_state(&self, bundle_state: &revm_database::BundleState) -> HashedPostState {
         HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
     }
 }
 
-<<<<<<< HEAD
-impl<Provider: DBProvider + BlockHashReader> StateProvider
-    for LatestStateProviderRef<'_, Provider>
-{
-    /// Get storage.
-=======
 impl<Provider: DBProvider + BlockHashReader + StorageSettingsCache> StateProvider
     for LatestStateProviderRef<'_, Provider>
 {
     /// Get storage by plain (unhashed) storage key slot.
->>>>>>> v1.11.3
     fn storage(
         &self,
         account: Address,
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
-<<<<<<< HEAD
-        let mut cursor = self.tx().cursor_dup_read::<tables::PlainStorageState>()?;
-        if let Some(entry) = cursor.seek_by_key_subkey(account, storage_key)? &&
-            entry.key == storage_key
-        {
-            return Ok(Some(entry.value))
-=======
         if self.0.cached_storage_settings().use_hashed_state() {
             self.hashed_storage_lookup(
                 alloy_primitives::keccak256(account),
@@ -272,13 +193,10 @@ impl<Provider: DBProvider + BlockHashReader + StorageSettingsCache> StateProvide
                 return Ok(Some(entry.value));
             }
             Ok(None)
->>>>>>> v1.11.3
         }
     }
 }
 
-<<<<<<< HEAD
-=======
     fn storage_by_hashed_key(
         &self,
         address: Address,
@@ -292,7 +210,6 @@ impl<Provider: DBProvider + BlockHashReader + StorageSettingsCache> StateProvide
     }
 }
 
->>>>>>> v1.11.3
 impl<Provider: DBProvider + BlockHashReader> BytecodeReader
     for LatestStateProviderRef<'_, Provider>
 {
@@ -320,11 +237,7 @@ impl<Provider: DBProvider> LatestStateProvider<Provider> {
 }
 
 // Delegates all provider impls to [LatestStateProviderRef]
-<<<<<<< HEAD
-delegate_provider_impls!(LatestStateProvider<Provider> where [Provider: DBProvider + BlockHashReader ]);
-=======
 reth_storage_api::macros::delegate_provider_impls!(LatestStateProvider<Provider> where [Provider: DBProvider + BlockHashReader + StorageSettingsCache]);
->>>>>>> v1.11.3
 
 #[cfg(test)]
 mod tests {
@@ -342,13 +255,9 @@ mod tests {
 
     const fn assert_state_provider<T: StateProvider>() {}
     #[expect(dead_code)]
-<<<<<<< HEAD
-    const fn assert_latest_state_provider<T: DBProvider + BlockHashReader>() {
-=======
     const fn assert_latest_state_provider<
         T: DBProvider + BlockHashReader + StorageSettingsCache,
     >() {
->>>>>>> v1.11.3
         assert_state_provider::<LatestStateProvider<T>>();
     }
 

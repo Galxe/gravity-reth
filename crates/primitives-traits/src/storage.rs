@@ -1,9 +1,6 @@
-<<<<<<< HEAD
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{keccak256, B256, U256};
 
 use crate::SubkeyContainedValue;
-=======
-use alloy_primitives::{keccak256, B256, U256};
 
 /// Trait for `DupSort` table values that contain a subkey.
 ///
@@ -127,7 +124,6 @@ impl From<StorageSlotKey> for B256 {
         key.as_b256()
     }
 }
->>>>>>> v1.11.3
 
 /// Account storage entry.
 ///

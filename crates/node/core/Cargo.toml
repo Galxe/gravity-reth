@@ -16,11 +16,7 @@ reth-chainspec.workspace = true
 reth-consensus.workspace = true
 reth-primitives-traits = { workspace = true, features = ["rayon"] }
 reth-cli-util.workspace = true
-<<<<<<< HEAD
 reth-db = { workspace = true }
-=======
-reth-db = { workspace = true, features = ["mdbx"] }
->>>>>>> v1.11.3
 reth-storage-errors.workspace = true
 reth-storage-api = { workspace = true, features = ["std", "db-api"] }
 reth-network = { workspace = true, features = ["serde"] }
@@ -41,10 +37,7 @@ reth-stages-types.workspace = true
 reth-ethereum-forks.workspace = true
 reth-engine-local.workspace = true
 reth-engine-primitives.workspace = true
-<<<<<<< HEAD
 gravity-primitives.workspace = true
-=======
->>>>>>> v1.11.3
 
 # ethereum
 alloy-primitives.workspace = true
@@ -63,11 +56,7 @@ serde.workspace = true
 strum = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 url.workspace = true
-<<<<<<< HEAD
-
-=======
 ipnet.workspace = true
->>>>>>> v1.11.3
 # io
 dirs-next.workspace = true
 shellexpand.workspace = true
@@ -91,8 +80,6 @@ tokio.workspace = true
 # Features for vergen to generate correct env vars
 jemalloc = ["reth-cli-util/jemalloc"]
 asm-keccak = ["alloy-primitives/asm-keccak"]
-<<<<<<< HEAD
-=======
 keccak-cache-global = ["alloy-primitives/keccak-cache-global"]
 otlp = ["reth-tracing/otlp", "reth-tracing-otlp/otlp"]
 otlp-logs = ["reth-tracing/otlp-logs", "reth-tracing-otlp/otlp-logs"]
@@ -109,7 +96,6 @@ rocksdb = ["reth-storage-api/rocksdb"]
 
 # Marker feature for edge/unstable builds - enables rocksdb and sets v2 defaults
 edge = ["rocksdb"]
->>>>>>> v1.11.3
 
 [build-dependencies]
 vergen = { workspace = true, features = ["build", "cargo", "emit_and_set"] }

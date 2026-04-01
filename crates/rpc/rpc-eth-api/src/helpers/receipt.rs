@@ -2,36 +2,6 @@
 //! loads receipt data w.r.t. network.
 
 use crate::{EthApiTypes, RpcNodeCoreExt, RpcReceipt};
-<<<<<<< HEAD
-use alloy_consensus::{
-    transaction::{Recovered, TransactionMeta},
-    TxReceipt,
-};
-use alloy_primitives::Address;
-use futures::Future;
-use reth_primitives_traits::SignerRecoverable;
-use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcConvert};
-use reth_rpc_eth_types::{error::FromEthApiError, EthApiError};
-use reth_storage_api::{ProviderReceipt, ProviderTx};
-
-/// Calculates the gas used and next log index for a transaction at the given index
-pub fn calculate_gas_used_and_next_log_index(
-    tx_index: u64,
-    all_receipts: &[impl TxReceipt],
-) -> (u64, usize) {
-    let mut gas_used = 0;
-    let mut next_log_index = 0;
-
-    if tx_index > 0 {
-        for receipt in all_receipts.iter().take(tx_index as usize) {
-            gas_used = receipt.cumulative_gas_used();
-            next_log_index += receipt.logs().len();
-        }
-    }
-
-    (gas_used, next_log_index)
-}
-=======
 use alloy_consensus::{transaction::TransactionMeta, TxReceipt};
 use futures::Future;
 use reth_primitives_traits::SignerRecoverable;
@@ -40,26 +10,12 @@ use reth_rpc_eth_types::{
     error::FromEthApiError, utils::calculate_gas_used_and_next_log_index, EthApiError,
 };
 use reth_storage_api::{ProviderReceipt, ProviderTx};
->>>>>>> v1.11.3
 
 /// Assembles transaction receipt data w.r.t to network.
 ///
 /// Behaviour shared by several `eth_` RPC methods, not exclusive to `eth_` receipts RPC methods.
 pub trait LoadReceipt:
-<<<<<<< HEAD
-    EthApiTypes<
-        RpcConvert: RpcConvert<
-            Primitives = Self::Primitives,
-            Error = Self::Error,
-            Network = Self::NetworkTypes,
-        >,
-        Error: FromEthApiError,
-    > + RpcNodeCoreExt
-    + Send
-    + Sync
-=======
     EthApiTypes<RpcConvert: RpcConvert<Primitives = Self::Primitives>> + RpcNodeCoreExt + Send + Sync
->>>>>>> v1.11.3
 {
     /// Helper method for `eth_getBlockReceipts` and `eth_getTransactionReceipt`.
     fn build_transaction_receipt(
@@ -82,20 +38,19 @@ pub trait LoadReceipt:
                 calculate_gas_used_and_next_log_index(meta.index, &all_receipts);
 
             Ok(self
-<<<<<<< HEAD
-                .tx_resp_builder()
-                .convert_receipts(vec![ConvertReceiptInput {
-                    tx: tx
-                        .try_to_recovered_ref_unchecked()
-                        .unwrap_or_else(|_| Recovered::new_unchecked(&tx, Address::ZERO)),
-=======
                 .converter()
                 .convert_receipts(vec![ConvertReceiptInput {
                     tx: tx
                         .try_into_recovered_unchecked()
-                        .map_err(Self::Error::from_eth_err)?
+                        // Gravity fallback: system transactions may have empty/invalid signatures,
+                        // use Address::ZERO (SYSTEM_CALLER) instead of erroring out.
+                        .unwrap_or_else(|tx| {
+                            reth_primitives_traits::Recovered::new_unchecked(
+                                tx,
+                                alloy_primitives::Address::ZERO,
+                            )
+                        })
                         .as_recovered_ref(),
->>>>>>> v1.11.3
                     gas_used: receipt.cumulative_gas_used() - gas_used,
                     receipt,
                     next_log_index,

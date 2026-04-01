@@ -10,7 +10,10 @@ use alloy_primitives::{
 };
 use alloy_trie::{nodes::TrieNode, EMPTY_ROOT_HASH};
 use nybbles::Nibbles;
-use reth_storage_errors::{db::DatabaseError, ProviderResult};
+/// Database error re-exported for the nested trie.
+pub type DatabaseError = alloc::boxed::Box<dyn core::error::Error + Send + Sync>;
+/// Result alias for provider operations in the nested trie.
+pub type ProviderResult<T> = Result<T, DatabaseError>;
 
 use crate::nested_trie::node::{Node, NodeFlag};
 

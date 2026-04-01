@@ -14,11 +14,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SEED: rustethereumethereumrust
-<<<<<<< HEAD
   CARGO_INCREMENTAL: 0
-=======
   RUSTC_WRAPPER: "sccache"
->>>>>>> v1.11.3
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -26,41 +23,18 @@ concurrency:
 
 jobs:
   test:
-<<<<<<< HEAD
     name: test / ${{ matrix.network }}
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-=======
-    name: test / ${{ matrix.network }} / ${{ matrix.storage }}
-    if: github.event_name != 'schedule'
-    runs-on: depot-ubuntu-latest-4
->>>>>>> v1.11.3
     env:
       RUST_BACKTRACE: 1
       GRETH_DISABLE_PIPE_EXECUTION: 1
     strategy:
       matrix:
         network: ["ethereum"]
-<<<<<<< HEAD
-    timeout-minutes: 60
-    steps:
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: true
-      - uses: actions/checkout@v5
-=======
-        storage: ["stable", "edge"]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
->>>>>>> v1.11.3
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Geth
@@ -73,7 +47,6 @@ jobs:
       - name: Run tests
         run: |
           cargo nextest run \
-<<<<<<< HEAD
             --locked --features "asm-keccak ${{ matrix.network }} config-from-env" \
             --workspace --exclude ef-tests \
             --exclude "reth-pipe-exec-layer-*" \
@@ -92,16 +65,6 @@ jobs:
       RUST_MIN_STACK: 16777216
     timeout-minutes: 60
     steps:
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: true
       - uses: actions/checkout@v4
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
@@ -109,24 +72,13 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo test --package reth-pipe-exec-layer-ext-v2 --test gravity_pipe_test -- --exact test --show-output --nocapture
-=======
-            --no-fail-fast \
-            --locked --features "asm-keccak ${{ matrix.network }} ${{ matrix.storage == 'edge' && 'edge' || '' }}" \
-            --workspace --exclude ef-tests \
-            -E "kind(test) and not binary(e2e_testsuite)"
->>>>>>> v1.11.3
 
   integration-success:
     name: integration success
     runs-on: ubuntu-latest
     if: always() && github.event_name != 'schedule'
-<<<<<<< HEAD
     needs: [test, gravity-pipe-test]
     timeout-minutes: 60
-=======
-    needs: [test]
-    timeout-minutes: 30
->>>>>>> v1.11.3
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@release/v1
@@ -135,31 +87,16 @@ jobs:
 
   era-files:
     name: era1 file integration tests once a day
-<<<<<<< HEAD
     # if: github.event_name == 'schedule'
     if: false # FIXME: remove this line to enable the era1 file integration tests job after fixing the issues with the test suite.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@nextest
-=======
-    if: github.event_name == 'schedule' && github.repository == 'paradigmxyz/reth'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
-      - uses: mozilla-actions/sccache-action@v0.0.9
->>>>>>> v1.11.3
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - name: run era1 files integration tests
-<<<<<<< HEAD
         run: cargo nextest run --package reth-era --test it -- --ignored
-=======
-        run: cargo nextest run --no-fail-fast --release --package reth-era --test it -- --ignored
->>>>>>> v1.11.3

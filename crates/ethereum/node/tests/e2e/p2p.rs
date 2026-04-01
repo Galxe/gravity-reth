@@ -1,10 +1,4 @@
 use crate::utils::{advance_with_random_transactions, eth_payload_attributes};
-<<<<<<< HEAD
-use alloy_provider::{Provider, ProviderBuilder};
-use rand::{rngs::StdRng, Rng, SeedableRng};
-use reth_chainspec::{ChainSpecBuilder, MAINNET};
-use reth_e2e_test_utils::{setup, setup_engine, transaction::TransactionTestContext};
-=======
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::Encodable2718;
 use alloy_network::TxSignerSync;
@@ -16,7 +10,6 @@ use reth_e2e_test_utils::{
     setup, setup_engine, setup_engine_with_connection, transaction::TransactionTestContext,
     wallet::Wallet,
 };
->>>>>>> v1.11.3
 use reth_node_ethereum::EthereumNode;
 use reth_rpc_api::EthApiServer;
 use std::{sync::Arc, time::Duration};
@@ -81,11 +74,7 @@ async fn e2e_test_send_transactions() -> eyre::Result<()> {
             .build(),
     );
 
-<<<<<<< HEAD
-    let (mut nodes, _tasks, _) = setup_engine::<EthereumNode>(
-=======
     let (mut nodes, _) = setup_engine::<EthereumNode>(
->>>>>>> v1.11.3
         2,
         chain_spec.clone(),
         false,
@@ -111,10 +100,7 @@ async fn e2e_test_send_transactions() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-<<<<<<< HEAD
 #[ignore = "todo fix: How to reorg"]
-=======
->>>>>>> v1.11.3
 async fn test_long_reorg() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -131,11 +117,7 @@ async fn test_long_reorg() -> eyre::Result<()> {
             .build(),
     );
 
-<<<<<<< HEAD
-    let (mut nodes, _tasks, _) = setup_engine::<EthereumNode>(
-=======
     let (mut nodes, _) = setup_engine::<EthereumNode>(
->>>>>>> v1.11.3
         2,
         chain_spec.clone(),
         false,
@@ -175,10 +157,7 @@ async fn test_long_reorg() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-<<<<<<< HEAD
 #[ignore = "todo fix: How to reorg"]
-=======
->>>>>>> v1.11.3
 async fn test_reorg_through_backfill() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -195,11 +174,7 @@ async fn test_reorg_through_backfill() -> eyre::Result<()> {
             .build(),
     );
 
-<<<<<<< HEAD
-    let (mut nodes, _tasks, _) = setup_engine::<EthereumNode>(
-=======
     let (mut nodes, _) = setup_engine::<EthereumNode>(
->>>>>>> v1.11.3
         2,
         chain_spec.clone(),
         false,
@@ -230,8 +205,6 @@ async fn test_reorg_through_backfill() -> eyre::Result<()> {
 
     Ok(())
 }
-<<<<<<< HEAD
-=======
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tx_propagation() -> eyre::Result<()> {
@@ -323,4 +296,3 @@ async fn test_tx_propagation() -> eyre::Result<()> {
 
     Ok(())
 }
->>>>>>> v1.11.3

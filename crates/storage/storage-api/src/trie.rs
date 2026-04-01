@@ -3,15 +3,10 @@ use alloy_primitives::{Address, Bytes, B256};
 #[cfg(feature = "db-api")]
 use reth_db_api::DatabaseError;
 use reth_storage_errors::provider::ProviderResult;
-<<<<<<< HEAD
 #[cfg(feature = "db-api")]
 use reth_trie_common::updates::TrieUpdatesV2;
 use reth_trie_common::{
-    updates::{StorageTrieUpdates, TrieUpdates},
-=======
-use reth_trie_common::{
     updates::{StorageTrieUpdatesSorted, TrieUpdates, TrieUpdatesSorted},
->>>>>>> v1.11.3
     AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
     StorageProof, TrieInput,
 };
@@ -99,35 +94,6 @@ pub trait StateProofProvider {
 }
 
 /// Trie Writer
-<<<<<<< HEAD
-#[auto_impl::auto_impl(&, Arc, Box)]
-pub trait TrieWriter: Send + Sync {
-    /// Writes trie updates to the database.
-    ///
-    /// Returns the number of entries modified.
-    fn write_trie_updates(&self, trie_updates: &TrieUpdates) -> ProviderResult<usize>;
-}
-
-/// Storage Trie Writer
-#[auto_impl::auto_impl(&, Arc, Box)]
-pub trait StorageTrieWriter: Send + Sync {
-    /// Writes storage trie updates from the given storage trie map.
-    ///
-    /// First sorts the storage trie updates by the hashed address key, writing in sorted order.
-    ///
-    /// Returns the number of entries modified.
-    fn write_storage_trie_updates<'a>(
-        &self,
-        storage_tries: impl Iterator<Item = (&'a B256, &'a StorageTrieUpdates)>,
-    ) -> ProviderResult<usize>;
-}
-
-/// Trie writer for nested trie
-#[cfg(feature = "db-api")]
-pub trait TrieWriterV2 {
-    /// Write trie updates for nested trie
-    fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError>;
-=======
 #[auto_impl::auto_impl(&, Box)]
 pub trait TrieWriter: Send {
     /// Writes trie updates to the database.
@@ -155,5 +121,11 @@ pub trait StorageTrieWriter: Send {
         &self,
         storage_tries: impl Iterator<Item = (&'a B256, &'a StorageTrieUpdatesSorted)>,
     ) -> ProviderResult<usize>;
->>>>>>> v1.11.3
+}
+
+/// Trie writer for nested trie
+#[cfg(feature = "db-api")]
+pub trait TrieWriterV2 {
+    /// Write trie updates for nested trie
+    fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError>;
 }

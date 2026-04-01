@@ -6,22 +6,12 @@
 use alloy_eips::eip4895::Withdrawal;
 use alloy_evm::{
     block::{BlockExecutorFactory, BlockExecutorFor, ExecutableTx},
-<<<<<<< HEAD
-    eth::{EthBlockExecutionCtx, EthBlockExecutor},
-    precompiles::PrecompilesMap,
-    revm::context::result::ResultAndState,
-    EthEvm, EthEvmFactory,
-};
-use alloy_sol_macro::sol;
-use alloy_sol_types::SolCall;
-=======
     eth::{EthBlockExecutionCtx, EthBlockExecutor, EthTxResult},
     precompiles::PrecompilesMap,
     revm::context::Block as _,
     EthEvm, EthEvmFactory,
 };
 use alloy_sol_types::{sol, SolCall};
->>>>>>> v1.11.3
 use reth_ethereum::{
     chainspec::ChainSpec,
     cli::interface::Cli,
@@ -48,11 +38,7 @@ use reth_ethereum::{
     primitives::{Header, SealedBlock, SealedHeader},
     provider::BlockExecutionResult,
     rpc::types::engine::ExecutionData,
-<<<<<<< HEAD
-    Block, EthPrimitives, Receipt, TransactionSigned,
-=======
     Block, EthPrimitives, Receipt, TransactionSigned, TxType,
->>>>>>> v1.11.3
 };
 use std::{fmt::Display, sync::Arc};
 
@@ -177,17 +163,6 @@ impl ConfigureEvm for CustomEvmConfig {
 }
 
 impl ConfigureEngineEvm<ExecutionData> for CustomEvmConfig {
-<<<<<<< HEAD
-    fn evm_env_for_payload(&self, payload: &ExecutionData) -> EvmEnvFor<Self> {
-        self.inner.evm_env_for_payload(payload)
-    }
-
-    fn context_for_payload<'a>(&self, payload: &'a ExecutionData) -> ExecutionCtxFor<'a, Self> {
-        self.inner.context_for_payload(payload)
-    }
-
-    fn tx_iterator_for_payload(&self, payload: &ExecutionData) -> impl ExecutableTxIterator<Self> {
-=======
     fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
         self.inner.evm_env_for_payload(payload)
     }
@@ -203,7 +178,6 @@ impl ConfigureEngineEvm<ExecutionData> for CustomEvmConfig {
         &self,
         payload: &ExecutionData,
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
->>>>>>> v1.11.3
         self.inner.tx_iterator_for_payload(payload)
     }
 }
@@ -221,30 +195,12 @@ where
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
     type Evm = E;
-<<<<<<< HEAD
-=======
     type Result = EthTxResult<E::HaltReason, TxType>;
->>>>>>> v1.11.3
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.inner.apply_pre_execution_changes()
     }
 
-<<<<<<< HEAD
-    fn execute_transaction_without_commit(
-        &mut self,
-        tx: impl ExecutableTx<Self>,
-    ) -> Result<ResultAndState<<Self::Evm as Evm>::HaltReason>, BlockExecutionError> {
-        self.inner.execute_transaction_without_commit(tx)
-    }
-
-    fn commit_transaction(
-        &mut self,
-        output: ResultAndState<<Self::Evm as Evm>::HaltReason>,
-        tx: impl ExecutableTx<Self>,
-    ) -> Result<u64, BlockExecutionError> {
-        self.inner.commit_transaction(output, tx)
-=======
     fn receipts(&self) -> &[Self::Receipt] {
         self.inner.receipts()
     }
@@ -258,7 +214,6 @@ where
 
     fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
         self.inner.commit_transaction(output)
->>>>>>> v1.11.3
     }
 
     fn finish(mut self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
@@ -316,11 +271,7 @@ pub fn apply_withdrawals_contract_call(
 
     // Clean-up post system tx context
     state.remove(&SYSTEM_ADDRESS);
-<<<<<<< HEAD
-    state.remove(&evm.block().beneficiary);
-=======
     state.remove(&evm.block().beneficiary());
->>>>>>> v1.11.3
 
     evm.db_mut().commit(state);
 

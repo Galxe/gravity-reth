@@ -18,11 +18,7 @@ reth-chainspec.workspace = true
 reth-config.workspace = true
 reth-consensus-debug-client.workspace = true
 reth-consensus.workspace = true
-<<<<<<< HEAD
 reth-db.workspace = true
-=======
-reth-db = { workspace = true, features = ["mdbx"] }
->>>>>>> v1.11.3
 reth-db-api.workspace = true
 reth-db-common.workspace = true
 reth-downloaders.workspace = true
@@ -59,10 +55,7 @@ reth-tasks = { workspace = true, features = ["rayon"] }
 reth-tokio-util.workspace = true
 reth-tracing.workspace = true
 reth-transaction-pool.workspace = true
-<<<<<<< HEAD
-=======
 reth-trie-db = { workspace = true, features = ["metrics"] }
->>>>>>> v1.11.3
 reth-basic-payload-builder.workspace = true
 reth-node-ethstats.workspace = true
 
@@ -85,10 +78,7 @@ secp256k1 = { workspace = true, features = ["global-context", "std", "recovery"]
 ## misc
 aquamarine.workspace = true
 eyre.workspace = true
-<<<<<<< HEAD
-=======
 parking_lot.workspace = true
->>>>>>> v1.11.3
 jsonrpsee.workspace = true
 fdlimit.workspace = true
 rayon.workspace = true
@@ -107,15 +97,11 @@ reth-evm-ethereum = { workspace = true, features = ["test-utils"] }
 
 [features]
 default = []
-<<<<<<< HEAD
-js-tracer = ["reth-rpc/js-tracer"]
-=======
 js-tracer = [
     "reth-rpc/js-tracer",
     "reth-node-ethereum/js-tracer",
     "reth-rpc-eth-types/js-tracer",
 ]
->>>>>>> v1.11.3
 test-utils = [
     "reth-db/test-utils",
     "reth-chain-state/test-utils",
@@ -131,17 +117,11 @@ test-utils = [
     "reth-db-api/test-utils",
     "reth-provider/test-utils",
     "reth-transaction-pool/test-utils",
-<<<<<<< HEAD
-    "reth-evm-ethereum/test-utils",
-    "reth-node-ethereum/test-utils",
-    "reth-primitives-traits/test-utils",
-=======
     "reth-trie-db/test-utils",
     "reth-evm-ethereum/test-utils",
     "reth-node-ethereum/test-utils",
     "reth-primitives-traits/test-utils",
     "reth-tasks/test-utils",
->>>>>>> v1.11.3
 ]
 op = [
     "reth-db/op",
@@ -150,11 +130,8 @@ op = [
     "reth-evm/op",
     "reth-primitives-traits/op",
 ]
-<<<<<<< HEAD
 failpoints = [
     "reth-engine-tree/failpoints",
     "reth-rpc/failpoints",
     "reth-db/failpoints",
 ]
-=======
->>>>>>> v1.11.3

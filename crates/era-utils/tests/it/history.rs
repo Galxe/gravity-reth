@@ -1,11 +1,7 @@
 use crate::{ClientWithFakeIndex, ITHACA_ERA_INDEX_URL};
 use reqwest::{Client, Url};
 use reth_db_common::init::init_genesis;
-<<<<<<< HEAD
-use reth_era::execution_types::MAX_BLOCKS_PER_ERA1;
-=======
 use reth_era::era1::types::execution::MAX_BLOCKS_PER_ERA1;
->>>>>>> v1.11.3
 use reth_era_downloader::{EraClient, EraStream, EraStreamConfig};
 use reth_era_utils::{export, import, ExportConfig};
 use reth_etl::Collector;
@@ -42,10 +38,6 @@ async fn test_history_imports_from_fresh_state_successfully() {
     let mut hash_collector = Collector::new(4096, folder);
 
     let expected_block_number = 8191;
-<<<<<<< HEAD
-    // should turn on proxy to visit `https://era.ithaca.xyz/era1/checksums.txt`
-=======
->>>>>>> v1.11.3
     let actual_block_number = import(stream, &pf, &mut hash_collector).unwrap();
 
     assert_eq!(actual_block_number, expected_block_number);

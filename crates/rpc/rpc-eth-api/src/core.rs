@@ -16,13 +16,9 @@ use alloy_rpc_types_eth::{
 };
 use alloy_serde::JsonStorageKey;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
-<<<<<<< HEAD
-use reth_rpc_convert::RpcTxReq;
-=======
 use reth_primitives_traits::TxTy;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_types::FillTransaction;
->>>>>>> v1.11.3
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use tracing::trace;
 
@@ -35,10 +31,7 @@ pub trait FullEthApiServer:
         RpcBlock<Self::NetworkTypes>,
         RpcReceipt<Self::NetworkTypes>,
         RpcHeader<Self::NetworkTypes>,
-<<<<<<< HEAD
-=======
         TxTy<Self::Primitives>,
->>>>>>> v1.11.3
     > + FullEthApi
     + Clone
 {
@@ -51,10 +44,7 @@ impl<T> FullEthApiServer for T where
             RpcBlock<T::NetworkTypes>,
             RpcReceipt<T::NetworkTypes>,
             RpcHeader<T::NetworkTypes>,
-<<<<<<< HEAD
-=======
             TxTy<T::Primitives>,
->>>>>>> v1.11.3
         > + FullEthApi
         + Clone
 {
@@ -63,9 +53,6 @@ impl<T> FullEthApiServer for T where
 /// Eth rpc interface: <https://ethereum.github.io/execution-apis/api-documentation>
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "eth"))]
 #[cfg_attr(feature = "client", rpc(server, client, namespace = "eth"))]
-<<<<<<< HEAD
-pub trait EthApi<TxReq: RpcObject, T: RpcObject, B: RpcObject, R: RpcObject, H: RpcObject> {
-=======
 pub trait EthApi<
     TxReq: RpcObject,
     T: RpcObject,
@@ -75,7 +62,6 @@ pub trait EthApi<
     RawTx: RpcObject,
 >
 {
->>>>>>> v1.11.3
     /// Returns the protocol version encoded as a string.
     #[method(name = "protocolVersion")]
     async fn protocol_version(&self) -> RpcResult<U64>;
@@ -408,8 +394,6 @@ pub trait EthApi<
         address: Address,
         block: BlockId,
     ) -> RpcResult<alloy_rpc_types_eth::AccountInfo>;
-<<<<<<< HEAD
-=======
 
     /// Returns the EIP-7928 block access list for a block by hash.
     #[method(name = "getBlockAccessListByBlockHash")]
@@ -421,7 +405,6 @@ pub trait EthApi<
         &self,
         number: BlockNumberOrTag,
     ) -> RpcResult<Option<Bytes>>;
->>>>>>> v1.11.3
 }
 
 #[async_trait::async_trait]
@@ -432,10 +415,7 @@ impl<T>
         RpcBlock<T::NetworkTypes>,
         RpcReceipt<T::NetworkTypes>,
         RpcHeader<T::NetworkTypes>,
-<<<<<<< HEAD
-=======
         TxTy<T::Primitives>,
->>>>>>> v1.11.3
     > for T
 where
     T: FullEthApi,
@@ -581,14 +561,9 @@ where
         trace!(target: "rpc::eth", ?hash, "Serving eth_getTransactionByHash");
         Ok(EthTransactions::transaction_by_hash(self, hash)
             .await?
-<<<<<<< HEAD
-            .map(|tx| tx.into_transaction(self.tx_resp_builder()))
-            .transpose()?)
-=======
             .map(|tx| tx.into_transaction(self.converter()))
             .transpose()
             .map_err(T::Error::from)?)
->>>>>>> v1.11.3
     }
 
     /// Handler for: `eth_getRawTransactionByBlockHashAndIndex`
@@ -917,8 +892,6 @@ where
         trace!(target: "rpc::eth", "Serving eth_getAccountInfo");
         Ok(EthState::get_account_info(self, address, block).await?)
     }
-<<<<<<< HEAD
-=======
 
     /// Handler for: `eth_getBlockAccessListByBlockHash`
     async fn block_access_list_by_block_hash(&self, hash: B256) -> RpcResult<Option<Bytes>> {
@@ -934,5 +907,4 @@ where
         trace!(target: "rpc::eth", ?number, "Serving eth_getBlockAccessListByBlockNumber");
         Err(internal_rpc_err("unimplemented"))
     }
->>>>>>> v1.11.3
 }

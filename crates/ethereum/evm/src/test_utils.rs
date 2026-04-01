@@ -1,10 +1,6 @@
 use crate::EthEvmConfig;
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-<<<<<<< HEAD
-use alloy_consensus::Header;
-=======
 use alloy_consensus::{Header, TxType};
->>>>>>> v1.11.3
 use alloy_eips::eip7685::Requests;
 use alloy_evm::precompiles::PrecompilesMap;
 use alloy_primitives::Bytes;
@@ -15,25 +11,15 @@ use reth_evm::{
     block::{
         BlockExecutionError, BlockExecutor, BlockExecutorFactory, BlockExecutorFor, ExecutableTx,
     },
-<<<<<<< HEAD
-    eth::{EthBlockExecutionCtx, EthEvmContext},
+    eth::{EthBlockExecutionCtx, EthEvmContext, EthTxResult},
     parallel_execute::ParallelExecutor,
     ConfigureEngineEvm, ConfigureEvm, Database, EthEvm, EthEvmFactory, Evm, EvmEnvFor, EvmFactory,
-    ExecutableTxIterator, ExecutionCtxFor, ParallelDatabase,
-=======
-    eth::{EthBlockExecutionCtx, EthEvmContext, EthTxResult},
-    ConfigureEngineEvm, ConfigureEvm, Database, EthEvm, EthEvmFactory, Evm, EvmEnvFor, EvmFactory,
-    ExecutableTxIterator, ExecutionCtxFor, RecoveredTx,
->>>>>>> v1.11.3
+    ExecutableTxIterator, ExecutionCtxFor, ParallelDatabase, RecoveredTx,
 };
 use reth_execution_types::{BlockExecutionResult, ExecutionOutcome};
 use reth_primitives_traits::{BlockTy, SealedBlock, SealedHeader};
 use revm::{
-<<<<<<< HEAD
-    context::result::{ExecutionResult, Output, ResultAndState, SuccessReason},
-=======
     context::result::{ExecutionResult, HaltReason, Output, ResultAndState, SuccessReason},
->>>>>>> v1.11.3
     database::State,
     Inspector,
 };
@@ -80,16 +66,12 @@ impl BlockExecutorFactory for MockEvmConfig {
         DB: Database + 'a,
         I: Inspector<<Self::EvmFactory as EvmFactory>::Context<&'a mut State<DB>>> + 'a,
     {
-<<<<<<< HEAD
-        MockExecutor { result: self.exec_results.lock().pop().unwrap(), evm, hook: None }
-=======
         MockExecutor {
             result: self.exec_results.lock().pop().unwrap(),
             evm,
             hook: None,
             receipts: Vec::new(),
         }
->>>>>>> v1.11.3
     }
 }
 
@@ -100,10 +82,7 @@ pub struct MockExecutor<'a, DB: Database, I> {
     evm: EthEvm<&'a mut State<DB>, I, PrecompilesMap>,
     #[debug(skip)]
     hook: Option<Box<dyn reth_evm::OnStateHook>>,
-<<<<<<< HEAD
-=======
     receipts: Vec<Receipt>,
->>>>>>> v1.11.3
 }
 
 impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExecutor
@@ -112,39 +91,12 @@ impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExec
     type Evm = EthEvm<&'a mut State<DB>, I, PrecompilesMap>;
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
-<<<<<<< HEAD
-=======
     type Result = EthTxResult<HaltReason, TxType>;
->>>>>>> v1.11.3
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         Ok(())
     }
 
-<<<<<<< HEAD
-    fn execute_transaction_without_commit(
-        &mut self,
-        _tx: impl ExecutableTx<Self>,
-    ) -> Result<ResultAndState<<Self::Evm as Evm>::HaltReason>, BlockExecutionError> {
-        Ok(ResultAndState::new(
-            ExecutionResult::Success {
-                reason: SuccessReason::Return,
-                gas_used: 0,
-                gas_refunded: 0,
-                logs: vec![],
-                output: Output::Call(Bytes::from(vec![])),
-            },
-            Default::default(),
-            0,
-        ))
-    }
-
-    fn commit_transaction(
-        &mut self,
-        _output: ResultAndState<<Self::Evm as Evm>::HaltReason>,
-        _tx: impl ExecutableTx<Self>,
-    ) -> Result<u64, BlockExecutionError> {
-=======
     fn receipts(&self) -> &[Self::Receipt] {
         &self.receipts
     }
@@ -170,7 +122,6 @@ impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExec
     }
 
     fn commit_transaction(&mut self, _output: Self::Result) -> Result<u64, BlockExecutionError> {
->>>>>>> v1.11.3
         Ok(0)
     }
 
@@ -186,10 +137,7 @@ impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExec
                 reqs
             }),
             gas_used: 0,
-<<<<<<< HEAD
-=======
             blob_gas_used: 0,
->>>>>>> v1.11.3
         };
 
         evm.db_mut().bundle_state = bundle;
@@ -251,7 +199,6 @@ impl ConfigureEvm for MockEvmConfig {
     ) -> Result<reth_evm::ExecutionCtxFor<'_, Self>, Self::Error> {
         self.inner.context_for_next_block(parent, attributes)
     }
-<<<<<<< HEAD
 
     fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
         &self,
@@ -260,19 +207,6 @@ impl ConfigureEvm for MockEvmConfig {
     {
         self.inner.parallel_executor(db)
     }
-}
-
-impl ConfigureEngineEvm<ExecutionData> for MockEvmConfig {
-    fn evm_env_for_payload(&self, payload: &ExecutionData) -> EvmEnvFor<Self> {
-        self.inner.evm_env_for_payload(payload)
-    }
-
-    fn context_for_payload<'a>(&self, payload: &'a ExecutionData) -> ExecutionCtxFor<'a, Self> {
-        self.inner.context_for_payload(payload)
-    }
-
-    fn tx_iterator_for_payload(&self, payload: &ExecutionData) -> impl ExecutableTxIterator<Self> {
-=======
 }
 
 impl ConfigureEngineEvm<ExecutionData> for MockEvmConfig {
@@ -291,7 +225,6 @@ impl ConfigureEngineEvm<ExecutionData> for MockEvmConfig {
         &self,
         payload: &ExecutionData,
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
->>>>>>> v1.11.3
         self.inner.tx_iterator_for_payload(payload)
     }
 }

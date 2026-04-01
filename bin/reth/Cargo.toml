@@ -31,11 +31,7 @@ workspace = true
 reth-ethereum-cli.workspace = true
 reth-chainspec.workspace = true
 reth-primitives.workspace = true
-<<<<<<< HEAD
-reth-db = { workspace = true }
-=======
 reth-db = { workspace = true, features = ["mdbx"] }
->>>>>>> v1.11.3
 reth-provider.workspace = true
 reth-revm.workspace = true
 reth-transaction-pool.workspace = true
@@ -61,23 +57,15 @@ reth-node-ethereum = { workspace = true, features = ["js-tracer"] }
 reth-node-builder.workspace = true
 reth-node-metrics.workspace = true
 reth-consensus.workspace = true
-<<<<<<< HEAD
 reth-tokio-util.workspace = true
-reth-ress-protocol.workspace = true
-reth-ress-provider.workspace = true
-
-# alloy
-=======
 
 # alloy
 alloy-primitives.workspace = true
->>>>>>> v1.11.3
 alloy-rpc-types = { workspace = true, features = ["engine"] }
 
 # tracing
 tracing.workspace = true
 
-<<<<<<< HEAD
 # async
 tokio = { workspace = true, features = ["sync", "macros", "time", "rt-multi-thread"] }
 
@@ -87,36 +75,16 @@ clap = { workspace = true, features = ["derive", "env"] }
 eyre.workspace = true
 
 [dev-dependencies]
-backon.workspace = true
-=======
-# misc
-aquamarine.workspace = true
-clap = { workspace = true, features = ["derive", "env"] }
-
-[dev-dependencies]
 alloy-node-bindings = "1.6.3"
 alloy-provider = { workspace = true, features = ["reqwest"] }
 alloy-rpc-types-eth.workspace = true
 backon.workspace = true
 serde_json.workspace = true
->>>>>>> v1.11.3
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml.workspace = true
 
 [features]
-<<<<<<< HEAD
-default = ["jemalloc", "reth-revm/portable"]
-
-dev = ["reth-ethereum-cli/dev"]
-
-asm-keccak = [
-    "reth-node-core/asm-keccak",
-    "reth-primitives/asm-keccak",
-    "reth-ethereum-cli/asm-keccak",
-    "reth-node-ethereum/asm-keccak",
-]
-=======
 default = [
     "jemalloc",
     "otlp",
@@ -145,7 +113,6 @@ js-tracer = [
 ]
 
 dev = ["reth-ethereum-cli/dev"]
->>>>>>> v1.11.3
 
 asm-keccak = [
     "reth-node-core/asm-keccak",
@@ -169,8 +136,6 @@ jemalloc-prof = [
     "reth-cli-util/jemalloc",
     "reth-cli-util/jemalloc-prof",
     "reth-ethereum-cli/jemalloc-prof",
-<<<<<<< HEAD
-=======
     "reth-node-metrics/jemalloc-prof",
 ]
 jemalloc-symbols = [
@@ -182,19 +147,15 @@ jemalloc-unprefixed = [
     "reth-node-core/jemalloc",
     "reth-node-metrics/jemalloc",
     "reth-ethereum-cli/jemalloc",
->>>>>>> v1.11.3
 ]
 tracy-allocator = [
     "reth-cli-util/tracy-allocator",
     "reth-ethereum-cli/tracy-allocator",
-<<<<<<< HEAD
-=======
     "tracy",
 ]
 tracy = [
     "reth-ethereum-cli/tracy",
     "reth-node-core/tracy",
->>>>>>> v1.11.3
 ]
 
 # Because jemalloc is default and preferred over snmalloc when both features are
@@ -208,8 +169,6 @@ snmalloc-native = [
     "reth-cli-util/snmalloc-native",
     "reth-ethereum-cli/snmalloc-native",
 ]
-<<<<<<< HEAD
-=======
 
 min-error-logs = [
     "tracing/release_max_level_error",
@@ -239,28 +198,6 @@ min-trace-logs = [
 
 rocksdb = ["reth-ethereum-cli/rocksdb", "reth-node-core/rocksdb"]
 edge = ["rocksdb"]
->>>>>>> v1.11.3
-
-min-error-logs = [
-    "tracing/release_max_level_error",
-    "reth-ethereum-cli/min-error-logs",
-]
-min-warn-logs = [
-    "tracing/release_max_level_warn",
-    "reth-ethereum-cli/min-warn-logs",
-]
-min-info-logs = [
-    "tracing/release_max_level_info",
-    "reth-ethereum-cli/min-info-logs",
-]
-min-debug-logs = [
-    "tracing/release_max_level_debug",
-    "reth-ethereum-cli/min-debug-logs",
-]
-min-trace-logs = [
-    "tracing/release_max_level_trace",
-    "reth-ethereum-cli/min-trace-logs",
-]
 
 failpoints = ["reth-node-ethereum/failpoints"]
 [[bin]]

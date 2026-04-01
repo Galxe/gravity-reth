@@ -178,23 +178,10 @@ fn append<T>(db: DatabaseEnv, input: Vec<(<T as Table>::Key, <T as Table>::Value
 where
     T: Table,
 {
-<<<<<<< HEAD
-    {
-        let tx = db.tx_mut().expect("tx");
-        let mut crsr = tx.cursor_write::<T>().expect("cursor");
-        black_box({
-            for (k, v) in input {
-                crsr.append(k, &v).expect("submit");
-            }
-
-            tx.inner.commit().unwrap()
-        });
-=======
     let tx = db.tx_mut().expect("tx");
     let mut crsr = tx.cursor_write::<T>().expect("cursor");
     for (k, v) in input {
         crsr.append(k, &v).expect("submit");
->>>>>>> v1.11.3
     }
     drop(crsr);
     tx.commit().unwrap();
@@ -205,23 +192,10 @@ fn insert<T>(db: DatabaseEnv, input: Vec<(<T as Table>::Key, <T as Table>::Value
 where
     T: Table,
 {
-<<<<<<< HEAD
-    {
-        let tx = db.tx_mut().expect("tx");
-        let mut crsr = tx.cursor_write::<T>().expect("cursor");
-        black_box({
-            for (k, v) in input {
-                crsr.insert(k, &v).expect("submit");
-            }
-
-            tx.inner.commit().unwrap()
-        });
-=======
     let tx = db.tx_mut().expect("tx");
     let mut crsr = tx.cursor_write::<T>().expect("cursor");
     for (k, v) in input {
         crsr.insert(k, &v).expect("submit");
->>>>>>> v1.11.3
     }
     drop(crsr);
     tx.commit().unwrap();
@@ -256,20 +230,12 @@ where
     T: Table,
 {
     db.view(|tx| {
-<<<<<<< HEAD
-        let table_db = tx.open_db(Some(T::NAME)).map_err(|_| "Could not open db.").unwrap();
-
-        println!(
-            "{:?}\n",
-            tx.db_stat(&table_db)
-=======
         let table_db = tx.inner().open_db(Some(T::NAME)).map_err(|_| "Could not open db.").unwrap();
 
         println!(
             "{:?}\n",
             tx.inner()
                 .db_stat(table_db.dbi())
->>>>>>> v1.11.3
                 .map_err(|_| format!("Could not find table: {}", T::NAME))
                 .map(|stats| {
                     let num_pages =

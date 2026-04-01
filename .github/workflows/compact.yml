@@ -6,7 +6,6 @@
 # 4) deserialize previously generated test vectors
 
 on:
-<<<<<<< HEAD
   workflow_dispatch:
 #  pull_request:
 #  merge_group:
@@ -15,50 +14,26 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-=======
-  pull_request:
-  merge_group:
-  push:
-    branches: [main]
-
-env:
-  CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: "sccache"
->>>>>>> v1.11.3
 
 name: compact-codec
 jobs:
   compact-codec:
-<<<<<<< HEAD
     runs-on:
       group: Reth
-=======
-    runs-on: depot-ubuntu-latest
->>>>>>> v1.11.3
     strategy:
       matrix:
         bin:
           - cargo run --bin reth --features "dev"
-<<<<<<< HEAD
-          - cargo run --bin op-reth --features "dev" --manifest-path crates/optimism/bin/Cargo.toml
-    steps:
-      - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@stable
-=======
     steps:
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
->>>>>>> v1.11.3
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - name: Checkout base
-<<<<<<< HEAD
-        uses: actions/checkout@v5
-=======
         uses: actions/checkout@v6
->>>>>>> v1.11.3
         with:
           ref: ${{ github.base_ref || 'main' }}
       # On `main` branch, generates test vectors and serializes them to disk using `Compact`.
@@ -66,11 +41,7 @@ jobs:
         run: |
           ${{ matrix.bin }} -- test-vectors compact --write
       - name: Checkout PR
-<<<<<<< HEAD
-        uses: actions/checkout@v5
-=======
         uses: actions/checkout@v6
->>>>>>> v1.11.3
         with:
           clean: false
       # On incoming merge try to read and decode previously generated vectors with `Compact`

@@ -18,10 +18,7 @@ reth-fs-util.workspace = true
 reth-storage-errors.workspace = true
 reth-nippy-jar.workspace = true
 reth-tracing.workspace = true
-<<<<<<< HEAD
-=======
 tracing.workspace = true
->>>>>>> v1.11.3
 reth-static-file-types.workspace = true
 
 # ethereum
@@ -31,12 +28,9 @@ alloy-primitives.workspace = true
 reth-libmdbx = { workspace = true, optional = true, features = ["return-borrowed", "read-tx-timeouts"] }
 eyre = { workspace = true, optional = true }
 
-<<<<<<< HEAD
 # rocksdb
 rocksdb = { version = "0.24.0", optional = true, default-features = true }
 
-=======
->>>>>>> v1.11.3
 # metrics
 metrics = { workspace = true, optional = true }
 
@@ -45,17 +39,12 @@ page_size = { workspace = true, optional = true }
 thiserror.workspace = true
 tempfile = { workspace = true, optional = true }
 derive_more.workspace = true
-<<<<<<< HEAD
-sysinfo = { workspace = true, features = ["system"] }
-parking_lot = { workspace = true, optional = true }
-=======
 rustc-hash = { workspace = true, optional = true, features = ["std"] }
 sysinfo = { workspace = true, features = ["system"] }
 parking_lot = { workspace = true, optional = true }
 
 # arbitrary utils
 strum = { workspace = true, features = ["derive"], optional = true }
->>>>>>> v1.11.3
 
 [dev-dependencies]
 # reth libs with arbitrary
@@ -88,7 +77,6 @@ mdbx = [
     "reth-storage-errors/std",
     "alloy-primitives/std",
 ]
-<<<<<<< HEAD
 rocksdb = [
     "dep:rocksdb",
     "dep:eyre",
@@ -102,13 +90,6 @@ test-utils = [
     "rocksdb",
     "arbitrary",
     "dep:parking_lot",
-=======
-test-utils = [
-    "dep:tempfile",
-    "mdbx",
-    "arbitrary",
-    "parking_lot",
->>>>>>> v1.11.3
     "reth-db-api/test-utils",
     "reth-nippy-jar/test-utils",
     "reth-primitives-traits/test-utils",
@@ -122,15 +103,11 @@ arbitrary = [
     "reth-primitives-traits/arbitrary",
     "reth-prune-types/arbitrary",
 ]
-<<<<<<< HEAD
-op = ["reth-db-api/op", "reth-primitives-traits/op"]
-failpoints = ["fail/failpoints"]
-=======
 op = [
     "reth-db-api/op",
     "reth-primitives-traits/op",
 ]
->>>>>>> v1.11.3
+failpoints = ["fail/failpoints"]
 disable-lock = []
 
 [dependencies.fail]
@@ -149,13 +126,10 @@ harness = false
 
 [[bench]]
 name = "get"
-<<<<<<< HEAD
-=======
 required-features = ["test-utils"]
 harness = false
 
 [[bench]]
 name = "put"
->>>>>>> v1.11.3
 required-features = ["test-utils"]
 harness = false

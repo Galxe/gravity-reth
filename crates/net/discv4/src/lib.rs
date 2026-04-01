@@ -213,10 +213,6 @@ impl Discv4 {
     /// Binds a new `UdpSocket` and creates the service
     ///
     /// ```
-<<<<<<< HEAD
-    /// # use std::io;
-=======
->>>>>>> v1.11.3
     /// use reth_discv4::{Discv4, Discv4Config};
     /// use reth_network_peers::{pk2id, NodeRecord, PeerId};
     /// use secp256k1::SECP256K1;
@@ -629,12 +625,6 @@ impl Discv4Service {
         self.lookup_interval = tokio::time::interval(duration);
     }
 
-<<<<<<< HEAD
-    /// Sets the external Ip to the configured external IP if [`NatResolver::ExternalIp`].
-    fn resolve_external_ip(&mut self) {
-        if let Some(r) = &self.resolve_external_ip_interval &&
-            let Some(external_ip) = r.resolver().as_external_ip()
-=======
     /// Sets the external Ip to the configured external IP if [`NatResolver::ExternalIp`] or
     /// [`NatResolver::ExternalAddr`]. In the case of [`NatResolver::ExternalAddr`], it will return
     /// the first IP address found for the domain associated with the discv4 UDP port.
@@ -642,7 +632,6 @@ impl Discv4Service {
         if let Some(r) = &self.resolve_external_ip_interval &&
             let Some(external_ip) =
                 r.resolver().clone().as_external_ip(self.local_node_record.udp_port)
->>>>>>> v1.11.3
         {
             self.set_external_ip_addr(external_ip);
         }
@@ -3056,11 +3045,7 @@ mod tests {
 
         // Poll for events for a reasonable time
         let mut bootnode_appeared = false;
-<<<<<<< HEAD
-        let timeout = tokio::time::sleep(Duration::from_secs(3));
-=======
         let timeout = tokio::time::sleep(Duration::from_secs(1));
->>>>>>> v1.11.3
         tokio::pin!(timeout);
 
         loop {

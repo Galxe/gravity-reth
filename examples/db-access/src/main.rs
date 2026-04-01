@@ -1,22 +1,13 @@
 #![warn(unused_crate_dependencies)]
 
-<<<<<<< HEAD
-use alloy_primitives::{Address, B256};
-=======
 use alloy_primitives::{keccak256, Address, B256};
->>>>>>> v1.11.3
 use reth_ethereum::{
     chainspec::ChainSpecBuilder,
     node::EthereumNode,
     primitives::{AlloyBlockHeader, SealedBlock, SealedHeader},
     provider::{
-<<<<<<< HEAD
-        providers::ReadOnlyConfig, AccountReader, BlockReader, BlockSource, HeaderProvider,
-        ReceiptProvider, StateProvider, TransactionVariant, TransactionsProvider,
-=======
         providers::ReadOnlyConfig, AccountReader, BlockNumReader, BlockReader, BlockSource,
         HeaderProvider, ReceiptProvider, StateProvider, TransactionVariant, TransactionsProvider,
->>>>>>> v1.11.3
     },
     rpc::eth::primitives::Filter,
     TransactionSigned,
@@ -34,17 +25,12 @@ fn main() -> eyre::Result<()> {
 
     // Instantiate a provider factory for Ethereum mainnet using the provided datadir path.
     let spec = ChainSpecBuilder::mainnet().build();
-<<<<<<< HEAD
-    let factory = EthereumNode::provider_factory_builder()
-        .open_read_only(spec.into(), ReadOnlyConfig::from_datadir(datadir))?;
-=======
     let runtime = reth_ethereum::tasks::Runtime::test();
     let factory = EthereumNode::provider_factory_builder().open_read_only(
         spec.into(),
         ReadOnlyConfig::from_datadir(datadir),
         runtime,
     )?;
->>>>>>> v1.11.3
 
     // This call opens a RO transaction on the database. To write to the DB you'd need to call
     // the `provider_rw` function and look for the `Writer` variants of the traits.
@@ -201,11 +187,6 @@ fn receipts_provider_example<
     let indexed_to = Address::random();
     let transfer_signature = keccak256("Transfer(address,address,uint256)");
 
-<<<<<<< HEAD
-    // TODO: Make it clearer how to choose between event_signature(topic0) (event name) and the
-    // other 3 indexed topics. This API is a bit clunky and not obvious to use at the moment.
-    let filter = Filter::new().address(addr).event_signature(topic);
-=======
     // This matches ERC-20 Transfer events emitted by contract_addr where both indexed addresses are
     // fixed. If your event declares a third indexed parameter, continue with topic3(...).
     let filter = Filter::new()
@@ -213,7 +194,6 @@ fn receipts_provider_example<
         .event_signature(transfer_signature)
         .topic1(indexed_from)
         .topic2(indexed_to);
->>>>>>> v1.11.3
 
     // 3. If the address & topics filters match do something. We use the outer check against the
     // bloom filter stored in the header to avoid having to query the receipts table when there
@@ -245,13 +225,6 @@ fn state_provider_example<T: StateProvider + AccountReader, H: HeaderProvider>(
     let state_root = header.state_root();
 
     // Can get account / storage state with simple point queries
-<<<<<<< HEAD
-    let _account = provider.basic_account(&address)?;
-    let _code = provider.account_code(&address)?;
-    let _storage = provider.storage(address, storage_key)?;
-    // TODO: unimplemented.
-    // let _proof = provider.proof(address, &[])?;
-=======
     let account = provider.basic_account(&address)?;
     let code = provider.account_code(&address)?;
     let storage_value = provider.storage(address, storage_key)?;
@@ -271,7 +244,6 @@ fn state_provider_example<T: StateProvider + AccountReader, H: HeaderProvider>(
     // Can verify the returned proof against the state root
     proof.verify(state_root)?;
     println!("account proof verified against state root {state_root:?}");
->>>>>>> v1.11.3
 
     Ok(())
 }

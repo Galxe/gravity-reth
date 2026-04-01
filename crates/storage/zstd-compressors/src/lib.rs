@@ -6,11 +6,7 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-<<<<<<< HEAD
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-=======
 #![cfg_attr(docsrs, feature(doc_cfg))]
->>>>>>> v1.11.3
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -90,8 +86,6 @@ pub fn create_receipt_decompressor() -> ReusableDecompressor {
     )
 }
 
-<<<<<<< HEAD
-=======
 /// Executes `f` with the thread-local transaction compressor on `std`, otherwise creates a new one.
 #[inline]
 pub fn with_tx_compressor<R>(f: impl FnOnce(&mut Compressor<'_>) -> R) -> R {
@@ -145,7 +139,6 @@ pub fn with_receipt_decompressor<R>(f: impl FnOnce(&mut ReusableDecompressor) ->
     }
 }
 
->>>>>>> v1.11.3
 /// Reusable decompressor that uses its own internal buffer.
 #[expect(missing_debug_implementations)]
 pub struct ReusableDecompressor {

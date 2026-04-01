@@ -22,11 +22,8 @@ reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
 revm.workspace = true
 reth-evm.workspace = true
-<<<<<<< HEAD
 grevm.workspace = true
 gravity-primitives.workspace = true
-=======
->>>>>>> v1.11.3
 reth-storage-errors.workspace = true
 
 # Alloy
@@ -68,10 +65,7 @@ std = [
     "reth-storage-errors/std",
 ]
 test-utils = [
-<<<<<<< HEAD
-=======
     "std",
->>>>>>> v1.11.3
     "dep:parking_lot",
     "dep:derive_more",
     "reth-chainspec/test-utils",

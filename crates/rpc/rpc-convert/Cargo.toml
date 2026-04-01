@@ -24,7 +24,7 @@ alloy-signer.workspace = true
 alloy-consensus.workspace = true
 alloy-network.workspace = true
 alloy-json-rpc.workspace = true
-alloy-evm = { workspace = true, features = ["rpc"] }
+alloy-evm.workspace = true
 
 # optimism
 op-alloy-consensus = { workspace = true, optional = true }

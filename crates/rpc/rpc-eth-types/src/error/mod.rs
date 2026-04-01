@@ -1,10 +1,6 @@
 //! Implementation specific Errors for the `eth_` namespace.
 
 pub mod api;
-<<<<<<< HEAD
-use crate::error::api::FromEvmHalt;
-=======
->>>>>>> v1.11.3
 use alloy_eips::BlockId;
 use alloy_evm::{call::CallError, overrides::StateOverrideError};
 use alloy_primitives::{Address, Bytes, B256, U256};
@@ -15,10 +11,7 @@ pub use api::{AsEthApiError, FromEthApiError, FromEvmError, IntoEthApiError};
 use core::time::Duration;
 use reth_errors::{BlockExecutionError, BlockValidationError, RethError};
 use reth_primitives_traits::transaction::{error::InvalidTransactionError, signed::RecoveryError};
-<<<<<<< HEAD
-=======
 use reth_revm::db::bal::EvmDatabaseError;
->>>>>>> v1.11.3
 use reth_rpc_convert::{CallFeesError, EthTxEnvError, TransactionConversionError};
 use reth_rpc_server_types::result::{
     block_id_to_str, internal_rpc_err, invalid_params_rpc_err, rpc_err, rpc_error_with_code,
@@ -27,12 +20,6 @@ use reth_transaction_pool::error::{
     Eip4844PoolTransactionError, Eip7702PoolTransactionError, InvalidPoolTransactionError,
     PoolError, PoolErrorKind, PoolTransactionError,
 };
-<<<<<<< HEAD
-use revm::context_interface::result::{
-    EVMError, ExecutionResult, HaltReason, InvalidHeader, InvalidTransaction, OutOfGasError,
-};
-use revm_inspectors::tracing::MuxError;
-=======
 use revm::{
     context_interface::result::{
         EVMError, HaltReason, InvalidHeader, InvalidTransaction, OutOfGasError,
@@ -40,7 +27,6 @@ use revm::{
     state::bal::BalError,
 };
 use revm_inspectors::tracing::{DebugInspectorError, MuxError};
->>>>>>> v1.11.3
 use std::convert::Infallible;
 use tokio::sync::oneshot::error::RecvError;
 
@@ -211,8 +197,6 @@ pub enum EthApiError {
     /// Error thrown when batch tx send channel fails
     #[error("Batch transaction sender channel closed")]
     BatchTxSendError,
-<<<<<<< HEAD
-=======
     /// Error that occurred during `call_many` execution with bundle and transaction context
     #[error("call_many error in bundle {bundle_index} and transaction {tx_index}: {}", .error.message())]
     CallManyError {
@@ -223,7 +207,6 @@ pub enum EthApiError {
         /// The underlying error object
         error: jsonrpsee_types::ErrorObject<'static>,
     },
->>>>>>> v1.11.3
     /// Any other error
     #[error("{0}")]
     Other(Box<dyn ToRpcError>),
@@ -303,11 +286,7 @@ impl From<EthApiError> for jsonrpsee_types::error::ErrorObject<'static> {
             EthApiError::Signing(_) |
             EthApiError::BothStateAndStateDiffInOverride(_) |
             EthApiError::InvalidTracerConfig |
-<<<<<<< HEAD
-            EthApiError::TransactionConversionError |
-=======
             EthApiError::TransactionConversionError(_) |
->>>>>>> v1.11.3
             EthApiError::InvalidRewardPercentiles |
             EthApiError::InvalidBytecode(_) => invalid_params_rpc_err(error.to_string()),
             EthApiError::InvalidTransaction(err) => err.into(),
@@ -356,73 +335,6 @@ impl From<EthApiError> for jsonrpsee_types::error::ErrorObject<'static> {
             EthApiError::BatchTxSendError => {
                 internal_rpc_err("Batch transaction sender channel closed".to_string())
             }
-<<<<<<< HEAD
-        }
-    }
-}
-
-impl From<TransactionConversionError> for EthApiError {
-    fn from(_: TransactionConversionError) -> Self {
-        Self::TransactionConversionError
-    }
-}
-
-impl<E> From<CallError<E>> for EthApiError
-where
-    E: Into<Self>,
-{
-    fn from(value: CallError<E>) -> Self {
-        match value {
-            CallError::Database(err) => err.into(),
-            CallError::InsufficientFunds(insufficient_funds_error) => {
-                Self::InvalidTransaction(RpcInvalidTransactionError::InsufficientFunds {
-                    cost: insufficient_funds_error.cost,
-                    balance: insufficient_funds_error.balance,
-                })
-            }
-        }
-    }
-}
-
-impl<E> From<StateOverrideError<E>> for EthApiError
-where
-    E: Into<Self>,
-{
-    fn from(value: StateOverrideError<E>) -> Self {
-        match value {
-            StateOverrideError::InvalidBytecode(bytecode_decode_error) => {
-                Self::InvalidBytecode(bytecode_decode_error.to_string())
-            }
-            StateOverrideError::BothStateAndStateDiff(address) => {
-                Self::BothStateAndStateDiffInOverride(address)
-            }
-            StateOverrideError::Database(err) => err.into(),
-        }
-    }
-}
-
-impl From<EthTxEnvError> for EthApiError {
-    fn from(value: EthTxEnvError) -> Self {
-        match value {
-            EthTxEnvError::CallFees(CallFeesError::BlobTransactionMissingBlobHashes) => {
-                Self::InvalidTransaction(
-                    RpcInvalidTransactionError::BlobTransactionMissingBlobHashes,
-                )
-            }
-            EthTxEnvError::CallFees(CallFeesError::FeeCapTooLow) => {
-                Self::InvalidTransaction(RpcInvalidTransactionError::FeeCapTooLow)
-            }
-            EthTxEnvError::CallFees(CallFeesError::ConflictingFeeFieldsInRequest) => {
-                Self::ConflictingFeeFieldsInRequest
-            }
-            EthTxEnvError::CallFees(CallFeesError::TipAboveFeeCap) => {
-                Self::InvalidTransaction(RpcInvalidTransactionError::TipAboveFeeCap)
-            }
-            EthTxEnvError::CallFees(CallFeesError::TipVeryHigh) => {
-                Self::InvalidTransaction(RpcInvalidTransactionError::TipVeryHigh)
-            }
-            EthTxEnvError::Input(err) => Self::TransactionInputError(err),
-=======
             EthApiError::CallManyError { bundle_index, tx_index, error } => {
                 jsonrpsee_types::error::ErrorObject::owned(
                     error.code(),
@@ -433,7 +345,6 @@ impl From<EthTxEnvError> for EthApiError {
                     error.data(),
                 )
             }
->>>>>>> v1.11.3
         }
     }
 }
@@ -613,20 +524,12 @@ impl From<InvalidHeader> for EthApiError {
     }
 }
 
-<<<<<<< HEAD
-impl<T> From<EVMError<T, InvalidTransaction>> for EthApiError
-=======
 impl<T, TxError> From<EVMError<T, TxError>> for EthApiError
->>>>>>> v1.11.3
 where
     T: Into<Self>,
     TxError: reth_evm::InvalidTxError,
 {
-<<<<<<< HEAD
-    fn from(err: EVMError<T, InvalidTransaction>) -> Self {
-=======
     fn from(err: EVMError<T, TxError>) -> Self {
->>>>>>> v1.11.3
         match err {
             EVMError::Transaction(invalid_tx) => {
                 // Try to get the underlying InvalidTransaction if available
@@ -646,12 +549,7 @@ where
                     // convert to a custom error message
                     Self::EvmCustom(invalid_tx.to_string())
                 }
-<<<<<<< HEAD
-                _ => RpcInvalidTransactionError::from(invalid_tx).into(),
-            },
-=======
             }
->>>>>>> v1.11.3
             EVMError::Header(err) => err.into(),
             EVMError::Database(err) => err.into(),
             EVMError::Custom(err) => Self::EvmCustom(err),
@@ -874,12 +772,8 @@ impl RpcInvalidTransactionError {
             OutOfGasError::Basic | OutOfGasError::ReentrancySentry => {
                 Self::BasicOutOfGas(gas_limit)
             }
-<<<<<<< HEAD
-            OutOfGasError::Memory | OutOfGasError::MemoryLimit => Self::MemoryOutOfGas(gas_limit),
-=======
             OutOfGasError::Memory => Self::MemoryOutOfGas(gas_limit),
             OutOfGasError::MemoryLimit => Self::MemoryLimitOutOfGas,
->>>>>>> v1.11.3
             OutOfGasError::Precompile => Self::PrecompileOutOfGas(gas_limit),
             OutOfGasError::InvalidOperand => Self::InvalidOperandOutOfGas(gas_limit),
         }
@@ -1077,11 +971,7 @@ pub enum RpcPoolError {
     /// respect the tx fee exceeds the configured cap
     #[error("tx fee ({max_tx_fee_wei} wei) exceeds the configured cap ({tx_fee_cap_wei} wei)")]
     ExceedsFeeCap {
-<<<<<<< HEAD
-        /// max fee in wei of new tx submitted to the pull (e.g. 0.11534 ETH)
-=======
         /// max fee in wei of new tx submitted to the pool (e.g. 0.11534 ETH)
->>>>>>> v1.11.3
         max_tx_fee_wei: u128,
         /// configured tx fee cap in wei (e.g. 1.0 ETH)
         tx_fee_cap_wei: u128,
@@ -1138,11 +1028,7 @@ impl From<RpcPoolError> for jsonrpsee_types::error::ErrorObject<'static> {
             RpcPoolError::MaxTxGasLimitExceeded |
             RpcPoolError::ExceedsFeeCap { .. } |
             RpcPoolError::NegativeValue |
-<<<<<<< HEAD
-            RpcPoolError::OversizedData |
-=======
             RpcPoolError::OversizedData { .. } |
->>>>>>> v1.11.3
             RpcPoolError::ExceedsMaxInitCodeSize |
             RpcPoolError::PoolTransactionError(_) |
             RpcPoolError::Eip4844(_) |
@@ -1234,23 +1120,6 @@ pub enum SignError {
     NoChainId,
 }
 
-<<<<<<< HEAD
-/// Converts the evm [`ExecutionResult`] into a result where `Ok` variant is the output bytes if it
-/// is [`ExecutionResult::Success`].
-pub fn ensure_success<Halt, Error: FromEvmHalt<Halt> + FromEthApiError>(
-    result: ExecutionResult<Halt>,
-) -> Result<Bytes, Error> {
-    match result {
-        ExecutionResult::Success { output, .. } => Ok(output.into_data()),
-        ExecutionResult::Revert { output, .. } => {
-            Err(Error::from_eth_err(RpcInvalidTransactionError::Revert(RevertError::new(output))))
-        }
-        ExecutionResult::Halt { reason, gas_used } => Err(Error::from_evm_halt(reason, gas_used)),
-    }
-}
-
-=======
->>>>>>> v1.11.3
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1298,8 +1167,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-=======
     fn receipts_not_found_message() {
         let err: jsonrpsee_types::error::ErrorObject<'static> =
             EthApiError::ReceiptsNotFound(BlockId::hash(b256!(
@@ -1341,7 +1208,6 @@ mod tests {
     }
 
     #[test]
->>>>>>> v1.11.3
     fn revert_err_display() {
         let revert = Revert::from("test_revert_reason");
         let err = RevertError::new(revert.abi_encode().into());

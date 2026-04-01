@@ -94,10 +94,7 @@ impl RethRpcServerConfig for RpcServerArgs {
     fn eth_config(&self) -> EthConfig {
         EthConfig::default()
             .max_tracing_requests(self.rpc_max_tracing_requests)
-<<<<<<< HEAD
-=======
             .max_blocking_io_requests(self.rpc_max_blocking_io_requests)
->>>>>>> v1.11.3
             .max_trace_filter_blocks(self.rpc_max_trace_filter_blocks)
             .max_blocks_per_filter(self.rpc_max_blocks_per_filter.unwrap_or_max())
             .max_logs_per_response(self.rpc_max_logs_per_response.unwrap_or_max() as usize)
@@ -109,11 +106,8 @@ impl RethRpcServerConfig for RpcServerArgs {
             .proof_permits(self.rpc_proof_permits)
             .pending_block_kind(self.rpc_pending_block)
             .raw_tx_forwarder(self.rpc_forwarder.clone())
-<<<<<<< HEAD
-=======
             .rpc_evm_memory_limit(self.rpc_evm_memory_limit)
             .force_blob_sidecar_upcasting(self.rpc_force_blob_sidecar_upcasting)
->>>>>>> v1.11.3
     }
 
     fn flashbots_config(&self) -> ValidationApiConfig {
@@ -199,8 +193,6 @@ impl RethRpcServerConfig for RpcServerArgs {
             );
         }
 
-<<<<<<< HEAD
-=======
         if self.ws_api.is_some() && !self.ws {
             warn!(
                 target: "reth::cli",
@@ -208,19 +200,13 @@ impl RethRpcServerConfig for RpcServerArgs {
             );
         }
 
->>>>>>> v1.11.3
         if self.http {
             let socket_address = SocketAddr::new(self.http_addr, self.http_port);
             config = config
                 .with_http_address(socket_address)
                 .with_http(self.http_ws_server_builder())
                 .with_http_cors(self.http_corsdomain.clone())
-<<<<<<< HEAD
-                .with_http_disable_compression(self.http_disable_compression)
-                .with_ws_cors(self.ws_allowed_origins.clone());
-=======
                 .with_http_disable_compression(self.http_disable_compression);
->>>>>>> v1.11.3
         }
 
         if self.ws {

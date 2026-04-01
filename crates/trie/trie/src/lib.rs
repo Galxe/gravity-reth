@@ -12,11 +12,7 @@
     html_favicon_url = "https://avatars0.githubusercontent.com/u/97369466?s=256",
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
-<<<<<<< HEAD
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-=======
 #![cfg_attr(docsrs, feature(doc_cfg))]
->>>>>>> v1.11.3
 
 /// The implementation of forward-only in-memory cursor.
 pub mod forward_cursor;
@@ -71,11 +67,7 @@ pub mod metrics;
 pub mod test_utils;
 
 /// Collection of mock types for testing.
-<<<<<<< HEAD
-#[cfg(test)]
-=======
 #[cfg(any(test, feature = "test-utils"))]
->>>>>>> v1.11.3
 pub mod mock;
 
 /// Verification of existing stored trie nodes against state data.

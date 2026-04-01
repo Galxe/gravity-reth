@@ -50,8 +50,6 @@ pub enum NatResolver {
     PublicIp,
     /// Use the given [`IpAddr`]
     ExternalIp(IpAddr),
-<<<<<<< HEAD
-=======
     /// Use the given domain name as the external address to expose to peers.
     /// This is behaving essentially the same as [`NatResolver::ExternalIp`], but supports domain
     /// names. Domain names are resolved to IP addresses using the OS's resolver. The first IP
@@ -60,7 +58,6 @@ pub enum NatResolver {
     /// instead of direct IP addresses.
     /// Note: the domain shouldn't include a port number. Only the IP address is resolved.
     ExternalAddr(String),
->>>>>>> v1.11.3
     /// Resolve external IP via the network interface.
     NetIf,
     /// Resolve nothing
@@ -73,12 +70,6 @@ impl NatResolver {
         external_addr_with(self).await
     }
 
-<<<<<<< HEAD
-    /// Returns the external ip, if it is [`NatResolver::ExternalIp`]
-    pub const fn as_external_ip(self) -> Option<IpAddr> {
-        match self {
-            Self::ExternalIp(ip) => Some(ip),
-=======
     /// Returns the fixed ip, if it is [`NatResolver::ExternalIp`] or [`NatResolver::ExternalAddr`].
     ///
     /// In the case of [`NatResolver::ExternalAddr`], it will return the first IP address found for
@@ -90,7 +81,6 @@ impl NatResolver {
                 .to_socket_addrs()
                 .ok()
                 .and_then(|mut addrs| addrs.next().map(|addr| addr.ip())),
->>>>>>> v1.11.3
             _ => None,
         }
     }
@@ -103,10 +93,7 @@ impl fmt::Display for NatResolver {
             Self::Upnp => f.write_str("upnp"),
             Self::PublicIp => f.write_str("publicip"),
             Self::ExternalIp(ip) => write!(f, "extip:{ip}"),
-<<<<<<< HEAD
-=======
             Self::ExternalAddr(domain) => write!(f, "extaddr:{domain}"),
->>>>>>> v1.11.3
             Self::NetIf => f.write_str("netif"),
             Self::None => f.write_str("none"),
         }
@@ -142,14 +129,8 @@ impl FromStr for NatResolver {
                 } else {
                     return Err(ParseNatResolverError::UnknownVariant(format!(
                         "Unknown Nat Resolver: {s}"
-<<<<<<< HEAD
-                    )))
-                };
-                Self::ExternalIp(ip.parse()?)
-=======
                     )));
                 }
->>>>>>> v1.11.3
             }
         };
         Ok(r)
@@ -250,12 +231,9 @@ pub async fn external_addr_with(resolver: NatResolver) -> Option<IpAddr> {
                 );
             })
             .ok(),
-<<<<<<< HEAD
-=======
         NatResolver::ExternalAddr(domain) => {
             domain.to_socket_addrs().ok().and_then(|mut addrs| addrs.next().map(|addr| addr.ip()))
         }
->>>>>>> v1.11.3
         NatResolver::None => None,
     }
 }

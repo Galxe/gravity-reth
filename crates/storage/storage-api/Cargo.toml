@@ -21,12 +21,9 @@ reth-primitives-traits.workspace = true
 reth-prune-types.workspace = true
 reth-stages-types.workspace = true
 reth-storage-errors.workspace = true
-reth-trie-common.workspace = true
-<<<<<<< HEAD
+reth-trie-common = { workspace = true, features = ["nested-trie"] }
 revm-bytecode.workspace = true
 gravity-primitives.workspace = true
-=======
->>>>>>> v1.11.3
 revm-database.workspace = true
 reth-ethereum-primitives.workspace = true
 
@@ -39,23 +36,17 @@ alloy-rpc-types-engine.workspace = true
 # misc
 dashmap = { workspace = true, features = ["inline"] }
 auto_impl.workspace = true
-<<<<<<< HEAD
 metrics.workspace = true
 metrics-derive.workspace = true
 once_cell.workspace = true
 rayon.workspace = true
+serde_json = { workspace = true, optional = true }
 
 [features]
 config-from-env = ["gravity-primitives/config-from-env"]
 default = ["std"]
-=======
-serde_json = { workspace = true, optional = true }
-
-[features]
-default = ["std"]
 rocksdb = ["reth-db-api/rocksdb"]
 edge = ["rocksdb"]
->>>>>>> v1.11.3
 std = [
     "reth-chainspec/std",
     "alloy-consensus/std",
@@ -71,20 +62,14 @@ std = [
     "reth-storage-errors/std",
     "reth-db-models/std",
     "reth-trie-common/std",
-<<<<<<< HEAD
     "revm-bytecode/std",
     "once_cell/std",
-=======
     "serde_json?/std",
->>>>>>> v1.11.3
 ]
 
 db-api = [
     "dep:reth-db-api",
-<<<<<<< HEAD
-=======
     "dep:serde_json",
->>>>>>> v1.11.3
 ]
 
 serde = [
@@ -96,26 +81,17 @@ serde = [
     "reth-stages-types/serde",
     "reth-trie-common/serde",
     "revm-database/serde",
-<<<<<<< HEAD
     "reth-ethereum-primitives/serde",
-=======
->>>>>>> v1.11.3
     "alloy-eips/serde",
     "alloy-primitives/serde",
     "alloy-consensus/serde",
     "alloy-rpc-types-engine/serde",
-<<<<<<< HEAD
     "dashmap/serde",
     "revm-bytecode/serde",
 ]
 
 serde-bincode-compat = [
     "reth-ethereum-primitives/serde-bincode-compat",
-=======
-]
-
-serde-bincode-compat = [
->>>>>>> v1.11.3
     "reth-execution-types/serde-bincode-compat",
     "reth-primitives-traits/serde-bincode-compat",
     "reth-trie-common/serde-bincode-compat",

@@ -14,13 +14,8 @@ use reth_trie_common::HashedPostState;
 use revm_database::BundleState;
 
 /// This just receives state, or [`ExecutionOutcome`], from the provider
-<<<<<<< HEAD
-#[auto_impl::auto_impl(&, Arc, Box)]
-pub trait StateReader: Send + Sync {
-=======
 #[auto_impl::auto_impl(&, Box)]
 pub trait StateReader: Send {
->>>>>>> v1.11.3
     /// Receipt type in [`ExecutionOutcome`].
     type Receipt: Send + Sync;
 
@@ -44,11 +39,6 @@ pub trait StateProvider:
     + StorageRootProvider
     + StateProofProvider
     + HashedPostStateProvider
-<<<<<<< HEAD
-    + Send
-    + Sync
-=======
->>>>>>> v1.11.3
 {
     /// Get storage of given account.
     ///
@@ -60,8 +50,6 @@ pub trait StateProvider:
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>>;
 
-<<<<<<< HEAD
-=======
     /// Get storage using a pre-hashed storage key.
     ///
     /// Unlike [`Self::storage`], `hashed_storage_key` must already be keccak256-hashed.
@@ -74,7 +62,6 @@ pub trait StateProvider:
         hashed_storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>>;
 
->>>>>>> v1.11.3
     /// Get account code by its address.
     ///
     /// Returns `None` if the account doesn't exist or account is not a contract
@@ -123,25 +110,15 @@ pub trait AccountInfoReader: AccountReader + BytecodeReader {}
 impl<T: AccountReader + BytecodeReader> AccountInfoReader for T {}
 
 /// Trait that provides the hashed state from various sources.
-<<<<<<< HEAD
-#[auto_impl(&, Arc, Box)]
-pub trait HashedPostStateProvider: Send + Sync {
-=======
 #[auto_impl(&, Box)]
 pub trait HashedPostStateProvider {
->>>>>>> v1.11.3
     /// Returns the `HashedPostState` of the provided [`BundleState`].
     fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState;
 }
 
 /// Trait for reading bytecode associated with a given code hash.
-<<<<<<< HEAD
-#[auto_impl(&, Arc, Box)]
-pub trait BytecodeReader: Send + Sync {
-=======
 #[auto_impl(&, Box)]
 pub trait BytecodeReader {
->>>>>>> v1.11.3
     /// Get account code by its hash
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>>;
 }
@@ -169,11 +146,7 @@ pub trait TryIntoHistoricalStateProvider {
 /// Note: the `pending` block is considered the block that extends the canonical chain but one and
 /// has the `latest` block as its parent.
 ///
-<<<<<<< HEAD
-/// All states are _inclusive_, meaning they include _all_ all changes made (executed transactions)
-=======
 /// All states are _inclusive_, meaning they include _all_ changes made (executed transactions)
->>>>>>> v1.11.3
 /// in their respective blocks. For example [`StateProviderFactory::history_by_block_number`] for
 /// block number `n` will return the state after block `n` was executed (transactions, withdrawals).
 /// In other words, all states point to the end of the state's respective block, which is equivalent

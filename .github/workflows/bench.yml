@@ -1,53 +1,26 @@
 # Runs benchmarks.
 
 on:
-<<<<<<< HEAD
   workflow_dispatch:
 #  pull_request:
 #  # TODO: Disabled temporarily for https://github.com/CodSpeedHQ/runner/issues/55
 #  # merge_group:
 #  push:
 #    branches: [main]
-=======
-  pull_request:
-  # TODO: Disabled temporarily for https://github.com/CodSpeedHQ/runner/issues/55
-  # merge_group:
-  push:
-    branches: [main]
->>>>>>> v1.11.3
 
 env:
   CARGO_TERM_COLOR: always
   BASELINE: base
   SEED: reth
-<<<<<<< HEAD
-=======
   RUSTC_WRAPPER: "sccache"
->>>>>>> v1.11.3
 
 name: bench
 jobs:
   codspeed:
-<<<<<<< HEAD
     runs-on:
       group: Reth
     steps:
-      - uses: actions/checkout@v5
-=======
-    runs-on: depot-ubuntu-latest
-    strategy:
-      matrix:
-        partition: [1, 2]
-        total_partitions: [2]
-        include:
-          - partition: 1
-            crates: "-p reth-primitives -p reth-trie-common -p reth-trie-sparse"
-          - partition: 2
-            crates: "-p reth-trie"
-    name: codspeed (${{ matrix.partition }}/${{ matrix.total_partitions }})
-    steps:
       - uses: actions/checkout@v6
->>>>>>> v1.11.3
         with:
           submodules: true
       - uses: rui314/setup-mold@v1
@@ -61,18 +34,10 @@ jobs:
         with:
           tool: cargo-codspeed
       - name: Build the benchmark target(s)
-<<<<<<< HEAD
         run: ./.github/scripts/codspeed-build.sh
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v4
         with:
           run: cargo codspeed run --workspace
-=======
-        run: cargo codspeed build --profile profiling --features test-utils ${{ matrix.crates }}
-      - name: Run the benchmarks
-        uses: CodSpeedHQ/action@v4
-        with:
-          run: cargo codspeed run ${{ matrix.crates }}
->>>>>>> v1.11.3
           mode: instrumentation
           token: ${{ secrets.CODSPEED_TOKEN }}

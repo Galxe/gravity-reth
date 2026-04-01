@@ -1,21 +1,13 @@
 //! Traits for execution.
 
 use crate::{ConfigureEvm, Database, OnStateHook, TxEnvFor};
-<<<<<<< HEAD
-use alloc::{boxed::Box, vec::Vec};
-=======
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
->>>>>>> v1.11.3
 use alloy_consensus::{BlockHeader, Header};
 use alloy_eips::eip2718::WithEncoded;
 pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory};
 use alloy_evm::{
-<<<<<<< HEAD
-    block::{CommitChanges, ExecutableTx},
-    precompiles::DynPrecompile,
-=======
     block::{CommitChanges, ExecutableTxParts},
->>>>>>> v1.11.3
+    precompiles::DynPrecompile,
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
 };
 use alloy_primitives::{Address, B256};
@@ -31,14 +23,10 @@ use reth_storage_api::StateProvider;
 pub use reth_storage_errors::provider::ProviderError;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::{
-<<<<<<< HEAD
     context::{
         result::{ExecutionResult, HaltReason},
         TxEnv,
     },
-=======
-    context::result::ExecutionResult,
->>>>>>> v1.11.3
     database::{states::bundle_state::BundleRetention, BundleState, State},
 };
 
@@ -91,17 +79,11 @@ pub trait Executor<DB: Database>: Sized {
     where
         I: IntoIterator<Item = &'a RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>>,
     {
-<<<<<<< HEAD
-        let mut results = Vec::new();
-        let mut first_block = None;
-        for block in blocks {
-=======
         let blocks_iter = blocks.into_iter();
         let capacity = blocks_iter.size_hint().0;
         let mut results = Vec::with_capacity(capacity);
         let mut first_block = None;
         for block in blocks_iter {
->>>>>>> v1.11.3
             if first_block.is_none() {
                 first_block = Some(block.header().number());
             }
@@ -131,8 +113,6 @@ pub trait Executor<DB: Database>: Sized {
         Ok(BlockExecutionOutput { state: state.take_bundle(), result })
     }
 
-<<<<<<< HEAD
-=======
     /// Executes the EVM with the given input and accepts a state closure that is always invoked
     /// with the EVM state after execution, even after failure.
     fn execute_with_state_closure_always<F>(
@@ -150,7 +130,6 @@ pub trait Executor<DB: Database>: Sized {
         Ok(BlockExecutionOutput { state: state.take_bundle(), result: result? })
     }
 
->>>>>>> v1.11.3
     /// Executes the EVM with the given input and accepts a state hook closure that is invoked with
     /// the EVM state after execution.
     fn execute_with_state_hook<F>(
@@ -169,17 +148,13 @@ pub trait Executor<DB: Database>: Sized {
     /// Consumes the executor and returns the [`State`] containing all state changes.
     fn into_state(self) -> State<DB>;
 
-<<<<<<< HEAD
     /// Takes the `BundleState` changeset from the State, replacing it with an empty one.
     fn take_bundle(&mut self) -> BundleState;
 
-=======
->>>>>>> v1.11.3
     /// The size hint of the batch's tracked state size.
     ///
     /// This is used to optimize DB commits depending on the size of the state.
     fn size_hint(&self) -> usize;
-<<<<<<< HEAD
 
     /// Executes a single system transaction on the executor's own internal state and commits
     /// the resulting state changes immediately.
@@ -189,17 +164,6 @@ pub trait Executor<DB: Database>: Sized {
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error>;
-}
-
-/// Helper type for the output of executing a block.
-#[derive(Debug, Clone)]
-pub struct ExecuteOutput<R> {
-    /// Receipts obtained after executing a block.
-    pub receipts: Vec<R>,
-    /// Cumulative gas used in the block execution.
-    pub gas_used: u64,
-=======
->>>>>>> v1.11.3
 }
 
 /// Input for block building. Consumed by [`BlockAssembler`].
@@ -243,12 +207,8 @@ pub struct BlockAssemblerInput<'a, 'b, F: BlockExecutorFactory, H = Header> {
     /// Configuration of EVM used when executing the block.
     ///
     /// Contains context relevant to EVM such as [`revm::context::BlockEnv`].
-<<<<<<< HEAD
-    pub evm_env: EvmEnv<<F::EvmFactory as EvmFactory>::Spec>,
-=======
     pub evm_env:
         EvmEnv<<F::EvmFactory as EvmFactory>::Spec, <F::EvmFactory as EvmFactory>::BlockEnv>,
->>>>>>> v1.11.3
     /// [`BlockExecutorFactory::ExecutionCtx`] used to execute the block.
     pub execution_ctx: F::ExecutionCtx<'a>,
     /// Parent block header.
@@ -270,14 +230,10 @@ impl<'a, 'b, F: BlockExecutorFactory, H> BlockAssemblerInput<'a, 'b, F, H> {
     /// Creates a new [`BlockAssemblerInput`].
     #[expect(clippy::too_many_arguments)]
     pub fn new(
-<<<<<<< HEAD
-        evm_env: EvmEnv<<F::EvmFactory as EvmFactory>::Spec>,
-=======
         evm_env: EvmEnv<
             <F::EvmFactory as EvmFactory>::Spec,
             <F::EvmFactory as EvmFactory>::BlockEnv,
         >,
->>>>>>> v1.11.3
         execution_ctx: F::ExecutionCtx<'a>,
         parent: &'a SealedHeader<H>,
         transactions: Vec<F::Transaction>,
@@ -463,61 +419,19 @@ where
 
 /// Conversions for executable transactions.
 pub trait ExecutorTx<Executor: BlockExecutor> {
-<<<<<<< HEAD
-    /// Converts the transaction into [`ExecutableTx`].
-    fn as_executable(&self) -> impl ExecutableTx<Executor>;
-
-    /// Converts the transaction into [`Recovered`].
-    fn into_recovered(self) -> Recovered<Executor::Transaction>;
-=======
     /// Converts the transaction into a tuple of [`TxEnvFor`] and [`Recovered`].
     fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>);
->>>>>>> v1.11.3
 }
 
 impl<Executor: BlockExecutor> ExecutorTx<Executor>
     for WithEncoded<Recovered<Executor::Transaction>>
 {
-<<<<<<< HEAD
-    fn as_executable(&self) -> impl ExecutableTx<Executor> {
-        self
-    }
-
-    fn into_recovered(self) -> Recovered<Executor::Transaction> {
-        self.1
-=======
     fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>) {
         (self.to_tx_env(), self.1)
->>>>>>> v1.11.3
     }
 }
 
 impl<Executor: BlockExecutor> ExecutorTx<Executor> for Recovered<Executor::Transaction> {
-<<<<<<< HEAD
-    fn as_executable(&self) -> impl ExecutableTx<Executor> {
-        self
-    }
-
-    fn into_recovered(self) -> Self {
-        self
-    }
-}
-
-impl<T, Executor> ExecutorTx<Executor>
-    for WithTxEnv<<<Executor as BlockExecutor>::Evm as Evm>::Tx, T>
-where
-    T: ExecutorTx<Executor>,
-    Executor: BlockExecutor,
-    <<Executor as BlockExecutor>::Evm as Evm>::Tx: Clone,
-    Self: RecoveredTx<Executor::Transaction>,
-{
-    fn as_executable(&self) -> impl ExecutableTx<Executor> {
-        self
-    }
-
-    fn into_recovered(self) -> Recovered<Executor::Transaction> {
-        self.tx.into_recovered()
-=======
     fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Self) {
         (self.to_tx_env(), self)
     }
@@ -530,7 +444,6 @@ where
 {
     fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>) {
         (self.tx_env, Arc::unwrap_or_clone(self.tx))
->>>>>>> v1.11.3
     }
 }
 
@@ -542,10 +455,7 @@ where
         Evm: Evm<
             Spec = <F::EvmFactory as EvmFactory>::Spec,
             HaltReason = <F::EvmFactory as EvmFactory>::HaltReason,
-<<<<<<< HEAD
-=======
             BlockEnv = <F::EvmFactory as EvmFactory>::BlockEnv,
->>>>>>> v1.11.3
             DB = &'a mut State<DB>,
         >,
         Transaction = N::SignedTx,
@@ -569,18 +479,11 @@ where
             &ExecutionResult<<<Self::Executor as BlockExecutor>::Evm as Evm>::HaltReason>,
         ) -> CommitChanges,
     ) -> Result<Option<u64>, BlockExecutionError> {
-<<<<<<< HEAD
-        if let Some(gas_used) =
-            self.executor.execute_transaction_with_commit_condition(tx.as_executable(), f)?
-        {
-            self.transactions.push(tx.into_recovered());
-=======
         let (tx_env, tx) = tx.into_parts();
         if let Some(gas_used) =
             self.executor.execute_transaction_with_commit_condition((tx_env, &tx), f)?
         {
             self.transactions.push(tx);
->>>>>>> v1.11.3
             Ok(Some(gas_used))
         } else {
             Ok(None)
@@ -693,11 +596,8 @@ where
             .with_state_hook(Some(Box::new(state_hook)))
             .execute_block(block.transactions_recovered())?;
 
-<<<<<<< HEAD
-=======
         self.db.merge_transitions(BundleRetention::Reverts);
 
->>>>>>> v1.11.3
         Ok(result)
     }
 
@@ -705,7 +605,6 @@ where
         self.db
     }
 
-<<<<<<< HEAD
     fn take_bundle(&mut self) -> BundleState {
         self.db.merge_transitions(BundleRetention::Reverts);
         self.db.take_bundle()
@@ -725,46 +624,24 @@ where
     }
 }
 
-/// A helper trait marking a 'static type that can be converted into an [`ExecutableTx`] for block
-/// executor.
-pub trait ExecutableTxFor<Evm: ConfigureEvm>:
-    ToTxEnv<TxEnvFor<Evm>> + RecoveredTx<TxTy<Evm::Primitives>>
-=======
-    fn size_hint(&self) -> usize {
-        self.db.bundle_state.size_hint()
-    }
-}
-
 /// A helper trait marking a 'static type that can be converted into an [`ExecutableTxParts`] for
 /// block executor.
 pub trait ExecutableTxFor<Evm: ConfigureEvm>:
     ExecutableTxParts<TxEnvFor<Evm>, TxTy<Evm::Primitives>> + RecoveredTx<TxTy<Evm::Primitives>>
->>>>>>> v1.11.3
 {
 }
 
 impl<T, Evm: ConfigureEvm> ExecutableTxFor<Evm> for T where
-<<<<<<< HEAD
-    T: ToTxEnv<TxEnvFor<Evm>> + RecoveredTx<TxTy<Evm::Primitives>>
-=======
     T: ExecutableTxParts<TxEnvFor<Evm>, TxTy<Evm::Primitives>> + RecoveredTx<TxTy<Evm::Primitives>>
->>>>>>> v1.11.3
 {
 }
 
 /// A container for a transaction and a transaction environment.
-<<<<<<< HEAD
-#[derive(Debug, Clone)]
-=======
 #[derive(Debug)]
->>>>>>> v1.11.3
 pub struct WithTxEnv<TxEnv, T> {
     /// The transaction environment for EVM.
     pub tx_env: TxEnv,
     /// The recovered transaction.
-<<<<<<< HEAD
-    pub tx: T,
-=======
     pub tx: Arc<T>,
 }
 
@@ -772,7 +649,6 @@ impl<TxEnv: Clone, T> Clone for WithTxEnv<TxEnv, T> {
     fn clone(&self) -> Self {
         Self { tx_env: self.tx_env.clone(), tx: self.tx.clone() }
     }
->>>>>>> v1.11.3
 }
 
 impl<TxEnv, Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for WithTxEnv<TxEnv, T> {
@@ -785,17 +661,11 @@ impl<TxEnv, Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for WithTxEnv<TxEnv, T> {
     }
 }
 
-<<<<<<< HEAD
-impl<TxEnv: Clone, T> ToTxEnv<TxEnv> for WithTxEnv<TxEnv, T> {
-    fn to_tx_env(&self) -> TxEnv {
-        self.tx_env.clone()
-=======
 impl<TxEnv, T: RecoveredTx<Tx>, Tx> ExecutableTxParts<TxEnv, Tx> for WithTxEnv<TxEnv, T> {
     type Recovered = Arc<T>;
 
     fn into_parts(self) -> (TxEnv, Self::Recovered) {
         (self.tx_env, self.tx)
->>>>>>> v1.11.3
     }
 }
 
@@ -854,7 +724,6 @@ mod tests {
             unreachable!()
         }
 
-<<<<<<< HEAD
         fn take_bundle(&mut self) -> BundleState {
             unreachable!()
         }
@@ -871,11 +740,6 @@ mod tests {
         ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
             unreachable!()
         }
-=======
-        fn size_hint(&self) -> usize {
-            0
-        }
->>>>>>> v1.11.3
     }
 
     #[test]
@@ -899,10 +763,7 @@ mod tests {
             nonce,
             code_hash: KECCAK_EMPTY,
             code: None,
-<<<<<<< HEAD
-=======
             account_id: None,
->>>>>>> v1.11.3
         };
         state.insert_account(addr, account_info);
         state
@@ -939,10 +800,6 @@ mod tests {
 
         let mut state = setup_state_with_account(addr1, 100, 1);
 
-<<<<<<< HEAD
-        let account2 =
-            AccountInfo { balance: U256::from(200), nonce: 1, code_hash: KECCAK_EMPTY, code: None };
-=======
         let account2 = AccountInfo {
             balance: U256::from(200),
             nonce: 1,
@@ -950,7 +807,6 @@ mod tests {
             code: None,
             account_id: None,
         };
->>>>>>> v1.11.3
         state.insert_account(addr2, account2);
 
         let mut increments = HashMap::default();
@@ -971,10 +827,6 @@ mod tests {
 
         let mut state = setup_state_with_account(addr1, 100, 1);
 
-<<<<<<< HEAD
-        let account2 =
-            AccountInfo { balance: U256::from(200), nonce: 1, code_hash: KECCAK_EMPTY, code: None };
-=======
         let account2 = AccountInfo {
             balance: U256::from(200),
             nonce: 1,
@@ -982,7 +834,6 @@ mod tests {
             code: None,
             account_id: None,
         };
->>>>>>> v1.11.3
         state.insert_account(addr2, account2);
 
         let mut increments = HashMap::default();

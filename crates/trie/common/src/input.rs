@@ -1,13 +1,9 @@
-<<<<<<< HEAD
-use crate::{prefix_set::TriePrefixSetsMut, updates::TrieUpdates, HashedPostState};
-=======
 use crate::{
     prefix_set::TriePrefixSetsMut,
     updates::{TrieUpdates, TrieUpdatesSorted},
     HashedPostState, HashedPostStateSorted,
 };
 use alloc::sync::Arc;
->>>>>>> v1.11.3
 
 /// Inputs for trie-related computations.
 #[derive(Default, Debug, Clone)]
@@ -43,33 +39,13 @@ impl TrieInput {
     /// Create new trie input from the provided blocks, from oldest to newest. See the documentation
     /// for [`Self::extend_with_blocks`] for details.
     pub fn from_blocks<'a>(
-<<<<<<< HEAD
         blocks: impl IntoIterator<Item = (&'a HashedPostState, Option<&'a TrieUpdates>)>,
-=======
-        blocks: impl IntoIterator<Item = (&'a HashedPostState, &'a TrieUpdates)>,
->>>>>>> v1.11.3
     ) -> Self {
         let mut input = Self::default();
         input.extend_with_blocks(blocks);
         input
     }
 
-<<<<<<< HEAD
-    /// Extend the trie input with the provided blocks, from oldest to newest.
-    ///
-    /// For blocks with missing trie updates, the trie input will be extended with prefix sets
-    /// constructed from the state of this block and the state itself, **without** trie updates.
-    pub fn extend_with_blocks<'a>(
-        &mut self,
-        blocks: impl IntoIterator<Item = (&'a HashedPostState, Option<&'a TrieUpdates>)>,
-    ) {
-        for (hashed_state, trie_updates) in blocks {
-            if let Some(nodes) = trie_updates.as_ref() {
-                self.append_cached_ref(nodes, hashed_state);
-            } else {
-                self.append_ref(hashed_state);
-            }
-=======
     /// Create new trie input from the provided sorted blocks, from oldest to newest.
     /// Converts sorted types to unsorted for aggregation.
     pub fn from_blocks_sorted<'a>(
@@ -85,13 +61,19 @@ impl TrieInput {
     }
 
     /// Extend the trie input with the provided blocks, from oldest to newest.
+    ///
+    /// For blocks with missing trie updates, the trie input will be extended with prefix sets
+    /// constructed from the state of this block and the state itself, **without** trie updates.
     pub fn extend_with_blocks<'a>(
         &mut self,
-        blocks: impl IntoIterator<Item = (&'a HashedPostState, &'a TrieUpdates)>,
+        blocks: impl IntoIterator<Item = (&'a HashedPostState, Option<&'a TrieUpdates>)>,
     ) {
         for (hashed_state, trie_updates) in blocks {
-            self.append_cached_ref(trie_updates, hashed_state);
->>>>>>> v1.11.3
+            if let Some(nodes) = trie_updates.as_ref() {
+                self.append_cached_ref(nodes, hashed_state);
+            } else {
+                self.append_ref(hashed_state);
+            }
         }
     }
 
@@ -160,8 +142,6 @@ impl TrieInput {
         self
     }
 }
-<<<<<<< HEAD
-=======
 
 /// Sorted variant of [`TrieInput`] for efficient proof generation.
 ///
@@ -199,4 +179,3 @@ impl TrieInputSorted {
 
 #[cfg(test)]
 mod tests {}
->>>>>>> v1.11.3

@@ -3,31 +3,22 @@
 use std::time::Duration;
 
 use crate::EthApi;
-<<<<<<< HEAD
-use alloy_primitives::{hex, Bytes, B256};
-=======
 use alloy_consensus::BlobTransactionValidationError;
 use alloy_eips::{eip7594::BlobTransactionSidecarVariant, BlockId, Typed2718};
 use alloy_primitives::{hex, B256};
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_primitives_traits::{AlloyBlockHeader, Recovered, WithEncoded};
->>>>>>> v1.11.3
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_api::{
     helpers::{spec::SignersForRpc, EthTransactions, LoadTransaction},
     FromEvmError, RpcNodeCore,
 };
-<<<<<<< HEAD
-use reth_rpc_eth_types::{utils::recover_raw_transaction, EthApiError};
-use reth_transaction_pool::{AddedTransactionOutcome, PoolTransaction, TransactionPool};
-=======
 use reth_rpc_eth_types::{error::RpcPoolError, EthApiError};
 use reth_storage_api::BlockReaderIdExt;
 use reth_transaction_pool::{
     error::Eip4844PoolTransactionError, AddedTransactionOutcome, EthBlobTransactionSidecar,
     EthPoolTransaction, PoolPooledTx, PoolTransaction, TransactionPool,
 };
->>>>>>> v1.11.3
 
 impl<N, Rpc> EthTransactions for EthApi<N, Rpc>
 where
@@ -45,15 +36,6 @@ where
         self.inner.send_raw_transaction_sync_timeout()
     }
 
-<<<<<<< HEAD
-    /// Decodes and recovers the transaction and submits it to the pool.
-    ///
-    /// Returns the hash of the transaction.
-    async fn send_raw_transaction(&self, tx: Bytes) -> Result<B256, Self::Error> {
-        let recovered = recover_raw_transaction(&tx)?;
-
-        let pool_transaction = <Self::Pool as TransactionPool>::Transaction::from_pooled(recovered);
-=======
     async fn send_transaction(
         &self,
         origin: reth_transaction_pool::TransactionOrigin,
@@ -110,7 +92,6 @@ where
                         )
                     })?;
         }
->>>>>>> v1.11.3
 
         // forward the transaction to the specific endpoint if configured.
         if let Some(client) = self.raw_tx_forwarder() {
@@ -126,11 +107,7 @@ where
                 }).map_err(EthApiError::other)?;
 
             // Retain tx in local tx pool after forwarding, for local RPC usage.
-<<<<<<< HEAD
-            let _ = self.inner.add_pool_transaction(pool_transaction).await;
-=======
             let _ = self.inner.add_pool_transaction(origin, pool_transaction).await;
->>>>>>> v1.11.3
 
             return Ok(hash);
         }
@@ -138,14 +115,8 @@ where
         // broadcast raw transaction to subscribers if there is any.
         self.broadcast_raw_transaction(tx);
 
-<<<<<<< HEAD
-        // submit the transaction to the pool with a `Local` origin
-        let AddedTransactionOutcome { hash, .. } =
-            self.inner.add_pool_transaction(pool_transaction).await?;
-=======
         let AddedTransactionOutcome { hash, .. } =
             self.inner.add_pool_transaction(origin, pool_transaction).await?;
->>>>>>> v1.11.3
 
         Ok(hash)
     }
@@ -162,27 +133,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-<<<<<<< HEAD
-    use alloy_primitives::{hex_literal::hex, Bytes};
-    use reth_chainspec::ChainSpecProvider;
-    use reth_evm_ethereum::EthEvmConfig;
-    use reth_network_api::noop::NoopNetwork;
-    use reth_provider::test_utils::NoopProvider;
-    use reth_rpc_eth_api::helpers::EthTransactions;
-    use reth_transaction_pool::{test_utils::testing_pool, TransactionPool};
-
-    #[tokio::test]
-    async fn send_raw_transaction() {
-        let noop_provider = NoopProvider::default();
-        let noop_network_provider = NoopNetwork::default();
-
-        let pool = testing_pool();
-
-        let evm_config = EthEvmConfig::new(noop_provider.chain_spec());
-        let eth_api =
-            EthApi::builder(noop_provider.clone(), pool.clone(), noop_network_provider, evm_config)
-                .build();
-=======
     use crate::eth::helpers::types::EthRpcConverter;
     use alloy_consensus::{
         BlobTransactionSidecar, Block, Header, SidecarBuilder, SimpleCoder, Transaction,
@@ -233,7 +183,6 @@ mod tests {
     async fn send_raw_transaction() {
         let eth_api = mock_eth_api(Default::default());
         let pool = eth_api.pool();
->>>>>>> v1.11.3
 
         // https://etherscan.io/tx/0xa694b71e6c128a2ed8e2e0f6770bddbe52e3bb8f10e8472f9a79ab81497a8b5d
         let tx_1 = Bytes::from(hex!(

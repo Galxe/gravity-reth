@@ -4,34 +4,16 @@
 
 use alloy_primitives::{Address, B256, U256};
 use reth_errors::ProviderResult;
-<<<<<<< HEAD
-use reth_revm::{database::StateProviderDatabase, DatabaseRef};
-use reth_storage_api::{BytecodeReader, HashedPostStateProvider, StateProvider};
-use reth_trie::{HashedStorage, MultiProofTargets};
-use revm::{
-    database::{BundleState, CacheDB},
-    primitives::HashMap,
-    state::{AccountInfo, Bytecode},
-    Database, DatabaseCommit,
-};
-=======
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BytecodeReader, HashedPostStateProvider, StateProvider, StateProviderBox};
 use reth_trie::{HashedStorage, MultiProofTargets};
 use revm::database::{BundleState, State};
->>>>>>> v1.11.3
 
 /// Helper alias type for the state's [`State`]
 pub type StateCacheDb = State<StateProviderDatabase<StateProviderTraitObjWrapper>>;
 
 /// Hack to get around 'higher-ranked lifetime error', see
 /// <https://github.com/rust-lang/rust/issues/100013>
-<<<<<<< HEAD
-#[expect(missing_debug_implementations)]
-pub struct StateProviderTraitObjWrapper<'a>(pub &'a dyn StateProvider);
-
-impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper<'_> {
-=======
 ///
 /// Apparently, when dealing with our RPC code, compiler is struggling to prove lifetimes around
 /// [`StateProvider`] trait objects. This type is a workaround which should help the compiler to
@@ -40,7 +22,6 @@ impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper<'_> {
 pub struct StateProviderTraitObjWrapper(pub StateProviderBox);
 
 impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper {
->>>>>>> v1.11.3
     fn state_root(
         &self,
         hashed_state: reth_trie::HashedPostState,
@@ -70,11 +51,7 @@ impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper {
     }
 }
 
-<<<<<<< HEAD
-impl reth_storage_api::StorageRootProvider for StateProviderTraitObjWrapper<'_> {
-=======
 impl reth_storage_api::StorageRootProvider for StateProviderTraitObjWrapper {
->>>>>>> v1.11.3
     fn storage_root(
         &self,
         address: Address,
@@ -102,11 +79,7 @@ impl reth_storage_api::StorageRootProvider for StateProviderTraitObjWrapper {
     }
 }
 
-<<<<<<< HEAD
-impl reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper<'_> {
-=======
 impl reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper {
->>>>>>> v1.11.3
     fn proof(
         &self,
         input: reth_trie::TrieInput,
@@ -133,11 +106,7 @@ impl reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper {
     }
 }
 
-<<<<<<< HEAD
-impl reth_storage_api::AccountReader for StateProviderTraitObjWrapper<'_> {
-=======
 impl reth_storage_api::AccountReader for StateProviderTraitObjWrapper {
->>>>>>> v1.11.3
     fn basic_account(
         &self,
         address: &Address,
@@ -146,11 +115,7 @@ impl reth_storage_api::AccountReader for StateProviderTraitObjWrapper {
     }
 }
 
-<<<<<<< HEAD
-impl reth_storage_api::BlockHashReader for StateProviderTraitObjWrapper<'_> {
-=======
 impl reth_storage_api::BlockHashReader for StateProviderTraitObjWrapper {
->>>>>>> v1.11.3
     fn block_hash(
         &self,
         block_number: alloy_primitives::BlockNumber,
@@ -174,21 +139,13 @@ impl reth_storage_api::BlockHashReader for StateProviderTraitObjWrapper {
     }
 }
 
-<<<<<<< HEAD
-impl HashedPostStateProvider for StateProviderTraitObjWrapper<'_> {
-=======
 impl HashedPostStateProvider for StateProviderTraitObjWrapper {
->>>>>>> v1.11.3
     fn hashed_post_state(&self, bundle_state: &BundleState) -> reth_trie::HashedPostState {
         self.0.hashed_post_state(bundle_state)
     }
 }
 
-<<<<<<< HEAD
-impl StateProvider for StateProviderTraitObjWrapper<'_> {
-=======
 impl StateProvider for StateProviderTraitObjWrapper {
->>>>>>> v1.11.3
     fn storage(
         &self,
         account: Address,
@@ -196,76 +153,6 @@ impl StateProvider for StateProviderTraitObjWrapper {
     ) -> reth_errors::ProviderResult<Option<alloy_primitives::StorageValue>> {
         self.0.storage(account, storage_key)
     }
-<<<<<<< HEAD
-
-    fn account_code(
-        &self,
-        addr: &Address,
-    ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Bytecode>> {
-        self.0.account_code(addr)
-    }
-
-    fn account_balance(&self, addr: &Address) -> reth_errors::ProviderResult<Option<U256>> {
-        self.0.account_balance(addr)
-    }
-
-    fn account_nonce(&self, addr: &Address) -> reth_errors::ProviderResult<Option<u64>> {
-        self.0.account_nonce(addr)
-    }
-}
-
-impl BytecodeReader for StateProviderTraitObjWrapper<'_> {
-    fn bytecode_by_hash(
-        &self,
-        code_hash: &B256,
-    ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Bytecode>> {
-        self.0.bytecode_by_hash(code_hash)
-    }
-}
-
-/// Hack to get around 'higher-ranked lifetime error', see
-/// <https://github.com/rust-lang/rust/issues/100013>
-pub struct StateCacheDbRefMutWrapper<'a, 'b>(pub &'b mut StateCacheDb<'a>);
-
-impl<'a, 'b> core::fmt::Debug for StateCacheDbRefMutWrapper<'a, 'b> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("StateCacheDbRefMutWrapper").finish_non_exhaustive()
-    }
-}
-
-impl<'a> Database for StateCacheDbRefMutWrapper<'a, '_> {
-    type Error = <StateCacheDb<'a> as Database>::Error;
-    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.0.basic(address)
-    }
-
-    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        self.0.code_by_hash(code_hash)
-    }
-
-    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
-        self.0.storage(address, index)
-    }
-
-    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-        self.0.block_hash(number)
-    }
-}
-
-impl<'a> DatabaseRef for StateCacheDbRefMutWrapper<'a, '_> {
-    type Error = <StateCacheDb<'a> as Database>::Error;
-
-    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.0.basic_ref(address)
-    }
-
-    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        self.0.code_by_hash_ref(code_hash)
-    }
-
-    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
-        self.0.storage_ref(address, index)
-=======
 
     fn storage_by_hashed_key(
         &self,
@@ -280,7 +167,6 @@ impl<'a> DatabaseRef for StateCacheDbRefMutWrapper<'a, '_> {
         addr: &Address,
     ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Bytecode>> {
         self.0.account_code(addr)
->>>>>>> v1.11.3
     }
 
     fn account_balance(&self, addr: &Address) -> reth_errors::ProviderResult<Option<U256>> {

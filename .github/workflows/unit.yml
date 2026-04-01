@@ -19,7 +19,6 @@ concurrency:
 
 jobs:
   test:
-<<<<<<< HEAD
     name: test / ${{ matrix.type }} (${{ matrix.partition }}/${{ matrix.total_partitions }})
     runs-on: ubuntu-latest
     env:
@@ -38,35 +37,7 @@ jobs:
             total_partitions: 2
     timeout-minutes: 30
     steps:
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: true
-      - uses: actions/checkout@v5
-=======
-    name: test / ${{ matrix.type }} / ${{ matrix.storage }}
-    runs-on: depot-ubuntu-latest-4
-    env:
-      RUST_BACKTRACE: 1
-      EDGE_FEATURES: ${{ matrix.storage == 'edge' && 'edge' || '' }}
-    strategy:
-      matrix:
-        type: [ethereum]
-        storage: [stable, edge]
-        include:
-          - type: ethereum
-            features: asm-keccak ethereum
-            exclude_args: ""
-    timeout-minutes: 30
-    steps:
       - uses: actions/checkout@v6
->>>>>>> v1.11.3
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
@@ -81,7 +52,6 @@ jobs:
       - name: Run tests
         run: |
           cargo nextest run \
-<<<<<<< HEAD
             ${{ matrix.args }} --workspace \
             --exclude ef-tests --no-tests=warn \
             --exclude "reth-pipe-exec-layer-*" \
@@ -90,12 +60,6 @@ jobs:
             --exclude "reth-op" \
             --exclude "reth-optimism-*" \
             --partition hash:${{ matrix.partition }}/2 \
-=======
-            --no-fail-fast \
-            --features "${{ matrix.features }} $EDGE_FEATURES" --locked \
-            ${{ matrix.exclude_args }} --workspace \
-            --exclude ef-tests --no-tests=warn \
->>>>>>> v1.11.3
             -E "!kind(test) and not binary(e2e_testsuite)"
 
   state:
@@ -107,15 +71,9 @@ jobs:
       RUST_BACKTRACE: 1
     timeout-minutes: 30
     steps:
-<<<<<<< HEAD
-      - uses: actions/checkout@v5
-      - name: Checkout ethereum/tests
-        uses: actions/checkout@v5
-=======
       - uses: actions/checkout@v6
       - name: Checkout ethereum/tests
         uses: actions/checkout@v6
->>>>>>> v1.11.3
         with:
           repository: ethereum/tests
           ref: 81862e4848585a438d64f911a19b3825f0f4cd95
@@ -142,22 +100,14 @@ jobs:
 
   doc:
     name: doc tests
-<<<<<<< HEAD
     if: false # FIXME: remove this line to enable the doc tests job after fixing the issues with the test suite.
     runs-on:
       group: Reth
-=======
-    runs-on: depot-ubuntu-latest
->>>>>>> v1.11.3
     env:
       RUST_BACKTRACE: 1
     timeout-minutes: 30
     steps:
-<<<<<<< HEAD
-      - uses: actions/checkout@v5
-=======
       - uses: actions/checkout@v6
->>>>>>> v1.11.3
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9

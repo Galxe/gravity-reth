@@ -37,31 +37,6 @@ pub struct TxPoolMetrics {
     pub blob_pool_size_bytes: Gauge,
 
     /// Number of all transactions of all sub-pools: pending + basefee + queued + blob
-<<<<<<< HEAD
-    pub(crate) total_transactions: Gauge,
-    /// Number of all legacy transactions in the pool
-    pub(crate) total_legacy_transactions: Gauge,
-    /// Number of all EIP-2930 transactions in the pool
-    pub(crate) total_eip2930_transactions: Gauge,
-    /// Number of all EIP-1559 transactions in the pool
-    pub(crate) total_eip1559_transactions: Gauge,
-    /// Number of all EIP-4844 transactions in the pool
-    pub(crate) total_eip4844_transactions: Gauge,
-    /// Number of all EIP-7702 transactions in the pool
-    pub(crate) total_eip7702_transactions: Gauge,
-
-    /// How often the pool was updated after the canonical state changed
-    pub(crate) performed_state_updates: Counter,
-
-    /// Counter for the number of pending transactions evicted
-    pub(crate) pending_transactions_evicted: Counter,
-    /// Counter for the number of basefee transactions evicted
-    pub(crate) basefee_transactions_evicted: Counter,
-    /// Counter for the number of blob transactions evicted
-    pub(crate) blob_transactions_evicted: Counter,
-    /// Counter for the number of queued transactions evicted
-    pub(crate) queued_transactions_evicted: Counter,
-=======
     pub total_transactions: Gauge,
     /// Number of all legacy transactions in the pool
     pub total_legacy_transactions: Gauge,
@@ -87,7 +62,6 @@ pub struct TxPoolMetrics {
     pub blob_transactions_evicted: Counter,
     /// Counter for the number of queued transactions evicted
     pub queued_transactions_evicted: Counter,
->>>>>>> v1.11.3
 }
 
 /// Transaction pool blobstore metrics
@@ -179,20 +153,4 @@ pub struct TxPoolValidationMetrics {
 pub struct TxPoolValidatorMetrics {
     /// Number of in-flight validation job sends waiting for channel capacity
     pub inflight_validation_jobs: Gauge,
-}
-
-/// Transaction pool validation metrics
-#[derive(Metrics)]
-#[metrics(scope = "transaction_pool")]
-pub struct TxPoolValidationMetrics {
-    /// How long to successfully validate a blob
-    pub(crate) blob_validation_duration: Histogram,
-}
-
-/// Transaction pool validator task metrics
-#[derive(Metrics)]
-#[metrics(scope = "transaction_pool")]
-pub struct TxPoolValidatorMetrics {
-    /// Number of in-flight validation job sends waiting for channel capacity
-    pub(crate) inflight_validation_jobs: Gauge,
 }

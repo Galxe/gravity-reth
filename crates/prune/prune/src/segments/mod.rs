@@ -4,10 +4,6 @@ mod user;
 
 use crate::{PruneLimiter, PrunerError};
 use alloy_primitives::{BlockNumber, TxNumber};
-<<<<<<< HEAD
-use reth_provider::{errors::provider::ProviderResult, BlockReader, PruneCheckpointWriter};
-use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, SegmentOutput};
-=======
 use reth_provider::{
     errors::provider::ProviderResult, BlockReader, PruneCheckpointWriter, StaticFileProviderFactory,
 };
@@ -17,7 +13,6 @@ use reth_prune_types::{
 };
 use reth_stages_types::StageId;
 use reth_static_file_types::StaticFileSegment;
->>>>>>> v1.11.3
 pub use set::SegmentSet;
 use std::{fmt::Debug, ops::RangeInclusive};
 use tracing::error;
@@ -246,10 +241,7 @@ mod tests {
     use reth_provider::{
         providers::BlockchainProvider,
         test_utils::{create_test_provider_factory, MockEthProvider},
-<<<<<<< HEAD
-=======
         BlockWriter,
->>>>>>> v1.11.3
     };
     use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
 
@@ -291,21 +283,12 @@ mod tests {
         let provider_rw = factory.provider_rw().expect("failed to get provider_rw");
         for block in &blocks {
             provider_rw
-<<<<<<< HEAD
-                .insert_historical_block(
-                    block.clone().try_recover().expect("failed to seal block with senders"),
-                )
-                .expect("failed to insert block");
-            provider_rw.commit_view().unwrap();
-        }
-=======
                 .insert_block(
                     &block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
         }
         provider_rw.commit().expect("failed to commit");
->>>>>>> v1.11.3
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -338,21 +321,12 @@ mod tests {
         let provider_rw = factory.provider_rw().expect("failed to get provider_rw");
         for block in &blocks {
             provider_rw
-<<<<<<< HEAD
-                .insert_historical_block(
-                    block.clone().try_recover().expect("failed to seal block with senders"),
-                )
-                .expect("failed to insert block");
-            provider_rw.commit_view().unwrap();
-        }
-=======
                 .insert_block(
                     &block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
         }
         provider_rw.commit().expect("failed to commit");
->>>>>>> v1.11.3
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -393,21 +367,12 @@ mod tests {
         let provider_rw = factory.provider_rw().expect("failed to get provider_rw");
         for block in &blocks {
             provider_rw
-<<<<<<< HEAD
-                .insert_historical_block(
-                    block.clone().try_recover().expect("failed to seal block with senders"),
-                )
-                .expect("failed to insert block");
-            provider_rw.commit_view().unwrap();
-        }
-=======
                 .insert_block(
                     &block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
         }
         provider_rw.commit().expect("failed to commit");
->>>>>>> v1.11.3
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -438,21 +403,12 @@ mod tests {
         let provider_rw = factory.provider_rw().expect("failed to get provider_rw");
         for block in &blocks {
             provider_rw
-<<<<<<< HEAD
-                .insert_historical_block(
-                    block.clone().try_recover().expect("failed to seal block with senders"),
-                )
-                .expect("failed to insert block");
-            provider_rw.commit_view().unwrap();
-        }
-=======
                 .insert_block(
                     &block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
         }
         provider_rw.commit().expect("failed to commit");
->>>>>>> v1.11.3
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();

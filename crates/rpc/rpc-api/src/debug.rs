@@ -2,15 +2,9 @@ use alloy_eip7928::BlockAccessList;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_genesis::ChainConfig;
 use alloy_json_rpc::RpcObject;
-<<<<<<< HEAD
-use alloy_primitives::{Address, Bytes, B256};
-use alloy_rpc_types_debug::ExecutionWitness;
-use alloy_rpc_types_eth::{Block, Bundle, StateContext};
-=======
 use alloy_primitives::{Address, Bytes, B256, U64};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{Bundle, StateContext};
->>>>>>> v1.11.3
 use alloy_rpc_types_trace::geth::{
     BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
 };
@@ -442,29 +436,6 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Note: Only available when built with the `failpoints` feature.
     #[method(name = "setFailpoint")]
     async fn debug_set_failpoint(&self, name: String, actions: String) -> RpcResult<()>;
-}
-
-/// An extension to the `debug_` namespace that provides additional methods for retrieving
-/// witnesses.
-///
-/// This is separate from the regular `debug_` api, because this depends on the network specific
-/// params. For optimism this will expect the optimism specific payload attributes
-#[cfg_attr(not(feature = "client"), rpc(server, namespace = "debug"))]
-#[cfg_attr(feature = "client", rpc(server, client, namespace = "debug"))]
-pub trait DebugExecutionWitnessApi<Attributes> {
-    /// The `debug_executePayload` method allows for re-execution of a group of transactions with
-    /// the purpose of generating an execution witness. The witness comprises of a map of all
-    /// hashed trie nodes to their preimages that were required during the execution of the block,
-    /// including during state root recomputation.
-    ///
-    /// The first argument is the parent block hash. The second argument is the payload
-    /// attributes for the new block.
-    #[method(name = "executePayload")]
-    async fn execute_payload(
-        &self,
-        parent_block_hash: B256,
-        attributes: Attributes,
-    ) -> RpcResult<ExecutionWitness>;
 }
 
 /// An extension to the `debug_` namespace that provides additional methods for retrieving

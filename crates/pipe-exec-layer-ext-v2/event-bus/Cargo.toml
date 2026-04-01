@@ -1,37 +1,20 @@
 [package]
-<<<<<<<< HEAD:crates/pipe-exec-layer-ext-v2/event-bus/Cargo.toml
 name = "reth-pipe-exec-layer-event-bus"
-========
-name = "reth-payload-util"
->>>>>>>> v1.11.3:crates/payload/util/Cargo.toml
 version.workspace = true
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-<<<<<<<< HEAD:crates/pipe-exec-layer-ext-v2/event-bus/Cargo.toml
 rust-version.workspace = true
 description = "event bus for pipeline execution layer extension"
-========
-description = "reth payload utilities"
->>>>>>>> v1.11.3:crates/payload/util/Cargo.toml
 
 [lints]
 workspace = true
 
 [dependencies]
-<<<<<<<< HEAD:crates/pipe-exec-layer-ext-v2/event-bus/Cargo.toml
 reth-primitives.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-chain-state.workspace = true
 alloy-primitives.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-========
-# reth
-reth-transaction-pool.workspace = true
-
-# alloy
-alloy-primitives.workspace = true
-alloy-consensus.workspace = true
->>>>>>>> v1.11.3:crates/payload/util/Cargo.toml

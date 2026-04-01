@@ -1,13 +1,5 @@
-<<<<<<< HEAD
-use crate::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory, PrefixSetLoader};
-use alloy_primitives::{
-    map::{AddressMap, B256Map},
-    Address, BlockNumber, B256, U256,
-};
-=======
 use crate::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
 use alloy_primitives::{keccak256, map::B256Map, BlockNumber, B256};
->>>>>>> v1.11.3
 use reth_db_api::{
     models::{AccountBeforeTx, BlockNumberAddress},
     tables,
@@ -15,15 +7,6 @@ use reth_db_api::{
     DatabaseError,
 };
 use reth_execution_errors::StateRootError;
-<<<<<<< HEAD
-use reth_trie::{
-    hashed_cursor::HashedPostStateCursorFactory, trie_cursor::InMemoryTrieCursorFactory,
-    updates::TrieUpdates, HashedPostState, HashedStorage, KeccakKeyHasher, KeyHasher, StateRoot,
-    StateRootProgress, TrieInput,
-};
-use std::{collections::HashMap, ops::RangeInclusive};
-use tracing::debug;
-=======
 use reth_storage_api::{
     BlockNumReader, ChangeSetReader, DBProvider, StorageChangeSetReader, StorageSettingsCache,
 };
@@ -38,7 +21,6 @@ use std::{
     ops::{Bound, RangeBounds, RangeInclusive},
 };
 use tracing::{debug, instrument};
->>>>>>> v1.11.3
 
 /// Extends [`StateRoot`] with operations specific for working with a database transaction.
 pub trait DatabaseStateRoot<'a, TX>: Sized {
@@ -157,13 +139,6 @@ pub trait DatabaseStateRoot<'a, TX>: Sized {
     ) -> Result<(B256, TrieUpdates), StateRootError>;
 }
 
-<<<<<<< HEAD
-/// Extends [`HashedPostState`] with operations specific for working with a database transaction.
-pub trait DatabaseHashedPostState<TX>: Sized {
-    /// Initializes [`HashedPostState`] from reverts. Iterates over state reverts from the specified
-    /// block up to the current tip and aggregates them into hashed state in reverse.
-    fn from_reverts<KH: KeyHasher>(tx: &TX, from: BlockNumber) -> Result<Self, DatabaseError>;
-=======
 /// Extends [`HashedPostStateSorted`] with operations specific for working with a database
 /// transaction.
 pub trait DatabaseHashedPostState: Sized {
@@ -178,7 +153,6 @@ pub trait DatabaseHashedPostState: Sized {
         provider: &(impl ChangeSetReader + StorageChangeSetReader + BlockNumReader + DBProvider),
         range: impl RangeBounds<BlockNumber>,
     ) -> Result<HashedPostStateSorted, ProviderError>;
->>>>>>> v1.11.3
 }
 
 impl<'a, TX: DbTx> DatabaseStateRoot<'a, TX>
@@ -195,14 +169,9 @@ impl<'a, TX: DbTx> DatabaseStateRoot<'a, TX>
                  + DBProvider<Tx = TX>),
         range: RangeInclusive<BlockNumber>,
     ) -> Result<Self, StateRootError> {
-<<<<<<< HEAD
-        let loaded_prefix_sets = PrefixSetLoader::<_, KeccakKeyHasher>::new(tx).load(range)?;
-        Ok(Self::from_tx(tx).with_prefix_sets(loaded_prefix_sets))
-=======
         let loaded_prefix_sets =
             crate::prefix_set::load_prefix_sets_with_provider(provider, range)?;
         Ok(Self::from_tx(provider.tx_ref()).with_prefix_sets(loaded_prefix_sets))
->>>>>>> v1.11.3
     }
 
     fn incremental_root(
@@ -298,49 +267,6 @@ impl<'a, TX: DbTx> DatabaseStateRoot<'a, TX>
     }
 }
 
-<<<<<<< HEAD
-impl<TX: DbTx> DatabaseHashedPostState<TX> for HashedPostState {
-    fn from_reverts<KH: KeyHasher>(tx: &TX, from: BlockNumber) -> Result<Self, DatabaseError> {
-        // Iterate over account changesets and record value before first occurring account change.
-        let mut accounts = HashMap::new();
-        let mut account_changesets_cursor = tx.cursor_read::<tables::AccountChangeSets>()?;
-        for entry in account_changesets_cursor.walk_range(from..)? {
-            let (_, AccountBeforeTx { address, info }) = entry?;
-            accounts.entry(address).or_insert(info);
-        }
-
-        // Iterate over storage changesets and record value before first occurring storage change.
-        let mut storages = AddressMap::<B256Map<U256>>::default();
-        let mut storage_changesets_cursor = tx.cursor_read::<tables::StorageChangeSets>()?;
-        for entry in
-            storage_changesets_cursor.walk_range(BlockNumberAddress((from, Address::ZERO))..)?
-        {
-            let (BlockNumberAddress((_, address)), storage) = entry?;
-            let account_storage = storages.entry(address).or_default();
-            account_storage.entry(storage.key).or_insert(storage.value);
-        }
-
-        let hashed_accounts =
-            accounts.into_iter().map(|(address, info)| (KH::hash_key(address), info)).collect();
-
-        let hashed_storages = storages
-            .into_iter()
-            .map(|(address, storage)| {
-                (
-                    KH::hash_key(address),
-                    HashedStorage::from_iter(
-                        // The `wiped` flag indicates only whether previous storage entries
-                        // should be looked up in db or not. For reverts it's a noop since all
-                        // wiped changes had been written as storage reverts.
-                        false,
-                        storage.into_iter().map(|(slot, value)| (KH::hash_key(slot), value)),
-                    ),
-                )
-            })
-            .collect();
-
-        Ok(Self { accounts: hashed_accounts, storages: hashed_storages })
-=======
 /// Calls [`HashedPostStateSorted::from_reverts`].
 ///
 /// This is a convenience wrapper kept for backward compatibility. The storage
@@ -426,19 +352,12 @@ impl DatabaseHashedPostState for HashedPostStateSorted {
             .collect();
 
         Ok(Self::new(accounts, hashed_storages))
->>>>>>> v1.11.3
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-<<<<<<< HEAD
-    use alloy_primitives::{hex, map::HashMap, Address, U256};
-    use reth_db::test_utils::create_test_rw_db;
-    use reth_db_api::database::Database;
-    use reth_trie::KeccakKeyHasher;
-=======
     use alloy_primitives::{hex, keccak256, map::HashMap, Address, B256, U256};
     use reth_db::test_utils::create_test_rw_db;
     use reth_db_api::{
@@ -450,7 +369,6 @@ mod tests {
     use reth_primitives_traits::{Account, StorageEntry};
     use reth_provider::test_utils::create_test_provider_factory;
     use reth_trie::{HashedPostState, HashedStorage, KeccakKeyHasher};
->>>>>>> v1.11.3
     use revm::state::AccountInfo;
     use revm_database::BundleState;
 

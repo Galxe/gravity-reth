@@ -33,14 +33,11 @@ pub trait Compress: Send + Sync + Sized + Debug {
 
     /// Compresses data to a given buffer.
     fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B);
-<<<<<<< HEAD
 
     /// Return the compressed length of prefix subkey
     fn subkey_compress_length(&self) -> Option<usize> {
         None
     }
-=======
->>>>>>> v1.11.3
 }
 
 /// Trait that will transform the data to be read from the DB.
@@ -51,8 +48,6 @@ pub trait Decompress: Send + Sync + Sized + Debug {
     /// Decompresses owned data coming from the database.
     fn decompress_owned(value: Vec<u8>) -> Result<Self, DatabaseError> {
         Self::decompress(&value)
-<<<<<<< HEAD
-=======
     }
 }
 
@@ -83,7 +78,6 @@ impl<const N: usize> IntoVec for arrayvec::ArrayVec<u8, N> {
     #[inline]
     fn into_vec(self) -> Vec<u8> {
         self.to_vec()
->>>>>>> v1.11.3
     }
 }
 

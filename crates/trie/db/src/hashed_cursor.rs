@@ -12,31 +12,13 @@ use reth_trie::hashed_cursor::{HashedCursor, HashedCursorFactory, HashedStorageC
 #[derive(Debug, Clone)]
 pub struct DatabaseHashedCursorFactory<T>(T);
 
-<<<<<<< HEAD
-impl<TX> Clone for DatabaseHashedCursorFactory<'_, TX> {
-    fn clone(&self) -> Self {
-        Self(self.0)
-    }
-}
-
-impl<'a, TX> DatabaseHashedCursorFactory<'a, TX> {
-=======
 impl<T> DatabaseHashedCursorFactory<T> {
->>>>>>> v1.11.3
     /// Create new database hashed cursor factory.
     pub const fn new(tx: T) -> Self {
         Self(tx)
     }
 }
 
-<<<<<<< HEAD
-impl<TX: DbTx> HashedCursorFactory for DatabaseHashedCursorFactory<'_, TX> {
-    type AccountCursor = DatabaseHashedAccountCursor<<TX as DbTx>::Cursor<tables::HashedAccounts>>;
-    type StorageCursor =
-        DatabaseHashedStorageCursor<<TX as DbTx>::DupCursor<tables::HashedStorages>>;
-
-    fn hashed_account_cursor(&self) -> Result<Self::AccountCursor, DatabaseError> {
-=======
 impl<TX: DbTx> HashedCursorFactory for DatabaseHashedCursorFactory<&TX> {
     type AccountCursor<'a>
         = DatabaseHashedAccountCursor<<TX as DbTx>::Cursor<tables::HashedAccounts>>
@@ -48,18 +30,13 @@ impl<TX: DbTx> HashedCursorFactory for DatabaseHashedCursorFactory<&TX> {
         Self: 'a;
 
     fn hashed_account_cursor(&self) -> Result<Self::AccountCursor<'_>, DatabaseError> {
->>>>>>> v1.11.3
         Ok(DatabaseHashedAccountCursor(self.0.cursor_read::<tables::HashedAccounts>()?))
     }
 
     fn hashed_storage_cursor(
         &self,
         hashed_address: B256,
-<<<<<<< HEAD
-    ) -> Result<Self::StorageCursor, DatabaseError> {
-=======
     ) -> Result<Self::StorageCursor<'_>, DatabaseError> {
->>>>>>> v1.11.3
         Ok(DatabaseHashedStorageCursor::new(
             self.0.cursor_dup_read::<tables::HashedStorages>()?,
             hashed_address,

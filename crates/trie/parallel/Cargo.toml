@@ -13,25 +13,16 @@ workspace = true
 
 [dependencies]
 # reth
-<<<<<<< HEAD
 reth-db-api.workspace = true
-=======
 reth-primitives-traits = { workspace = true, features = ["dashmap"] }
->>>>>>> v1.11.3
 reth-execution-errors.workspace = true
 reth-provider.workspace = true
 reth-storage-errors.workspace = true
-reth-trie-common.workspace = true
-<<<<<<< HEAD
+reth-trie-common = { workspace = true, features = ["nested-trie"] }
 reth-trie-db.workspace = true
-reth-trie-sparse = { workspace = true, features = ["std"] }
-reth-trie.workspace = true
-reth-primitives-traits.workspace = true
-=======
 reth-trie-sparse = { workspace = true, features = ["std"] }
 reth-tasks = { workspace = true, features = ["rayon"] }
 reth-trie.workspace = true
->>>>>>> v1.11.3
 
 # alloy
 alloy-rlp.workspace = true
@@ -45,13 +36,10 @@ thiserror.workspace = true
 derive_more.workspace = true
 rayon.workspace = true
 itertools.workspace = true
-<<<<<<< HEAD
 parking_lot.workspace = true
 once_cell.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
-=======
 crossbeam-channel.workspace = true
->>>>>>> v1.11.3
 
 # `metrics` feature
 reth-metrics = { workspace = true, optional = true }
@@ -66,10 +54,7 @@ reth-trie = { workspace = true, features = ["test-utils"] }
 
 # misc
 rand.workspace = true
-<<<<<<< HEAD
 rayon.workspace = true
-=======
->>>>>>> v1.11.3
 criterion.workspace = true
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
@@ -79,20 +64,14 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 default = ["metrics"]
 metrics = ["reth-metrics", "dep:metrics", "reth-trie/metrics", "reth-trie-sparse/metrics"]
 test-utils = [
-<<<<<<< HEAD
     "reth-db-api/test-utils",
-=======
->>>>>>> v1.11.3
     "reth-primitives-traits/test-utils",
     "reth-provider/test-utils",
     "reth-trie-common/test-utils",
     "reth-trie-db/test-utils",
     "reth-trie-sparse/test-utils",
     "reth-trie/test-utils",
-<<<<<<< HEAD
-=======
     "reth-tasks/test-utils",
->>>>>>> v1.11.3
 ]
 
 [[bench]]

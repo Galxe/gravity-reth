@@ -1,23 +1,11 @@
 use alloc::vec::Vec;
-<<<<<<< HEAD
-use alloy_primitives::BlockNumber;
-use reth_db_models::StoredBlockBodyIndices;
-use reth_execution_types::ExecutionOutcome;
-=======
 use alloy_consensus::transaction::Either;
 use alloy_primitives::BlockNumber;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
->>>>>>> v1.11.3
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie_common::HashedPostStateSorted;
 use revm_database::{
     states::{PlainStateReverts, StateChangeset},
-<<<<<<< HEAD
-    OriginalValuesKnown,
-};
-
-use super::StorageLocation;
-=======
     BundleState, OriginalValuesKnown,
 };
 
@@ -93,39 +81,10 @@ impl<'a, R> From<&'a ExecutionOutcome<R>> for WriteStateInput<'a, R> {
         Self::Multiple(outcome)
     }
 }
->>>>>>> v1.11.3
 
 /// A trait specifically for writing state changes or reverts
 pub trait StateWriter {
     /// Receipt type included into [`ExecutionOutcome`].
-<<<<<<< HEAD
-    type Receipt;
-
-    /// Write the state and receipts to the database or static files if `static_file_producer` is
-    /// `Some`. It should be `None` if there is any kind of pruning/filtering over the receipts.
-    fn write_state_with_indices(
-        &self,
-        execution_outcome: &ExecutionOutcome<Self::Receipt>,
-        is_value_known: OriginalValuesKnown,
-        write_receipts_to: StorageLocation,
-        body_indices: Option<Vec<StoredBlockBodyIndices>>,
-    ) -> ProviderResult<()>;
-
-    /// Write the state and receipts to the database or static files if `static_file_producer` is
-    /// `Some`. It should be `None` if there is any kind of pruning/filtering over the receipts.
-    fn write_state(
-        &self,
-        execution_outcome: &ExecutionOutcome<Self::Receipt>,
-        is_value_known: OriginalValuesKnown,
-        write_receipts_to: StorageLocation,
-    ) -> ProviderResult<()> {
-        self.write_state_with_indices(execution_outcome, is_value_known, write_receipts_to, None)
-    }
-
-    /// Write state reverts to the database.
-    ///
-    /// NOTE: Reverts will delete all wiped storage from plain state.
-=======
     type Receipt: 'static;
 
     /// Write the state and optionally receipts to the database.
@@ -143,15 +102,11 @@ pub trait StateWriter {
     /// NOTE: Reverts will delete all wiped storage from plain state.
     ///
     /// Use `config` to skip writing certain data types when they are written elsewhere.
->>>>>>> v1.11.3
     fn write_state_reverts(
         &self,
         reverts: PlainStateReverts,
         first_block: BlockNumber,
-<<<<<<< HEAD
-=======
         config: StateWriteConfig,
->>>>>>> v1.11.3
     ) -> ProviderResult<()>;
 
     /// Write state changes to the database.
@@ -162,26 +117,13 @@ pub trait StateWriter {
 
     /// Remove the block range of state above the given block. The state of the passed block is not
     /// removed.
-<<<<<<< HEAD
-    fn remove_state_above(
-        &self,
-        block: BlockNumber,
-        remove_receipts_from: StorageLocation,
-    ) -> ProviderResult<()>;
-=======
     fn remove_state_above(&self, block: BlockNumber) -> ProviderResult<()>;
->>>>>>> v1.11.3
 
     /// Take the block range of state, recreating the [`ExecutionOutcome`]. The state of the passed
     /// block is not removed.
     fn take_state_above(
         &self,
         block: BlockNumber,
-<<<<<<< HEAD
-        remove_receipts_from: StorageLocation,
-    ) -> ProviderResult<ExecutionOutcome<Self::Receipt>>;
-}
-=======
     ) -> ProviderResult<ExecutionOutcome<Self::Receipt>>;
 }
 
@@ -207,4 +149,3 @@ impl Default for StateWriteConfig {
         }
     }
 }
->>>>>>> v1.11.3

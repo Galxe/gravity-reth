@@ -18,14 +18,10 @@ use crate::{
 use core::ops::Bound;
 use std::{collections::BTreeMap, ops::RangeBounds};
 
-<<<<<<< HEAD
-/// Mock database used for testing with inner `BTreeMap` structure
-=======
 /// Mock database implementation for testing and development.
 ///
 /// Provides a lightweight implementation of the [`Database`] trait suitable
 /// for testing scenarios where actual database operations are not required.
->>>>>>> v1.11.3
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseMock {
     /// Internal data storage using a `BTreeMap`.
@@ -58,15 +54,11 @@ impl Database for DatabaseMock {
 
 impl DatabaseMetrics for DatabaseMock {}
 
-<<<<<<< HEAD
-/// Mock read only tx
-=======
 /// Mock transaction implementation for testing and development.
 ///
 /// Implements both [`DbTx`] and [`DbTxMut`] traits. All operations are no-ops
 /// that return success or default values, suitable for testing database operations
 /// without side effects.
->>>>>>> v1.11.3
 #[derive(Debug, Clone, Default)]
 pub struct TxMock {
     /// Internal table representation (currently unused).
@@ -87,25 +79,15 @@ impl DbTx for TxMock {
         Ok(None)
     }
 
-<<<<<<< HEAD
-=======
     /// Retrieves a value by encoded key from the specified table.
     ///
     /// **Mock behavior**: Always returns `None` regardless of the encoded key.
     /// This is equivalent to [`Self::get`] but works with pre-encoded keys.
->>>>>>> v1.11.3
     fn get_by_encoded_key<T: Table>(
         &self,
         _key: &<T::Key as Encode>::Encoded,
     ) -> Result<Option<T::Value>, DatabaseError> {
         Ok(None)
-<<<<<<< HEAD
-    }
-
-    fn commit(self) -> Result<bool, DatabaseError> {
-        Ok(true)
-=======
->>>>>>> v1.11.3
     }
 
     /// Commits the transaction.

@@ -12,11 +12,8 @@ pub fn read_dir(
     start_from: BlockNumber,
 ) -> eyre::Result<impl Stream<Item = eyre::Result<EraLocalMeta>> + Send + Sync + 'static + Unpin> {
     let mut checksums = None;
-<<<<<<< HEAD
-=======
 
     // read all the files in the given dir and also read the checksums file
->>>>>>> v1.11.3
     let mut entries = fs::read_dir(dir)?
         .filter_map(|entry| {
             (|| {
@@ -34,10 +31,7 @@ pub fn read_dir(
                         return Ok(Some((number, path.into_boxed_path())));
                     }
                 }
-<<<<<<< HEAD
-=======
 
->>>>>>> v1.11.3
                 if path.file_name() == Some("checksums.txt".as_ref()) {
                     let file = fs::open(path)?;
                     let reader = io::BufReader::new(file);
@@ -52,11 +46,6 @@ pub fn read_dir(
         .collect::<eyre::Result<Vec<_>>>()?;
     let mut checksums = checksums.ok_or_eyre("Missing file `checksums.txt` in the `dir`")?;
 
-<<<<<<< HEAD
-    entries.sort_by_key(|a| a.0);
-
-    Ok(stream::iter(entries.into_iter().skip(start_from as usize / BLOCKS_PER_FILE).map(
-=======
     let start_index = start_from as usize / BLOCKS_PER_FILE;
     for _ in 0..start_index {
         // skip the first entries in the checksums iterator so that both iters align
@@ -66,7 +55,6 @@ pub fn read_dir(
     entries.sort_by_key(|(left, _)| *left);
 
     Ok(stream::iter(entries.into_iter().skip_while(move |(n, _)| *n < start_index).map(
->>>>>>> v1.11.3
         move |(_, path)| {
             let expected_checksum =
                 checksums.next().transpose()?.ok_or_eyre("Got less checksums than ERA files")?;

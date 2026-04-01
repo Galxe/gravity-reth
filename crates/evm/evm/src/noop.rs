@@ -1,14 +1,10 @@
 //! Helpers for testing.
 
-<<<<<<< HEAD
 use crate::{
     parallel_execute::ParallelExecutor, BlockExecutionError, ConfigureEvm, EvmEnvFor,
     ParallelDatabase,
 };
 use alloc::boxed::Box;
-=======
-use crate::{ConfigureEvm, EvmEnvFor};
->>>>>>> v1.11.3
 use reth_primitives_traits::{BlockTy, HeaderTy, SealedBlock, SealedHeader};
 
 /// A no-op EVM config that panics on any call. Used as a typesystem hack to satisfy
@@ -77,7 +73,6 @@ where
     ) -> Result<crate::ExecutionCtxFor<'_, Self>, Self::Error> {
         self.inner().context_for_next_block(parent, attributes)
     }
-<<<<<<< HEAD
 
     fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
         &self,
@@ -86,6 +81,4 @@ where
     {
         self.inner().parallel_executor(db)
     }
-=======
->>>>>>> v1.11.3
 }

@@ -133,23 +133,6 @@ pub use alloy_consensus::{
     transaction::{Recovered, TransactionMeta},
     ReceiptWithBloom,
 };
-<<<<<<< HEAD
-
-pub use transaction::{
-    execute::FillTxEnv,
-    signed::{FullSignedTx, SignedTransaction},
-    FullTransaction, SignerRecoverable, Transaction,
-};
-
-pub mod block;
-pub use block::{
-    body::{BlockBody, FullBlockBody},
-    header::{AlloyBlockHeader, BlockHeader, FullBlockHeader},
-    recovered::IndexedTx,
-    Block, FullBlock, RecoveredBlock, SealedBlock,
-};
-=======
->>>>>>> v1.11.3
 
 pub use transaction::{
     execute::FillTxEnv,
@@ -205,11 +188,6 @@ pub mod serde_bincode_compat;
 pub mod size;
 pub use size::InMemorySize;
 
-<<<<<<< HEAD
-/// Node traits
-pub mod node;
-pub use node::{BlockTy, BodyTy, FullNodePrimitives, HeaderTy, NodePrimitives, ReceiptTy, TxTy};
-=======
 /// Rayon utilities
 #[cfg(feature = "rayon")]
 pub mod rayon;
@@ -219,7 +197,6 @@ pub use rayon::ParallelBridgeBuffered;
 /// Node traits
 pub mod node;
 pub use node::{BlockTy, BodyTy, HeaderTy, NodePrimitives, ReceiptTy, TxTy};
->>>>>>> v1.11.3
 
 /// Helper trait that requires de-/serialize implementation since `serde` feature is enabled.
 #[cfg(feature = "serde")]
@@ -269,12 +246,6 @@ pub mod test_utils {
     pub use crate::{block::TestBlock, header::test_utils::TestHeader};
 }
 
-<<<<<<< HEAD
-/// Value that contains subkey
-pub trait SubkeyContainedValue {
-    /// Return the length of compressed subkey
-    fn subkey_length(&self) -> Option<usize>;
-=======
 /// Re-exports of `dashmap` types with [`alloy_primitives::map::DefaultHashBuilder`] as the hasher.
 #[cfg(feature = "dashmap")]
 pub mod dashmap {
@@ -282,5 +253,4 @@ pub mod dashmap {
     /// Re-export of `DashMap` with [`alloy_primitives::map::DefaultHashBuilder`] as the hasher.
     pub type DashMap<K, V, S = alloy_primitives::map::DefaultHashBuilder> =
         ::dashmap::DashMap<K, V, S>;
->>>>>>> v1.11.3
 }

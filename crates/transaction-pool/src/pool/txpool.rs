@@ -30,13 +30,9 @@ use alloy_eips::{
     eip4844::BLOB_TX_MIN_BLOB_GASPRICE,
     Typed2718,
 };
-<<<<<<< HEAD
-use alloy_primitives::{Address, TxHash, B256};
-=======
 #[cfg(test)]
 use alloy_primitives::Address;
 use alloy_primitives::{map::AddressSet, TxHash, B256};
->>>>>>> v1.11.3
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::{
@@ -130,10 +126,6 @@ impl<T: TransactionOrdering> TxPool<T> {
     /// Create a new graph pool instance.
     pub fn new(ordering: T, config: PoolConfig) -> Self {
         Self {
-<<<<<<< HEAD
-            sender_info: Default::default(),
-=======
->>>>>>> v1.11.3
             pending_pool: PendingPool::with_buffer(
                 ordering,
                 config.max_new_pending_txs_notifications,
@@ -175,11 +167,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         let mut last_consecutive_tx = None;
 
         // ensure this operates on the most recent
-<<<<<<< HEAD
-        if let Some(current) = self.sender_info.get(&on_chain.sender) {
-=======
         if let Some(current) = self.all_transactions.sender_info.get(&on_chain.sender) {
->>>>>>> v1.11.3
             on_chain.nonce = on_chain.nonce.max(current.state_nonce);
         }
 
@@ -577,8 +565,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         self.all_transactions.txs_iter(sender).map(|(_, tx)| Arc::clone(&tx.transaction)).collect()
     }
 
-<<<<<<< HEAD
-=======
     /// Returns a pending transaction sent by the given sender with the given nonce.
     pub(crate) fn get_pending_transaction_by_sender_and_nonce(
         &self,
@@ -591,7 +577,6 @@ impl<T: TransactionOrdering> TxPool<T> {
             .map(|(_, tx)| Arc::clone(&tx.transaction))
     }
 
->>>>>>> v1.11.3
     /// Updates only the pending fees without triggering subpool updates.
     /// Returns the previous base fee and blob fee values.
     const fn update_pending_fees_only(
@@ -654,11 +639,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         let updates = self.all_transactions.update(&changed_senders);
 
         // track changed accounts
-<<<<<<< HEAD
-        self.sender_info.extend(changed_senders);
-=======
         self.all_transactions.sender_info.extend(changed_senders);
->>>>>>> v1.11.3
 
         // Process the sub-pool updates
         let update = self.process_updates(updates);
@@ -676,11 +657,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         block_info: BlockInfo,
         mined_transactions: Vec<TxHash>,
         changed_senders: FxHashMap<SenderId, SenderInfo>,
-<<<<<<< HEAD
-        update_kind: PoolUpdateKind,
-=======
         _update_kind: PoolUpdateKind,
->>>>>>> v1.11.3
     ) -> OnNewCanonicalStateOutcome<T::Transaction> {
         // update block info
         let block_hash = block_info.last_seen_block_hash;
@@ -716,12 +693,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         self.update_transaction_type_metrics();
         self.metrics.performed_state_updates.increment(1);
 
-<<<<<<< HEAD
-        // Update the latest update kind
-        self.latest_update_kind = Some(update_kind);
-
-=======
->>>>>>> v1.11.3
         OnNewCanonicalStateOutcome {
             block_hash,
             mined: mined_transactions,
@@ -751,10 +722,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         let mut eip1559_count = 0;
         let mut eip4844_count = 0;
         let mut eip7702_count = 0;
-<<<<<<< HEAD
-=======
         let mut other_count = 0;
->>>>>>> v1.11.3
 
         for tx in self.all_transactions.transactions_iter() {
             match tx.transaction.ty() {
@@ -763,11 +731,7 @@ impl<T: TransactionOrdering> TxPool<T> {
                 EIP1559_TX_TYPE_ID => eip1559_count += 1,
                 EIP4844_TX_TYPE_ID => eip4844_count += 1,
                 EIP7702_TX_TYPE_ID => eip7702_count += 1,
-<<<<<<< HEAD
-                _ => {} // Ignore other types
-=======
                 _ => other_count += 1,
->>>>>>> v1.11.3
             }
         }
 
@@ -776,10 +740,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         self.metrics.total_eip1559_transactions.set(eip1559_count as f64);
         self.metrics.total_eip4844_transactions.set(eip4844_count as f64);
         self.metrics.total_eip7702_transactions.set(eip7702_count as f64);
-<<<<<<< HEAD
-=======
         self.metrics.total_other_transactions.set(other_count as f64);
->>>>>>> v1.11.3
     }
 
     pub(crate) fn add_transaction(
@@ -992,10 +953,7 @@ impl<T: TransactionOrdering> TxPool<T> {
     /// This will move/discard the given transaction according to the `PoolUpdate`
     fn process_updates(&mut self, updates: Vec<PoolUpdate>) -> UpdateOutcome<T::Transaction> {
         let mut outcome = UpdateOutcome::default();
-<<<<<<< HEAD
-=======
         let mut removed = 0;
->>>>>>> v1.11.3
         for PoolUpdate { id, current, destination } in updates {
             match destination {
                 Destination::Discard => {
@@ -1018,13 +976,10 @@ impl<T: TransactionOrdering> TxPool<T> {
             }
         }
 
-<<<<<<< HEAD
-=======
         if removed > 0 {
             self.metrics.removed_transactions.increment(removed);
         }
 
->>>>>>> v1.11.3
         outcome
     }
 
@@ -1089,8 +1044,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         removed
     }
 
-<<<<<<< HEAD
-=======
     /// Prunes and returns all matching transactions from the pool.
     ///
     /// This uses [`Self::prune_transaction_by_hash`] which does **not** park descendant
@@ -1106,7 +1059,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         txs
     }
 
->>>>>>> v1.11.3
     /// Remove the transaction from the __entire__ pool.
     ///
     /// This includes the total set of transaction and the subpool it currently resides in.
@@ -2192,11 +2144,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn assert_invariants(&self) {
         assert_eq!(self.by_hash.len(), self.txs.len(), "by_hash.len() != txs.len()");
-<<<<<<< HEAD
-        assert!(self.auths.len() <= self.txs.len(), "auths > txs.len()");
-=======
         assert!(self.auths.len() <= self.txs.len(), "auths.len() > txs.len()");
->>>>>>> v1.11.3
     }
 }
 
@@ -3705,11 +3653,7 @@ mod tests {
         // update the tracked nonce
         let mut info = SenderInfo::default();
         info.update(8, U256::ZERO);
-<<<<<<< HEAD
-        pool.sender_info.insert(sender_id, info);
-=======
         pool.all_transactions.sender_info.insert(sender_id, info);
->>>>>>> v1.11.3
         let next_tx =
             pool.get_highest_consecutive_transaction_by_sender(sender_id.into_transaction_id(5));
         assert_eq!(next_tx.map(|tx| tx.nonce()), Some(9), "Expected nonce 9 for on-chain nonce 8");

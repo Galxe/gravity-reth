@@ -1,9 +1,6 @@
 use crate::PruneLimiter;
 use alloy_primitives::BlockNumber;
-<<<<<<< HEAD
-=======
 use itertools::Itertools;
->>>>>>> v1.11.3
 use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW},
     models::ShardedKey,
@@ -196,16 +193,9 @@ where
                     // If current shard is the last shard for the sharded key that
                     // has previous shards, replace it with the previous shard.
                     Some((prev_key, prev_value)) if key_matches(&prev_key, &key) => {
-<<<<<<< HEAD
-                        // Delete the previous shard by its key
-                        cursor.delete_by_key(RawKey::new(prev_key))?;
-                        // Upsert the current (last) shard key with the previous shard's value
-                        // This effectively "promotes" the previous shard to be the new last shard
-=======
                         cursor.delete_current()?;
                         // Upsert will replace the last shard for this sharded key with
                         // the previous value.
->>>>>>> v1.11.3
                         cursor.upsert(RawKey::new(key), &prev_value)?;
                         Ok(PruneShardOutcome::Updated)
                     }

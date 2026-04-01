@@ -17,26 +17,18 @@ reth-chain-state.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-chainspec.workspace = true
 reth-eth-wire-types.workspace = true
-<<<<<<< HEAD
-=======
 reth-evm.workspace = true
 reth-evm-ethereum.workspace = true
->>>>>>> v1.11.3
 reth-primitives-traits.workspace = true
 reth-execution-types.workspace = true
 reth-fs-util.workspace = true
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
-<<<<<<< HEAD
+revm.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 gravity-primitives.workspace = true
 reth-pipe-exec-layer-event-bus.workspace = true
-=======
-revm.workspace = true
-revm-interpreter.workspace = true
-revm-primitives.workspace = true
->>>>>>> v1.11.3
 
 # ethereum
 alloy-eips = { workspace = true, features = ["kzg"] }
@@ -89,10 +81,7 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 futures.workspace = true
 
 [features]
-<<<<<<< HEAD
 config-from-env = ["gravity-primitives/config-from-env"]
-=======
->>>>>>> v1.11.3
 serde = [
     "reth-execution-types/serde",
     "reth-eth-wire-types/serde",
@@ -109,10 +98,7 @@ serde = [
     "reth-ethereum-primitives/serde",
     "reth-chain-state/serde",
     "reth-storage-api/serde",
-<<<<<<< HEAD
-=======
     "revm/serde",
->>>>>>> v1.11.3
 ]
 test-utils = [
     "rand",
@@ -124,12 +110,9 @@ test-utils = [
     "reth-primitives-traits/test-utils",
     "reth-ethereum-primitives/test-utils",
     "alloy-primitives/rand",
-<<<<<<< HEAD
-=======
     "reth-evm/test-utils",
     "reth-evm-ethereum/test-utils",
     "reth-tasks/test-utils",
->>>>>>> v1.11.3
 ]
 arbitrary = [
     "proptest",
@@ -145,10 +128,7 @@ arbitrary = [
     "revm-interpreter/arbitrary",
     "reth-ethereum-primitives/arbitrary",
     "revm-primitives/arbitrary",
-<<<<<<< HEAD
-=======
     "revm/arbitrary",
->>>>>>> v1.11.3
 ]
 
 [[bench]]

@@ -15,17 +15,11 @@ use reth_e2e_test_utils::{
         setup::{NetworkSetup, Setup},
         Environment, TestBuilder,
     },
-<<<<<<< HEAD
-};
-use reth_node_api::TreeConfig;
-use reth_node_ethereum::{EthEngineTypes, EthereumNode};
-=======
     E2ETestSetupBuilder,
 };
 use reth_node_api::TreeConfig;
 use reth_node_ethereum::{EthEngineTypes, EthereumNode};
 use reth_payload_builder::EthPayloadBuilderAttributes;
->>>>>>> v1.11.3
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracing::debug;
@@ -90,10 +84,7 @@ async fn test_apply_with_import() -> Result<()> {
             alloy_rpc_types_eth::Block,
             alloy_rpc_types_eth::Receipt,
             alloy_rpc_types_eth::Header,
-<<<<<<< HEAD
-=======
             reth_ethereum_primitives::TransactionSigned,
->>>>>>> v1.11.3
         >::block_by_number(
             &client.rpc,
             alloy_eips::BlockNumberOrTag::Number(10),
@@ -350,12 +341,9 @@ async fn test_testsuite_multinode_block_production() -> Result<()> {
         .with_action(MakeCanonical::new())
         .with_action(CaptureBlockOnNode::new("node0_tip", 0))
         .with_action(CompareNodeChainTips::expect_same(0, 1))
-<<<<<<< HEAD
-=======
         // node 0 already has the state and can continue producing blocks
         .with_action(ProduceBlocks::<EthEngineTypes>::new(2))
         .with_action(MakeCanonical::new())
->>>>>>> v1.11.3
         .with_action(CaptureBlockOnNode::new("node0_tip_2", 0))
         // verify both nodes remain in sync
         .with_action(CompareNodeChainTips::expect_same(0, 1));
@@ -364,8 +352,6 @@ async fn test_testsuite_multinode_block_production() -> Result<()> {
 
     Ok(())
 }
-<<<<<<< HEAD
-=======
 
 #[tokio::test]
 async fn test_setup_builder_with_custom_tree_config() -> Result<()> {
@@ -400,4 +386,3 @@ async fn test_setup_builder_with_custom_tree_config() -> Result<()> {
 
     Ok(())
 }
->>>>>>> v1.11.3
