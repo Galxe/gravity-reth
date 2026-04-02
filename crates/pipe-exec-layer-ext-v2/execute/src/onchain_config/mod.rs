@@ -15,6 +15,7 @@ pub mod oracle_state;
 pub mod oracle_task_helpers;
 pub mod types;
 pub mod validator_set;
+pub mod performance;
 
 // Re-export main types for convenience
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
@@ -75,6 +76,7 @@ pub const VALIDATOR_MANAGER_ADDR: Address = address!("00000000000000000000000000
 pub const DKG_ADDR: Address = address!("00000000000000000000000000000001625f2002");
 pub const RECONFIGURATION_ADDR: Address = address!("00000000000000000000000000000001625f2003");
 pub const BLOCK_ADDR: Address = address!("00000000000000000000000000000001625f2004");
+pub const PERFORMANCE_TRACKER_ADDR: Address = address!("00000000000000000000000000000001625f2005");
 
 // Governance (0x1625F3xxx)
 pub const GOVERNANCE_ADDR: Address = address!("00000000000000000000000000000001625f3000");
