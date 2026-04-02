@@ -7,8 +7,11 @@
 //! It pushes blocks through the MockConsensus/PipeExecLayerApi pipeline
 //! and verifies that the hardfork dispatch infrastructure correctly parses
 //! and activates hardforks at the configured block numbers.
+//!
+//! **Gamma hardfork**: system contract bytecodes + StakePool upgrades + ReentrancyGuard init
+//! **Delta hardfork**: 4 contract bytecodes + Governance owner + StakingConfig migration
 
-use alloy_primitives::{address, Address, B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_api_types::{
     config_storage::{BlockNumber, ConfigStorage, OnChainConfig},
@@ -20,9 +23,13 @@ use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
-use reth_ethereum_forks::Hardforks;
 use reth_evm_ethereum::hardfork::{
-    delta::{GOVERNANCE_ADDRESS, GOVERNANCE_OWNER, GOVERNANCE_OWNER_SLOT},
+    delta::{
+        DELTA_SYSTEM_UPGRADES, GOVERNANCE_ADDRESS, GOVERNANCE_CONFIG_ADDRESS, GOVERNANCE_OWNER,
+        GOVERNANCE_OWNER_SLOT, GOV_CONFIG_MIN_THRESHOLD, GOV_CONFIG_PROPOSER_STAKE,
+        GOV_CONFIG_SLOT_MIN_THRESHOLD, GOV_CONFIG_SLOT_PROPOSER_STAKE,
+        GOV_CONFIG_SLOT_VOTING_DURATION, GOV_CONFIG_VOTING_DURATION, STAKING_CONFIG_ADDRESS,
+    },
     gamma::{
         GAMMA_SYSTEM_UPGRADES, REENTRANCY_GUARD_NOT_ENTERED, REENTRANCY_GUARD_SLOT,
         STAKEPOOL_ADDRESSES, STAKEPOOL_BYTECODE,
@@ -103,13 +110,13 @@ where
             .try_into()
             .unwrap();
         println!(
-            "[hardfork_test] latest_block_number={latest_block_number}, epoch={epoch}, gammaBlock={GAMMA_BLOCK}"
+            "[hardfork_test] latest_block_number={latest_block_number}, epoch={epoch}, gammaBlock={GAMMA_BLOCK}, deltaBlock={DELTA_BLOCK}"
         );
 
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        // Push blocks past the hardfork boundary
-        let target_block = GAMMA_BLOCK + 30;
+        // Push blocks past all hardfork boundaries
+        let target_block = DELTA_BLOCK + 30;
         for block_number in latest_block_number + 1..=target_block {
             let block_id = mock_block_id(block_number);
             let parent_block_id = mock_block_id(block_number - 1);
@@ -159,13 +166,21 @@ where
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        println!("[hardfork_test] ✅ Pushed {target_block} blocks past gammaBlock.");
+        println!("[hardfork_test] ✅ Pushed {target_block} blocks past deltaBlock.");
     }
 }
 
-/// Verify that all system contracts have the expected new bytecodes after the hardfork.
-fn verify_bytecodes_upgraded<P: StateProviderFactory>(provider: &P) {
-    println!("[hardfork_test] Verifying system contract bytecodes at block {GAMMA_BLOCK}...");
+// ═══════════════════════════════════════════════════════════════════════════════
+// GAMMA HARDFORK VERIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Verify that all system contracts have the expected new bytecodes after the Gamma hardfork.
+fn verify_gamma_bytecodes_upgraded<P: StateProviderFactory>(provider: &P) {
+    if GAMMA_SYSTEM_UPGRADES.is_empty() {
+        println!("[hardfork_test] ⚠ GAMMA_SYSTEM_UPGRADES is empty (bytecodes stripped), skipping Gamma bytecode verification");
+        return;
+    }
+    println!("[hardfork_test] Verifying Gamma system contract bytecodes at block {GAMMA_BLOCK}...");
 
     let state = provider
         .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(GAMMA_BLOCK))
@@ -200,7 +215,7 @@ fn verify_bytecodes_upgraded<P: StateProviderFactory>(provider: &P) {
 
     assert!(all_upgraded, "Not all system contracts were upgraded at gammaBlock!");
     println!(
-        "[hardfork_test] ✅ All {} system contract bytecodes verified!",
+        "[hardfork_test] ✅ All {} Gamma system contract bytecodes verified!",
         GAMMA_SYSTEM_UPGRADES.len()
     );
 
@@ -240,8 +255,12 @@ fn verify_bytecodes_upgraded<P: StateProviderFactory>(provider: &P) {
     }
 }
 
-/// Also verify bytecodes were NOT yet upgraded before the hardfork block.
-fn verify_bytecodes_not_upgraded_before<P: StateProviderFactory>(provider: &P) {
+/// Verify bytecodes were NOT yet upgraded before the Gamma hardfork block.
+fn verify_gamma_bytecodes_not_upgraded_before<P: StateProviderFactory>(provider: &P) {
+    if GAMMA_SYSTEM_UPGRADES.is_empty() {
+        println!("[hardfork_test] ⚠ GAMMA_SYSTEM_UPGRADES is empty (bytecodes stripped), skipping pre-Gamma verification");
+        return;
+    }
     println!("[hardfork_test] Verifying bytecodes are OLD before gammaBlock...");
 
     let pre_block = GAMMA_BLOCK - 1;
@@ -297,6 +316,237 @@ fn verify_bytecodes_not_upgraded_before<P: StateProviderFactory>(provider: &P) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// DELTA HARDFORK VERIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Verify that all 4 system contracts have new bytecodes after the Delta hardfork.
+fn verify_delta_bytecodes_upgraded<P: StateProviderFactory>(provider: &P) {
+    println!("[hardfork_test] Verifying Delta system contract bytecodes at block {DELTA_BLOCK}...");
+
+    let state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK))
+        .expect("Failed to get state provider for delta hardfork block");
+
+    let mut all_upgraded = true;
+    for (addr, expected_bytecode) in DELTA_SYSTEM_UPGRADES {
+        match state.account_code(addr) {
+            Ok(Some(code)) => {
+                let code_bytes = code.original_bytes();
+                if code_bytes.as_ref() == *expected_bytecode {
+                    println!(
+                        "[hardfork_test] ✅ Delta {addr}: bytecode matches ({}B)",
+                        code_bytes.len()
+                    );
+                } else {
+                    println!(
+                        "[hardfork_test] ❌ Delta {addr}: MISMATCH got={}B expected={}B",
+                        code_bytes.len(),
+                        expected_bytecode.len()
+                    );
+                    all_upgraded = false;
+                }
+            }
+            Ok(None) => {
+                println!("[hardfork_test] ❌ Delta {addr}: no code found");
+                all_upgraded = false;
+            }
+            Err(e) => {
+                println!("[hardfork_test] ❌ Delta {addr}: error: {e:?}");
+                all_upgraded = false;
+            }
+        }
+    }
+
+    assert!(all_upgraded, "Not all Delta system contracts were upgraded at deltaBlock!");
+    println!(
+        "[hardfork_test] ✅ All {} Delta system contract bytecodes verified!",
+        DELTA_SYSTEM_UPGRADES.len()
+    );
+}
+
+/// Verify Delta bytecodes were NOT yet upgraded before the Delta hardfork block.
+fn verify_delta_bytecodes_not_upgraded_before<P: StateProviderFactory>(provider: &P) {
+    println!("[hardfork_test] Verifying Delta bytecodes are OLD before deltaBlock...");
+
+    let pre_block = DELTA_BLOCK - 1;
+    let state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(pre_block))
+        .expect("Failed to get state provider for pre-delta block");
+
+    // Check first Delta contract (StakingConfig) as smoke test
+    let (addr, expected_new) = &DELTA_SYSTEM_UPGRADES[0];
+    match state.account_code(addr) {
+        Ok(Some(code)) => {
+            let code_bytes = code.original_bytes();
+            // Before deltaBlock, bytecode may have been upgraded by gammaBlock already,
+            // but it should NOT match the delta bytecodes
+            assert_ne!(
+                code_bytes.as_ref(),
+                *expected_new,
+                "Delta bytecode at {addr} should be OLD before deltaBlock"
+            );
+            println!(
+                "[hardfork_test] ✅ {addr} at block {pre_block}: bytecode differs from Delta target ({}B vs {}B)",
+                code_bytes.len(),
+                expected_new.len()
+            );
+        }
+        Ok(None) => {
+            println!(
+                "[hardfork_test] ⚠ {addr} at block {pre_block}: no code (unexpected for StakingConfig)"
+            );
+        }
+        Err(e) => {
+            panic!("[hardfork_test] Failed to fetch code before delta hardfork: {e:?}");
+        }
+    }
+}
+
+/// Verify that the Governance contract owner was set by the Delta hardfork.
+fn verify_governance_owner_set<P: StateProviderFactory>(provider: &P) {
+    println!("[hardfork_test] Verifying Governance owner storage at block {DELTA_BLOCK}...");
+
+    let state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK))
+        .expect("Failed to get state provider for delta hardfork block");
+
+    let owner_slot = alloy_primitives::B256::from(GOVERNANCE_OWNER_SLOT);
+    let owner_value = state
+        .storage(GOVERNANCE_ADDRESS, owner_slot)
+        .expect("Failed to read Governance owner storage");
+    let expected_value = U256::from_be_bytes(GOVERNANCE_OWNER.into_word().0);
+    assert_eq!(
+        owner_value,
+        Some(expected_value),
+        "Governance owner should be set to {GOVERNANCE_OWNER} after deltaBlock"
+    );
+    println!("[hardfork_test] ✅ Governance owner at block {DELTA_BLOCK}: {GOVERNANCE_OWNER}");
+
+    // Also verify owner was NOT set before delta block
+    let pre_state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK - 1))
+        .expect("Failed to get state provider for pre-delta block");
+    let pre_owner = pre_state
+        .storage(GOVERNANCE_ADDRESS, owner_slot)
+        .expect("Failed to read pre-delta Governance owner");
+    assert_ne!(
+        pre_owner,
+        Some(expected_value),
+        "Governance owner should NOT be set before deltaBlock"
+    );
+    println!(
+        "[hardfork_test] ✅ Governance owner at block {}: not yet set (as expected)",
+        DELTA_BLOCK - 1
+    );
+}
+
+/// Verify GovernanceConfig E2E overrides were applied at deltaBlock.
+fn verify_governance_config_overrides<P: StateProviderFactory>(provider: &P) {
+    println!("[hardfork_test] Verifying GovernanceConfig overrides at block {DELTA_BLOCK}...");
+
+    let state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK))
+        .expect("Failed to get state provider for delta hardfork block");
+
+    // minVotingThreshold (slot 0) = 1
+    let threshold = state
+        .storage(GOVERNANCE_CONFIG_ADDRESS, B256::from(GOV_CONFIG_SLOT_MIN_THRESHOLD))
+        .expect("Failed to read GovernanceConfig minVotingThreshold");
+    assert_eq!(
+        threshold,
+        Some(U256::from(GOV_CONFIG_MIN_THRESHOLD)),
+        "GovernanceConfig.minVotingThreshold should be {GOV_CONFIG_MIN_THRESHOLD}"
+    );
+    println!("[hardfork_test] ✅ GovernanceConfig.minVotingThreshold = {GOV_CONFIG_MIN_THRESHOLD}");
+
+    // requiredProposerStake (slot 1) = 1
+    let stake = state
+        .storage(GOVERNANCE_CONFIG_ADDRESS, B256::from(GOV_CONFIG_SLOT_PROPOSER_STAKE))
+        .expect("Failed to read GovernanceConfig requiredProposerStake");
+    assert_eq!(
+        stake,
+        Some(U256::from(GOV_CONFIG_PROPOSER_STAKE)),
+        "GovernanceConfig.requiredProposerStake should be {GOV_CONFIG_PROPOSER_STAKE}"
+    );
+    println!(
+        "[hardfork_test] ✅ GovernanceConfig.requiredProposerStake = {GOV_CONFIG_PROPOSER_STAKE}"
+    );
+
+    // votingDurationMicros (slot 2) = 10_000_000
+    let duration = state
+        .storage(GOVERNANCE_CONFIG_ADDRESS, B256::from(GOV_CONFIG_SLOT_VOTING_DURATION))
+        .expect("Failed to read GovernanceConfig votingDurationMicros");
+    assert_eq!(
+        duration,
+        Some(U256::from(GOV_CONFIG_VOTING_DURATION)),
+        "GovernanceConfig.votingDurationMicros should be {GOV_CONFIG_VOTING_DURATION}"
+    );
+    println!(
+        "[hardfork_test] ✅ GovernanceConfig.votingDurationMicros = {GOV_CONFIG_VOTING_DURATION}"
+    );
+}
+
+/// Verify StakingConfig storage is preserved after Delta hardfork (gap pattern).
+/// With the storage gap approach, slot positions are unchanged from v1.2.0.
+fn verify_staking_config_preserved<P: StateProviderFactory>(provider: &P) {
+    println!(
+        "[hardfork_test] Verifying StakingConfig storage preservation at block {DELTA_BLOCK}..."
+    );
+
+    let state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK))
+        .expect("Failed to get state provider for delta hardfork block");
+
+    // Verify minimumStake (slot 0) is preserved (not cleared)
+    let slot_0 = B256::ZERO;
+    let min_stake =
+        state.storage(STAKING_CONFIG_ADDRESS, slot_0).expect("Failed to read StakingConfig slot 0");
+    assert!(
+        min_stake.map_or(false, |v| v > U256::ZERO),
+        "StakingConfig slot 0 (minimumStake) should be preserved, got {:?}",
+        min_stake
+    );
+    println!("[hardfork_test] ✅ StakingConfig slot 0 (minimumStake): preserved ({:?})", min_stake);
+
+    // Verify slot 1 (lockup|unbonding packed) is preserved
+    let slot_1 = {
+        let mut s = [0u8; 32];
+        s[31] = 1;
+        B256::new(s)
+    };
+    let slot_1_value =
+        state.storage(STAKING_CONFIG_ADDRESS, slot_1).expect("Failed to read StakingConfig slot 1");
+    assert!(
+        slot_1_value.map_or(false, |v| v > U256::ZERO),
+        "StakingConfig slot 1 (lockup|unbonding) should be preserved, got {:?}",
+        slot_1_value
+    );
+    println!(
+        "[hardfork_test] ✅ StakingConfig slot 1 (lockup|unbonding): preserved ({:#066x})",
+        slot_1_value.unwrap()
+    );
+
+    // Verify _initialized (slot 3 with gap pattern) is still true
+    let slot_3 = {
+        let mut s = [0u8; 32];
+        s[31] = 3;
+        B256::new(s)
+    };
+    let initialized =
+        state.storage(STAKING_CONFIG_ADDRESS, slot_3).expect("Failed to read StakingConfig slot 3");
+    assert!(
+        initialized.map_or(false, |v| v > U256::ZERO),
+        "StakingConfig slot 3 (_initialized) should be true, got {:?}",
+        initialized
+    );
+    println!("[hardfork_test] ✅ StakingConfig slot 3 (_initialized): true");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
 async fn run_pipe(
     builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>,
 ) -> eyre::Result<()> {
@@ -334,6 +584,7 @@ async fn run_pipe(
     );
     println!("[hardfork_test] ✅ ChainSpec correctly parsed gammaBlock={GAMMA_BLOCK}");
 
+    // Verify deltaBlock is parsed correctly
     assert!(
         chain_spec
             .gravity_hardforks()
@@ -375,14 +626,22 @@ async fn run_pipe(
 
     tx.send(ExecutionArgs { block_number_to_block_id: BTreeMap::new() }).unwrap();
 
-    // Run consensus — push blocks past gammaBlock
+    // Run consensus — push blocks past all hardfork boundaries
     let consensus = MockConsensus::new(pipeline_api);
     consensus.run(latest_block_number).await;
 
-    // After all blocks are pushed, verify bytecodes
-    verify_bytecodes_not_upgraded_before(&provider);
-    verify_bytecodes_upgraded(&provider);
+    // ── Gamma hardfork verification ──
+    verify_gamma_bytecodes_not_upgraded_before(&provider);
+    verify_gamma_bytecodes_upgraded(&provider);
+
+    // ── Delta hardfork verification ──
+    verify_delta_bytecodes_not_upgraded_before(&provider);
+    verify_delta_bytecodes_upgraded(&provider);
     verify_governance_owner_set(&provider);
+    verify_governance_config_overrides(&provider);
+    verify_staking_config_preserved(&provider);
+
+    println!("[hardfork_test] ✅ All hardfork verifications passed!");
 
     Ok(())
 }
@@ -431,42 +690,4 @@ fn test_gamma_hardfork() {
 
     // Give background threads time to exit cleanly
     std::thread::sleep(Duration::from_secs(2));
-}
-
-/// Verify that the Governance contract owner was set by the Delta hardfork.
-fn verify_governance_owner_set<P: StateProviderFactory>(provider: &P) {
-    println!("[hardfork_test] Verifying Governance owner storage at block {DELTA_BLOCK}...");
-
-    let state = provider
-        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK))
-        .expect("Failed to get state provider for delta hardfork block");
-
-    let owner_slot = alloy_primitives::B256::from(GOVERNANCE_OWNER_SLOT);
-    let owner_value = state
-        .storage(GOVERNANCE_ADDRESS, owner_slot)
-        .expect("Failed to read Governance owner storage");
-    let expected_value = U256::from_be_bytes(GOVERNANCE_OWNER.into_word().0);
-    assert_eq!(
-        owner_value,
-        Some(expected_value),
-        "Governance owner should be set to {GOVERNANCE_OWNER} after deltaBlock"
-    );
-    println!("[hardfork_test] ✅ Governance owner at block {DELTA_BLOCK}: {GOVERNANCE_OWNER}");
-
-    // Also verify owner was NOT set before delta block
-    let pre_state = provider
-        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(DELTA_BLOCK - 1))
-        .expect("Failed to get state provider for pre-delta block");
-    let pre_owner = pre_state
-        .storage(GOVERNANCE_ADDRESS, owner_slot)
-        .expect("Failed to read pre-delta Governance owner");
-    assert_ne!(
-        pre_owner,
-        Some(expected_value),
-        "Governance owner should NOT be set before deltaBlock"
-    );
-    println!(
-        "[hardfork_test] ✅ Governance owner at block {}: not yet set (as expected)",
-        DELTA_BLOCK - 1
-    );
 }

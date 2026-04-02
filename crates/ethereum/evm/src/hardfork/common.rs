@@ -11,7 +11,7 @@ use reth_evm::{execute::BlockExecutionError, ParallelDatabase};
 use revm::{
     bytecode::Bytecode,
     state::{Account, AccountStatus, EvmState, EvmStorageSlot},
-    DatabaseCommit,
+    Database, DatabaseCommit,
 };
 
 /// A single bytecode replacement: target address → new runtime bytecode.
@@ -87,15 +87,20 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
         state.cache.contracts.insert(code_hash, new_bytecode);
     }
 
-    // 2. Apply storage patches
+    // 2. Apply storage patches (overwrite)
     for (addr, slot, value) in hardfork.storage_patches() {
         // Ensure account is loaded
         state
             .load_mut_cache_account(*addr)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
+        // Read current value to properly track the state transition
+        let slot_key = U256::from_be_bytes(slot.0);
+        let current_value = state
+            .storage(*addr, slot_key)
+            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+
         let entry = hardfork_changes.entry(*addr).or_insert_with(|| {
-            // Account already loaded above; create a minimal touched entry
             let info = state
                 .cache
                 .accounts
@@ -109,11 +114,7 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
                 transaction_id: 0,
             }
         });
-
-        entry.storage.insert(
-            U256::from_be_bytes(slot.0),
-            EvmStorageSlot::new_changed(U256::ZERO, *value, 0),
-        );
+        entry.storage.insert(slot_key, EvmStorageSlot::new_changed(current_value, *value, 0));
     }
 
     // 3. Commit all changes atomically

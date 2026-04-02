@@ -1,76 +1,58 @@
-//! Delta hardfork: activate Governance contract
+//! Delta hardfork: upgrade `StakingConfig`, `ValidatorManagement`, `Governance`, `NativeOracle`
 //!
-//! The Governance contract was deployed via BSC-style bytecode placement during genesis,
-//! which skips the Solidity constructor. As a result, the `Ownable(initialOwner)` constructor
-//! never ran, leaving `_owner` as `address(0)`. This prevents the owner from calling
-//! `addExecutor()` / `removeExecutor()`, which in turn makes `execute()` permanently
-//! unreachable.
+//! This hardfork upgrades 4 system contracts and applies storage patches:
 //!
-//! This hardfork writes the correct owner address to storage slot 0 of the Governance
-//! contract, restoring the full proposal execution lifecycle.
+//! **Bytecode Upgrades** (from `gravity-testnet-v1.2.0` → `main`):
+//! - `StakingConfig`: deprecated `minimumProposalStake` (kept as storage gap to preserve layout)
+//! - `ValidatorManagement`: consensus key rotation, try/catch `renewPoolLockup`, whale VP fix,
+//!   eviction fairness fix
+//! - `Governance`: `MAX_PROPOSAL_TARGETS` limit, `ProposalNotResolved` check
+//! - `NativeOracle`: callback invocation refactored, `CallbackSkipped` event
 //!
-//! Additionally, for E2E testing, it overrides `GovernanceConfig` storage to enable
-//! fast governance proposals (10-second voting, minimal thresholds).
+//! **Storage Patches**:
+//! - Governance `_owner` set to the configured owner address
+//! - Governance `nextProposalId` set to 1
+//! - `GovernanceConfig` E2E overrides (testnet-only: 1 vote quorum, 1 wei stake, 10s voting)
 
 use super::common::{BytecodeUpgrade, HardforkUpgrades, StoragePatch};
 use alloy_primitives::{address, Address, B256, U256};
 
-/// Delta hardfork descriptor.
-#[derive(Debug)]
-pub struct DeltaHardfork;
+// ── Compiled runtime bytecodes ──────────────────────────────────────────────────
+static STAKING_CONFIG_BYTECODE: &[u8] = include_bytes!("bytecodes/delta/StakingConfig.bin");
+static VALIDATOR_MANAGEMENT_BYTECODE: &[u8] =
+    include_bytes!("bytecodes/delta/ValidatorManagement.bin");
+static GOVERNANCE_BYTECODE: &[u8] = include_bytes!("bytecodes/delta/Governance.bin");
+static NATIVE_ORACLE_BYTECODE: &[u8] = include_bytes!("bytecodes/delta/NativeOracle.bin");
 
-/// Storage patches for Delta hardfork: Governance owner + `GovernanceConfig` E2E overrides.
-static DELTA_STORAGE_PATCHES: &[StoragePatch] = &[
-    // Set Governance._owner = GOVERNANCE_OWNER
-    (
-        GOVERNANCE_ADDRESS,
-        B256::new(GOVERNANCE_OWNER_SLOT),
-        // GOVERNANCE_OWNER as left-padded U256: the address occupies the lower 20 bytes
-        GOVERNANCE_OWNER_U256,
-    ),
-    // Set Governance.nextProposalId = 1 (packed in slot 1 with _pendingOwner)
-    (
-        GOVERNANCE_ADDRESS,
-        B256::new(GOVERNANCE_NEXT_PROPOSAL_ID_SLOT),
-        U256::from_be_bytes(GOVERNANCE_NEXT_PROPOSAL_ID_VALUE),
-    ),
-    // GovernanceConfig: minVotingThreshold = 1
-    (
-        GOVERNANCE_CONFIG_ADDRESS,
-        B256::new(GOV_CONFIG_SLOT_MIN_THRESHOLD),
-        U256::from_limbs([GOV_CONFIG_MIN_THRESHOLD as u64, 0, 0, 0]),
-    ),
-    // GovernanceConfig: requiredProposerStake = 1
-    (
-        GOVERNANCE_CONFIG_ADDRESS,
-        B256::new(GOV_CONFIG_SLOT_PROPOSER_STAKE),
-        U256::from_limbs([GOV_CONFIG_PROPOSER_STAKE as u64, 0, 0, 0]),
-    ),
-    // GovernanceConfig: votingDurationMicros = 10_000_000 (10s)
-    (
-        GOVERNANCE_CONFIG_ADDRESS,
-        B256::new(GOV_CONFIG_SLOT_VOTING_DURATION),
-        U256::from_limbs([GOV_CONFIG_VOTING_DURATION, 0, 0, 0]),
-    ),
+// ── System addresses ────────────────────────────────────────────────────────────
+
+/// `StakingConfig` contract system address
+pub const STAKING_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625F1001");
+
+/// `ValidatorManagement` contract system address
+pub const VALIDATOR_MANAGEMENT_ADDRESS: Address =
+    address!("00000000000000000000000000000001625F2001");
+
+/// `Governance` contract system address
+pub const GOVERNANCE_ADDRESS: Address = address!("00000000000000000000000000000001625F3000");
+
+/// `GovernanceConfig` contract system address
+pub const GOVERNANCE_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625F1004");
+
+/// `NativeOracle` contract system address
+pub const NATIVE_ORACLE_ADDRESS: Address = address!("00000000000000000000000000000001625F4000");
+
+// ── Bytecode upgrade table ──────────────────────────────────────────────────────
+
+/// All 4 system contract upgrades for the Delta hardfork.
+pub static DELTA_SYSTEM_UPGRADES: &[BytecodeUpgrade] = &[
+    (STAKING_CONFIG_ADDRESS, STAKING_CONFIG_BYTECODE),
+    (VALIDATOR_MANAGEMENT_ADDRESS, VALIDATOR_MANAGEMENT_BYTECODE),
+    (GOVERNANCE_ADDRESS, GOVERNANCE_BYTECODE),
+    (NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_BYTECODE),
 ];
 
-impl HardforkUpgrades for DeltaHardfork {
-    fn name(&self) -> &'static str {
-        "Delta"
-    }
-    fn system_upgrades(&self) -> &'static [BytecodeUpgrade] {
-        &[]
-    }
-    fn extra_upgrades(&self) -> &'static [BytecodeUpgrade] {
-        &[]
-    }
-    fn storage_patches(&self) -> &'static [StoragePatch] {
-        DELTA_STORAGE_PATCHES
-    }
-}
-
-/// Governance contract system address
-pub const GOVERNANCE_ADDRESS: Address = address!("00000000000000000000000000000001625F3000");
+// ── Governance storage patches ──────────────────────────────────────────────────
 
 /// Storage slot for `Ownable._owner` (slot 0 in standard Solidity layout)
 ///
@@ -121,10 +103,7 @@ pub const GOVERNANCE_OWNER_U256: U256 = {
     U256::from_be_bytes(word)
 };
 
-// ── GovernanceConfig overrides for E2E testing ──────────────────────────
-
-/// `GovernanceConfig` contract system address
-pub const GOVERNANCE_CONFIG_ADDRESS: Address = address!("00000000000000000000000000000001625F1004");
+// ── GovernanceConfig overrides (testnet-only) ───────────────────────────────────
 
 /// `GovernanceConfig` storage layout (Solidity sequential packing):
 ///   slot 0: `minVotingThreshold`    (uint128)
@@ -150,3 +129,61 @@ pub const GOV_CONFIG_MIN_THRESHOLD: u128 = 1;
 pub const GOV_CONFIG_PROPOSER_STAKE: u128 = 1;
 /// 10 seconds in microseconds
 pub const GOV_CONFIG_VOTING_DURATION: u64 = 10_000_000;
+
+// ── Storage patch tables ────────────────────────────────────────────────────────
+
+/// Storage patches for Delta hardfork (overwrite operations).
+static DELTA_STORAGE_PATCHES: &[StoragePatch] = &[
+    // ── Governance patches ──
+    // Set Governance._owner = GOVERNANCE_OWNER
+    (GOVERNANCE_ADDRESS, B256::new(GOVERNANCE_OWNER_SLOT), GOVERNANCE_OWNER_U256),
+    // Set Governance.nextProposalId = 1 (packed in slot 1 with _pendingOwner)
+    (
+        GOVERNANCE_ADDRESS,
+        B256::new(GOVERNANCE_NEXT_PROPOSAL_ID_SLOT),
+        U256::from_be_bytes(GOVERNANCE_NEXT_PROPOSAL_ID_VALUE),
+    ),
+    // ── GovernanceConfig E2E overrides (testnet-only) ──
+    // minVotingThreshold = 1
+    (
+        GOVERNANCE_CONFIG_ADDRESS,
+        B256::new(GOV_CONFIG_SLOT_MIN_THRESHOLD),
+        U256::from_limbs([GOV_CONFIG_MIN_THRESHOLD as u64, 0, 0, 0]),
+    ),
+    // requiredProposerStake = 1
+    (
+        GOVERNANCE_CONFIG_ADDRESS,
+        B256::new(GOV_CONFIG_SLOT_PROPOSER_STAKE),
+        U256::from_limbs([GOV_CONFIG_PROPOSER_STAKE as u64, 0, 0, 0]),
+    ),
+    // votingDurationMicros = 10_000_000 (10s)
+    (
+        GOVERNANCE_CONFIG_ADDRESS,
+        B256::new(GOV_CONFIG_SLOT_VOTING_DURATION),
+        U256::from_limbs([GOV_CONFIG_VOTING_DURATION, 0, 0, 0]),
+    ),
+    // NOTE: No StakingConfig storage patches needed — storage gap pattern preserves
+    // the v1.2.0 slot layout, so _initialized, _pendingConfig, and hasPendingConfig
+    // remain at their original slot positions.
+];
+
+// ── HardforkUpgrades impl ───────────────────────────────────────────────────────
+
+/// Delta hardfork descriptor.
+#[derive(Debug)]
+pub struct DeltaHardfork;
+
+impl HardforkUpgrades for DeltaHardfork {
+    fn name(&self) -> &'static str {
+        "Delta"
+    }
+    fn system_upgrades(&self) -> &'static [BytecodeUpgrade] {
+        DELTA_SYSTEM_UPGRADES
+    }
+    fn extra_upgrades(&self) -> &'static [BytecodeUpgrade] {
+        &[]
+    }
+    fn storage_patches(&self) -> &'static [StoragePatch] {
+        DELTA_STORAGE_PATCHES
+    }
+}
