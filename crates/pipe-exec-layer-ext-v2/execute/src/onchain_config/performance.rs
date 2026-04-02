@@ -39,19 +39,40 @@ where
         let performances = {
             let call = getAllPerformancesCall {};
             let input: Bytes = call.abi_encode().into();
-            let result = self
-                .base_fetcher
-                .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
-                .map_err(|e| {
-                    tracing::warn!(
-                        "Failed to fetch validator performances at block {}: {:?}",
-                        block_id,
-                        e
+            
+            let call_result = self.base_fetcher.eth_call(Self::caller_address(), Self::contract_address(), input, block_id);
+            
+            let result = match call_result {
+                Ok(res) => {
+                    tracing::info!(
+                        target: "lightman0402",
+                        bytes_length = res.len(),
+                        "ValidatorPerformanceFetcher eth_call SUCCESS"
                     );
-                })
-                .ok()?;
-            getAllPerformancesCall::abi_decode_returns(&result)
-                .expect("Failed to decode getAllPerformances return value")
+                    res
+                },
+                Err(e) => {
+                    tracing::error!(
+                        target: "lightman0402",
+                        block_id = ?block_id,
+                        error = ?e,
+                        "ValidatorPerformanceFetcher eth_call FAILED"
+                    );
+                    return None;
+                }
+            };
+
+            match getAllPerformancesCall::abi_decode_returns(&result, true) {
+                Ok(decoded) => decoded,
+                Err(e) => {
+                    tracing::error!(
+                        target: "lightman0402",
+                        error = ?e,
+                        "ValidatorPerformanceFetcher decode FAILED"
+                    );
+                    return None;
+                }
+            }
         };
 
         // Convert the IndividualPerformance array into BCS-encoded ValidatorPerformances
