@@ -62,7 +62,7 @@ where
                 }
             };
 
-            match getAllPerformancesCall::abi_decode_returns(&result, true) {
+            match getAllPerformancesCall::abi_decode_returns(&result) {
                 Ok(decoded) => decoded,
                 Err(e) => {
                     tracing::error!(
