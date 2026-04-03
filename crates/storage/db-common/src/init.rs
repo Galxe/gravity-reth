@@ -120,7 +120,7 @@ where
                     return Err(InitStorageError::UninitializedDatabase)
                 }
 
-                debug!("Genesis already written, skipping.");
+                info!("Genesis already written, skipping.");
                 return Ok(hash)
             }
 

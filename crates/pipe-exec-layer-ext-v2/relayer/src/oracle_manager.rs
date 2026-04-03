@@ -303,7 +303,13 @@ impl OracleRelayerManager {
         Ok(PollResult { jwk_structs, max_block_number, nonce, updated })
     }
 
-    /// Update in-memory state and persist to disk
+    /// Update in-memory state and persist to disk.
+    ///
+    /// Writes to disk first (via a temporary clone) so that on the success
+    /// path the on-disk state is never behind in-memory state.  If the disk
+    /// write fails, in-memory state is still advanced to avoid duplicate
+    /// delivery in the running process — only a subsequent crash would
+    /// replay events from the stale checkpoint.
     async fn update_and_save_state(
         &self,
         uri: &str,
@@ -314,17 +320,24 @@ impl OracleRelayerManager {
         cursor_block: u64,
     ) {
         let mut state = self.state.write().await;
-        state.update(uri, source_type, source_id, last_nonce, last_nonce_block, cursor_block);
+
+        // Build a candidate state with the update applied, without mutating
+        // the live state yet.
+        let mut candidate = state.clone();
+        candidate.update(uri, source_type, source_id, last_nonce, last_nonce_block, cursor_block);
 
         let path = state_file_path(&self.datadir);
-        if let Err(e) = state.save(&path) {
+        if let Err(e) = candidate.save(&path) {
             warn!(
                 target: "oracle_manager",
                 error = ?e,
                 path = ?path,
-                "Failed to persist relayer state"
+                "Failed to persist relayer state; a crash may replay events from the last checkpoint"
             );
         }
+
+        // Always commit to memory so the running process does not re-deliver.
+        *state = candidate;
     }
 
     /// Remove a source by URI

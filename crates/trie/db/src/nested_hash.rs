@@ -18,14 +18,14 @@ use reth_db_api::{
 
 use parking_lot::Mutex;
 use reth_primitives_traits::Account;
-use reth_provider::{PersistBlockCache, ProviderResult};
-use reth_storage_errors::db::DatabaseError;
+use reth_storage_api::PersistBlockCache;
+use reth_storage_errors::{db::DatabaseError, provider::ProviderResult};
 use reth_trie::{
     nested_trie::{Node, Trie, TrieReader, MIN_PARALLEL_NODES},
+    updates::TrieUpdatesV2,
     AccountProof, HashedPostState, HashedStorage, MultiProofTargets, Nibbles, StorageTrieUpdatesV2,
     StoredNibbles, StoredNibblesSubKey, EMPTY_ROOT_HASH,
 };
-use reth_trie_common::updates::TrieUpdatesV2;
 
 /// Storage trie node reader
 #[allow(missing_debug_implementations)]
