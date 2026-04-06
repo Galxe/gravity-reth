@@ -57,6 +57,7 @@ fn new_ordered_block(
     parent_block_id: B256,
 ) -> OrderedBlock {
     OrderedBlock {
+        failed_proposer_indices: vec![],
         epoch,
         parent_id: parent_block_id,
         id: block_id,

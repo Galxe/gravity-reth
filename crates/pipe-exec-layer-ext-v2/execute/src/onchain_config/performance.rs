@@ -44,20 +44,9 @@ where
             
             let result = match call_result {
                 Ok(res) => {
-                    tracing::info!(
-                        target: "lightman0402",
-                        bytes_length = res.len(),
-                        "ValidatorPerformanceFetcher eth_call SUCCESS"
-                    );
                     res
                 },
                 Err(e) => {
-                    tracing::error!(
-                        target: "lightman0402",
-                        block_id = ?block_id,
-                        error = ?e,
-                        "ValidatorPerformanceFetcher eth_call FAILED"
-                    );
                     return None;
                 }
             };
@@ -65,11 +54,6 @@ where
             match getAllPerformancesCall::abi_decode_returns(&result) {
                 Ok(decoded) => decoded,
                 Err(e) => {
-                    tracing::error!(
-                        target: "lightman0402",
-                        error = ?e,
-                        "ValidatorPerformanceFetcher decode FAILED"
-                    );
                     return None;
                 }
             }
