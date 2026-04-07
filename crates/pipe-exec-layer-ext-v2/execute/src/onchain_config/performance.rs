@@ -39,13 +39,16 @@ where
         let performances = {
             let call = getAllPerformancesCall {};
             let input: Bytes = call.abi_encode().into();
-            
-            let call_result = self.base_fetcher.eth_call(Self::caller_address(), Self::contract_address(), input, block_id);
-            
+
+            let call_result = self.base_fetcher.eth_call(
+                Self::caller_address(),
+                Self::contract_address(),
+                input,
+                block_id,
+            );
+
             let result = match call_result {
-                Ok(res) => {
-                    res
-                },
+                Ok(res) => res,
                 Err(e) => {
                     return None;
                 }

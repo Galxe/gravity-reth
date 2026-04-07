@@ -165,7 +165,8 @@ pub fn convert_active_validators_to_bcs(validators: &[ValidatorConsensusInfo]) -
 /// Used to bridge performance tracking from contract EVM state to native Aptos consensus.
 pub fn convert_performances_to_bcs(performances: &[IndividualPerformance]) -> Bytes {
     use gravity_api_types::on_chain_config::validator_performances::{
-        ValidatorPerformance as GravityValidatorPerformance, ValidatorPerformances as GravityValidatorPerformances,
+        ValidatorPerformance as GravityValidatorPerformance,
+        ValidatorPerformances as GravityValidatorPerformances,
     };
 
     let converted_performances: Vec<GravityValidatorPerformance> = performances
@@ -176,9 +177,8 @@ pub fn convert_performances_to_bcs(performances: &[IndividualPerformance]) -> By
         })
         .collect();
 
-    let gravity_validator_performances = GravityValidatorPerformances {
-        validators: converted_performances,
-    };
+    let gravity_validator_performances =
+        GravityValidatorPerformances { validators: converted_performances };
 
     bcs::to_bytes(&gravity_validator_performances)
         .expect("Failed to serialize validator performances")

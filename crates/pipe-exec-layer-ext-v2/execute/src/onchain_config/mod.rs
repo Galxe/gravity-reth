@@ -13,9 +13,9 @@ pub mod metadata_txn;
 pub mod observed_jwk;
 pub mod oracle_state;
 pub mod oracle_task_helpers;
+pub mod performance;
 pub mod types;
 pub mod validator_set;
-pub mod performance;
 
 // Re-export main types for convenience
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
