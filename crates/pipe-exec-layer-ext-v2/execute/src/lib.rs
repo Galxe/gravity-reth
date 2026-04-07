@@ -702,7 +702,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             base_fee as u128,
             ordered_block.timestamp_us,
             ordered_block.proposer_index,
-            ordered_block.failed_proposer_indices.clone(),
+            &ordered_block.failed_proposer_indices,
         );
         current_nonce = metadata_txn.nonce() + 1;
 

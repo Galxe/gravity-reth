@@ -11,7 +11,6 @@ use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use std::str::FromStr;
 
 /// Fetcher for validator performance data
 #[derive(Debug)]
@@ -50,6 +49,11 @@ where
             let result = match call_result {
                 Ok(res) => res,
                 Err(e) => {
+                    tracing::warn!(
+                        "Failed to fetch validator performances at block {}: {:?}",
+                        block_id,
+                        e
+                    );
                     return None;
                 }
             };
@@ -57,6 +61,11 @@ where
             match getAllPerformancesCall::abi_decode_returns(&result) {
                 Ok(decoded) => decoded,
                 Err(e) => {
+                    tracing::warn!(
+                        "Failed to decode validator performances at block {}: {:?}",
+                        block_id,
+                        e
+                    );
                     return None;
                 }
             }
