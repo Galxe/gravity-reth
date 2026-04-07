@@ -61,12 +61,16 @@ where
             match getAllPerformancesCall::abi_decode_returns(&result) {
                 Ok(decoded) => decoded,
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to decode validator performances at block {}: {:?}",
-                        block_id,
-                        e
+                    // Case A: empty result means contract has no data yet, this is normal
+                    if result.is_empty() {
+                        tracing::debug!(target: "validator_performance", ?block_id, "no performance data yet");
+                        return None;
+                    }
+                    // Case B: non-empty result but decode failed → ABI mismatch, must not be silent
+                    panic!(
+                        "ValidatorPerformanceTracker ABI mismatch at block {:?}: {:?}, raw bytes = {:?}",
+                        block_id, e, result
                     );
-                    return None;
                 }
             }
         };
