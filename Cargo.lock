@@ -1032,7 +1032,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=7f8fdbb320fe2e4a94804d7334d59bf784aef3e1#7f8fdbb320fe2e4a94804d7334d59bf784aef3e1"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=08239add55708a3b9cc7e780062dd3355d426ffb#08239add55708a3b9cc7e780062dd3355d426ffb"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4775,7 +4775,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
