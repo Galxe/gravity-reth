@@ -11,7 +11,7 @@ use reth_evm::{execute::BlockExecutionError, ParallelDatabase};
 use revm::{
     bytecode::Bytecode,
     state::{Account, AccountStatus, EvmState, EvmStorageSlot},
-    DatabaseCommit,
+    DatabaseCommit, DatabaseRef,
 };
 
 /// A single bytecode replacement: target address → new runtime bytecode.
@@ -104,6 +104,11 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
             .load_mut_cache_account(*addr)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
+        let slot_key = U256::from_be_bytes(slot.0);
+        let original_value = state
+            .storage_ref(*addr, slot_key)
+            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+
         let entry = hardfork_changes.entry(*addr).or_insert_with(|| {
             // Account already loaded above; create a minimal touched entry
             let info = state
@@ -120,17 +125,19 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
             }
         });
 
-        entry.storage.insert(
-            U256::from_be_bytes(slot.0),
-            EvmStorageSlot::new_changed(U256::ZERO, *value, 0),
-        );
+        entry.storage.insert(slot_key, EvmStorageSlot::new_changed(original_value, *value, 0));
     }
 
     // 3. Apply batch storage patches (same slot+value to multiple addresses)
     for (addresses, slot, value) in hardfork.batch_storage_patches() {
+        let slot_key = U256::from_be_bytes(slot.0);
         for addr in *addresses {
             state
                 .load_mut_cache_account(*addr)
+                .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+
+            let original_value = state
+                .storage_ref(*addr, slot_key)
                 .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
             let entry = hardfork_changes.entry(*addr).or_insert_with(|| {
@@ -148,10 +155,7 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
                 }
             });
 
-            entry.storage.insert(
-                U256::from_be_bytes(slot.0),
-                EvmStorageSlot::new_changed(U256::ZERO, *value, 0),
-            );
+            entry.storage.insert(slot_key, EvmStorageSlot::new_changed(original_value, *value, 0));
         }
     }
 
