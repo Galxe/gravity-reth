@@ -175,6 +175,8 @@ where
             Requests::default()
         };
 
+        // Gravity chain uses a deflationary model where rewards come solely from gas fees,
+        // so PoW block rewards (coinbase increments) are disabled to prevent inflation.
         let mut balance_increments = HashMap::default();
         let state = self.state.as_mut().unwrap();
 
