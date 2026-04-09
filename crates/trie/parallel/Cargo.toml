@@ -21,7 +21,6 @@ reth-trie-common.workspace = true
 reth-trie-db.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std"] }
 reth-trie.workspace = true
-reth-primitives-traits.workspace = true
 
 # alloy
 alloy-rlp.workspace = true
@@ -35,8 +34,6 @@ thiserror.workspace = true
 derive_more.workspace = true
 rayon.workspace = true
 itertools.workspace = true
-parking_lot.workspace = true
-once_cell.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 # `metrics` feature

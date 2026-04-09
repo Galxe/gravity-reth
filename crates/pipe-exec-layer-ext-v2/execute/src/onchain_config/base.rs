@@ -101,6 +101,7 @@ where
             jwk_consensus_config::JwkConsensusConfigFetcher,
             observed_jwk::ObservedJwkFetcher,
             oracle_state::OracleStateFetcher,
+            performance::ValidatorPerformanceFetcher,
             validator_set::ValidatorSetFetcher,
         };
 
@@ -142,6 +143,10 @@ where
             }
             OnChainConfig::OracleState => {
                 let fetcher = OracleStateFetcher::new(self);
+                fetcher.fetch(block_id).map(|bytes| bytes.0.into())
+            }
+            OnChainConfig::ValidatorPerformances => {
+                let fetcher = ValidatorPerformanceFetcher::new(self);
                 fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             _ => todo!("Implement fetching for other config types"),

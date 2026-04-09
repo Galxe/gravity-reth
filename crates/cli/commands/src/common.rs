@@ -24,13 +24,13 @@ use reth_node_core::{
 };
 use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider, StaticFileProvider},
-    ProviderFactory, StaticFileProviderFactory,
+    ProviderFactory, StageCheckpointReader, StaticFileProviderFactory,
 };
-use reth_stages::{sets::DefaultStages, Pipeline, PipelineTarget};
+use reth_stages::{sets::DefaultStages, Pipeline, PipelineTarget, StageId};
 use reth_static_file::StaticFileProducer;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Struct to hold config and datadir paths
 #[derive(Debug, Parser)]
@@ -107,8 +107,19 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
 
         let provider_factory = self.create_provider_factory(&config, db, sfp)?;
         if access.is_read_write() {
-            debug!(target: "reth::cli", chain=%self.chain.chain(), genesis=?self.chain.genesis_hash(), "Initializing genesis");
-            init_genesis(&provider_factory)?;
+            // Skip init_genesis if the database already has an Execution checkpoint > 0,
+            // indicating it has been used. In pipe execution mode, genesis headers
+            // may not be in static files or CanonicalHeaders, causing init_genesis
+            // to incorrectly re-initialize and reset all stage checkpoints to 0.
+            let should_init = provider_factory
+                .get_stage_checkpoint(StageId::Execution)
+                .ok()
+                .flatten()
+                .is_none_or(|ck| ck.block_number == 0);
+            if should_init {
+                info!(target: "reth::cli", chain=%self.chain.chain(), genesis=?self.chain.genesis_hash(), "Initializing genesis");
+                init_genesis(&provider_factory)?;
+            }
         }
 
         Ok(Environment { config, provider_factory, data_dir })

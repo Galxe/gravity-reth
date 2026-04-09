@@ -46,6 +46,15 @@ sol! {
     // Function to get total voting power directly from contract
     function getTotalVotingPower() external view returns (uint256);
 
+    // ValidatorPerformanceTracker definitions (from ValidatorPerformanceTracker.sol)
+    struct IndividualPerformance {
+        uint64 successfulProposals;
+        uint64 failedProposals;
+    }
+
+    // Function from ValidatorPerformanceTracker
+    function getAllPerformances() external view returns (IndividualPerformance[] memory);
+
     /// NewEpochEvent from Reconfiguration.sol
     /// Emitted when epoch transition completes with full validator set
     event NewEpochEvent(
@@ -150,6 +159,30 @@ pub fn convert_validators_to_bcs(
 /// Used when we don't have pending validator info available
 pub fn convert_active_validators_to_bcs(validators: &[ValidatorConsensusInfo]) -> Bytes {
     convert_validators_to_bcs(validators, &[], &[])
+}
+
+/// Convert array of EVM IndividualPerformance to BCS-encoded ValidatorPerformances
+/// Used to bridge performance tracking from contract EVM state to native Aptos consensus.
+pub fn convert_performances_to_bcs(performances: &[IndividualPerformance]) -> Bytes {
+    use gravity_api_types::on_chain_config::validator_performances::{
+        ValidatorPerformance as GravityValidatorPerformance,
+        ValidatorPerformances as GravityValidatorPerformances,
+    };
+
+    let converted_performances: Vec<GravityValidatorPerformance> = performances
+        .iter()
+        .map(|p| GravityValidatorPerformance {
+            successful_proposals: p.successfulProposals,
+            failed_proposals: p.failedProposals,
+        })
+        .collect();
+
+    let gravity_validator_performances =
+        GravityValidatorPerformances { validators: converted_performances };
+
+    bcs::to_bytes(&gravity_validator_performances)
+        .expect("Failed to serialize validator performances")
+        .into()
 }
 
 // =============================================================================

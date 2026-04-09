@@ -226,13 +226,14 @@ pub fn construct_metadata_txn(
     gas_price: u128,
     timestamp_us: u64,
     proposer_index: Option<u64>,
+    failed_proposer_indices: &[u64],
 ) -> TransactionSigned {
     // For NIL blocks, use NIL_PROPOSER_INDEX (type(uint64).max in Solidity)
     let proposer_idx = proposer_index.unwrap_or(NIL_PROPOSER_INDEX);
 
     let call = onBlockStartCall {
         proposerIndex: proposer_idx,
-        failedProposerIndices: vec![],
+        failedProposerIndices: failed_proposer_indices.to_vec(),
         timestampMicros: timestamp_us,
     };
     let input: Bytes = call.abi_encode().into();

@@ -64,6 +64,16 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
     /// Returns the final total difficulty if the Paris hardfork is known.
     fn final_paris_total_difficulty(&self) -> Option<U256>;
 
+    /// Returns the Gravity-specific hardforks and their activation conditions.
+    ///
+    /// Callers use the generic [`Hardforks`] trait to query activation:
+    /// ```ignore
+    /// use reth_chainspec::GravityHardfork;
+    /// chain_spec.gravity_hardforks().is_fork_active_at_block(GravityHardfork::Alpha, n);
+    /// chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(n);
+    /// ```
+    fn gravity_hardforks(&self) -> &reth_ethereum_forks::ChainHardforks;
+
     /// See [`calc_next_block_base_fee`].
     fn next_block_base_fee(&self, parent: &Self::Header, target_timestamp: u64) -> Option<u64> {
         Some(calc_next_block_base_fee(
@@ -134,5 +144,9 @@ impl EthChainSpec for ChainSpec {
 
     fn final_paris_total_difficulty(&self) -> Option<U256> {
         self.paris_block_and_final_difficulty.map(|(_, final_difficulty)| final_difficulty)
+    }
+
+    fn gravity_hardforks(&self) -> &reth_ethereum_forks::ChainHardforks {
+        &self.gravity_hardforks
     }
 }

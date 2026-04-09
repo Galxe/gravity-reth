@@ -26,7 +26,7 @@ use alloy_consensus::{
 use alloy_eips::{eip2718::Encodable2718, BlockHashOrNumber};
 use alloy_primitives::{
     keccak256,
-    map::{hash_map, B256Map, HashMap, HashSet},
+    map::{hash_map, HashMap, HashSet},
     Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256,
 };
 use itertools::Itertools;
@@ -62,11 +62,10 @@ use reth_storage_api::{
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
     nested_trie::StorageNodeEntry,
-    prefix_set::{PrefixSet, PrefixSetMut, TriePrefixSets},
     updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesV2},
-    HashedPostStateSorted, Nibbles, StateRoot, StoredNibbles, StoredNibblesSubKey,
+    HashedPostStateSorted, StoredNibbles, StoredNibblesSubKey,
 };
-use reth_trie_db::{DatabaseStateRoot, DatabaseStorageTrieCursor};
+use reth_trie_db::{nested_hash::NestedStateRoot, DatabaseStorageTrieCursor};
 use revm_database::states::{
     PlainStateReverts, PlainStorageChangeset, PlainStorageRevert, StateChangeset,
 };
@@ -270,16 +269,8 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
             .walk_range(range.clone())?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Unwind account hashes. Add changed accounts to account prefix set.
-        let hashed_addresses = self.unwind_account_hashing(changed_accounts.iter())?;
-        let mut account_prefix_set = PrefixSetMut::with_capacity(hashed_addresses.len());
-        let mut destroyed_accounts = HashSet::default();
-        for (hashed_address, account) in hashed_addresses {
-            account_prefix_set.insert(Nibbles::unpack(hashed_address));
-            if account.is_none() {
-                destroyed_accounts.insert(hashed_address);
-            }
-        }
+        // Unwind account hashes.
+        self.unwind_account_hashing(changed_accounts.iter())?;
 
         // Unwind account history indices.
         self.unwind_account_history_indices(changed_accounts.iter())?;
@@ -291,34 +282,20 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
             .walk_range(storage_range)?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Unwind storage hashes. Add changed account and storage keys to corresponding prefix
-        // sets.
-        let mut storage_prefix_sets = B256Map::<PrefixSet>::default();
-        let storage_entries = self.unwind_storage_hashing(changed_storages.iter().copied())?;
-        for (hashed_address, hashed_slots) in storage_entries {
-            account_prefix_set.insert(Nibbles::unpack(hashed_address));
-            let mut storage_prefix_set = PrefixSetMut::with_capacity(hashed_slots.len());
-            for slot in hashed_slots {
-                storage_prefix_set.insert(Nibbles::unpack(slot));
-            }
-            storage_prefix_sets.insert(hashed_address, storage_prefix_set.freeze());
-        }
+        // Unwind storage hashes.
+        self.unwind_storage_hashing(changed_storages.iter().copied())?;
 
         // Unwind storage history indices.
         self.unwind_storage_history_indices(changed_storages.iter().copied())?;
 
-        // Calculate the reverted merkle root.
-        // This is the same as `StateRoot::incremental_root_with_updates`, only the prefix sets
-        // are pre-loaded.
-        let prefix_sets = TriePrefixSets {
-            account_prefix_set: account_prefix_set.freeze(),
-            storage_prefix_sets,
-            destroyed_accounts,
-        };
-        let (new_state_root, trie_updates) = StateRoot::from_tx(&self.tx)
-            .with_prefix_sets(prefix_sets)
-            .root_with_updates()
-            .map_err(reth_db_api::DatabaseError::from)?;
+        // Flush WriteBatch so NestedStateRoot can read the updated hashed state.
+        self.commit_view()?;
+
+        // Use gravity-reth's NestedStateRoot algorithm for state root calculation,
+        // matching the approach used in MerkleStage::unwind.
+        let nested_state_root = NestedStateRoot::new(&self.tx, None);
+        let hashed_state = nested_state_root.read_hashed_state(Some(range.clone()))?;
+        let (new_state_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
 
         let parent_number = range.start().saturating_sub(1);
         let parent_state_root = self
@@ -338,7 +315,7 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
                 block_hash: parent_hash,
             })))
         }
-        self.write_trie_updates(&trie_updates)?;
+        self.write_trie_updatesv2(&trie_updates_v2)?;
 
         Ok(())
     }
@@ -2760,9 +2737,11 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider + 'static> BlockExecu
         let range = block + 1..=self.last_block_number()?;
 
         self.unwind_trie_state_range(range.clone())?;
+        self.commit_view()?;
 
         // get execution res
         let execution_state = self.take_state_above(block, remove_from)?;
+        self.commit_view()?;
 
         let blocks = self.recovered_block_range(range)?;
 
@@ -2784,9 +2763,11 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider + 'static> BlockExecu
         let range = block + 1..=self.last_block_number()?;
 
         self.unwind_trie_state_range(range)?;
+        self.commit_view()?;
 
         // remove execution res
         self.remove_state_above(block, remove_from)?;
+        self.commit_view()?;
 
         // remove block bodies it is needed for both get block range and get block execution results
         // that is why it is deleted afterwards.

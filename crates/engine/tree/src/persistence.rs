@@ -226,7 +226,6 @@ where
                     let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
                         let start = Instant::now();
                         let provider_rw = inner_provider.database_provider_rw()?;
-                        let static_file_provider = inner_provider.static_file_provider();
                         let ck = Self::get_checkpoint(
                             provider_rw.tx_ref(),
                             StageId::Execution,
@@ -250,7 +249,7 @@ where
                             StageId::Execution,
                             StageCheckpoint { block_number, ..ck },
                         )?;
-                        static_file_provider.commit()?;
+                        provider_rw.static_file_provider().commit()?;
                         provider_rw.commit()?;
                         set_fail_point!("persistence::after_state_commit");
                         metrics::histogram!("save_blocks_time", &[("process", "write_state")])
