@@ -208,7 +208,7 @@ fn construct_jwk_record_transaction(
     let call = recordCall {
         sourceType: SOURCE_TYPE_JWK,
         sourceId: source_id,
-        nonce: nonce as u128,
+        nonce: version as u128,
         blockNumber: U256::ZERO, // JWK records don't have a source block number
         payload: payload.into(),
         callbackGasLimit: U256::from(CALLBACK_GAS_LIMIT),
