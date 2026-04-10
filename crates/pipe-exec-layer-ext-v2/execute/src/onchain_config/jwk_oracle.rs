@@ -17,7 +17,7 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use gravity_api_types::on_chain_config::jwks::{JWKStruct, ProviderJWKs};
 use reth_ethereum_primitives::TransactionSigned;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Default callback gas limit for oracle updates
 const CALLBACK_GAS_LIMIT: u64 = 500_000;
@@ -167,8 +167,20 @@ pub fn construct_oracle_record_transaction(
         .ok_or_else(|| format!("No JWKs found for issuer: {}", issuer_str))?;
 
     if is_rsa_jwk(first_jwk) {
-        // RSA JWK update
-        construct_jwk_record_transaction(provider_jwks, nonce, gas_price)
+        // RSA JWK path is not currently used in production. All JWK data flows through
+        // the UnsupportedJWK (blockchain event) path. If this is reached, something
+        // unexpected has changed in the consensus layer.
+        error!(
+            target: "gravity::onchain_config::jwk_oracle",
+            issuer = %issuer_str,
+            jwk_count = provider_jwks.jwks.len(),
+            "RSA JWK path entered unexpectedly — this code path should be unreachable"
+        );
+        panic!(
+            "RSA JWK oracle record path is unreachable: issuer={}, jwk_count={}",
+            issuer_str,
+            provider_jwks.jwks.len()
+        );
     } else if is_unsupported_jwk(first_jwk) {
         // Blockchain/oracle events - use recordBatch for ALL logs
         construct_blockchain_batch_transaction(provider_jwks, nonce, gas_price)
