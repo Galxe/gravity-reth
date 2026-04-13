@@ -750,6 +750,10 @@ impl From<Genesis> for ChainSpec {
                 GravityHardfork::Delta.boxed(),
                 genesis.config.extra_fields.get("deltaBlock").and_then(|v| v.as_u64()),
             ),
+            (
+                GravityHardfork::Epsilon.boxed(),
+                genesis.config.extra_fields.get("epsilonBlock").and_then(|v| v.as_u64()),
+            ),
         ];
         let gravity_hardforks = ChainHardforks::new(
             gravity_hardfork_opts

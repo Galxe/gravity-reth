@@ -32,7 +32,8 @@
     "gammaBlock": 20,
     "alphaBlock": 5,
     "betaBlock": 10,
-    "deltaBlock": 25
+    "deltaBlock": 25,
+    "epsilonBlock": 30
   },
   "alloc": {
     "0x00000000000000000000000000000001625f3000": {

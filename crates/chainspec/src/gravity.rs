@@ -13,5 +13,8 @@ hardfork!(
         Gamma,
         /// Delta hardfork: activate Governance contract by setting Ownable._owner
         Delta,
+        /// Epsilon hardfork: D3-2 underbonded eviction, eviction call-site move,
+        /// `autoEvictThresholdPct`, GBridgeReceiver `_processedNonces` removal
+        Epsilon,
     }
 );

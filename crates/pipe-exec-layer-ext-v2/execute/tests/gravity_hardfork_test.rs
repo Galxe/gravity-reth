@@ -20,7 +20,6 @@ use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
-use reth_ethereum_forks::Hardforks;
 use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{
@@ -45,6 +44,9 @@ const GAMMA_BLOCK: u64 = 20;
 
 /// Block number at which Delta hardfork activates (must match gravity_hardfork.json).
 const DELTA_BLOCK: u64 = 25;
+
+/// Block number at which Epsilon hardfork activates (must match gravity_hardfork.json).
+const EPSILON_BLOCK: u64 = 30;
 
 fn mock_block_id(block_number: u64) -> B256 {
     B256::left_padding_from(&block_number.to_be_bytes())
@@ -210,6 +212,23 @@ async fn run_pipe(
         DELTA_BLOCK - 1
     );
     println!("[hardfork_test] ✅ ChainSpec correctly parsed deltaBlock={DELTA_BLOCK}");
+
+    assert!(
+        chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::Epsilon)
+            .transitions_at_block(EPSILON_BLOCK),
+        "epsilon transitions_at_block({EPSILON_BLOCK}) should be true"
+    );
+    assert!(
+        !chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::Epsilon)
+            .transitions_at_block(EPSILON_BLOCK - 1),
+        "epsilon transitions_at_block({}) should be false",
+        EPSILON_BLOCK - 1
+    );
+    println!("[hardfork_test] ✅ ChainSpec correctly parsed epsilonBlock={EPSILON_BLOCK}");
 
     let eth_api = handle.node.rpc_registry.eth_api().clone();
     let provider = handle.node.provider;
