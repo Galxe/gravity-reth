@@ -1,4 +1,4 @@
-//! Beta hardfork: upgrade StakePool contract bytecodes with correct FACTORY immutable.
+//! Beta hardfork: upgrade `StakePool` contract bytecodes with correct FACTORY immutable.
 
 use super::common::{BytecodeUpgrade, HardforkUpgrades};
 use alloy_primitives::{address, Address};
@@ -446,7 +446,7 @@ pub const STAKEPOOL_BETA_RUNTIME_BYTECODE: &[u8] = &[
 
 // ── Upgrade tables ──────────────────────────────────────────────────────────────
 
-/// Extra upgrades for Beta hardfork: StakePool bytecode replacements.
+/// Extra upgrades for Beta hardfork: `StakePool` bytecode replacements.
 pub static BETA_EXTRA_UPGRADES: &[BytecodeUpgrade] = &[
     (STAKEPOOL_ADDRESSES[0], STAKEPOOL_BETA_RUNTIME_BYTECODE),
     (STAKEPOOL_ADDRESSES[1], STAKEPOOL_BETA_RUNTIME_BYTECODE),

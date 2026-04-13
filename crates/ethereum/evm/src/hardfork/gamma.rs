@@ -104,7 +104,7 @@ pub const GAMMA_SYSTEM_UPGRADES: &[BytecodeUpgrade] = &[
     (ORACLE_REQUEST_QUEUE_ADDRESS, ORACLE_REQUEST_QUEUE_BYTECODE),
 ];
 
-/// Extra upgrades for Gamma: StakePool bytecode replacements.
+/// Extra upgrades for Gamma: `StakePool` bytecode replacements.
 pub static GAMMA_EXTRA_UPGRADES: &[BytecodeUpgrade] = &[
     (STAKEPOOL_ADDRESSES[0], STAKEPOOL_BYTECODE),
     (STAKEPOOL_ADDRESSES[1], STAKEPOOL_BYTECODE),
@@ -125,7 +125,7 @@ pub const REENTRANCY_GUARD_SLOT: [u8; 32] = [
 /// `NOT_ENTERED` value for `ReentrancyGuard` (must be written after bytecode replacement)
 pub const REENTRANCY_GUARD_NOT_ENTERED: u8 = 1;
 
-/// Batch storage patches: initialize ReentrancyGuard for all StakePool instances.
+/// Batch storage patches: initialize `ReentrancyGuard` for all `StakePool` instances.
 pub static GAMMA_BATCH_STORAGE_PATCHES: &[BatchStoragePatch] = &[(
     STAKEPOOL_ADDRESSES,
     B256::new(REENTRANCY_GUARD_SLOT),

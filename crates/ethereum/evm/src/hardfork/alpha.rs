@@ -1,6 +1,6 @@
-//! Alpha hardfork: upgrade Staking and StakePool contract bytecodes.
+//! Alpha hardfork: upgrade `Staking` and `StakePool` contract bytecodes.
 //!
-//! Disables PoW rewards after activation (handled in `parallel_execute.rs`).
+//! Disables `PoW` rewards after activation (handled in `parallel_execute.rs`).
 
 use super::common::{BytecodeUpgrade, HardforkUpgrades};
 use alloy_primitives::{address, Address};
@@ -1141,7 +1141,7 @@ pub const STAKEPOOL_ALPHA_RUNTIME_BYTECODE: &[u8] = &[
 pub static ALPHA_SYSTEM_UPGRADES: &[BytecodeUpgrade] =
     &[(STAKING_ADDRESS, STAKING_ALPHA_RUNTIME_BYTECODE)];
 
-/// Extra upgrades for Alpha hardfork: StakePool bytecode replacements.
+/// Extra upgrades for Alpha hardfork: `StakePool` bytecode replacements.
 pub static ALPHA_EXTRA_UPGRADES: &[BytecodeUpgrade] = &[
     (STAKEPOOL_ADDRESSES[0], STAKEPOOL_ALPHA_RUNTIME_BYTECODE),
     (STAKEPOOL_ADDRESSES[1], STAKEPOOL_ALPHA_RUNTIME_BYTECODE),
