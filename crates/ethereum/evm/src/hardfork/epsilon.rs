@@ -1,20 +1,19 @@
-//! Epsilon hardfork: D3-2 underbonded eviction + GBridgeReceiver dedup
+//! Epsilon hardfork: D3-2 underbonded eviction + `GBridgeReceiver` dedup
 //!
 //! Replaces 4 contract bytecodes (gravity-testnet-v1.3 → v1.4):
 //!
-//! - `ValidatorManagement` (PR #56): D3-2 Phase 1 underbonded eviction +
-//!   percentage-based Phase 2 performance threshold + skip-epoch-1 rule
-//! - `Reconfiguration` (PR #63): `evictUnderperformingValidators()` call site
-//!   moved from `_applyReconfiguration` into `checkAndStartTransition` and
-//!   `governanceReconfigure` (fixes DKG synchronization)
-//! - `ValidatorConfig` (PR #63): new `autoEvictThresholdPct (uint64)` field,
-//!   declared between `autoEvictEnabled` and `__deprecated_autoEvictThreshold`
-//!   so it packs into the same slot as `autoEvictEnabled` and the storage
-//!   layout stays byte-identical to v1.3
+//! - `ValidatorManagement` (PR #56): D3-2 Phase 1 underbonded eviction + percentage-based Phase 2
+//!   performance threshold + skip-epoch-1 rule
+//! - `Reconfiguration` (PR #63): `evictUnderperformingValidators()` call site moved from
+//!   `_applyReconfiguration` into `checkAndStartTransition` and `governanceReconfigure` (fixes DKG
+//!   synchronization)
+//! - `ValidatorConfig` (PR #63): new `autoEvictThresholdPct (uint64)` field, declared between
+//!   `autoEvictEnabled` and `__deprecated_autoEvictThreshold` so it packs into the same slot as
+//!   `autoEvictEnabled` and the storage layout stays byte-identical to v1.3
 //! - `GBridgeReceiver` (PR #66): `_processedNonces` mapping replaced with
-//!   `__deprecated_processedNonces` storage gap (slot 0); `isProcessed()` and
-//!   `AlreadyProcessed` removed. Also adds the `trustedSourceId` immutable
-//!   that did not exist in the originally-deployed v1.0 receiver.
+//!   `__deprecated_processedNonces` storage gap (slot 0); `isProcessed()` and `AlreadyProcessed`
+//!   removed. Also adds the `trustedSourceId` immutable that did not exist in the
+//!   originally-deployed v1.0 receiver.
 //!
 //! **No storage patches** are needed — every byte of pre-Epsilon storage stays
 //! at the same slot/offset under the new bytecode. This is a pure bytecode-
@@ -54,8 +53,7 @@ pub const VALIDATOR_CONFIG_ADDRESS: Address = address!("000000000000000000000000
 /// on the gravity testnet. For other environments, override this constant and
 /// regenerate `bytecodes/epsilon/GBridgeReceiver.bin` with the matching
 /// immutables via `scripts/build_epsilon_bytecodes.sh` in the contracts repo.
-pub const GBRIDGE_RECEIVER_ADDRESS: Address =
-    address!("595475934ed7d9faa7fca28341c2ce583904a44e");
+pub const GBRIDGE_RECEIVER_ADDRESS: Address = address!("595475934ed7d9faa7fca28341c2ce583904a44e");
 
 // ── Bytecode upgrade tables ─────────────────────────────────────────────────────
 

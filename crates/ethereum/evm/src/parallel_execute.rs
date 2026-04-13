@@ -217,8 +217,8 @@ where
 
         {
             use crate::hardfork::{
-                common::apply_hardfork_upgrades, delta::DeltaHardfork,
-                epsilon::EpsilonHardfork, gamma::GammaHardfork,
+                common::apply_hardfork_upgrades, delta::DeltaHardfork, epsilon::EpsilonHardfork,
+                gamma::GammaHardfork,
             };
 
             let hf = self.chain_spec.gravity_hardforks();
