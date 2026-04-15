@@ -715,7 +715,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         let metadata_txn_result =
             SystemTxnResult { result: metadata_execution_result, txn: metadata_txn };
 
-
         // Check for epoch change from metadata txn
         if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
             assert_eq!(new_epoch, epoch + 1);
