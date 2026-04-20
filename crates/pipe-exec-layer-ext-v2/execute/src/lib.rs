@@ -739,6 +739,15 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
         }
 
+        if !metadata_txn_result.result.is_success() {
+            error!(target: "execute_ordered_block",
+                block_number=?block_number,
+                gas_used=?metadata_txn_result.result.gas_used(),
+                output=?metadata_txn_result.result.output(),
+                "metadata system transaction reverted"
+            );
+        }
+
         debug!(target: "execute_ordered_block",
             metadata_txn_result=?metadata_txn_result,
             "metadata transaction result"
