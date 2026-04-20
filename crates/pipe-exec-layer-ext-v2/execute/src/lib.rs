@@ -739,6 +739,15 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
         }
 
+        if !metadata_txn_result.result.is_success() {
+            error!(target: "execute_ordered_block",
+                block_number=?block_number,
+                gas_used=?metadata_txn_result.result.gas_used(),
+                output=?metadata_txn_result.result.output(),
+                "metadata system transaction reverted"
+            );
+        }
+
         debug!(target: "execute_ordered_block",
             metadata_txn_result=?metadata_txn_result,
             "metadata transaction result"
@@ -791,37 +800,48 @@ impl<Storage: GravityStorage> Core<Storage> {
 
             let validator_result = SystemTxnResult { result: execution_result, txn };
 
-            // DKG transactions may trigger epoch change
-            if is_dkg {
-                if let Some((new_epoch, validators)) = validator_result.emit_new_epoch() {
-                    assert_eq!(new_epoch, epoch + 1);
-                    info!(target: "execute_ordered_block",
-                        id=?block_id,
-                        parent_id=?parent_id,
-                        number=?block_number,
-                        new_epoch=?new_epoch,
-                        "DKG triggered new epoch, discard the block"
-                    );
-                    let bundle = executor.take_bundle();
-                    return SystemTxnExecutionOutcome::EpochChanged(
-                        validator_result.into_executed_ordered_block_result(
-                            chain_spec,
-                            ordered_block,
-                            base_fee,
-                            bundle,
-                            validators,
-                        ),
-                    );
+            if !validator_result.result.is_success() {
+                error!(target: "execute_ordered_block",
+                    index=?index,
+                    is_dkg=?is_dkg,
+                    block_number=?block_number,
+                    gas_used=?validator_result.result.gas_used(),
+                    output=?validator_result.result.output(),
+                    "validator system transaction reverted"
+                );
+            } else {
+                // DKG transactions may trigger epoch change
+                if is_dkg {
+                    if let Some((new_epoch, validators)) = validator_result.emit_new_epoch() {
+                        assert_eq!(new_epoch, epoch + 1);
+                        info!(target: "execute_ordered_block",
+                            id=?block_id,
+                            parent_id=?parent_id,
+                            number=?block_number,
+                            new_epoch=?new_epoch,
+                            "DKG triggered new epoch, discard the block"
+                        );
+                        let bundle = executor.take_bundle();
+                        return SystemTxnExecutionOutcome::EpochChanged(
+                            validator_result.into_executed_ordered_block_result(
+                                chain_spec,
+                                ordered_block,
+                                base_fee,
+                                bundle,
+                                validators,
+                            ),
+                        );
+                    }
                 }
-            }
 
-            info!(target: "execute_ordered_block",
-                index=?index,
-                is_dkg=?is_dkg,
-                gas_used=?validator_result.result.gas_used(),
-                block_number=?block_number,
-                "validator transaction executed successfully"
-            );
+                info!(target: "execute_ordered_block",
+                    index=?index,
+                    is_dkg=?is_dkg,
+                    gas_used=?validator_result.result.gas_used(),
+                    block_number=?block_number,
+                    "validator transaction executed successfully"
+                );
+            }
 
             validator_txn_results.push(validator_result);
         }
