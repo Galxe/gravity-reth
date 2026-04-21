@@ -1243,21 +1243,24 @@ fn filter_invalid_txs<DB: ParallelDatabase>(
     gas_limit: u64,
 ) -> HashSet<usize> {
     let mut gas_limit_exceeded_tx_idx = txs.len();
-    let mut tx_gas_limit_sum = 0;
+    let mut tx_gas_limit_sum: u64 = 0;
     for (idx, tx) in txs.iter().enumerate() {
         let tx_gas_limit = tx.gas_limit();
-        if tx_gas_limit_sum + tx_gas_limit > gas_limit {
-            warn!(target: "filter_invalid_txs",
-                tx_hash=?txs[idx].hash(),
-                sender=?senders[idx],
-                block_gas_limit=?gas_limit,
-                "gas limit exceeded, truncated to {}",
-                idx,
-            );
-            gas_limit_exceeded_tx_idx = idx;
-            break;
-        } else {
-            tx_gas_limit_sum += tx_gas_limit;
+        match tx_gas_limit_sum.checked_add(tx_gas_limit) {
+            Some(new_sum) if new_sum <= gas_limit => {
+                tx_gas_limit_sum = new_sum;
+            }
+            _ => {
+                warn!(target: "filter_invalid_txs",
+                    tx_hash=?txs[idx].hash(),
+                    sender=?senders[idx],
+                    block_gas_limit=?gas_limit,
+                    "gas limit exceeded, truncated to {}",
+                    idx,
+                );
+                gas_limit_exceeded_tx_idx = idx;
+                break;
+            }
         }
     }
 
