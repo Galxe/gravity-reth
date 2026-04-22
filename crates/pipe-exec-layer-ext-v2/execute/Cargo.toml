@@ -40,7 +40,9 @@ tokio.workspace = true
 rayon.workspace = true
 
 # ethereum
-revm.workspace = true
+# `optional_no_base_fee` enables `CfgEnv::disable_base_fee`, which is set for system-tx
+# execution so gas_price = 0 passes the EIP-1559 base-fee check.
+revm = { workspace = true, features = ["optional_no_base_fee"] }
 
 # misc
 tracing.workspace = true

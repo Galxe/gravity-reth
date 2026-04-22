@@ -697,9 +697,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         // -----------------------------------------------------------------------
         // Metadata transaction (onBlockStart)
         // -----------------------------------------------------------------------
+        // System transactions are gas-free: pass gas_price = 0. Passes the base-fee check because
+        // `cfg_env.disable_base_fee` was set upstream in `execute_ordered_block`.
         let metadata_txn = construct_metadata_txn(
             current_nonce,
-            base_fee as u128,
+            0,
             ordered_block.timestamp_us,
             ordered_block.proposer_index,
             &ordered_block.failed_proposer_indices,
@@ -766,11 +768,8 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         for (index, extra_data) in sorted_extra_data.iter().enumerate() {
             let is_dkg = matches!(extra_data, ExtraDataType::DKG(_));
-            let txn = match construct_validator_txn_from_extra_data(
-                extra_data,
-                current_nonce,
-                base_fee as u128,
-            ) {
+            // gas_price = 0 — see comment on metadata_txn construction above.
+            let txn = match construct_validator_txn_from_extra_data(extra_data, current_nonce, 0) {
                 Ok(txn) => txn,
                 Err(e) => {
                     error!(target: "execute_ordered_block",
@@ -951,7 +950,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let state = self.storage.get_state_view().unwrap();
 
-        let evm_env = self
+        let mut evm_env = self
             .evm_config
             .next_evm_env(
                 parent_header,
@@ -970,6 +969,12 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number=?block_number,
         );
         let base_fee = evm_env.block_env.basefee;
+
+        // System transactions run with `gas_price = 0` so SYSTEM_CALLER pays no wei and no
+        // base_fee is burned. Disabling the base-fee check on this env only allows that; user
+        // transactions execute in a fresh env built from the block header inside
+        // `executor.execute`, so they remain subject to EIP-1559 as usual.
+        evm_env.cfg_env.disable_base_fee = true;
 
         // Read SYSTEM_CALLER nonce and gas price from state BEFORE moving state into executor.
         // ParallelDatabase (Storage::StateView) implements DatabaseRef, so we can read directly.
