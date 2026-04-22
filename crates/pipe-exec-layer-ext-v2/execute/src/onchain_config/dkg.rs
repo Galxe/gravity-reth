@@ -229,9 +229,8 @@ fn convert_config_v2_data(
 fn convert_randomness_config(
     config: &RandomnessConfigData,
 ) -> gravity_api_types::on_chain_config::dkg::RandomnessConfigData {
-    // Convert enum variant (Off -> V1, V2 -> V2 in API types)
     let variant = match config.variant {
-        ConfigVariant::Off => gravity_api_types::on_chain_config::dkg::ConfigVariant::V1,
+        ConfigVariant::Off => gravity_api_types::on_chain_config::dkg::ConfigVariant::Off,
         ConfigVariant::V2 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V2,
         ConfigVariant::__Invalid => panic!("Invalid ConfigVariant"),
     };
