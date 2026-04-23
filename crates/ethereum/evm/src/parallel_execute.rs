@@ -216,7 +216,7 @@ where
         {
             use crate::hardfork::{
                 common::apply_hardfork_upgrades, delta::DeltaHardfork, epsilon::EpsilonHardfork,
-                gamma::GammaHardfork,
+                gamma::GammaHardfork, zeta::ZetaHardfork,
             };
 
             let hf = self.chain_spec.gravity_hardforks();
@@ -228,6 +228,9 @@ where
             }
             if hf.fork(GravityHardfork::Epsilon).transitions_at_block(block.number()) {
                 apply_hardfork_upgrades(&EpsilonHardfork, state)?;
+            }
+            if hf.fork(GravityHardfork::Zeta).transitions_at_block(block.number()) {
+                apply_hardfork_upgrades(&ZetaHardfork, state)?;
             }
         }
 

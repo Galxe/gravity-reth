@@ -16,5 +16,10 @@ hardfork!(
         /// Epsilon hardfork: D3-2 underbonded eviction, eviction call-site move,
         /// `autoEvictThresholdPct`, GBridgeReceiver `_processedNonces` removal
         Epsilon,
+        /// Zeta hardfork: Governance initialize+owner, ValidatorManagement
+        /// whitelist seed, StakePool 2-step role timelock, StakingConfig
+        /// single-field setters, Reconfiguration DKG snapshot fix, JWKManager
+        /// non-empty field validation
+        Zeta,
     }
 );
