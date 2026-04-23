@@ -782,6 +782,10 @@ impl From<Genesis> for ChainSpec {
                 GravityHardfork::Epsilon.boxed(),
                 genesis.config.extra_fields.get("epsilonBlock").and_then(|v| v.as_u64()),
             ),
+            (
+                GravityHardfork::Zeta.boxed(),
+                genesis.config.extra_fields.get("zetaBlock").and_then(|v| v.as_u64()),
+            ),
         ];
         let gravity_hardforks = ChainHardforks::new(
             gravity_hardfork_opts
@@ -795,11 +799,23 @@ impl From<Genesis> for ChainSpec {
         // history sync).
         let gravity_min_base_fee =
             genesis.config.extra_fields.get("gravityMinBaseFee").and_then(|v| v.as_u64());
-        // main: floor activates at genesis (block 0). Released testnet branches override
-        // this to read the rolling-upgrade activation height from genesis (e.g.
-        // `epsilonBlock`), keeping the value configurable per-network without code
-        // changes — same mechanism as Alpha/Beta/Gamma/Delta above.
-        let gravity_min_base_fee_activation_block = 0u64;
+        // v1.5 (Zeta) is the rolling-upgrade hardfork that introduces the 50 Gwei
+        // base fee floor on top of the existing v1.4 chain. Activation of the floor
+        // schedule is therefore tied to `zetaBlock` (same value parsed for the Zeta
+        // bytecode/storage upgrades above), so the consensus rule, contract upgrades,
+        // and rolling-upgrade window all transition at one block — operators only
+        // configure the height once.
+        //
+        // Default `u64::MAX` (effectively never) when `zetaBlock` is absent: this is
+        // the safe behavior when a v1.5 binary is pointed at a v1.4 chain config that
+        // predates Zeta. Defaulting to 0 there would silently enforce the floor on
+        // historical v1.4 blocks (whose base_fee may be < 50 Gwei) and break re-sync.
+        let gravity_min_base_fee_activation_block = genesis
+            .config
+            .extra_fields
+            .get("zetaBlock")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u64::MAX);
 
         Self {
             chain: genesis.config.chain_id.into(),
