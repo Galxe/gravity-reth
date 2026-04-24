@@ -41,7 +41,8 @@ async fn test_tx_gossip() {
 
     // ensure the sender has balance
     let sender = tx.sender();
-    provider.add_account(sender, ExtendedAccount::new(0, U256::from(100_000_000)));
+    // Balance must cover upfront cost: 50 Gwei (GRAVITY_MIN_BASE_FEE) * 300k gas = 1.5e16 wei.
+    provider.add_account(sender, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
 
     // insert pending tx in peer0's pool
     let AddedTransactionOutcome { hash, .. } =
@@ -81,7 +82,8 @@ async fn test_tx_propagation_policy_trusted_only() {
 
     // ensure the sender has balance
     let sender = tx.sender();
-    provider.add_account(sender, ExtendedAccount::new(0, U256::from(100_000_000)));
+    // Balance must cover upfront cost: 50 Gwei (GRAVITY_MIN_BASE_FEE) * 300k gas = 1.5e16 wei.
+    provider.add_account(sender, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
 
     // insert the tx in peer0's pool
     let outcome_0 = peer_0_handle.pool().unwrap().add_external_transaction(tx).await.unwrap();
@@ -108,7 +110,8 @@ async fn test_tx_propagation_policy_trusted_only() {
 
     // ensure the sender has balance
     let sender = tx.sender();
-    provider.add_account(sender, ExtendedAccount::new(0, U256::from(100_000_000)));
+    // Balance must cover upfront cost: 50 Gwei (GRAVITY_MIN_BASE_FEE) * 300k gas = 1.5e16 wei.
+    provider.add_account(sender, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
 
     // insert pending tx in peer0's pool
     let outcome_1 = peer_0_handle.pool().unwrap().add_external_transaction(tx).await.unwrap();
@@ -149,7 +152,8 @@ async fn test_4844_tx_gossip_penalization() {
 
     for tx in &txs {
         let sender = tx.sender();
-        provider.add_account(sender, ExtendedAccount::new(0, U256::from(100_000_000)));
+        // Balance must cover upfront cost: 50 Gwei (GRAVITY_MIN_BASE_FEE) * 300k gas = 1.5e16 wei.
+        provider.add_account(sender, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
     }
 
     let signed_txs: Vec<Arc<TransactionSigned>> =
