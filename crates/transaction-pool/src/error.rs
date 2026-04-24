@@ -53,7 +53,7 @@ pub enum PoolErrorKind {
     /// The fee cap of the transaction is below the minimum fee cap determined by the protocol
     #[error("transaction feeCap {fee_cap} below chain minimum {minimum}")]
     FeeCapBelowMinimumProtocolFeeCap {
-        /// The transaction's declared fee cap (max_fee_per_gas).
+        /// The transaction's declared fee cap (`max_fee_per_gas`).
         fee_cap: u128,
         /// The protocol's minimum base fee (in wei) that the fee cap must meet or exceed.
         minimum: u64,

@@ -1716,11 +1716,13 @@ Post-merge hard forks (timestamp based):
 
     #[test]
     fn dev_fork_ids() {
+        // Gravity's 50 Gwei genesis base_fee fallback (vs upstream's 1 Gwei) changes
+        // the DEV chain genesis hash, which changes this fork ID.
         test_fork_ids(
             &DEV,
             &[(
                 Head { number: 0, ..Default::default() },
-                ForkId { hash: ForkHash([0x0b, 0x1a, 0x4e, 0xf7]), next: 0 },
+                ForkId { hash: ForkHash([0x4f, 0x66, 0xfe, 0xb7]), next: 0 },
             )],
         )
     }
@@ -2432,12 +2434,16 @@ Post-merge hard forks (timestamp based):
 
         // check the genesis hash
         let genesis_hash = header.hash_slow();
+        // Genesis hash differs from upstream Reth because Gravity uses
+        // GRAVITY_MIN_BASE_FEE (50 Gwei) instead of INITIAL_BASE_FEE (1 Gwei)
+        // as the genesis base_fee fallback; the header's baseFeePerGas therefore
+        // changes and so does its hash.
         let expected_hash =
-            b256!("0x16bb7c59613a5bad3f7c04a852fd056545ade2483968d9a25a1abb05af0c4d37");
+            b256!("0x1d0fc10d8f976bc4731b7b40975b1ff8b95712fe43318dea939ae3792f91cbcc");
         assert_eq!(genesis_hash, expected_hash);
 
         // check that the forkhash is correct
-        let expected_forkhash = ForkHash(hex!("8062457a"));
+        let expected_forkhash = ForkHash(hex!("3e3a308f"));
         assert_eq!(ForkHash::from(genesis_hash), expected_forkhash);
     }
 
