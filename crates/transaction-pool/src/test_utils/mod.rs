@@ -24,9 +24,11 @@ pub struct TestPoolBuilder(TestPool);
 
 impl Default for TestPoolBuilder {
     fn default() -> Self {
-        // Disable the protocol minimum base fee so tests can use canonical mainnet
-        // transactions (which carry pre-Gravity sub-50 Gwei fees) without being
-        // rejected at admission.
+        // Downstream crates compile reth-transaction-pool as a regular dep, so the cfg(test)
+        // floor relaxation in PoolConfig::default() doesn't reach them. Explicitly disable
+        // the protocol minimum base fee in the shared test builder so tests in other crates
+        // (reth-rpc, reth-network) that use `testing_pool()` can admit canonical mainnet
+        // transactions with sub-50-Gwei fees.
         let config = PoolConfig::default().with_disabled_protocol_base_fee();
         Self(Pool::new(
             MockTransactionValidator::default(),
