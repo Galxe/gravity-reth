@@ -26,11 +26,11 @@ use alloy_consensus::constants::{
     LEGACY_TX_TYPE_ID,
 };
 use alloy_eips::{
-    eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip4844::BLOB_TX_MIN_BLOB_GASPRICE, Typed2718,
+    eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE},
+    eip4844::BLOB_TX_MIN_BLOB_GASPRICE,
+    Typed2718,
 };
 use alloy_primitives::{Address, TxHash, B256};
-#[cfg(not(test))]
-use reth_chainspec::GRAVITY_MIN_BASE_FEE;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::{
@@ -2131,12 +2131,7 @@ impl<T: PoolTransaction> Default for AllTransactions<T> {
     fn default() -> Self {
         Self {
             max_account_slots: TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
-            // Mirror PoolConfig::default(): drop the Gravity 50 Gwei floor to 0 under
-            // cfg(test) so tests using MockTransaction with tiny fee caps aren't rejected.
-            #[cfg(not(test))]
-            minimal_protocol_basefee: GRAVITY_MIN_BASE_FEE,
-            #[cfg(test)]
-            minimal_protocol_basefee: 0,
+            minimal_protocol_basefee: MIN_PROTOCOL_BASE_FEE,
             block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
             by_hash: Default::default(),
             txs: Default::default(),
@@ -2186,7 +2181,7 @@ pub(crate) enum InsertErr<T: PoolTransaction> {
     Overdraft { transaction: Arc<ValidPoolTransaction<T>> },
     /// The transactions feeCap is lower than the chain's minimum fee requirement.
     ///
-    /// See also [`GRAVITY_MIN_BASE_FEE`]
+    /// See also [`MIN_PROTOCOL_BASE_FEE`]
     FeeCapBelowMinimumProtocolFeeCap { transaction: Arc<ValidPoolTransaction<T>>, fee_cap: u128 },
     /// Sender currently exceeds the configured limit for max account slots.
     ///
@@ -3145,9 +3140,8 @@ mod tests {
         let on_chain_nonce = 0;
         let mut f = MockTransactionFactory::default();
         let mut pool = AllTransactions::default();
+        pool.pending_fees.base_fee = pool.minimal_protocol_basefee.checked_add(1).unwrap();
         let tx = MockTransaction::eip1559().inc_nonce().inc_limit();
-        // Set pending base fee above the MockTransaction default gas price so the tx is parked.
-        pool.pending_fees.base_fee = (tx.get_gas_price() as u64).saturating_add(1);
         let first = f.validated(tx.clone());
 
         let _res = pool.insert_tx(first.clone(), on_chain_balance, on_chain_nonce);

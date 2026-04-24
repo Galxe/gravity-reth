@@ -4,10 +4,8 @@ use crate::{
     PoolSize, TransactionOrigin,
 };
 use alloy_consensus::constants::EIP4844_TX_TYPE_ID;
-use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
+use alloy_eips::eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE};
 use alloy_primitives::Address;
-#[cfg(not(test))]
-use reth_chainspec::GRAVITY_MIN_BASE_FEE;
 use std::{collections::HashSet, ops::Mul, time::Duration};
 
 /// Guarantees max transactions for one sender, compatible with geth/erigon
@@ -86,8 +84,10 @@ impl PoolConfig {
 
     /// Configures the minimal protocol base fee that should be enforced.
     ///
-    /// Gravity's EIP-1559 base fee can't drop below [`GRAVITY_MIN_BASE_FEE`] hence this is
-    /// enforced by default in the pool.
+    /// Ethereum's EIP-1559 base fee can't drop below [`MIN_PROTOCOL_BASE_FEE`] hence this is
+    /// enforced by default in the pool. Gravity's production node raises this to
+    /// `GRAVITY_MIN_BASE_FEE` (50 Gwei) via the `--txpool.minimal-protocol-fee` CLI arg
+    /// (see `TxPoolArgs`), so this default only matters for ad-hoc test pool construction.
     pub const fn with_protocol_base_fee(mut self, protocol_base_fee: u64) -> Self {
         self.minimal_protocol_basefee = protocol_base_fee;
         self
@@ -122,15 +122,7 @@ impl Default for PoolConfig {
             blob_cache_size: None,
             max_account_slots: TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
             price_bumps: Default::default(),
-            // In production, enforce Gravity's EIP-1559 floor of 50 Gwei. Within this crate's
-            // own test builds we drop to 0 so tests that use canonical mainnet transactions
-            // or small MockTransaction fee caps aren't rejected at admission. Tests in other
-            // crates that need the relaxed floor should use `with_disabled_protocol_base_fee`
-            // explicitly or construct pools via the `test_utils` builders.
-            #[cfg(not(test))]
-            minimal_protocol_basefee: GRAVITY_MIN_BASE_FEE,
-            #[cfg(test)]
-            minimal_protocol_basefee: 0,
+            minimal_protocol_basefee: MIN_PROTOCOL_BASE_FEE,
             minimum_priority_fee: None,
             gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
             local_transactions_config: Default::default(),
