@@ -4,7 +4,7 @@ use alloy_consensus::{
     constants::MAXIMUM_EXTRA_DATA_SIZE, BlockHeader as _, Transaction, EMPTY_OMMER_ROOT_HASH,
 };
 use alloy_eips::{eip4844::DATA_GAS_PER_BLOB, eip7840::BlobParams};
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks};
+use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, GRAVITY_MIN_BASE_FEE};
 use reth_consensus::{ConsensusError, TxGasLimitTooHighErr};
 use reth_primitives_traits::{
     constants::{
@@ -313,7 +313,7 @@ pub fn validate_against_parent_eip1559_base_fee<ChainSpec: EthChainSpec + Ethere
             .ethereum_fork_activation(EthereumHardfork::London)
             .transitions_at_block(header.number())
         {
-            alloy_eips::eip1559::INITIAL_BASE_FEE
+            GRAVITY_MIN_BASE_FEE
         } else {
             chain_spec
                 .next_block_base_fee(parent, header.timestamp())

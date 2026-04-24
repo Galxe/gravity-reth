@@ -26,11 +26,10 @@ use alloy_consensus::constants::{
     LEGACY_TX_TYPE_ID,
 };
 use alloy_eips::{
-    eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE},
-    eip4844::BLOB_TX_MIN_BLOB_GASPRICE,
-    Typed2718,
+    eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip4844::BLOB_TX_MIN_BLOB_GASPRICE, Typed2718,
 };
 use alloy_primitives::{Address, TxHash, B256};
+use reth_chainspec::GRAVITY_MIN_BASE_FEE;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::{
@@ -797,7 +796,10 @@ impl<T: TransactionOrdering> TxPool<T> {
                     InsertErr::FeeCapBelowMinimumProtocolFeeCap { transaction, fee_cap } => {
                         Err(PoolError::new(
                             *transaction.hash(),
-                            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap(fee_cap),
+                            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap {
+                                fee_cap,
+                                minimum: self.all_transactions.minimal_protocol_basefee,
+                            },
                         ))
                     }
                     InsertErr::ExceededSenderTransactionsCapacity { transaction } => {
@@ -2128,7 +2130,7 @@ impl<T: PoolTransaction> Default for AllTransactions<T> {
     fn default() -> Self {
         Self {
             max_account_slots: TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
-            minimal_protocol_basefee: MIN_PROTOCOL_BASE_FEE,
+            minimal_protocol_basefee: GRAVITY_MIN_BASE_FEE,
             block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
             by_hash: Default::default(),
             txs: Default::default(),
@@ -2178,7 +2180,7 @@ pub(crate) enum InsertErr<T: PoolTransaction> {
     Overdraft { transaction: Arc<ValidPoolTransaction<T>> },
     /// The transactions feeCap is lower than the chain's minimum fee requirement.
     ///
-    /// See also [`MIN_PROTOCOL_BASE_FEE`]
+    /// See also [`GRAVITY_MIN_BASE_FEE`]
     FeeCapBelowMinimumProtocolFeeCap { transaction: Arc<ValidPoolTransaction<T>>, fee_cap: u128 },
     /// Sender currently exceeds the configured limit for max account slots.
     ///

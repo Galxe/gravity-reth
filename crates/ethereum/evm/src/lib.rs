@@ -54,9 +54,10 @@ use revm::{
 };
 
 mod config;
-use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip7840::BlobParams};
+use alloy_eips::eip7840::BlobParams;
 use alloy_evm::{eth::spec::EthExecutorSpec, Database, Evm};
 pub use config::{revm_spec, revm_spec_by_timestamp_and_block_number};
+use reth_chainspec::GRAVITY_MIN_BASE_FEE;
 use reth_ethereum_forks::{EthereumHardfork, Hardforks};
 use revm::{context::TxEnv, DatabaseCommit};
 
@@ -247,7 +248,7 @@ where
             gas_limit *= elasticity_multiplier as u64;
 
             // set the base fee to the initial base fee from the EIP-1559 spec
-            basefee = Some(INITIAL_BASE_FEE)
+            basefee = Some(GRAVITY_MIN_BASE_FEE)
         }
 
         let block_env = BlockEnv {

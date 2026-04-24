@@ -4,8 +4,9 @@ use crate::{
     PoolSize, TransactionOrigin,
 };
 use alloy_consensus::constants::EIP4844_TX_TYPE_ID;
-use alloy_eips::eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE};
+use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_primitives::Address;
+use reth_chainspec::GRAVITY_MIN_BASE_FEE;
 use std::{collections::HashSet, ops::Mul, time::Duration};
 
 /// Guarantees max transactions for one sender, compatible with geth/erigon
@@ -76,15 +77,15 @@ pub struct PoolConfig {
 
 impl PoolConfig {
     /// Sets the minimal protocol base fee to 0, effectively disabling checks that enforce that a
-    /// transaction's fee must be higher than the [`MIN_PROTOCOL_BASE_FEE`] which is the lowest
-    /// value the ethereum EIP-1559 base fee can reach.
+    /// transaction's fee must be higher than the protocol minimum base fee which is the lowest
+    /// value the EIP-1559 base fee can reach.
     pub const fn with_disabled_protocol_base_fee(self) -> Self {
         self.with_protocol_base_fee(0)
     }
 
     /// Configures the minimal protocol base fee that should be enforced.
     ///
-    /// Ethereum's EIP-1559 base fee can't drop below [`MIN_PROTOCOL_BASE_FEE`] hence this is
+    /// Gravity's EIP-1559 base fee can't drop below [`GRAVITY_MIN_BASE_FEE`] hence this is
     /// enforced by default in the pool.
     pub const fn with_protocol_base_fee(mut self, protocol_base_fee: u64) -> Self {
         self.minimal_protocol_basefee = protocol_base_fee;
@@ -120,7 +121,7 @@ impl Default for PoolConfig {
             blob_cache_size: None,
             max_account_slots: TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
             price_bumps: Default::default(),
-            minimal_protocol_basefee: MIN_PROTOCOL_BASE_FEE,
+            minimal_protocol_basefee: GRAVITY_MIN_BASE_FEE,
             minimum_priority_fee: None,
             gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
             local_transactions_config: Default::default(),

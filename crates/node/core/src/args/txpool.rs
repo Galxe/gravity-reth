@@ -1,9 +1,10 @@
 //! Transaction pool arguments
 
 use crate::cli::config::RethTransactionPoolConfig;
-use alloy_eips::eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE};
+use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_primitives::Address;
 use clap::Args;
+use reth_chainspec::GRAVITY_MIN_BASE_FEE;
 use reth_cli_util::parse_duration_from_secs_or_ms;
 use reth_transaction_pool::{
     blobstore::disk::DEFAULT_MAX_CACHED_BLOBS,
@@ -62,7 +63,7 @@ pub struct TxPoolArgs {
     pub price_bump: u128,
 
     /// Minimum base fee required by the protocol.
-    #[arg(long = "txpool.minimal-protocol-fee", default_value_t = MIN_PROTOCOL_BASE_FEE)]
+    #[arg(long = "txpool.minimal-protocol-fee", default_value_t = GRAVITY_MIN_BASE_FEE)]
     pub minimal_protocol_basefee: u64,
 
     /// Minimum priority fee required for transaction acceptance into the pool.
@@ -140,15 +141,15 @@ pub struct TxPoolArgs {
 
 impl TxPoolArgs {
     /// Sets the minimal protocol base fee to 0, effectively disabling checks that enforce that a
-    /// transaction's fee must be higher than the [`MIN_PROTOCOL_BASE_FEE`] which is the lowest
-    /// value the ethereum EIP-1559 base fee can reach.
+    /// transaction's fee must be higher than the protocol minimum base fee which is the lowest
+    /// value the EIP-1559 base fee can reach.
     pub const fn with_disabled_protocol_base_fee(self) -> Self {
         self.with_protocol_base_fee(0)
     }
 
     /// Configures the minimal protocol base fee that should be enforced.
     ///
-    /// Ethereum's EIP-1559 base fee can't drop below [`MIN_PROTOCOL_BASE_FEE`] hence this is
+    /// Gravity's EIP-1559 base fee can't drop below [`GRAVITY_MIN_BASE_FEE`] hence this is
     /// enforced by default in the pool.
     pub const fn with_protocol_base_fee(mut self, protocol_base_fee: u64) -> Self {
         self.minimal_protocol_basefee = protocol_base_fee;
@@ -170,7 +171,7 @@ impl Default for TxPoolArgs {
             blob_cache_size: None,
             max_account_slots: TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
             price_bump: DEFAULT_PRICE_BUMP,
-            minimal_protocol_basefee: MIN_PROTOCOL_BASE_FEE,
+            minimal_protocol_basefee: GRAVITY_MIN_BASE_FEE,
             minimum_priority_fee: None,
             enforced_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
             max_tx_gas_limit: None,

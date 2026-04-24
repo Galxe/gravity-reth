@@ -5,6 +5,13 @@ use alloy_primitives::b256;
 /// Gas per transaction not creating a contract.
 pub const MIN_TRANSACTION_GAS: u64 = 21_000u64;
 
+/// Gravity protocol minimum base fee per gas (50 Gwei).
+///
+/// Acts as both the floor for EIP-1559 base fee updates and the initial base fee at
+/// genesis. The EIP-1559 recurrence is clamped at this value, so base fee never drops
+/// below 50 Gwei.
+pub const GRAVITY_MIN_BASE_FEE: u64 = 50_000_000_000;
+
 /// Mainnet prune delete limit.
 pub const MAINNET_PRUNE_DELETE_LIMIT: usize = 20000;
 

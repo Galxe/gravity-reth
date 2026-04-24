@@ -1,4 +1,4 @@
-use crate::{ChainSpec, DepositContract};
+use crate::{constants::GRAVITY_MIN_BASE_FEE, ChainSpec, DepositContract};
 use alloc::{boxed::Box, vec::Vec};
 use alloy_chains::Chain;
 use alloy_consensus::Header;
@@ -75,13 +75,20 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
     fn gravity_hardforks(&self) -> &reth_ethereum_forks::ChainHardforks;
 
     /// See [`calc_next_block_base_fee`].
+    ///
+    /// Gravity applies a protocol-wide floor of [`GRAVITY_MIN_BASE_FEE`] (50 Gwei):
+    /// the EIP-1559 recurrence runs normally, and the result is clamped so base fee
+    /// never drops below the floor. If the parent has no base fee (pre-London header),
+    /// the floor is used as the parent base fee.
     fn next_block_base_fee(&self, parent: &Self::Header, target_timestamp: u64) -> Option<u64> {
-        Some(calc_next_block_base_fee(
+        let parent_base_fee = parent.base_fee_per_gas().unwrap_or(GRAVITY_MIN_BASE_FEE);
+        let next = calc_next_block_base_fee(
             parent.gas_used(),
             parent.gas_limit(),
-            parent.base_fee_per_gas()?,
+            parent_base_fee,
             self.base_fee_params_at_timestamp(target_timestamp),
-        ))
+        );
+        Some(next.max(GRAVITY_MIN_BASE_FEE))
     }
 }
 

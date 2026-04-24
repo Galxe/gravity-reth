@@ -151,15 +151,14 @@ mod tests {
 
     #[test]
     fn test_centralized_base_fee_calculation() {
-        use crate::{ChainSpec, EthChainSpec};
+        use crate::{constants::GRAVITY_MIN_BASE_FEE, ChainSpec, EthChainSpec};
         use alloy_consensus::Header;
-        use alloy_eips::eip1559::INITIAL_BASE_FEE;
 
         fn parent_header() -> Header {
             Header {
                 gas_used: 15_000_000,
                 gas_limit: 30_000_000,
-                base_fee_per_gas: Some(INITIAL_BASE_FEE),
+                base_fee_per_gas: Some(GRAVITY_MIN_BASE_FEE),
                 timestamp: 1_000,
                 ..Default::default()
             }
@@ -171,9 +170,11 @@ mod tests {
         // For testing, assume next block has timestamp 12 seconds later
         let next_timestamp = parent.timestamp + 12;
 
+        // Gravity clamps the EIP-1559 recurrence at GRAVITY_MIN_BASE_FEE.
         let expected = parent
             .next_block_base_fee(spec.base_fee_params_at_timestamp(next_timestamp))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .max(GRAVITY_MIN_BASE_FEE);
 
         let got = spec.next_block_base_fee(&parent, next_timestamp).unwrap_or_default();
         assert_eq!(expected, got, "Base fee calculation does not match expected value");

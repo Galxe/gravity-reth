@@ -16,9 +16,10 @@ use alloy_consensus::{
     Header,
 };
 use alloy_eips::{
-    eip1559::INITIAL_BASE_FEE, eip7685::EMPTY_REQUESTS_HASH, eip7840::BlobParams,
-    eip7892::BlobScheduleBlobParams,
+    eip7685::EMPTY_REQUESTS_HASH, eip7840::BlobParams, eip7892::BlobScheduleBlobParams,
 };
+
+use crate::constants::GRAVITY_MIN_BASE_FEE;
 use alloy_genesis::Genesis;
 use alloy_primitives::{address, b256, Address, BlockNumber, B256, U256};
 use alloy_trie::root::state_root_ref_unhashed;
@@ -40,7 +41,7 @@ pub fn make_genesis_header(genesis: &Genesis, hardforks: &ChainHardforks) -> Hea
     let base_fee_per_gas = hardforks
         .fork(EthereumHardfork::London)
         .active_at_block(0)
-        .then(|| genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(INITIAL_BASE_FEE));
+        .then(|| genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(GRAVITY_MIN_BASE_FEE));
 
     // If shanghai is activated, initialize the header with an empty withdrawals hash, and
     // empty withdrawals list.
@@ -387,7 +388,7 @@ impl ChainSpec {
     pub fn initial_base_fee(&self) -> Option<u64> {
         // If the base fee is set in the genesis block, we use that instead of the default.
         let genesis_base_fee =
-            self.genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(INITIAL_BASE_FEE);
+            self.genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(GRAVITY_MIN_BASE_FEE);
 
         // If London is activated at genesis, we set the initial base fee as per EIP-1559.
         self.hardforks.fork(EthereumHardfork::London).active_at_block(0).then_some(genesis_base_fee)
