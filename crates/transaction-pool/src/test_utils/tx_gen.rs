@@ -1,9 +1,9 @@
 use crate::{EthPooledTransaction, PoolTransaction};
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEip4844, TxLegacy};
-use alloy_eips::{eip1559::MIN_PROTOCOL_BASE_FEE, eip2718::Encodable2718, eip2930::AccessList};
+use alloy_eips::{eip2718::Encodable2718, eip2930::AccessList};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use rand::{Rng, RngCore};
-use reth_chainspec::MAINNET;
+use reth_chainspec::{GRAVITY_MIN_BASE_FEE, MAINNET};
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_primitives_traits::{crypto::secp256k1::sign_message, SignedTransaction};
 
@@ -31,7 +31,7 @@ impl<R: RngCore> TransactionGenerator<R> {
         Self {
             rng,
             signer_keys: (0..num_signers).map(|_| B256::random()).collect(),
-            base_fee: MIN_PROTOCOL_BASE_FEE as u128,
+            base_fee: GRAVITY_MIN_BASE_FEE as u128,
             gas_limit: 300_000,
         }
     }
