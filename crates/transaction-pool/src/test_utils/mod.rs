@@ -24,11 +24,15 @@ pub struct TestPoolBuilder(TestPool);
 
 impl Default for TestPoolBuilder {
     fn default() -> Self {
+        // Disable the protocol minimum base fee so tests can use canonical mainnet
+        // transactions (which carry pre-Gravity sub-50 Gwei fees) without being
+        // rejected at admission.
+        let config = PoolConfig::default().with_disabled_protocol_base_fee();
         Self(Pool::new(
             MockTransactionValidator::default(),
             MockOrdering::default(),
             InMemoryBlobStore::default(),
-            Default::default(),
+            config,
         ))
     }
 }
