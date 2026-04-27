@@ -6,39 +6,34 @@
 //!
 //! **Bytecode Upgrades** (from `gravity_chain_core_contracts` main, i.e.
 //! `gravity-testnet-v1.5` contracts branch):
-//! - `Governance` (PR #83): new `initialize(address)` gated entrypoint plus
-//!   `_initialized` slot; companion storage patch below seeds both slots.
-//! - `StakingConfig` (PR #85): three single-field governance setters
-//!   (`setMinimumStakeForNextEpoch` / `setLockupDurationForNextEpoch` /
-//!   `setUnbondingDelayForNextEpoch`) overlaying pending config.
-//! - `ValidatorManagement` (PR #85): per-pool whitelist + permissionless-join
-//!   flag gating `registerValidator` / `joinValidatorSet`. Active pools are
-//!   seeded into `_allowedPools` via the batch storage patch below.
-//! - `Reconfiguration` (PR #82): apply `ValidatorConfig.applyPendingConfig()`
-//!   before `_startDkgSession()` so the DKG snapshot matches the post-apply
-//!   validator set. ABI unchanged.
-//! - `JWKManager` (PR #79): stricter non-empty JWK field validation on
-//!   `setPatches`. ABI unchanged.
-//! - `StakePool` (PR #73): 2-step timelock for staker/operator/voter role
-//!   changes. The three `*ChangeDelay` slots read 0 on upgraded pools (no
-//!   constructor rerun); `_effectiveDelay(0) == MIN_ROLE_CHANGE_DELAY`
-//!   handles that lazily, so no storage patch is needed on `StakePool`.
+//! - `Governance` (PR #83): new `initialize(address)` gated entrypoint plus `_initialized` slot;
+//!   companion storage patch below seeds both slots.
+//! - `StakingConfig` (PR #85): three single-field governance setters (`setMinimumStakeForNextEpoch`
+//!   / `setLockupDurationForNextEpoch` / `setUnbondingDelayForNextEpoch`) overlaying pending
+//!   config.
+//! - `ValidatorManagement` (PR #85): per-pool whitelist + permissionless-join flag gating
+//!   `registerValidator` / `joinValidatorSet`. Active pools are seeded into `_allowedPools` via the
+//!   batch storage patch below.
+//! - `Reconfiguration` (PR #82): apply `ValidatorConfig.applyPendingConfig()` before
+//!   `_startDkgSession()` so the DKG snapshot matches the post-apply validator set. ABI unchanged.
+//! - `JWKManager` (PR #79): stricter non-empty JWK field validation on `setPatches`. ABI unchanged.
+//! - `StakePool` (PR #73): 2-step timelock for staker/operator/voter role changes. The three
+//!   `*ChangeDelay` slots read 0 on upgraded pools (no constructor rerun); `_effectiveDelay(0) ==
+//!   MIN_ROLE_CHANGE_DELAY` handles that lazily, so no storage patch is needed on `StakePool`.
 //!
 //! **Storage Patches**:
 //! - `Governance._owner` (slot 0) ← configured admin address.
-//! - `Governance._initialized` (slot 8) ← 1. Once set, `initialize(address)`
-//!   permanently reverts, so `addExecutor` / `removeExecutor` / ownership
-//!   transfer become reachable for the patched owner.
+//! - `Governance._initialized` (slot 8) ← 1. Once set, `initialize(address)` permanently reverts,
+//!   so `addExecutor` / `removeExecutor` / ownership transfer become reachable for the patched
+//!   owner.
 //!
 //! **Batch Storage Patches**:
-//! - Per-pool `ValidatorManagement._allowedPools[pool] = true` for every
-//!   existing active pool. `_allowedPools` is a `mapping(address => bool)`
-//!   at storage slot 7, so the real slot for each pool is
-//!   `keccak256(pool_address_padded || slot7_padded)`. This is not a "same
-//!   slot on many addresses" shape so the built-in `batch_storage_patches`
-//!   helper (which shares one slot across multiple accounts) does not fit.
-//!   The per-pool slot hashes are precomputed below and emitted as ordinary
-//!   `storage_patches`.
+//! - Per-pool `ValidatorManagement._allowedPools[pool] = true` for every existing active pool.
+//!   `_allowedPools` is a `mapping(address => bool)` at storage slot 7, so the real slot for each
+//!   pool is `keccak256(pool_address_padded || slot7_padded)`. This is not a "same slot on many
+//!   addresses" shape so the built-in `batch_storage_patches` helper (which shares one slot across
+//!   multiple accounts) does not fit. The per-pool slot hashes are precomputed below and emitted as
+//!   ordinary `storage_patches`.
 //!
 //! The `_permissionlessJoinEnabled` flag (slot 8, one byte) stays at 0
 //! intentionally — the network launches permissioned, and governance flips
@@ -107,7 +102,7 @@ pub static ZETA_SYSTEM_UPGRADES: &[BytecodeUpgrade] = &[
     (JWK_MANAGER_ADDRESS, JWK_MANAGER_BYTECODE),
 ];
 
-/// Dynamic-address upgrades: StakePool bytecode for each existing pool.
+/// Dynamic-address upgrades: `StakePool` bytecode for each existing pool.
 pub static ZETA_EXTRA_UPGRADES: &[BytecodeUpgrade] = &[
     (STAKEPOOL_ADDRESSES[0], STAKEPOOL_BYTECODE),
     (STAKEPOOL_ADDRESSES[1], STAKEPOOL_BYTECODE),
@@ -193,21 +188,13 @@ pub const ONE_U256: U256 = U256::from_limbs([1, 0, 0, 0]);
 /// `STAKEPOOL_ADDRESSES` (index-aligned).
 const ALLOWED_POOLS_SLOTS: [B256; 4] = [
     // ce128222bd84d67672f863424a03d114cd1253c5
-    B256::new(hex_to_bytes32(
-        "f0e7cd36827fa13711ddad3d7068a25b49281673eaf95afa383c82c2a3aa3b36",
-    )),
+    B256::new(hex_to_bytes32("f0e7cd36827fa13711ddad3d7068a25b49281673eaf95afa383c82c2a3aa3b36")),
     // 78f595fb25d03a742338fb32acfd544bdc63d814
-    B256::new(hex_to_bytes32(
-        "127031e46799c53f1421740658d3168f5a15495d5c31383f8e8de158ad8e7674",
-    )),
+    B256::new(hex_to_bytes32("127031e46799c53f1421740658d3168f5a15495d5c31383f8e8de158ad8e7674")),
     // 891299fe364088ead65aba911ea17dd5d968cd81
-    B256::new(hex_to_bytes32(
-        "ce7ff84eddcbb51b207ab1ac22cc2e13d4f8f5d3b67b091092ea514186bb963c",
-    )),
+    B256::new(hex_to_bytes32("ce7ff84eddcbb51b207ab1ac22cc2e13d4f8f5d3b67b091092ea514186bb963c")),
     // b99aa922eb5cae399b79adc87621e72f66d5a976
-    B256::new(hex_to_bytes32(
-        "53aa3d4aaf7033d5b7219de41ba52ce5b1fbd2c29d483026006724b3b2230a1b",
-    )),
+    B256::new(hex_to_bytes32("53aa3d4aaf7033d5b7219de41ba52ce5b1fbd2c29d483026006724b3b2230a1b")),
 ];
 
 /// `const`-friendly hex-string → `[u8; 32]` converter. Panics at compile time
