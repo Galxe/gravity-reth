@@ -55,14 +55,19 @@ static VALIDATOR_MANAGEMENT_BYTECODE: &[u8] =
     include_bytes!("bytecodes/zeta/ValidatorManagement.bin");
 static RECONFIGURATION_BYTECODE: &[u8] = include_bytes!("bytecodes/zeta/Reconfiguration.bin");
 static JWK_MANAGER_BYTECODE: &[u8] = include_bytes!("bytecodes/zeta/JWKManager.bin");
-static STAKEPOOL_BYTECODE: &[u8] = include_bytes!("bytecodes/gamma/stakepool.bin");
-// NOTE: the StakePool template bytecode is sourced from the Gamma bundle because
-// the v1.4 / v1.5 contract tree does not regenerate the StakePool bin. At
-// runtime, constructor-set immutables (FACTORY) are already baked into the
-// pre-deployed instance's bytecode at each pool's address, and the PR #73
-// additions are code-only (no new immutables) so the Gamma-era template plus
-// the per-pool immutable patch remain correct. If a future PR changes StakePool
-// immutables, regenerate this to `bytecodes/zeta/StakePool.bin`.
+static STAKEPOOL_BYTECODE: &[u8] = include_bytes!("bytecodes/zeta/StakePool.bin");
+// PR #73 changes the StakePool runtime: it removes setStaker/setOperator/setVoter
+// and adds the propose/accept/cancel + per-role-delay surface plus the
+// MIN_ROLE_CHANGE_DELAY constant. Function selectors and code section both
+// change, so the Gamma template would no-op the upgrade and leave the new ABI
+// missing on chain (verify_hardfork/zeta.sh would fail at proposeStaker(),
+// acceptStaker(), MIN_ROLE_CHANGE_DELAY, *ChangeDelay()).
+//
+// Regenerated from `out/StakePool.sol/StakePool.json` (deployedBytecode.object,
+// 9223 bytes) with the FACTORY immutable patched to the Staking system address
+// (0x…01625F2000) at the two immutableReferences offsets. All four pools share
+// the same FACTORY (singleton Staking), so a single template applies to every
+// entry in STAKEPOOL_ADDRESSES, matching the Gamma deployment pattern.
 
 // ── System addresses ────────────────────────────────────────────────────────────
 
