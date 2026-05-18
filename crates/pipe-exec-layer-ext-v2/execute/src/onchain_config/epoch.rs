@@ -10,6 +10,7 @@ use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
+use std::time::Instant;
 
 // New Reconfiguration contract ABI (aligned with
 // gravity_chain_core_contracts/src/blocker/IReconfiguration.sol)
@@ -50,19 +51,37 @@ where
 
         #[cfg(not(feature = "pipe_test"))]
         {
+            let start = Instant::now();
             let call = Reconfiguration::currentEpochCall {};
             let input: Bytes = call.abi_encode().into();
+            tracing::info!(
+                "epoch fetch enter: block_id={}, contract={}, caller={}",
+                block_id,
+                Self::contract_address(),
+                Self::caller_address(),
+            );
 
             let result = self
                 .base_fetcher
                 .eth_call(Self::caller_address(), Self::contract_address(), input, block_id)
                 .map_err(|e| {
-                    tracing::warn!("Failed to fetch epoch info at block {}: {:?}", block_id, e);
+                    tracing::warn!(
+                        "epoch fetch error: block_id={}, elapsed_ms={}, error={:?}",
+                        block_id,
+                        start.elapsed().as_millis(),
+                        e,
+                    );
                 })
                 .ok()?;
 
             let epoch = Reconfiguration::currentEpochCall::abi_decode_returns(&result)
                 .expect("Failed to decode currentEpoch return value");
+            tracing::info!(
+                "epoch fetch exit: block_id={}, epoch={}, elapsed_ms={}",
+                block_id,
+                epoch,
+                start.elapsed().as_millis(),
+            );
 
             // Convert epoch to bytes
             Some(Bytes::from(epoch.to_le_bytes().to_vec()))

@@ -7,7 +7,7 @@ use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequ
 use alloy_primitives::TxKind;
 use gravity_api_types::config_storage::{OnChainConfig, OnChainConfigResType};
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
-use std::{fmt::Debug, sync::OnceLock};
+use std::{fmt::Debug, sync::OnceLock, time::Instant};
 use tokio::runtime::Runtime;
 
 static ETH_CALL_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -48,6 +48,14 @@ where
         input: Bytes,
         block_id: BlockId,
     ) -> Result<Bytes, EthApi::Error> {
+        let start = Instant::now();
+        tracing::info!(
+            "onchain config eth_call enter: block_id={}, from={}, to={}, input_len={}",
+            block_id,
+            from,
+            to,
+            input.len(),
+        );
         let rt_handle = ETH_CALL_RUNTIME
             .get_or_init(|| {
                 tokio::runtime::Builder::new_multi_thread()
@@ -59,7 +67,7 @@ where
             })
             .handle();
 
-        tokio::task::block_in_place(|| {
+        let result = tokio::task::block_in_place(|| {
             rt_handle.block_on(async {
                 self.eth_api
                     .call(
@@ -74,7 +82,22 @@ where
                     )
                     .await
             })
-        })
+        });
+        match &result {
+            Ok(bytes) => tracing::info!(
+                "onchain config eth_call exit: block_id={}, elapsed_ms={}, bytes_len={}",
+                block_id,
+                start.elapsed().as_millis(),
+                bytes.len(),
+            ),
+            Err(error) => tracing::warn!(
+                "onchain config eth_call error: block_id={}, elapsed_ms={}, error={:?}",
+                block_id,
+                start.elapsed().as_millis(),
+                error,
+            ),
+        }
+        result
     }
 
     /// Fetch epoch directly
@@ -94,6 +117,13 @@ where
         config_name: OnChainConfig,
         block_id: BlockId,
     ) -> Option<OnChainConfigResType> {
+        let start = Instant::now();
+        let config_debug = format!("{:?}", config_name);
+        tracing::info!(
+            "onchain config fetch enter: config={}, block_id={}",
+            config_debug,
+            block_id,
+        );
         use crate::onchain_config::{
             consensus_config::ConsensusConfigFetcher,
             dkg::{DKGStateFetcher, RandomnessConfigFetcher},
@@ -105,7 +135,7 @@ where
             validator_set::ValidatorSetFetcher,
         };
 
-        match config_name {
+        let result = match config_name {
             OnChainConfig::ConsensusConfig => {
                 let fetcher = ConsensusConfigFetcher::new(self);
                 fetcher.fetch(block_id).map(|bytes| bytes.0.into())
@@ -150,7 +180,15 @@ where
                 fetcher.fetch(block_id).map(|bytes| bytes.0.into())
             }
             _ => todo!("Implement fetching for other config types"),
-        }
+        };
+        tracing::info!(
+            "onchain config fetch exit: config={}, block_id={}, elapsed_ms={}, result={}",
+            config_debug,
+            block_id,
+            start.elapsed().as_millis(),
+            if result.is_some() { "Some" } else { "None" },
+        );
+        result
     }
 }
 
