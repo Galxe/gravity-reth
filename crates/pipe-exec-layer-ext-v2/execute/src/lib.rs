@@ -920,7 +920,14 @@ impl<Storage: GravityStorage> Core<Storage> {
                     ProviderJWKs {
                         issuer: issuer.into_bytes(),
                         version: nonce as u64, // nonce as version
-                        jwks: vec![],          // return empty jwks
+                        jwks: vec![gravity_api_types::on_chain_config::jwks::JWKStruct {
+                            // gaptos reads gravity:// oracle progress from Any.data as a raw
+                            // 16-byte nonce. The GravityEvent adapter only preserves raw bytes
+                            // for known JWK wrappers, so this entry is a nonce carrier rather
+                            // than an RSA key.
+                            type_name: "0x1::jwks::RSA_JWK".to_string(),
+                            data: nonce.to_be_bytes().to_vec(),
+                        }],
                     }
                 })
                 .collect();
