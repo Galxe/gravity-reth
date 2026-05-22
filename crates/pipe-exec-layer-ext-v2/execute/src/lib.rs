@@ -418,6 +418,30 @@ impl<Storage: GravityStorage> Core<Storage> {
         };
         if let ReceivedBlock::OrderedBlock(ordered_block) = &block {
             assert!(ordered_block.epoch == epoch);
+            info!(target: "PipeExecService.process",
+                block_number=?block_number,
+                block_id=?block_id,
+                parent_id=?ordered_block.parent_id,
+                ordered_epoch=?ordered_block.epoch,
+                ordered_timestamp_us=?ordered_block.timestamp_us,
+                ordered_coinbase=?ordered_block.coinbase,
+                ordered_prev_randao=?ordered_block.prev_randao,
+                ordered_randomness=?ordered_block.randomness,
+                ordered_txs_len=?ordered_block.transactions.len(),
+                ordered_senders_len=?ordered_block.senders.len(),
+                ordered_withdrawals_empty=?ordered_block.withdrawals.is_empty(),
+                ordered_extra_data_len=?ordered_block.extra_data.len(),
+                parent_header_number=?parent_header.number,
+                parent_header_hash=?parent_header.hash_slow(),
+                parent_header_parent_hash=?parent_header.parent_hash,
+                parent_header_state_root=?parent_header.state_root,
+                parent_header_transactions_root=?parent_header.transactions_root,
+                parent_header_receipts_root=?parent_header.receipts_root,
+                parent_header_timestamp=?parent_header.timestamp,
+                parent_header_difficulty=?parent_header.difficulty,
+                parent_header_mix_hash=?parent_header.mix_hash,
+                "lightman0522 process ordered block input and parent header"
+            );
         }
         self.storage.insert_block_id(block_number, block_id);
 
@@ -514,15 +538,54 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         block.header.state_root = state_root;
         block.header.difficulty = randomness;
+        info!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            state_root=?block.header.state_root,
+            difficulty=?block.header.difficulty,
+            mix_hash=?block.header.mix_hash,
+            beneficiary=?block.header.beneficiary,
+            timestamp=?block.header.timestamp,
+            gas_used=?block.header.gas_used,
+            transactions_root=?block.header.transactions_root,
+            receipts_root=?block.header.receipts_root,
+            withdrawals_root=?block.header.withdrawals_root,
+            parent_beacon_block_root=?block.header.parent_beacon_block_root,
+            "lightman0522 pre-seal header after state root and difficulty"
+        );
 
         // Seal the block
         let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
         block.header.parent_hash = parent_hash;
+        info!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            parent_hash_from_seal_barrier=?parent_hash,
+            header_parent_hash=?block.header.parent_hash,
+            parent_header_number=?parent_header.number,
+            parent_header_hash=?parent_header.hash_slow(),
+            "lightman0522 seal parent hash selected"
+        );
         let sealed_block = block.seal_slow();
         let block_hash = sealed_block.hash();
         self.metrics.seal_duration.record(start_time.elapsed());
         self.seal_barrier.notify(block_number, block_hash).unwrap();
+        info!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            block_hash=?block_hash,
+            parent_hash=?sealed_block.parent_hash,
+            state_root=?sealed_block.state_root,
+            transactions_root=?sealed_block.transactions_root,
+            receipts_root=?sealed_block.receipts_root,
+            difficulty=?sealed_block.difficulty,
+            mix_hash=?sealed_block.mix_hash,
+            beneficiary=?sealed_block.beneficiary,
+            timestamp=?sealed_block.timestamp,
+            gas_used=?sealed_block.gas_used,
+            "lightman0522 sealed block header"
+        );
         debug!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
@@ -595,6 +658,26 @@ impl<Storage: GravityStorage> Core<Storage> {
         mut validator_txns: Vec<TransactionSigned>,
     ) -> (RecoveredBlock<Block>, Vec<TxInfo>) {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
+        info!(target: "create_block_for_executor",
+            id=?ordered_block.id,
+            parent_id=?ordered_block.parent_id,
+            epoch=?ordered_block.epoch,
+            number=?ordered_block.number,
+            timestamp_us=?ordered_block.timestamp_us,
+            timestamp_sec=?ordered_block.timestamp_us / 1_000_000,
+            coinbase=?ordered_block.coinbase,
+            prev_randao=?ordered_block.prev_randao,
+            randomness=?ordered_block.randomness,
+            withdrawals_empty=?ordered_block.withdrawals.is_empty(),
+            txs_len=?ordered_block.transactions.len(),
+            senders_len=?ordered_block.senders.len(),
+            proposer_index=?ordered_block.proposer_index,
+            failed_proposer_indices=?ordered_block.failed_proposer_indices,
+            extra_data_len=?ordered_block.extra_data.len(),
+            base_fee=?base_fee,
+            validator_txns_len=?validator_txns.len(),
+            "lightman0522 create block from ordered input"
+        );
         let mut block = Block {
             header: Header {
                 beneficiary: ordered_block.coinbase,
@@ -609,6 +692,20 @@ impl<Storage: GravityStorage> Core<Storage> {
             },
             body: BlockBody::default(),
         };
+        info!(target: "create_block_for_executor",
+            id=?ordered_block.id,
+            parent_id=?ordered_block.parent_id,
+            number=?ordered_block.number,
+            header_parent_hash=?block.header.parent_hash,
+            header_beneficiary=?block.header.beneficiary,
+            header_timestamp=?block.header.timestamp,
+            header_mix_hash=?block.header.mix_hash,
+            header_difficulty=?block.header.difficulty,
+            header_base_fee_per_gas=?block.header.base_fee_per_gas,
+            header_gas_limit=?block.header.gas_limit,
+            header_parent_beacon_block_root=?block.header.parent_beacon_block_root,
+            "lightman0522 created initial execution header"
+        );
         debug!(target: "create_block_for_executor",
             header=?block.header,
             "created block"
@@ -977,6 +1074,30 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number=?block_number,
         );
         let base_fee = evm_env.block_env.basefee;
+        info!(target: "execute_ordered_block",
+            id=?block_id,
+            parent_id=?parent_id,
+            number=?block_number,
+            epoch=?epoch,
+            parent_header_number=?parent_header.number,
+            parent_header_hash=?parent_header.hash_slow(),
+            parent_header_parent_hash=?parent_header.parent_hash,
+            parent_header_state_root=?parent_header.state_root,
+            parent_header_transactions_root=?parent_header.transactions_root,
+            parent_header_receipts_root=?parent_header.receipts_root,
+            ordered_timestamp_us=?ordered_block.timestamp_us,
+            ordered_timestamp_sec=?ordered_block.timestamp_us / 1_000_000,
+            ordered_coinbase=?ordered_block.coinbase,
+            ordered_prev_randao=?ordered_block.prev_randao,
+            ordered_randomness=?ordered_block.randomness,
+            ordered_withdrawals_empty=?ordered_block.withdrawals.is_empty(),
+            ordered_txs_len=?ordered_block.transactions.len(),
+            ordered_senders_len=?ordered_block.senders.len(),
+            ordered_extra_data_len=?ordered_block.extra_data.len(),
+            base_fee=?base_fee,
+            evm_block_env=?evm_env.block_env,
+            "lightman0522 execute ordered block input"
+        );
 
         // Read SYSTEM_CALLER nonce and gas price from state BEFORE moving state into executor.
         // ParallelDatabase (Storage::StateView) implements DatabaseRef, so we can read directly.
@@ -985,6 +1106,13 @@ impl<Storage: GravityStorage> Core<Storage> {
             .expect("failed to read SYSTEM_CALLER account from state")
             .map(|a| a.nonce)
             .unwrap_or(0);
+        info!(target: "execute_ordered_block",
+            id=?block_id,
+            parent_id=?parent_id,
+            number=?block_number,
+            initial_system_caller_nonce=?initial_nonce,
+            "lightman0522 initial system caller nonce"
+        );
 
         // Create executor with state. System transactions will commit directly to its
         // ParallelState, so there is a single source of truth for both system and user txns.
@@ -1054,6 +1182,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             parent_id=?parent_id,
             number=?block_number,
             receipts_len=?outcome.receipts.len(),
+            gas_used=?outcome.gas_used,
             "executed block done"
         );
 
@@ -1068,6 +1197,16 @@ impl<Storage: GravityStorage> Core<Storage> {
             epoch,
         };
         let n_system_receipts = 1 + validator_txn_results.len();
+        info!(target: "execute_ordered_block",
+            id=?block_id,
+            parent_id=?parent_id,
+            number=?block_number,
+            n_system_receipts=?n_system_receipts,
+            total_receipts_len=?result.execution_output.receipts.len(),
+            execution_gas_used=?result.execution_output.gas_used,
+            block_header_gas_used=?result.block.header.gas_used,
+            "lightman0522 execution output before inserting system receipts"
+        );
         metadata_txn_result.insert_to_executed_ordered_block_result(&mut result, 0);
         // Insert validator transaction results one by one after the metadata transaction
         // Position 1 is right after the metadata transaction at position 0
@@ -1087,6 +1226,16 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
 
         result.gravity_events.extend(gravity_events);
+        info!(target: "execute_ordered_block",
+            id=?block_id,
+            parent_id=?parent_id,
+            number=?block_number,
+            final_receipts_len=?result.execution_output.receipts.len(),
+            txs_info_len=?result.txs_info.len(),
+            gravity_events_len=?result.gravity_events.len(),
+            final_gas_used=?result.execution_output.gas_used,
+            "lightman0522 execute ordered block result"
+        );
         result
     }
 
