@@ -61,6 +61,7 @@ use onchain_config::OnchainConfigFetcher;
 use reth_evm::parallel_execute::ParallelExecutor;
 use reth_rpc_eth_api::helpers::EthCall;
 use reth_trie::{HashedPostState, KeccakKeyHasher};
+use revm::database::BundleState;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot, Mutex,
@@ -74,7 +75,8 @@ use crate::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         types::DataRecorded,
-        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, BLOCK_ADDR, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
+        SYSTEM_CALLER,
     },
 };
 
@@ -349,6 +351,162 @@ fn validate_execution_output(
 }
 
 impl<Storage: GravityStorage> Core<Storage> {
+    fn log_account_state(
+        label: &'static str,
+        block_id: B256,
+        block_number: u64,
+        state: &Storage::StateView,
+        address: Address,
+    ) {
+        match state.basic_ref(address) {
+            Ok(Some(info)) => {
+                info!(target: "execute_ordered_block",
+                    label=?label,
+                    block_id=?block_id,
+                    block_number=?block_number,
+                    address=?address,
+                    nonce=?info.nonce,
+                    balance=?info.balance,
+                    code_hash=?info.code_hash,
+                    has_code=?info.code.is_some(),
+                    "lightman0522 account state snapshot"
+                );
+            }
+            Ok(None) => {
+                info!(target: "execute_ordered_block",
+                    label=?label,
+                    block_id=?block_id,
+                    block_number=?block_number,
+                    address=?address,
+                    "lightman0522 account state snapshot missing"
+                );
+            }
+            Err(err) => {
+                error!(target: "execute_ordered_block",
+                    label=?label,
+                    block_id=?block_id,
+                    block_number=?block_number,
+                    address=?address,
+                    error=?err,
+                    "lightman0522 account state snapshot failed"
+                );
+            }
+        }
+    }
+
+    fn log_bundle_state_summary(
+        label: &'static str,
+        block_id: B256,
+        block_number: u64,
+        bundle: &BundleState,
+    ) {
+        let storage_slots: usize = bundle.state.values().map(|account| account.storage.len()).sum();
+        info!(target: "execute_ordered_block",
+            label=?label,
+            block_id=?block_id,
+            block_number=?block_number,
+            accounts_len=?bundle.state.len(),
+            contracts_len=?bundle.contracts.len(),
+            reverts_len=?bundle.reverts.len(),
+            state_size=?bundle.state_size,
+            reverts_size=?bundle.reverts_size,
+            storage_slots=?storage_slots,
+            "lightman0522 bundle state summary"
+        );
+
+        for (address, account) in bundle.state.iter().take(12) {
+            let changed_storage = account
+                .storage
+                .iter()
+                .filter(|(_, slot)| slot.previous_or_original_value != slot.present_value)
+                .count();
+            info!(target: "execute_ordered_block",
+                label=?label,
+                block_id=?block_id,
+                block_number=?block_number,
+                address=?address,
+                status=?account.status,
+                original_nonce=?account.original_info.as_ref().map(|info| info.nonce),
+                present_nonce=?account.info.as_ref().map(|info| info.nonce),
+                original_balance=?account.original_info.as_ref().map(|info| info.balance),
+                present_balance=?account.info.as_ref().map(|info| info.balance),
+                original_code_hash=?account.original_info.as_ref().map(|info| info.code_hash),
+                present_code_hash=?account.info.as_ref().map(|info| info.code_hash),
+                storage_len=?account.storage.len(),
+                changed_storage=?changed_storage,
+                "lightman0522 bundle account diff"
+            );
+
+            for (slot, value) in account.storage.iter().take(12) {
+                info!(target: "execute_ordered_block",
+                    label=?label,
+                    block_id=?block_id,
+                    block_number=?block_number,
+                    address=?address,
+                    slot=?slot,
+                    previous_or_original_value=?value.previous_or_original_value,
+                    present_value=?value.present_value,
+                    changed=?(value.previous_or_original_value != value.present_value),
+                    "lightman0522 bundle storage diff"
+                );
+            }
+        }
+    }
+
+    fn log_hashed_state_summary(
+        label: &'static str,
+        block_id: B256,
+        block_number: u64,
+        hashed_state: &HashedPostState,
+    ) {
+        let storage_slots: usize =
+            hashed_state.storages.values().map(|storage| storage.storage.len()).sum();
+        info!(target: "PipeExecService.process",
+            label=?label,
+            block_id=?block_id,
+            block_number=?block_number,
+            accounts_len=?hashed_state.accounts.len(),
+            storages_len=?hashed_state.storages.len(),
+            storage_slots=?storage_slots,
+            "lightman0522 hashed post state summary"
+        );
+        for (hashed_address, account) in hashed_state.accounts.iter().take(12) {
+            info!(target: "PipeExecService.process",
+                label=?label,
+                block_id=?block_id,
+                block_number=?block_number,
+                hashed_address=?hashed_address,
+                nonce=?account.as_ref().map(|account| account.nonce),
+                balance=?account.as_ref().map(|account| account.balance),
+                bytecode_hash=?account.as_ref().and_then(|account| account.bytecode_hash),
+                destroyed=?account.is_none(),
+                "lightman0522 hashed account"
+            );
+        }
+        for (hashed_address, storage) in hashed_state.storages.iter().take(12) {
+            info!(target: "PipeExecService.process",
+                label=?label,
+                block_id=?block_id,
+                block_number=?block_number,
+                hashed_address=?hashed_address,
+                wiped=?storage.wiped,
+                storage_len=?storage.storage.len(),
+                "lightman0522 hashed storage"
+            );
+            for (slot, value) in storage.storage.iter().take(12) {
+                info!(target: "PipeExecService.process",
+                    label=?label,
+                    block_id=?block_id,
+                    block_number=?block_number,
+                    hashed_address=?hashed_address,
+                    hashed_slot=?slot,
+                    value=?value,
+                    "lightman0522 hashed storage slot"
+                );
+            }
+        }
+    }
+
     fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
     }
@@ -478,6 +636,18 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         let hashed_state =
             HashedPostState::from_bundle_state::<KeccakKeyHasher>(&execution_output.state.state);
+        Self::log_bundle_state_summary(
+            "post_execution_before_state_root",
+            block_id,
+            block_number,
+            &execution_output.state,
+        );
+        Self::log_hashed_state_summary(
+            "post_execution_before_state_root",
+            block_id,
+            block_number,
+            &hashed_state,
+        );
         self.metrics.cache_account_state.record(write_start.elapsed());
         let elapsed = start_time.elapsed();
         info!(target: "PipeExecService.process",
@@ -522,7 +692,28 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();
         let start_time = Instant::now();
+        Self::log_hashed_state_summary(
+            "pre_storage_state_root",
+            block_id,
+            block_number,
+            &hashed_state,
+        );
         let (state_root, trie_updates) = self.storage.state_root(&hashed_state).unwrap();
+        let trie_storage_nodes: usize =
+            trie_updates.storage_tries.values().map(|updates| updates.storage_nodes.len()).sum();
+        let trie_storage_removed_nodes: usize =
+            trie_updates.storage_tries.values().map(|updates| updates.removed_nodes.len()).sum();
+        info!(target: "PipeExecService.process",
+            block_number=?block_number,
+            block_id=?block_id,
+            state_root=?state_root,
+            trie_account_nodes=?trie_updates.account_nodes.len(),
+            trie_account_removed_nodes=?trie_updates.removed_nodes.len(),
+            trie_storage_tries=?trie_updates.storage_tries.len(),
+            trie_storage_nodes=?trie_storage_nodes,
+            trie_storage_removed_nodes=?trie_storage_removed_nodes,
+            "lightman0522 storage state_root output"
+        );
         let write_start = Instant::now();
         self.cache.write_trie_updates(&trie_updates, block_number);
         self.metrics.cache_trie_state.record(write_start.elapsed());
@@ -1169,6 +1360,27 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Read SYSTEM_CALLER nonce and gas price from state BEFORE moving state into executor.
         // ParallelDatabase (Storage::StateView) implements DatabaseRef, so we can read directly.
+        Self::log_account_state(
+            "pre_execute_system_caller",
+            block_id,
+            block_number,
+            &state,
+            SYSTEM_CALLER,
+        );
+        Self::log_account_state(
+            "pre_execute_block_contract",
+            block_id,
+            block_number,
+            &state,
+            BLOCK_ADDR,
+        );
+        Self::log_account_state(
+            "pre_execute_coinbase",
+            block_id,
+            block_number,
+            &state,
+            ordered_block.coinbase,
+        );
         let initial_nonce = state
             .basic_ref(SYSTEM_CALLER)
             .expect("failed to read SYSTEM_CALLER account from state")

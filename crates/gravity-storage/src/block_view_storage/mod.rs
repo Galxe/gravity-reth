@@ -17,6 +17,7 @@ use std::{
     fmt,
     sync::{Arc, Mutex},
 };
+use tracing::info;
 
 /// Errors returned by `block_hash_ref` when the requested block number is out of range.
 #[derive(Debug, Clone)]
@@ -85,9 +86,53 @@ where
     }
 
     fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        let storage_slots: usize =
+            hashed_state.storages.values().map(|storage| storage.storage.len()).sum();
+        info!(
+            target: "gravity_storage::state_root",
+            accounts_len=?hashed_state.accounts.len(),
+            storages_len=?hashed_state.storages.len(),
+            storage_slots=?storage_slots,
+            "lightman0522 gravity storage state_root input"
+        );
+        for (hashed_address, account) in hashed_state.accounts.iter().take(12) {
+            info!(
+                target: "gravity_storage::state_root",
+                hashed_address=?hashed_address,
+                nonce=?account.as_ref().map(|account| account.nonce),
+                balance=?account.as_ref().map(|account| account.balance),
+                bytecode_hash=?account.as_ref().and_then(|account| account.bytecode_hash),
+                destroyed=?account.is_none(),
+                "lightman0522 gravity storage state_root account input"
+            );
+        }
+        for (hashed_address, storage) in hashed_state.storages.iter().take(12) {
+            info!(
+                target: "gravity_storage::state_root",
+                hashed_address=?hashed_address,
+                wiped=?storage.wiped,
+                storage_len=?storage.storage.len(),
+                "lightman0522 gravity storage state_root storage input"
+            );
+        }
         let tx = self.client.database_provider_ro()?.into_tx();
         let nested_hash = NestedStateRoot::new(&tx, Some(self.cache.clone()));
-        nested_hash.calculate(hashed_state)
+        let (state_root, trie_updates) = nested_hash.calculate(hashed_state)?;
+        let trie_storage_nodes: usize =
+            trie_updates.storage_tries.values().map(|updates| updates.storage_nodes.len()).sum();
+        let trie_storage_removed_nodes: usize =
+            trie_updates.storage_tries.values().map(|updates| updates.removed_nodes.len()).sum();
+        info!(
+            target: "gravity_storage::state_root",
+            state_root=?state_root,
+            trie_account_nodes=?trie_updates.account_nodes.len(),
+            trie_account_removed_nodes=?trie_updates.removed_nodes.len(),
+            trie_storage_tries=?trie_updates.storage_tries.len(),
+            trie_storage_nodes=?trie_storage_nodes,
+            trie_storage_removed_nodes=?trie_storage_removed_nodes,
+            "lightman0522 gravity storage state_root output"
+        );
+        Ok((state_root, trie_updates))
     }
 
     fn insert_block_id(&self, block_number: u64, block_id: B256) {
@@ -142,7 +187,7 @@ impl<Tx: DbTx> DatabaseRef for RawBlockViewProvider<Tx> {
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         if let Some(cache) = &self.cache {
             if let Some(value) = cache.basic_account(&address) {
-                return Ok(value.map(Into::into))
+                return Ok(value.map(Into::into));
             }
         }
         Ok(self.tx.get_by_encoded_key::<tables::PlainAccountState>(&address)?.map(Into::into))
@@ -220,7 +265,7 @@ impl DatabaseRef for BlockViewProvider {
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         if let Some(cache) = &self.cache {
             if let Some(value) = cache.basic_account(&address) {
-                return Ok(value.map(Into::into))
+                return Ok(value.map(Into::into));
             }
         }
         self.db.basic_ref(address)
