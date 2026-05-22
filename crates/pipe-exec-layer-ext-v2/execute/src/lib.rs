@@ -732,6 +732,16 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.header.excess_blob_gas = Some(0);
             block.header.blob_gas_used = Some(0);
         }
+        info!(target: "create_block_for_executor",
+            id=?ordered_block.id,
+            parent_id=?ordered_block.parent_id,
+            number=?ordered_block.number,
+            withdrawals_root=?block.header.withdrawals_root,
+            parent_beacon_block_root=?block.header.parent_beacon_block_root,
+            excess_blob_gas=?block.header.excess_blob_gas,
+            blob_gas_used=?block.header.blob_gas_used,
+            "lightman0522 execution header after fork fields"
+        );
 
         // Discard the invalid txs
         let start_time = Instant::now();
@@ -753,6 +763,18 @@ impl<Storage: GravityStorage> Core<Storage> {
         };
 
         block.body.transactions = txs;
+        let final_tx_hashes =
+            block.body.transactions.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
+        info!(target: "create_block_for_executor",
+            id=?ordered_block.id,
+            parent_id=?ordered_block.parent_id,
+            number=?ordered_block.number,
+            final_txs_len=?block.body.transactions.len(),
+            final_senders_len=?senders.len(),
+            txs_info_len=?txs_info.len(),
+            final_tx_hashes=?final_tx_hashes,
+            "lightman0522 final block body for executor"
+        );
         (RecoveredBlock::new_unhashed(block, senders), txs_info)
     }
 
@@ -801,6 +823,16 @@ impl<Storage: GravityStorage> Core<Storage> {
             ordered_block.proposer_index,
             &ordered_block.failed_proposer_indices,
         );
+        info!(target: "execute_ordered_block",
+            id=?block_id,
+            parent_id=?parent_id,
+            number=?block_number,
+            metadata_tx_hash=?metadata_txn.hash(),
+            metadata_nonce=?metadata_txn.nonce(),
+            metadata_gas_limit=?metadata_txn.gas_limit(),
+            metadata_input_len=?metadata_txn.input().len(),
+            "lightman0522 metadata system transaction constructed"
+        );
         current_nonce = metadata_txn.nonce() + 1;
 
         let metadata_tx_env =
@@ -811,6 +843,17 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         let metadata_txn_result =
             SystemTxnResult { result: metadata_execution_result, txn: metadata_txn };
+        info!(target: "execute_ordered_block",
+            id=?block_id,
+            parent_id=?parent_id,
+            number=?block_number,
+            metadata_tx_hash=?metadata_txn_result.txn.hash(),
+            metadata_nonce=?metadata_txn_result.txn.nonce(),
+            metadata_success=?metadata_txn_result.result.is_success(),
+            metadata_gas_used=?metadata_txn_result.result.gas_used(),
+            metadata_logs_len=?metadata_txn_result.result.logs().len(),
+            "lightman0522 metadata system transaction executed"
+        );
 
         // Check for epoch change from metadata txn
         if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
@@ -880,6 +923,18 @@ impl<Storage: GravityStorage> Core<Storage> {
                     continue;
                 }
             };
+            info!(target: "execute_ordered_block",
+                id=?block_id,
+                parent_id=?parent_id,
+                number=?block_number,
+                index=?index,
+                is_dkg=?is_dkg,
+                validator_tx_hash=?txn.hash(),
+                validator_nonce=?txn.nonce(),
+                validator_gas_limit=?txn.gas_limit(),
+                validator_input_len=?txn.input().len(),
+                "lightman0522 validator system transaction constructed"
+            );
             current_nonce += 1;
 
             debug!(target: "execute_ordered_block",
@@ -896,6 +951,19 @@ impl<Storage: GravityStorage> Core<Storage> {
                 .unwrap_or_else(|e| panic!("validator txn execution failed: {e:?}"));
 
             let validator_result = SystemTxnResult { result: execution_result, txn };
+            info!(target: "execute_ordered_block",
+                id=?block_id,
+                parent_id=?parent_id,
+                number=?block_number,
+                index=?index,
+                is_dkg=?is_dkg,
+                validator_tx_hash=?validator_result.txn.hash(),
+                validator_nonce=?validator_result.txn.nonce(),
+                validator_success=?validator_result.result.is_success(),
+                validator_gas_used=?validator_result.result.gas_used(),
+                validator_logs_len=?validator_result.result.logs().len(),
+                "lightman0522 validator system transaction executed"
+            );
 
             if !validator_result.result.is_success() {
                 error!(target: "execute_ordered_block",
