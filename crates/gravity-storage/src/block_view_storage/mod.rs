@@ -1,6 +1,11 @@
 use crate::GravityStorage;
 use alloy_primitives::{Address, B256, U256};
-use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx, Database};
+use reth_db_api::{
+    cursor::{DbCursorRO, DbDupCursorRO},
+    tables,
+    transaction::DbTx,
+    Database,
+};
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
     PersistBlockCache, ProviderError, ProviderResult, StateProviderBox, PERSIST_BLOCK_CACHE,
@@ -10,7 +15,9 @@ use reth_revm::{
     state::AccountInfo, DatabaseRef,
 };
 use reth_storage_api::StateProviderFactory;
-use reth_trie::{updates::TrieUpdatesV2, HashedPostState};
+use reth_trie::{
+    updates::TrieUpdatesV2, HashedPostState, Nibbles, StoredNibbles, StoredNibblesSubKey,
+};
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use std::{
     collections::BTreeMap,
@@ -116,6 +123,55 @@ where
             );
         }
         let tx = self.client.database_provider_ro()?.into_tx();
+        for (hashed_address, account) in hashed_state.accounts.iter().take(12) {
+            let db_account = tx.get::<tables::HashedAccounts>(*hashed_address)?;
+            info!(
+                target: "gravity_storage::state_root",
+                hashed_address=?hashed_address,
+                db_nonce=?db_account.as_ref().map(|account| account.nonce),
+                db_balance=?db_account.as_ref().map(|account| account.balance),
+                db_bytecode_hash=?db_account.as_ref().and_then(|account| account.bytecode_hash),
+                post_nonce=?account.as_ref().map(|account| account.nonce),
+                post_balance=?account.as_ref().map(|account| account.balance),
+                post_bytecode_hash=?account.as_ref().and_then(|account| account.bytecode_hash),
+                "lightman0522 gravity storage hashed account table before root"
+            );
+        }
+        let empty_path = Nibbles::new();
+        let account_root_node = tx
+            .cursor_read::<tables::AccountsTrieV2>()?
+            .get(StoredNibbles(empty_path))?
+            .map(|(_, node)| node);
+        info!(
+            target: "gravity_storage::state_root",
+            account_root_node=?account_root_node,
+            "lightman0522 gravity storage account trie root node before root"
+        );
+        let mut storage_cursor = tx.cursor_dup_read::<tables::HashedStorages>()?;
+        let mut storage_trie_cursor = tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
+        for (hashed_address, storage) in hashed_state.storages.iter().take(12) {
+            let storage_root_node = storage_trie_cursor
+                .get_by_key_subkey(*hashed_address, StoredNibblesSubKey(Nibbles::new()))?
+                .map(|entry| entry.node);
+            info!(
+                target: "gravity_storage::state_root",
+                hashed_address=?hashed_address,
+                wiped=?storage.wiped,
+                storage_root_node=?storage_root_node,
+                "lightman0522 gravity storage storage trie root node before root"
+            );
+            for (hashed_slot, post_value) in storage.storage.iter().take(12) {
+                let db_storage = storage_cursor.get_by_key_subkey(*hashed_address, *hashed_slot)?;
+                info!(
+                    target: "gravity_storage::state_root",
+                    hashed_address=?hashed_address,
+                    hashed_slot=?hashed_slot,
+                    db_value=?db_storage.as_ref().map(|entry| entry.value),
+                    post_value=?post_value,
+                    "lightman0522 gravity storage hashed storage table before root"
+                );
+            }
+        }
         let nested_hash = NestedStateRoot::new(&tx, Some(self.cache.clone()));
         let (state_root, trie_updates) = nested_hash.calculate(hashed_state)?;
         let trie_storage_nodes: usize =

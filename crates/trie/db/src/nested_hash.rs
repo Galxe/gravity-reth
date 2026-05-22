@@ -26,6 +26,7 @@ use reth_trie::{
     AccountProof, HashedPostState, HashedStorage, MultiProofTargets, Nibbles, StorageTrieUpdatesV2,
     StoredNibbles, StoredNibblesSubKey, EMPTY_ROOT_HASH,
 };
+use tracing::info;
 
 /// Storage trie node reader
 #[allow(missing_debug_implementations)]
@@ -326,10 +327,30 @@ where
                                     .map(|s| s.storage.len() > MIN_PARALLEL_NODES)
                                     .unwrap_or(false);
                                 let mut storage_trie = Trie::new(trie_reader, parallel)?;
+                                let storage_root_before = storage_trie.hash();
+                                let storage_slots_len =
+                                    storage.as_ref().map(|s| s.storage.len()).unwrap_or_default();
+                                info!(
+                                    target: "reth_trie_parallel::nested_hash",
+                                    hashed_address=?hashed_address,
+                                    storage_root_before=?storage_root_before,
+                                    storage_slots_len=?storage_slots_len,
+                                    parallel=?parallel,
+                                    "lightman0522 nested storage trie before update"
+                                );
                                 if let Some(storage) = storage {
                                     for (hashed_slot, value) in storage.storage {
                                         let nibbles = Nibbles::unpack(hashed_slot);
                                         let index = nibbles.get_unchecked(0) as usize;
+                                        info!(
+                                            target: "reth_trie_parallel::nested_hash",
+                                            hashed_address=?hashed_address,
+                                            hashed_slot=?hashed_slot,
+                                            slot_prefix=?index,
+                                            value=?value,
+                                            deletes=?value.is_zero(),
+                                            "lightman0522 nested storage trie update input"
+                                        );
                                         let value = if value.is_zero() {
                                             None
                                         } else {
@@ -341,7 +362,15 @@ where
                                 }
                                 storage_trie
                                     .parallel_update(updated_storage_nodes, create_reader)?;
-                                let account = account.into_trie_account(storage_trie.hash());
+                                let storage_root_after = storage_trie.hash();
+                                info!(
+                                    target: "reth_trie_parallel::nested_hash",
+                                    hashed_address=?hashed_address,
+                                    storage_root_before=?storage_root_before,
+                                    storage_root_after=?storage_root_after,
+                                    "lightman0522 nested storage trie after update"
+                                );
+                                let account = account.into_trie_account(storage_root_after);
                                 updated_account_nodes.push((
                                     path,
                                     Some(Node::ValueNode(alloy_rlp::encode(account))),
@@ -349,6 +378,13 @@ where
 
                                 if need_update {
                                     let trie_output = storage_trie.take_output();
+                                    info!(
+                                        target: "reth_trie_parallel::nested_hash",
+                                        hashed_address=?hashed_address,
+                                        update_nodes=?trie_output.update_nodes.len(),
+                                        removed_nodes=?trie_output.removed_nodes.len(),
+                                        "lightman0522 nested storage trie output"
+                                    );
                                     if !trie_output.is_empty() {
                                         assert!(trie_update
                                             .lock()
@@ -392,11 +428,30 @@ where
         };
         let cursor = self.tx.cursor_read::<tables::AccountsTrieV2>()?;
         let mut account_trie = Trie::new(AccountTrieReader(cursor, self.cache.clone()), true)?;
+        let account_root_before = account_trie.hash();
+        info!(
+            target: "reth_trie_parallel::nested_hash",
+            account_root_before=?account_root_before,
+            account_partitions=?updated_account_nodes.iter().map(Vec::len).sum::<usize>(),
+            "lightman0522 nested account trie before update"
+        );
         account_trie.parallel_update(updated_account_nodes, create_reader)?;
 
         let root_hash = account_trie.hash();
+        info!(
+            target: "reth_trie_parallel::nested_hash",
+            account_root_before=?account_root_before,
+            account_root_after=?root_hash,
+            "lightman0522 nested account trie after update"
+        );
         if need_update {
             let output = account_trie.take_output();
+            info!(
+                target: "reth_trie_parallel::nested_hash",
+                account_update_nodes=?output.update_nodes.len(),
+                account_removed_nodes=?output.removed_nodes.len(),
+                "lightman0522 nested account trie output"
+            );
             trie_update.account_nodes = output.update_nodes;
             trie_update.removed_nodes = output.removed_nodes;
         } else {
