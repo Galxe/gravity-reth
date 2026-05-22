@@ -119,12 +119,9 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         let best_block_number = provider_ro.best_block_number()?;
         drop(provider_ro);
 
-        if recover_block_number == best_block_number {
-            info!(target: "engine::recovery", block_number = ?recover_block_number, "No recovery needed, checkpoints are consistent");
-            return Ok(());
+        if recover_block_number != best_block_number {
+            info!(target: "engine::recovery", recover_block = ?recover_block_number, best_block = ?best_block_number, "Detected interrupted block write, starting recovery");
         }
-
-        info!(target: "engine::recovery", recover_block = ?recover_block_number, best_block = ?best_block_number, "Detected interrupted block write, starting recovery");
 
         // Stage 1: Recover AccountHashing
         self.recover_hashing(recover_block_number)?;

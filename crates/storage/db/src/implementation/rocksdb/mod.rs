@@ -378,9 +378,10 @@ impl DatabaseEnv {
         opts.set_max_compaction_bytes(2 * 1024 * 1024 * 1024);
 
         // === Write Configuration ===
-        opts.set_enable_pipelined_write(true);
+        // Pipelined write disabled: every commit() now uses WriteOptions::set_sync(true)
+        // in tx.rs::commit_view(), so fsync per write makes pipelining pointless.
+        opts.set_enable_pipelined_write(false);
         opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1GB max WAL per DB
-        opts.set_wal_bytes_per_sync(4 * 1024 * 1024);
 
         // === Compression Configuration ===
         opts.set_compression_per_level(&[
