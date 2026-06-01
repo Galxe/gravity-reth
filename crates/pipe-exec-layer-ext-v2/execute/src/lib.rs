@@ -18,8 +18,14 @@ use metrics::PipeExecLayerMetrics;
 use alloy_consensus::{
     constants::EMPTY_WITHDRAWALS, BlockHeader, Header, Transaction, EMPTY_OMMER_ROOT_HASH,
 };
-use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
+use alloy_eips::{
+    eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
+    eip4895::Withdrawals,
+    merge::BEACON_NONCE,
+    BlockNumberOrTag,
+};
 use alloy_primitives::{
+    keccak256,
     map::{HashMap, HashSet},
     Address, TxHash, B256, U256,
 };
@@ -27,7 +33,7 @@ use alloy_rpc_types_eth::TransactionRequest;
 use gravity_primitives::get_gravity_config;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
-use reth_chainspec::{ChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
     execute::BlockExecutionError, precompiles::DynPrecompile, ConfigureEvm, IntoTxEnv,
@@ -46,7 +52,11 @@ use reth_primitives_traits::{
 };
 use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
 use reth_rpc_eth_api::RpcTypes;
-use revm::{state::AccountInfo, DatabaseRef};
+use revm::{
+    bytecode::Bytecode,
+    state::{Account, AccountInfo, AccountStatus, EvmState},
+    DatabaseRef,
+};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -597,6 +607,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
         let mut block = Block {
             header: Header {
+                // Transient carrier: feeds parent_id to the upstream EIP-2935 SystemCaller
+                // as the blockhash-contract calldata. Overwritten with the real chain
+                // parent hash by the seal step below before sealing.
+                parent_hash: ordered_block.parent_id,
                 beneficiary: ordered_block.coinbase,
                 timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
                 mix_hash: ordered_block.prev_randao,
@@ -667,6 +681,36 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
     /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
     ///
+    /// Deploy the EIP-2935 history storage contract via the executor's
+    /// [`ParallelExecutor::apply_state_change`] irregular-state-change channel.
+    ///
+    /// Mainnet-aligned alloc: nonce=1, balance=0, `code=HISTORY_STORAGE_CODE`, no storage
+    /// prefill (the 8191-slot ring fills naturally via the per-block system call). The
+    /// `Created | Touched` status routes the diff through ParallelState's `newly_created`
+    /// path so the contract code is recorded and a proper transition lands in the bundle.
+    fn deploy_history_storage_contract(
+        executor: &mut dyn ParallelExecutor<
+            Primitives = EthPrimitives,
+            Error = BlockExecutionError,
+        >,
+    ) -> Result<(), BlockExecutionError> {
+        let bytecode = Bytecode::new_raw(HISTORY_STORAGE_CODE.clone());
+        let code_hash = keccak256(HISTORY_STORAGE_CODE.as_ref());
+        let info = AccountInfo { nonce: 1, balance: U256::ZERO, code_hash, code: Some(bytecode) };
+
+        let mut state_diff = EvmState::default();
+        state_diff.insert(
+            HISTORY_STORAGE_ADDRESS,
+            Account {
+                info,
+                storage: Default::default(),
+                status: AccountStatus::Created | AccountStatus::Touched,
+                transaction_id: 0,
+            },
+        );
+        executor.apply_state_change(state_diff)
+    }
+
     /// DESIGN: The `unwrap_or_else(|e| panic!(...))` calls on system transaction
     /// execution are intentional. These are unrecoverable failures; in the gravity-sdk
     /// integration the panic handler aborts the process, preventing partial-state
@@ -990,6 +1034,28 @@ impl<Storage: GravityStorage> Core<Storage> {
         // ParallelState, so there is a single source of truth for both system and user txns.
         let mut executor = self.evm_config.parallel_executor(state);
         executor.apply_custom_precompiles(self.custom_precompiles.clone());
+
+        // EIP-2935 (Prague) activation: deploy the HISTORY_STORAGE contract as an
+        // irregular state change on the Prague transition block. Mainnet-aligned alloc:
+        // nonce=1, balance=0, code=HISTORY_STORAGE_CODE, no storage prefill. The
+        // upstream SystemCaller runs the per-block SSTORE inside apply_pre_execution_changes
+        // — that fires later inside executor.execute(&block), reading the freshly deployed
+        // contract. Idempotency comes from transitions_at_timestamp: parent_ts < pragueTime
+        // is history-immutable, so this branch fires exactly on the activation block.
+        let current_ts = ordered_block.timestamp_us / 1_000_000;
+        if self
+            .chain_spec
+            .fork(EthereumHardfork::Prague)
+            .transitions_at_timestamp(current_ts, parent_header.timestamp)
+        {
+            Self::deploy_history_storage_contract(&mut *executor).unwrap_or_else(|e| {
+                panic!("HISTORY_STORAGE deployment failed at Prague activation: {e:?}")
+            });
+            info!(target: "execute_ordered_block",
+                number=?block_number,
+                "deployed EIP-2935 HISTORY_STORAGE contract on Prague activation block"
+            );
+        }
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.
         // State changes are committed directly into executor's ParallelState.

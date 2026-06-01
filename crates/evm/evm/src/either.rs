@@ -13,6 +13,7 @@ use revm::{
         TxEnv,
     },
     database::BundleState,
+    state::EvmState,
 };
 
 impl<A, B, DB> Executor<DB> for Either<A, B>
@@ -104,6 +105,13 @@ where
         match self {
             Self::Left(a) => a.transact_system_txn(evm_env, precompiles, tx_env),
             Self::Right(b) => b.transact_system_txn(evm_env, precompiles, tx_env),
+        }
+    }
+
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error> {
+        match self {
+            Self::Left(a) => a.apply_state_change(state_diff),
+            Self::Right(b) => b.apply_state_change(state_diff),
         }
     }
 }

@@ -312,6 +312,11 @@ where
         Ok(execution_result)
     }
 
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error> {
+        self.state.as_mut().unwrap().commit(state_diff);
+        Ok(())
+    }
+
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
         self.custom_precompiles = Some(custom_precompiles);
     }

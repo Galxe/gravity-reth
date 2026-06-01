@@ -28,6 +28,8 @@ use revm::{
         TxEnv,
     },
     database::{states::bundle_state::BundleRetention, BundleState, State},
+    state::EvmState,
+    DatabaseCommit,
 };
 
 /// A type that knows how to execute a block. It is assumed to operate on a
@@ -145,6 +147,18 @@ pub trait Executor<DB: Database>: Sized {
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error>;
+
+    /// Applies an irregular state change (e.g. a fork-block contract deployment) directly to
+    /// the executor's in-memory state, bypassing normal transaction execution. The state diff
+    /// is committed immediately; the resulting transitions land in the bundle returned by
+    /// [`take_bundle`].
+    ///
+    /// Used for state mutations that are inherently not transaction-shaped (e.g. the EIP-2935
+    /// `HISTORY_STORAGE` deployment at the Prague activation block, where `CREATE` / `CREATE2`
+    /// cannot target the canonical address without owning a mined deployer key).
+    ///
+    /// [`take_bundle`]: Self::take_bundle
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error>;
 }
 
 /// Helper type for the output of executing a block.
@@ -622,6 +636,11 @@ where
     ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
         self.strategy_factory.transact_system_txn(&mut self.db, evm_env, precompiles, tx_env)
     }
+
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error> {
+        self.db.commit(state_diff);
+        Ok(())
+    }
 }
 
 /// A helper trait marking a 'static type that can be converted into an [`ExecutableTx`] for block
@@ -730,6 +749,10 @@ mod tests {
             _precompiles: Vec<(Address, DynPrecompile)>,
             _tx_env: TxEnv,
         ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+            unreachable!()
+        }
+
+        fn apply_state_change(&mut self, _state_diff: EvmState) -> Result<(), Self::Error> {
             unreachable!()
         }
     }

@@ -12,6 +12,7 @@ use revm::{
     context::TxEnv,
     context_interface::result::{ExecutionResult, HaltReason},
     database::BundleState,
+    state::EvmState,
 };
 
 /// The `ParallelExecutor` trait defines the interface for executing EVM blocks in parallel.
@@ -68,6 +69,18 @@ pub trait ParallelExecutor {
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error>;
 
+    /// Applies an irregular state change (e.g. a fork-block contract deployment) directly to
+    /// the executor's in-memory state, bypassing normal transaction execution. The state diff
+    /// is committed immediately; the resulting transitions land in the bundle returned by
+    /// [`take_bundle`].
+    ///
+    /// Used for state mutations that are inherently not transaction-shaped (e.g. the EIP-2935
+    /// `HISTORY_STORAGE` deployment at the Prague activation block, where `CREATE` / `CREATE2`
+    /// cannot target the canonical address without owning a mined deployer key).
+    ///
+    /// [`take_bundle`]: Self::take_bundle
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error>;
+
     /// Applies custom precompiled contracts to the executor.
     ///
     /// These precompiles will be available during transaction execution alongside
@@ -117,6 +130,11 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
         self.0.transact_system_txn(evm_env, precompiles, tx_env)
+    }
+
+    #[inline]
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error> {
+        self.0.apply_state_change(state_diff)
     }
 
     #[inline]
