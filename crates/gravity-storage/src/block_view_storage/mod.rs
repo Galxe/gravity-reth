@@ -1,6 +1,7 @@
 use crate::GravityStorage;
 use alloy_primitives::{Address, B256, U256};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx, Database};
+use reth_primitives_traits::AlloyBlockHeader;
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
     PersistBlockCache, ProviderError, ProviderResult, StateProviderBox, PERSIST_BLOCK_CACHE,
@@ -114,6 +115,11 @@ where
                 break;
             }
         }
+    }
+
+    fn randomness_by_height(&self, block_number: u64) -> ProviderResult<Option<B256>> {
+        let provider = self.client.database_provider_ro()?;
+        Ok(provider.header_by_number(block_number)?.and_then(|header| header.mix_hash()))
     }
 }
 

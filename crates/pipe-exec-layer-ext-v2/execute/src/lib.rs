@@ -6,6 +6,7 @@ mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
+pub mod randomness_precompile;
 mod tx_filter;
 use alloy_sol_types::SolEvent;
 
@@ -72,8 +73,10 @@ use crate::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         types::DataRecorded,
-        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
+        RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
+    randomness_precompile::{create_randomness_by_height_precompile, RandomnessByHeightProvider},
 };
 
 /// Metadata about an executed block
@@ -1389,6 +1392,7 @@ where
         "new pipe exec layer api"
     );
 
+    let randomness_provider: Arc<dyn RandomnessByHeightProvider> = storage.clone();
     let start_time = Instant::now();
     let service = PipeExecService {
         core: Arc::new(Core {
@@ -1397,10 +1401,13 @@ where
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
-            custom_precompiles: Arc::new(vec![(
-                BLS_PRECOMPILE_ADDR,
-                create_bls_pop_verify_precompile(),
-            )]),
+            custom_precompiles: Arc::new(vec![
+                (BLS_PRECOMPILE_ADDR, create_bls_pop_verify_precompile()),
+                (
+                    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+                    create_randomness_by_height_precompile(randomness_provider),
+                ),
+            ]),
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
                 (epoch, latest_block_number),
