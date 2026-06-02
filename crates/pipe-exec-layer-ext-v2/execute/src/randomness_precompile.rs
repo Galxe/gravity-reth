@@ -6,6 +6,7 @@
 use alloy_primitives::{Bytes, B256, U256};
 use gravity_storage::GravityStorage;
 use reth_evm::precompiles::{DynPrecompile, PrecompileInput};
+use reth_provider::ProviderResult;
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use std::sync::Arc;
 use tracing::warn;
@@ -17,22 +18,28 @@ const LOOKUP_GAS: u64 = 2_000;
 /// Read-only provider for canonical randomness values by block height.
 pub trait RandomnessByHeightProvider: Send + Sync + 'static {
     /// Return `header.mix_hash` / `prev_randao` for `height` if the block is known.
-    fn randomness_by_height(&self, height: u64) -> Option<B256>;
+    fn randomness_by_height(&self, height: u64) -> ProviderResult<Option<B256>>;
 }
 
 impl<S> RandomnessByHeightProvider for S
 where
     S: GravityStorage,
 {
-    fn randomness_by_height(&self, height: u64) -> Option<B256> {
-        GravityStorage::randomness_by_height(self, height).ok().flatten()
+    fn randomness_by_height(&self, height: u64) -> ProviderResult<Option<B256>> {
+        GravityStorage::randomness_by_height(self, height)
     }
 }
 
 /// Creates the historical randomness lookup precompile.
 ///
-/// Input is a raw ABI word (`uint256 blockNumber`). Output is `(uint256 found, bytes32
-/// randomness)`.
+/// Input is a raw ABI word (`uint256 blockNumber`).
+///
+/// Output is ABI-word encoded as `(uint256 found, bytes32 randomness)`:
+/// - bytes `[0..32]`: `found`, encoded as `0` or `1`.
+/// - bytes `[32..64]`: the block header `mix_hash` / `prev_randao` value, or zero if not found.
+///
+/// A direct `cast call` therefore prints 64 bytes. For example, the leading
+/// `0x000...001` word means `found = 1`; the following 32-byte word is the randomness value.
 pub fn create_randomness_by_height_precompile(
     provider: Arc<dyn RandomnessByHeightProvider>,
 ) -> DynPrecompile {
@@ -70,7 +77,9 @@ pub fn randomness_by_height_handler_raw(
         });
     }
 
-    let randomness = provider.randomness_by_height(height.to::<u64>());
+    let randomness = provider
+        .randomness_by_height(height.to::<u64>())
+        .map_err(|err| PrecompileError::Other(format!("randomness lookup failed: {err}").into()))?;
     Ok(PrecompileOutput {
         gas_used: LOOKUP_GAS,
         bytes: match randomness {
@@ -94,6 +103,7 @@ fn encode_result(found: bool, randomness: B256) -> Bytes {
 mod tests {
     use super::{randomness_by_height_handler_raw, RandomnessByHeightProvider};
     use alloy_primitives::{B256, U256};
+    use reth_provider::ProviderResult;
     use std::collections::BTreeMap;
 
     #[derive(Default)]
@@ -102,8 +112,8 @@ mod tests {
     }
 
     impl RandomnessByHeightProvider for MockRandomnessProvider {
-        fn randomness_by_height(&self, height: u64) -> Option<B256> {
-            self.values.get(&height).copied()
+        fn randomness_by_height(&self, height: u64) -> ProviderResult<Option<B256>> {
+            Ok(self.values.get(&height).copied())
         }
     }
 
