@@ -435,3 +435,253 @@ fn balance_increment_state<DB: ParallelDatabase>(
         .map(|(addr, _)| load_account(addr))
         .collect::<Result<EvmState, _>>()
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `apply_state_change` trait method on both
+    //! `WrapExecutor<BasicBlockExecutor>` (revm backend) and `GrevmExecutor`
+    //! (grevm backend). These pin the contract that pipe-layer EIP-2935
+    //! deployment relies on:
+    //!
+    //! - U-1 / U-2: a first-touch HISTORY_STORAGE deployment diff lands in the bundle with
+    //!   `nonce=1, balance=0, code_hash=keccak(HISTORY_STORAGE_CODE)`, no storage prefill, with
+    //!   identical bundle contents across both impls (this is the unit-level proof of
+    //!   `disable_grevm` equivalence — far cheaper than e2e state-root comparisons).
+    //! - U-3: after `apply_state_change`, a subsequent `execute(&block)` runs the EIP-2935 system
+    //!   call against the just-deployed code and writes slot `(N-1) % 8191` == `parent_hash`. Pins
+    //!   the F9 regression boundary (pre-load-then-commit timing).
+    //! - U-4: empty diff is a no-op, does not panic.
+    //! - U-5: repeated `apply_state_change` accumulates (revm `state.commit` semantics) rather than
+    //!   replacing.
+
+    use super::*;
+    use crate::EthEvmConfig;
+    use alloc::sync::Arc;
+    use alloy_consensus::Header;
+    use alloy_eips::{
+        eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
+        eip7685::EMPTY_REQUESTS_HASH,
+    };
+    use alloy_primitives::{keccak256, B256, U256};
+    use reth_chainspec::{ChainSpec, ChainSpecBuilder, MAINNET};
+    use reth_ethereum_primitives::Block;
+    use reth_evm::{execute::BasicBlockExecutor, parallel_execute::WrapExecutor};
+    use reth_primitives_traits::RecoveredBlock;
+    use revm::{
+        bytecode::Bytecode,
+        database::{CacheDB, EmptyDB},
+        state::AccountInfo,
+    };
+
+    fn prague_chainspec() -> Arc<ChainSpec> {
+        Arc::new(
+            ChainSpecBuilder::from(&*MAINNET)
+                .shanghai_activated()
+                .cancun_activated()
+                .prague_activated()
+                .build(),
+        )
+    }
+
+    /// Mirrors the alloc shape that `eip_2935::apply_state_changes_for_block`
+    /// produces via `deploy_contract` in the pipe layer: nonce=1, balance=0,
+    /// code = HISTORY_STORAGE_CODE, no storage prefill, `Created | Touched`.
+    fn build_history_storage_deployment_diff() -> EvmState {
+        let code = HISTORY_STORAGE_CODE.clone();
+        let code_hash = keccak256(code.as_ref());
+        let info = AccountInfo {
+            nonce: 1,
+            balance: U256::ZERO,
+            code_hash,
+            code: Some(Bytecode::new_raw(code)),
+        };
+        let mut state_diff = EvmState::default();
+        state_diff.insert(
+            HISTORY_STORAGE_ADDRESS,
+            Account {
+                info,
+                storage: Default::default(),
+                status: AccountStatus::Created | AccountStatus::Touched,
+                transaction_id: 0,
+            },
+        );
+        state_diff
+    }
+
+    fn prague_block(number: u64, parent_hash: B256) -> RecoveredBlock<Block> {
+        let header = Header {
+            parent_hash,
+            timestamp: 1,
+            number,
+            requests_hash: Some(EMPTY_REQUESTS_HASH),
+            excess_blob_gas: Some(0),
+            blob_gas_used: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            ..Header::default()
+        };
+        RecoveredBlock::new_unhashed(Block { header, body: Default::default() }, vec![])
+    }
+
+    // --- U-1: WrapExecutor (revm path) -----------------------------------
+
+    #[test]
+    fn u1_wrap_executor_apply_state_change_injects_history_storage() {
+        let chain_spec = prague_chainspec();
+        let evm_config = EthEvmConfig::new(chain_spec);
+        let db = CacheDB::new(EmptyDB::default());
+        let mut executor = WrapExecutor::new(BasicBlockExecutor::new(evm_config, db));
+
+        executor
+            .apply_state_change(build_history_storage_deployment_diff())
+            .expect("apply_state_change must succeed for HISTORY_STORAGE deployment diff");
+
+        let bundle = executor.take_bundle();
+        let acc = bundle
+            .state
+            .get(&HISTORY_STORAGE_ADDRESS)
+            .expect("HISTORY_STORAGE_ADDRESS must be present in bundle after apply_state_change");
+        let info =
+            acc.info.as_ref().expect("HISTORY_STORAGE bundle account must carry account info");
+
+        let code_hash = keccak256(HISTORY_STORAGE_CODE.as_ref());
+        assert_eq!(info.nonce, 1, "deployed nonce must be 1 (mainnet alloc shape)");
+        assert_eq!(info.balance, U256::ZERO, "deployed balance must be 0");
+        assert_eq!(info.code_hash, code_hash, "code hash must match HISTORY_STORAGE_CODE");
+        assert!(
+            bundle.contracts.contains_key(&code_hash),
+            "bundle.contracts must include HISTORY_STORAGE bytecode"
+        );
+        assert!(acc.storage.is_empty(), "EIP-2935 storage must not be prefilled");
+    }
+
+    // --- U-2: GrevmExecutor (grevm path) — bundle byte-equal to U-1 -----
+
+    #[test]
+    fn u2_grevm_executor_apply_state_change_matches_wrap_executor() {
+        let chain_spec = prague_chainspec();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let db = EmptyDB::default();
+        let mut executor = GrevmExecutor::new(chain_spec, &evm_config, db);
+
+        executor
+            .apply_state_change(build_history_storage_deployment_diff())
+            .expect("apply_state_change must succeed on the grevm path");
+
+        let bundle = executor.take_bundle();
+        let acc = bundle
+            .state
+            .get(&HISTORY_STORAGE_ADDRESS)
+            .expect("HISTORY_STORAGE_ADDRESS must be present in grevm bundle");
+        let info = acc.info.as_ref().expect("grevm bundle account info must be present");
+
+        let code_hash = keccak256(HISTORY_STORAGE_CODE.as_ref());
+        assert_eq!(info.nonce, 1, "grevm path must produce identical nonce to revm path");
+        assert_eq!(info.balance, U256::ZERO, "grevm path must produce identical balance");
+        assert_eq!(info.code_hash, code_hash, "grevm path must produce identical code_hash");
+        assert!(
+            bundle.contracts.contains_key(&code_hash),
+            "grevm bundle.contracts must include HISTORY_STORAGE bytecode"
+        );
+        assert!(acc.storage.is_empty(), "grevm storage must not be prefilled either");
+    }
+
+    // --- U-3: deployment ↔ pre-execution system call timing -------------
+
+    #[test]
+    fn u3_grevm_apply_state_change_visible_to_system_call() {
+        let chain_spec = prague_chainspec();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let db = EmptyDB::default();
+        let mut executor = GrevmExecutor::new(chain_spec, &evm_config, db);
+
+        executor.apply_state_change(build_history_storage_deployment_diff()).unwrap();
+
+        // Construct a Prague-compliant block at number 100. The pre-execution
+        // system call hits HISTORY_STORAGE with calldata = parent_hash and
+        // writes slot (number - 1) % HISTORY_SERVE_WINDOW = 99.
+        let parent_hash = B256::from([0xA9; 32]);
+        let block = prague_block(100, parent_hash);
+
+        // `execute` internally takes the bundle and returns it via output.state,
+        // so we must read the deployment + system-call effects from there.
+        let output = executor.execute(&block).expect("post-deploy execute must succeed");
+        let bundle = output.state;
+
+        let acc = bundle
+            .state
+            .get(&HISTORY_STORAGE_ADDRESS)
+            .expect("HISTORY_STORAGE must be in bundle output after execute");
+        let slot_99 = acc
+            .storage
+            .get(&U256::from(99u64))
+            .expect("slot 99 must be written by the EIP-2935 system call");
+        assert_eq!(
+            slot_99.present_value,
+            U256::from_be_bytes(parent_hash.0),
+            "slot 99 must hold the block's parent_hash after pre-execution system call"
+        );
+    }
+
+    // --- U-4: empty diff is a no-op ---------------------------------------
+
+    #[test]
+    fn u4_wrap_executor_apply_state_change_empty_diff_is_noop() {
+        let chain_spec = prague_chainspec();
+        let evm_config = EthEvmConfig::new(chain_spec);
+        let db = CacheDB::new(EmptyDB::default());
+        let mut executor = WrapExecutor::new(BasicBlockExecutor::new(evm_config, db));
+
+        executor.apply_state_change(EvmState::default()).expect("empty diff must not error");
+
+        let bundle = executor.take_bundle();
+        assert!(
+            bundle.state.is_empty(),
+            "empty diff must leave bundle empty (no spurious account injection)"
+        );
+        assert!(bundle.contracts.is_empty(), "empty diff must leave bundle.contracts empty");
+    }
+
+    // --- U-5: repeated apply_state_change accumulates -----------------------
+
+    #[test]
+    fn u5_grevm_apply_state_change_accumulates_across_calls() {
+        let chain_spec = prague_chainspec();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let db = EmptyDB::default();
+        let mut executor = GrevmExecutor::new(chain_spec, &evm_config, db);
+
+        // First call deploys HISTORY_STORAGE with nonce=1, balance=0, code set.
+        executor.apply_state_change(build_history_storage_deployment_diff()).unwrap();
+
+        // Second call mutates only nonce + balance on the same address — no
+        // `code` field. revm's `state.commit` semantics preserve previously
+        // committed code if the new diff doesn't supply one.
+        let code_hash = keccak256(HISTORY_STORAGE_CODE.as_ref());
+        let bumped_info =
+            AccountInfo { nonce: 2, balance: U256::from(100u64), code_hash, code: None };
+        let mut second_diff = EvmState::default();
+        second_diff.insert(
+            HISTORY_STORAGE_ADDRESS,
+            Account {
+                info: bumped_info,
+                storage: Default::default(),
+                status: AccountStatus::Touched,
+                transaction_id: 0,
+            },
+        );
+        executor.apply_state_change(second_diff).unwrap();
+
+        let bundle = executor.take_bundle();
+        let acc = bundle
+            .state
+            .get(&HISTORY_STORAGE_ADDRESS)
+            .expect("HISTORY_STORAGE_ADDRESS must still be present after second commit");
+        let info = acc.info.as_ref().expect("info present");
+        assert_eq!(info.nonce, 2, "nonce must reflect the second diff (cumulative commit)");
+        assert_eq!(info.balance, U256::from(100u64), "balance must reflect the second diff");
+        assert_eq!(
+            info.code_hash, code_hash,
+            "code_hash must still match HISTORY_STORAGE bytecode after second commit"
+        );
+    }
+}

@@ -11,7 +11,7 @@ use alloy_eips::{
     eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
     BlockId,
 };
-use alloy_primitives::{address, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::{state::EvmOverrides, TransactionRequest};
 use gravity_api_types::{
     config_storage::{BlockNumber, ConfigStorage, OnChainConfig},
@@ -328,33 +328,23 @@ async fn run_pipe_pre_fork(
 }
 
 #[test]
-fn test_p1_pre_fork_no_deployment() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
+fn test_p1_pre_fork_no_deployment_grevm() {
+    run_pipe_e2e_test(
         "gravity_prague.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p1_test",
-    ])
-    .unwrap();
+        "data/gravity_eip2935_p1_grevm_test",
+        false,
+        run_pipe_pre_fork,
+    );
+}
 
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_pre_fork(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn test_p1_pre_fork_no_deployment_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague.json",
+        "data/gravity_eip2935_p1_disable_grevm_test",
+        true,
+        run_pipe_pre_fork,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -432,33 +422,23 @@ async fn run_pipe_p3_activation(
 }
 
 #[test]
-fn test_p3_activation_block() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
+fn test_p3_activation_block_grevm() {
+    run_pipe_e2e_test(
         "gravity_prague_p3.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p3_test",
-    ])
-    .unwrap();
+        "data/gravity_eip2935_p3_grevm_test",
+        false,
+        run_pipe_p3_activation,
+    );
+}
 
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_p3_activation(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn test_p3_activation_block_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p3_disable_grevm_test",
+        true,
+        run_pipe_p3_activation,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -554,33 +534,23 @@ async fn run_pipe_p4_post_activation(
 }
 
 #[test]
-fn test_p4_no_redeploy_at_t_plus_1() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
+fn test_p4_no_redeploy_at_t_plus_1_grevm() {
+    run_pipe_e2e_test(
         "gravity_prague_p3.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p4_test",
-    ])
-    .unwrap();
+        "data/gravity_eip2935_p4_grevm_test",
+        false,
+        run_pipe_p4_post_activation,
+    );
+}
 
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_p4_post_activation(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn test_p4_no_redeploy_at_t_plus_1_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p4_disable_grevm_test",
+        true,
+        run_pipe_p4_post_activation,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -676,33 +646,23 @@ async fn run_pipe_p5_idempotency(
 }
 
 #[test]
-fn test_p5_redeployment_idempotency() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
+fn test_p5_redeployment_idempotency_grevm() {
+    run_pipe_e2e_test(
         "gravity_prague_p3.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p5_test",
-    ])
-    .unwrap();
+        "data/gravity_eip2935_p5_grevm_test",
+        false,
+        run_pipe_p5_idempotency,
+    );
+}
 
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_p5_idempotency(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn test_p5_redeployment_idempotency_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p5_disable_grevm_test",
+        true,
+        run_pipe_p5_idempotency,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -719,33 +679,23 @@ fn test_p5_redeployment_idempotency() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_p15_chainspec_without_prague_time() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
+fn test_p15_chainspec_without_prague_time_grevm() {
+    run_pipe_e2e_test(
         "gravity_hardfork.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p15_test",
-    ])
-    .unwrap();
+        "data/gravity_eip2935_p15_grevm_test",
+        false,
+        run_pipe_pre_fork,
+    );
+}
 
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_pre_fork(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn test_p15_chainspec_without_prague_time_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_hardfork.json",
+        "data/gravity_eip2935_p15_disable_grevm_test",
+        true,
+        run_pipe_pre_fork,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -761,33 +711,23 @@ fn test_p15_chainspec_without_prague_time() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_p2_genesis_activation_no_auto_deploy() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
+fn test_p2_genesis_activation_no_auto_deploy_grevm() {
+    run_pipe_e2e_test(
         "gravity_prague_genesis.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p2_test",
-    ])
-    .unwrap();
+        "data/gravity_eip2935_p2_grevm_test",
+        false,
+        run_pipe_pre_fork,
+    );
+}
 
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_pre_fork(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn test_p2_genesis_activation_no_auto_deploy_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_genesis.json",
+        "data/gravity_eip2935_p2_disable_grevm_test",
+        true,
+        run_pipe_pre_fork,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -909,18 +849,13 @@ async fn run_pipe_p6_transient_parent_hash(
     );
 
     // Sanity: block 99 also has a coherent parent_hash chained back to its predecessor.
-    assert_ne!(
-        header_99.parent_hash, B256::ZERO,
-        "block 99 must reference a non-zero parent"
-    );
+    assert_ne!(header_99.parent_hash, B256::ZERO, "block 99 must reference a non-zero parent");
 
     println!(
         "[eip2935_test] ✅ P-6 transient parent_hash:\n  real_hash(99) = {real_hash_99:?}\n  mock_block_id(99) = {transient_99:?}\n  header_100.parent_hash = {:?}",
         header_100.parent_hash
     );
-    println!(
-        "[eip2935_test]   → header_100.parent_hash == real_hash(99) ✓ (seal overwrite)"
-    );
+    println!("[eip2935_test]   → header_100.parent_hash == real_hash(99) ✓ (seal overwrite)");
     println!(
         "[eip2935_test]   → slot 99 == mock_block_id(99) ✓ (transient carrier consumed by SystemCaller)"
     );
@@ -928,33 +863,23 @@ async fn run_pipe_p6_transient_parent_hash(
 }
 
 #[test]
-fn test_p6_transient_parent_hash_carrier() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
+fn test_p6_transient_parent_hash_carrier_grevm() {
+    run_pipe_e2e_test(
         "gravity_prague_p3.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p6_test",
-    ])
-    .unwrap();
+        "data/gravity_eip2935_p6_grevm_test",
+        false,
+        run_pipe_p6_transient_parent_hash,
+    );
+}
 
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_p6_transient_parent_hash(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn test_p6_transient_parent_hash_carrier_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p6_disable_grevm_test",
+        true,
+        run_pipe_p6_transient_parent_hash,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,82 +991,57 @@ async fn run_pipe_p16_pre_t_silent(
 }
 
 #[test]
-fn test_p16_pre_t_no_deployment() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
+fn test_p16_pre_t_no_deployment_grevm() {
+    run_pipe_e2e_test(
         "gravity_prague_p3.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p16_test",
-    ])
-    .unwrap();
+        "data/gravity_eip2935_p16_grevm_test",
+        false,
+        run_pipe_p16_pre_t_silent,
+    );
+}
 
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_p16_pre_t_silent(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn test_p16_pre_t_no_deployment_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p16_disable_grevm_test",
+        true,
+        run_pipe_p16_pre_t_silent,
+    );
 }
 
 // ---------------------------------------------------------------------------
-// P-7 / P-8 shared infrastructure — HISTORY_STORAGE reader
+// P-7' / P-8': eth_call directly against canonical HISTORY_STORAGE_ADDRESS
 //
-// The pipe layer auto-deploys a thin reader contract at the activation
-// block when the chainspec's `gravityTestReaderDeployTime` extra field is
-// set (see lib.rs::deploy_test_history_reader_contract). The reader's
-// runtime bytecode forwards a single 32-byte calldata `n` to
-// `staticcall(HISTORY_STORAGE_ADDRESS, n)` and bubbles up the result —
-// success path returns the 32-byte storage value, revert path surfaces
-// the underlying revert. This lets eth_call exercise the exact same EVM
-// pre-condition checks dApps would see at runtime.
+// The end-to-end user contract is "dApp calls eth_call to HISTORY_STORAGE
+// with 32-byte calldata = block number n; gets back the corresponding block
+// id, or reverts if n is out of window". These two cases exercise that
+// contract through pipe deploy + RPC + EVM + bytecode — any layer breaking
+// (cache/journaling timing, RPC simulation seeing stale state, ...) reds.
+// No probe contract / no chainspec bypass: the canonical 0x...0935 address
+// is the production EIP-2935 entry point.
+//
+// P-7' sample plan (block 110 with pragueTime aligned to block 100):
+//   - n=99   → SystemCaller wrote slot 99 at block 100, expect mock_block_id(99)
+//   - n=109  → SystemCaller wrote slot 109 at block 110, expect mock_block_id(109)
+//   - n=50   → pre-T slot, never written; predicate n < N && N - n <= 8191 holds, so the read path
+//     returns ZERO without revert
+//   - n=0    → same warmup-miss path
+//
+// P-8' boundary plan (same fixture):
+//   - n == N      → contract's n < block.number guard fails → revert
+//   - n == N + 1  → same
+//   - n == u64::MAX → far-future / overflow → same
 // ---------------------------------------------------------------------------
 
-/// Mirror of `lib.rs::TEST_HISTORY_QUERY_READER_ADDRESS` — kept literal so
-/// any drift between the pipe-side hook and the test driver fails loudly.
-const READER_ADDRESS: Address = address!("0x00000000000000000000000000000000000C0DE1");
-
-/// Number of blocks pushed past the Prague activation block. With T=100 and
-/// the reader deployed at the same time, pushing 10 more blocks fills ring
-/// slots 99..=109 with `mock_block_id(99..=109)`, leaving slots 0..98 and
-/// 110..8190 unwritten — the canonical warmup window.
-const P7_BLOCKS_AFTER_T: u64 = 10;
-const P7_QUERY_BLOCK: u64 = P3_ACTIVATION_BLOCK + P7_BLOCKS_AFTER_T;
-
-/// Build a `TransactionRequest` that calls the reader at block `query_block`
-/// with `n` as raw 32-byte calldata.
-fn build_reader_call(n: u64) -> TransactionRequest {
+/// Build a `TransactionRequest` for `eth_call` against the canonical
+/// `HISTORY_STORAGE_ADDRESS` with `n` packed as 32-byte big-endian calldata.
+fn call_history_storage_request(n: u64) -> TransactionRequest {
     let calldata = Bytes::copy_from_slice(B256::from(U256::from(n)).as_slice());
-    TransactionRequest::default().to(READER_ADDRESS).input(calldata.into())
+    TransactionRequest::default().to(HISTORY_STORAGE_ADDRESS).input(calldata.into())
 }
 
-// ---------------------------------------------------------------------------
-// P-7: Warmup-window queries — pre-T blocks return ZERO without revert,
-//      already-populated post-T blocks return the stored block_id.
-//
-// Exercises the contract's `n < N && N - n <= 8191` predicate via eth_call.
-// All sampled `n` values satisfy the predicate (so no revert path is taken
-// here — P-8 covers the revert side). Slot semantics:
-//   - n=0..98     → never written (system call started at T=100, ring index
-//                   for block 100 is (100-1)%8191=99). SLOAD on unwritten
-//                   slot returns ZERO. The reader must surface ZERO, NOT
-//                   revert — the historical / warmup-window contract behaviour.
-//   - n=99..=109  → written by blocks 100..=110 respectively.
-//                   Slot (n) % 8191 == n for n < 8191, so storage[n] = mock_block_id(n).
-// ---------------------------------------------------------------------------
-
-async fn run_pipe_p7_warmup_window(
+async fn run_pipe_p7_warmup_eth_call(
     builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>,
 ) -> eyre::Result<()> {
     let handle = builder
@@ -1170,7 +1070,7 @@ async fn run_pipe_p7_warmup_window(
 
     assert_eq!(
         latest_block_number, 0,
-        "P-7 expects a fresh datadir so block numbers align with deterministic timestamps"
+        "P-7' expects a fresh datadir so block numbers align with deterministic timestamps"
     );
 
     let storage = BlockViewStorage::new(provider.clone());
@@ -1187,131 +1087,64 @@ async fn run_pipe_p7_warmup_window(
 
     tx.send(ExecutionArgs { block_number_to_block_id: BTreeMap::new() }).unwrap();
 
-    let consensus = MockConsensus::new(pipeline_api, P7_QUERY_BLOCK, Box::new(p3_ts_us));
+    // Push 110 blocks: SystemCaller fills slot indices 99..=109 (one per block
+    // 100..=110), leaving slot 0..=98 / 110..=8190 as the warmup window.
+    let query_block: u64 = P3_ACTIVATION_BLOCK + 10;
+    let consensus = MockConsensus::new(pipeline_api, query_block, Box::new(p3_ts_us));
     consensus.run(latest_block_number).await;
 
-    // Sanity: the reader contract was deployed by the pipe hook at the activation
-    // block — confirm it carries the expected runtime code before issuing calls.
-    let state = provider
-        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(P7_QUERY_BLOCK))
-        .unwrap();
-    let reader_code = state
-        .account_code(&READER_ADDRESS)
-        .expect("read reader account_code")
-        .expect("test HISTORY_STORAGE reader must be deployed");
-    assert_eq!(
-        reader_code.original_bytes().len(),
-        52,
-        "reader bytecode length drift — pipe lib and test must stay in sync"
-    );
-    drop(state);
+    let query_at = Some(BlockId::Number(query_block.into()));
 
-    let query_at = Some(BlockId::Number(P7_QUERY_BLOCK.into()));
-
-    // Case 1: n=99 — written at block 100 (slot (100-1)%8191=99). Should
-    // return mock_block_id(99).
+    // Populated post-T slots: n=99 / n=109 → expect mock_block_id(n).
     let ret = eth_api
-        .call(build_reader_call(99), query_at, EvmOverrides::default())
+        .call(call_history_storage_request(99), query_at, EvmOverrides::default())
         .await
-        .expect("reader.query(99) must not revert (n=99 in [N-8191, N-1] at N=110)");
+        .expect("eth_call(HISTORY_STORAGE, n=99) must not revert");
     assert_eq!(
         ret.as_ref(),
         mock_block_id(99).as_slice(),
-        "warmup hit at n=99 must surface mock_block_id(99)"
+        "eth_call(n=99) must return mock_block_id(99)"
     );
-    println!("[eip2935_test] ✅ P-7 query(99) at block 110 → mock_block_id(99)");
+    println!("[eip2935_test] ✅ P-7' eth_call(n=99) → mock_block_id(99)");
 
-    // Case 2: n=109 — written at block 110 (slot (110-1)%8191=109). Should
-    // return mock_block_id(109).
     let ret = eth_api
-        .call(build_reader_call(109), query_at, EvmOverrides::default())
+        .call(call_history_storage_request(109), query_at, EvmOverrides::default())
         .await
-        .expect("reader.query(109) must not revert");
+        .expect("eth_call(HISTORY_STORAGE, n=109) must not revert");
     assert_eq!(
         ret.as_ref(),
         mock_block_id(109).as_slice(),
-        "warmup hit at n=109 must surface mock_block_id(109)"
+        "eth_call(n=109) must return mock_block_id(109)"
     );
-    println!("[eip2935_test] ✅ P-7 query(109) at block 110 → mock_block_id(109)");
+    println!("[eip2935_test] ✅ P-7' eth_call(n=109) → mock_block_id(109)");
 
-    // Case 3: n=50 — pre-activation block number. Slot 50 was NEVER written
-    // (the per-block SSTORE started at T=100, writing slot 99 first). The
-    // contract's range predicate is satisfied (50 < 110 ✓, 110-50=60 ≤ 8191 ✓),
-    // so the call must succeed and return ZERO — *not* revert.
+    // Warmup-window pre-T slots: predicate n < N && N - n <= 8191 holds,
+    // SLOAD on unwritten slot returns ZERO → contract returns ZERO, no revert.
     let ret = eth_api
-        .call(build_reader_call(50), query_at, EvmOverrides::default())
+        .call(call_history_storage_request(50), query_at, EvmOverrides::default())
         .await
-        .expect("warmup pre-T n=50 must return ZERO, not revert");
+        .expect("eth_call(HISTORY_STORAGE, n=50) must return ZERO, not revert");
     assert_eq!(
         ret.as_ref(),
         [0u8; 32].as_ref(),
-        "warmup miss at n=50 must surface ZERO (slot never written, but n in [N-8191, N-1])"
+        "eth_call(n=50) at block 110 must surface ZERO (slot never written, but in window)"
     );
-    println!("[eip2935_test] ✅ P-7 query(50) at block 110 → 0x00..00 (warmup miss, no revert)");
+    println!("[eip2935_test] ✅ P-7' eth_call(n=50) → 0x00..00 (warmup miss)");
 
-    // Case 4: n=0 — even earlier pre-activation block. Same warmup-miss path.
     let ret = eth_api
-        .call(build_reader_call(0), query_at, EvmOverrides::default())
+        .call(call_history_storage_request(0), query_at, EvmOverrides::default())
         .await
-        .expect("warmup pre-T n=0 must return ZERO, not revert");
-    assert_eq!(
-        ret.as_ref(),
-        [0u8; 32].as_ref(),
-        "warmup miss at n=0 must surface ZERO"
-    );
-    println!("[eip2935_test] ✅ P-7 query(0) at block 110 → 0x00..00");
+        .expect("eth_call(HISTORY_STORAGE, n=0) must return ZERO, not revert");
+    assert_eq!(ret.as_ref(), [0u8; 32].as_ref(), "eth_call(n=0) must surface ZERO");
+    println!("[eip2935_test] ✅ P-7' eth_call(n=0) → 0x00..00");
 
     println!(
-        "[eip2935_test] ✅ P-7 warmup window: pre-T queries return ZERO without revert; populated slots return their mock_block_id."
+        "[eip2935_test] ✅ P-7' warmup window: eth_call direct to canonical HISTORY_STORAGE_ADDRESS surfaces correct block ids and warmup ZEROs without revert."
     );
     Ok(())
 }
 
-#[test]
-fn test_p7_warmup_window_queries() {
-    init_panic_hook_and_tracer();
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
-        "gravity_prague_p7.json",
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        "data/gravity_eip2935_p7_test",
-    ])
-    .unwrap();
-
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_p7_warmup_window(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    std::thread::sleep(Duration::from_secs(2));
-}
-
-// ---------------------------------------------------------------------------
-// P-8: Out-of-window queries revert
-//
-// Exercises the contract's two revert paths:
-//   (a) n >= block.number    → "future / current block" guard
-//   (b) N - n > 8191          → "past window exceeded" guard
-//
-// Path (b) requires advancing past block 8192 (slow — gated by ring depth);
-// we cover (a) here, which is the load-bearing day-one path for dApps that
-// pass user-controlled block numbers. The bubble-up semantics are also
-// asserted: the reader contract MUST surface the revert (i.e. eth_api.call
-// returns Err), not silently swallow the staticcall failure.
-// ---------------------------------------------------------------------------
-
-async fn run_pipe_p8_out_of_window_revert(
+async fn run_pipe_p8_out_of_window_eth_call(
     builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>,
 ) -> eyre::Result<()> {
     let handle = builder
@@ -1340,7 +1173,7 @@ async fn run_pipe_p8_out_of_window_revert(
 
     assert_eq!(
         latest_block_number, 0,
-        "P-8 expects a fresh datadir so block numbers align with deterministic timestamps"
+        "P-8' expects a fresh datadir so block numbers align with deterministic timestamps"
     );
 
     let storage = BlockViewStorage::new(provider.clone());
@@ -1357,69 +1190,124 @@ async fn run_pipe_p8_out_of_window_revert(
 
     tx.send(ExecutionArgs { block_number_to_block_id: BTreeMap::new() }).unwrap();
 
-    let consensus = MockConsensus::new(pipeline_api, P7_QUERY_BLOCK, Box::new(p3_ts_us));
+    let query_block: u64 = P3_ACTIVATION_BLOCK + 10;
+    let consensus = MockConsensus::new(pipeline_api, query_block, Box::new(p3_ts_us));
     consensus.run(latest_block_number).await;
 
-    let query_at = Some(BlockId::Number(P7_QUERY_BLOCK.into()));
+    let query_at = Some(BlockId::Number(query_block.into()));
 
-    // (a) n == N — "current block" guard. Per the EIP-2935 spec contract,
-    //     `n > N-1` (i.e. n >= N) reverts. With eth_call's BlockEnv setting
-    //     NUMBER=N (the queried block), n=N triggers the guard.
+    // n == N: contract's `n < block.number` guard fails.
     let err = eth_api
-        .call(build_reader_call(P7_QUERY_BLOCK), query_at, EvmOverrides::default())
+        .call(call_history_storage_request(query_block), query_at, EvmOverrides::default())
         .await
-        .expect_err("reader.query(N) must revert via n >= N guard");
-    println!(
-        "[eip2935_test] ✅ P-8 query(N={P7_QUERY_BLOCK}) reverted as expected: {err:?}"
-    );
+        .expect_err("eth_call(HISTORY_STORAGE, n=N) must revert");
+    println!("[eip2935_test] ✅ P-8' eth_call(n=N={query_block}) reverted: {err:?}");
 
-    // (a') n = N + 1 — clearly future.
+    // n == N + 1: clearly future.
     let err = eth_api
-        .call(build_reader_call(P7_QUERY_BLOCK + 1), query_at, EvmOverrides::default())
+        .call(call_history_storage_request(query_block + 1), query_at, EvmOverrides::default())
         .await
-        .expect_err("reader.query(N+1) must revert");
-    println!(
-        "[eip2935_test] ✅ P-8 query(N+1={}) reverted as expected: {err:?}",
-        P7_QUERY_BLOCK + 1
-    );
+        .expect_err("eth_call(HISTORY_STORAGE, n=N+1) must revert");
+    println!("[eip2935_test] ✅ P-8' eth_call(n=N+1={}) reverted: {err:?}", query_block + 1);
 
-    // (a'') n = u64::MAX — far-future / overflow guard.
+    // n == u64::MAX: far-future / overflow.
     let err = eth_api
-        .call(build_reader_call(u64::MAX), query_at, EvmOverrides::default())
+        .call(call_history_storage_request(u64::MAX), query_at, EvmOverrides::default())
         .await
-        .expect_err("reader.query(u64::MAX) must revert");
-    println!(
-        "[eip2935_test] ✅ P-8 query(u64::MAX) reverted as expected: {err:?}"
-    );
+        .expect_err("eth_call(HISTORY_STORAGE, n=u64::MAX) must revert");
+    println!("[eip2935_test] ✅ P-8' eth_call(n=u64::MAX) reverted: {err:?}");
 
     println!(
-        "[eip2935_test] ✅ P-8 out-of-window: n >= N consistently reverts (3 sampled boundary cases). Past-window (N-n > 8191) gate deferred to P-9 ring-buffer test."
+        "[eip2935_test] ✅ P-8' out-of-window: eth_call direct to canonical HISTORY_STORAGE_ADDRESS reverts on n >= N (3 sampled boundaries)."
     );
     Ok(())
 }
 
 #[test]
-fn test_p8_out_of_window_revert() {
+fn test_p7_warmup_eth_call_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p7_grevm_test",
+        false,
+        run_pipe_p7_warmup_eth_call,
+    );
+}
+
+#[test]
+fn test_p7_warmup_eth_call_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p7_disable_grevm_test",
+        true,
+        run_pipe_p7_warmup_eth_call,
+    );
+}
+
+#[test]
+fn test_p8_out_of_window_eth_call_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p8_grevm_test",
+        false,
+        run_pipe_p8_out_of_window_eth_call,
+    );
+}
+
+#[test]
+fn test_p8_out_of_window_eth_call_disable_grevm() {
+    run_pipe_e2e_test(
+        "gravity_prague_p3.json",
+        "data/gravity_eip2935_p8_disable_grevm_test",
+        true,
+        run_pipe_p8_out_of_window_eth_call,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// shared init + parameterization helper
+//
+// `run_pipe_e2e_test` is the single entry point every #[test] in this file
+// dispatches through. It builds the NodeCommand CLI args, optionally
+// appending `--gravity.disable-grevm`, then drives the CliRunner. This is
+// how each behavior case (P-1..P-8' / P-15 / P-16) gets sampled twice — once
+// on the grevm path and once on the WrapExecutor path — without duplicating
+// 25 lines of CLI boilerplate per case.
+// ---------------------------------------------------------------------------
+
+fn run_pipe_e2e_test<F, Fut>(
+    chain_spec_file: &'static str,
+    datadir: &'static str,
+    disable_grevm: bool,
+    run_fn: F,
+) where
+    F: FnOnce(WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = eyre::Result<()>> + Send + 'static,
+{
     init_panic_hook_and_tracer();
 
     let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
+
+    let mut args: Vec<&str> = vec![
         "reth",
         "--chain",
-        "gravity_prague_p7.json",
+        chain_spec_file,
         "--with-unused-ports",
         "--dev",
         "--datadir",
-        "data/gravity_eip2935_p8_test",
-    ])
-    .unwrap();
+        datadir,
+    ];
+    if disable_grevm {
+        args.push("--gravity.disable-grevm");
+    }
+    let command: NodeCommand<EthereumChainSpecParser> =
+        NodeCommand::try_parse_args_from(args).unwrap();
 
     runner
         .run_command_until_exit(|ctx| {
             command.execute(
                 ctx,
                 FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_pipe_p8_out_of_window_revert(builder).await
+                    run_fn(builder).await
                 }),
             )
         })
@@ -1427,10 +1315,6 @@ fn test_p8_out_of_window_revert() {
 
     std::thread::sleep(Duration::from_secs(2));
 }
-
-// ---------------------------------------------------------------------------
-// shared init
-// ---------------------------------------------------------------------------
 
 fn init_panic_hook_and_tracer() {
     std::panic::set_hook(Box::new(|panic_info| {
