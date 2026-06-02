@@ -94,14 +94,19 @@ jobs:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: Run gravity pipe + EIP-7702 / EIP-2935 integration tests
-        # Runs gravity_pipe_test plus the EIP-7702 and EIP-2935 integration
-        # binaries together — they share the same MockConsensus + PipeExecLayerApi
-        # harness, so one cold build covers all three.
+        # `--test <name>` is required (vs. just `-E 'binary(...)'`) because
+        # nextest's filterset only filters at *run* time — without `--test`,
+        # `-p <crate>` still tries to compile every integration binary in the
+        # crate, including ones that don't compile in this workspace (e.g.
+        # gravity_hardfork_test.rs depends on reth-ethereum-forks which is not
+        # in dev-dependencies). `--test` restricts both compile and run.
         run: |
           cargo nextest run \
             --locked \
             -p reth-pipe-exec-layer-ext-v2 \
-            -E 'binary(gravity_pipe_test) + binary(gravity_eip2935_test) + binary(gravity_eip7702_test)'
+            --test gravity_pipe_test \
+            --test gravity_eip2935_test \
+            --test gravity_eip7702_test
 
   integration-success:
     name: integration success
