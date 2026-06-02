@@ -63,6 +63,23 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
             );
             return false;
         }
+        // Pre-Prague safety. revm rejects any TxEip7702 with `Eip7702NotSupported`
+        // when `spec_id < PRAGUE` (revm-handler validation.rs:181-182), but
+        // `calculate_initial_tx_gas` below only adds the auth-list cost when
+        // `spec_id >= PRAGUE` (revm-interpreter gas/calc.rs:417). Without this
+        // guard a TxEip7702 with `gas_limit == 21000` in a pre-Prague OrderedBlock
+        // would pass the intrinsic check, reach the executor, and panic
+        // `lib.rs:1067-1073`. Closes the boundary called out in the acceptance
+        // design as P-2.
+        if tx.is_eip7702() && !spec_id.is_enabled_in(SpecId::PRAGUE) {
+            warn!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                spec_id=?spec_id,
+                "EIP-7702 tx in pre-Prague block"
+            );
+            return false;
+        }
         // Mirror reth pool's `ensure_intrinsic_gas` so non-pool-injected txs (e.g. consensus-side
         // mempool) cannot reach grevm with `gas_limit < initial_gas` and panic the executor.
         let access_list = tx.access_list();
@@ -551,6 +568,36 @@ mod tests {
 
         let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::PRAGUE);
         assert_eq!(invalid_idxs.len(), 1, "three-auth 7702 tx at 21k gas must be discarded");
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    /// Pre-Prague boundary (acceptance design P-2): a TxEip7702 with otherwise-fine intrinsic
+    /// gas (`gas_limit > 21_000` so the SHANGHAI calculator that ignores `auth_list_num` would
+    /// accept it) must still be discarded when `spec_id < PRAGUE`, because the executor would
+    /// otherwise reject the tx with `Eip7702NotSupported` and panic `lib.rs:1067-1073`.
+    #[test]
+    fn test_filter_invalid_txs_eip7702_rejected_pre_prague() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: B256::default(),
+                code: None,
+            },
+        );
+
+        // 100k gas is well above the pre-Prague intrinsic (21k flat, since the
+        // auth-list cost is gated behind PRAGUE). Without the pre-Prague guard
+        // this tx would pass the filter and panic the executor.
+        let tx = create_test_7702_transaction(0, 100_000, 1);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::SHANGHAI);
+        assert_eq!(invalid_idxs.len(), 1, "7702 tx must be discarded when spec_id < PRAGUE");
         assert!(invalid_idxs.contains(&0));
     }
 

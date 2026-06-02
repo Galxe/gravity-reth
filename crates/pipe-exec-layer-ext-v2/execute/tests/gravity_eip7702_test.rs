@@ -66,11 +66,7 @@ use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -140,10 +136,6 @@ fn authority_signer(seed: u8) -> PrivateKeySigner {
 
 fn mock_block_id(block_number: u64) -> B256 {
     B256::left_padding_from(&block_number.to_be_bytes())
-}
-
-fn now_us(_block_number: u64) -> u64 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros() as u64
 }
 
 fn p3_ts_us(block_number: u64) -> u64 {
@@ -675,9 +667,4 @@ fn init_panic_hook_and_tracer() {
             Some("always".to_string()),
         ))
         .init();
-}
-
-#[allow(dead_code)]
-fn _silence_unused(_: fn() -> u64) {
-    let _ = now_us;
 }
