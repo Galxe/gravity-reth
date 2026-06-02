@@ -10031,6 +10031,7 @@ dependencies = [
  "reth-trie",
  "reth-trie-parallel",
  "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-interpreter 25.0.3 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
  "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
  "serde",
  "serde_json",
