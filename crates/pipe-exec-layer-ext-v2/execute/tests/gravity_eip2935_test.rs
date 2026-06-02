@@ -2,10 +2,10 @@
 
 //! Integration tests for EIP-2935 (HISTORY_STORAGE) on the Gravity pipe-exec-layer.
 //!
-//! Boots a single reth node from `gravity_prague*.json` (Prague-enabled variants of
-//! `gravity_hardfork.json`) and drives `MockConsensus + PipeExecLayerApi` to exercise
-//! the EIP-2935 activation path described in
-//! `_local/drafts/eip-2935/EIP-2935-acceptance-tests-2026-06-01.md`.
+//! Boots a single reth node from `gravity_hardfork.json` patched with a per-test
+//! `pragueTime` (via `gravity_prague_chainspec()` below) and drives
+//! `MockConsensus + PipeExecLayerApi` to exercise the EIP-2935 activation path
+//! described in `_local/drafts/eip-2935/EIP-2935-acceptance-tests-2026-06-01.md`.
 
 use alloy_eips::{
     eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
@@ -47,11 +47,46 @@ const PRE_FORK_BLOCK_COUNT: u64 = 50;
 
 /// P-3: pragueTime is aligned so block 100 is the activation block.
 ///
-/// `gravity_prague_p3.json` sets `pragueTime = P3_TS_BASE + P3_ACTIVATION_BLOCK`.
 /// Block N is pushed with `timestamp = P3_TS_BASE + N`, so block 99's ts equals
 /// `pragueTime - 1` (pre-Prague) and block 100's ts equals `pragueTime` (transitions).
 const P3_TS_BASE: u64 = 2_000_000_000;
 const P3_ACTIVATION_BLOCK: u64 = 100;
+
+/// pragueTime aligned to the P-3 activation block. Used by P-3 / P-4 / P-5 /
+/// P-6 / P-7' / P-8' / P-16 — every test that needs the chain to cross the
+/// Prague boundary within the deterministic timestamp range.
+const PRAGUE_TS_BLOCK_100: u64 = P3_TS_BASE + P3_ACTIVATION_BLOCK;
+
+/// "Prague never fires during the test" — far-future timestamp. Used by P-1
+/// to verify the deployment branch stays dormant when `pragueTime` is set
+/// (`ForkCondition::Timestamp(far_future)`).
+const PRAGUE_TS_FAR_FUTURE: u64 = 9_999_999_999;
+
+/// `pragueTime = 0` boundary case. Used by P-2 to verify
+/// `transitions_at_timestamp(parent_ts=0, current_ts=0)` returns false
+/// (`parent_ts < pragueTime` is `0 < 0` ⇒ false), so the deployment branch
+/// is unreachable from genesis without an alloc preload.
+const PRAGUE_TS_GENESIS: u64 = 0;
+
+/// Build a Gravity chainspec JSON string by loading `gravity_hardfork.json`
+/// at compile time and patching `config.pragueTime`.
+///
+/// - `Some(ts)` ⇒ `ForkCondition::Timestamp(ts)` — Prague fires at `ts`.
+/// - `None` ⇒ field omitted ⇒ `ForkCondition::Never` — Prague never fires. Used by P-15 to verify
+///   the missing-field path.
+///
+/// Returns an in-memory JSON string. `chain_value_parser`
+/// (`crates/ethereum/cli/src/chainspec.rs`) accepts in-memory JSON for
+/// `--chain`, so no tempfile is needed.
+fn gravity_prague_chainspec(prague_time: Option<u64>) -> String {
+    let mut json: serde_json::Value =
+        serde_json::from_str(include_str!("../gravity_hardfork.json"))
+            .expect("gravity_hardfork.json must parse as JSON");
+    if let Some(ts) = prague_time {
+        json["config"]["pragueTime"] = serde_json::json!(ts);
+    }
+    json.to_string()
+}
 
 fn mock_block_id(block_number: u64) -> B256 {
     B256::left_padding_from(&block_number.to_be_bytes())
@@ -330,7 +365,7 @@ async fn run_pipe_pre_fork(
 #[test]
 fn test_p1_pre_fork_no_deployment_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_FAR_FUTURE)),
         "data/gravity_eip2935_p1_grevm_test",
         false,
         run_pipe_pre_fork,
@@ -340,7 +375,7 @@ fn test_p1_pre_fork_no_deployment_grevm() {
 #[test]
 fn test_p1_pre_fork_no_deployment_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_FAR_FUTURE)),
         "data/gravity_eip2935_p1_disable_grevm_test",
         true,
         run_pipe_pre_fork,
@@ -424,7 +459,7 @@ async fn run_pipe_p3_activation(
 #[test]
 fn test_p3_activation_block_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p3_grevm_test",
         false,
         run_pipe_p3_activation,
@@ -434,7 +469,7 @@ fn test_p3_activation_block_grevm() {
 #[test]
 fn test_p3_activation_block_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p3_disable_grevm_test",
         true,
         run_pipe_p3_activation,
@@ -536,7 +571,7 @@ async fn run_pipe_p4_post_activation(
 #[test]
 fn test_p4_no_redeploy_at_t_plus_1_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p4_grevm_test",
         false,
         run_pipe_p4_post_activation,
@@ -546,7 +581,7 @@ fn test_p4_no_redeploy_at_t_plus_1_grevm() {
 #[test]
 fn test_p4_no_redeploy_at_t_plus_1_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p4_disable_grevm_test",
         true,
         run_pipe_p4_post_activation,
@@ -648,7 +683,7 @@ async fn run_pipe_p5_idempotency(
 #[test]
 fn test_p5_redeployment_idempotency_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p5_grevm_test",
         false,
         run_pipe_p5_idempotency,
@@ -658,7 +693,7 @@ fn test_p5_redeployment_idempotency_grevm() {
 #[test]
 fn test_p5_redeployment_idempotency_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p5_disable_grevm_test",
         true,
         run_pipe_p5_idempotency,
@@ -681,7 +716,7 @@ fn test_p5_redeployment_idempotency_disable_grevm() {
 #[test]
 fn test_p15_chainspec_without_prague_time_grevm() {
     run_pipe_e2e_test(
-        "gravity_hardfork.json",
+        &gravity_prague_chainspec(None),
         "data/gravity_eip2935_p15_grevm_test",
         false,
         run_pipe_pre_fork,
@@ -691,7 +726,7 @@ fn test_p15_chainspec_without_prague_time_grevm() {
 #[test]
 fn test_p15_chainspec_without_prague_time_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_hardfork.json",
+        &gravity_prague_chainspec(None),
         "data/gravity_eip2935_p15_disable_grevm_test",
         true,
         run_pipe_pre_fork,
@@ -713,7 +748,7 @@ fn test_p15_chainspec_without_prague_time_disable_grevm() {
 #[test]
 fn test_p2_genesis_activation_no_auto_deploy_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_genesis.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_GENESIS)),
         "data/gravity_eip2935_p2_grevm_test",
         false,
         run_pipe_pre_fork,
@@ -723,7 +758,7 @@ fn test_p2_genesis_activation_no_auto_deploy_grevm() {
 #[test]
 fn test_p2_genesis_activation_no_auto_deploy_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_genesis.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_GENESIS)),
         "data/gravity_eip2935_p2_disable_grevm_test",
         true,
         run_pipe_pre_fork,
@@ -865,7 +900,7 @@ async fn run_pipe_p6_transient_parent_hash(
 #[test]
 fn test_p6_transient_parent_hash_carrier_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p6_grevm_test",
         false,
         run_pipe_p6_transient_parent_hash,
@@ -875,7 +910,7 @@ fn test_p6_transient_parent_hash_carrier_grevm() {
 #[test]
 fn test_p6_transient_parent_hash_carrier_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p6_disable_grevm_test",
         true,
         run_pipe_p6_transient_parent_hash,
@@ -993,7 +1028,7 @@ async fn run_pipe_p16_pre_t_silent(
 #[test]
 fn test_p16_pre_t_no_deployment_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p16_grevm_test",
         false,
         run_pipe_p16_pre_t_silent,
@@ -1003,7 +1038,7 @@ fn test_p16_pre_t_no_deployment_grevm() {
 #[test]
 fn test_p16_pre_t_no_deployment_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p16_disable_grevm_test",
         true,
         run_pipe_p16_pre_t_silent,
@@ -1226,7 +1261,7 @@ async fn run_pipe_p8_out_of_window_eth_call(
 #[test]
 fn test_p7_warmup_eth_call_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p7_grevm_test",
         false,
         run_pipe_p7_warmup_eth_call,
@@ -1236,7 +1271,7 @@ fn test_p7_warmup_eth_call_grevm() {
 #[test]
 fn test_p7_warmup_eth_call_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p7_disable_grevm_test",
         true,
         run_pipe_p7_warmup_eth_call,
@@ -1246,7 +1281,7 @@ fn test_p7_warmup_eth_call_disable_grevm() {
 #[test]
 fn test_p8_out_of_window_eth_call_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p8_grevm_test",
         false,
         run_pipe_p8_out_of_window_eth_call,
@@ -1256,7 +1291,7 @@ fn test_p8_out_of_window_eth_call_grevm() {
 #[test]
 fn test_p8_out_of_window_eth_call_disable_grevm() {
     run_pipe_e2e_test(
-        "gravity_prague_p3.json",
+        &gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100)),
         "data/gravity_eip2935_p8_disable_grevm_test",
         true,
         run_pipe_p8_out_of_window_eth_call,
@@ -1275,7 +1310,7 @@ fn test_p8_out_of_window_eth_call_disable_grevm() {
 // ---------------------------------------------------------------------------
 
 fn run_pipe_e2e_test<F, Fut>(
-    chain_spec_file: &'static str,
+    chain_spec: &str,
     datadir: &'static str,
     disable_grevm: bool,
     run_fn: F,
@@ -1287,15 +1322,8 @@ fn run_pipe_e2e_test<F, Fut>(
 
     let runner = CliRunner::try_default_runtime().unwrap();
 
-    let mut args: Vec<&str> = vec![
-        "reth",
-        "--chain",
-        chain_spec_file,
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        datadir,
-    ];
+    let mut args: Vec<&str> =
+        vec!["reth", "--chain", chain_spec, "--with-unused-ports", "--dev", "--datadir", datadir];
     if disable_grevm {
         args.push("--gravity.disable-grevm");
     }
