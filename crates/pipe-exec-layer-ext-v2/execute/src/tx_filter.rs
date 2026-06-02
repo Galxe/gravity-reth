@@ -10,21 +10,37 @@ use alloy_primitives::{
     Address, U256,
 };
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use reth_chainspec::ChainSpec;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm::ParallelDatabase;
+use reth_evm_ethereum::revm_spec_by_timestamp_and_block_number;
 use revm::state::AccountInfo;
 use revm_primitives::hardfork::SpecId;
 use tracing::warn;
 
 /// Return the invalid transaction indexes.
+///
+/// `chain_spec`, `block_timestamp`, `block_number` are taken instead of a
+/// pre-computed `SpecId` because the only consumer of `spec_id` here is the
+/// intrinsic-gas / 7702 fork-gate logic, and the caller (`lib.rs`) does not
+/// know which hardforks the filter *cares about* — historically it built a
+/// truncated MERGE/SHANGHAI/PRAGUE ladder that mislabelled CANCUN-active
+/// blocks as SHANGHAI. The canonical
+/// `revm_spec_by_timestamp_and_block_number` helper is used so the same
+/// (correct) mapping that the executor sees is the one the filter is gating
+/// against — no risk of the two drifting apart on a future hardfork.
 pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     db: DB,
     txs: &[TransactionSigned],
     senders: &[Address],
     base_fee_per_gas: u64,
     gas_limit: u64,
-    spec_id: SpecId,
+    chain_spec: &ChainSpec,
+    block_timestamp: u64,
+    block_number: u64,
 ) -> HashSet<usize> {
+    let spec_id =
+        revm_spec_by_timestamp_and_block_number(chain_spec, block_timestamp, block_number);
     let mut gas_limit_exceeded_tx_idx = txs.len();
     let mut tx_gas_limit_sum: u64 = 0;
     for (idx, tx) in txs.iter().enumerate() {
@@ -151,13 +167,28 @@ mod tests {
     use alloy_consensus::{TxEip7702, TxLegacy};
     use alloy_eips::eip7702::{Authorization, SignedAuthorization};
     use alloy_primitives::{Address, Signature, TxKind, B256};
+    use reth_chainspec::{ChainSpec, ChainSpecBuilder, MAINNET};
     use reth_ethereum_primitives::{Transaction, TransactionSigned};
     use reth_revm::state::{AccountInfo, Bytecode};
     use revm::{
         primitives::{StorageKey, StorageValue},
         DatabaseRef,
     };
-    use std::collections::HashMap as StdHashMap;
+    use std::{collections::HashMap as StdHashMap, sync::Arc};
+
+    /// Chainspec with Prague active from genesis — the canonical test fixture for
+    /// every case that wants the filter to apply 7702 intrinsic-gas rules.
+    fn prague_chain_spec() -> Arc<ChainSpec> {
+        Arc::new(ChainSpecBuilder::from(&*MAINNET).prague_activated().build())
+    }
+
+    /// Chainspec with Shanghai active from genesis but Prague unset — the
+    /// `pre-Prague` test fixture. Used to pin the boundary where a TxEip7702
+    /// must be discarded by the filter (revm would otherwise reject it with
+    /// `Eip7702NotSupported` and panic the executor).
+    fn shanghai_chain_spec() -> Arc<ChainSpec> {
+        Arc::new(ChainSpecBuilder::from(&*MAINNET).shanghai_activated().build())
+    }
 
     // Mock database for testing
     #[derive(Debug, Default)]
@@ -271,8 +302,16 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64; // 20 gwei
         let gas_limit = 30_000_000u64; // 30M gas
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert!(invalid_idxs.is_empty());
     }
 
@@ -288,8 +327,16 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert_eq!(invalid_idxs.len(), 1);
         assert!(invalid_idxs.contains(&0));
     }
@@ -315,8 +362,16 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert_eq!(invalid_idxs.len(), 1);
         assert!(invalid_idxs.contains(&0));
     }
@@ -345,8 +400,16 @@ mod tests {
         let base_fee_per_gas = 1_000;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert_eq!(invalid_idxs.len(), 2);
         assert!(invalid_idxs.contains(&0));
         assert!(invalid_idxs.contains(&2));
@@ -374,8 +437,16 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64; // 30M gas limit
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert_eq!(invalid_idxs.len(), 1);
         assert!(invalid_idxs.contains(&1));
     }
@@ -402,8 +473,16 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert!(invalid_idxs.is_empty());
     }
 
@@ -451,8 +530,16 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert_eq!(invalid_idxs.len(), 5, "invalid_idxs: {invalid_idxs:?}");
         assert!(invalid_idxs.contains(&1));
         assert!(invalid_idxs.contains(&2));
@@ -486,8 +573,16 @@ mod tests {
         let base_fee_per_gas = 0;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert_eq!(invalid_idxs.len(), 1, "intrinsic-gas-too-low 7702 tx should be discarded");
         assert!(invalid_idxs.contains(&0));
     }
@@ -514,8 +609,16 @@ mod tests {
         let base_fee_per_gas = 0;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
         assert!(invalid_idxs.is_empty(), "got: {invalid_idxs:?}");
     }
 
@@ -539,7 +642,8 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::PRAGUE);
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert!(
             invalid_idxs.is_empty(),
             "two-auth 7702 tx with 72k gas must pass: {invalid_idxs:?}"
@@ -566,7 +670,8 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::PRAGUE);
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert_eq!(invalid_idxs.len(), 1, "three-auth 7702 tx at 21k gas must be discarded");
         assert!(invalid_idxs.contains(&0));
     }
@@ -596,7 +701,8 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::SHANGHAI);
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &shanghai_chain_spec(), 0, 0);
         assert_eq!(invalid_idxs.len(), 1, "7702 tx must be discarded when spec_id < PRAGUE");
         assert!(invalid_idxs.contains(&0));
     }
@@ -622,7 +728,8 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::PRAGUE);
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert!(
             invalid_idxs.is_empty(),
             "legacy 21k-gas tx must not be regressed by the 7702 intrinsic fix: {invalid_idxs:?}"

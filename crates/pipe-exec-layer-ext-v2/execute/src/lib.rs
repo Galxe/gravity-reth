@@ -45,7 +45,6 @@ use reth_primitives_traits::{
 use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
 use reth_rpc_eth_api::RpcTypes;
 use revm::DatabaseRef;
-use revm_primitives::hardfork::SpecId;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -641,20 +640,14 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Discard the invalid txs
         let start_time = Instant::now();
-        let spec_id = if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
-            SpecId::PRAGUE
-        } else if self.chain_spec.is_shanghai_active_at_timestamp(block.timestamp) {
-            SpecId::SHANGHAI
-        } else {
-            SpecId::MERGE
-        };
         let (txs, senders, txs_info) = self.filter_invalid_txs(
             state,
             ordered_block.transactions,
             ordered_block.senders,
             base_fee,
             block.gas_limit,
-            spec_id,
+            block.timestamp,
+            block.number,
         );
         self.metrics.filter_transaction_duration.record(start_time.elapsed());
         let (txs, senders) = if !validator_txns.is_empty() {
@@ -1218,10 +1211,19 @@ impl<Storage: GravityStorage> Core<Storage> {
         senders: Vec<Address>,
         base_fee_per_gas: u64,
         gas_limit: u64,
-        spec_id: SpecId,
+        block_timestamp: u64,
+        block_number: u64,
     ) -> (Vec<TransactionSigned>, Vec<Address>, Vec<TxInfo>) {
-        let invalid_idxs =
-            tx_filter::filter_invalid_txs(db, &txs, &senders, base_fee_per_gas, gas_limit, spec_id);
+        let invalid_idxs = tx_filter::filter_invalid_txs(
+            db,
+            &txs,
+            &senders,
+            base_fee_per_gas,
+            gas_limit,
+            &self.chain_spec,
+            block_timestamp,
+            block_number,
+        );
         if invalid_idxs.is_empty() {
             let mut txs_info = Vec::with_capacity(txs.len());
             for (tx, sender) in txs.iter().zip(senders.iter()) {
