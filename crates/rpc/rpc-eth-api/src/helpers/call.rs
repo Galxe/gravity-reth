@@ -11,15 +11,17 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_eips::eip2930::AccessListResult;
 use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides, OverrideBlockHashes};
 use alloy_network::TransactionBuilder;
-use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
+    precompiles::{DynPrecompile, PrecompileInput, PrecompilesMap},
     ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor, SpecFor, TransactionEnv,
     TxEnvFor,
 };
@@ -42,6 +44,7 @@ use revm::{
         result::{ExecutionResult, ResultAndState},
         Transaction,
     },
+    precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult},
     Database, DatabaseCommit,
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
@@ -166,13 +169,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .context_for_next_block(&parent, this.next_env_attributes(&parent)?)
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
+                    let block_number = evm_env.block_env.number;
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs
                         let inspector = TransferInspector::new(false).with_logs(true);
-                        let evm = this
+                        let mut evm = this
                             .evm_config()
                             .evm_with_env_and_inspector(&mut db, evm_env, inspector);
+                        this.register_randomness_precompile_if_active(&mut evm, block_number);
                         let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
                         simulate::execute_transactions(
                             builder,
@@ -182,7 +187,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             this.tx_resp_builder(),
                         )?
                     } else {
-                        let evm = this.evm_config().evm_with_env(&mut db, evm_env);
+                        let mut evm = this.evm_config().evm_with_env(&mut db, evm_env);
+                        this.register_randomness_precompile_if_active(&mut evm, block_number);
                         let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
                         simulate::execute_transactions(
                             builder,
@@ -219,49 +225,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         overrides: EvmOverrides,
     ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send {
         async move {
-            if let Some(output) = self.handle_randomness_by_height_call(&request)? {
-                return Ok(output)
-            }
-
-            let res =
-                self.transact_call_at(request, block_number.unwrap_or_default(), overrides).await?;
+            let at = block_number.unwrap_or_default();
+            let res = self.transact_call_at(request, at, overrides).await?;
 
             ensure_success(res.result)
         }
-    }
-
-    /// Handles direct `eth_call` requests to Gravity's read-only randomness lookup precompile.
-    fn handle_randomness_by_height_call(
-        &self,
-        request: &RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
-    ) -> Result<Option<Bytes>, Self::Error> {
-        if request.as_ref().kind() != Some(TxKind::Call(RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR)) {
-            return Ok(None)
-        }
-
-        let input = request.as_ref().input().cloned().unwrap_or_default();
-        if input.len() != 32 {
-            return Err(EthApiError::InvalidParams(
-                "randomness-by-height precompile expects exactly 32 bytes".to_string(),
-            )
-            .into())
-        }
-
-        let height = U256::from_be_slice(&input);
-        let Ok(height) = u64::try_from(height) else {
-            return Ok(Some(randomness_by_height_response(false, B256::ZERO)))
-        };
-
-        let randomness = self
-            .provider()
-            .header_by_number(height)
-            .map_err(Self::Error::from_eth_err)?
-            .and_then(|header| header.mix_hash());
-
-        Ok(Some(match randomness {
-            Some(randomness) => randomness_by_height_response(true, randomness),
-            None => randomness_by_height_response(false, B256::ZERO),
-        }))
     }
 
     /// Simulate arbitrary number of transactions at an arbitrary blockchain index, with the
@@ -506,6 +474,51 @@ fn randomness_by_height_response(found: bool, randomness: B256) -> Bytes {
     output.into()
 }
 
+fn create_rpc_randomness_by_height_precompile<Provider>(provider: Provider) -> DynPrecompile
+where
+    Provider: HeaderProvider + Clone + Send + Sync + 'static,
+{
+    let precompile_id = PrecompileId::custom("randomness_by_height");
+
+    (precompile_id, move |input: PrecompileInput<'_>| -> PrecompileResult {
+        if input.data.len() != 32 {
+            return Err(PrecompileError::Other(
+                format!(
+                    "randomness-by-height precompile expects exactly 32 bytes, got {}",
+                    input.data.len()
+                )
+                .into(),
+            ))
+        }
+
+        let height = U256::from_be_slice(input.data);
+        let Ok(height) = u64::try_from(height) else {
+            return Ok(PrecompileOutput {
+                gas_used: 2_000,
+                bytes: randomness_by_height_response(false, B256::ZERO),
+                reverted: false,
+            })
+        };
+
+        let randomness = provider
+            .header_by_number(height)
+            .map_err(|err| {
+                PrecompileError::Other(format!("randomness lookup failed: {err}").into())
+            })?
+            .and_then(|header| header.mix_hash());
+
+        Ok(PrecompileOutput {
+            gas_used: 2_000,
+            bytes: match randomness {
+                Some(randomness) => randomness_by_height_response(true, randomness),
+                None => randomness_by_height_response(false, B256::ZERO),
+            },
+            reverted: false,
+        })
+    })
+        .into()
+}
+
 /// Executes code on state.
 pub trait Call:
     LoadState<
@@ -522,6 +535,28 @@ pub trait Call:
 
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
+
+    /// Returns whether Gravity's randomness lookup precompile is active for the given EVM block.
+    fn is_randomness_precompile_active(&self, block_number: U256) -> bool {
+        let Ok(block_number) = u64::try_from(block_number) else { return false };
+
+        self.provider()
+            .chain_spec()
+            .gravity_hardforks()
+            .is_fork_active_at_block(GravityHardfork::Alpha, block_number)
+    }
+
+    /// Registers Gravity's randomness lookup precompile when the EVM block is at or after Alpha.
+    fn register_randomness_precompile_if_active<EV>(&self, evm: &mut EV, block_number: U256)
+    where
+        EV: Evm<Precompiles = PrecompilesMap>,
+    {
+        if self.is_randomness_precompile_active(block_number) {
+            let precompile = create_rpc_randomness_by_height_precompile(self.provider().clone());
+            evm.precompiles_mut()
+                .apply_precompile(&RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, move |_| Some(precompile));
+        }
+    }
 
     /// Returns the max gas limit that the caller can afford given a transaction environment.
     fn caller_gas_allowance(
@@ -562,7 +597,9 @@ pub trait Call:
     where
         DB: Database<Error = ProviderError> + fmt::Debug,
     {
+        let block_number = evm_env.block_env.number;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
+        self.register_randomness_precompile_if_active(&mut evm, block_number);
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -581,7 +618,9 @@ pub trait Call:
         DB: Database<Error = ProviderError> + fmt::Debug,
         I: InspectorFor<Self::Evm, DB>,
     {
+        let block_number = evm_env.block_env.number;
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
+        self.register_randomness_precompile_if_active(&mut evm, block_number);
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -743,7 +782,9 @@ pub trait Call:
         DB: Database<Error = ProviderError> + DatabaseCommit + core::fmt::Debug,
         I: IntoIterator<Item = Recovered<&'a ProviderTx<Self::Provider>>>,
     {
+        let block_number = evm_env.block_env.number;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
+        self.register_randomness_precompile_if_active(&mut evm, block_number);
         let mut index = 0;
         for tx in transactions {
             if *tx.tx_hash() == target_tx_hash {

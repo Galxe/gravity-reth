@@ -26,7 +26,7 @@ use alloy_primitives::{Address, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
-use reth_chainspec::{ChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
     execute::BlockExecutionError, precompiles::DynPrecompile, ConfigureEvm, IntoTxEnv,
@@ -170,7 +170,6 @@ pub struct ExecutionArgs {
 }
 
 /// Owned by EL
-#[derive(Debug)]
 struct PipeExecService<Storage: GravityStorage> {
     /// Immutable part of the state
     core: Arc<Core<Storage>>,
@@ -217,7 +216,6 @@ struct ExecuteBlockContext {
     epoch: u64,
 }
 
-#[derive(Debug)]
 struct Core<Storage: GravityStorage> {
     /// Send executed block hash to Coordinator
     execution_result_tx: UnboundedSender<ExecutionResult>,
@@ -227,6 +225,7 @@ struct Core<Storage: GravityStorage> {
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
     custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+    randomness_provider: Arc<dyn RandomnessByHeightProvider>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
@@ -356,6 +355,27 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     fn execute_height(&self) -> u64 {
         self.execute_height.load(Ordering::Acquire)
+    }
+
+    fn custom_precompiles_for_block(
+        &self,
+        block_number: u64,
+    ) -> Arc<Vec<(Address, DynPrecompile)>> {
+        if !self
+            .chain_spec
+            .gravity_hardforks()
+            .is_fork_active_at_block(GravityHardfork::Alpha, block_number)
+        {
+            return self.custom_precompiles.clone()
+        }
+
+        Arc::new(vec![
+            (BLS_PRECOMPILE_ADDR, create_bls_pop_verify_precompile()),
+            (
+                RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+                create_randomness_by_height_precompile(self.randomness_provider.clone()),
+            ),
+        ])
     }
 
     /// DESIGN: All `.unwrap()` calls on barrier wait/notify, state root, and
@@ -996,7 +1016,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Create executor with state. System transactions will commit directly to its
         // ParallelState, so there is a single source of truth for both system and user txns.
         let mut executor = self.evm_config.parallel_executor(state);
-        executor.apply_custom_precompiles(self.custom_precompiles.clone());
+        executor.apply_custom_precompiles(self.custom_precompiles_for_block(block_number));
 
         // EIP-2935 (Prague) boundary state change: deploy `HISTORY_STORAGE_ADDRESS`
         // on the Prague activation block. Idempotency is gated by
@@ -1401,13 +1421,11 @@ where
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
-            custom_precompiles: Arc::new(vec![
-                (BLS_PRECOMPILE_ADDR, create_bls_pop_verify_precompile()),
-                (
-                    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
-                    create_randomness_by_height_precompile(randomness_provider),
-                ),
-            ]),
+            custom_precompiles: Arc::new(vec![(
+                BLS_PRECOMPILE_ADDR,
+                create_bls_pop_verify_precompile(),
+            )]),
+            randomness_provider,
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
                 (epoch, latest_block_number),
