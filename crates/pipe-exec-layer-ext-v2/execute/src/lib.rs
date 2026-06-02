@@ -2,6 +2,7 @@
 #[macro_use]
 mod channel;
 pub mod bls_precompile;
+mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
@@ -18,14 +19,8 @@ use metrics::PipeExecLayerMetrics;
 use alloy_consensus::{
     constants::EMPTY_WITHDRAWALS, BlockHeader, Header, Transaction, EMPTY_OMMER_ROOT_HASH,
 };
-use alloy_eips::{
-    eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
-    eip4895::Withdrawals,
-    merge::BEACON_NONCE,
-    BlockNumberOrTag,
-};
+use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{
-    keccak256,
     map::{HashMap, HashSet},
     Address, TxHash, B256, U256,
 };
@@ -33,7 +28,7 @@ use alloy_rpc_types_eth::TransactionRequest;
 use gravity_primitives::get_gravity_config;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
-use reth_chainspec::{ChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
+use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
     execute::BlockExecutionError, precompiles::DynPrecompile, ConfigureEvm, IntoTxEnv,
@@ -52,11 +47,7 @@ use reth_primitives_traits::{
 };
 use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
 use reth_rpc_eth_api::RpcTypes;
-use revm::{
-    bytecode::Bytecode,
-    state::{Account, AccountInfo, AccountStatus, EvmState},
-    DatabaseRef,
-};
+use revm::{state::AccountInfo, DatabaseRef};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -681,93 +672,6 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
     /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
     ///
-    /// Deploy the EIP-2935 history storage contract via the executor's
-    /// [`ParallelExecutor::apply_state_change`] irregular-state-change channel.
-    ///
-    /// Mainnet-aligned alloc: nonce=1, balance=0, `code=HISTORY_STORAGE_CODE`, no storage
-    /// prefill (the 8191-slot ring fills naturally via the per-block system call). The
-    /// `Created | Touched` status routes the diff through ParallelState's `newly_created`
-    /// path so the contract code is recorded and a proper transition lands in the bundle.
-    fn deploy_history_storage_contract(
-        executor: &mut dyn ParallelExecutor<
-            Primitives = EthPrimitives,
-            Error = BlockExecutionError,
-        >,
-    ) -> Result<(), BlockExecutionError> {
-        let bytecode = Bytecode::new_raw(HISTORY_STORAGE_CODE.clone());
-        let code_hash = keccak256(HISTORY_STORAGE_CODE.as_ref());
-        let info = AccountInfo { nonce: 1, balance: U256::ZERO, code_hash, code: Some(bytecode) };
-
-        let mut state_diff = EvmState::default();
-        state_diff.insert(
-            HISTORY_STORAGE_ADDRESS,
-            Account {
-                info,
-                storage: Default::default(),
-                status: AccountStatus::Created | AccountStatus::Touched,
-                transaction_id: 0,
-            },
-        );
-        executor.apply_state_change(state_diff)
-    }
-
-    /// Test-only HISTORY_STORAGE reader deployed via the same
-    /// `apply_state_change` channel as EIP-2935, gated on the chainspec
-    /// `extra_fields["gravityTestReaderDeployTime"]` key. The branch is
-    /// data-driven and dormant in production: chainspecs that omit the key
-    /// never instantiate the diff and the bytecode constant is unreachable
-    /// code from the deployed binary's perspective.
-    ///
-    /// Bytecode (52 bytes, hand-written EVM):
-    ///   - `mem[0:32] := calldata[0:32]`        (n)
-    ///   - `staticcall(gas, HISTORY_STORAGE, mem[0:32], mem[0:32])`
-    ///   - on success → `return mem[0:32]`
-    ///   - on revert  → `revert(mem[0:32])` (32 zero bytes; EIP-2935 itself
-    ///     returns no revert data, so the bubble-up has no payload anyway)
-    ///
-    /// Invocation: callers send exactly 32 bytes of calldata holding the
-    /// block number `n`. The reader is therefore directly callable via
-    /// `eth_call({ to, data: B256::from(U256::from(n)).as_slice() })` —
-    /// no Solidity ABI selector to manage, no `solc` dependency.
-    pub(crate) const TEST_HISTORY_QUERY_READER_ADDRESS: Address =
-        alloy_primitives::address!("0x00000000000000000000000000000000000C0DE1");
-
-    /// Runtime bytecode for `TEST_HISTORY_QUERY_READER_ADDRESS`. See the doc
-    /// comment on the address constant above for the disassembly.
-    pub(crate) const TEST_HISTORY_QUERY_READER_BYTECODE: [u8; 52] = alloy_primitives::hex!(
-        "602060006000376020600060206000730000f90827f1c53a10cb7a02335b1753200029355afa602e5760206000fd5b60206000f3"
-    );
-
-    /// Deploy the test HISTORY_STORAGE reader via the executor's
-    /// `apply_state_change` channel. Mirrors `deploy_history_storage_contract`
-    /// in shape — nonce=1, balance=0, code=reader bytecode, no storage prefill,
-    /// `Created | Touched` status. Only invoked when the chainspec opts in via
-    /// the `gravityTestReaderDeployTime` extra field.
-    fn deploy_test_history_reader_contract(
-        executor: &mut dyn ParallelExecutor<
-            Primitives = EthPrimitives,
-            Error = BlockExecutionError,
-        >,
-    ) -> Result<(), BlockExecutionError> {
-        let bytecode_bytes =
-            alloy_primitives::Bytes::from_static(&Self::TEST_HISTORY_QUERY_READER_BYTECODE);
-        let bytecode = Bytecode::new_raw(bytecode_bytes);
-        let code_hash = keccak256(Self::TEST_HISTORY_QUERY_READER_BYTECODE.as_ref());
-        let info = AccountInfo { nonce: 1, balance: U256::ZERO, code_hash, code: Some(bytecode) };
-
-        let mut state_diff = EvmState::default();
-        state_diff.insert(
-            Self::TEST_HISTORY_QUERY_READER_ADDRESS,
-            Account {
-                info,
-                storage: Default::default(),
-                status: AccountStatus::Created | AccountStatus::Touched,
-                transaction_id: 0,
-            },
-        );
-        executor.apply_state_change(state_diff)
-    }
-
     /// DESIGN: The `unwrap_or_else(|e| panic!(...))` calls on system transaction
     /// execution are intentional. These are unrecoverable failures; in the gravity-sdk
     /// integration the panic handler aborts the process, preventing partial-state
@@ -1092,56 +996,16 @@ impl<Storage: GravityStorage> Core<Storage> {
         let mut executor = self.evm_config.parallel_executor(state);
         executor.apply_custom_precompiles(self.custom_precompiles.clone());
 
-        // EIP-2935 (Prague) activation: deploy the HISTORY_STORAGE contract as an
-        // irregular state change on the Prague transition block. Mainnet-aligned alloc:
-        // nonce=1, balance=0, code=HISTORY_STORAGE_CODE, no storage prefill. The
-        // upstream SystemCaller runs the per-block SSTORE inside apply_pre_execution_changes
-        // — that fires later inside executor.execute(&block), reading the freshly deployed
-        // contract. Idempotency comes from transitions_at_timestamp: parent_ts < pragueTime
-        // is history-immutable, so this branch fires exactly on the activation block.
-        let current_ts = ordered_block.timestamp_us / 1_000_000;
-        if self
-            .chain_spec
-            .fork(EthereumHardfork::Prague)
-            .transitions_at_timestamp(current_ts, parent_header.timestamp)
-        {
-            Self::deploy_history_storage_contract(&mut *executor).unwrap_or_else(|e| {
-                panic!("HISTORY_STORAGE deployment failed at Prague activation: {e:?}")
-            });
-            info!(target: "execute_ordered_block",
-                number=?block_number,
-                "deployed EIP-2935 HISTORY_STORAGE contract on Prague activation block"
-            );
-        }
-
-        // Test-only: deploy a thin HISTORY_STORAGE reader at the activation
-        // timestamp configured in `genesis.config.extra_fields.gravityTestReaderDeployTime`.
-        // Mirrors the EIP-2935 branch — same `transitions_at_timestamp` helper,
-        // same `apply_state_change` channel — so the test seam exercises the
-        // production deployment path. Production chainspecs omit the field, so
-        // `.and_then(|v| v.as_u64())` returns `None` and the branch is dead.
-        if let Some(reader_deploy_ts) = self
-            .chain_spec
-            .genesis()
-            .config
-            .extra_fields
-            .get("gravityTestReaderDeployTime")
-            .and_then(|v| v.as_u64())
-        {
-            // Replicate the EIP-2935 helper inline; we don't share the
-            // `transitions_at_timestamp` call because the underlying ForkCondition
-            // is custom to the test field and not registered in `EthereumHardfork`.
-            if parent_header.timestamp < reader_deploy_ts && current_ts >= reader_deploy_ts {
-                Self::deploy_test_history_reader_contract(&mut *executor).unwrap_or_else(
-                    |e| panic!("test HISTORY_STORAGE reader deployment failed: {e:?}"),
-                );
-                info!(target: "execute_ordered_block",
-                    number=?block_number,
-                    address=?Self::TEST_HISTORY_QUERY_READER_ADDRESS,
-                    "deployed test HISTORY_STORAGE reader contract"
-                );
-            }
-        }
+        // EIP-2935 (Prague) boundary state changes: deploy `HISTORY_STORAGE_ADDRESS`
+        // on the Prague activation block, plus an optional test-only reader gated by
+        // a chainspec `extra_fields` key. See `eip_2935` for the full rationale.
+        eip_2935::apply_state_changes_for_block(
+            &mut *executor,
+            &self.chain_spec,
+            ordered_block.timestamp_us / 1_000_000,
+            parent_header.timestamp,
+            block_number,
+        );
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.
         // State changes are committed directly into executor's ParallelState.
