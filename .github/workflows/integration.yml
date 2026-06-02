@@ -72,6 +72,8 @@ jobs:
     env:
       RUST_BACKTRACE: 1
       RUST_MIN_STACK: 16777216
+      # Intentionally NOT setting GRETH_DISABLE_PIPE_EXECUTION: these tests
+      # drive PipeExecLayerApi end-to-end and assert the real fork-gated path.
     timeout-minutes: 60
     steps:
       - name: Free Disk Space
@@ -90,7 +92,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: cargo test --package reth-pipe-exec-layer-ext-v2 --test gravity_pipe_test -- --exact test --show-output --nocapture
+      - uses: taiki-e/install-action@nextest
+      - name: Run gravity pipe + EIP-7702 / EIP-2935 integration tests
+        # Runs gravity_pipe_test plus the EIP-7702 and EIP-2935 integration
+        # binaries together — they share the same MockConsensus + PipeExecLayerApi
+        # harness, so one cold build covers all three.
+        run: |
+          cargo nextest run \
+            --locked \
+            -p reth-pipe-exec-layer-ext-v2 \
+            -E 'binary(gravity_pipe_test) + binary(gravity_eip2935_test) + binary(gravity_eip7702_test)'
 
   integration-success:
     name: integration success
