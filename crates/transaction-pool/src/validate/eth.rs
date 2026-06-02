@@ -1679,4 +1679,121 @@ mod tests {
         let outcome = validator.validate_one(TransactionOrigin::External, transaction);
         assert!(outcome.is_valid()); // Should be valid because balance check is disabled
     }
+
+    /// U-4 (acceptance design §3.2): `ensure_intrinsic_gas` for a TxEip7702 with
+    /// `authorization_list.len() == 2` and `gas_limit = 21000 + 25000 * 2 - 1 = 70_999`
+    /// (one wei below the Prague floor) must return `IntrinsicGasTooLow` when the
+    /// pool's ForkTracker has Prague active.
+    #[test]
+    fn ensure_intrinsic_gas_eip7702_below_floor_under_prague() {
+        use alloy_consensus::TxEip7702;
+        use alloy_eips::eip7702::{Authorization, SignedAuthorization};
+        use alloy_primitives::{Signature, U256};
+        use reth_ethereum_primitives::TransactionSigned;
+        use reth_primitives_traits::Recovered;
+
+        let authorization_list = (0..2)
+            .map(|_| {
+                SignedAuthorization::new_unchecked(
+                    Authorization { chain_id: U256::ZERO, address: Default::default(), nonce: 0 },
+                    0,
+                    U256::ZERO,
+                    U256::ZERO,
+                )
+            })
+            .collect();
+
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 70_999,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: Default::default(),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list,
+            input: Default::default(),
+        };
+
+        let signed_inner = TransactionSigned::new_unhashed(
+            reth_ethereum_primitives::Transaction::Eip7702(tx),
+            Signature::test_signature(),
+        );
+        let recovered = Recovered::new_unchecked(signed_inner, Default::default());
+        let pooled = EthPooledTransaction::new(recovered, 200);
+
+        let fork_tracker = ForkTracker {
+            shanghai: true.into(),
+            cancun: true.into(),
+            prague: true.into(),
+            osaka: false.into(),
+            max_blob_count: 0.into(),
+        };
+
+        let res = ensure_intrinsic_gas(&pooled, &fork_tracker);
+        assert!(matches!(res, Err(InvalidPoolTransactionError::IntrinsicGasTooLow)), "got {res:?}");
+    }
+
+    /// U-5 (acceptance design §3.2): when Prague is *not* activated on the pool's
+    /// ForkTracker, the same TxEip7702 is rejected by `validate_one` with
+    /// `TxTypeNotSupported` (fork gating short-circuit) and the intrinsic-gas
+    /// codepath is therefore never reached.
+    #[tokio::test]
+    async fn validate_one_eip7702_rejected_before_prague_activation() {
+        use alloy_consensus::TxEip7702;
+        use alloy_eips::eip7702::{Authorization, SignedAuthorization};
+        use alloy_primitives::{Signature, U256};
+        use reth_ethereum_primitives::TransactionSigned;
+        use reth_primitives_traits::Recovered;
+
+        let authorization_list = (0..2)
+            .map(|_| {
+                SignedAuthorization::new_unchecked(
+                    Authorization { chain_id: U256::ZERO, address: Default::default(), nonce: 0 },
+                    0,
+                    U256::ZERO,
+                    U256::ZERO,
+                )
+            })
+            .collect();
+
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 70_999,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: Default::default(),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list,
+            input: Default::default(),
+        };
+
+        let signed_inner = TransactionSigned::new_unhashed(
+            reth_ethereum_primitives::Transaction::Eip7702(tx),
+            Signature::test_signature(),
+        );
+        let recovered = Recovered::new_unchecked(signed_inner, Default::default());
+        let pooled = EthPooledTransaction::new(recovered, 200);
+
+        let provider = MockEthProvider::default();
+        let blob_store = InMemoryBlobStore::default();
+        let validator = EthTransactionValidatorBuilder::new(provider).no_prague().build(blob_store);
+
+        let outcome = validator.validate_one(TransactionOrigin::External, pooled);
+        match outcome {
+            TransactionValidationOutcome::Invalid(_, err) => assert!(
+                matches!(
+                    err,
+                    InvalidPoolTransactionError::Consensus(
+                        InvalidTransactionError::TxTypeNotSupported
+                    )
+                ),
+                "expected TxTypeNotSupported, got {err:?}"
+            ),
+            other => panic!("expected Invalid outcome, got {other:?}"),
+        }
+    }
 }

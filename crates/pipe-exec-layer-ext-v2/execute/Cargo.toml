@@ -76,6 +76,8 @@ eyre.workspace = true
 rand.workspace = true
 criterion.workspace = true
 hex-literal = "0.4"
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
 
 [features]
 pipe_test = ["reth-provider/pipe_test"]

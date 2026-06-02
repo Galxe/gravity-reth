@@ -501,4 +501,84 @@ mod tests {
             filter_invalid_txs(&db, &txs, &senders, base_fee_per_gas, gas_limit, SpecId::PRAGUE);
         assert!(invalid_idxs.is_empty(), "got: {invalid_idxs:?}");
     }
+
+    /// U-1 (acceptance design §3.1): a 7702 tx with `authorization_list.len() == 2` and
+    /// `gas_limit = 21000 + 25000 * 2 + 1000 = 72000` passes the filter under Prague.
+    #[test]
+    fn test_filter_invalid_txs_eip7702_two_auths_gas_sufficient() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: B256::default(),
+                code: None,
+            },
+        );
+
+        let tx = create_test_7702_transaction(0, 72_000, 2);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::PRAGUE);
+        assert!(
+            invalid_idxs.is_empty(),
+            "two-auth 7702 tx with 72k gas must pass: {invalid_idxs:?}"
+        );
+    }
+
+    /// U-2 (acceptance design §3.1): a 7702 tx with three authorizations and
+    /// `gas_limit = 21_000` is discarded by the filter rather than reaching the executor.
+    #[test]
+    fn test_filter_invalid_txs_eip7702_three_auths_gas_too_low() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: B256::default(),
+                code: None,
+            },
+        );
+
+        let tx = create_test_7702_transaction(0, 21_000, 3);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::PRAGUE);
+        assert_eq!(invalid_idxs.len(), 1, "three-auth 7702 tx at 21k gas must be discarded");
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    /// U-3 (acceptance design §3.1): the #668 fix must not regress legacy/1559 filtering.
+    /// A non-7702 tx with `authorization_list == None` and a 21k gas limit must still
+    /// pass the filter under Prague (the auth-list count contribution to intrinsic is 0).
+    #[test]
+    fn test_filter_invalid_txs_non_eip7702_under_prague_still_passes() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: B256::default(),
+                code: None,
+            },
+        );
+
+        let tx = create_test_transaction(0, 21_000, 25_000_000_000);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, SpecId::PRAGUE);
+        assert!(
+            invalid_idxs.is_empty(),
+            "legacy 21k-gas tx must not be regressed by the 7702 intrinsic fix: {invalid_idxs:?}"
+        );
+    }
 }

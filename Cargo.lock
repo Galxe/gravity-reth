@@ -9987,6 +9987,8 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-eth",
+ "alloy-signer",
+ "alloy-signer-local",
  "alloy-sol-macro",
  "alloy-sol-types",
  "api-types",
