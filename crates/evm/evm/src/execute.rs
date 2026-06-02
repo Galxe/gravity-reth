@@ -29,7 +29,7 @@ use revm::{
     },
     database::{states::bundle_state::BundleRetention, BundleState, State},
     state::EvmState,
-    DatabaseCommit,
+    Database as RevmDatabase, DatabaseCommit,
 };
 
 /// A type that knows how to execute a block. It is assumed to operate on a
@@ -638,6 +638,19 @@ where
     }
 
     fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error> {
+        // revm's `State::commit` (via `CacheState`) panics with "All accounts
+        // should be present inside cache" if a touched address has never been
+        // loaded. Irregular state changes (e.g. EIP-2935 HISTORY_STORAGE
+        // deployment at the Prague activation block) introduce brand-new
+        // accounts that no prior transaction has read. Pre-load each touched
+        // address via `basic` so the cache holds an entry before commit runs.
+        // The grevm path (`GrevmExecutor::apply_state_change` in
+        // `crates/ethereum/evm/src/parallel_execute.rs`) needs the same fix.
+        for addr in state_diff.keys().copied() {
+            RevmDatabase::basic(&mut self.db, addr).map_err(|e| {
+                BlockExecutionError::msg(alloc::format!("apply_state_change preload {addr}: {e:?}"))
+            })?;
+        }
         self.db.commit(state_diff);
         Ok(())
     }

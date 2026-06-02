@@ -35,7 +35,7 @@ use revm::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
     state::{Account, AccountStatus, EvmState},
-    DatabaseCommit,
+    Database, DatabaseCommit,
 };
 
 /// EVM executor using Grevm that executes blocks in parallel.
@@ -313,7 +313,19 @@ where
     }
 
     fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error> {
-        self.state.as_mut().unwrap().commit(state_diff);
+        let state = self.state.as_mut().unwrap();
+        // Grevm's `ParallelState::commit` panics with "All accounts should be present
+        // inside cache" if a touched address has never been loaded. Irregular state
+        // changes (e.g. EIP-2935 HISTORY_STORAGE deployment at the Prague activation
+        // block) introduce brand-new accounts that no prior transaction has read.
+        // Pre-load each touched address via `basic` so the cache holds at least a
+        // `LoadedNotExisting` entry before commit's `get_account_mut` runs.
+        for addr in state_diff.keys().copied() {
+            state.basic(addr).map_err(|e| {
+                BlockExecutionError::msg(alloc::format!("apply_state_change preload {addr}: {e:?}"))
+            })?;
+        }
+        state.commit(state_diff);
         Ok(())
     }
 

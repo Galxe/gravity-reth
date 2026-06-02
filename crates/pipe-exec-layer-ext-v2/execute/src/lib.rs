@@ -711,6 +711,63 @@ impl<Storage: GravityStorage> Core<Storage> {
         executor.apply_state_change(state_diff)
     }
 
+    /// Test-only HISTORY_STORAGE reader deployed via the same
+    /// `apply_state_change` channel as EIP-2935, gated on the chainspec
+    /// `extra_fields["gravityTestReaderDeployTime"]` key. The branch is
+    /// data-driven and dormant in production: chainspecs that omit the key
+    /// never instantiate the diff and the bytecode constant is unreachable
+    /// code from the deployed binary's perspective.
+    ///
+    /// Bytecode (52 bytes, hand-written EVM):
+    ///   - `mem[0:32] := calldata[0:32]`        (n)
+    ///   - `staticcall(gas, HISTORY_STORAGE, mem[0:32], mem[0:32])`
+    ///   - on success → `return mem[0:32]`
+    ///   - on revert  → `revert(mem[0:32])` (32 zero bytes; EIP-2935 itself
+    ///     returns no revert data, so the bubble-up has no payload anyway)
+    ///
+    /// Invocation: callers send exactly 32 bytes of calldata holding the
+    /// block number `n`. The reader is therefore directly callable via
+    /// `eth_call({ to, data: B256::from(U256::from(n)).as_slice() })` —
+    /// no Solidity ABI selector to manage, no `solc` dependency.
+    pub(crate) const TEST_HISTORY_QUERY_READER_ADDRESS: Address =
+        alloy_primitives::address!("0x00000000000000000000000000000000000C0DE1");
+
+    /// Runtime bytecode for `TEST_HISTORY_QUERY_READER_ADDRESS`. See the doc
+    /// comment on the address constant above for the disassembly.
+    pub(crate) const TEST_HISTORY_QUERY_READER_BYTECODE: [u8; 52] = alloy_primitives::hex!(
+        "602060006000376020600060206000730000f90827f1c53a10cb7a02335b1753200029355afa602e5760206000fd5b60206000f3"
+    );
+
+    /// Deploy the test HISTORY_STORAGE reader via the executor's
+    /// `apply_state_change` channel. Mirrors `deploy_history_storage_contract`
+    /// in shape — nonce=1, balance=0, code=reader bytecode, no storage prefill,
+    /// `Created | Touched` status. Only invoked when the chainspec opts in via
+    /// the `gravityTestReaderDeployTime` extra field.
+    fn deploy_test_history_reader_contract(
+        executor: &mut dyn ParallelExecutor<
+            Primitives = EthPrimitives,
+            Error = BlockExecutionError,
+        >,
+    ) -> Result<(), BlockExecutionError> {
+        let bytecode_bytes =
+            alloy_primitives::Bytes::from_static(&Self::TEST_HISTORY_QUERY_READER_BYTECODE);
+        let bytecode = Bytecode::new_raw(bytecode_bytes);
+        let code_hash = keccak256(Self::TEST_HISTORY_QUERY_READER_BYTECODE.as_ref());
+        let info = AccountInfo { nonce: 1, balance: U256::ZERO, code_hash, code: Some(bytecode) };
+
+        let mut state_diff = EvmState::default();
+        state_diff.insert(
+            Self::TEST_HISTORY_QUERY_READER_ADDRESS,
+            Account {
+                info,
+                storage: Default::default(),
+                status: AccountStatus::Created | AccountStatus::Touched,
+                transaction_id: 0,
+            },
+        );
+        executor.apply_state_change(state_diff)
+    }
+
     /// DESIGN: The `unwrap_or_else(|e| panic!(...))` calls on system transaction
     /// execution are intentional. These are unrecoverable failures; in the gravity-sdk
     /// integration the panic handler aborts the process, preventing partial-state
@@ -1055,6 +1112,35 @@ impl<Storage: GravityStorage> Core<Storage> {
                 number=?block_number,
                 "deployed EIP-2935 HISTORY_STORAGE contract on Prague activation block"
             );
+        }
+
+        // Test-only: deploy a thin HISTORY_STORAGE reader at the activation
+        // timestamp configured in `genesis.config.extra_fields.gravityTestReaderDeployTime`.
+        // Mirrors the EIP-2935 branch — same `transitions_at_timestamp` helper,
+        // same `apply_state_change` channel — so the test seam exercises the
+        // production deployment path. Production chainspecs omit the field, so
+        // `.and_then(|v| v.as_u64())` returns `None` and the branch is dead.
+        if let Some(reader_deploy_ts) = self
+            .chain_spec
+            .genesis()
+            .config
+            .extra_fields
+            .get("gravityTestReaderDeployTime")
+            .and_then(|v| v.as_u64())
+        {
+            // Replicate the EIP-2935 helper inline; we don't share the
+            // `transitions_at_timestamp` call because the underlying ForkCondition
+            // is custom to the test field and not registered in `EthereumHardfork`.
+            if parent_header.timestamp < reader_deploy_ts && current_ts >= reader_deploy_ts {
+                Self::deploy_test_history_reader_contract(&mut *executor).unwrap_or_else(
+                    |e| panic!("test HISTORY_STORAGE reader deployment failed: {e:?}"),
+                );
+                info!(target: "execute_ordered_block",
+                    number=?block_number,
+                    address=?Self::TEST_HISTORY_QUERY_READER_ADDRESS,
+                    "deployed test HISTORY_STORAGE reader contract"
+                );
+            }
         }
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.
