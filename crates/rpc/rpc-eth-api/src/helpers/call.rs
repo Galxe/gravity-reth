@@ -11,7 +11,7 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_eips::eip2930::AccessListResult;
 use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides, OverrideBlockHashes};
 use alloy_network::TransactionBuilder;
-use alloy_primitives::{Bytes, B256, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
@@ -36,7 +36,7 @@ use reth_rpc_eth_types::{
     simulate::{self, EthSimulateError},
     EthApiError, RevertError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, ProviderTx};
+use reth_storage_api::{BlockIdReader, HeaderProvider, ProviderTx};
 use revm::{
     context_interface::{
         result::{ExecutionResult, ResultAndState},
@@ -46,6 +46,9 @@ use revm::{
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
 use tracing::{trace, warn};
+
+const RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR: Address =
+    address!("00000000000000000000000000000001625f5002");
 
 /// Result type for `eth_simulateV1` RPC method.
 pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
@@ -216,11 +219,49 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         overrides: EvmOverrides,
     ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send {
         async move {
+            if let Some(output) = self.handle_randomness_by_height_call(&request)? {
+                return Ok(output)
+            }
+
             let res =
                 self.transact_call_at(request, block_number.unwrap_or_default(), overrides).await?;
 
             ensure_success(res.result)
         }
+    }
+
+    /// Handles direct `eth_call` requests to Gravity's read-only randomness lookup precompile.
+    fn handle_randomness_by_height_call(
+        &self,
+        request: &RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
+    ) -> Result<Option<Bytes>, Self::Error> {
+        if request.as_ref().kind() != Some(TxKind::Call(RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR)) {
+            return Ok(None)
+        }
+
+        let input = request.as_ref().input().cloned().unwrap_or_default();
+        if input.len() != 32 {
+            return Err(EthApiError::InvalidParams(
+                "randomness-by-height precompile expects exactly 32 bytes".to_string(),
+            )
+            .into())
+        }
+
+        let height = U256::from_be_slice(&input);
+        let Ok(height) = u64::try_from(height) else {
+            return Ok(Some(randomness_by_height_response(false, B256::ZERO)))
+        };
+
+        let randomness = self
+            .provider()
+            .header_by_number(height)
+            .map_err(Self::Error::from_eth_err)?
+            .and_then(|header| header.mix_hash());
+
+        Ok(Some(match randomness {
+            Some(randomness) => randomness_by_height_response(true, randomness),
+            None => randomness_by_height_response(false, B256::ZERO),
+        }))
     }
 
     /// Simulate arbitrary number of transactions at an arbitrary blockchain index, with the
@@ -456,6 +497,13 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             Ok(res)
         })
     }
+}
+
+fn randomness_by_height_response(found: bool, randomness: B256) -> Bytes {
+    let mut output = Vec::with_capacity(64);
+    output.extend_from_slice(&U256::from(found as u8).to_be_bytes::<32>());
+    output.extend_from_slice(randomness.as_slice());
+    output.into()
 }
 
 /// Executes code on state.
