@@ -996,9 +996,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         let mut executor = self.evm_config.parallel_executor(state);
         executor.apply_custom_precompiles(self.custom_precompiles.clone());
 
-        // EIP-2935 (Prague) boundary state changes: deploy `HISTORY_STORAGE_ADDRESS`
-        // on the Prague activation block, plus an optional test-only reader gated by
-        // a chainspec `extra_fields` key. See `eip_2935` for the full rationale.
+        // EIP-2935 (Prague) boundary state change: deploy `HISTORY_STORAGE_ADDRESS`
+        // on the Prague activation block. Idempotency is gated by
+        // `transitions_at_timestamp(current_ts, parent_ts)` — see `eip_2935` for the
+        // full rationale.
         eip_2935::apply_state_changes_for_block(
             &mut *executor,
             &self.chain_spec,
