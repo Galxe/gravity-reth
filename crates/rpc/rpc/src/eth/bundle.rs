@@ -161,7 +161,9 @@ where
                 let mut total_gas_fees = U256::ZERO;
                 let mut hasher = Keccak256::new();
 
+                let block_number = evm_env.block_env.number;
                 let mut evm = eth_api.evm_config().evm_with_env(db, evm_env);
+                eth_api.register_custom_precompiles(&mut evm, block_number);
 
                 let mut results = Vec::with_capacity(transactions.len());
                 let mut transactions = transactions.into_iter().peekable();
