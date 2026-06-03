@@ -18,7 +18,11 @@ pub const RANDOMNESS_BY_HEIGHT_INPUT_LEN: usize = 32;
 /// Precompile output length: ABI-encoded `(uint256 found, bytes32 randomness)`.
 pub const RANDOMNESS_BY_HEIGHT_OUTPUT_LEN: usize = 64;
 /// Gas charged by the lookup precompile.
-pub const RANDOMNESS_BY_HEIGHT_LOOKUP_GAS: u64 = 2_000;
+///
+/// This is aligned with the mint precompile base cost. The lookup is read-only and much cheaper
+/// than BLS verification, but it can hit header storage, so pricing it at the transaction base gas
+/// keeps worst-case lookup volume bounded more conservatively than a low pure-compute price.
+pub const RANDOMNESS_BY_HEIGHT_LOOKUP_GAS: u64 = 21_000;
 
 /// Read-only provider for canonical randomness values by block height.
 pub trait RandomnessByHeightProvider {
