@@ -18,11 +18,6 @@ use alloy_rpc_types_eth::{
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
-use gravity_precompiles::randomness_by_height::{
-    create_randomness_by_height_precompile, RandomnessByHeightProvider,
-    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
-};
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor,
@@ -41,7 +36,7 @@ use reth_rpc_eth_types::{
     simulate::{self, EthSimulateError},
     EthApiError, RevertError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, HeaderProvider, ProviderTx};
+use reth_storage_api::{BlockIdReader, ProviderTx};
 use revm::{
     context_interface::{
         result::{ExecutionResult, ResultAndState},
@@ -50,7 +45,6 @@ use revm::{
     Database, DatabaseCommit,
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
-use std::sync::Arc;
 use tracing::{trace, warn};
 
 /// Result type for `eth_simulateV1` RPC method.
@@ -177,7 +171,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         let mut evm = this
                             .evm_config()
                             .evm_with_env_and_inspector(&mut db, evm_env, inspector);
-                        this.register_randomness_precompile_if_active(&mut evm, block_number);
+                        this.register_custom_precompiles(&mut evm, block_number);
                         let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
                         simulate::execute_transactions(
                             builder,
@@ -188,7 +182,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         )?
                     } else {
                         let mut evm = this.evm_config().evm_with_env(&mut db, evm_env);
-                        this.register_randomness_precompile_if_active(&mut evm, block_number);
+                        this.register_custom_precompiles(&mut evm, block_number);
                         let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
                         simulate::execute_transactions(
                             builder,
@@ -467,30 +461,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
     }
 }
 
-#[derive(Clone, Debug)]
-struct HeaderRandomnessProvider<Provider> {
-    provider: Provider,
-}
-
-impl<Provider> HeaderRandomnessProvider<Provider> {
-    const fn new(provider: Provider) -> Self {
-        Self { provider }
-    }
-}
-
-impl<Provider> RandomnessByHeightProvider for HeaderRandomnessProvider<Provider>
-where
-    Provider: HeaderProvider,
-{
-    type Error = ProviderError;
-
-    fn randomness_by_height(&self, height: u64) -> Result<Option<B256>, Self::Error> {
-        self.provider
-            .header_by_number(height)
-            .map(|header| header.and_then(|header| header.mix_hash()))
-    }
-}
-
 /// Executes code on state.
 pub trait Call:
     LoadState<
@@ -508,28 +478,11 @@ pub trait Call:
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
 
-    /// Returns whether Gravity's randomness lookup precompile is active for the given EVM block.
-    fn is_randomness_precompile_active(&self, block_number: U256) -> bool {
-        let Ok(block_number) = u64::try_from(block_number) else { return false };
-
-        self.provider()
-            .chain_spec()
-            .gravity_hardforks()
-            .is_fork_active_at_block(GravityHardfork::Alpha, block_number)
-    }
-
-    /// Registers Gravity's randomness lookup precompile when the EVM block is at or after Alpha.
-    fn register_randomness_precompile_if_active<EV>(&self, evm: &mut EV, block_number: U256)
+    /// Registers chain-specific precompiles for this EVM block.
+    fn register_custom_precompiles<EV>(&self, _evm: &mut EV, _block_number: U256)
     where
         EV: Evm<Precompiles = PrecompilesMap>,
     {
-        if self.is_randomness_precompile_active(block_number) {
-            let precompile = create_randomness_by_height_precompile(Arc::new(
-                HeaderRandomnessProvider::new(self.provider().clone()),
-            ));
-            evm.precompiles_mut()
-                .apply_precompile(&RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, move |_| Some(precompile));
-        }
     }
 
     /// Returns the max gas limit that the caller can afford given a transaction environment.
@@ -573,7 +526,7 @@ pub trait Call:
     {
         let block_number = evm_env.block_env.number;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
-        self.register_randomness_precompile_if_active(&mut evm, block_number);
+        self.register_custom_precompiles(&mut evm, block_number);
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -594,7 +547,7 @@ pub trait Call:
     {
         let block_number = evm_env.block_env.number;
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
-        self.register_randomness_precompile_if_active(&mut evm, block_number);
+        self.register_custom_precompiles(&mut evm, block_number);
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -758,7 +711,7 @@ pub trait Call:
     {
         let block_number = evm_env.block_env.number;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
-        self.register_randomness_precompile_if_active(&mut evm, block_number);
+        self.register_custom_precompiles(&mut evm, block_number);
         let mut index = 0;
         for tx in transactions {
             if *tx.tx_hash() == target_tx_hash {

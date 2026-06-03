@@ -113,7 +113,7 @@ pub trait EstimateCall: Call {
 
         // Create EVM instance once and reuse it throughout the entire estimation process
         let mut evm = self.evm_config().evm_with_env(&mut db, evm_env);
-        self.register_randomness_precompile_if_active(&mut evm, block_number);
+        self.register_custom_precompiles(&mut evm, block_number);
 
         // For basic transfers, try using minimum gas before running full binary search
         if is_basic_transfer {

@@ -43,7 +43,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
     {
         let block_number = evm_env.block_env.number;
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
-        self.register_randomness_precompile_if_active(&mut evm, block_number);
+        self.register_custom_precompiles(&mut evm, block_number);
         evm.transact(tx_env).map_err(Self::Error::from_evm_err)
     }
 
@@ -334,7 +334,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                     evm_env,
                     inspector_setup(),
                 );
-                this.register_randomness_precompile_if_active(&mut evm, evm_block_number);
+                this.register_custom_precompiles(&mut evm, evm_block_number);
 
                 let results = TxTracer::new(evm)
                     .try_trace_many(block.transactions_recovered().take(max_transactions), |ctx| {
