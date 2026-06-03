@@ -15,3 +15,12 @@ slow-timeout = { period = "2m", terminate-after = 10 }
 [[profile.default.overrides]]
 filter = "binary(e2e_testsuite)"
 slow-timeout = { period = "2m", terminate-after = 3 }
+
+# Gravity pipe-exec-layer integration tests: each test boots a full reth node
+# and pushes 100s–1000s of blocks through MockConsensus + PipeExecLayerApi.
+# Under runner contention (multiple of these tests share a 2-core box) wall
+# clock can routinely brush the default 120s kill — gravity_pipe_test alone
+# pushes 1671 blocks. Grant the same headroom as e2e_testsuite.
+[[profile.default.overrides]]
+filter = "binary(gravity_pipe_test) + binary(gravity_eip2935_test) + binary(gravity_eip7702_test)"
+slow-timeout = { period = "2m", terminate-after = 3 }
