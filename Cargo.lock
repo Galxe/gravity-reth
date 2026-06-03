@@ -4299,6 +4299,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gravity-precompiles"
+version = "1.8.3"
+dependencies = [
+ "alloy-primitives",
+ "reth-evm",
+ "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "tracing",
+]
+
+[[package]]
 name = "gravity-primitives"
 version = "1.8.3"
 
@@ -9996,6 +10006,7 @@ dependencies = [
  "blst",
  "codspeed-criterion-compat",
  "eyre",
+ "gravity-precompiles",
  "gravity-primitives",
  "gravity-storage",
  "grevm",
@@ -10581,6 +10592,7 @@ dependencies = [
  "auto_impl",
  "dyn-clone",
  "futures",
+ "gravity-precompiles",
  "jsonrpsee",
  "jsonrpsee-types",
  "parking_lot",

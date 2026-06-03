@@ -109,8 +109,11 @@ pub trait EstimateCall: Call {
         // If the provided gas limit is less than computed cap, use that
         tx_env.set_gas_limit(tx_env.gas_limit().min(highest_gas_limit));
 
+        let block_number = evm_env.block_env.number;
+
         // Create EVM instance once and reuse it throughout the entire estimation process
         let mut evm = self.evm_config().evm_with_env(&mut db, evm_env);
+        self.register_randomness_precompile_if_active(&mut evm, block_number);
 
         // For basic transfers, try using minimum gas before running full binary search
         if is_basic_transfer {

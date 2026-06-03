@@ -30,6 +30,7 @@ revm-primitives.workspace = true
 revm-interpreter.workspace = true
 gravity-storage.workspace = true
 gravity-primitives.workspace = true
+gravity-precompiles.workspace = true
 grevm.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true

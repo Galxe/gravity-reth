@@ -11,19 +11,22 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_eips::eip2930::AccessListResult;
 use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides, OverrideBlockHashes};
 use alloy_network::TransactionBuilder;
-use alloy_primitives::{address, Address, Bytes, B256, U256};
+use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
+use gravity_precompiles::randomness_by_height::{
+    create_randomness_by_height_precompile, RandomnessByHeightProvider,
+    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+};
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    precompiles::{DynPrecompile, PrecompileInput, PrecompilesMap},
-    ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor, SpecFor, TransactionEnv,
-    TxEnvFor,
+    precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor,
+    SpecFor, TransactionEnv, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
@@ -44,14 +47,11 @@ use revm::{
         result::{ExecutionResult, ResultAndState},
         Transaction,
     },
-    precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult},
     Database, DatabaseCommit,
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
+use std::sync::Arc;
 use tracing::{trace, warn};
-
-const RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR: Address =
-    address!("00000000000000000000000000000001625f5002");
 
 /// Result type for `eth_simulateV1` RPC method.
 pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
@@ -225,8 +225,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         overrides: EvmOverrides,
     ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send {
         async move {
-            let at = block_number.unwrap_or_default();
-            let res = self.transact_call_at(request, at, overrides).await?;
+            let res =
+                self.transact_call_at(request, block_number.unwrap_or_default(), overrides).await?;
 
             ensure_success(res.result)
         }
@@ -467,56 +467,28 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
     }
 }
 
-fn randomness_by_height_response(found: bool, randomness: B256) -> Bytes {
-    let mut output = Vec::with_capacity(64);
-    output.extend_from_slice(&U256::from(found as u8).to_be_bytes::<32>());
-    output.extend_from_slice(randomness.as_slice());
-    output.into()
+#[derive(Clone, Debug)]
+struct HeaderRandomnessProvider<Provider> {
+    provider: Provider,
 }
 
-fn create_rpc_randomness_by_height_precompile<Provider>(provider: Provider) -> DynPrecompile
+impl<Provider> HeaderRandomnessProvider<Provider> {
+    const fn new(provider: Provider) -> Self {
+        Self { provider }
+    }
+}
+
+impl<Provider> RandomnessByHeightProvider for HeaderRandomnessProvider<Provider>
 where
-    Provider: HeaderProvider + Clone + Send + Sync + 'static,
+    Provider: HeaderProvider,
 {
-    let precompile_id = PrecompileId::custom("randomness_by_height");
+    type Error = ProviderError;
 
-    (precompile_id, move |input: PrecompileInput<'_>| -> PrecompileResult {
-        if input.data.len() != 32 {
-            return Err(PrecompileError::Other(
-                format!(
-                    "randomness-by-height precompile expects exactly 32 bytes, got {}",
-                    input.data.len()
-                )
-                .into(),
-            ))
-        }
-
-        let height = U256::from_be_slice(input.data);
-        let Ok(height) = u64::try_from(height) else {
-            return Ok(PrecompileOutput {
-                gas_used: 2_000,
-                bytes: randomness_by_height_response(false, B256::ZERO),
-                reverted: false,
-            })
-        };
-
-        let randomness = provider
+    fn randomness_by_height(&self, height: u64) -> Result<Option<B256>, Self::Error> {
+        self.provider
             .header_by_number(height)
-            .map_err(|err| {
-                PrecompileError::Other(format!("randomness lookup failed: {err}").into())
-            })?
-            .and_then(|header| header.mix_hash());
-
-        Ok(PrecompileOutput {
-            gas_used: 2_000,
-            bytes: match randomness {
-                Some(randomness) => randomness_by_height_response(true, randomness),
-                None => randomness_by_height_response(false, B256::ZERO),
-            },
-            reverted: false,
-        })
-    })
-        .into()
+            .map(|header| header.and_then(|header| header.mix_hash()))
+    }
 }
 
 /// Executes code on state.
@@ -552,7 +524,9 @@ pub trait Call:
         EV: Evm<Precompiles = PrecompilesMap>,
     {
         if self.is_randomness_precompile_active(block_number) {
-            let precompile = create_rpc_randomness_by_height_precompile(self.provider().clone());
+            let precompile = create_randomness_by_height_precompile(Arc::new(
+                HeaderRandomnessProvider::new(self.provider().clone()),
+            ));
             evm.precompiles_mut()
                 .apply_precompile(&RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, move |_| Some(precompile));
         }

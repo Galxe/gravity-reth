@@ -76,7 +76,9 @@ use crate::{
         SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
         RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
-    randomness_precompile::{create_randomness_by_height_precompile, RandomnessByHeightProvider},
+    randomness_precompile::{
+        create_randomness_by_height_precompile, GravityStorageRandomnessProvider,
+    },
 };
 
 /// Metadata about an executed block
@@ -170,6 +172,7 @@ pub struct ExecutionArgs {
 }
 
 /// Owned by EL
+#[derive(Debug)]
 struct PipeExecService<Storage: GravityStorage> {
     /// Immutable part of the state
     core: Arc<Core<Storage>>,
@@ -216,6 +219,7 @@ struct ExecuteBlockContext {
     epoch: u64,
 }
 
+#[derive(Debug)]
 struct Core<Storage: GravityStorage> {
     /// Send executed block hash to Coordinator
     execution_result_tx: UnboundedSender<ExecutionResult>,
@@ -224,8 +228,8 @@ struct Core<Storage: GravityStorage> {
     storage: Arc<Storage>,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
-    custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
-    randomness_provider: Arc<dyn RandomnessByHeightProvider>,
+    pre_alpha_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+    post_alpha_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
@@ -366,16 +370,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             .gravity_hardforks()
             .is_fork_active_at_block(GravityHardfork::Alpha, block_number)
         {
-            return self.custom_precompiles.clone()
+            return self.pre_alpha_precompiles.clone()
         }
 
-        Arc::new(vec![
-            (BLS_PRECOMPILE_ADDR, create_bls_pop_verify_precompile()),
-            (
-                RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
-                create_randomness_by_height_precompile(self.randomness_provider.clone()),
-            ),
-        ])
+        self.post_alpha_precompiles.clone()
     }
 
     /// DESIGN: All `.unwrap()` calls on barrier wait/notify, state root, and
@@ -1412,7 +1410,16 @@ where
         "new pipe exec layer api"
     );
 
-    let randomness_provider: Arc<dyn RandomnessByHeightProvider> = storage.clone();
+    let randomness_provider = Arc::new(GravityStorageRandomnessProvider::new(storage.clone()));
+    let pre_alpha_precompiles =
+        Arc::new(vec![(BLS_PRECOMPILE_ADDR, create_bls_pop_verify_precompile())]);
+    let post_alpha_precompiles = Arc::new(vec![
+        (BLS_PRECOMPILE_ADDR, create_bls_pop_verify_precompile()),
+        (
+            RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+            create_randomness_by_height_precompile(randomness_provider),
+        ),
+    ]);
     let start_time = Instant::now();
     let service = PipeExecService {
         core: Arc::new(Core {
@@ -1421,11 +1428,8 @@ where
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
-            custom_precompiles: Arc::new(vec![(
-                BLS_PRECOMPILE_ADDR,
-                create_bls_pop_verify_precompile(),
-            )]),
-            randomness_provider,
+            pre_alpha_precompiles,
+            post_alpha_precompiles,
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
                 (epoch, latest_block_number),
