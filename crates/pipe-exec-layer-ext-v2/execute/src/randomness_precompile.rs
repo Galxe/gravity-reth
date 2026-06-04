@@ -1,16 +1,18 @@
 //! Storage adapter for Gravity's historical randomness lookup precompile.
 
 use alloy_primitives::B256;
-use gravity_precompiles::randomness_by_height::RandomnessByHeightProvider;
+use gravity_precompiles::randomness_by_height::{
+    RandomnessByHeightLookup, RandomnessByHeightProvider,
+};
 use gravity_storage::GravityStorage;
 use reth_provider::ProviderError;
 use std::sync::Arc;
 
 pub use gravity_precompiles::randomness_by_height::{
     create_randomness_by_height_precompile, encode_randomness_by_height_result,
-    randomness_by_height_handler_raw, RANDOMNESS_BY_HEIGHT_INPUT_LEN,
-    RANDOMNESS_BY_HEIGHT_LOOKUP_GAS, RANDOMNESS_BY_HEIGHT_OUTPUT_LEN,
-    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+    randomness_by_height_handler_raw, RANDOMNESS_BY_HEIGHT_CONTEXT_GAS,
+    RANDOMNESS_BY_HEIGHT_INPUT_LEN, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
+    RANDOMNESS_BY_HEIGHT_OUTPUT_LEN, RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
 };
 
 /// Adapter that exposes [`GravityStorage::randomness_by_height`] to the shared precompile handler.
@@ -32,8 +34,9 @@ where
 {
     type Error = ProviderError;
 
-    fn randomness_by_height(&self, height: u64) -> Result<Option<B256>, Self::Error> {
+    fn randomness_by_height(&self, height: u64) -> Result<RandomnessByHeightLookup, Self::Error> {
         GravityStorage::randomness_by_height(self.storage.as_ref(), height)
+            .map(RandomnessByHeightLookup::storage)
     }
 }
 
@@ -71,13 +74,13 @@ where
 {
     type Error = Fallback::Error;
 
-    fn randomness_by_height(&self, height: u64) -> Result<Option<B256>, Self::Error> {
+    fn randomness_by_height(&self, height: u64) -> Result<RandomnessByHeightLookup, Self::Error> {
         if height == self.current_number {
-            return Ok(Some(self.current_randomness));
+            return Ok(RandomnessByHeightLookup::context(Some(self.current_randomness)));
         }
 
         if height == self.parent_number {
-            return Ok(self.parent_randomness);
+            return Ok(RandomnessByHeightLookup::context(self.parent_randomness));
         }
 
         self.fallback.randomness_by_height(height)

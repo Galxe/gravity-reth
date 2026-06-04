@@ -2,9 +2,9 @@
 
 use crate::EthApi;
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::U256;
 use gravity_precompiles::randomness_by_height::{
-    create_randomness_by_height_precompile, RandomnessByHeightProvider,
+    create_randomness_by_height_precompile, RandomnessByHeightLookup, RandomnessByHeightProvider,
     RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
 };
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork};
@@ -36,10 +36,11 @@ where
 {
     type Error = ProviderError;
 
-    fn randomness_by_height(&self, height: u64) -> Result<Option<B256>, Self::Error> {
+    fn randomness_by_height(&self, height: u64) -> Result<RandomnessByHeightLookup, Self::Error> {
         self.provider
             .header_by_number(height)
             .map(|header| header.and_then(|header| header.mix_hash()))
+            .map(RandomnessByHeightLookup::storage)
     }
 }
 

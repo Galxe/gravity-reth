@@ -23,14 +23,41 @@ pub const RANDOMNESS_BY_HEIGHT_OUTPUT_LEN: usize = 64;
 /// than BLS verification, but it can hit header storage, so pricing it at the transaction base gas
 /// keeps worst-case lookup volume bounded more conservatively than a low pure-compute price.
 pub const RANDOMNESS_BY_HEIGHT_LOOKUP_GAS: u64 = 21_000;
+/// Gas charged when the lookup is satisfied from live execution context.
+///
+/// Current/parent block lookups do not hit header storage, but still execute a custom precompile
+/// call and ABI encode/decode the result, so they are priced above a plain opcode and below a
+/// storage-backed lookup.
+pub const RANDOMNESS_BY_HEIGHT_CONTEXT_GAS: u64 = 2_100;
+
+/// Result returned by a randomness provider, including the gas cost for the chosen lookup path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RandomnessByHeightLookup {
+    /// Block header `mix_hash` / `prev_randao`, if the block is known.
+    pub value: Option<B256>,
+    /// Gas charged for this lookup path.
+    pub gas_used: u64,
+}
+
+impl RandomnessByHeightLookup {
+    /// Creates a storage-backed lookup result.
+    pub const fn storage(value: Option<B256>) -> Self {
+        Self { value, gas_used: RANDOMNESS_BY_HEIGHT_LOOKUP_GAS }
+    }
+
+    /// Creates an execution-context lookup result.
+    pub const fn context(value: Option<B256>) -> Self {
+        Self { value, gas_used: RANDOMNESS_BY_HEIGHT_CONTEXT_GAS }
+    }
+}
 
 /// Read-only provider for canonical randomness values by block height.
 pub trait RandomnessByHeightProvider {
     /// Provider lookup error.
     type Error: fmt::Display;
 
-    /// Return `header.mix_hash` / `prev_randao` for `height` if the block is known.
-    fn randomness_by_height(&self, height: u64) -> Result<Option<B256>, Self::Error>;
+    /// Return `header.mix_hash` / `prev_randao` for `height` if the block is known, with gas.
+    fn randomness_by_height(&self, height: u64) -> Result<RandomnessByHeightLookup, Self::Error>;
 }
 
 /// Creates the historical randomness lookup precompile.
@@ -88,12 +115,12 @@ where
         });
     }
 
-    let randomness = provider
+    let lookup = provider
         .randomness_by_height(height.to::<u64>())
         .map_err(|err| PrecompileError::Other(format!("randomness lookup failed: {err}").into()))?;
     Ok(PrecompileOutput {
-        gas_used: RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
-        bytes: match randomness {
+        gas_used: lookup.gas_used,
+        bytes: match lookup.value {
             Some(value) => encode_randomness_by_height_result(true, value),
             None => encode_randomness_by_height_result(false, B256::ZERO),
         },
@@ -113,7 +140,10 @@ pub fn encode_randomness_by_height_result(found: bool, randomness: B256) -> Byte
 
 #[cfg(test)]
 mod tests {
-    use super::{randomness_by_height_handler_raw, RandomnessByHeightProvider};
+    use super::{
+        randomness_by_height_handler_raw, RandomnessByHeightLookup, RandomnessByHeightProvider,
+        RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
+    };
     use alloy_primitives::{B256, U256};
     use std::{collections::BTreeMap, convert::Infallible};
 
@@ -125,8 +155,11 @@ mod tests {
     impl RandomnessByHeightProvider for MockRandomnessProvider {
         type Error = Infallible;
 
-        fn randomness_by_height(&self, height: u64) -> Result<Option<B256>, Self::Error> {
-            Ok(self.values.get(&height).copied())
+        fn randomness_by_height(
+            &self,
+            height: u64,
+        ) -> Result<RandomnessByHeightLookup, Self::Error> {
+            Ok(RandomnessByHeightLookup::storage(self.values.get(&height).copied()))
         }
     }
 
@@ -143,6 +176,7 @@ mod tests {
             .expect("lookup succeeds");
 
         assert!(!result.reverted);
+        assert_eq!(result.gas_used, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS);
         assert_eq!(result.bytes[31], 1);
         assert_eq!(&result.bytes[32..64], randomness.as_slice());
     }
