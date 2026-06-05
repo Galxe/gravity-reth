@@ -5,7 +5,7 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::U256;
 use gravity_precompiles::randomness_by_height::{
     create_randomness_by_height_precompile, RandomnessByHeightLookup, RandomnessByHeightProvider,
-    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, RANDOMNESS_BY_HEIGHT_RECENT_WINDOW,
 };
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork};
 use reth_errors::ProviderError;
@@ -22,11 +22,12 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 struct HeaderRandomnessProvider<Provider> {
     provider: Provider,
+    reference_number: u64,
 }
 
 impl<Provider> HeaderRandomnessProvider<Provider> {
-    const fn new(provider: Provider) -> Self {
-        Self { provider }
+    const fn new(provider: Provider, reference_number: u64) -> Self {
+        Self { provider, reference_number }
     }
 }
 
@@ -37,10 +38,21 @@ where
     type Error = ProviderError;
 
     fn randomness_by_height(&self, height: u64) -> Result<RandomnessByHeightLookup, Self::Error> {
+        if height > self.reference_number {
+            return Ok(RandomnessByHeightLookup::recent(None));
+        }
+
+        let is_recent = self.reference_number - height <= RANDOMNESS_BY_HEIGHT_RECENT_WINDOW;
         self.provider
             .header_by_number(height)
             .map(|header| header.and_then(|header| header.mix_hash()))
-            .map(RandomnessByHeightLookup::storage)
+            .map(|value| {
+                if is_recent {
+                    RandomnessByHeightLookup::recent(value)
+                } else {
+                    RandomnessByHeightLookup::storage(value)
+                }
+            })
     }
 }
 
@@ -93,7 +105,7 @@ where
         }
 
         let precompile = create_randomness_by_height_precompile(Arc::new(
-            HeaderRandomnessProvider::new(self.provider().clone()),
+            HeaderRandomnessProvider::new(self.provider().clone(), block_number),
         ));
         evm.precompiles_mut()
             .apply_precompile(&RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, move |_| Some(precompile));

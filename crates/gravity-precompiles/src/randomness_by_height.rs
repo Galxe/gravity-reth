@@ -17,18 +17,20 @@ pub const RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR: Address =
 pub const RANDOMNESS_BY_HEIGHT_INPUT_LEN: usize = 32;
 /// Precompile output length: ABI-encoded `(uint256 found, bytes32 randomness)`.
 pub const RANDOMNESS_BY_HEIGHT_OUTPUT_LEN: usize = 64;
-/// Gas charged by the lookup precompile.
+/// Number of recent ancestor blocks charged at the cheaper recent-window price.
 ///
-/// This is aligned with the mint precompile base cost. The lookup is read-only and much cheaper
-/// than BLS verification, but it can hit header storage, so pricing it at the transaction base gas
-/// keeps worst-case lookup volume bounded more conservatively than a low pure-compute price.
-pub const RANDOMNESS_BY_HEIGHT_LOOKUP_GAS: u64 = 21_000;
-/// Gas charged when the lookup is satisfied from live execution context.
+/// Gravity targets roughly 3 blocks per second, so 86,400 blocks is about 8 hours.
+pub const RANDOMNESS_BY_HEIGHT_RECENT_WINDOW: u64 = 86_400;
+/// Gas charged when the lookup is bounded to the recent block window.
 ///
-/// Current/parent block lookups do not hit header storage, but still execute a custom precompile
-/// call and ABI encode/decode the result, so they are priced above a plain opcode and below a
-/// storage-backed lookup.
-pub const RANDOMNESS_BY_HEIGHT_CONTEXT_GAS: u64 = 2_100;
+/// The provider is responsible for only using this tier for current/future misses or recent
+/// heights relative to the executing block.
+pub const RANDOMNESS_BY_HEIGHT_RECENT_GAS: u64 = 4_000;
+/// Gas charged by an older historical lookup.
+///
+/// Older heights may hit header storage/static files, so they are priced above the cheap recent
+/// window to avoid making arbitrary historical scans as cheap as a context opcode.
+pub const RANDOMNESS_BY_HEIGHT_LOOKUP_GAS: u64 = 20_000;
 
 /// Result returned by a randomness provider, including the gas cost for the chosen lookup path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,9 +47,9 @@ impl RandomnessByHeightLookup {
         Self { value, gas_used: RANDOMNESS_BY_HEIGHT_LOOKUP_GAS }
     }
 
-    /// Creates an execution-context lookup result.
-    pub const fn context(value: Option<B256>) -> Self {
-        Self { value, gas_used: RANDOMNESS_BY_HEIGHT_CONTEXT_GAS }
+    /// Creates a recent-window lookup result.
+    pub const fn recent(value: Option<B256>) -> Self {
+        Self { value, gas_used: RANDOMNESS_BY_HEIGHT_RECENT_GAS }
     }
 }
 
@@ -142,7 +144,7 @@ pub fn encode_randomness_by_height_result(found: bool, randomness: B256) -> Byte
 mod tests {
     use super::{
         randomness_by_height_handler_raw, RandomnessByHeightLookup, RandomnessByHeightProvider,
-        RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
+        RANDOMNESS_BY_HEIGHT_LOOKUP_GAS, RANDOMNESS_BY_HEIGHT_RECENT_GAS,
     };
     use alloy_primitives::{B256, U256};
     use std::{collections::BTreeMap, convert::Infallible};
@@ -150,6 +152,22 @@ mod tests {
     #[derive(Default)]
     struct MockRandomnessProvider {
         values: BTreeMap<u64, B256>,
+    }
+
+    #[derive(Default)]
+    struct RecentMockRandomnessProvider {
+        values: BTreeMap<u64, B256>,
+    }
+
+    impl RandomnessByHeightProvider for RecentMockRandomnessProvider {
+        type Error = Infallible;
+
+        fn randomness_by_height(
+            &self,
+            height: u64,
+        ) -> Result<RandomnessByHeightLookup, Self::Error> {
+            Ok(RandomnessByHeightLookup::recent(self.values.get(&height).copied()))
+        }
     }
 
     impl RandomnessByHeightProvider for MockRandomnessProvider {
@@ -191,6 +209,20 @@ mod tests {
         assert!(!result.reverted);
         assert_eq!(result.bytes[31], 0);
         assert_eq!(&result.bytes[32..64], B256::ZERO.as_slice());
+    }
+
+    #[test]
+    fn returns_provider_selected_recent_gas() {
+        let randomness = B256::repeat_byte(0xbb);
+        let provider = RecentMockRandomnessProvider { values: BTreeMap::from([(10, randomness)]) };
+
+        let result = randomness_by_height_handler_raw(&encode_height(U256::from(10)), &provider)
+            .expect("lookup succeeds");
+
+        assert!(!result.reverted);
+        assert_eq!(result.gas_used, RANDOMNESS_BY_HEIGHT_RECENT_GAS);
+        assert_eq!(result.bytes[31], 1);
+        assert_eq!(&result.bytes[32..64], randomness.as_slice());
     }
 
     #[test]
