@@ -140,3 +140,32 @@ Notes:
 
 reth is **all-or-nothing to compile** — unlike the leaf forks (which compile-drive incrementally), the workspace won't build until *all* 111 conflicts + their API migrations are resolved. So the transplant is best done as a dedicated, uninterrupted effort that resolves Layer A→E in one branch and only then attempts `cargo check`, rather than expecting intermediate green builds. The consensus-critical cluster (§2) should pair with the grevm/revm authors and gate on the Phase-6 mainnet block-replay state-root parity check before any rollout.
 
+## 9. Trial transplant onto v2.2.0 — measured resolution split (2026-06-08)
+
+A full `git cherry-pick gravity-base/v1.8.3-clean-ancestry` onto upstream `v2.2.0` was run and the 111 conflicts triaged. Result — **81 of 111 resolve mechanically, 30 need a real merge:**
+
+- **272 files apply clean** (the Gravity-owned crates `pipe-exec-layer-ext-v2`, `gravity-storage`, `gravity-primitives` + all non-overlapping edits).
+- **81 conflicts → take upstream `v2.2.0` (`git checkout --ours`)**: these are Gravity's v1.8.3-era code that upstream simply evolved, or Gravity edits that v2.2.0 already adopted (e.g. `payload_validator.rs` `triev2: Default::default()` is now upstream; `engine.rs` `#[allow]`→`#[expect]` cosmetic). Identified automatically: a conflict file whose Gravity diff (`git diff v1.8.3 gravity-base -- <f>`) contains **no** Gravity-specific marker (`gravity|pipe_exec|min_base_fee|lazy_reward|gravity_storage|coinbase tip`) is take-HEAD. Plus 3 `DU` deletions (`codspeed-build.sh`, `windows.yml`, `zstd-compressors` — upstream removed them).
+- **30 conflicts → real merge** (Gravity functionality must be re-applied onto v2.2.0). Ranked by Gravity-diff size:
+
+  | Tier | Files | Notes |
+  |---|---|---|
+  | **Deep / consensus-critical** | `storage/provider/.../database/provider.rs` (322), `engine/tree/src/persistence.rs` (217), `engine/tree/src/tree/mod.rs` (193) + `tree/tests.rs` (175), `storage/provider/.../static_file/manager.rs` (126) | Gravity storage + pipe-exec engine integration vs v2.2.0's rewritten internals. **Pair with authors + Phase-6 state-root replay. Do NOT guess.** |
+  | **Localized real** | `ethereum/evm/src/lib.rs` (89, lazy-reward/system-call EVM cfg), `chainspec/src/spec.rs` (72, Gravity hardfork schedule + 50-Gwei min base fee), `storage/.../blockchain_provider.rs` (32), `cli/commands/src/common.rs` (32) | Well-understood; localized; tractable with care. |
+  | **Cargo wiring** | root `Cargo.toml` + 7 crate `Cargo.toml` | Take v2.2.0's version numbers, redirect revm-family to the §7 forks via `[patch.crates-io]`, add Gravity members + `gravity-api-types`. **op-revm omitted.** |
+  | **Small** | `node/core/{args,node_config}`, `primitives-traits/{lib,storage}`, `optimism/chainspec`, `rpc-eth-api/helpers/transaction`, `ethereum/node`, `cli/commands/node`, stages benches | <16-line Gravity diffs; mostly mechanical. |
+
+**Reproduce the split:**
+```bash
+git checkout -b transplant v2.2.0 && git cherry-pick -n gravity-base/v1.8.3-clean-ancestry
+# classify: take-HEAD vs merge
+for f in $(git diff --name-only --diff-filter=U); do
+  git diff v1.8.3 gravity-base/v1.8.3-clean-ancestry -- "$f" \
+    | grep -qiE 'gravity|pipe_exec|min_base_fee|lazy_reward|gravity_storage|coinbase.*tip' \
+    && echo "MERGE  $f" || echo "HEAD   $f"
+done
+# auto-resolve the HEAD ones, then hand-merge the ~30 MERGE ones
+```
+
+**Status:** the 81-mechanical resolution is reproducible in seconds; the 30 real merges (esp. the 5 deep storage/engine ones) are the dedicated, author-paired, compile-fed effort gated on Phase-6 verification. This trial confirms the transplant is **bounded and tractable** — the bulk is mechanical, the irreducible hard core is ~5 files of storage/engine integration.
+
