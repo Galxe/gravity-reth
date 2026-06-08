@@ -31,7 +31,6 @@ nybbles = { workspace = true, features = ["rlp"] }
 
 # reth
 revm-database.workspace = true
-reth-storage-errors.workspace = true
 gravity-primitives.workspace = true
 
 # `serde` feature
@@ -92,7 +91,6 @@ std = [
     "revm-database/std",
     "revm-state/std",
     "reth-codecs?/std",
-    "reth-storage-errors/std",
     "once_cell/std",
 ]
 eip1186 = ["alloy-rpc-types-eth/serde", "dep:alloy-serde"]

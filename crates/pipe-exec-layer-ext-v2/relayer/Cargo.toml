@@ -29,7 +29,8 @@ async-trait.workspace = true
 # Error handling and utilities
 anyhow.workspace = true
 tracing.workspace = true
-reqwest = { workspace = true, features = ["rustls-tls"] }
+# reqwest 0.13 renamed `rustls-tls` -> `rustls`; workspace already enables it.
+reqwest.workspace = true
 url.workspace = true
 
 # Persistence
