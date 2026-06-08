@@ -24,6 +24,7 @@ use alloy_consensus::{
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{Address, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
+use gravity_precompiles::randomness_by_height::RandomnessByHeightGasPolicy;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
@@ -81,6 +82,18 @@ use crate::{
         GravityStorageRandomnessProvider,
     },
 };
+
+/// Selects the randomness-by-height gas/window policy for `block_number`.
+///
+/// This currently returns the Alpha defaults for every post-Alpha block. Keep this as the
+/// execution-side extension point for future hardforks that need different pricing or a different
+/// recent-window size.
+fn randomness_by_height_gas_policy_at_block<C: EthChainSpec + ?Sized>(
+    _chain_spec: &C,
+    _block_number: u64,
+) -> RandomnessByHeightGasPolicy {
+    RandomnessByHeightGasPolicy::DEFAULT
+}
 
 /// Metadata about an executed block
 #[derive(Debug, Clone, Copy)]
@@ -376,12 +389,15 @@ impl<Storage: GravityStorage> Core<Storage> {
         }
 
         let canonical_provider = GravityStorageRandomnessProvider::new(self.storage.clone());
-        let execution_provider = Arc::new(ExecutionRandomnessProvider::new(
+        let gas_policy =
+            randomness_by_height_gas_policy_at_block(self.chain_spec.as_ref(), block_number);
+        let execution_provider = Arc::new(ExecutionRandomnessProvider::new_with_gas_policy(
             canonical_provider,
             block_number,
             ordered_block.prev_randao,
             parent_header.number,
             parent_header.mix_hash(),
+            gas_policy,
         ));
 
         Arc::new(vec![

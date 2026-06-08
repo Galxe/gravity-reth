@@ -2,7 +2,7 @@
 
 use alloy_primitives::B256;
 use gravity_precompiles::randomness_by_height::{
-    RandomnessByHeightLookup, RandomnessByHeightProvider,
+    RandomnessByHeightGasPolicy, RandomnessByHeightLookup, RandomnessByHeightProvider,
 };
 use gravity_storage::GravityStorage;
 use reth_provider::ProviderError;
@@ -54,6 +54,7 @@ pub struct ExecutionRandomnessProvider<Fallback> {
     current_randomness: B256,
     parent_number: u64,
     parent_randomness: Option<B256>,
+    gas_policy: RandomnessByHeightGasPolicy,
 }
 
 impl<Fallback> ExecutionRandomnessProvider<Fallback> {
@@ -65,7 +66,33 @@ impl<Fallback> ExecutionRandomnessProvider<Fallback> {
         parent_number: u64,
         parent_randomness: Option<B256>,
     ) -> Self {
-        Self { fallback, current_number, current_randomness, parent_number, parent_randomness }
+        Self::new_with_gas_policy(
+            fallback,
+            current_number,
+            current_randomness,
+            parent_number,
+            parent_randomness,
+            RandomnessByHeightGasPolicy::DEFAULT,
+        )
+    }
+
+    /// Creates a live execution randomness provider with an explicit gas/window policy.
+    pub const fn new_with_gas_policy(
+        fallback: Fallback,
+        current_number: u64,
+        current_randomness: B256,
+        parent_number: u64,
+        parent_randomness: Option<B256>,
+        gas_policy: RandomnessByHeightGasPolicy,
+    ) -> Self {
+        Self {
+            fallback,
+            current_number,
+            current_randomness,
+            parent_number,
+            parent_randomness,
+            gas_policy,
+        }
     }
 }
 
@@ -77,34 +104,36 @@ where
 
     fn randomness_by_height(&self, height: u64) -> Result<RandomnessByHeightLookup, Self::Error> {
         if height == self.current_number {
-            return Ok(RandomnessByHeightLookup::recent(Some(self.current_randomness)));
+            return Ok(self.gas_policy.recent(Some(self.current_randomness)));
         }
 
         if height == self.parent_number {
-            return Ok(RandomnessByHeightLookup::recent(self.parent_randomness));
+            return Ok(self.gas_policy.recent(self.parent_randomness));
         }
 
         if height > self.current_number {
-            return Ok(RandomnessByHeightLookup::recent(None));
+            return Ok(self.gas_policy.recent(None));
         }
 
-        if self.current_number - height <= RANDOMNESS_BY_HEIGHT_RECENT_WINDOW {
+        if self.current_number - height <= self.gas_policy.recent_window {
             return self
                 .fallback
                 .randomness_by_height(height)
-                .map(|lookup| RandomnessByHeightLookup::recent(lookup.value));
+                .map(|lookup| self.gas_policy.recent(lookup.value));
         }
 
-        self.fallback.randomness_by_height(height)
+        self.fallback
+            .randomness_by_height(height)
+            .map(|lookup| self.gas_policy.storage(lookup.value))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionRandomnessProvider, RandomnessByHeightLookup, RandomnessByHeightProvider,
-        RANDOMNESS_BY_HEIGHT_LOOKUP_GAS, RANDOMNESS_BY_HEIGHT_RECENT_GAS,
-        RANDOMNESS_BY_HEIGHT_RECENT_WINDOW,
+        ExecutionRandomnessProvider, RandomnessByHeightGasPolicy, RandomnessByHeightLookup,
+        RandomnessByHeightProvider, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
+        RANDOMNESS_BY_HEIGHT_RECENT_GAS, RANDOMNESS_BY_HEIGHT_RECENT_WINDOW,
     };
     use alloy_primitives::B256;
     use std::{collections::BTreeMap, convert::Infallible};
@@ -186,5 +215,32 @@ mod tests {
         let lookup = provider.randomness_by_height(older_height).expect("older lookup");
         assert_eq!(lookup.value, Some(B256::repeat_byte(0x43)));
         assert_eq!(lookup.gas_used, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS);
+    }
+
+    #[test]
+    fn explicit_gas_policy_controls_window_and_prices() {
+        let policy =
+            RandomnessByHeightGasPolicy { recent_window: 2, recent_gas: 77, lookup_gas: 99 };
+        let provider = ExecutionRandomnessProvider::new_with_gas_policy(
+            MockFallback {
+                values: BTreeMap::from([
+                    (CURRENT_NUMBER - 2, B256::repeat_byte(0x22)),
+                    (CURRENT_NUMBER - 3, B256::repeat_byte(0x21)),
+                ]),
+            },
+            CURRENT_NUMBER,
+            B256::repeat_byte(0xaa),
+            PARENT_NUMBER,
+            Some(B256::repeat_byte(0xbb)),
+            policy,
+        );
+
+        let recent = provider.randomness_by_height(CURRENT_NUMBER - 2).expect("recent lookup");
+        assert_eq!(recent.value, Some(B256::repeat_byte(0x22)));
+        assert_eq!(recent.gas_used, 77);
+
+        let older = provider.randomness_by_height(CURRENT_NUMBER - 3).expect("older lookup");
+        assert_eq!(older.value, Some(B256::repeat_byte(0x21)));
+        assert_eq!(older.gas_used, 99);
     }
 }

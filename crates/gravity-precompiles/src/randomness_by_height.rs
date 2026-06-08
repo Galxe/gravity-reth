@@ -32,6 +32,41 @@ pub const RANDOMNESS_BY_HEIGHT_RECENT_GAS: u64 = 4_000;
 /// window to avoid making arbitrary historical scans as cheap as a context opcode.
 pub const RANDOMNESS_BY_HEIGHT_LOOKUP_GAS: u64 = 20_000;
 
+/// Gas/window policy for the randomness-by-height precompile.
+///
+/// These values are intentionally carried as a policy instead of being read directly from constants
+/// at every call site. The defaults preserve the current Alpha behavior, while Gravity-specific
+/// execution/RPC code can select a different policy by block height when a future hardfork changes
+/// the pricing or recent-window size.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RandomnessByHeightGasPolicy {
+    /// Number of recent ancestor blocks charged at the cheaper recent-window price.
+    pub recent_window: u64,
+    /// Gas charged for current/future misses or recent-window lookups.
+    pub recent_gas: u64,
+    /// Gas charged for older historical lookups.
+    pub lookup_gas: u64,
+}
+
+impl RandomnessByHeightGasPolicy {
+    /// Default gas/window policy used by the Alpha implementation.
+    pub const DEFAULT: Self = Self {
+        recent_window: RANDOMNESS_BY_HEIGHT_RECENT_WINDOW,
+        recent_gas: RANDOMNESS_BY_HEIGHT_RECENT_GAS,
+        lookup_gas: RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
+    };
+
+    /// Creates a storage-backed lookup result using this policy.
+    pub const fn storage(self, value: Option<B256>) -> RandomnessByHeightLookup {
+        RandomnessByHeightLookup { value, gas_used: self.lookup_gas }
+    }
+
+    /// Creates a recent-window lookup result using this policy.
+    pub const fn recent(self, value: Option<B256>) -> RandomnessByHeightLookup {
+        RandomnessByHeightLookup { value, gas_used: self.recent_gas }
+    }
+}
+
 /// Result returned by a randomness provider, including the gas cost for the chosen lookup path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RandomnessByHeightLookup {
@@ -44,12 +79,12 @@ pub struct RandomnessByHeightLookup {
 impl RandomnessByHeightLookup {
     /// Creates a storage-backed lookup result.
     pub const fn storage(value: Option<B256>) -> Self {
-        Self { value, gas_used: RANDOMNESS_BY_HEIGHT_LOOKUP_GAS }
+        RandomnessByHeightGasPolicy::DEFAULT.storage(value)
     }
 
     /// Creates a recent-window lookup result.
     pub const fn recent(value: Option<B256>) -> Self {
-        Self { value, gas_used: RANDOMNESS_BY_HEIGHT_RECENT_GAS }
+        RandomnessByHeightGasPolicy::DEFAULT.recent(value)
     }
 }
 
@@ -143,8 +178,9 @@ pub fn encode_randomness_by_height_result(found: bool, randomness: B256) -> Byte
 #[cfg(test)]
 mod tests {
     use super::{
-        randomness_by_height_handler_raw, RandomnessByHeightLookup, RandomnessByHeightProvider,
-        RANDOMNESS_BY_HEIGHT_LOOKUP_GAS, RANDOMNESS_BY_HEIGHT_RECENT_GAS,
+        randomness_by_height_handler_raw, RandomnessByHeightGasPolicy, RandomnessByHeightLookup,
+        RandomnessByHeightProvider, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
+        RANDOMNESS_BY_HEIGHT_RECENT_GAS,
     };
     use alloy_primitives::{B256, U256};
     use std::{collections::BTreeMap, convert::Infallible};
@@ -223,6 +259,16 @@ mod tests {
         assert_eq!(result.gas_used, RANDOMNESS_BY_HEIGHT_RECENT_GAS);
         assert_eq!(result.bytes[31], 1);
         assert_eq!(&result.bytes[32..64], randomness.as_slice());
+    }
+
+    #[test]
+    fn lookup_can_use_custom_gas_policy() {
+        let randomness = B256::repeat_byte(0xcc);
+        let policy =
+            RandomnessByHeightGasPolicy { recent_window: 8, recent_gas: 123, lookup_gas: 456 };
+
+        assert_eq!(policy.recent(Some(randomness)).gas_used, 123);
+        assert_eq!(policy.storage(Some(randomness)).gas_used, 456);
     }
 
     #[test]

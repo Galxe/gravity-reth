@@ -4,8 +4,8 @@ use crate::EthApi;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, U256};
 use gravity_precompiles::randomness_by_height::{
-    create_randomness_by_height_precompile, RandomnessByHeightLookup, RandomnessByHeightProvider,
-    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, RANDOMNESS_BY_HEIGHT_RECENT_WINDOW,
+    create_randomness_by_height_precompile, RandomnessByHeightGasPolicy, RandomnessByHeightLookup,
+    RandomnessByHeightProvider, RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
 };
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork};
 use reth_errors::ProviderError;
@@ -24,6 +24,7 @@ struct HeaderRandomnessProvider<Provider> {
     provider: Provider,
     reference_number: u64,
     current_randomness: Option<B256>,
+    gas_policy: RandomnessByHeightGasPolicy,
 }
 
 impl<Provider> HeaderRandomnessProvider<Provider> {
@@ -31,9 +32,17 @@ impl<Provider> HeaderRandomnessProvider<Provider> {
         provider: Provider,
         reference_number: u64,
         current_randomness: Option<B256>,
+        gas_policy: RandomnessByHeightGasPolicy,
     ) -> Self {
-        Self { provider, reference_number, current_randomness }
+        Self { provider, reference_number, current_randomness, gas_policy }
     }
+}
+
+fn randomness_by_height_gas_policy_at_block<C: EthChainSpec + ?Sized>(
+    _chain_spec: &C,
+    _block_number: u64,
+) -> RandomnessByHeightGasPolicy {
+    RandomnessByHeightGasPolicy::DEFAULT
 }
 
 impl<Provider> RandomnessByHeightProvider for HeaderRandomnessProvider<Provider>
@@ -44,22 +53,22 @@ where
 
     fn randomness_by_height(&self, height: u64) -> Result<RandomnessByHeightLookup, Self::Error> {
         if height == self.reference_number && self.current_randomness.is_some() {
-            return Ok(RandomnessByHeightLookup::recent(self.current_randomness));
+            return Ok(self.gas_policy.recent(self.current_randomness));
         }
 
         if height > self.reference_number {
-            return Ok(RandomnessByHeightLookup::recent(None));
+            return Ok(self.gas_policy.recent(None));
         }
 
-        let is_recent = self.reference_number - height <= RANDOMNESS_BY_HEIGHT_RECENT_WINDOW;
+        let is_recent = self.reference_number - height <= self.gas_policy.recent_window;
         self.provider
             .header_by_number(height)
             .map(|header| header.and_then(|header| header.mix_hash()))
             .map(|value| {
                 if is_recent {
-                    RandomnessByHeightLookup::recent(value)
+                    self.gas_policy.recent(value)
                 } else {
-                    RandomnessByHeightLookup::storage(value)
+                    self.gas_policy.storage(value)
                 }
             })
     }
@@ -108,9 +117,8 @@ where
         EV: Evm<Precompiles = PrecompilesMap>,
     {
         let Ok(block_number) = u64::try_from(block_number) else { return };
-        if !self
-            .provider()
-            .chain_spec()
+        let chain_spec = self.provider().chain_spec();
+        if !chain_spec
             .gravity_hardforks()
             .is_fork_active_at_block(GravityHardfork::Alpha, block_number)
         {
@@ -122,6 +130,7 @@ where
                 self.provider().clone(),
                 block_number,
                 current_randomness,
+                randomness_by_height_gas_policy_at_block(chain_spec.as_ref(), block_number),
             )));
         evm.precompiles_mut()
             .apply_precompile(&RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, move |_| Some(precompile));
