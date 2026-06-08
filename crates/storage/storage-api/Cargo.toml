@@ -22,6 +22,8 @@ reth-prune-types.workspace = true
 reth-stages-types.workspace = true
 reth-storage-errors.workspace = true
 reth-trie-common.workspace = true
+revm-bytecode.workspace = true
+gravity-primitives.workspace = true
 revm-database.workspace = true
 reth-ethereum-primitives.workspace = true
 
@@ -31,10 +33,17 @@ alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-rpc-types-engine.workspace = true
 
+# misc
+dashmap = { workspace = true, features = ["inline"] }
 auto_impl.workspace = true
 serde_json = { workspace = true, optional = true }
+metrics.workspace = true
+metrics-derive.workspace = true
+once_cell.workspace = true
+rayon.workspace = true
 
 [features]
+config-from-env = ["gravity-primitives/config-from-env"]
 default = ["std"]
 std = [
     "reth-chainspec/std",
@@ -52,6 +61,8 @@ std = [
     "reth-db-models/std",
     "reth-trie-common/std",
     "serde_json?/std",
+    "revm-bytecode/std",
+    "once_cell/std",
 ]
 
 db-api = [
@@ -68,13 +79,17 @@ serde = [
     "reth-stages-types/serde",
     "reth-trie-common/serde",
     "revm-database/serde",
+    "reth-ethereum-primitives/serde",
     "alloy-eips/serde",
     "alloy-primitives/serde",
     "alloy-consensus/serde",
     "alloy-rpc-types-engine/serde",
+    "dashmap/serde",
+    "revm-bytecode/serde",
 ]
 
 serde-bincode-compat = [
+    "reth-ethereum-primitives/serde-bincode-compat",
     "reth-execution-types/serde-bincode-compat",
     "reth-trie-common/serde-bincode-compat",
     "alloy-eips/serde-bincode-compat",

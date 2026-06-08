@@ -33,6 +33,10 @@ reth-stages-api.workspace = true
 reth-tasks = { workspace = true, features = ["rayon"] }
 reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
+reth-storage-errors.workspace = true
+# Gravity: pipe-exec engine integration
+reth-pipe-exec-layer-event-bus.workspace = true
+gravity-primitives.workspace = true
 reth-trie.workspace = true
 reth-trie-common.workspace = true
 reth-trie-db.workspace = true
@@ -106,6 +110,7 @@ rand.workspace = true
 rand_08.workspace = true
 
 [features]
+config-from-env = ["gravity-primitives/config-from-env"]
 test-utils = [
     "reth-chain-state/test-utils",
     "reth-chainspec/test-utils",
@@ -141,6 +146,11 @@ trie-debug = [
     "reth-engine-primitives/trie-debug",
     "dep:serde_json",
 ]
+failpoints = ["fail/failpoints", "reth-db/failpoints"]
+
+[dependencies.fail]
+version = "0.5"
+optional = true
 
 [[test]]
 name = "e2e_testsuite"

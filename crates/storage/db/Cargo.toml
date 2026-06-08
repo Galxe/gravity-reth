@@ -108,7 +108,6 @@ arbitrary = [
     "reth-prune-types/arbitrary",
 ]
 disable-lock = []
-op = ["reth-db-api/op", "reth-primitives-traits/op"]
 failpoints = ["fail/failpoints"]
 
 [dependencies.fail]

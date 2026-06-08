@@ -20,7 +20,7 @@ reth-primitives-traits = { workspace = true, features = ["reth-codec", "secp256k
 reth-errors.workspace = true
 reth-storage-errors.workspace = true
 reth-storage-api = { workspace = true, features = ["std", "db-api"] }
-reth-db = { workspace = true, features = ["mdbx"] }
+reth-db = { workspace = true }
 reth-db-api.workspace = true
 reth-prune-types.workspace = true
 reth-stages-types.workspace = true
@@ -33,6 +33,7 @@ reth-chain-state.workspace = true
 reth-node-types.workspace = true
 reth-static-file-types = { workspace = true, features = ["std"] }
 reth-fs-util.workspace = true
+gravity-primitives.workspace = true
 
 # ethereum
 alloy-eips.workspace = true
@@ -85,8 +86,11 @@ rand.workspace = true
 
 tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
 
+alloy-consensus.workspace = true
+
 [features]
 jemalloc = ["rocksdb/jemalloc"]
+pipe_test = []
 test-utils = [
     "reth-db/test-utils",
     "reth-nippy-jar/test-utils",
