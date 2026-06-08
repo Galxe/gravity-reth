@@ -69,8 +69,8 @@ The rebase is too big for one PR. Suggested sequence, each independently reviewa
 | PR | Scope | Depends on |
 |---|---|---|
 | **PR 0** (this) | re-anchor foundation + workflow + script + this map. No reth code change. | — |
-| **PR 1** | `Galxe/revm` v38 branch + `Galxe/grevm` revm-38 + alloy-evm/inspectors bumps (separate repos) | — |
-| **PR 2** | reth scaffolding compiles: Cargo deps → 2.2.0 + dep forks; Layer A owned-crate API fixes | PR 1 |
+| **PR 1** ✅ **DONE** | the 4 dependency forks (separate repos) — all built + tested, see §6 | — |
+| **PR 2** | reth scaffolding compiles: Cargo deps → 2.2.0 + dep forks (§7 patch); Layer A owned-crate API fixes | PR 1 ✅ |
 | **PR 3** | Layer B execution/EVM conflicts (evm/execute, ethereum/evm) | PR 2 |
 | **PR 4** | Layer C engine/tree + consensus validation | PR 2 |
 | **PR 5** | Layer D storage/trie/stages (+ opportunistic extraction) | PR 2 |
@@ -90,3 +90,53 @@ git rebase --abort
 ```
 
 (`gravity-base/v1.8.3-clean-ancestry` is the re-anchored foundation tag created in PR 0.)
+
+---
+
+## 6. Dependency forks — DONE ✅ (PR 1 complete, 2026-06-08)
+
+All four Galxe forks the reth-2.2.0 transplant depends on are migrated to revm 38, built, and tested. The transplant (PR 2+) is now unblocked.
+
+| Fork | Branch | Base / target | Tests |
+|---|---|---|---|
+| `Galxe/revm` | `v38.0.0-gravity` | bluealloy **v107** (= crates.io revm 38.0.0; NOT git tip) + lazy-reward | **420 pass** |
+| `Galxe/alloy-evm` | `v0.34.0-gravity` | upstream v0.34.0 + lazy-reward + Galxe revm | **51 pass** |
+| `Galxe/grevm` | `feat/revm-38` | parallel-state migrated to revm 38; MSRV 1.93 | **14 pass** (erc20/native/uniswap) |
+| `Galxe/revm-inspectors` | `v0.39.0-gravity` | upstream v0.39.0 + Galxe revm | **42 pass** |
+
+**Hard-won lesson (applied to all four):** bluealloy/paradigm **git tip runs ahead of crates.io**. Base each fork on the *exact commit/tag whose published version matches what reth 2.2.0 pins* (e.g. revm → tag `v107`, where `revm-handler` is `18.1.0` with `warm_addresses -> Box<impl Iterator>`, matching crates.io 38.0.0 — NOT git `afc22938`/"38.1" which had already changed it to `&AddressSet`). Verify by diffing an API surface against the crates.io source in `~/.cargo/registry/src/.../<crate>-<ver>/`. Getting this wrong surfaces as `warm_addresses`/`AccountInfo` mismatches when a downstream fork compiles against yours.
+
+## 7. Cargo wiring for the transplant (ready to paste into reth's root Cargo.toml)
+
+reth 2.2.0 pulls these revm-family crates from crates.io; redirect them all to the Galxe forks so the whole workspace uses one consistent (lazy-reward-bearing) revm. Put this in the **root** `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+# revm core (all sub-crates → one Galxe fork branch, based on bluealloy v107)
+revm                    = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-bytecode           = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-context            = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-context-interface  = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-database           = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-database-interface = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-handler            = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-inspector          = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-interpreter        = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-precompile         = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-primitives         = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-state              = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+# higher-level
+alloy-evm               = { git = "https://github.com/Galxe/alloy-evm", branch = "v0.34.0-gravity" }
+revm-inspectors         = { git = "https://github.com/Galxe/revm-inspectors", branch = "v0.39.0-gravity" }
+grevm                   = { git = "https://github.com/Galxe/grevm", branch = "feat/revm-38" }
+```
+
+Notes:
+- **op-revm** is intentionally absent — revm 38 dropped it from the workspace and reth 2.2.0 no longer depends on it (confirmed in reth v2.2.0 `Cargo.lock`).
+- Pin to commit SHAs instead of `branch` before any production rollout (branches move).
+- MSRV is **1.93** for the whole tree (revm 38). Set `rust-toolchain.toml` accordingly.
+
+## 8. Transplant execution note (PR 2+)
+
+reth is **all-or-nothing to compile** — unlike the leaf forks (which compile-drive incrementally), the workspace won't build until *all* 111 conflicts + their API migrations are resolved. So the transplant is best done as a dedicated, uninterrupted effort that resolves Layer A→E in one branch and only then attempts `cargo check`, rather than expecting intermediate green builds. The consensus-critical cluster (§2) should pair with the grevm/revm authors and gate on the Phase-6 mainnet block-replay state-root parity check before any rollout.
+
