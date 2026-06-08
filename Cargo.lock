@@ -4316,10 +4316,13 @@ version = "1.8.3"
 name = "gravity-storage"
 version = "1.8.3"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "async-trait",
  "metrics",
  "once_cell",
+ "reth-chainspec",
  "reth-db-api",
  "reth-evm",
  "reth-metrics",
