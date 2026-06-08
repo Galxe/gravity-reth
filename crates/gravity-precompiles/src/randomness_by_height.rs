@@ -67,6 +67,18 @@ impl RandomnessByHeightGasPolicy {
     }
 }
 
+/// Selects the randomness-by-height gas/window policy for `block_number`.
+///
+/// This currently returns the Alpha defaults for every post-Alpha block. Keep this as the shared
+/// Gravity extension point for future hardforks that need different pricing or a different
+/// recent-window size.
+pub const fn randomness_by_height_gas_policy_at_block<ChainSpec: ?Sized>(
+    _chain_spec: &ChainSpec,
+    _block_number: u64,
+) -> RandomnessByHeightGasPolicy {
+    RandomnessByHeightGasPolicy::DEFAULT
+}
+
 /// Result returned by a randomness provider, including the gas cost for the chosen lookup path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RandomnessByHeightLookup {
