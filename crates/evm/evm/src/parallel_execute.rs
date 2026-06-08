@@ -138,10 +138,7 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
     }
 
     #[inline]
-    fn apply_custom_precompiles(
-        &mut self,
-        _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
-    ) {
-        // TODO(Ashin Gau): How does basic executor handle custom precompiles
+    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
+        self.0.apply_custom_precompiles(custom_precompiles);
     }
 }

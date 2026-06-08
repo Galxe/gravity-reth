@@ -2,7 +2,7 @@
 
 use crate::EthApi;
 use alloy_consensus::BlockHeader;
-use alloy_primitives::U256;
+use alloy_primitives::{B256, U256};
 use gravity_precompiles::randomness_by_height::{
     create_randomness_by_height_precompile, RandomnessByHeightLookup, RandomnessByHeightProvider,
     RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, RANDOMNESS_BY_HEIGHT_RECENT_WINDOW,
@@ -23,11 +23,16 @@ use std::sync::Arc;
 struct HeaderRandomnessProvider<Provider> {
     provider: Provider,
     reference_number: u64,
+    current_randomness: Option<B256>,
 }
 
 impl<Provider> HeaderRandomnessProvider<Provider> {
-    const fn new(provider: Provider, reference_number: u64) -> Self {
-        Self { provider, reference_number }
+    const fn new(
+        provider: Provider,
+        reference_number: u64,
+        current_randomness: Option<B256>,
+    ) -> Self {
+        Self { provider, reference_number, current_randomness }
     }
 }
 
@@ -38,6 +43,10 @@ where
     type Error = ProviderError;
 
     fn randomness_by_height(&self, height: u64) -> Result<RandomnessByHeightLookup, Self::Error> {
+        if height == self.reference_number && self.current_randomness.is_some() {
+            return Ok(RandomnessByHeightLookup::recent(self.current_randomness));
+        }
+
         if height > self.reference_number {
             return Ok(RandomnessByHeightLookup::recent(None));
         }
@@ -90,8 +99,12 @@ where
         self.inner.max_simulate_blocks()
     }
 
-    fn register_custom_precompiles<EV>(&self, evm: &mut EV, block_number: U256)
-    where
+    fn register_custom_precompiles<EV>(
+        &self,
+        evm: &mut EV,
+        block_number: U256,
+        current_randomness: Option<B256>,
+    ) where
         EV: Evm<Precompiles = PrecompilesMap>,
     {
         let Ok(block_number) = u64::try_from(block_number) else { return };
@@ -104,9 +117,12 @@ where
             return
         }
 
-        let precompile = create_randomness_by_height_precompile(Arc::new(
-            HeaderRandomnessProvider::new(self.provider().clone(), block_number),
-        ));
+        let precompile =
+            create_randomness_by_height_precompile(Arc::new(HeaderRandomnessProvider::new(
+                self.provider().clone(),
+                block_number,
+                current_randomness,
+            )));
         evm.precompiles_mut()
             .apply_precompile(&RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, move |_| Some(precompile));
     }

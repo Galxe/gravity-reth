@@ -110,10 +110,11 @@ pub trait EstimateCall: Call {
         tx_env.set_gas_limit(tx_env.gas_limit().min(highest_gas_limit));
 
         let block_number = evm_env.block_env.number;
+        let current_randomness = evm_env.block_env.prevrandao;
 
         // Create EVM instance once and reuse it throughout the entire estimation process
         let mut evm = self.evm_config().evm_with_env(&mut db, evm_env);
-        self.register_custom_precompiles(&mut evm, block_number);
+        self.register_custom_precompiles(&mut evm, block_number, current_randomness);
 
         // For basic transfers, try using minimum gas before running full binary search
         if is_basic_transfer {
