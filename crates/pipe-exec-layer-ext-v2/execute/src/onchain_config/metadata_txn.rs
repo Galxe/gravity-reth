@@ -16,7 +16,7 @@ use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
 use reth_evm::Evm;
 use reth_execution_types::BlockExecutionOutput;
-use reth_primitives::Receipt;
+use reth_ethereum_primitives::Receipt;
 use reth_provider::BlockExecutionResult;
 use revm::{
     context::TxEnv,
@@ -195,7 +195,7 @@ pub fn transact_system_txn(
     txn: TransactionSigned,
 ) -> (SystemTxnResult, EvmState) {
     use reth_evm::IntoTxEnv;
-    use reth_primitives::Recovered;
+    use reth_primitives_traits::Recovered;
 
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
     let result = evm.transact_raw(tx_env).unwrap();

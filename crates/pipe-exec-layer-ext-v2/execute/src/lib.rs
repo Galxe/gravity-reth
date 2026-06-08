@@ -37,7 +37,8 @@ use reth_pipe_exec_layer_event_bus::{
     MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus, WaitForPersistenceEvent,
     PIPE_EXEC_LAYER_EVENT_BUS,
 };
-use reth_primitives::{EthPrimitives, Recovered};
+use reth_ethereum_primitives::EthPrimitives;
+use reth_primitives_traits::Recovered;
 use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,

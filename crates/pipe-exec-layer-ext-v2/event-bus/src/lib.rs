@@ -3,7 +3,7 @@
 use alloy_primitives::TxHash;
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_ethereum_primitives::EthPrimitives;
-use reth_primitives::NodePrimitives;
+use reth_primitives_traits::NodePrimitives;
 use std::{sync::OnceLock, thread::sleep, time::Duration};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::info;

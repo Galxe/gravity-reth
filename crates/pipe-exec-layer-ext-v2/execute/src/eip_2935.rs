@@ -12,7 +12,7 @@ use alloy_eips::eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE};
 use alloy_primitives::{keccak256, Address, Bytes, U256};
 use reth_chainspec::{ChainSpec, EthereumHardfork, Hardforks};
 use reth_evm::{execute::BlockExecutionError, parallel_execute::ParallelExecutor};
-use reth_primitives::EthPrimitives;
+use reth_ethereum_primitives::EthPrimitives;
 use revm::{
     bytecode::Bytecode,
     state::{Account, AccountInfo, AccountStatus, EvmState},
