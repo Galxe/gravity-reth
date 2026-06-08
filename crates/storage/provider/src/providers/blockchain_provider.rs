@@ -1,3 +1,6 @@
+// !!! GRAVITY-TRANSPLANT-TODO: re-apply Gravity storage provider integration onto this v2.2.0 file.
+//     delta: git diff v1.8.3 gravity-base/v1.8.3-clean-ancestry -- crates/storage/provider/src/providers/blockchain_provider.rs
+//
 use crate::{
     providers::{
         ConsistentProvider, ProviderNodeTypes, RocksDBProvider, StaticFileProvider,

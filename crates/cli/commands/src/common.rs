@@ -1,3 +1,6 @@
+// !!! GRAVITY-TRANSPLANT-TODO: re-apply Gravity CLI integration onto this v2.2.0 file.
+//     delta: git diff v1.8.3 gravity-base/v1.8.3-clean-ancestry -- crates/cli/commands/src/common.rs
+//
 //! Contains common `reth` arguments
 
 pub use reth_primitives_traits::header::HeaderMut;

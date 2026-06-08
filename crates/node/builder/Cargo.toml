@@ -18,7 +18,7 @@ reth-chainspec.workspace = true
 reth-config.workspace = true
 reth-consensus-debug-client.workspace = true
 reth-consensus.workspace = true
-reth-db = { workspace = true, features = ["mdbx"] }
+reth-db.workspace = true
 reth-db-api.workspace = true
 reth-db-common.workspace = true
 reth-downloaders.workspace = true
@@ -26,6 +26,7 @@ reth-engine-local.workspace = true
 reth-engine-primitives.workspace = true
 reth-engine-tree.workspace = true
 reth-engine-util.workspace = true
+gravity-primitives.workspace = true
 reth-evm.workspace = true
 reth-exex.workspace = true
 reth-fs-util.workspace = true
@@ -125,4 +126,9 @@ trie-debug = [
     "reth-engine-tree/trie-debug",
     "reth-engine-primitives/trie-debug",
     "reth-node-core/trie-debug",
+]
+failpoints = [
+    "reth-engine-tree/failpoints",
+    "reth-rpc/failpoints",
+    "reth-db/failpoints",
 ]

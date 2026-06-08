@@ -1,12 +1,26 @@
 //! Helper functions for initializing and opening a database.
 
-use crate::{is_database_empty, TableSet, Tables};
+use crate::{TableSet, Tables};
 use eyre::Context;
 use reth_tracing::tracing::{info, warn};
 use std::path::Path;
 
-pub use crate::implementation::mdbx::*;
-pub use reth_libmdbx::*;
+// Always use RocksDB implementation
+use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
+
+fn is_database_empty<P: AsRef<Path>>(path: P) -> bool {
+    let path = path.as_ref();
+
+    if !path.exists() {
+        true
+    } else if path.is_file() {
+        false
+    } else if let Ok(dir) = path.read_dir() {
+        dir.count() == 0
+    } else {
+        true
+    }
+}
 
 /// Tables that have been removed from the schema but may still exist on disk from previous
 /// versions. These will be dropped during database initialization.
@@ -104,13 +118,13 @@ pub fn init_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Result
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables defined
 /// in the given [`TableSet`] if necessary. Read/Write mode.
-pub fn init_db_for<P: AsRef<Path>, TS: TableSet>(
+pub(crate) fn init_db_for<P: AsRef<Path>, TS: TableSet>(
     path: P,
     args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
     let client_version = args.client_version().clone();
-    let mut db = create_db(path, args)?;
-    db.create_and_track_tables_for::<TS>()?;
+    let db = create_db(path, args)?;
+    db.create_tables_for::<TS>()?;
     db.record_client_version(client_version)?;
     drop_orphan_tables(&db);
     Ok(db)
@@ -146,8 +160,8 @@ pub fn open_db_read_only(
         .with_context(|| format!("Could not open database at path: {}", path.display()))
 }
 
-/// Opens up an existing database. Read/Write mode with `WriteMap` enabled. It doesn't create it or
-/// create tables if missing.
+/// Opens up an existing database. Read/Write mode. It doesn't create it or create tables if
+/// missing.
 pub fn open_db(path: impl AsRef<Path>, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
     fn open(path: &Path, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
         let client_version = args.client_version().clone();

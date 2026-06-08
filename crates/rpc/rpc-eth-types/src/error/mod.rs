@@ -1052,7 +1052,7 @@ impl From<PoolError> for RpcPoolError {
     fn from(err: PoolError) -> Self {
         match err.kind {
             PoolErrorKind::ReplacementUnderpriced => Self::ReplaceUnderpriced,
-            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap(_) => Self::Underpriced,
+            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap { .. } => Self::Underpriced,
             PoolErrorKind::SpammerExceededCapacity(_) | PoolErrorKind::DiscardedOnInsert => {
                 Self::TxPoolOverflow
             }

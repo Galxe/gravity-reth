@@ -1,3 +1,6 @@
+// !!! GRAVITY-TRANSPLANT-TODO: re-apply Gravity hardfork schedule + 50-Gwei min base fee onto this v2.2.0 file.
+//     delta: git diff v1.8.3 gravity-base/v1.8.3-clean-ancestry -- crates/chainspec/src/spec.rs
+//
 pub use alloy_eips::eip1559::BaseFeeParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 

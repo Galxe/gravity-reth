@@ -1,3 +1,6 @@
+// !!! GRAVITY-TRANSPLANT-TODO: re-apply Gravity lazy-reward / system-call EVM cfg onto this v2.2.0 file.
+//     delta: git diff v1.8.3 gravity-base/v1.8.3-clean-ancestry -- crates/ethereum/evm/src/lib.rs
+//
 //! EVM config for vanilla ethereum.
 //!
 //! # Revm features

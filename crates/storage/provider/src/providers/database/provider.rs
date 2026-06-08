@@ -1,3 +1,10 @@
+// !!! GRAVITY-TRANSPLANT-TODO (reth 1.8.3 -> 2.2.0) !!!
+// Holds UPSTREAM v2.2.0. Gravity's storage/pipe-exec integration from
+// gravity-base/v1.8.3-clean-ancestry is NOT merged here yet — deep,
+// consensus-critical 3-way merge needing authors + compile feedback +
+// Phase-6 state-root replay. See docs/design/rebase-2.x-conflict-map.md §9.
+// Gravity delta: git diff v1.8.3 gravity-base/v1.8.3-clean-ancestry -- crates/storage/provider/src/providers/database/provider.rs
+//
 use crate::{
     changesets_utils::StorageRevertsIter,
     providers::{

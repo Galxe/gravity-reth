@@ -700,3 +700,33 @@ vergen-git2 = "9.1.0"
 
 # networking
 ipnet = "2.11"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GRAVITY-TRANSPLANT-TODO (reth 1.8.3 -> 2.2.0)
+#
+# Redirect the revm-family + alloy-evm + revm-inspectors crates to the Galxe
+# forks (all migrated to revm 38, tested — see docs/design/rebase-2.x-conflict-map.md
+# §6/§7). Pin to commit SHAs (not branches) before any production rollout.
+#
+# Also STILL TO DO for a working build (not done in this WIP scaffold):
+#   - re-add Gravity workspace members: pipe-exec-layer-ext-v2, gravity-storage,
+#     gravity-primitives, reth-pipe-exec-layer-event-bus (they applied to the tree
+#     but their [workspace] member + dependency entries were taken from upstream
+#     v2.2.0 here and need re-adding).
+#   - re-add gravity-api-types + grevm workspace deps.
+#   - resolve the 5 deep storage/engine merges flagged with GRAVITY-TRANSPLANT-TODO.
+[patch.crates-io]
+revm                    = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-bytecode           = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-context            = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-context-interface  = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-database           = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-database-interface = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-handler            = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-inspector          = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-interpreter        = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-precompile         = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-primitives         = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-state              = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+alloy-evm               = { git = "https://github.com/Galxe/alloy-evm", branch = "v0.34.0-gravity" }
+revm-inspectors         = { git = "https://github.com/Galxe/revm-inspectors", branch = "v0.39.0-gravity" }

@@ -287,8 +287,8 @@ mod tests {
                     &block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().expect("failed to commit");
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -325,8 +325,8 @@ mod tests {
                     &block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().expect("failed to commit");
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -371,8 +371,8 @@ mod tests {
                     &block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().expect("failed to commit");
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -407,8 +407,8 @@ mod tests {
                     &block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
+            provider_rw.commit_view().unwrap();
         }
-        provider_rw.commit().expect("failed to commit");
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
