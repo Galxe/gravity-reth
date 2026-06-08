@@ -1,10 +1,3 @@
-// !!! GRAVITY-TRANSPLANT-TODO (reth 1.8.3 -> 2.2.0) !!!
-// Holds UPSTREAM v2.2.0. Gravity's storage/pipe-exec integration from
-// gravity-base/v1.8.3-clean-ancestry is NOT merged here yet — deep,
-// consensus-critical 3-way merge needing authors + compile feedback +
-// Phase-6 state-root replay. See docs/design/rebase-2.x-conflict-map.md §9.
-// Gravity delta: git diff v1.8.3 gravity-base/v1.8.3-clean-ancestry -- crates/storage/provider/src/providers/static_file/manager.rs
-//
 use super::{
     metrics::StaticFileProviderMetrics, writer::StaticFileWriters, LoadedJar,
     StaticFileJarProvider, StaticFileProviderRW, StaticFileProviderRWRefMut,
@@ -18,8 +11,9 @@ use crate::{
 use alloy_consensus::{transaction::TransactionMeta, Header};
 use alloy_eips::{eip2718::Encodable2718, BlockHashOrNumber};
 use alloy_primitives::{b256, keccak256, Address, BlockHash, BlockNumber, TxHash, TxNumber, B256};
-
+use gravity_primitives::get_gravity_config;
 use parking_lot::RwLock;
+use reth_stages_types::StageId;
 use reth_chain_state::ExecutedBlock;
 use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, NamedChain};
 use reth_db::{
@@ -1272,6 +1266,13 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             + StorageSettingsCache,
         N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
     {
+        // Gravity: in pipe-execution mode the staged pipeline is not used, so the
+        // pipeline-oriented consistency check below does not apply. Use the
+        // pipe-execution consistency path instead (heal NippyJar + truncate static
+        // files ahead of the Execution checkpoint).
+        if !get_gravity_config().disable_pipe_execution {
+            return self.check_consistency_pipe_execution(provider);
+        }
         // OVM historical import is broken and does not work with this check. It's importing
         // duplicated receipts resulting in having more receipts than the expected transaction
         // range.
@@ -1412,6 +1413,100 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             let _ = self.maybe_heal_segment(segment)?;
         }
 
+        Ok(())
+    }
+
+    /// Consistency check for Gravity pipe-execution mode.
+    ///
+    /// In pipe-execution mode the staged pipeline is not used, so `ensure_invariants` and
+    /// pipeline unwind do not apply. Instead:
+    ///
+    /// 1. **Heal `NippyJar` files**: a crash during block persistence may leave uncommitted data
+    ///    in the data/offsets files. [`Self::maybe_heal_segment`] opens the writer which triggers
+    ///    `NippyJarChecker::ensure_consistency`, truncating dirty data to the committed config.
+    /// 2. **Truncate static files ahead of the database**: `on_save_blocks` commits the static-file
+    ///    provider before the DB provider, so a crash in between can leave static files ahead of the
+    ///    `Execution` checkpoint. We prune the extra rows. All segments use [`StageId::Execution`]
+    ///    as the reference checkpoint (unlike pipeline mode's per-segment stage IDs).
+    fn check_consistency_pipe_execution<Provider>(
+        &self,
+        provider: &Provider,
+    ) -> ProviderResult<Option<PipelineTarget>>
+    where
+        Provider: DBProvider
+            + BlockReader
+            + StageCheckpointReader
+            + ChainSpecProvider
+            + StorageSettingsCache
+            + PruneCheckpointReader,
+        N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
+    {
+        if self.is_read_only() {
+            return Ok(None);
+        }
+
+        info!(target: "reth::cli", "Verifying storage consistency (pipe execution mode).");
+
+        // Phase 1: heal NippyJar file-level inconsistencies (segments_to_check already
+        // skips receipts when receipt pruning is configured).
+        for segment in self.segments_to_check(provider) {
+            self.maybe_heal_segment(segment)?;
+        }
+
+        // Phase 2: truncate static files ahead of the Execution checkpoint.
+        let checkpoint_block_number =
+            provider.get_stage_checkpoint(StageId::Execution)?.unwrap_or_default().block_number;
+
+        for segment in self.segments_to_check(provider) {
+            if let Some(highest_static_file_block) = self.get_highest_static_file_block(segment) {
+                if checkpoint_block_number < highest_static_file_block {
+                    self.prune_segment_to(
+                        provider,
+                        segment,
+                        checkpoint_block_number,
+                        highest_static_file_block,
+                    )?;
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Prunes a static file segment so its highest block matches `target_block`.
+    ///
+    /// Used when static files are ahead of the database after a crash (static-file commit
+    /// succeeded but the DB commit did not).
+    fn prune_segment_to<Provider>(
+        &self,
+        provider: &Provider,
+        segment: StaticFileSegment,
+        target_block: BlockNumber,
+        highest_static_file_block: BlockNumber,
+    ) -> ProviderResult<()>
+    where
+        Provider: DBProvider + BlockReader,
+    {
+        info!(
+            target: "reth::providers",
+            ?segment,
+            from = highest_static_file_block,
+            to = target_block,
+            "Pruning static file segment to target block."
+        );
+        let mut writer = self.latest_writer(segment)?;
+        if segment.is_headers() {
+            writer.prune_headers(highest_static_file_block - target_block)?;
+        } else if let Some(block) = provider.block_body_indices(target_block)? {
+            let highest_tx = self.get_highest_static_file_tx(segment).unwrap_or_default();
+            let to_delete = highest_tx - block.last_tx_num();
+            if segment.is_receipts() {
+                writer.prune_receipts(to_delete, target_block)?;
+            } else {
+                writer.prune_transactions(to_delete, target_block)?;
+            }
+        }
+        writer.commit()?;
         Ok(())
     }
 
