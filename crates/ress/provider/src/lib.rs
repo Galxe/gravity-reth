@@ -128,6 +128,7 @@ where
                         executed = Some(ExecutedBlockWithTrieUpdates {
                             block: ExecutedBlock { recovered_block: invalid, ..Default::default() },
                             trie: ExecutedTrieUpdates::empty(),
+                            triev2: Default::default(),
                         });
                     }
 

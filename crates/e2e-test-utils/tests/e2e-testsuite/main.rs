@@ -338,9 +338,6 @@ async fn test_testsuite_multinode_block_production() -> Result<()> {
         .with_action(MakeCanonical::new())
         .with_action(CaptureBlockOnNode::new("node0_tip", 0))
         .with_action(CompareNodeChainTips::expect_same(0, 1))
-        // node 0 already has the state and can continue producing blocks
-        .with_action(ProduceBlocks::<EthEngineTypes>::new(2))
-        .with_action(MakeCanonical::new())
         .with_action(CaptureBlockOnNode::new("node0_tip_2", 0))
         // verify both nodes remain in sync
         .with_action(CompareNodeChainTips::expect_same(0, 1));

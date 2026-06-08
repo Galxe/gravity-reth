@@ -1,5 +1,7 @@
 use alloy_primitives::{B256, U256};
 
+use crate::SubkeyContainedValue;
+
 /// Account storage entry.
 ///
 /// `key` is the subkey when used as a value in the `StorageChangeSets` table.
@@ -18,6 +20,12 @@ impl StorageEntry {
     /// Create a new `StorageEntry` with given key and value.
     pub const fn new(key: B256, value: U256) -> Self {
         Self { key, value }
+    }
+}
+
+impl SubkeyContainedValue for StorageEntry {
+    fn subkey_length(&self) -> Option<usize> {
+        Some(32)
     }
 }
 

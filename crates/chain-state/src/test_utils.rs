@@ -221,6 +221,7 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
             )),
             Arc::new(HashedPostState::default()),
             ExecutedTrieUpdates::empty(),
+            Default::default(),
         )
     }
 

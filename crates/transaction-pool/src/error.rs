@@ -51,8 +51,13 @@ pub enum PoolErrorKind {
     #[error("insufficient gas price to replace existing transaction")]
     ReplacementUnderpriced,
     /// The fee cap of the transaction is below the minimum fee cap determined by the protocol
-    #[error("transaction feeCap {0} below chain minimum")]
-    FeeCapBelowMinimumProtocolFeeCap(u128),
+    #[error("transaction feeCap {fee_cap} below chain minimum {minimum}")]
+    FeeCapBelowMinimumProtocolFeeCap {
+        /// The transaction's declared fee cap (`max_fee_per_gas`).
+        fee_cap: u128,
+        /// The protocol's minimum base fee (in wei) that the fee cap must meet or exceed.
+        minimum: u64,
+    },
     /// Thrown when the number of unique transactions of a sender exceeded the slot capacity.
     #[error("rejected due to {0} being identified as a spammer")]
     SpammerExceededCapacity(Address),
@@ -112,7 +117,7 @@ impl PoolError {
                 // already imported but not bad
                 false
             }
-            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap(_) => {
+            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap { .. } => {
                 // fee cap of the tx below the technical minimum determined by the protocol, see
                 // [MINIMUM_PROTOCOL_FEE_CAP](alloy_primitives::constants::MIN_PROTOCOL_BASE_FEE)
                 // although this transaction will always be invalid, we do not want to penalize the

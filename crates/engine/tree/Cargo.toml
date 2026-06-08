@@ -29,10 +29,13 @@ reth-provider.workspace = true
 reth-prune.workspace = true
 reth-revm.workspace = true
 reth-stages-api.workspace = true
+reth-storage-errors.workspace = true
 reth-tasks.workspace = true
 reth-trie-db.workspace = true
 reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
+reth-pipe-exec-layer-event-bus.workspace = true
+gravity-primitives.workspace = true
 reth-trie-sparse-parallel = { workspace = true, features = ["std"] }
 reth-trie.workspace = true
 
@@ -112,6 +115,7 @@ name = "state_root_task"
 harness = false
 
 [features]
+config-from-env = ["gravity-primitives/config-from-env"]
 test-utils = [
     "reth-chain-state/test-utils",
     "reth-chainspec/test-utils",
@@ -138,6 +142,11 @@ test-utils = [
     "reth-node-ethereum/test-utils",
     "reth-evm-ethereum/test-utils",
 ]
+failpoints = ["fail/failpoints", "reth-db/failpoints"]
+
+[dependencies.fail]
+version = "0.5"
+optional = true
 
 [[test]]
 name = "e2e_testsuite"

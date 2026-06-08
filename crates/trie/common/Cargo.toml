@@ -30,6 +30,8 @@ nybbles = { workspace = true, features = ["rlp"] }
 
 # reth
 revm-database.workspace = true
+reth-storage-errors.workspace = true
+gravity-primitives.workspace = true
 
 # `serde` feature
 serde = { workspace = true, optional = true }
@@ -43,6 +45,8 @@ arbitrary = { workspace = true, features = ["derive"], optional = true }
 
 # misc
 rayon = { workspace = true, optional = true }
+parking_lot.workspace = true
+once_cell.workspace = true
 
 [dev-dependencies]
 reth-primitives-traits = { workspace = true, features = ["serde"] }
@@ -67,6 +71,8 @@ revm-state.workspace = true
 [features]
 default = ["std"]
 std = [
+    "dep:bytes",
+    "dep:rayon",
     "alloy-consensus/std",
     "alloy-genesis/std",
     "alloy-primitives/std",
@@ -74,7 +80,7 @@ std = [
     "alloy-rpc-types-eth?/std",
     "alloy-serde?/std",
     "alloy-trie/std",
-    "bytes?/std",
+    "bytes/std",
     "derive_more/std",
     "nybbles/std",
     "reth-primitives-traits/std",
@@ -83,6 +89,8 @@ std = [
     "serde_json/std",
     "revm-database/std",
     "revm-state/std",
+    "reth-storage-errors/std",
+    "once_cell/std",
 ]
 eip1186 = ["alloy-rpc-types-eth/serde", "dep:alloy-serde"]
 serde = [
@@ -97,6 +105,7 @@ serde = [
     "reth-codecs?/serde",
     "revm-database/serde",
     "revm-state/serde",
+    "parking_lot/serde",
 ]
 reth-codec = ["dep:reth-codecs", "dep:bytes"]
 serde-bincode-compat = [

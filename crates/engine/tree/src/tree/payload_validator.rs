@@ -677,6 +677,7 @@ where
                 hashed_state: Arc::new(hashed_state),
             },
             trie: trie_updates,
+            triev2: Default::default(),
         })
     }
 

@@ -15,3 +15,17 @@ slow-timeout = { period = "2m", terminate-after = 10 }
 [[profile.default.overrides]]
 filter = "binary(e2e_testsuite)"
 slow-timeout = { period = "2m", terminate-after = 3 }
+
+# Gravity pipe-exec-layer integration tests: each test boots a full reth node
+# and pushes 100s–1000s of blocks through MockConsensus + PipeExecLayerApi.
+# Mirror the effective contract of the pre-nextest CI command (plain
+# `cargo test --test gravity_pipe_test`, which had no per-test timeout and
+# relied solely on the 60-min job-level cap). Grant a generous 30-minute
+# per-test ceiling so contention-induced slowness doesn't cause flake kills.
+# Retries are forced to 0: (a) these are deterministic state-machine tests
+# where retry adds no signal, (b) 30m × default 3 attempts = 90m would blow
+# past the 60-min job timeout-minutes.
+[[profile.default.overrides]]
+filter = "binary(gravity_pipe_test) + binary(gravity_eip2935_test) + binary(gravity_eip7702_test)"
+slow-timeout = { period = "5m", terminate-after = 6 }
+retries = 0

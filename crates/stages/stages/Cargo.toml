@@ -37,8 +37,8 @@ reth-storage-errors.workspace = true
 reth-revm.workspace = true
 reth-stages-api.workspace = true
 reth-static-file-types.workspace = true
-reth-trie = { workspace = true, features = ["metrics"] }
-reth-trie-db = { workspace = true, features = ["metrics"] }
+reth-trie = { workspace = true, optional = true }
+reth-trie-parallel = { workspace = true, optional = true }
 
 reth-testing-utils = { workspace = true, optional = true }
 
@@ -66,7 +66,7 @@ eyre.workspace = true
 [dev-dependencies]
 # reth
 reth-chainspec.workspace = true
-reth-db = { workspace = true, features = ["test-utils", "mdbx"] }
+reth-db = { workspace = true, features = ["test-utils"] }
 reth-ethereum-primitives = { workspace = true, features = ["test-utils"] }
 reth-ethereum-consensus.workspace = true
 reth-evm-ethereum.workspace = true
@@ -76,10 +76,11 @@ reth-downloaders.workspace = true
 reth-static-file.workspace = true
 reth-stages-api = { workspace = true, features = ["test-utils"] }
 reth-testing-utils.workspace = true
-reth-trie = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-network-peers.workspace = true
-
+reth-tracing.workspace = true
+reth-trie = { workspace = true, features = ["test-utils"] }
+reth-trie-db = { workspace = true, features = ["test-utils"] }
 alloy-primitives = { workspace = true, features = ["getrandom", "rand"] }
 alloy-rlp.workspace = true
 
@@ -93,6 +94,8 @@ tempfile.workspace = true
 criterion = { workspace = true, features = ["async_tokio"] }
 
 [features]
+default = ["reth-trie-parallel"]
+reth-trie-parallel = ["dep:reth-trie-parallel", "dep:reth-trie"]
 test-utils = [
     "dep:reth-chainspec",
     "reth-network-p2p/test-utils",
@@ -109,12 +112,13 @@ test-utils = [
     "reth-revm/test-utils",
     "reth-codecs/test-utils",
     "reth-db-api/test-utils",
-    "reth-trie-db/test-utils",
+    "reth-trie-parallel/test-utils",
     "reth-trie/test-utils",
     "reth-prune-types/test-utils",
     "dep:reth-ethereum-primitives",
     "reth-ethereum-primitives?/test-utils",
     "reth-evm-ethereum/test-utils",
+    "reth-trie-db/test-utils",
 ]
 
 [[bench]]

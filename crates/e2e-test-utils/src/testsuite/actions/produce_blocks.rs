@@ -510,7 +510,7 @@ where
         Box::pin(async move {
             let mut accepted_check: bool = false;
 
-            let mut latest_block = env
+            let latest_block = env
                 .current_block_info()
                 .ok_or_else(|| eyre::eyre!("No latest block information available"))?;
 
@@ -605,8 +605,8 @@ where
                         rpc_latest_header.hash;
 
                     // update local copy for any further usage in this scope
-                    latest_block.hash = rpc_latest_header.hash;
-                    latest_block.number = rpc_latest_header.inner.number;
+                    // latest_block.hash = rpc_latest_header.hash;
+                    // latest_block.number = rpc_latest_header.inner.number;
                 }
             }
 

@@ -17,7 +17,10 @@ use reth_primitives_traits::{
     SignedTransaction,
 };
 use reth_storage_api::StateProviderBox;
-use reth_trie::{updates::TrieUpdates, HashedPostState};
+use reth_trie::{
+    updates::{TrieUpdates, TrieUpdatesV2},
+    HashedPostState,
+};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{broadcast, watch};
 
@@ -570,7 +573,7 @@ pub struct BlockState<N: NodePrimitives = EthPrimitives> {
     /// The executed block that determines the state after this block has been executed.
     block: ExecutedBlockWithTrieUpdates<N>,
     /// The block's parent block if it exists.
-    parent: Option<Arc<BlockState<N>>>,
+    parent: Option<Arc<Self>>,
 }
 
 impl<N: NodePrimitives> BlockState<N> {
@@ -851,6 +854,8 @@ pub struct ExecutedBlockWithTrieUpdates<N: NodePrimitives = EthPrimitives> {
     /// If [`ExecutedTrieUpdates::Missing`], the trie updates should be computed when persisting
     /// the block **on top of the canonical parent**.
     pub trie: ExecutedTrieUpdates,
+    /// trie updates for nested trie
+    pub triev2: Arc<TrieUpdatesV2>,
 }
 
 impl<N: NodePrimitives> ExecutedBlockWithTrieUpdates<N> {
@@ -860,8 +865,13 @@ impl<N: NodePrimitives> ExecutedBlockWithTrieUpdates<N> {
         execution_output: Arc<ExecutionOutcome<N::Receipt>>,
         hashed_state: Arc<HashedPostState>,
         trie: ExecutedTrieUpdates,
+        triev2: Arc<TrieUpdatesV2>,
     ) -> Self {
-        Self { block: ExecutedBlock { recovered_block, execution_output, hashed_state }, trie }
+        Self {
+            block: ExecutedBlock { recovered_block, execution_output, hashed_state },
+            trie,
+            triev2,
+        }
     }
 
     /// Returns a reference to the trie updates for the block, if present.

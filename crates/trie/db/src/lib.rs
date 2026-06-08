@@ -2,6 +2,10 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+/// Nested state root implementation using V2 trie tables.
+pub mod nested_hash;
+
+mod commitment;
 mod hashed_cursor;
 mod prefix_set;
 mod proof;
@@ -10,6 +14,7 @@ mod storage;
 mod trie_cursor;
 mod witness;
 
+pub use commitment::{MerklePatriciaTrie, StateCommitment};
 pub use hashed_cursor::{
     DatabaseHashedAccountCursor, DatabaseHashedCursorFactory, DatabaseHashedStorageCursor,
 };

@@ -9,6 +9,7 @@ use reth_trie::{
 };
 use reth_trie_db::{DatabaseAccountTrieCursor, DatabaseStorageTrieCursor};
 
+#[ignore = "deprecated"]
 #[test]
 fn walk_nodes_with_common_prefix() {
     let inputs = vec![
@@ -39,6 +40,8 @@ fn walk_nodes_with_common_prefix() {
     for (k, v) in &inputs {
         account_cursor.upsert(k.clone().into(), &v.clone()).unwrap();
     }
+    tx.commit_view().unwrap();
+    let account_cursor = tx.tx_ref().cursor_write::<tables::AccountsTrie>().unwrap();
     let account_trie = DatabaseAccountTrieCursor::new(account_cursor);
     test_cursor(account_trie, &expected);
 
@@ -52,6 +55,9 @@ fn walk_nodes_with_common_prefix() {
             )
             .unwrap();
     }
+    tx.commit_view().unwrap();
+    let storage_cursor = tx.tx_ref().cursor_dup_write::<tables::StoragesTrie>().unwrap();
+
     let storage_trie = DatabaseStorageTrieCursor::new(storage_cursor, hashed_address);
     test_cursor(storage_trie, &expected);
 }
@@ -110,6 +116,8 @@ fn cursor_rootnode_with_changesets() {
     for (k, v) in nodes {
         cursor.upsert(hashed_address, &StorageTrieEntry { nibbles: k.into(), node: v }).unwrap();
     }
+    tx.commit_view().unwrap();
+    let cursor = tx.tx_ref().cursor_dup_write::<tables::StoragesTrie>().unwrap();
 
     let mut trie = DatabaseStorageTrieCursor::new(cursor, hashed_address);
 

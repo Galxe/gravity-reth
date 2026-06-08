@@ -1,4 +1,4 @@
-## reth Contributor Documentation
+## reth Contributor Documentation & Benchmarking
 
 This directory contains documentation for contributors.
 
@@ -10,3 +10,7 @@ This directory contains documentation for contributors.
 
 - [Workflow](./workflow.md): The lifecycle of PRs
 - [Releases](./release.md): How reth is released and when (for maintainers)
+
+### Benchmarking
+
+- [Benchmarking](./benchmark): Benchmark results.

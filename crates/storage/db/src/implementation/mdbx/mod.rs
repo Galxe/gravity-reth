@@ -32,6 +32,8 @@ use std::{
 use tx::Tx;
 
 pub mod cursor;
+pub mod parallel_tx;
+use parallel_tx::ParallelTxRO;
 pub mod tx;
 
 mod utils;
@@ -100,6 +102,9 @@ pub struct DatabaseArguments {
     ///
     /// This flag affects only at environment opening but can't be changed after.
     exclusive: Option<bool>,
+    /// Sync mode for database commits. Controls the durability vs performance trade-off.
+    /// If [None], the default value (Durable) is used.
+    sync_mode: Option<SyncMode>,
     /// MDBX allows up to 32767 readers (`MDBX_READERS_LIMIT`). This arg is to configure the max
     /// readers.
     max_readers: Option<u64>,
@@ -125,6 +130,7 @@ impl DatabaseArguments {
             log_level: None,
             max_read_transaction_duration: None,
             exclusive: None,
+            sync_mode: None,
             max_readers: None,
         }
     }
@@ -174,6 +180,12 @@ impl DatabaseArguments {
         self
     }
 
+    /// Set the sync mode for database commits.
+    pub const fn with_sync_mode(mut self, sync_mode: Option<SyncMode>) -> Self {
+        self.sync_mode = sync_mode;
+        self
+    }
+
     /// Set `max_readers` flag.
     pub const fn with_max_readers(mut self, max_readers: Option<u64>) -> Self {
         self.max_readers = max_readers;
@@ -201,19 +213,16 @@ pub struct DatabaseEnv {
     metrics: Option<Arc<DatabaseEnvMetrics>>,
     /// Write lock for when dealing with a read-write environment.
     _lock_file: Option<StorageLock>,
+    /// Database environment kind (read-only or read-write).
+    kind: DatabaseEnvKind,
 }
 
 impl Database for DatabaseEnv {
-    type TX = tx::Tx<RO>;
+    type TX = ParallelTxRO;
     type TXMut = tx::Tx<RW>;
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
-        Tx::new(
-            self.inner.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?,
-            self.dbis.clone(),
-            self.metrics.clone(),
-        )
-        .map_err(|e| DatabaseError::InitTx(e.into()))
+        ParallelTxRO::try_new(self.inner.clone(), self.dbis.clone(), self.metrics.clone())
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
@@ -239,12 +248,10 @@ impl DatabaseMetrics for DatabaseEnv {
         let _ = self
             .view(|tx| {
                 for table in Tables::ALL.iter().map(Tables::name) {
-                    let table_db = tx.inner.open_db(Some(table)).wrap_err("Could not open db.")?;
+                    let table_db = tx.open_db(Some(table)).wrap_err("Could not open db.")?;
 
-                    let stats = tx
-                        .inner
-                        .db_stat(&table_db)
-                        .wrap_err(format!("Could not find table: {table}"))?;
+                    let stats =
+                        tx.db_stat(&table_db).wrap_err(format!("Could not find table: {table}"))?;
 
                     let page_size = stats.page_size() as usize;
                     let leaf_pages = stats.leaf_pages();
@@ -329,7 +336,9 @@ impl DatabaseEnv {
             DatabaseEnvKind::RW => {
                 // enable writemap mode in RW mode
                 inner_env.write_map();
-                Mode::ReadWrite { sync_mode: SyncMode::Durable }
+                // Use configured sync mode or default to Durable
+                let sync_mode = args.sync_mode.unwrap_or(SyncMode::Durable);
+                Mode::ReadWrite { sync_mode }
             }
         };
 
@@ -457,9 +466,15 @@ impl DatabaseEnv {
             dbis: Arc::default(),
             metrics: None,
             _lock_file,
+            kind,
         };
 
         Ok(env)
+    }
+
+    /// Returns `true` if the database is read-only.
+    pub fn is_read_only(&self) -> bool {
+        matches!(self.kind, DatabaseEnvKind::RO)
     }
 
     /// Enables metrics on the database.

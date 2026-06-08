@@ -1,4 +1,4 @@
-use crate::{BranchNodeCompact, HashBuilder, Nibbles};
+use crate::{nested_trie::Node, BranchNodeCompact, HashBuilder, Nibbles};
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
     vec::Vec,
@@ -7,6 +7,39 @@ use alloy_primitives::{
     map::{B256Map, B256Set, HashMap, HashSet},
     FixedBytes, B256,
 };
+
+/// The aggregation of nested trie updates
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct TrieUpdatesV2 {
+    /// Collection of updated intermediate account nodes indexed by full path.
+    pub account_nodes: HashMap<Nibbles, Node>,
+    /// Collection of removed intermediate account nodes indexed by full path.
+    pub removed_nodes: HashSet<Nibbles>,
+    /// Collection of updated storage tries indexed by the hashed address.
+    pub storage_tries: B256Map<StorageTrieUpdatesV2>,
+}
+
+/// Trie updates for nested storage trie of a single account.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct StorageTrieUpdatesV2 {
+    /// Flag indicating whether the trie was deleted.
+    pub is_deleted: bool,
+    /// Collection of updated storage trie nodes.
+    pub storage_nodes: HashMap<Nibbles, Node>,
+    /// Collection of removed storage trie nodes.
+    pub removed_nodes: HashSet<Nibbles>,
+}
+
+impl StorageTrieUpdatesV2 {
+    /// Returns empty storage trie updates with `deleted` set to `true`.
+    pub fn deleted() -> Self {
+        Self {
+            is_deleted: true,
+            storage_nodes: HashMap::default(),
+            removed_nodes: HashSet::default(),
+        }
+    }
+}
 
 /// The aggregation of trie updates.
 #[derive(PartialEq, Eq, Clone, Default, Debug)]
@@ -130,7 +163,7 @@ impl TrieUpdates {
             .collect::<Vec<_>>();
 
         account_nodes.extend(self.removed_nodes.drain().map(|path| (path, None)));
-        account_nodes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        account_nodes.sort_unstable_by_key(|a| a.0);
 
         let storage_tries = self
             .storage_tries
@@ -276,7 +309,7 @@ impl StorageTrieUpdates {
             .collect::<Vec<_>>();
 
         storage_nodes.extend(self.removed_nodes.into_iter().map(|path| (path, None)));
-        storage_nodes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        storage_nodes.sort_unstable_by_key(|a| a.0);
 
         StorageTrieUpdatesSorted { is_deleted: self.is_deleted, storage_nodes }
     }

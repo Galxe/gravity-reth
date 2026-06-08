@@ -5,7 +5,7 @@ use num_traits::Zero;
 use reth_config::config::ExecutionConfig;
 use reth_consensus::{ConsensusError, FullConsensus};
 use reth_db::{static_file::HeaderMask, tables};
-use reth_evm::{execute::Executor, metrics::ExecutorMetrics, ConfigureEvm};
+use reth_evm::{metrics::ExecutorMetrics, ConfigureEvm};
 use reth_execution_types::Chain;
 use reth_exex::{ExExManagerHandle, ExExNotification, ExExNotificationSource};
 use reth_primitives_traits::{format_gas_throughput, BlockBody, NodePrimitives};
@@ -168,7 +168,7 @@ where
         // We can only prune changesets if we're not executing MerkleStage from scratch (by
         // threshold or first-sync)
         Ok(max_block - start_block > self.external_clean_threshold ||
-            provider.count_entries::<tables::AccountsTrie>()?.is_zero())
+            provider.count_entries::<tables::AccountsTrieV2>()?.is_zero())
     }
 
     /// Performs consistency check on static files.
@@ -290,7 +290,7 @@ where
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
         let db = StateProviderDatabase(LatestStateProviderRef::new(provider));
-        let mut executor = self.evm_config.batch_executor(db);
+        let mut executor = self.evm_config.parallel_executor(db);
 
         // Progress tracking
         let mut stage_progress = start_block;
@@ -391,11 +391,7 @@ where
 
         // prepare execution output for writing
         let time = Instant::now();
-        let mut state = ExecutionOutcome::from_blocks(
-            start_block,
-            executor.into_state().take_bundle(),
-            results,
-        );
+        let mut state = ExecutionOutcome::from_blocks(start_block, executor.take_bundle(), results);
         let write_preparation_duration = time.elapsed();
 
         // log the gas per second for the range we just executed
@@ -942,11 +938,8 @@ mod tests {
             let account1_info =
                 Account { balance: U256::ZERO, nonce: 0x00, bytecode_hash: Some(code_hash) };
             let account2 = address!("0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba");
-            let account2_info = Account {
-                balance: U256::from(0x1bc16d674ece94bau128),
-                nonce: 0x00,
-                bytecode_hash: None,
-            };
+            let account2_info =
+                Account { balance: U256::from(0x694bau128), nonce: 0x00, bytecode_hash: None };
             let account3 = address!("0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b");
             let account3_info = Account {
                 balance: U256::from(0x3635c9adc5de996b46u128),
@@ -1030,7 +1023,6 @@ mod tests {
         provider.commit().unwrap();
 
         // execute
-        let mut provider = factory.database_provider_rw().unwrap();
 
         // If there is a pruning configuration, then it's forced to use the database.
         // This way we test both cases.
@@ -1049,6 +1041,7 @@ mod tests {
 
             // Test Execution
             let mut execution_stage = stage();
+            let mut provider = factory.database_provider_rw().unwrap();
             provider.set_prune_modes(mode.clone().unwrap_or_default());
 
             let result = execution_stage.execute(&provider, input).unwrap();
@@ -1065,6 +1058,7 @@ mod tests {
                     UnwindInput { checkpoint: result.checkpoint, unwind_to: 0, bad_block: None },
                 )
                 .unwrap();
+            provider.commit_view().unwrap();
 
             assert_matches!(result, UnwindOutput {
                 checkpoint: StageCheckpoint {
@@ -1090,6 +1084,7 @@ mod tests {
             assert!(matches!(provider.basic_account(&miner_acc), Ok(None)));
 
             assert!(matches!(provider.receipt(0), Ok(None)));
+            provider.commit().unwrap();
         }
     }
 
@@ -1186,11 +1181,7 @@ mod tests {
             vec![
                 (
                     beneficiary_address,
-                    Account {
-                        nonce: 0,
-                        balance: U256::from(0x1bc16d674eca30a0u64),
-                        bytecode_hash: None
-                    }
+                    Account { nonce: 0, balance: U256::from(0x230a0u64), bytecode_hash: None }
                 ),
                 (
                     caller_address,

@@ -797,7 +797,10 @@ impl<T: TransactionOrdering> TxPool<T> {
                     InsertErr::FeeCapBelowMinimumProtocolFeeCap { transaction, fee_cap } => {
                         Err(PoolError::new(
                             *transaction.hash(),
-                            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap(fee_cap),
+                            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap {
+                                fee_cap,
+                                minimum: self.all_transactions.minimal_protocol_basefee,
+                            },
                         ))
                     }
                     InsertErr::ExceededSenderTransactionsCapacity { transaction } => {

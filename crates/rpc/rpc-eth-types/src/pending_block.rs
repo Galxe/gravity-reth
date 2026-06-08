@@ -140,6 +140,7 @@ impl<N: NodePrimitives> From<PendingBlock<N>> for BlockState<N> {
             pending_block.executed_block.execution_output,
             pending_block.executed_block.hashed_state,
             ExecutedTrieUpdates::Missing,
+            Default::default(),
         ))
     }
 }

@@ -2,6 +2,7 @@
 
 use alloy_primitives::B256;
 use clap::Parser;
+use gravity_primitives::get_gravity_config;
 use reth_chainspec::EthChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_config::{config::EtlConfig, Config};
@@ -9,6 +10,7 @@ use reth_consensus::noop::NoopConsensus;
 use reth_db::{init_db, open_db_read_only, DatabaseEnv};
 use reth_db_common::init::init_genesis;
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
+use reth_engine_tree::recovery::StorageRecoveryHelper;
 use reth_eth_wire::NetPrimitivesFor;
 use reth_evm::{noop::NoopEvmConfig, ConfigureEvm};
 use reth_network::NetworkEventListenerProvider;
@@ -22,13 +24,13 @@ use reth_node_core::{
 };
 use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider, StaticFileProvider},
-    ProviderFactory, StaticFileProviderFactory,
+    ProviderFactory, StageCheckpointReader, StaticFileProviderFactory,
 };
-use reth_stages::{sets::DefaultStages, Pipeline, PipelineTarget};
+use reth_stages::{sets::DefaultStages, Pipeline, PipelineTarget, StageId};
 use reth_static_file::StaticFileProducer;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Struct to hold config and datadir paths
 #[derive(Debug, Parser)]
@@ -105,8 +107,19 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
 
         let provider_factory = self.create_provider_factory(&config, db, sfp)?;
         if access.is_read_write() {
-            debug!(target: "reth::cli", chain=%self.chain.chain(), genesis=?self.chain.genesis_hash(), "Initializing genesis");
-            init_genesis(&provider_factory)?;
+            // Skip init_genesis if the database already has an Execution checkpoint > 0,
+            // indicating it has been used. In pipe execution mode, genesis headers
+            // may not be in static files or CanonicalHeaders, causing init_genesis
+            // to incorrectly re-initialize and reset all stage checkpoints to 0.
+            let should_init = provider_factory
+                .get_stage_checkpoint(StageId::Execution)
+                .ok()
+                .flatten()
+                .is_none_or(|ck| ck.block_number == 0);
+            if should_init {
+                info!(target: "reth::cli", chain=%self.chain.chain(), genesis=?self.chain.genesis_hash(), "Initializing genesis");
+                init_genesis(&provider_factory)?;
+            }
         }
 
         Ok(Environment { config, provider_factory, data_dir })
@@ -141,7 +154,8 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             .static_file_provider()
             .check_consistency(&factory.provider()?, has_receipt_pruning)?
         {
-            if factory.db_ref().is_read_only()? {
+            // Check if database is read-only to avoid destructive operations
+            if factory.db_ref().is_read_only() {
                 warn!(target: "reth::cli", ?unwind_target, "Inconsistent storage. Restart node to heal.");
                 return Ok(factory)
             }
@@ -176,6 +190,13 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             // Move all applicable data from database to static files.
             pipeline.move_to_static_files()?;
             pipeline.unwind(unwind_target.unwind_target().expect("should exist"), None)?;
+        }
+
+        // In pipe execution mode (disable_pipe_execution = false), we need to recover
+        // any interrupted block writes from checkpoints
+        if !get_gravity_config().disable_pipe_execution {
+            info!(target: "reth::cli", "Checking for interrupted block writes and recovering if needed");
+            StorageRecoveryHelper::new(&factory).check_and_recover()?;
         }
 
         Ok(factory)

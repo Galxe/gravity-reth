@@ -418,7 +418,7 @@ mod tests {
         let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap().with_metrics();
 
         let mut tx = db.tx().unwrap();
-        tx.metrics_handler.as_mut().unwrap().long_transaction_duration = MAX_DURATION;
+        tx.tx.metrics_handler.as_mut().unwrap().long_transaction_duration = MAX_DURATION;
         tx.disable_long_read_transaction_safety();
         // Give the `TxnManager` some time to time out the transaction.
         sleep(MAX_DURATION + Duration::from_millis(100));
@@ -429,7 +429,7 @@ mod tests {
             Err(DatabaseError::Open(reth_libmdbx::Error::NotFound.into()))
         );
         // Backtrace is not recorded.
-        assert!(!tx.metrics_handler.unwrap().backtrace_recorded.load(Ordering::Relaxed));
+        assert!(!tx.tx.metrics_handler.unwrap().backtrace_recorded.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
         let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap().with_metrics();
 
         let mut tx = db.tx().unwrap();
-        tx.metrics_handler.as_mut().unwrap().long_transaction_duration = MAX_DURATION;
+        tx.tx.metrics_handler.as_mut().unwrap().long_transaction_duration = MAX_DURATION;
         // Give the `TxnManager` some time to time out the transaction.
         sleep(MAX_DURATION + Duration::from_millis(100));
 
@@ -454,6 +454,6 @@ mod tests {
             Err(DatabaseError::Open(reth_libmdbx::Error::ReadTransactionTimeout.into()))
         );
         // Backtrace is recorded.
-        assert!(tx.metrics_handler.unwrap().backtrace_recorded.load(Ordering::Relaxed));
+        assert!(tx.tx.metrics_handler.unwrap().backtrace_recorded.load(Ordering::Relaxed));
     }
 }

@@ -1,3 +1,38 @@
+<<<<<<<< HEAD:docs/vocs/docs/pages/cli/reth/p2p/bootnode.mdx
+# reth p2p bootnode
+
+Bootnode command
+
+```bash
+$ reth p2p bootnode --help
+```
+```txt
+Usage: reth p2p bootnode [OPTIONS]
+
+Options:
+      --addr <ADDR>
+          Listen address for the bootnode (default: ":30301")
+
+          [default: :30301]
+
+      --gen-key <GEN_KEY>
+          Generate a new node key and save it to the specified file
+
+          [default: ]
+
+      --node-key <NODE_KEY>
+          Private key filename for the node
+
+          [default: ]
+
+      --nat <NAT>
+          NAT resolution method (any|none|upnp|publicip|extip:\<IP\>)
+
+          [default: any]
+
+      --v5
+          Run a v5 topic discovery bootnode
+========
 # reth db repair-trie
 
 Verifies trie consistency and outputs any inconsistencies
@@ -11,6 +46,7 @@ Usage: reth db repair-trie [OPTIONS]
 Options:
       --dry-run
           Only show inconsistencies without making any repairs
+>>>>>>>> v1.8.3:docs/vocs/docs/pages/cli/reth/db/repair-trie.mdx
 
   -h, --help
           Print help (see a summary with '-h')

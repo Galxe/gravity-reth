@@ -15,10 +15,12 @@ use futures_util::{
     future::{BoxFuture, Fuse, FusedFuture},
     FutureExt, Stream, StreamExt,
 };
+use gravity_primitives::get_gravity_config;
 use reth_chain_state::CanonStateNotification;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_execution_types::ChangedAccount;
 use reth_fs_util::FsPathError;
+use reth_pipe_exec_layer_event_bus::get_pipe_exec_layer_event_bus;
 use reth_primitives_traits::{
     transaction::signed::SignedTransaction, NodePrimitives, SealedHeader,
 };
@@ -176,6 +178,18 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
 
     // toggle for the first notification
     let mut first_event = true;
+
+    if !get_gravity_config().disable_pipe_execution {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let mut discard_txs_rx =
+                get_pipe_exec_layer_event_bus().discard_txs.lock().await.take().unwrap();
+            while let Some(discard_txs) = discard_txs_rx.recv().await {
+                debug!(target: "txpool", count=%discard_txs.len(), "discarding transactions");
+                pool.remove_transactions(discard_txs);
+            }
+        });
+    }
 
     // The update loop that waits for new blocks and reorgs and performs pool updated
     // Listen for new chain events and derive the update action for the pool

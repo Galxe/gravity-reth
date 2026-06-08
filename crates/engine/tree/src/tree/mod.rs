@@ -13,6 +13,7 @@ use alloy_rpc_types_engine::{
     ForkchoiceState, PayloadStatus, PayloadStatusEnum, PayloadValidationError,
 };
 use error::{InsertBlockError, InsertBlockFatalError};
+use gravity_primitives::get_gravity_config;
 use persistence_state::CurrentPersistenceAction;
 use reth_chain_state::{
     CanonicalInMemoryState, ExecutedBlock, ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates,
@@ -21,13 +22,16 @@ use reth_chain_state::{
 use reth_consensus::{Consensus, FullConsensus};
 use reth_engine_primitives::{
     BeaconEngineMessage, BeaconOnNewPayloadError, ConsensusEngineEvent, ExecutionPayload,
-    ForkchoiceStateTracker, OnForkChoiceUpdated,
+    ForkchoiceStateTracker, ForkchoiceStatus, OnForkChoiceUpdated,
 };
 use reth_errors::{ConsensusError, ProviderResult};
 use reth_evm::{ConfigureEvm, OnStateHook};
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{
     BuiltPayload, EngineApiMessageVersion, NewPayloadError, PayloadBuilderAttributes, PayloadTypes,
+};
+use reth_pipe_exec_layer_event_bus::{
+    get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, WaitForPersistenceEvent,
 };
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader};
 use reth_provider::{
@@ -42,6 +46,7 @@ use reth_trie_db::DatabaseHashedPostState;
 use revm::state::EvmState;
 use state::TreeState;
 use std::{
+    collections::BTreeMap,
     fmt::Debug,
     sync::{
         mpsc::{Receiver, RecvError, RecvTimeoutError, Sender},
@@ -92,6 +97,11 @@ pub mod state;
 /// an epoch has slots), then this exceeds the threshold at which the pipeline should be used to
 /// backfill this gap.
 pub(crate) const MIN_BLOCKS_FOR_PIPELINE_RUN: u64 = EPOCH_SLOTS;
+
+/// The max number of blocks to persist in batch.
+/// Memory is released after blocks are persisted in a batch, so limiting the batch size
+/// prevents memory accumulation and ensures timely cleanup in high-throughput scenarios.
+const MAX_BLOCKS_TO_PERSIST: u64 = 8;
 
 /// A builder for creating state providers that can be used across threads.
 #[derive(Clone, Debug)]
@@ -212,6 +222,41 @@ pub enum TreeAction {
     },
 }
 
+struct PersistenceWaiters {
+    /// The block number that the waiters are waiting for.
+    waiters: BTreeMap<u64, oneshot::Sender<()>>,
+}
+
+impl PersistenceWaiters {
+    const fn new() -> Self {
+        Self { waiters: BTreeMap::new() }
+    }
+
+    /// Adds a new waiter for the given block number.
+    fn add_waiter(&mut self, block_number: u64, tx: oneshot::Sender<()>) {
+        self.waiters.insert(block_number, tx);
+    }
+
+    /// Notifies all waiters for the given block number.
+    fn notify_waiters(&mut self, block_number: u64) {
+        while let Some((waiter_block_number, _)) = self.waiters.first_key_value() {
+            if *waiter_block_number > block_number {
+                break
+            }
+            let waiter_block_number = *waiter_block_number;
+            // Remove the waiter since it has been notified
+            let tx = self.waiters.remove(&waiter_block_number).unwrap();
+            tx.send(()).unwrap_or_else(|_| {
+                warn!(target: "engine::tree", ?waiter_block_number, "Failed to notify persistence waiter");
+            });
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.waiters.is_empty()
+    }
+}
+
 /// Wrapper struct that combines metrics and state hook
 struct MeteredStateHook {
     metrics: reth_evm::metrics::ExecutorMetrics,
@@ -282,6 +327,8 @@ where
     engine_kind: EngineApiKind,
     /// The EVM configuration.
     evm_config: C,
+    /// Persistence waiters that are waiting for the block to be persisted.
+    persistence_waiters: PersistenceWaiters,
 }
 
 impl<N, P: Debug, T: PayloadTypes + Debug, V: Debug, C> std::fmt::Debug
@@ -361,6 +408,7 @@ where
             incoming_tx,
             engine_kind,
             evm_config,
+            persistence_waiters: PersistenceWaiters::new(),
         }
     }
 
@@ -417,6 +465,94 @@ where
         (incoming, outgoing)
     }
 
+    fn try_recv_pipe_exec_event(
+        &self,
+        event_rx: &std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>,
+    ) -> Result<Option<PipeExecLayerEvent<N>>, RecvError> {
+        if self.persistence_state.in_progress() {
+            // wait for a shorter duration if there are waiters
+            match event_rx.recv_timeout(std::time::Duration::from_millis(
+                if self.persistence_waiters.is_empty() { 500 } else { 10 },
+            )) {
+                Ok(event) => Ok(Some(event)),
+                Err(err) => match err {
+                    RecvTimeoutError::Timeout => Ok(None),
+                    RecvTimeoutError::Disconnected => Err(RecvError),
+                },
+            }
+        } else {
+            event_rx.recv().map(Some)
+        }
+    }
+
+    /// DESIGN: The `.expect()` calls on oneshot sends below are intentional. In
+    /// the gravity-sdk integration the panic handler is configured to abort the
+    /// process (via `std::process::exit`), so a dropped receiver terminates the
+    /// node rather than silently leaving a broken engine tree running.
+    fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent<N>) {
+        match event {
+            PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }) => {
+                let block_number = executed_block.recovered_block.number();
+                debug!(target: "on_pipe_exec_event",
+                    block_number=%block_number,
+                    block_hash=%executed_block.recovered_block.hash(),
+                    "Received make canonical event");
+                self.make_executed_block_canonical(executed_block);
+                tx.send(()).expect("Failed to send make canonical event");
+            }
+            PipeExecLayerEvent::WaitForPersistence(WaitForPersistenceEvent {
+                block_number,
+                tx,
+            }) => {
+                info!(target: "on_pipe_exec_event",
+                    block_number=%block_number,
+                    "Received wait for persistence event");
+                if self.persistence_state.last_persisted_block.number < block_number {
+                    // The block is not yet persisted, so we add a waiter for the block number
+                    self.persistence_waiters.add_waiter(block_number, tx);
+                } else {
+                    // The block is already persisted, so we can notify the sender immediately
+                    tx.send(()).expect("Failed to send wait for persistence event");
+                }
+            }
+        }
+    }
+
+    /// DESIGN: `insert_executed` → `make_canonical` runs synchronously within
+    /// a single `pipe_run_inner` loop iteration (see its doc comment). Because
+    /// `advance_persistence` only runs after this function returns, no pruning
+    /// can remove the parent block from `blocks_by_hash` between insertion and
+    /// the `on_new_head` walk-back inside `make_canonical`. Additionally,
+    /// `on_new_head` only checks `current_canonical_head.hash` (a plain
+    /// `BlockNumHash` value) — it does not require the parent to still exist in
+    /// `blocks_by_hash` for the normal sequential extension case.
+    fn make_executed_block_canonical(&mut self, block: ExecutedBlockWithTrieUpdates<N>) {
+        let block_number = block.recovered_block.number();
+        let block_hash = block.recovered_block.hash();
+        let sealed_header = block.recovered_block.clone_sealed_header();
+
+        self.state.tree_state.insert_executed(block);
+
+        self.state.forkchoice_state_tracker.set_latest(
+            ForkchoiceState {
+                head_block_hash: block_hash,
+                safe_block_hash: block_hash,
+                finalized_block_hash: block_hash,
+            },
+            ForkchoiceStatus::Valid,
+        );
+
+        self.make_canonical(block_hash).unwrap_or_else(|err| {
+            panic!(
+                "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
+            )
+        });
+
+        // deterministic consensus means canonical block is immediately safe and finalized
+        self.canonical_in_memory_state.set_safe(sealed_header.clone());
+        self.canonical_in_memory_state.set_finalized(sealed_header);
+    }
+
     /// Returns a new [`Sender`] to send messages to this type.
     pub fn sender(&self) -> Sender<FromEngine<EngineApiRequest<T, N>, N::Block>> {
         self.incoming_tx.clone()
@@ -425,7 +561,55 @@ where
     /// Run the engine API handler.
     ///
     /// This will block the current thread and process incoming messages.
-    pub fn run(mut self) {
+    pub fn run(self) {
+        if get_gravity_config().disable_pipe_execution {
+            self.run_inner();
+        } else {
+            self.pipe_run_inner();
+        }
+    }
+
+    /// DESIGN: This is a **single-threaded event loop**. `on_pipe_exec_event`
+    /// (which calls `make_executed_block_canonical`) runs **synchronously** and
+    /// completes entirely before `advance_persistence` is invoked. This ordering
+    /// guarantees that `advance_persistence` cannot prune in-memory blocks
+    /// between `insert_executed` and `on_new_head` within the same
+    /// `make_executed_block_canonical` call — the two steps are atomic with
+    /// respect to pruning.
+    fn pipe_run_inner(mut self) {
+        // Safety guard: assert N == EthPrimitives at runtime to prevent silent UB
+        // from the transmute below. This is feasible because NodePrimitives has a
+        // 'static bound, and keeps the reth upstream generic signature chain intact.
+        assert_eq!(
+            std::any::TypeId::of::<N>(),
+            std::any::TypeId::of::<reth_ethereum_primitives::EthPrimitives>(),
+            "pipe_run_inner requires N = EthPrimitives"
+        );
+        let pipe_event_rx =
+            get_pipe_exec_layer_event_bus().event_rx.lock().unwrap().take().unwrap();
+        // Safety: The TypeId assertion above guarantees N == EthPrimitives,
+        // so Receiver<PipeExecLayerEvent<EthPrimitives>> and Receiver<PipeExecLayerEvent<N>>
+        // are the same type at runtime.
+        let pipe_event_rx: std::sync::mpsc::Receiver<PipeExecLayerEvent<N>> =
+            unsafe { std::mem::transmute(pipe_event_rx) };
+        loop {
+            match self.try_recv_pipe_exec_event(&pipe_event_rx) {
+                Ok(Some(event)) => self.on_pipe_exec_event(event),
+                Ok(None) => {}
+                Err(RecvError) => {
+                    error!(target: "engine::tree", "Pipe exec layer channel disconnected");
+                    return
+                }
+            }
+
+            if let Err(err) = self.advance_persistence() {
+                error!(target: "engine::tree", %err, "Advancing persistence failed");
+                return
+            }
+        }
+    }
+
+    fn run_inner(mut self) {
         loop {
             match self.try_recv_engine_message() {
                 Ok(Some(msg)) => {
@@ -841,6 +1025,7 @@ where
                 let block_with_trie = ExecutedBlockWithTrieUpdates {
                     block: executed_block,
                     trie: ExecutedTrieUpdates::Missing,
+                    triev2: Default::default(),
                 };
 
                 // Perform the reorg to properly handle the unwind
@@ -901,6 +1086,7 @@ where
             let block_with_trie = ExecutedBlockWithTrieUpdates {
                 block: executed_block,
                 trie: ExecutedTrieUpdates::Missing,
+                triev2: Default::default(),
             };
 
             self.canonical_in_memory_state
@@ -1193,7 +1379,7 @@ where
             .map(|b| b.recovered_block().num_hash())
             .expect("Checked non-empty persisting blocks");
 
-        debug!(target: "engine::tree", blocks = ?blocks_to_persist.iter().map(|block| block.recovered_block().num_hash()).collect::<Vec<_>>(), "Persisting blocks");
+        info!(target: "engine::tree", blocks = ?blocks_to_persist.iter().map(|block| block.recovered_block().num_hash()).collect::<Vec<_>>(), "Persisting blocks");
         let (tx, rx) = oneshot::channel();
         let _ = self.persistence.save_blocks(blocks_to_persist, tx);
 
@@ -1226,7 +1412,8 @@ where
                         return Ok(())
                     };
 
-                    debug!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, "Finished persisting, calling finish");
+                    self.persistence_waiters.notify_waiters(last_persisted_block_number);
+                    info!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, "Finished persisting, calling finish");
                     self.persistence_state
                         .finish(last_persisted_block_hash, last_persisted_block_number);
                     self.on_new_persisted_block()?;
@@ -1241,7 +1428,9 @@ where
         if !self.persistence_state.in_progress() {
             if let Some(new_tip_num) = self.find_disk_reorg()? {
                 self.remove_blocks(new_tip_num)
-            } else if self.should_persist() {
+            }
+
+            if self.should_persist() {
                 let blocks_to_persist = self.get_canonical_blocks_to_persist()?;
                 self.persist_blocks(blocks_to_persist);
             }
@@ -1557,10 +1746,15 @@ where
     /// Returns true if the canonical chain length minus the last persisted
     /// block is greater than or equal to the persistence threshold and
     /// backfill is not running.
-    pub const fn should_persist(&self) -> bool {
+    pub fn should_persist(&self) -> bool {
         if !self.backfill_sync_state.is_idle() {
             // can't persist if backfill is running
             return false
+        }
+
+        if !self.persistence_waiters.is_empty() {
+            // if there are waiters, we should persist immediately
+            return true
         }
 
         let min_block = self.persistence_state.last_persisted_block.number;
@@ -1599,7 +1793,9 @@ where
 
         let target_number = if all_blocks_have_trie_updates {
             // Persist only up to block buffer target if all blocks have trie updates
-            canonical_head_number.saturating_sub(self.config.memory_block_buffer_target())
+            canonical_head_number
+                .saturating_sub(self.config.memory_block_buffer_target())
+                .min(last_persisted_number + MAX_BLOCKS_TO_PERSIST)
         } else {
             // Persist all blocks if any block is missing trie updates
             canonical_head_number
@@ -2118,6 +2314,7 @@ where
                     Some(ExecutedBlockWithTrieUpdates {
                         block: block.clone(),
                         trie: ExecutedTrieUpdates::Present(trie),
+                        triev2: Default::default(),
                     })
                 })
                 .collect::<Vec<_>>();

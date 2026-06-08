@@ -7,6 +7,7 @@ use alloy_eips::eip2718::WithEncoded;
 pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory};
 use alloy_evm::{
     block::{CommitChanges, ExecutableTx},
+    precompiles::DynPrecompile,
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
 };
 use alloy_primitives::{Address, B256};
@@ -22,8 +23,13 @@ use reth_storage_api::StateProvider;
 pub use reth_storage_errors::provider::ProviderError;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::{
-    context::result::ExecutionResult,
+    context::{
+        result::{ExecutionResult, HaltReason},
+        TxEnv,
+    },
     database::{states::bundle_state::BundleRetention, BundleState, State},
+    state::EvmState,
+    Database as RevmDatabase, DatabaseCommit,
 };
 
 /// A type that knows how to execute a block. It is assumed to operate on a
@@ -125,10 +131,34 @@ pub trait Executor<DB: Database>: Sized {
     /// Consumes the executor and returns the [`State`] containing all state changes.
     fn into_state(self) -> State<DB>;
 
+    /// Takes the `BundleState` changeset from the State, replacing it with an empty one.
+    fn take_bundle(&mut self) -> BundleState;
+
     /// The size hint of the batch's tracked state size.
     ///
     /// This is used to optimize DB commits depending on the size of the state.
     fn size_hint(&self) -> usize;
+
+    /// Executes a single system transaction on the executor's own internal state and commits
+    /// the resulting state changes immediately.
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error>;
+
+    /// Applies an irregular state change (e.g. a fork-block contract deployment) directly to
+    /// the executor's in-memory state, bypassing normal transaction execution. The state diff
+    /// is committed immediately; the resulting transitions land in the bundle returned by
+    /// [`take_bundle`].
+    ///
+    /// Used for state mutations that are inherently not transaction-shaped (e.g. the EIP-2935
+    /// `HISTORY_STORAGE` deployment at the Prague activation block, where `CREATE` / `CREATE2`
+    /// cannot target the canonical address without owning a mined deployer key).
+    ///
+    /// [`take_bundle`]: Self::take_bundle
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error>;
 }
 
 /// Helper type for the output of executing a block.
@@ -582,8 +612,6 @@ where
             .with_state_hook(Some(Box::new(state_hook)))
             .execute_block(block.transactions_recovered())?;
 
-        self.db.merge_transitions(BundleRetention::Reverts);
-
         Ok(result)
     }
 
@@ -591,8 +619,40 @@ where
         self.db
     }
 
+    fn take_bundle(&mut self) -> BundleState {
+        self.db.merge_transitions(BundleRetention::Reverts);
+        self.db.take_bundle()
+    }
+
     fn size_hint(&self) -> usize {
         self.db.bundle_state.size_hint()
+    }
+
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        self.strategy_factory.transact_system_txn(&mut self.db, evm_env, precompiles, tx_env)
+    }
+
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error> {
+        // revm's `State::commit` (via `CacheState`) panics with "All accounts
+        // should be present inside cache" if a touched address has never been
+        // loaded. Irregular state changes (e.g. EIP-2935 HISTORY_STORAGE
+        // deployment at the Prague activation block) introduce brand-new
+        // accounts that no prior transaction has read. Pre-load each touched
+        // address via `basic` so the cache holds an entry before commit runs.
+        // The grevm path (`GrevmExecutor::apply_state_change` in
+        // `crates/ethereum/evm/src/parallel_execute.rs`) needs the same fix.
+        for addr in state_diff.keys().copied() {
+            RevmDatabase::basic(&mut self.db, addr).map_err(|e| {
+                BlockExecutionError::msg(alloc::format!("apply_state_change preload {addr}: {e:?}"))
+            })?;
+        }
+        self.db.commit(state_diff);
+        Ok(())
     }
 }
 
@@ -688,8 +748,25 @@ mod tests {
             unreachable!()
         }
 
+        fn take_bundle(&mut self) -> BundleState {
+            unreachable!()
+        }
+
         fn size_hint(&self) -> usize {
             0
+        }
+
+        fn transact_system_txn(
+            &mut self,
+            _evm_env: EvmEnv,
+            _precompiles: Vec<(Address, DynPrecompile)>,
+            _tx_env: TxEnv,
+        ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+            unreachable!()
+        }
+
+        fn apply_state_change(&mut self, _state_diff: EvmState) -> Result<(), Self::Error> {
+            unreachable!()
         }
     }
 

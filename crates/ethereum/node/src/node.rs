@@ -453,7 +453,18 @@ where
     type Pool = EthTransactionPool<Node::Provider, DiskFileBlobStore>;
 
     async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
-        let pool_config = ctx.pool_config();
+        let mut pool_config = ctx.pool_config();
+
+        // Gravity: when the chainspec floor is active for the next block to be produced,
+        // raise the pool admission floor to match consensus. The decision is made once
+        // at startup; nodes that boot pre-activation and run past it will not auto-
+        // tighten — operationally acceptable because pipe-exec rejects sub-floor txs
+        // at block production regardless of pool state. `max()` preserves any operator
+        // override via `--txpool.minimal-protocol-fee` that is already higher.
+        let next_block = ctx.head().number + 1;
+        if let Some(floor) = ctx.chain_spec().gravity_min_base_fee_at_block(next_block) {
+            pool_config.minimal_protocol_basefee = pool_config.minimal_protocol_basefee.max(floor);
+        }
 
         let blob_cache_size = if let Some(blob_cache_size) = pool_config.blob_cache_size {
             Some(blob_cache_size)

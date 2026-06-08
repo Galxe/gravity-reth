@@ -26,7 +26,6 @@ use revm::context_interface::result::{
 use revm_inspectors::tracing::MuxError;
 use std::convert::Infallible;
 use tokio::sync::oneshot::error::RecvError;
-use tracing::error;
 
 /// A trait to convert an error to an RPC error.
 pub trait ToRpcError: core::error::Error + Send + Sync + 'static {
@@ -954,7 +953,7 @@ impl From<PoolError> for RpcPoolError {
     fn from(err: PoolError) -> Self {
         match err.kind {
             PoolErrorKind::ReplacementUnderpriced => Self::ReplaceUnderpriced,
-            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap(_) => Self::Underpriced,
+            PoolErrorKind::FeeCapBelowMinimumProtocolFeeCap { .. } => Self::Underpriced,
             PoolErrorKind::SpammerExceededCapacity(_) | PoolErrorKind::DiscardedOnInsert => {
                 Self::TxPoolOverflow
             }

@@ -18,7 +18,7 @@
 extern crate alloc;
 
 use crate::execute::{BasicBlockBuilder, Executor};
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use alloy_eips::{
     eip2718::{EIP2930_TX_TYPE_ID, LEGACY_TX_TYPE_ID},
     eip2930::AccessList,
@@ -26,7 +26,7 @@ use alloy_eips::{
 };
 use alloy_evm::{
     block::{BlockExecutorFactory, BlockExecutorFor},
-    precompiles::PrecompilesMap,
+    precompiles::{DynPrecompile, PrecompilesMap},
 };
 use alloy_primitives::{Address, B256};
 use core::{error::Error, fmt::Debug};
@@ -35,11 +35,17 @@ use reth_execution_errors::BlockExecutionError;
 use reth_primitives_traits::{
     BlockTy, HeaderTy, NodePrimitives, ReceiptTy, SealedBlock, SealedHeader, TxTy,
 };
-use revm::{context::TxEnv, database::State};
+use revm::{
+    context::{result::ExecutionResult, TxEnv},
+    context_interface::result::HaltReason,
+    database::State,
+};
 
 pub mod either;
 /// EVM environment configuration.
 pub mod execute;
+pub mod parallel_execute;
+use parallel_execute::ParallelExecutor;
 
 mod aliases;
 pub use aliases::*;
@@ -60,6 +66,16 @@ pub use alloy_evm::{
 };
 
 pub use alloy_evm::block::state_changes as state_change;
+
+/// Database abstraction for parallel execution.
+pub trait ParallelDatabase:
+    revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync + Debug
+{
+}
+impl<T> ParallelDatabase for T where
+    T: revm::DatabaseRef<Error: Error + Send + Sync + 'static + Clone> + Send + Sync + Debug
+{
+}
 
 /// A complete configuration of EVM for Reth.
 ///
@@ -447,6 +463,27 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
         BasicBlockExecutor::new(self, db)
     }
+
+    /// Executes a single system transaction directly against the given database state and commits
+    /// the resulting state changes immediately.
+    ///
+    /// Default: `unimplemented!()` — override in every `ConfigureEvm` impl that supports system
+    /// transactions.
+    fn transact_system_txn<DB: Database>(
+        &self,
+        _db: &mut State<DB>,
+        _evm_env: EvmEnv,
+        _precompiles: Vec<(Address, DynPrecompile)>,
+        _tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
+        unimplemented!("transact_system_txn not implemented for this ConfigureEvm")
+    }
+
+    /// Returns a new [`ParallelExecutor`].
+    fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+    ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>;
 }
 
 /// Represents additional attributes required to configure the next block.

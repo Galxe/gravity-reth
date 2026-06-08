@@ -16,6 +16,7 @@ reth-primitives-traits.workspace = true
 reth-config.workspace = true
 reth-trie.workspace = true
 reth-trie-db.workspace = true
+reth-trie-parallel.workspace = true
 reth-etl.workspace = true
 reth-codecs.workspace = true
 reth-stages-types.workspace = true
@@ -42,8 +43,9 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-reth-db = { workspace = true, features = ["mdbx"] }
+reth-db = { workspace = true }
 reth-provider = { workspace = true, features = ["test-utils"] }
+alloy-consensus.workspace = true
 
 [lints]
 workspace = true

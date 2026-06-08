@@ -8,7 +8,7 @@ use crate::{
     RpcTransaction,
 };
 use alloy_consensus::{
-    transaction::{SignerRecoverable, TransactionMeta, TxHashRef},
+    transaction::{Recovered, SignerRecoverable, TransactionMeta, TxHashRef},
     BlockHeader, Transaction,
 };
 use alloy_dyn_abi::TypedData;
@@ -33,6 +33,10 @@ use reth_transaction_pool::{
     AddedTransactionOutcome, PoolTransaction, TransactionOrigin, TransactionPool,
 };
 use std::{sync::Arc, time::Duration};
+
+/// See `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/mod.rs`
+const SYSTEM_CALLER: Address =
+    alloy_primitives::address!("00000000000000000000000000000001625f0000");
 
 /// Transaction related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
@@ -537,9 +541,9 @@ pub trait LoadTransaction: SpawnBlocking + FullEthApiTypes + RpcNodeCoreExt {
                             // Note: we assume this transaction is valid, because it's mined (or
                             // part of pending block) and already. We don't need to
                             // check for pre EIP-2 because this transaction could be pre-EIP-2.
-                            let transaction = tx
-                                .try_into_recovered_unchecked()
-                                .map_err(|_| EthApiError::InvalidTransactionSignature)?;
+                            // FIXME: Hardcoded for meta txns with empty signature
+                            let signer = tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER);
+                            let transaction = Recovered::new_unchecked(tx, signer);
 
                             let tx = TransactionSource::Block {
                                 transaction,

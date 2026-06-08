@@ -16,6 +16,8 @@ mod constants;
 pub use constants::*;
 
 mod api;
+/// Gravity-specific hardforks module.
+mod gravity;
 /// The chain info module.
 mod info;
 /// The chain spec module.
@@ -26,6 +28,7 @@ pub use alloy_chains::{Chain, ChainKind, NamedChain};
 pub use reth_ethereum_forks::*;
 
 pub use api::EthChainSpec;
+pub use gravity::GravityHardfork;
 pub use info::ChainInfo;
 #[cfg(any(test, feature = "test-utils"))]
 pub use spec::test_fork_ids;
@@ -148,31 +151,46 @@ mod tests {
 
     #[test]
     fn test_centralized_base_fee_calculation() {
-        use crate::{ChainSpec, EthChainSpec};
+        use crate::{constants::GRAVITY_MIN_BASE_FEE, ChainSpec, EthChainSpec};
         use alloy_consensus::Header;
         use alloy_eips::eip1559::INITIAL_BASE_FEE;
 
-        fn parent_header() -> Header {
+        fn parent_header(number: u64, base_fee: u64) -> Header {
             Header {
+                number,
                 gas_used: 15_000_000,
                 gas_limit: 30_000_000,
-                base_fee_per_gas: Some(INITIAL_BASE_FEE),
+                base_fee_per_gas: Some(base_fee),
                 timestamp: 1_000,
                 ..Default::default()
             }
         }
 
-        let spec = ChainSpec::default();
-        let parent = parent_header();
-
-        // For testing, assume next block has timestamp 12 seconds later
-        let next_timestamp = parent.timestamp + 12;
-
+        // Scenario 1: chainspec has no Gravity floor configured (Ethereum mainnet
+        // history sync). Result follows upstream EIP-1559 with no clamp.
+        let upstream_spec = ChainSpec::default();
+        let parent = parent_header(0, INITIAL_BASE_FEE);
+        let next_ts = parent.timestamp + 12;
         let expected = parent
-            .next_block_base_fee(spec.base_fee_params_at_timestamp(next_timestamp))
+            .next_block_base_fee(upstream_spec.base_fee_params_at_timestamp(next_ts))
             .unwrap_or_default();
+        let got = upstream_spec.next_block_base_fee(&parent, next_ts).unwrap_or_default();
+        assert_eq!(expected, got, "Upstream chainspec must follow vanilla EIP-1559 (no clamp)");
+        assert!(got < GRAVITY_MIN_BASE_FEE, "sanity: upstream computed value is below floor");
 
-        let got = spec.next_block_base_fee(&parent, next_timestamp).unwrap_or_default();
-        assert_eq!(expected, got, "Base fee calculation does not match expected value");
+        // Scenario 2: Gravity main — chainspec has gravityMinBaseFee = 50 Gwei,
+        // schedule activates at block 0, so floor is enforced for every block.
+        let main_spec =
+            ChainSpec { gravity_min_base_fee: Some(GRAVITY_MIN_BASE_FEE), ..Default::default() };
+        // floor query returns Some at any block
+        assert_eq!(main_spec.gravity_min_base_fee_at_block(0), Some(GRAVITY_MIN_BASE_FEE));
+        assert_eq!(main_spec.gravity_min_base_fee_at_block(123_456), Some(GRAVITY_MIN_BASE_FEE));
+        // EIP-1559 result clamped at the floor when input is below
+        let got_main = main_spec.next_block_base_fee(&parent, next_ts).unwrap_or_default();
+        assert_eq!(got_main, GRAVITY_MIN_BASE_FEE, "main: clamp at floor");
+        // when parent already at/above floor, recurrence runs above floor
+        let parent_above = parent_header(0, GRAVITY_MIN_BASE_FEE);
+        let got_above = main_spec.next_block_base_fee(&parent_above, next_ts).unwrap_or_default();
+        assert!(got_above >= GRAVITY_MIN_BASE_FEE, "main: stays above floor");
     }
 }

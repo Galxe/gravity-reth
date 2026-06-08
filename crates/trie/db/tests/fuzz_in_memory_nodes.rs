@@ -5,7 +5,7 @@ use proptest::prelude::*;
 use reth_db::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRW},
     tables,
-    transaction::DbTxMut,
+    transaction::{DbTx, DbTxMut},
 };
 use reth_primitives_traits::{Account, StorageEntry};
 use reth_provider::test_utils::create_test_provider_factory;
@@ -33,6 +33,7 @@ proptest! {
         for (hashed_address, balance) in init_state.clone() {
             hashed_account_cursor.upsert(hashed_address, &Account { balance, ..Default::default() }).unwrap();
         }
+        provider.tx_ref().commit_view().unwrap();
 
         // Compute initial root and updates
         let (_, mut trie_nodes) = StateRoot::from_tx(provider.tx_ref())
@@ -54,6 +55,7 @@ proptest! {
                     state.remove(&hashed_address);
                 }
             }
+            provider.tx_ref().commit_view().unwrap();
 
             // Compute root with in-memory trie nodes overlay
             let (state_root, trie_updates) = StateRoot::from_tx(provider.tx_ref())
@@ -79,15 +81,18 @@ proptest! {
         let hashed_address = B256::random();
         let factory = create_test_provider_factory();
         let provider = factory.provider_rw().unwrap();
-        let mut hashed_storage_cursor =
-            provider.tx_ref().cursor_write::<tables::HashedStorages>().unwrap();
 
         // Insert init state into database
-        for (hashed_slot, value) in init_storage.clone() {
-            hashed_storage_cursor
-                .upsert(hashed_address, &StorageEntry { key: hashed_slot, value })
-                .unwrap();
+        {
+            let mut hashed_storage_cursor =
+                provider.tx_ref().cursor_write::<tables::HashedStorages>().unwrap();
+            for (hashed_slot, value) in init_storage.clone() {
+                hashed_storage_cursor
+                    .upsert(hashed_address, &StorageEntry { key: hashed_slot, value })
+                    .unwrap();
+            }
         }
+        provider.tx_ref().commit_view().unwrap();
 
         // Compute initial storage root and updates
         let (_, _, mut storage_trie_nodes) =
@@ -95,6 +100,11 @@ proptest! {
 
         let mut storage = init_storage;
         for (is_deleted, mut storage_update) in storage_updates {
+            // Create a fresh cursor for each iteration to see committed data
+            // (RocksDB iterators don't see data committed after their creation)
+            let mut hashed_storage_cursor =
+                provider.tx_ref().cursor_write::<tables::HashedStorages>().unwrap();
+
             // Insert state updates into database
             if is_deleted && hashed_storage_cursor.seek_exact(hashed_address).unwrap().is_some() {
                 hashed_storage_cursor.delete_current_duplicates().unwrap();
@@ -106,6 +116,7 @@ proptest! {
                     .unwrap();
                 hashed_storage.storage.insert(hashed_slot, value);
             }
+            provider.tx_ref().commit_view().unwrap();
 
             // Compute root with in-memory trie nodes overlay
             let mut trie_nodes = TrieUpdates::default();

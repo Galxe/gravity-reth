@@ -7,6 +7,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[package.metadata.zepter.propagate-feature]
+ignore = ["grevm"]
+
 [lints]
 workspace = true
 
@@ -19,6 +22,8 @@ reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
 revm.workspace = true
 reth-evm.workspace = true
+grevm.workspace = true
+gravity-primitives.workspace = true
 reth-storage-errors.workspace = true
 
 # Alloy
@@ -39,6 +44,7 @@ secp256k1.workspace = true
 alloy-genesis.workspace = true
 
 [features]
+config-from-env = ["gravity-primitives/config-from-env"]
 default = ["std"]
 std = [
     "alloy-consensus/std",

@@ -185,7 +185,7 @@ where
                     };
 
                     hasher.update(*tx.tx_hash());
-                    let ResultAndState { result, state } = evm
+                    let ResultAndState { result, state, .. } = evm
                         .transact(eth_api.evm_config().tx_env(&tx))
                         .map_err(Eth::Error::from_evm_err)?;
 

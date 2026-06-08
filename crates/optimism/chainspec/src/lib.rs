@@ -292,6 +292,14 @@ impl EthChainSpec for OpChainSpec {
         self.inner.final_paris_total_difficulty()
     }
 
+    fn gravity_hardforks(&self) -> &ChainHardforks {
+        self.inner.gravity_hardforks()
+    }
+
+    fn gravity_min_base_fee_at_block(&self, block: u64) -> Option<u64> {
+        self.inner.gravity_min_base_fee_at_block(block)
+    }
+
     fn next_block_base_fee(&self, parent: &Header, target_timestamp: u64) -> Option<u64> {
         if self.is_jovian_active_at_timestamp(parent.timestamp()) {
             compute_jovian_base_fee(self, parent, target_timestamp).ok()

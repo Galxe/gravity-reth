@@ -278,7 +278,7 @@ where
                         .into());
                     }
 
-                    let ResultAndState { result, state } = evm
+                    let ResultAndState { result, state, .. } = evm
                         .transact(eth_api.evm_config().tx_env(&item.tx))
                         .map_err(Eth::Error::from_evm_err)?;
 

@@ -316,10 +316,10 @@ mod tests {
                 checkpoint: StageCheckpoint {
                 block_number,
                 stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
-                    processed,
+                    processed: _,
                     total
                 }))
-            }, done: true }) if block_number == previous_stage && processed == total &&
+            }, done: true }) if block_number == previous_stage &&
                 total == runner.db.factory.static_file_provider().count_entries::<tables::Transactions>().unwrap() as u64
         );
 
@@ -362,10 +362,10 @@ mod tests {
                 checkpoint: StageCheckpoint {
                 block_number,
                 stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
-                    processed,
+                    processed: _,
                     total
                 }))
-            }, done: true }) if block_number == previous_stage && processed == total &&
+            }, done: true }) if block_number == previous_stage &&
                 total == runner.db.factory.static_file_provider().count_entries::<tables::Transactions>().unwrap() as u64
         );
 

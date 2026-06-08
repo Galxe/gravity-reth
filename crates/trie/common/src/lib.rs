@@ -70,3 +70,7 @@ pub mod serde_bincode_compat {
 
 /// Re-export
 pub use alloy_trie::{nodes::*, proof, BranchNodeCompact, HashBuilder, TrieMask, EMPTY_ROOT_HASH};
+pub use updates::{StorageTrieUpdatesV2, TrieUpdatesV2};
+
+/// Nested trie for merklization
+pub mod nested_trie;

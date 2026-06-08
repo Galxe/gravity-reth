@@ -15,15 +15,17 @@ use reth_provider::{
     BlockHashReader, BlockNumReader, BundleStateInit, ChainSpecProvider, DBProvider,
     DatabaseProviderFactory, ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter,
     OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader, StageCheckpointWriter,
-    StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter,
+    StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter, TrieWriterV2,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_trie::{
     prefix_set::{TriePrefixSets, TriePrefixSetsMut},
-    IntermediateStateRootState, Nibbles, StateRoot as StateRootComputer, StateRootProgress,
+    HashedPostState, HashedStorage, IntermediateStateRootState, Nibbles,
+    StateRoot as StateRootComputer, StateRootProgress,
 };
 use reth_trie_db::DatabaseStateRoot;
+use reth_trie_parallel::nested_hash::NestedStateRoot;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use tracing::{debug, error, info, trace};
@@ -95,6 +97,7 @@ where
         + HeaderProvider
         + HashingWriter
         + StateWriter
+        + TrieWriterV2
         + TrieWriter
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
@@ -117,7 +120,7 @@ where
                     return Err(InitStorageError::UninitializedDatabase)
                 }
 
-                debug!("Genesis already written, skipping.");
+                info!("Genesis already written, skipping.");
                 return Ok(hash)
             }
 
@@ -138,6 +141,7 @@ where
 
     // use transaction to insert genesis header
     let provider_rw = factory.database_provider_rw()?;
+    insert_world_trie(&provider_rw, alloc.iter())?;
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
     insert_genesis_history(&provider_rw, alloc.iter())?;
 
@@ -299,6 +303,40 @@ where
 
     trace!(target: "reth::cli", "Inserted storage hashes");
 
+    Ok(())
+}
+
+/// Insert the genesis world trie
+pub fn insert_world_trie<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
+) -> ProviderResult<()>
+where
+    Provider: DBProvider<Tx: DbTxMut> + TrieWriterV2,
+{
+    let mut accounts = HashMap::default();
+    let mut storages = HashMap::default();
+
+    for (address, account) in alloc {
+        let hashed_address = keccak256(*address);
+        accounts.insert(hashed_address, Some(Account::from(account)));
+        let mut hashed_storages = HashedStorage::default();
+        if let Some(storage) = account.storage.as_ref() {
+            for (slot, slot_value) in storage.clone() {
+                hashed_storages.storage.insert(keccak256(slot), slot_value.into());
+            }
+        }
+        storages.insert(hashed_address, hashed_storages);
+    }
+    let hashed_state = HashedPostState { accounts, storages };
+    let tx = provider.tx_ref();
+    let nested_hash = NestedStateRoot::new(tx, None);
+    let (root_hash, trie_updates) = nested_hash.calculate(&hashed_state)?;
+
+    provider.write_trie_updatesv2(&trie_updates)?;
+    info!(target: "reth::cli",
+    root_hash=?root_hash,
+    "Inserted world trie");
     Ok(())
 }
 

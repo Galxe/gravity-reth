@@ -16,6 +16,7 @@ use alloy_eips::{
 };
 use alloy_primitives::{Address, BlockHash, BlockNumber, Sealable, TxHash, TxNumber, B256, U256};
 use alloy_rpc_types_engine::ForkchoiceState;
+use gravity_primitives::get_gravity_config;
 use reth_chain_state::{
     BlockState, CanonicalInMemoryState, ForkChoiceNotifications, ForkChoiceSubscriptions,
     MemoryOverlayStateProvider,
@@ -253,6 +254,10 @@ impl<N: ProviderNodeTypes> BlockNumReader for BlockchainProvider<N> {
 
     fn last_block_number(&self) -> ProviderResult<BlockNumber> {
         self.database.last_block_number()
+    }
+
+    fn recover_block_number(&self) -> ProviderResult<BlockNumber> {
+        self.database.recover_block_number()
     }
 
     fn earliest_block_number(&self) -> ProviderResult<BlockNumber> {
@@ -507,10 +512,22 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
         // use latest state provider if the head state exists
         if let Some(state) = self.canonical_in_memory_state.head_state() {
             trace!(target: "providers::blockchain", "Using head state for latest state provider");
-            Ok(self.block_state_provider(&state)?.boxed())
+            if get_gravity_config().validator_node_only {
+                // Only supply latest view if current node is a validator
+                let latest_historical = self.database.latest()?;
+                Ok(state.state_provider(latest_historical).boxed())
+            } else {
+                Ok(self.block_state_provider(&state)?.boxed())
+            }
         } else {
             trace!(target: "providers::blockchain", "Using database state for latest state provider");
-            self.database.latest()
+            if get_gravity_config().validator_node_only {
+                self.database.latest()
+            } else {
+                // Always return historical provider in Rocksdb
+                let best_block_number = self.database.best_block_number()?;
+                self.database.history_by_block_number(best_block_number)
+            }
         }
     }
 
@@ -890,6 +907,7 @@ mod tests {
             provider_rw.insert_historical_block(
                 block.clone().try_recover().expect("failed to seal block with senders"),
             )?;
+            provider_rw.commit_view();
         }
 
         // Commit to both storages: database and static files
@@ -912,6 +930,7 @@ mod tests {
                         execution_outcome.into(),
                         Default::default(),
                         ExecutedTrieUpdates::empty(),
+                        Default::default(),
                     )
                 })
                 .collect(),
@@ -1044,6 +1063,7 @@ mod tests {
                 Default::default(),
                 Default::default(),
                 ExecutedTrieUpdates::empty(),
+                Default::default(),
             )],
         };
         provider.canonical_in_memory_state.update_chain(chain);
@@ -1082,6 +1102,7 @@ mod tests {
                 hashed_state: Default::default(),
             },
             trie: ExecutedTrieUpdates::empty(),
+            triev2: Default::default(),
         });
 
         // Now the last block should be found in memory
@@ -1140,6 +1161,7 @@ mod tests {
                 Default::default(),
                 Default::default(),
                 ExecutedTrieUpdates::empty(),
+                Default::default(),
             )],
         };
         provider.canonical_in_memory_state.update_chain(chain);
@@ -1196,6 +1218,7 @@ mod tests {
                 hashed_state: Default::default(),
             },
             trie: ExecutedTrieUpdates::empty(),
+            triev2: Default::default(),
         });
 
         // Assertions related to the pending block
@@ -1241,6 +1264,7 @@ mod tests {
                 Default::default(),
                 Default::default(),
                 ExecutedTrieUpdates::empty(),
+                Default::default(),
             )],
         };
         provider.canonical_in_memory_state.update_chain(chain);
@@ -1730,6 +1754,7 @@ mod tests {
                         }),
                         Default::default(),
                         ExecutedTrieUpdates::empty(),
+                        Default::default(),
                     )
                 })
                 .unwrap()],
@@ -1859,6 +1884,7 @@ mod tests {
                     hashed_state: Default::default(),
                 },
                 trie: ExecutedTrieUpdates::empty(),
+                triev2: Default::default(),
             },
         );
 
@@ -1956,6 +1982,7 @@ mod tests {
                 hashed_state: Default::default(),
             },
             trie: ExecutedTrieUpdates::empty(),
+            triev2: Default::default(),
         });
 
         // Set the safe block in memory
@@ -2551,7 +2578,7 @@ mod tests {
             |hash: B256,
              canonical_in_memory_state: CanonicalInMemoryState,
              factory: ProviderFactory<MockNodeTypesWithDB>| {
-                assert!(factory.transaction_by_hash(hash)?.is_none(), "should not be in database");
+                assert!(factory.transaction_by_hash(hash)?.is_some(), "should be in database");
                 Ok::<_, ProviderError>(canonical_in_memory_state.transaction_by_hash(hash))
             };
 

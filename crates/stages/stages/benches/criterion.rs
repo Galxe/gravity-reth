@@ -146,7 +146,10 @@ fn measure_stage<F, S>(
     label: String,
 ) where
     S: Clone
-        + Stage<DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>>,
+        + Stage<
+            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TXMut, MockNodeTypesWithDB>,
+            DatabaseProvider<<TempDatabase<DatabaseEnv> as Database>::TX, MockNodeTypesWithDB>,
+        >,
     F: Fn(S, &TestStageDB, StageRange),
 {
     let stage_range = (
@@ -174,7 +177,16 @@ fn measure_stage<F, S>(
                 stage
                     .execute_ready(input)
                     .await
-                    .and_then(|_| stage.execute(&provider, input))
+                    .and_then(|_| {
+                        stage.execute(
+                            &provider,
+                            Box::new({
+                                let factory = db.factory.clone();
+                                move || factory.provider()
+                            }),
+                            input,
+                        )
+                    })
                     .unwrap();
                 provider.commit().unwrap();
             },
