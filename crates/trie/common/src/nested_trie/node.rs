@@ -8,7 +8,7 @@ use alloy_trie::{
 };
 use bytes::BytesMut;
 use nybbles::Nibbles;
-use reth_primitives_traits::SubkeyContainedValue;
+use crate::SubkeyContainedValue;
 
 use crate::StoredNibblesSubKey;
 

@@ -80,6 +80,13 @@ pub mod updates;
 
 pub mod added_removed_keys;
 
+/// Gravity: nested (account/storage) trie types for the TrieV2 state-root path.
+pub mod nested_trie;
+
+/// Gravity: subkey-length trait for DupSort table values.
+pub mod subkey;
+pub use subkey::SubkeyContainedValue;
+
 /// Utilities used by other modules in this crate.
 mod utils;
 
