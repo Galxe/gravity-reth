@@ -12,7 +12,7 @@ use alloy_trie::{nodes::TrieNode, EMPTY_ROOT_HASH};
 use nybbles::Nibbles;
 use reth_storage_errors::{db::DatabaseError, ProviderResult};
 
-use crate::nested_trie::node::{Node, NodeFlag};
+use reth_trie_common::nested_trie::{Node, NodeFlag};
 
 /// The min number of nodes to parallelly update MPT sub-trie
 pub const MIN_PARALLEL_NODES: usize = 128;

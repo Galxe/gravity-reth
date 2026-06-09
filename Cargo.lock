@@ -8041,6 +8041,7 @@ name = "reth-db-api"
 version = "2.2.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-genesis",
  "alloy-primitives",
  "arbitrary",
  "arrayvec",
@@ -10713,7 +10714,11 @@ dependencies = [
  "alloy-consensus",
  "alloy-primitives",
  "alloy-rlp",
+ "alloy-trie",
+ "gravity-primitives",
  "metrics",
+ "nybbles",
+ "once_cell",
  "parking_lot",
  "proptest",
  "proptest-arbitrary-interop",

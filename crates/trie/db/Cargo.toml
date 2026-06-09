@@ -25,6 +25,12 @@ reth-metrics = { workspace = true, optional = true }
 
 # alloy
 alloy-primitives.workspace = true
+alloy-trie.workspace = true
+nybbles.workspace = true
+
+# gravity: nested-trie (TrieV2) algorithm
+gravity-primitives.workspace = true
+once_cell.workspace = true
 
 # misc
 parking_lot.workspace = true

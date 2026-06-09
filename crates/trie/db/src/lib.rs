@@ -4,6 +4,10 @@
 
 mod changesets;
 pub use changesets::*;
+
+/// Gravity: nested-trie (TrieV2) algorithm + the NestedStateRoot hashing path.
+mod nested_trie;
+pub mod nested_hash;
 mod hashed_cursor;
 mod prefix_set;
 mod proof;
