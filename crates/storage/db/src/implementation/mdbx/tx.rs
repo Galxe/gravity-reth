@@ -303,10 +303,14 @@ impl<K: TransactionKind> DbTx for Tx<K> {
     }
 
     #[instrument(name = "Tx::commit", level = "debug", target = "providers::db", skip_all)]
-    fn commit(self) -> Result<(), DatabaseError> {
+    fn commit(self) -> Result<bool, DatabaseError> {
+        // Gravity: DbTx::commit returns bool (committed?) for the pipe-exec view
+        // mechanism. v2.2.0's mdbx-rs commit() no longer surfaces the underlying
+        // "did-write" flag, so a successful commit reports `true`. (The pipe-exec
+        // reader-view path runs on the RocksDB backend, not mdbx.)
         self.execute_with_close_transaction_metric(TransactionOutcome::Commit, |this| {
             match this.inner.commit().map_err(|e| DatabaseError::Commit(e.into())) {
-                Ok(latency) => (Ok(()), Some(latency)),
+                Ok(latency) => (Ok(true), Some(latency)),
                 Err(e) => (Err(e), None),
             }
         })

@@ -7456,6 +7456,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "relative-path"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7811,7 +7817,7 @@ dependencies = [
  "reth-cli",
  "reth-cli-runner",
  "reth-cli-util",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-config",
  "reth-consensus",
  "reth-db",
@@ -7897,6 +7903,30 @@ dependencies = [
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
  "tracy-client",
+]
+
+[[package]]
+name = "reth-codecs"
+version = "0.3.1"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips 2.0.4",
+ "alloy-genesis",
+ "alloy-primitives",
+ "alloy-trie",
+ "arbitrary",
+ "bytes",
+ "modular-bitfield",
+ "parity-scale-codec",
+ "proptest",
+ "proptest-arbitrary-interop",
+ "reth-codecs-derive",
+ "reth-zstd-compressors",
+ "rstest",
+ "serde",
+ "serde_json",
+ "test-fuzz",
+ "visibility",
 ]
 
 [[package]]
@@ -8053,7 +8083,7 @@ dependencies = [
  "proptest",
  "proptest-arbitrary-interop",
  "rand 0.9.4",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-db-models",
  "reth-ethereum-primitives",
  "reth-primitives-traits",
@@ -8076,7 +8106,7 @@ dependencies = [
  "boyer-moore-magiclen",
  "eyre",
  "reth-chainspec",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-config",
  "reth-db",
  "reth-db-api",
@@ -8108,7 +8138,7 @@ dependencies = [
  "modular-bitfield",
  "proptest",
  "proptest-arbitrary-interop",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-primitives-traits",
  "serde",
 ]
@@ -8558,7 +8588,7 @@ dependencies = [
  "proptest-arbitrary-interop",
  "rand 0.8.6",
  "rand 0.9.4",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-ecies",
  "reth-eth-wire-types",
  "reth-ethereum-forks",
@@ -8611,7 +8641,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "reth-chainspec",
  "reth-cli-util",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-consensus",
  "reth-consensus-common",
  "reth-db",
@@ -8753,7 +8783,7 @@ dependencies = [
  "proptest",
  "proptest-arbitrary-interop",
  "rand 0.9.4",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-primitives-traits",
  "reth-zstd-compressors",
  "serde",
@@ -9740,7 +9770,7 @@ dependencies = [
  "proptest-arbitrary-interop",
  "quanta",
  "rayon",
- "reth-codecs",
+ "reth-codecs 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "revm-bytecode",
  "revm-primitives",
  "revm-state",
@@ -9769,7 +9799,7 @@ dependencies = [
  "rayon",
  "reth-chain-state",
  "reth-chainspec",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-db",
  "reth-db-api",
  "reth-errors",
@@ -9849,7 +9879,7 @@ dependencies = [
  "modular-bitfield",
  "proptest",
  "proptest-arbitrary-interop",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "serde",
  "serde_json",
  "strum",
@@ -10298,7 +10328,7 @@ dependencies = [
  "rayon",
  "reqwest 0.13.2",
  "reth-chainspec",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-config",
  "reth-consensus",
  "reth-db",
@@ -10352,7 +10382,7 @@ dependencies = [
  "futures-util",
  "metrics",
  "reth-chainspec",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-consensus",
  "reth-db",
  "reth-db-api",
@@ -10385,7 +10415,7 @@ dependencies = [
  "proptest",
  "proptest-arbitrary-interop",
  "rand 0.9.4",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-trie-common",
  "serde",
 ]
@@ -10398,7 +10428,7 @@ dependencies = [
  "assert_matches",
  "parking_lot",
  "rayon",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-db-api",
  "reth-primitives-traits",
  "reth-provider",
@@ -10469,7 +10499,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "derive_more",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-primitives-traits",
  "reth-prune-types",
  "reth-static-file-types",
@@ -10699,7 +10729,7 @@ dependencies = [
  "proptest",
  "proptest-arbitrary-interop",
  "rayon",
- "reth-codecs",
+ "reth-codecs 0.3.1",
  "reth-primitives-traits",
  "revm-database",
  "revm-state",
@@ -11126,6 +11156,35 @@ name = "route-recognizer"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afab94fb28594581f62d981211a9a4d53cc8130bbcbbb89a0440d9b8e81a7746"
+
+[[package]]
+name = "rstest"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5a3193c063baaa2a95a33f03035c8a72b83d97a54916055ba22d35ed3839d49"
+dependencies = [
+ "futures-timer",
+ "futures-util",
+ "rstest_macros",
+]
+
+[[package]]
+name = "rstest_macros"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c845311f0ff7951c5506121a9ad75aec44d083c31583b2ea5a30bcb0b0abba0"
+dependencies = [
+ "cfg-if",
+ "glob",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "relative-path",
+ "rustc_version 0.4.1",
+ "syn 2.0.117",
+ "unicode-ident",
+]
 
 [[package]]
 name = "ruint"
