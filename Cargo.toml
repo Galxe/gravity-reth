@@ -102,7 +102,6 @@ members = [
     "crates/storage/db-api/",
     "crates/storage/db-common",
     "crates/storage/db-models/",
-    "crates/storage/codecs/",
     "crates/storage/db/",
     "crates/storage/errors/",
     "crates/storage/libmdbx-rs/",
@@ -333,7 +332,7 @@ reth-cli = { path = "crates/cli/cli" }
 reth-cli-commands = { path = "crates/cli/commands" }
 reth-cli-runner = { path = "crates/cli/runner" }
 reth-cli-util = { path = "crates/cli/util" }
-reth-codecs = { path = "crates/storage/codecs", default-features = false }
+reth-codecs = { version = "0.3.1", default-features = false }
 reth-codecs-derive = "0.3.1"
 reth-config = { path = "crates/config", default-features = false }
 reth-consensus = { path = "crates/consensus/consensus", default-features = false }
@@ -732,6 +731,7 @@ ipnet = "2.11"
 #   - re-add gravity-api-types + grevm workspace deps.
 #   - resolve the 5 deep storage/engine merges flagged with GRAVITY-TRANSPLANT-TODO.
 [patch.crates-io]
+reth-codecs = { path = "crates/storage/codecs" }
 revm                    = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
 revm-bytecode           = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
 revm-context            = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
