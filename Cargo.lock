@@ -11032,6 +11032,7 @@ dependencies = [
  "assert_matches",
  "auto_impl",
  "bitflags 2.13.1",
+ "codspeed-criterion-compat",
  "futures",
  "futures-util",
  "gravity-primitives",
