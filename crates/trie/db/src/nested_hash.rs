@@ -672,4 +672,90 @@ mod tests {
             NestedStateRoot::new(tx, None).calculate(&hashed_state).unwrap();
         assert_eq!(parallel_root_hash, test_utils::state_root(state))
     }
+
+    /// Repro for CONFIRMED bug `nested-hash-wiped-recreate-storage-root`.
+    ///
+    /// When an account is selfdestructed and re-created (or CREATE2-redeployed) within the SAME
+    /// block while writing storage, revm produces an `AccountStatus::DestroyedChanged` bundle
+    /// account whose `was_destroyed() == true` (so `HashedStorage::from_plain_storage` sets
+    /// `wiped = true`) while `storage` carries the NEW non-zero recreated slots.
+    ///
+    /// `NestedStateRoot::calculate_and_proof` (nested_hash.rs:293-303) unconditionally treats
+    /// `wiped == true` as "storage gone": it sets the account storage root to `EMPTY_ROOT_HASH`,
+    /// emits `StorageTrieUpdatesV2::deleted()`, and `continue`s -- skipping the slot-application
+    /// loop. The newly recreated slots in `storage.storage` are silently dropped.
+    ///
+    /// Upstream reth (`HashedPostStateStorageCursor`) still returns the post-state slots when
+    /// wiped, so it computes the storage root over the recreated slots. The correct overall state
+    /// root therefore matches `test_utils::state_root` over the account + its new slots.
+    ///
+    /// This test asserts the CORRECT behavior and FAILS on HEAD (the gravity code yields the
+    /// state root computed with an EMPTY storage root instead).
+    ///
+    /// NOTE: #[ignore] keeps the default `unit` CI (which runs reth-trie-db lib tests across the
+    /// workspace) green — this test FAILS on HEAD by design. The `bug-repro-gate` workflow runs it
+    /// via `--run-ignored`. Remove the #[ignore] once the wiped branch is fixed so it becomes a
+    /// permanent regression gate in the normal suite.
+    #[test]
+    #[ignore = "repro of nested-hash-wiped-recreate-storage-root bug; FAILS until the wiped branch \
+                rebuilds a fresh storage trie over recreated slots. Un-ignore when fixed."]
+    fn repro_nested_hash_wiped_recreate_storage_root() {
+        let factory = create_test_provider_factory();
+
+        // A single account that is destroyed+recreated in the same block, carrying new
+        // non-zero storage slots.
+        let address = Address::with_last_byte(0x42);
+        let hashed_address = keccak256(address);
+
+        let account = Account {
+            nonce: 1,
+            balance: U256::from(1_000u64),
+            bytecode_hash: Some(B256::with_last_byte(0xaa)),
+        };
+
+        // New (recreated) non-zero slots written in the same block.
+        let raw_slots: Vec<(B256, U256)> = vec![
+            (B256::with_last_byte(0x01), U256::from(11u64)),
+            (B256::with_last_byte(0x02), U256::from(22u64)),
+            (B256::with_last_byte(0x03), U256::from(33u64)),
+        ];
+
+        // Build the HashedPostState exactly as the pipe-exec layer would for a DestroyedChanged
+        // bundle account: wiped = true AND storage = { new non-zero slots }.
+        let mut hashed_storage = HashedStorage::new(true);
+        for (slot, value) in &raw_slots {
+            hashed_storage.storage.insert(keccak256(slot), *value);
+        }
+        assert!(hashed_storage.wiped, "scenario requires wiped == true");
+        assert!(!hashed_storage.storage.is_empty(), "scenario requires recreated slots");
+
+        let mut hashed_state = HashedPostState::default();
+        hashed_state.accounts.insert(hashed_address, Some(account));
+        hashed_state.storages.insert(hashed_address, hashed_storage);
+
+        let provider = factory.database_provider_ro().unwrap();
+        let tx = provider.tx_ref();
+        let (parallel_root_hash, ..) =
+            NestedStateRoot::new(tx, None).calculate(&hashed_state).unwrap();
+
+        // Reference root: a correct EVM implementation computes the storage root over the
+        // recreated slots, NOT EMPTY_ROOT_HASH.
+        let expected_state =
+            vec![(address, (account, raw_slots.iter().cloned().collect::<Vec<_>>()))];
+        let expected_root = test_utils::state_root(expected_state);
+
+        // Sanity: the recreated storage is non-empty, so the correct storage root must differ
+        // from EMPTY_ROOT_HASH (otherwise the assertion below would be vacuous).
+        let storage_root = test_utils::storage_root(raw_slots.iter().cloned());
+        assert_ne!(
+            storage_root, EMPTY_ROOT_HASH,
+            "recreated storage must produce a non-empty storage root"
+        );
+
+        assert_eq!(
+            parallel_root_hash, expected_root,
+            "wiped+recreated account: NestedStateRoot dropped the recreated storage slots \
+             (storage root collapsed to EMPTY_ROOT_HASH instead of {storage_root})"
+        );
+    }
 }

@@ -1,0 +1,113 @@
+# Bug-repro gate — INFORMATIONAL, NON-BLOCKING.
+#
+# Runs the reproduction tests for KNOWN, UNFIXED consensus/fund bugs found in the
+# 2026-06-11 focus review (see `reviews/focus-2026-06-11*/`). Each test asserts the
+# CORRECT behavior and therefore FAILS on HEAD while the bug is present — that is the
+# intended signal. The job itself never fails the build (steps are continue-on-error
+# and the result is written to the job summary).
+#
+# DO NOT add this job to any required-status check (unit-success / integration-success)
+# or branch-protection rule while the bugs are unfixed — it is expected to be red.
+#
+# Lifecycle: when a fixer fixes a bug, its test flips to green. Move that test into the
+# normal blocking suite (for the trie test: remove its `#[ignore]`; for tx_filter lib
+# tests: they already run only here because `unit.yml` excludes `reth-pipe-exec-layer-*`)
+# so it becomes a permanent regression gate.
+
+name: bug-repro-gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/pipe-exec-layer-ext-v2/execute/src/tx_filter.rs"
+      - "crates/pipe-exec-layer-ext-v2/execute/tests/**"
+      - "crates/trie/db/src/nested_hash.rs"
+      - "crates/ethereum/evm/src/parallel_execute.rs"
+      - "crates/evm/evm/src/parallel_execute.rs"
+      - ".github/workflows/bug-repro-gate.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  repro-gate:
+    name: bug repro gate (informational — expected RED until fixes land)
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      RUST_MIN_STACK: 16777216
+    timeout-minutes: 45
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@v5
+      - uses: rui314/setup-mold@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+
+      # A1 differential oracle (filter_invalid_txs vs revm pre-execution) + the tx_filter
+      # repro/control unit tests. The `*_passes` controls PASS (filter correctly accepts
+      # valid txs); the `oracle_filter_vs_revm_*` and `repro_*` bug tests FAIL on HEAD.
+      # `--lib` restricts compilation to the lib target so the non-compiling integration
+      # binaries in this crate (e.g. gravity_hardfork_test.rs) are not built.
+      - name: A1 filter<->revm oracle + tx_filter repros (fast, deterministic)
+        id: txfilter
+        continue-on-error: true
+        run: |
+          cargo nextest run --locked \
+            -p reth-pipe-exec-layer-ext-v2 --lib \
+            -E 'test(/tx_filter::tests::(oracle_filter_vs_revm|repro_)/)'
+
+      # Nested-trie wipe+recreate differential vs reth_trie::test_utils::state_root.
+      # This test is #[ignore]d (so the default `unit` CI stays green); run it explicitly.
+      - name: nested-trie wipe+recreate differential repro
+        id: trie
+        continue-on-error: true
+        run: |
+          cargo nextest run --locked \
+            -p reth-trie-db --lib --run-ignored all \
+            -E 'test(/nested_hash::tests::repro_nested_hash_wiped_recreate_storage_root/)'
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Bug-repro gate (informational)"
+            echo ""
+            echo "These tests reproduce KNOWN, UNFIXED bugs from the 2026-06-11 focus review."
+            echo "A **failure** below means the bug STILL reproduces (expected until fixed)."
+            echo "A **success** means the bug appears FIXED — promote that test into the blocking suite."
+            echo ""
+            echo "| group | outcome |"
+            echo "|---|---|"
+            echo "| tx_filter A1 oracle + repros (filter<->revm chain-halt class) | ${{ steps.txfilter.outcome }} |"
+            echo "| nested-trie wipe+recreate storage-drop | ${{ steps.trie.outcome }} |"
+            echo ""
+            echo "### Heavier integration oracles (run locally — not wired into CI)"
+            echo '```bash'
+            echo "# grevm vs disable_grevm state-root divergence (re-execs the node per backend):"
+            echo "cargo test -p reth-pipe-exec-layer-ext-v2 --test oracle_grevm_vs_disable_grevm_test -- --nocapture"
+            echo "# JWK RSA-path unconditional panic:"
+            echo "cargo test -p reth-pipe-exec-layer-ext-v2 --test repro_jwk_rsa_path_unconditional_panic_test -- --nocapture"
+            echo "# round-1 integration repros:"
+            echo "cargo test -p reth-pipe-exec-layer-ext-v2 --test repro_wrapexecutor_custom_precompiles_noop_grevm_divergence_test -- --nocapture"
+            echo "cargo test -p reth-pipe-exec-layer-ext-v2 --test repro_filter_missing_empty_authlist_7702_halt_test -- --nocapture"
+            echo "cargo test -p reth-evm-ethereum --test repro_hardfork_upgrades_only_in_grevm_path_test -- --ignored --nocapture"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

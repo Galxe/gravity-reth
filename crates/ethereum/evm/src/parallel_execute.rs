@@ -684,4 +684,659 @@ mod tests {
             "code_hash must still match HISTORY_STORAGE bytecode after second commit"
         );
     }
+
+    // --- D-1: coinbase-touch bundle divergence (grevm lazy_reward vs serial revm) ---
+    //
+    // Serial revm credits the beneficiary INSIDE every tx via
+    // `reward_beneficiary` -> `journal.balance_incr(coinbase, reward)`, which
+    // *unconditionally* marks the coinbase as touched even when `reward == 0`
+    // (revm journal/inner.rs balance_incr touches regardless of amount).
+    //
+    // Grevm runs with `lazy_reward = true` (scheduler.rs sets cfg.lazy_reward),
+    // so `reward_beneficiary` is skipped (revm post_execution.rs:70). The fee is
+    // deferred and applied via `StateAsyncCommit::commit` ->
+    // `ParallelState::increment_balances(vec![(coinbase, lazy_reward)])`
+    // (async_commit.rs:189), and `increment_balances` SKIPS zero balances
+    // (parallel_state.rs:554). So a zero-priority-fee tx produces NO coinbase
+    // transition in grevm.
+    //
+    // Consequence: the two backends emit DIFFERENT BundleState account sets for
+    // the same committed state. `HashedPostState::from_bundle_state`
+    // (crates/trie/common/src/hashed_state.rs:48) is hashed from whatever set
+    // each backend emits, and the bundle is also persisted as plain-state +
+    // reverts/changesets. This test PROVES the divergence by running both
+    // backends on the same block and diffing the bundles.
+    use reth_primitives_traits::SignerRecoverable;
+
+    fn sign_legacy_tx(
+        secret: B256,
+        chain_id: u64,
+        nonce: u64,
+        gas_price: u128,
+        to: Address,
+        value: U256,
+    ) -> reth_ethereum_primitives::TransactionSigned {
+        sign_legacy_tx_gas(secret, chain_id, nonce, gas_price, to, value, 21_000)
+    }
+
+    fn sign_legacy_tx_gas(
+        secret: B256,
+        chain_id: u64,
+        nonce: u64,
+        gas_price: u128,
+        to: Address,
+        value: U256,
+        gas_limit: u64,
+    ) -> reth_ethereum_primitives::TransactionSigned {
+        use alloy_consensus::transaction::SignableTransaction;
+        use alloy_consensus::TxLegacy;
+        use alloy_primitives::TxKind;
+        let tx = TxLegacy {
+            chain_id: Some(chain_id),
+            nonce,
+            gas_price,
+            gas_limit,
+            to: TxKind::Call(to),
+            value,
+            input: Default::default(),
+        };
+        let tx = reth_ethereum_primitives::Transaction::Legacy(tx);
+        let sig = reth_primitives_traits::crypto::secp256k1::sign_message(
+            secret,
+            tx.signature_hash(),
+        )
+        .unwrap();
+        tx.into_signed(sig).into()
+    }
+
+    #[test]
+    fn d1_grevm_vs_serial_coinbase_bundle_divergence_zero_priority_fee() {
+        use alloy_consensus::constants::ETH_TO_WEI;
+        use reth_chainspec::ChainSpecBuilder;
+        use secp256k1::SecretKey;
+
+        // Paris (post-Merge) active => no PoW block reward in EITHER backend
+        // (calc::base_block_reward returns None after Paris), so the ONLY
+        // remaining coinbase delta is the per-tx priority fee. With a legacy tx
+        // priced exactly at base_fee, coinbase_gas_price = gas_price - basefee
+        // = 0 => reward == 0. This isolates the coinbase-touch asymmetry from the
+        // (intentional) Gravity block-reward disabling.
+        //
+        // RESULT (differential, both backends): at zero reward neither backend
+        // emits a coinbase bundle entry; at nonzero reward both emit identical
+        // entries (whether coinbase pre-exists or is freshly created). The
+        // hypothesised coinbase-touch divergence does NOT reproduce.
+        let chain_spec: Arc<ChainSpec> =
+            Arc::new(ChainSpecBuilder::from(&*MAINNET).paris_activated().build());
+        let chain_id = chain_spec.chain.id();
+
+        let secret = SecretKey::from_slice(&[0x11u8; 32]).unwrap();
+        let secret_b256 = B256::from_slice(&secret.secret_bytes());
+        let coinbase = Address::from([0xC0; 20]);
+        let recipient = Address::from([0xDD; 20]);
+
+        let base_fee: u64 = 1_000_000_000; // 1 gwei
+        let priority_test_gas_price = std::env::var("D1_GAS_PRICE_GWEI")
+            .ok()
+            .and_then(|s| s.parse::<u128>().ok())
+            .map(|g| g * 1_000_000_000)
+            .unwrap_or(base_fee as u128); // default: gas_price == base_fee => zero priority fee
+        let tx = sign_legacy_tx(
+            secret_b256,
+            chain_id,
+            0,
+            priority_test_gas_price,
+            recipient,
+            U256::from(1u64),
+        );
+        let sender = tx.recover_signer().expect("recover sender");
+
+        let header = Header {
+            number: 1,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(base_fee),
+            beneficiary: coinbase,
+            timestamp: 1,
+            ..Header::default()
+        };
+        let body = reth_ethereum_primitives::BlockBody {
+            transactions: vec![tx],
+            ommers: vec![],
+            withdrawals: None,
+        };
+        let block = Block { header, body };
+        let recovered = RecoveredBlock::new_unhashed(block, vec![sender]);
+
+        // Prestate: fund the sender. The coinbase prestate is selectable:
+        //  - default: pre-existing NON-empty account (nonce=7, balance=123)
+        //  - D1_COINBASE_EMPTY=1: coinbase absent from DB (LoadedNotExisting),
+        //    so a nonzero reward CREATES it.
+        let coinbase_empty = std::env::var("D1_COINBASE_EMPTY").is_ok();
+        let prestate = |db: &mut CacheDB<EmptyDB>| {
+            db.insert_account_info(
+                sender,
+                AccountInfo {
+                    balance: U256::from(10u128 * ETH_TO_WEI),
+                    nonce: 0,
+                    code_hash: revm::primitives::KECCAK_EMPTY,
+                    code: None,
+                },
+            );
+            if !coinbase_empty {
+                db.insert_account_info(
+                    coinbase,
+                    AccountInfo {
+                        balance: U256::from(123u64),
+                        nonce: 7,
+                        code_hash: revm::primitives::KECCAK_EMPTY,
+                        code: None,
+                    },
+                );
+            }
+        };
+
+        // --- serial revm path (disable_grevm equivalent) ---
+        let serial_bundle = {
+            let mut db = CacheDB::new(EmptyDB::default());
+            prestate(&mut db);
+            let evm_config = EthEvmConfig::new(chain_spec.clone());
+            let mut executor = WrapExecutor::new(BasicBlockExecutor::new(evm_config, db));
+            ParallelExecutor::execute(&mut executor, &recovered).expect("serial execute").state
+        };
+
+        // --- grevm path ---
+        let grevm_bundle = {
+            let mut db = CacheDB::new(EmptyDB::default());
+            prestate(&mut db);
+            let evm_config = EthEvmConfig::new(chain_spec.clone());
+            let mut executor = GrevmExecutor::new(chain_spec.clone(), &evm_config, db);
+            // GrevmExecutor::execute takes the bundle internally
+            <GrevmExecutor<_, _, _> as ParallelExecutor>::execute(&mut executor, &recovered)
+                .expect("grevm execute")
+                .state
+        };
+
+        let serial_coinbase = serial_bundle.state.get(&coinbase);
+        let grevm_coinbase = grevm_bundle.state.get(&coinbase);
+
+        eprintln!("serial coinbase bundle entry: {serial_coinbase:?}");
+        eprintln!("grevm  coinbase bundle entry: {grevm_coinbase:?}");
+        eprintln!("serial state addrs: {:?}", serial_bundle.state.keys().collect::<Vec<_>>());
+        eprintln!("grevm  state addrs: {:?}", grevm_bundle.state.keys().collect::<Vec<_>>());
+        let sbal = |b: &BundleState, a: &Address| {
+            b.state.get(a).and_then(|x| x.info.as_ref()).map(|i| i.balance)
+        };
+        eprintln!("sender  serial={:?} grevm={:?}", sbal(&serial_bundle, &sender), sbal(&grevm_bundle, &sender));
+        eprintln!("recip   serial={:?} grevm={:?}", sbal(&serial_bundle, &recipient), sbal(&grevm_bundle, &recipient));
+        eprintln!("coinbase serial={:?} grevm={:?} (grevm None => stays at DB value 123)", sbal(&serial_bundle, &coinbase), sbal(&grevm_bundle, &coinbase));
+
+        // The whole point: prove whether the bundle account SETS match.
+        // If they diverge, the two backends persist different plain-state /
+        // reverts, and feed different inputs to HashedPostState::from_bundle_state.
+        let serial_addrs: std::collections::BTreeSet<_> = serial_bundle.state.keys().collect();
+        let grevm_addrs: std::collections::BTreeSet<_> = grevm_bundle.state.keys().collect();
+        assert_eq!(
+            serial_addrs, grevm_addrs,
+            "BUNDLE ACCOUNT SET DIVERGENCE between serial revm and grevm \
+             (coinbase touch-by-zero-reward asymmetry)"
+        );
+    }
+
+    /// Run a single-tx block on both backends and return (serial_bundle, grevm_bundle).
+    fn run_both_backends(
+        chain_spec: Arc<ChainSpec>,
+        recovered: &RecoveredBlock<Block>,
+        prestate: impl Fn(&mut CacheDB<EmptyDB>),
+    ) -> (BundleState, BundleState) {
+        let serial = {
+            let mut db = CacheDB::new(EmptyDB::default());
+            prestate(&mut db);
+            let evm_config = EthEvmConfig::new(chain_spec.clone());
+            let mut ex = WrapExecutor::new(BasicBlockExecutor::new(evm_config, db));
+            ParallelExecutor::execute(&mut ex, recovered).expect("serial").state
+        };
+        let grevm = {
+            let mut db = CacheDB::new(EmptyDB::default());
+            prestate(&mut db);
+            let evm_config = EthEvmConfig::new(chain_spec.clone());
+            let mut ex = GrevmExecutor::new(chain_spec.clone(), &evm_config, db);
+            <GrevmExecutor<_, _, _> as ParallelExecutor>::execute(&mut ex, recovered)
+                .expect("grevm")
+                .state
+        };
+        (serial, grevm)
+    }
+
+    /// D-2: EIP-161 "touch empty existing account" class. A value=0 transfer to an
+    /// account that pre-exists in the DB as EMPTY (balance=0,nonce=0,no code) must
+    /// DELETE it from the trie (state clear). `from_bundle_state` keys a
+    /// destroyed/None-info account as a trie deletion (hashed_state.rs:147). This
+    /// pins that grevm's `touch_empty_eip161` transition (parallel_state.rs:128)
+    /// matches serial revm's `CacheAccount` exactly: both must emit
+    /// `info = None` for the touched-empty recipient.
+    #[test]
+    fn d2_grevm_vs_serial_eip161_touch_empty_existing_account() {
+        use alloy_consensus::constants::ETH_TO_WEI;
+        use reth_chainspec::ChainSpecBuilder;
+        use secp256k1::SecretKey;
+
+        let chain_spec: Arc<ChainSpec> =
+            Arc::new(ChainSpecBuilder::from(&*MAINNET).paris_activated().build());
+        let chain_id = chain_spec.chain.id();
+
+        let secret = SecretKey::from_slice(&[0x22u8; 32]).unwrap();
+        let secret_b256 = B256::from_slice(&secret.secret_bytes());
+        let empty_recipient = Address::from([0xEE; 20]);
+        let coinbase = Address::from([0xC0; 20]);
+
+        let base_fee: u64 = 1_000_000_000;
+        // value=0 transfer to an existing-but-empty account => pure EIP-161 touch.
+        let tx = sign_legacy_tx(secret_b256, chain_id, 0, base_fee as u128, empty_recipient, U256::ZERO);
+        let sender = tx.recover_signer().expect("recover");
+
+        let header = Header {
+            number: 1,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(base_fee),
+            beneficiary: coinbase,
+            timestamp: 1,
+            ..Header::default()
+        };
+        let body =
+            reth_ethereum_primitives::BlockBody { transactions: vec![tx], ommers: vec![], withdrawals: None };
+        let recovered = RecoveredBlock::new_unhashed(Block { header, body }, vec![sender]);
+
+        let prestate = |db: &mut CacheDB<EmptyDB>| {
+            db.insert_account_info(
+                sender,
+                AccountInfo {
+                    balance: U256::from(10u128 * ETH_TO_WEI),
+                    nonce: 0,
+                    code_hash: revm::primitives::KECCAK_EMPTY,
+                    code: None,
+                },
+            );
+            // Pre-existing EMPTY account (all-default). revm classifies this as
+            // LoadedEmptyEIP161 on load.
+            db.insert_account_info(empty_recipient, AccountInfo::default());
+        };
+
+        let (serial, grevm) = run_both_backends(chain_spec, &recovered, prestate);
+
+        let s = serial.state.get(&empty_recipient);
+        let g = grevm.state.get(&empty_recipient);
+        eprintln!("d2 serial empty_recipient: {s:?}");
+        eprintln!("d2 grevm  empty_recipient: {g:?}");
+
+        // info must be None (destroyed) in BOTH, or absent in BOTH.
+        let s_info_none = s.map(|a| a.info.is_none());
+        let g_info_none = g.map(|a| a.info.is_none());
+        assert_eq!(
+            s_info_none, g_info_none,
+            "EIP-161 touched-empty recipient diverges between backends: serial={s_info_none:?} grevm={g_info_none:?}"
+        );
+
+        let serial_addrs: std::collections::BTreeSet<_> = serial.state.keys().collect();
+        let grevm_addrs: std::collections::BTreeSet<_> = grevm.state.keys().collect();
+        assert_eq!(serial_addrs, grevm_addrs, "d2 bundle account set divergence");
+    }
+
+    /// D-3: self-destruct class. A pre-deployed contract whose only action is
+    /// SELFDESTRUCT(beneficiary). Calling it triggers grevm's
+    /// `AbortReason::SelfDestructed` -> `fallback_sequential` (scheduler.rs:564).
+    /// Compares the resulting bundle for the self-destructed contract, the
+    /// beneficiary, sender and coinbase against serial revm.
+    #[test]
+    fn d3_grevm_vs_serial_selfdestruct() {
+        use alloy_consensus::constants::ETH_TO_WEI;
+        use reth_chainspec::ChainSpecBuilder;
+        use revm::bytecode::Bytecode;
+        use secp256k1::SecretKey;
+
+        // Use a pre-Cancun spec (paris) so SELFDESTRUCT actually destroys the
+        // account (EIP-6780 restricts it to same-tx-created contracts in Cancun+).
+        let chain_spec: Arc<ChainSpec> =
+            Arc::new(ChainSpecBuilder::from(&*MAINNET).paris_activated().build());
+        let chain_id = chain_spec.chain.id();
+
+        let secret = SecretKey::from_slice(&[0x33u8; 32]).unwrap();
+        let secret_b256 = B256::from_slice(&secret.secret_bytes());
+        let sd_contract = Address::from([0x5D; 20]);
+        let sd_beneficiary = Address::from([0xBE; 20]);
+        let coinbase = Address::from([0xC0; 20]);
+
+        // PUSH20 <beneficiary> SELFDESTRUCT
+        let mut code = vec![0x73u8];
+        code.extend_from_slice(sd_beneficiary.as_slice());
+        code.push(0xFF);
+        let code = revm::primitives::Bytes::from(code);
+        let bytecode = Bytecode::new_raw(code.clone());
+        let code_hash = keccak256(&code);
+
+        let base_fee: u64 = 1_000_000_000;
+        // gas limit must cover CALL into a contract that SELFDESTRUCTs.
+        let tx = sign_legacy_tx_gas(
+            secret_b256,
+            chain_id,
+            0,
+            base_fee as u128,
+            sd_contract,
+            U256::ZERO,
+            100_000,
+        );
+        let sender = SignerRecoverable::recover_signer(&tx).expect("recover");
+
+        let header = Header {
+            number: 1,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(base_fee),
+            beneficiary: coinbase,
+            timestamp: 1,
+            ..Header::default()
+        };
+        let body =
+            reth_ethereum_primitives::BlockBody { transactions: vec![tx], ommers: vec![], withdrawals: None };
+        let recovered = RecoveredBlock::new_unhashed(Block { header, body }, vec![sender]);
+
+        let prestate = |db: &mut CacheDB<EmptyDB>| {
+            db.insert_account_info(
+                sender,
+                AccountInfo {
+                    balance: U256::from(10u128 * ETH_TO_WEI),
+                    nonce: 0,
+                    code_hash: revm::primitives::KECCAK_EMPTY,
+                    code: None,
+                },
+            );
+            db.insert_account_info(
+                sd_contract,
+                AccountInfo {
+                    balance: U256::from(7_000_000_000_000_000_000u128), // 7 ETH
+                    nonce: 1,
+                    code_hash,
+                    code: Some(bytecode.clone()),
+                },
+            );
+        };
+
+        let (serial, grevm) = run_both_backends(chain_spec, &recovered, prestate);
+
+        for (label, addr) in
+            [("sd_contract", sd_contract), ("sd_beneficiary", sd_beneficiary), ("sender", sender), ("coinbase", coinbase)]
+        {
+            let s = serial.state.get(&addr);
+            let g = grevm.state.get(&addr);
+            eprintln!("d3 {label} serial={:?}", s.map(|a| (a.info.as_ref().map(|i| i.balance), &a.status)));
+            eprintln!("d3 {label} grevm ={:?}", g.map(|a| (a.info.as_ref().map(|i| i.balance), &a.status)));
+            let s_bal = s.and_then(|a| a.info.as_ref()).map(|i| i.balance);
+            let g_bal = g.and_then(|a| a.info.as_ref()).map(|i| i.balance);
+            let s_none = s.map(|a| a.info.is_none());
+            let g_none = g.map(|a| a.info.is_none());
+            assert_eq!(s_bal, g_bal, "d3 {label} balance divergence");
+            assert_eq!(s_none, g_none, "d3 {label} info-None (destroyed) divergence");
+        }
+
+        let serial_addrs: std::collections::BTreeSet<_> = serial.state.keys().collect();
+        let grevm_addrs: std::collections::BTreeSet<_> = grevm.state.keys().collect();
+        assert_eq!(serial_addrs, grevm_addrs, "d3 bundle account set divergence (self-destruct)");
+    }
+
+    // --- D-4: system metadata transaction + plain (zero-user-tx) block --------
+    //
+    // FAITHFUL IN-PROCESS REPRO of the A2 oracle's "plain block" (height 7, no
+    // user txs). The A2 two-process oracle reported that a plain block yields
+    // DIFFERENT persisted state_roots across grevm vs disable_grevm. The d1/d2/d3
+    // tests only exercised ordinary USER txs (which all match). The A2 plain block
+    // contains NO user txs — only the SYSTEM metadata transaction (onBlockStart,
+    // sent by SYSTEM_CALLER to BLOCK_ADDR) followed by a zero-tx block body. That
+    // system-tx path is precisely what d1/d2/d3 never covered.
+    //
+    // This test drives, IN ONE PROCESS, the SAME sequence the pipe-exec
+    // `execute_ordered_block` runs for a plain block (lib.rs):
+    //   1. executor.transact_system_txn(evm_env, [], metadata_tx_env)   // onBlockStart
+    //   2. executor.execute(&zero_tx_block)                              // empty body
+    //   3. take_bundle() (called inside execute)                        // combined bundle
+    // through BOTH GrevmExecutor (default) and WrapExecutor<BasicBlockExecutor>
+    // (= --gravity.disable-grevm), against an IDENTICAL prestate, and diffs the
+    // resulting BundleState.state account maps.
+    //
+    // The metadata system tx is modeled as SYSTEM_CALLER calling a contract at
+    // BLOCK_ADDR whose runtime does SSTORE(slot0, CALLER) — i.e. it touches its
+    // own storage AND credits/charges SYSTEM_CALLER (nonce + gas), exactly the
+    // shape of account/storage transitions onBlockStart produces. EIP-2935 is a
+    // no-op pre-Prague (paris spec, height 7), matching the A2 plain-block height.
+    //
+    // VERDICT MECHANISM: `HashedPostState::from_bundle_state` (used by lib.rs to
+    // feed the state-root computation) is a PURE function of `bundle.state`.
+    // Therefore byte-identical bundle.state across the two backends ⟹ identical
+    // hashed state ⟹ identical state_root contribution from this block. Conversely,
+    // an account set that differs across backends ⟹ different state_root.
+    //
+    // VERDICT: **REAL bug.** This test FAILS (asserts an equivalence that does NOT
+    // hold) — it is a repro. At the production metadata-tx shape (gas_price ==
+    // base_fee, i.e. ZERO priority fee), the serial (disable_grevm) path's revm
+    // `reward_beneficiary` UNCONDITIONALLY touches the coinbase, and because
+    // `BasicBlockExecutor`'s `State` is built `without_state_clear()`, that
+    // touched-empty coinbase is NOT pruned and lands in the bundle. The grevm path
+    // emits no coinbase transition. → different bundle account sets → different
+    // state_root. The two-process A2 oracle confirms the SAME divergence on the
+    // PERSISTED root (grevm 0xb063… vs disable_grevm 0xc717… at height 7), and the
+    // coinbase (Address::ZERO) diverges by ~2 ETH per block in production. Full
+    // analysis: reviews/focus-2026-06-11-round3/A2-1-VERDICT.md. Setting
+    // D4_PRIORITY_FEE_GWEI=2 makes this PASS (nonzero reward is credited by both),
+    // confirming the trigger is the zero-coinbase-reward system-tx path.
+    const SYSTEM_CALLER_ADDR: Address =
+        alloy_primitives::address!("00000000000000000000000000000001625f0000");
+    const BLOCK_ADDR_SYS: Address =
+        alloy_primitives::address!("00000000000000000000000000000001625f2004");
+
+    // CONFIRMED REPRO for A2-1 (system-tx path coinbase divergence). FAILS on HEAD by design:
+    // on the `transact_system_txn` path the serial WrapExecutor<BasicBlockExecutor> (built
+    // `without_state_clear()`) retains/credits the touched coinbase while grevm (state-clear +
+    // lazy_reward) prunes/burns it -> divergent bundle -> divergent state_root every block.
+    // d1/d2/d3 (USER-tx path) pass because that path clears state; only the system-tx path d4
+    // exercises diverges. #[ignore] keeps `unit.yml` green (reth-evm-ethereum lib is not excluded
+    // there); run via the bug-repro-gate / `--ignored`. Un-ignore once both backends agree on the
+    // system-tx coinbase touch/credit + state-clear semantics.
+    #[test]
+    #[ignore = "repro of A2-1 (system-tx coinbase divergence between grevm and disable_grevm); \
+                FAILS until both backends agree on coinbase touch/credit semantics. Un-ignore when fixed."]
+    fn d4_grevm_vs_serial_system_tx_plain_block() {
+        use reth_chainspec::ChainSpecBuilder;
+
+        let chain_spec: Arc<ChainSpec> =
+            Arc::new(ChainSpecBuilder::from(&*MAINNET).paris_activated().build());
+
+        // Runtime code for BLOCK_ADDR: CALLER PUSH1 0x00 SSTORE STOP
+        //   33 (CALLER) 60 00 (PUSH1 0) 55 (SSTORE) 00 (STOP)
+        let block_runtime = revm::primitives::Bytes::from(vec![0x33u8, 0x60, 0x00, 0x55, 0x00]);
+        let block_code = Bytecode::new_raw(block_runtime.clone());
+        let block_code_hash = keccak256(&block_runtime);
+
+        let base_fee: u64 = 1_000_000_000;
+        let coinbase = Address::from([0xC0; 20]);
+
+        // Identical prestate for both backends: SYSTEM_CALLER funded (nonce 0),
+        // BLOCK_ADDR carries the SSTORE runtime. This mirrors a genesis where the
+        // system contracts are deployed and SYSTEM_CALLER exists.
+        let prestate = |db: &mut CacheDB<EmptyDB>| {
+            db.insert_account_info(
+                SYSTEM_CALLER_ADDR,
+                AccountInfo {
+                    balance: U256::from(1_000_000_000_000_000_000u128), // 1 ETH
+                    nonce: 0,
+                    code_hash: revm::primitives::KECCAK_EMPTY,
+                    code: None,
+                },
+            );
+            db.insert_account_info(
+                BLOCK_ADDR_SYS,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 1,
+                    code_hash: block_code_hash,
+                    code: Some(block_code.clone()),
+                },
+            );
+        };
+
+        // Plain block: height 7, zero user txs, paris (pre-Prague => EIP-2935 no-op).
+        let header = Header {
+            number: 7,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(base_fee),
+            beneficiary: coinbase,
+            timestamp: 7,
+            ..Header::default()
+        };
+        let block = Block { header: header.clone(), body: Default::default() };
+        let recovered = RecoveredBlock::new_unhashed(block, vec![]);
+
+        // The system metadata tx: SYSTEM_CALLER -> BLOCK_ADDR (onBlockStart shape).
+        // Built as a TxEnv directly (the pipe path uses
+        // `Recovered::new_unchecked(metadata_txn, SYSTEM_CALLER).into_tx_env()`;
+        // here we construct the equivalent TxEnv by hand so the test needs no
+        // pipe-exec dependency).
+        // FAITHFUL PRODUCTION SHAPE: the real metadata (onBlockStart) system tx is
+        // built with `gas_price = base_fee` (lib.rs:706 / construct_metadata_txn),
+        // i.e. ZERO priority fee. On the serial (disable_grevm) path, revm's
+        // `reward_beneficiary` still UNCONDITIONALLY touches the coinbase (balance
+        // increment of 0 marks it touched), and because `BasicBlockExecutor::new`
+        // builds its `State` with `without_state_clear()`, that touched-empty
+        // coinbase is NOT pruned at system-tx commit time — it lands in the bundle
+        // as an empty account. The grevm path runs the scheduler with
+        // `lazy_reward`, deferring the fee to `increment_balances`, which SKIPS zero
+        // increments (parallel_state.rs), so grevm emits NO coinbase transition.
+        // Result: the two backends emit DIFFERENT bundle account sets for the SAME
+        // plain block → different HashedPostState → different state_root.
+        let priority_fee: u128 = std::env::var("D4_PRIORITY_FEE_GWEI")
+            .ok()
+            .and_then(|s| s.parse::<u128>().ok())
+            .map(|g| g * 1_000_000_000)
+            .unwrap_or(0); // default: zero priority fee == production metadata tx
+        let build_sys_tx_env = || TxEnv {
+            caller: SYSTEM_CALLER_ADDR,
+            gas_limit: 200_000,
+            gas_price: base_fee as u128 + priority_fee,
+            kind: revm::primitives::TxKind::Call(BLOCK_ADDR_SYS),
+            value: U256::ZERO,
+            data: revm::primitives::Bytes::new(),
+            nonce: 0,
+            chain_id: Some(chain_spec.chain.id()),
+            gas_priority_fee: Some(priority_fee),
+            ..Default::default()
+        };
+
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let evm_env = evm_config.evm_env(&header).expect("evm_env");
+
+        // --- serial revm path (disable_grevm equivalent) ---
+        let (serial_bundle, serial_sys_ok) = {
+            let mut db = CacheDB::new(EmptyDB::default());
+            prestate(&mut db);
+            let evm_config = EthEvmConfig::new(chain_spec.clone());
+            let mut ex = WrapExecutor::new(BasicBlockExecutor::new(evm_config, db));
+            let r = ParallelExecutor::transact_system_txn(
+                &mut ex,
+                evm_env.clone(),
+                Vec::new(),
+                build_sys_tx_env(),
+            )
+            .expect("serial system tx");
+            let out = ParallelExecutor::execute(&mut ex, &recovered).expect("serial execute");
+            (out.state, r.is_success())
+        };
+
+        // --- grevm path (default) ---
+        let (grevm_bundle, grevm_sys_ok) = {
+            let mut db = CacheDB::new(EmptyDB::default());
+            prestate(&mut db);
+            let evm_config = EthEvmConfig::new(chain_spec.clone());
+            let mut ex = GrevmExecutor::new(chain_spec.clone(), &evm_config, db);
+            let r = <GrevmExecutor<_, _, _> as ParallelExecutor>::transact_system_txn(
+                &mut ex,
+                evm_env.clone(),
+                Vec::new(),
+                build_sys_tx_env(),
+            )
+            .expect("grevm system tx");
+            let out = <GrevmExecutor<_, _, _> as ParallelExecutor>::execute(&mut ex, &recovered)
+                .expect("grevm execute");
+            (out.state, r.is_success())
+        };
+
+        eprintln!("d4 serial system tx success = {serial_sys_ok}");
+        eprintln!("d4 grevm  system tx success = {grevm_sys_ok}");
+        assert!(serial_sys_ok, "serial system tx must succeed (SSTORE onBlockStart shape)");
+        assert!(grevm_sys_ok, "grevm system tx must succeed (SSTORE onBlockStart shape)");
+
+        // Sorted account-by-account diff of the two bundle.state maps.
+        let serial_addrs: std::collections::BTreeSet<_> = serial_bundle.state.keys().collect();
+        let grevm_addrs: std::collections::BTreeSet<_> = grevm_bundle.state.keys().collect();
+
+        eprintln!("d4 serial state addrs: {serial_addrs:?}");
+        eprintln!("d4 grevm  state addrs: {grevm_addrs:?}");
+
+        // Dump the first diverging account (if any) for the verdict.
+        let all: std::collections::BTreeSet<_> =
+            serial_addrs.union(&grevm_addrs).copied().collect();
+        let mut first_diff: Option<Address> = None;
+        for addr in &all {
+            let s = serial_bundle.state.get(*addr);
+            let g = grevm_bundle.state.get(*addr);
+            let s_info = s.and_then(|a| a.info.as_ref()).map(|i| (i.nonce, i.balance, i.code_hash));
+            let g_info = g.and_then(|a| a.info.as_ref()).map(|i| (i.nonce, i.balance, i.code_hash));
+            let s_storage: std::collections::BTreeMap<_, _> = s
+                .map(|a| a.storage.iter().map(|(k, v)| (*k, v.present_value)).collect())
+                .unwrap_or_default();
+            let g_storage: std::collections::BTreeMap<_, _> = g
+                .map(|a| a.storage.iter().map(|(k, v)| (*k, v.present_value)).collect())
+                .unwrap_or_default();
+            let s_status = s.map(|a| a.status);
+            let g_status = g.map(|a| a.status);
+            if s_info != g_info || s_storage != g_storage || s_status != g_status {
+                eprintln!("d4 DIVERGENCE at {addr:?}:");
+                eprintln!("   serial info={s_info:?} status={s_status:?} storage={s_storage:?}");
+                eprintln!("   grevm  info={g_info:?} status={g_status:?} storage={g_storage:?}");
+                if first_diff.is_none() {
+                    first_diff = Some(**addr);
+                }
+            }
+        }
+
+        // Account SET must match.
+        assert_eq!(
+            serial_addrs, grevm_addrs,
+            "D4 BUNDLE ACCOUNT SET DIVERGENCE (system metadata tx + plain block): \
+             serial={serial_addrs:?} grevm={grevm_addrs:?}"
+        );
+
+        // Full account-by-account equality (info + storage + status). Bundle
+        // equality ⟹ HashedPostState::from_bundle_state equality ⟹ identical
+        // state_root contribution for this block.
+        assert!(
+            first_diff.is_none(),
+            "D4 BUNDLE DIVERGENCE between serial revm and grevm for the system \
+             metadata tx + plain block — first diverging account: {first_diff:?}. \
+             This would make A2-1 a REAL single-block consensus bug."
+        );
+
+        // Belt-and-suspenders: assert the entire bundle.state map is equal.
+        for addr in &all {
+            let s = serial_bundle.state.get(*addr);
+            let g = grevm_bundle.state.get(*addr);
+            assert_eq!(
+                s.and_then(|a| a.info.as_ref()).map(|i| (i.nonce, i.balance, i.code_hash)),
+                g.and_then(|a| a.info.as_ref()).map(|i| (i.nonce, i.balance, i.code_hash)),
+                "d4 account info diverges at {addr:?}"
+            );
+            let s_storage: std::collections::BTreeMap<_, _> = s
+                .map(|a| a.storage.iter().map(|(k, v)| (*k, v.present_value)).collect())
+                .unwrap_or_default();
+            let g_storage: std::collections::BTreeMap<_, _> = g
+                .map(|a| a.storage.iter().map(|(k, v)| (*k, v.present_value)).collect())
+                .unwrap_or_default();
+            assert_eq!(s_storage, g_storage, "d4 account storage diverges at {addr:?}");
+        }
+    }
 }
