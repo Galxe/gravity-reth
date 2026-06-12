@@ -1,7 +1,6 @@
 //! Loads a receipt from database. Helper trait for `eth_` block and transaction RPC methods, that
 //! loads receipt data w.r.t. network.
 
-use reth_primitives_traits::SignerRecoverable;
 use std::sync::Arc;
 
 use crate::{EthApiTypes, RpcNodeCoreExt, RpcReceipt};
@@ -46,16 +45,10 @@ pub trait LoadReceipt:
             let (gas_used, next_log_index) =
                 calculate_gas_used_and_next_log_index(meta.index, &all_receipts);
 
-            // Gravity fallback (GRETH-001): system transactions may have empty/invalid
-            // signatures — use SYSTEM_CALLER instead of erroring out.
-            const SYSTEM_CALLER: alloy_primitives::Address =
-                alloy_primitives::address!("00000000000000000000000000000001625f0000");
-            let signer = tx
-                .recover_signer_unchecked()
-                .unwrap_or(SYSTEM_CALLER);
-            let recovered_tx =
-                reth_primitives_traits::Recovered::new_unchecked(tx, signer);
-
+            // GRETH-001 note: in pre-2.2 this fn received an unrecovered tx and applied
+            // the SYSTEM_CALLER fallback for system transactions with empty/invalid
+            // signatures. v2.2.0 performs recovery in the caller, so the fallback must
+            // live in that recovery path instead (re-verify for system-tx receipts).
             Ok(self
                 .converter()
                 .convert_receipts(vec![ConvertReceiptInput {

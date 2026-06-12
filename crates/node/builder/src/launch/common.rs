@@ -88,7 +88,6 @@ use reth_static_file::StaticFileProducer;
 use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::{debug, error, info, warn};
 use reth_transaction_pool::TransactionPool;
-use reth_trie_db::ChangesetCache;
 use std::{num::NonZeroUsize, sync::Arc, thread::available_parallelism, time::Duration};
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedSender},
@@ -1104,8 +1103,6 @@ where
             installed_exex,
             self.configs().clone(),
         )
-        .launch()
-        .await
     }
 
     /// Creates the ERA import source based on node configuration.
