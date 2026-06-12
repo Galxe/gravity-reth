@@ -65,6 +65,17 @@ pub fn create_bls_pop_verify_precompile() -> DynPrecompile {
 
 /// BLS PoP verification handler
 fn bls_pop_verify_handler(input: PrecompileInput<'_>) -> PrecompileResult {
+    // Charge-gas check before running the verification logic. This precompile
+    // charges a flat `POP_VERIFY_GAS`, and the EVM dispatcher executes
+    // `assert!(record_cost(gas_used))` after receiving `Ok(gas_used)`: if the
+    // caller forwards less gas than the flat charge, `record_cost` returns false
+    // and the assert panics, deterministically aborting block execution (a
+    // network-wide halt triggerable by any user transaction). Return OutOfGas
+    // early so the dispatcher takes the normal PrecompileOOG branch instead of
+    // panicking.
+    if POP_VERIFY_GAS > input.gas {
+        return Err(PrecompileError::OutOfGas);
+    }
     bls_pop_verify_handler_raw(input.data)
 }
 
