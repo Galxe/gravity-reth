@@ -93,7 +93,6 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 // Gravity sparse parallel trie - used via tree config
-use reth_trie_sparse_parallel as _;
 
 /// Support for backfill sync mode.
 pub mod backfill;

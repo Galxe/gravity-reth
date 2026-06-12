@@ -8472,7 +8472,6 @@ dependencies = [
  "reth-trie-db",
  "reth-trie-parallel",
  "reth-trie-sparse",
- "reth-trie-sparse-parallel",
  "revm",
  "revm-primitives",
  "revm-state",
@@ -10930,35 +10929,6 @@ dependencies = [
  "serde",
  "serde_json",
  "slotmap",
- "smallvec",
- "tracing",
-]
-
-[[package]]
-name = "reth-trie-sparse-parallel"
-version = "2.2.0"
-dependencies = [
- "alloy-primitives",
- "alloy-rlp",
- "alloy-trie",
- "arbitrary",
- "assert_matches",
- "itertools 0.14.0",
- "metrics",
- "pretty_assertions",
- "proptest",
- "proptest-arbitrary-interop",
- "rand 0.8.6",
- "rand 0.9.4",
- "rayon",
- "reth-execution-errors",
- "reth-metrics",
- "reth-primitives-traits",
- "reth-provider",
- "reth-trie",
- "reth-trie-common",
- "reth-trie-db",
- "reth-trie-sparse",
  "smallvec",
  "tracing",
 ]

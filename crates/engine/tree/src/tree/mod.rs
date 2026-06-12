@@ -15,16 +15,17 @@ use alloy_primitives::B256;
 use alloy_rpc_types_engine::{
     ForkchoiceState, PayloadStatus, PayloadStatusEnum, PayloadValidationError,
 };
-use error::{InsertBlockError, InsertBlockFatalError};
+use error::{InsertBlockError, InsertBlockFatalError, InsertBlockValidationError};
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{
-    CanonicalInMemoryState, ComputedTrieData, ExecutedBlock,
+    CanonicalInMemoryState, ComputedTrieData, ExecutedBlock, ExecutionTimingStats,
     MemoryOverlayStateProvider, NewCanonicalChain,
 };
 use reth_consensus::{Consensus, FullConsensus};
 use reth_engine_primitives::{
     BeaconEngineMessage, BeaconOnNewPayloadError, ConsensusEngineEvent, ExecutionPayload,
-    ForkchoiceStateTracker, ForkchoiceStatus, OnForkChoiceUpdated,
+    ForkchoiceStateTracker, ForkchoiceStatus, NewPayloadTimings, OnForkChoiceUpdated,
+    SlowBlockInfo,
 };
 use reth_errors::{ConsensusError, ProviderResult};
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
@@ -37,7 +38,6 @@ use reth_primitives_traits::{
 use reth_pipe_exec_layer_event_bus::{
     get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, WaitForPersistenceEvent,
 };
-use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader};
 use reth_provider::{
     BlockReader, ChangeSetReader, DatabaseProviderFactory, HashedPostStateProvider, ProviderError,
     StageCheckpointReader, StateProviderBox, StateProviderFactory, StateReader,
@@ -49,13 +49,13 @@ use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
 use reth_trie_db::ChangesetCache;
 use state::TreeState;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fmt::Debug,
     sync::{
         mpsc::{RecvError, RecvTimeoutError},
         Arc,
     },
-    time::Instant,
+    time::Duration,
 };
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -340,6 +340,15 @@ where
     use_hashed_state: bool,
     /// Persistence waiters that are waiting for the block to be persisted.
     persistence_waiters: PersistenceWaiters,
+    /// Timing statistics for executed blocks, keyed by block hash.
+    /// Stored here (not in `ExecutedBlock`) to avoid leaking observability concerns into the block
+    /// type. Entries are removed when blocks are persisted or invalidated.
+    execution_timing_stats: HashMap<B256, Box<ExecutionTimingStats>>,
+    /// Set when an FCU with payload attributes is received, cleared on the next FCU without.
+    /// Suppresses persistence cycles during payload building.
+    building_payload: bool,
+    /// Task runtime for spawning blocking work on named, reusable threads.
+    runtime: reth_tasks::Runtime,
 }
 
 impl<N, P: Debug, T: PayloadTypes + Debug, V: Debug, C> std::fmt::Debug
@@ -407,6 +416,7 @@ where
         evm_config: C,
         changeset_cache: ChangesetCache,
         runtime: reth_tasks::Runtime,
+        use_hashed_state: bool,
     ) -> Self {
         let (incoming_tx, incoming) = crossbeam_channel::unbounded();
 
@@ -430,6 +440,9 @@ where
             changeset_cache,
             use_hashed_state,
             persistence_waiters: Default::default(),
+            execution_timing_stats: HashMap::new(),
+            building_payload: false,
+            runtime,
         }
     }
 
@@ -450,6 +463,7 @@ where
         kind: EngineApiKind,
         evm_config: C,
         changeset_cache: ChangesetCache,
+        runtime: reth_tasks::Runtime,
         use_hashed_state: bool,
     ) -> (crossbeam_channel::Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>, UnboundedReceiver<EngineApiEvent<N>>)
     {
@@ -485,6 +499,7 @@ where
             evm_config,
             changeset_cache,
             runtime,
+            use_hashed_state,
         );
         let incoming = task.incoming_tx.clone();
         spawn_os_thread("engine", || {
@@ -492,6 +507,14 @@ where
             task.run()
         });
         (incoming, outgoing)
+    }
+
+    /// Returns a [`TreeOutcome`] indicating the forkchoice head is valid and canonical.
+    fn valid_outcome(state: ForkchoiceState) -> TreeOutcome<OnForkChoiceUpdated> {
+        TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::new(
+            PayloadStatusEnum::Valid,
+            Some(state.head_block_hash),
+        )))
     }
 
     fn try_recv_pipe_exec_event(
@@ -3036,7 +3059,8 @@ where
             &mut V,
             Input,
             TreeCtx<'_, N>,
-        ) -> Result<ExecutedBlock<N>, Err>,
+        )
+            -> Result<(ExecutedBlock<N>, Option<Box<ExecutionTimingStats>>), Err>,
         convert_to_block: impl FnOnce(&mut Self, Input) -> Result<SealedBlock<N::Block>, Err>,
     ) -> Result<InsertPayloadOk, Err>
     where
@@ -3528,3 +3552,23 @@ enum PersistTarget {
     Head,
 }
 
+
+/// Result of waiting for caches to become available.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CacheWaitDurations {
+    /// Time spent waiting for the execution cache lock.
+    pub execution_cache: Duration,
+    /// Time spent waiting for the sparse trie lock.
+    pub sparse_trie: Duration,
+}
+
+/// Trait for types that can wait for caches to become available.
+///
+/// This is used by `reth_newPayload` endpoint to ensure that payload processing
+/// waits for any ongoing operations to complete before starting.
+pub trait WaitForCaches {
+    /// Waits for cache updates to complete.
+    ///
+    /// Returns the time spent waiting for each cache separately.
+    fn wait_for_caches(&self) -> CacheWaitDurations;
+}

@@ -166,7 +166,6 @@ members = [
     "crates/trie/db",
     "crates/trie/parallel/",
     "crates/trie/sparse",
-    "crates/trie/sparse-parallel/",
     "crates/trie/trie",
     "examples/beacon-api-sidecar-fetcher/",
     "examples/beacon-api-sse/",
@@ -385,7 +384,6 @@ reth-bench-compare = { path = "bin/reth-bench-compare" }
 reth-engine-service = { path = "crates/engine/service" }
 reth-ress-protocol = { path = "crates/ress/protocol" }
 reth-ress-provider = { path = "crates/ress/provider" }
-reth-trie-sparse-parallel = { path = "crates/trie/sparse-parallel" }
 shellexpand = "3.0.0"
 # reth
 gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "b300f1fa7e98fe26c5a4d455c70459f5550830d2" }

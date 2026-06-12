@@ -20,6 +20,7 @@ use reth_network_p2p::BlockClient;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
+    StorageSettingsCache,
     providers::{BlockchainProvider, ProviderNodeTypes},
     ProviderFactory,
 };
@@ -82,6 +83,8 @@ where
 {
     let downloader = BasicBlockDownloader::new(client, consensus.clone());
 
+    let use_hashed_state = provider.cached_storage_settings().use_hashed_state();
+
     let persistence_handle =
         PersistenceHandle::<N::Primitives>::spawn_service(provider, pruner, sync_metrics_tx);
 
@@ -99,6 +102,7 @@ where
         evm_config,
         changeset_cache,
         runtime,
+        use_hashed_state,
     );
 
     let engine_handler = EngineApiRequestHandler::new(to_tree_tx, from_tree);
