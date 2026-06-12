@@ -368,10 +368,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         parent_header: &Header,
     ) -> Arc<Vec<(Address, DynPrecompile)>> {
         let block_number = ordered_block.number;
+        let block_timestamp = ordered_block.timestamp_us / 1_000_000;
         if !self
             .chain_spec
             .gravity_hardforks()
-            .is_fork_active_at_block(GravityHardfork::Alpha, block_number)
+            .is_fork_active_at_timestamp(GravityHardfork::Alpha, block_timestamp)
         {
             return self.pre_alpha_precompiles.clone()
         }

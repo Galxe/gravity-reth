@@ -106,15 +106,17 @@ where
         &self,
         evm: &mut EV,
         block_number: U256,
+        block_timestamp: U256,
         current_randomness: Option<B256>,
     ) where
         EV: Evm<Precompiles = PrecompilesMap>,
     {
         let Ok(block_number) = u64::try_from(block_number) else { return };
+        let Ok(block_timestamp) = u64::try_from(block_timestamp) else { return };
         let chain_spec = self.provider().chain_spec();
         if !chain_spec
             .gravity_hardforks()
-            .is_fork_active_at_block(GravityHardfork::Alpha, block_number)
+            .is_fork_active_at_timestamp(GravityHardfork::Alpha, block_timestamp)
         {
             return
         }

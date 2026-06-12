@@ -69,7 +69,7 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
     /// Callers use the generic [`Hardforks`] trait to query activation:
     /// ```ignore
     /// use reth_chainspec::GravityHardfork;
-    /// chain_spec.gravity_hardforks().is_fork_active_at_block(GravityHardfork::Alpha, n);
+    /// chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Alpha, ts);
     /// chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(n);
     /// ```
     fn gravity_hardforks(&self) -> &reth_ethereum_forks::ChainHardforks;

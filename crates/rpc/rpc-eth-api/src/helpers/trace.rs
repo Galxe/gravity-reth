@@ -42,9 +42,15 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         I: InspectorFor<Self::Evm, DB>,
     {
         let block_number = evm_env.block_env.number;
+        let block_timestamp = evm_env.block_env.timestamp;
         let current_randomness = evm_env.block_env.prevrandao;
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
-        self.register_custom_precompiles(&mut evm, block_number, current_randomness);
+        self.register_custom_precompiles(
+            &mut evm,
+            block_number,
+            block_timestamp,
+            current_randomness,
+        );
         evm.transact(tx_env).map_err(Self::Error::from_evm_err)
     }
 
@@ -330,13 +336,19 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 let mut idx = 0;
 
                 let evm_block_number = evm_env.block_env.number;
+                let evm_block_timestamp = evm_env.block_env.timestamp;
                 let current_randomness = evm_env.block_env.prevrandao;
                 let mut evm = this.evm_config().evm_factory().create_evm_with_inspector(
                     StateCacheDbRefMutWrapper(&mut db),
                     evm_env,
                     inspector_setup(),
                 );
-                this.register_custom_precompiles(&mut evm, evm_block_number, current_randomness);
+                this.register_custom_precompiles(
+                    &mut evm,
+                    evm_block_number,
+                    evm_block_timestamp,
+                    current_randomness,
+                );
 
                 let results = TxTracer::new(evm)
                     .try_trace_many(block.transactions_recovered().take(max_transactions), |ctx| {

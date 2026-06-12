@@ -164,6 +164,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
                     let block_number = evm_env.block_env.number;
+                    let block_timestamp = evm_env.block_env.timestamp;
                     let current_randomness = evm_env.block_env.prevrandao;
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
@@ -175,6 +176,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         this.register_custom_precompiles(
                             &mut evm,
                             block_number,
+                            block_timestamp,
                             current_randomness,
                         );
                         let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
@@ -190,6 +192,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         this.register_custom_precompiles(
                             &mut evm,
                             block_number,
+                            block_timestamp,
                             current_randomness,
                         );
                         let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
@@ -492,6 +495,7 @@ pub trait Call:
         &self,
         _evm: &mut EV,
         _block_number: U256,
+        _block_timestamp: U256,
         _current_randomness: Option<B256>,
     ) where
         EV: Evm<Precompiles = PrecompilesMap>,
@@ -538,9 +542,15 @@ pub trait Call:
         DB: Database<Error = ProviderError> + fmt::Debug,
     {
         let block_number = evm_env.block_env.number;
+        let block_timestamp = evm_env.block_env.timestamp;
         let current_randomness = evm_env.block_env.prevrandao;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
-        self.register_custom_precompiles(&mut evm, block_number, current_randomness);
+        self.register_custom_precompiles(
+            &mut evm,
+            block_number,
+            block_timestamp,
+            current_randomness,
+        );
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -560,9 +570,15 @@ pub trait Call:
         I: InspectorFor<Self::Evm, DB>,
     {
         let block_number = evm_env.block_env.number;
+        let block_timestamp = evm_env.block_env.timestamp;
         let current_randomness = evm_env.block_env.prevrandao;
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
-        self.register_custom_precompiles(&mut evm, block_number, current_randomness);
+        self.register_custom_precompiles(
+            &mut evm,
+            block_number,
+            block_timestamp,
+            current_randomness,
+        );
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -725,9 +741,15 @@ pub trait Call:
         I: IntoIterator<Item = Recovered<&'a ProviderTx<Self::Provider>>>,
     {
         let block_number = evm_env.block_env.number;
+        let block_timestamp = evm_env.block_env.timestamp;
         let current_randomness = evm_env.block_env.prevrandao;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
-        self.register_custom_precompiles(&mut evm, block_number, current_randomness);
+        self.register_custom_precompiles(
+            &mut evm,
+            block_number,
+            block_timestamp,
+            current_randomness,
+        );
         let mut index = 0;
         for tx in transactions {
             if *tx.tx_hash() == target_tx_hash {

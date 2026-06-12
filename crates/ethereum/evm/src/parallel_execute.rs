@@ -202,7 +202,7 @@ where
             };
 
             let hf = self.chain_spec.gravity_hardforks();
-            if hf.fork(GravityHardfork::Alpha).transitions_at_block(block.number()) {
+            if hf.fork(GravityHardfork::Alpha).active_at_timestamp(block.timestamp) {
                 apply_hardfork_upgrades(&AlphaHardfork, state)?;
             }
             if hf.fork(GravityHardfork::Beta).transitions_at_block(block.number()) {
@@ -348,7 +348,7 @@ where
     // (disables PoW block rewards and DAO fork irregularities)
     if chain_spec
         .gravity_hardforks()
-        .is_fork_active_at_block(GravityHardfork::Alpha, block.header().number())
+        .is_fork_active_at_timestamp(GravityHardfork::Alpha, block.header().timestamp())
     {
         return HashMap::default();
     }

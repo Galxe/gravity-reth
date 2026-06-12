@@ -30,7 +30,7 @@
     "extraFields": {},
     "depositContractAddress": null,
     "gammaBlock": 20,
-    "alphaBlock": 5,
+    "alphaTime": 5,
     "betaBlock": 10,
     "deltaBlock": 25
   },
