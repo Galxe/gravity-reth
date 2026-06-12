@@ -14,7 +14,6 @@ workspace = true
 [dependencies]
 gravity-api-types.workspace = true
 reth-pipe-exec-layer-event-bus.workspace = true
-reth-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-evm-ethereum.workspace = true
 reth-chainspec.workspace = true

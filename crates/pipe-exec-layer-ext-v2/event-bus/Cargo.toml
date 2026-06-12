@@ -12,8 +12,8 @@ description = "event bus for pipeline execution layer extension"
 workspace = true
 
 [dependencies]
-reth-primitives.workspace = true
 reth-ethereum-primitives.workspace = true
+reth-primitives-traits.workspace = true
 reth-chain-state.workspace = true
 alloy-primitives.workspace = true
 tokio.workspace = true

@@ -11,6 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+smallvec.workspace = true
+fixed-cache.workspace = true
 # reth
 reth-chain-state = { workspace = true, features = ["rayon"] }
 reth-chainspec = { workspace = true, optional = true }
@@ -32,6 +34,8 @@ reth-revm = { workspace = true, features = ["optional-balance-check"] }
 reth-stages-api.workspace = true
 reth-tasks = { workspace = true, features = ["rayon"] }
 reth-trie-parallel.workspace = true
+reth-storage-errors.workspace = true
+reth-trie-db.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
 reth-pipe-exec-layer-event-bus.workspace = true
 gravity-primitives.workspace = true
@@ -108,6 +112,7 @@ rand.workspace = true
 rand_08.workspace = true
 
 [features]
+failpoints = ["reth-db/failpoints"]
 config-from-env = ["gravity-primitives/config-from-env"]
 test-utils = [
     "reth-chain-state/test-utils",

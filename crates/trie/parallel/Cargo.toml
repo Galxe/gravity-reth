@@ -12,6 +12,8 @@ description = "Parallel implementation of merkle root algorithm"
 workspace = true
 
 [dependencies]
+reth-trie-common = { workspace = true, features = ["nested-trie"] }
+reth-db-api.workspace = true
 # reth
 reth-primitives-traits = { workspace = true, features = ["dashmap", "std"] }
 reth-execution-errors.workspace = true

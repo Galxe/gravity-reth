@@ -89,7 +89,6 @@ serde = [
 ]
 
 serde-bincode-compat = [
-    "reth-ethereum-primitives/serde-bincode-compat",
     "reth-execution-types/serde-bincode-compat",
     "reth-trie-common/serde-bincode-compat",
     "alloy-eips/serde-bincode-compat",

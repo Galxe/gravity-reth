@@ -86,6 +86,7 @@ rand.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
 
 [features]
+pipe_test = []
 jemalloc = ["rocksdb/jemalloc"]
 test-utils = [
     "reth-db/test-utils",

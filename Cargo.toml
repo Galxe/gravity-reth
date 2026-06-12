@@ -32,7 +32,6 @@ reth-rpc-layer.workspace = true
 reth-transaction-pool.workspace = true
 reth-consensus.workspace = true
 reth-ethereum-payload-builder.workspace = true
-reth-primitives.workspace = true
 reth-cli-commands.workspace = true
 reth-pipe-exec-layer-ext-v2.workspace = true
 reth-pipe-exec-layer-event-bus.workspace = true
@@ -369,6 +368,25 @@ codegen-units = 1
 incremental = false
 
 [workspace.dependencies]
+# --- restored gravity-1.11 / dropped-by-take-HEAD workspace deps ---
+alloy-op-evm = { version = "0.27.2", default-features = false }
+alloy-op-hardforks = "0.4.4"
+mev-share-sse = { version = "0.5.0", default-features = false }
+moka = "0.12"
+op-alloy-consensus = { version = "0.23.1", default-features = false }
+op-alloy-flz = { version = "0.13.1", default-features = false }
+op-alloy-network = { version = "0.23.1", default-features = false }
+op-alloy-rpc-jsonrpsee = { version = "0.23.1", default-features = false }
+op-alloy-rpc-types = { version = "0.23.1", default-features = false }
+op-alloy-rpc-types-engine = { version = "0.23.1", default-features = false }
+op-revm = { version = "15.0.0", default-features = false }
+parity-scale-codec = "3.2.1"
+reth-bench-compare = { path = "bin/reth-bench-compare" }
+reth-engine-service = { path = "crates/engine/service" }
+reth-ress-protocol = { path = "crates/ress/protocol" }
+reth-ress-provider = { path = "crates/ress/provider" }
+reth-trie-sparse-parallel = { path = "crates/trie/sparse-parallel" }
+shellexpand = "3.0.0"
 # reth
 gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "b300f1fa7e98fe26c5a4d455c70459f5550830d2" }
 reth = { path = "bin/reth" }
@@ -455,7 +473,7 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types", default-features = false }
 reth-revm = { path = "crates/revm", default-features = false }
-grevm = { package = "grevm", path = "/home/neko/grevm" }
+grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", branch = "feat/revm-38" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }
@@ -558,7 +576,6 @@ bitflags = "2.4"
 blake3 = "1.5.5"
 boyer-moore-magiclen = "0.2.16"
 bytes = { version = "1.11.1", default-features = false }
-blake3 = "1.8"
 brotli = "8"
 cfg-if = "1.0"
 clap = "4"
@@ -719,7 +736,7 @@ ahash = "0.8"
 anyhow = "1.0"
 bindgen = { version = "0.71", default-features = false }
 block-padding = "0.3.2"
-cc = "=1.2.15"
+cc = "1.2"
 cipher = "0.4.3"
 comfy-table = "7.0"
 concat-kdf = "0.1.0"
@@ -767,4 +784,19 @@ walkdir = "2.3.3"
 vergen-git2 = "9.1.0"
 
 # networking
-ipnet = "2.11"
+
+[patch.crates-io]
+revm                    = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-bytecode           = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-context            = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-context-interface  = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-database           = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-database-interface = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-handler            = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-inspector          = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-interpreter        = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-precompile         = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-primitives         = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+revm-state              = { git = "https://github.com/Galxe/revm", branch = "v38.0.0-gravity" }
+alloy-evm               = { git = "https://github.com/Galxe/alloy-evm", branch = "v0.34.0-gravity" }
+revm-inspectors         = { git = "https://github.com/Galxe/revm-inspectors", branch = "v0.39.0-gravity" }
