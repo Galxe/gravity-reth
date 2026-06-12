@@ -290,6 +290,7 @@ impl_compression_for_value_with_subkey!(
     AccountBeforeTx,
     StorageBeforeTx,
     StorageTrieEntry,
+    PackedStorageTrieEntry,
     StorageNodeEntry
 );
 

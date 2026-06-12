@@ -75,6 +75,14 @@ impl ValueWithSubKey for PackedStorageTrieEntry {
     }
 }
 
+impl SubkeyContainedValue for PackedStorageTrieEntry {
+    fn subkey_length(&self) -> Option<usize> {
+        // Compact layout is `nibbles ++ node`; PackedStoredNibblesSubKey always
+        // occupies 33 bytes (see from_compact below).
+        Some(33)
+    }
+}
+
 #[cfg(any(test, feature = "reth-codec"))]
 impl reth_codecs::Compact for PackedStorageTrieEntry {
     fn to_compact<B>(&self, buf: &mut B) -> usize

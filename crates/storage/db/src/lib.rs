@@ -16,7 +16,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 // Suppress unused-crate warnings for MDBX-era dependencies still in Cargo.toml
+#[cfg(feature = "mdbx")]
 use page_size as _;
+#[cfg(feature = "mdbx")]
 use reth_libmdbx as _;
 use tracing as _;
 

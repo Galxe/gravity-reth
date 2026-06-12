@@ -719,6 +719,22 @@ impl reth_db_api::database::Database for DatabaseEnv {
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
         Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
     }
+
+    fn path(&self) -> PathBuf {
+        // The state db lives at the database root (or its `state` shard); good
+        // enough for the informational uses of this accessor (CLI, metrics).
+        self.state_db.path().to_path_buf()
+    }
+
+    fn oldest_reader_txnid(&self) -> Option<u64> {
+        // MDBX-specific introspection (long-lived reader detection); RocksDB
+        // has no equivalent transaction-id concept.
+        None
+    }
+
+    fn last_txnid(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Convert `RocksDB` error to `DatabaseErrorInfo`
