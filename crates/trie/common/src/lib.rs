@@ -107,3 +107,8 @@ pub use updates::{StorageTrieUpdatesV2, TrieUpdatesV2};
 /// Nested trie for merklization
 #[cfg(feature = "nested-trie")]
 pub mod nested_trie;
+
+/// Gravity: subkey-length trait for DupSort table values (relocated from the
+/// pre-2.2 local `reth-primitives-traits`, which is now a crates.io dep).
+pub mod subkey;
+pub use subkey::SubkeyContainedValue;

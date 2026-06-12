@@ -25,9 +25,11 @@ reth-trie-common = { workspace = true, features = ["nested-trie"] }
 # ethereum
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-genesis.workspace = true
 
 # codecs
 modular-bitfield.workspace = true
+parity-scale-codec = { workspace = true, features = ["bytes"] }
 roaring.workspace = true
 serde = { workspace = true, default-features = false }
 

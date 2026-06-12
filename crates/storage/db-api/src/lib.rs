@@ -77,6 +77,7 @@ pub mod mock;
 
 /// Table traits
 pub mod table;
+mod scale;
 
 pub mod tables;
 pub use tables::*;

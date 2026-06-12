@@ -1,5 +1,6 @@
 use alloy_primitives::Address;
-use reth_primitives_traits::{Account, SubkeyContainedValue, ValueWithSubKey};
+use reth_primitives_traits::{Account, ValueWithSubKey};
+use reth_trie_common::SubkeyContainedValue;
 
 /// Account as it is saved in the database.
 ///

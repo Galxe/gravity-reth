@@ -1,5 +1,6 @@
 use alloy_primitives::{Address, B256, U256};
-use reth_primitives_traits::{SubkeyContainedValue, ValueWithSubKey};
+use reth_primitives_traits::ValueWithSubKey;
+use reth_trie_common::SubkeyContainedValue;
 
 /// Storage entry as it is saved in the static files.
 ///

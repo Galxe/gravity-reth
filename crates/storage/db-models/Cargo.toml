@@ -15,6 +15,8 @@ workspace = true
 # reth
 reth-codecs = { workspace = true, optional = true }
 reth-primitives-traits.workspace = true
+# Gravity: SubkeyContainedValue lives in trie-common now (primitives-traits is a crates.io dep in 2.2)
+reth-trie-common.workspace = true
 
 # ethereum
 alloy-primitives.workspace = true
