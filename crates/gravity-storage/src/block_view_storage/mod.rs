@@ -1,6 +1,11 @@
 use crate::GravityStorage;
 use alloy_primitives::{Address, B256, U256};
-use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx, Database};
+use reth_db_api::{
+    cursor::DbDupCursorRO,
+    tables,
+    transaction::{DbTx, DbTxMut},
+    Database,
+};
 use reth_primitives_traits::AlloyBlockHeader;
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
@@ -100,6 +105,38 @@ where
     }
 
     fn update_canonical(&self, block_number: u64, _block_hash: B256) {
+        // Persist the (block_number, block_id) mapping to MDBX so that historical
+        // `eth_call` / `debug_trace*` paths (which don't share the in-memory
+        // BlockViewStorage map) see the same `block_id` the live EVM executor
+        // saw.
+        //
+        // The in-memory map already holds `block_id` (populated by
+        // `insert_block_id` when the ordered block arrived). We persist here
+        // because `update_canonical` is invoked exactly once per canonical block,
+        // strictly after `make_canonical` succeeds.
+        //
+        // **Trade-off — synchronous DB write on the make_canonical hot path.**
+        // `make_canonical` is async (see pipe-exec-layer `Core::make_canonical`).
+        // Opening a fresh MDBX RW transaction inside a sync trait method blocks
+        // the calling tokio worker for the commit duration (typically <1ms for a
+        // ~40 byte put). For Gravity's throughput target (~10 blk/s) this is
+        // tolerable but not ideal — it also serializes against the engine-tree
+        // persistence task's RW tx on MDBX's single-writer lock. A future
+        // optimization is to batch this with the engine-tree persistence write
+        // (see design doc §7 Open Question 1) or `spawn_blocking` it.
+        let block_id = self.block_number_to_id.lock().unwrap().get(&block_number).copied();
+        if let Some(block_id) = block_id {
+            if let Err(err) = self.persist_block_id(block_number, block_id) {
+                tracing::warn!(
+                    target: "gravity-storage",
+                    %err,
+                    block_number,
+                    "failed to persist BlockNumberToBlockId mapping; \
+                     EVM BLOCKHASH at this block will return 0x0 after restart",
+                );
+            }
+        }
+
         if block_number <= BLOCK_HASH_HISTORY {
             return;
         }
@@ -120,6 +157,26 @@ where
     fn randomness_by_height(&self, block_number: u64) -> ProviderResult<Option<B256>> {
         let provider = self.client.database_provider_ro()?;
         Ok(provider.header_by_number(block_number)?.and_then(|header| header.mix_hash()))
+    }
+}
+
+impl<Client> BlockViewStorage<Client>
+where
+    Client: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
+        + StateProviderFactory
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    fn persist_block_id(&self, block_number: u64, block_id: B256) -> ProviderResult<()> {
+        let provider_rw = self.client.database_provider_rw()?;
+        provider_rw
+            .tx_ref()
+            .put::<tables::BlockNumberToBlockId>(block_number, block_id)
+            .map_err(ProviderError::Database)?;
+        provider_rw.commit()?;
+        Ok(())
     }
 }
 

@@ -18,6 +18,7 @@ mod admin;
 mod anvil;
 mod debug;
 mod engine;
+mod gravity;
 mod hardhat;
 mod mev;
 mod miner;
@@ -39,6 +40,7 @@ pub mod servers {
         admin::AdminApiServer,
         debug::{DebugApiServer, DebugExecutionWitnessApiServer},
         engine::{EngineApiServer, EngineEthApiServer, IntoEngineApiRpcModule},
+        gravity::GravityApiServer,
         mev::{MevFullApiServer, MevSimApiServer},
         miner::MinerApiServer,
         net::NetApiServer,
@@ -68,6 +70,7 @@ pub mod clients {
         anvil::AnvilApiClient,
         debug::{DebugApiClient, DebugExecutionWitnessApiClient},
         engine::{EngineApiClient, EngineEthApiClient},
+        gravity::GravityApiClient,
         hardhat::HardhatApiClient,
         mev::{MevFullApiClient, MevSimApiClient},
         miner::MinerApiClient,

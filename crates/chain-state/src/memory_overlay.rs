@@ -4,8 +4,9 @@ use alloy_primitives::{keccak256, Address, BlockNumber, Bytes, StorageKey, Stora
 use reth_errors::ProviderResult;
 use reth_primitives_traits::{Account, Bytecode, NodePrimitives};
 use reth_storage_api::{
-    AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider, StateProofProvider,
-    StateProvider, StateRootProvider, StorageRootProvider,
+    AccountReader, BlockHashReader, BlockNumberToBlockIdReader, BytecodeReader,
+    HashedPostStateProvider, StateProofProvider, StateProvider, StateRootProvider,
+    StorageRootProvider,
 };
 use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
@@ -63,6 +64,18 @@ impl<'a, N: NodePrimitives> MemoryOverlayStateProviderRef<'a, N> {
                     .map(|block| (block.hashed_state.as_ref(), block.trie.as_ref())),
             )
         })
+    }
+}
+
+impl<N: NodePrimitives> BlockNumberToBlockIdReader for MemoryOverlayStateProviderRef<'_, N> {
+    fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        // Delegates to the historical state provider, which carries the production
+        // `BlockNumberToBlockId` mapping. In-memory sealed blocks intentionally
+        // do not override here: the canonical mapping is the persisted table, and
+        // the historical provider sees through to it via its inner Provider.
+        // The in-memory race window (sealed but not yet `advance_persistence`-d)
+        // is tracked as a deferred Open Question in the design doc.
+        self.historical.block_id_by_number(number)
     }
 }
 

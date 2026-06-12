@@ -2,11 +2,11 @@
 
 use crate::{
     AccountReader, BlockBodyIndicesProvider, BlockHashReader, BlockIdReader, BlockNumReader,
-    BlockReader, BlockReaderIdExt, BlockSource, BytecodeReader, ChangeSetReader,
-    HashedPostStateProvider, HeaderProvider, NodePrimitivesProvider, PruneCheckpointReader,
-    ReceiptProvider, ReceiptProviderIdExt, StageCheckpointReader, StateProofProvider,
-    StateProvider, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
-    StorageRootProvider, TransactionVariant, TransactionsProvider,
+    BlockNumberToBlockIdReader, BlockReader, BlockReaderIdExt, BlockSource, BytecodeReader,
+    ChangeSetReader, HashedPostStateProvider, HeaderProvider, NodePrimitivesProvider,
+    PruneCheckpointReader, ReceiptProvider, ReceiptProviderIdExt, StageCheckpointReader,
+    StateProofProvider, StateProvider, StateProviderBox, StateProviderFactory, StateReader,
+    StateRootProvider, StorageRootProvider, TransactionVariant, TransactionsProvider,
 };
 
 #[cfg(feature = "db-api")]
@@ -102,6 +102,14 @@ impl<ChainSpec, N> Clone for NoopProvider<ChainSpec, N> {
             prune_modes: self.prune_modes.clone(),
             _phantom: Default::default(),
         }
+    }
+}
+
+impl<ChainSpec: Send + Sync, N: Send + Sync> BlockNumberToBlockIdReader
+    for NoopProvider<ChainSpec, N>
+{
+    fn block_id_by_number(&self, _number: BlockNumber) -> ProviderResult<Option<B256>> {
+        Ok(None)
     }
 }
 

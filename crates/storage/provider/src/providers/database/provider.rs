@@ -56,8 +56,8 @@ use reth_prune_types::{
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
-    BlockBodyIndicesProvider, BlockBodyReader, NodePrimitivesProvider, StateProvider,
-    StorageChangeSetReader, TryIntoHistoricalStateProvider,
+    BlockBodyIndicesProvider, BlockBodyReader, BlockNumberToBlockIdReader, NodePrimitivesProvider,
+    StateProvider, StorageChangeSetReader, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
@@ -1127,6 +1127,12 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockHashReader for DatabaseProvider<TX, 
             |range, _| self.cursor_read_collect::<tables::CanonicalHeaders>(range),
             |_| true,
         )
+    }
+}
+
+impl<TX: DbTx + 'static, N: NodeTypes> BlockNumberToBlockIdReader for DatabaseProvider<TX, N> {
+    fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        Ok(self.tx.get::<tables::BlockNumberToBlockId>(number)?)
     }
 }
 
@@ -3191,7 +3197,37 @@ mod tests {
         test_utils::{blocks::BlockchainTestData, create_test_provider_factory},
         BlockWriter,
     };
+    use reth_storage_api::DatabaseProviderFactory;
     use reth_testing_utils::generators::{self, random_block, BlockParams};
+
+    #[test]
+    fn block_number_to_block_id_roundtrip() {
+        // Persist a (block_number, block_id) pair via DbTxMut and read it back
+        // through both DatabaseProvider and ProviderFactory.
+        let factory = create_test_provider_factory();
+
+        // Miss before any write.
+        assert_eq!(factory.block_id_by_number(42).unwrap(), None);
+
+        // Write via RW transaction.
+        let provider_rw = factory.database_provider_rw().unwrap();
+        let expected = B256::from_slice(&[
+            0x46, 0x1d, 0x28, 0x5c, 0x18, 0x9b, 0xd7, 0x77, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x42,
+        ]);
+        provider_rw.tx_ref().put::<tables::BlockNumberToBlockId>(42, expected).unwrap();
+        provider_rw.commit().unwrap();
+
+        // Read back through both code paths.
+        assert_eq!(factory.block_id_by_number(42).unwrap(), Some(expected));
+        let provider_ro = factory.provider().unwrap();
+        assert_eq!(provider_ro.block_id_by_number(42).unwrap(), Some(expected));
+
+        // Other block numbers still miss.
+        assert_eq!(factory.block_id_by_number(41).unwrap(), None);
+        assert_eq!(factory.block_id_by_number(43).unwrap(), None);
+    }
 
     #[test]
     fn test_receipts_by_block_range_empty_range() {

@@ -1,6 +1,6 @@
 use super::{
-    AccountReader, BlockHashReader, BlockIdReader, StateProofProvider, StateRootProvider,
-    StorageRootProvider,
+    AccountReader, BlockHashReader, BlockIdReader, BlockNumberToBlockIdReader, StateProofProvider,
+    StateRootProvider, StorageRootProvider,
 };
 use alloc::boxed::Box;
 use alloy_consensus::constants::KECCAK_EMPTY;
@@ -30,9 +30,18 @@ pub trait StateReader: Send + Sync {
 pub type StateProviderBox = Box<dyn StateProvider>;
 
 /// An abstraction for a type that provides state data.
+///
+/// `BlockNumberToBlockIdReader` is a supertrait so that the EVM `BLOCKHASH`
+/// opcode path ([`StateProviderDatabase`](https://docs.rs/reth-revm/latest/reth_revm/database/struct.StateProviderDatabase.html))
+/// can resolve a block number to Gravity's Aptos consensus `block_id`. Production
+/// `StateProvider` impls (e.g. `LatestStateProviderRef`, `HistoricalStateProviderRef`,
+/// `BlockchainProvider`) query the `BlockNumberToBlockId` MDBX table. Test stubs
+/// (`MockEthProvider`, `MockStateProvider`, `NoopProvider`) alias to
+/// `BlockHashReader::block_hash` to preserve their existing semantics.
 #[auto_impl(&, Arc, Box)]
 pub trait StateProvider:
     BlockHashReader
+    + BlockNumberToBlockIdReader
     + AccountReader
     + BytecodeReader
     + StateRootProvider

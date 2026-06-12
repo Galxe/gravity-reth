@@ -537,6 +537,15 @@ tables! {
         type Key = ChainStateKey;
         type Value = BlockNumber;
     }
+
+    /// Maps a block number to the Aptos consensus ordered `block_id`.
+    /// Populated on every block commit by Gravity's pipeline execution layer.
+    /// Read by the EVM `BLOCKHASH` opcode path so that EVM-visible block hashes
+    /// equal the consensus `block_id` rather than `keccak(rlp(header))`.
+    table BlockNumberToBlockId {
+        type Key = BlockNumber;
+        type Value = B256;
+    }
 }
 
 /// Keys for the `ChainState` table.

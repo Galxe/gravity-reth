@@ -5,8 +5,9 @@ use reth_errors::ProviderResult;
 use reth_metrics::Metrics;
 use reth_primitives_traits::{Account, Bytecode};
 use reth_provider::{
-    AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider, StateProofProvider,
-    StateProvider, StateRootProvider, StorageRootProvider,
+    AccountReader, BlockHashReader, BlockNumberToBlockIdReader, BytecodeReader,
+    HashedPostStateProvider, StateProofProvider, StateProvider, StateRootProvider,
+    StorageRootProvider,
 };
 use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
@@ -292,6 +293,15 @@ impl<S: BlockHashReader> BlockHashReader for InstrumentedStateProvider<S> {
         end: alloy_primitives::BlockNumber,
     ) -> ProviderResult<Vec<B256>> {
         self.state_provider.canonical_hashes_range(start, end)
+    }
+}
+
+impl<S: BlockNumberToBlockIdReader> BlockNumberToBlockIdReader for InstrumentedStateProvider<S> {
+    fn block_id_by_number(
+        &self,
+        number: alloy_primitives::BlockNumber,
+    ) -> ProviderResult<Option<B256>> {
+        self.state_provider.block_id_by_number(number)
     }
 }
 

@@ -23,7 +23,8 @@ use reth_prune_types::{PruneCheckpoint, PruneModes, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
-    BlockBodyIndicesProvider, NodePrimitivesProvider, TryIntoHistoricalStateProvider,
+    BlockBodyIndicesProvider, BlockNumberToBlockIdReader, NodePrimitivesProvider,
+    TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::HashedPostState;
@@ -324,6 +325,12 @@ impl<N: ProviderNodeTypes> BlockHashReader for ProviderFactory<N> {
             |range, _| self.provider()?.canonical_hashes_range(range.start, range.end),
             |_| true,
         )
+    }
+}
+
+impl<N: ProviderNodeTypes> BlockNumberToBlockIdReader for ProviderFactory<N> {
+    fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        self.provider()?.block_id_by_number(number)
     }
 }
 

@@ -36,8 +36,8 @@ use reth_evm::ConfigureEvm;
 use reth_network_api::{noop::NoopNetwork, NetworkInfo, Peers};
 use reth_primitives_traits::NodePrimitives;
 use reth_rpc::{
-    AdminApi, DebugApi, EngineEthApi, EthApi, EthApiBuilder, EthBundle, MinerApi, NetApi,
-    OtterscanApi, RPCApi, RethApi, TraceApi, TxPoolApi, ValidationApiConfig, Web3Api,
+    AdminApi, DebugApi, EngineEthApi, EthApi, EthApiBuilder, EthBundle, GravityApi, MinerApi,
+    NetApi, OtterscanApi, RPCApi, RethApi, TraceApi, TxPoolApi, ValidationApiConfig, Web3Api,
 };
 use reth_rpc_api::servers::*;
 use reth_rpc_eth_api::{
@@ -996,6 +996,9 @@ where
                             EthSimBundle::new(eth_api.clone(), self.blocking_pool_guard.clone())
                                 .into_rpc()
                                 .into()
+                        }
+                        RethRpcModule::Gravity => {
+                            GravityApi::new(self.provider.clone()).into_rpc().into()
                         }
                     })
                     .clone()

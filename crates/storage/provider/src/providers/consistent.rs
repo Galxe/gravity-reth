@@ -24,8 +24,8 @@ use reth_primitives_traits::{Account, BlockBody, RecoveredBlock, SealedHeader, S
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
-    BlockBodyIndicesProvider, DatabaseProviderFactory, NodePrimitivesProvider, StateProvider,
-    StorageChangeSetReader, TryIntoHistoricalStateProvider,
+    BlockBodyIndicesProvider, BlockNumberToBlockIdReader, DatabaseProviderFactory,
+    NodePrimitivesProvider, StateProvider, StorageChangeSetReader, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use revm_database::states::PlainStorageRevert;
@@ -768,6 +768,15 @@ impl<N: ProviderNodeTypes> BlockHashReader for ConsistentProvider<N> {
             |block_state, _| Some(block_state.hash()),
             |_| true,
         )
+    }
+}
+
+impl<N: ProviderNodeTypes> BlockNumberToBlockIdReader for ConsistentProvider<N> {
+    fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        // Historical eth_call / debug_trace executes against persisted state, so we
+        // only need the persisted table here. The in-memory canonical window is
+        // handled at the `BlockchainProvider` level (see its impl).
+        self.storage_provider.block_id_by_number(number)
     }
 }
 

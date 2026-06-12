@@ -37,7 +37,8 @@ use reth_primitives_traits::{
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
-    BlockBodyIndicesProvider, DBProvider, NodePrimitivesProvider, StorageChangeSetReader,
+    BlockBodyIndicesProvider, BlockNumberToBlockIdReader, DBProvider, NodePrimitivesProvider,
+    StorageChangeSetReader,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{HashedPostState, KeccakKeyHasher};
@@ -240,6 +241,27 @@ impl<N: ProviderNodeTypes> BlockHashReader for BlockchainProvider<N> {
         end: BlockNumber,
     ) -> ProviderResult<Vec<B256>> {
         self.consistent_provider()?.canonical_hashes_range(start, end)
+    }
+}
+
+impl<N: ProviderNodeTypes> BlockNumberToBlockIdReader for BlockchainProvider<N> {
+    fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        // KNOWN RACE — `CanonicalInMemoryState` is not consulted here.
+        //
+        // In the Gravity pipe-exec flow, `BlockViewStorage::update_canonical`
+        // persists the `(block_number, block_id)` row to MDBX **before**
+        // `make_canonical` returns, so by the time any subsequent RPC observes
+        // block N as canonical the persisted table already has the row. So in
+        // practice the race window is closed.
+        //
+        // The upstream-reth path (`MakeCanonical` engine event with async
+        // `advance_persistence`) can open a window where block N is canonical
+        // in-memory but its `block_id` is not yet persisted — in that window
+        // `gravity_blockIdByNumber(N)` returns `null` and EVM `BLOCKHASH(N)`
+        // returns `0x0`. Mitigation is design doc §6.4: thread block_id through
+        // `CanonicalInMemoryState` so this reader can consult it before falling
+        // back to MDBX. Deferred to a follow-up; tracked in checklist §1.4.
+        self.consistent_provider()?.block_id_by_number(number)
     }
 }
 

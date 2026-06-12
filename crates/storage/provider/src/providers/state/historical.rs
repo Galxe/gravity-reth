@@ -14,7 +14,8 @@ use reth_db_api::{
 };
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
-    BlockNumReader, BytecodeReader, DBProvider, StateProofProvider, StorageRootProvider,
+    BlockNumReader, BlockNumberToBlockIdReader, BytecodeReader, DBProvider, StateProofProvider,
+    StorageRootProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
@@ -263,6 +264,14 @@ impl<Provider: DBProvider + BlockNumReader> AccountReader
     }
 }
 
+impl<Provider: BlockNumberToBlockIdReader> BlockNumberToBlockIdReader
+    for HistoricalStateProviderRef<'_, Provider>
+{
+    fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        self.provider.block_id_by_number(number)
+    }
+}
+
 impl<Provider: DBProvider + BlockNumReader + BlockHashReader> BlockHashReader
     for HistoricalStateProviderRef<'_, Provider>
 {
@@ -392,8 +401,8 @@ impl<Provider: Sync> HashedPostStateProvider for HistoricalStateProviderRef<'_, 
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader + BlockHashReader> StateProvider
-    for HistoricalStateProviderRef<'_, Provider>
+impl<Provider: DBProvider + BlockNumReader + BlockHashReader + BlockNumberToBlockIdReader>
+    StateProvider for HistoricalStateProviderRef<'_, Provider>
 {
     /// Get storage.
     fn storage(
@@ -481,7 +490,7 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
 }
 
 // Delegates all provider impls to [HistoricalStateProviderRef]
-delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader ]);
+delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader + BlockNumberToBlockIdReader]);
 
 /// Lowest blocks at which different parts of the state are available.
 /// They may be [Some] if pruning is enabled.
@@ -516,7 +525,8 @@ mod tests {
     use crate::{
         providers::state::historical::{HistoryInfo, LowestAvailableBlocks},
         test_utils::create_test_provider_factory,
-        AccountReader, HistoricalStateProvider, HistoricalStateProviderRef, StateProvider,
+        AccountReader, BlockNumberToBlockIdReader, HistoricalStateProvider,
+        HistoricalStateProviderRef, StateProvider,
     };
     use alloy_primitives::{address, b256, Address, B256, U256};
     use reth_db_api::{
@@ -536,7 +546,9 @@ mod tests {
 
     const fn assert_state_provider<T: StateProvider>() {}
     #[expect(dead_code)]
-    const fn assert_historical_state_provider<T: DBProvider + BlockNumReader + BlockHashReader>() {
+    const fn assert_historical_state_provider<
+        T: DBProvider + BlockNumReader + BlockHashReader + BlockNumberToBlockIdReader,
+    >() {
         assert_state_provider::<HistoricalStateProvider<T>>();
     }
 

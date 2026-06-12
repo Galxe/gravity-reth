@@ -1,9 +1,9 @@
 use crate::{
     traits::{BlockSource, ReceiptProvider},
-    AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BlockReaderIdExt,
-    ChainSpecProvider, ChangeSetReader, HeaderProvider, ReceiptProviderIdExt, StateProvider,
-    StateProviderBox, StateProviderFactory, StateReader, StateRootProvider, TransactionVariant,
-    TransactionsProvider,
+    AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockNumberToBlockIdReader,
+    BlockReader, BlockReaderIdExt, ChainSpecProvider, ChangeSetReader, HeaderProvider,
+    ReceiptProviderIdExt, StateProvider, StateProviderBox, StateProviderFactory, StateReader,
+    StateRootProvider, TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::{
     constants::EMPTY_ROOT_HASH,
@@ -562,6 +562,17 @@ where
     T: NodePrimitives,
     Self: ReceiptProvider + BlockIdReader,
 {
+}
+
+impl<T: NodePrimitives, ChainSpec: Send + Sync + 'static> BlockNumberToBlockIdReader
+    for MockEthProvider<T, ChainSpec>
+{
+    fn block_id_by_number(&self, _number: BlockNumber) -> ProviderResult<Option<B256>> {
+        // Tests that exercise this method should set a custom implementation or
+        // use a higher-fidelity provider. The default mock has no `block_id`
+        // recording surface.
+        Ok(None)
+    }
 }
 
 impl<T: NodePrimitives, ChainSpec: Send + Sync + 'static> BlockHashReader

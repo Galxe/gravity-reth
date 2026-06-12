@@ -4,8 +4,9 @@ use alloy_primitives::{
 };
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
-    AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider, StateProofProvider,
-    StateProvider, StateRootProvider, StorageRootProvider,
+    AccountReader, BlockHashReader, BlockNumberToBlockIdReader, BytecodeReader,
+    HashedPostStateProvider, StateProofProvider, StateProvider, StateRootProvider,
+    StorageRootProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
@@ -66,6 +67,16 @@ impl BlockHashReader for StateProviderTest {
             .iter()
             .filter_map(|(block, hash)| range.contains(block).then_some(*hash))
             .collect())
+    }
+}
+
+impl BlockNumberToBlockIdReader for StateProviderTest {
+    /// Test stub: aliases to `block_hash` so existing tests that insert a hash
+    /// via `insert_block_hash` and then assert the EVM `BLOCKHASH` value still
+    /// pass after `StateProvider` gained `BlockNumberToBlockIdReader` as a
+    /// supertrait. Production providers query `tables::BlockNumberToBlockId`.
+    fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        self.block_hash(number)
     }
 }
 

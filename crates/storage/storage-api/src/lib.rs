@@ -25,6 +25,9 @@ pub use block_id::*;
 mod block_hash;
 pub use block_hash::*;
 
+mod block_number_to_block_id;
+pub use block_number_to_block_id::*;
+
 #[cfg(feature = "db-api")]
 mod chain;
 #[cfg(feature = "db-api")]

@@ -1443,6 +1443,26 @@ where
     }
 }
 
+impl<P, Node, N> reth_storage_api::BlockNumberToBlockIdReader
+    for RpcBlockchainStateProvider<P, Node, N>
+where
+    P: Provider<N> + Clone + 'static,
+    N: Network,
+    Node: NodeTypes,
+{
+    /// RPC-proxy mode has no access to the Gravity `BlockNumberToBlockId`
+    /// table. Return `None` so the EVM observes `B256::ZERO` — never the upstream
+    /// `keccak(rlp(header))` — preserving the binary `{block_id, 0}` invariant
+    /// promised by `EvmStateProvider::block_hash`. Leaking the keccak hash here
+    /// would re-introduce the tri-valued `{block_id, keccak, 0}` distribution
+    /// that this whole design exists to eliminate. Operators who need real
+    /// `block_id` reads in proxy mode must front the proxy with a node that
+    /// queries `tables::BlockNumberToBlockId` directly.
+    fn block_id_by_number(&self, _number: BlockNumber) -> Result<Option<B256>, ProviderError> {
+        Ok(None)
+    }
+}
+
 impl<P, Node, N> BlockIdReader for RpcBlockchainStateProvider<P, Node, N>
 where
     P: Provider<N> + Clone + 'static,

@@ -260,8 +260,19 @@ where
             Primitives: NodePrimitives<BlockHeader: reth_db_api::table::Value>,
         > + StatsReader
         + BlockHashReader
+        + reth_provider::BlockNumberToBlockIdReader
         + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>,
 {
+    // NOTE — Gravity BLOCKHASH alignment caveat: this stage drives the EVM
+    // through `StateProviderDatabase`, which now resolves `BLOCKHASH(n)` via
+    // `BlockNumberToBlockIdReader::block_id_by_number`. If a node wipes its DB
+    // and reruns stage-sync on blocks the live pipeline previously executed,
+    // the `BlockNumberToBlockId` rows from those live runs will be missing and
+    // `BLOCKHASH(n)` will resolve to `0x0` — producing a state root divergent
+    // from the live run. In Gravity production, block execution flows through
+    // pipe-exec-layer rather than this stage, so the concern is limited to
+    // archive re-sync / forensic replay paths. Operators using stage-sync to
+    // re-execute Gravity history MUST backfill `BlockNumberToBlockId` first.
     /// Return the id of the stage
     fn id(&self) -> StageId {
         StageId::Execution

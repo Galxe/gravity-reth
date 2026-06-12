@@ -323,6 +323,8 @@ pub enum RethRpcModule {
     Miner,
     /// `mev_` module
     Mev,
+    /// `gravity_` module (Gravity-specific extensions)
+    Gravity,
     /// Custom RPC module not part of the standard set
     #[strum(default)]
     #[serde(untagged)]
@@ -347,6 +349,7 @@ impl RethRpcModule {
         Self::Flashbots,
         Self::Miner,
         Self::Mev,
+        Self::Gravity,
     ];
 
     /// Returns the number of standard variants (excludes Other)
@@ -406,6 +409,7 @@ impl AsRef<str> for RethRpcModule {
             Self::Flashbots => "flashbots",
             Self::Miner => "miner",
             Self::Mev => "mev",
+            Self::Gravity => "gravity",
         }
     }
 }

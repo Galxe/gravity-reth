@@ -140,6 +140,15 @@ impl reth_storage_api::BlockHashReader for StateProviderTraitObjWrapper<'_> {
     }
 }
 
+impl reth_storage_api::BlockNumberToBlockIdReader for StateProviderTraitObjWrapper<'_> {
+    fn block_id_by_number(
+        &self,
+        number: alloy_primitives::BlockNumber,
+    ) -> reth_errors::ProviderResult<Option<B256>> {
+        self.0.block_id_by_number(number)
+    }
+}
+
 impl HashedPostStateProvider for StateProviderTraitObjWrapper<'_> {
     fn hashed_post_state(&self, bundle_state: &BundleState) -> reth_trie::HashedPostState {
         self.0.hashed_post_state(bundle_state)

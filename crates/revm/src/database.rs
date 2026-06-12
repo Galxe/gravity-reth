@@ -2,7 +2,7 @@ use crate::primitives::alloy_primitives::{BlockNumber, StorageKey, StorageValue}
 use alloy_primitives::{Address, B256, U256};
 use core::ops::{Deref, DerefMut};
 use reth_primitives_traits::Account;
-use reth_storage_api::{AccountReader, BlockHashReader, BytecodeReader, StateProvider};
+use reth_storage_api::{AccountReader, BlockNumberToBlockIdReader, BytecodeReader, StateProvider};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use revm::{bytecode::Bytecode, state::AccountInfo, Database, DatabaseRef};
 
@@ -39,8 +39,21 @@ impl<T: StateProvider> EvmStateProvider for T {
         <T as AccountReader>::basic_account(self, address)
     }
 
+    /// Returns the value EVM `BLOCKHASH` should see at `number`.
+    ///
+    /// **This is Gravity-specific behavior.** For production `StateProvider`
+    /// impls this returns the Aptos consensus `block_id`, not the keccak header
+    /// hash. The mapping lives in `tables::BlockNumberToBlockId` and is queried
+    /// via the `BlockNumberToBlockIdReader` supertrait.
+    ///
+    /// On miss this returns `None`, which `StateProviderDatabase::block_hash_ref`
+    /// turns into `B256::ZERO`. It **must not** fall back to
+    /// `BlockHashReader::block_hash` — that would re-introduce keccak header hash
+    /// into EVM-visible state and produce a tri-valued
+    /// `{block_id, keccak, 0}` distribution. Cross-upgrade contracts must see
+    /// only `{block_id, 0}` so a single "is zero?" branch suffices.
     fn block_hash(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
-        <T as BlockHashReader>::block_hash(self, number)
+        <T as BlockNumberToBlockIdReader>::block_id_by_number(self, number)
     }
 
     fn bytecode_by_hash(

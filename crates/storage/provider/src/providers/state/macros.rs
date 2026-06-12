@@ -37,6 +37,9 @@ macro_rules! delegate_provider_impls {
                 fn block_hash(&self, number: u64) -> reth_storage_errors::provider::ProviderResult<Option<alloy_primitives::B256>>;
                 fn canonical_hashes_range(&self, start: alloy_primitives::BlockNumber, end: alloy_primitives::BlockNumber) -> reth_storage_errors::provider::ProviderResult<Vec<alloy_primitives::B256>>;
             }
+            BlockNumberToBlockIdReader $(where [$($generics)*])? {
+                fn block_id_by_number(&self, number: alloy_primitives::BlockNumber) -> reth_storage_errors::provider::ProviderResult<Option<alloy_primitives::B256>>;
+            }
             StateProvider $(where [$($generics)*])? {
                 fn storage(&self, account: alloy_primitives::Address, storage_key: alloy_primitives::StorageKey) -> reth_storage_errors::provider::ProviderResult<Option<alloy_primitives::StorageValue>>;
             }

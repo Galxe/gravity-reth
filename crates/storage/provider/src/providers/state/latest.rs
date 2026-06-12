@@ -5,7 +5,9 @@ use crate::{
 use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx};
 use reth_primitives_traits::{Account, Bytecode};
-use reth_storage_api::{BytecodeReader, DBProvider, StateProofProvider, StorageRootProvider};
+use reth_storage_api::{
+    BlockNumberToBlockIdReader, BytecodeReader, DBProvider, StateProofProvider, StorageRootProvider,
+};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_trie::{
     proof::{Proof, StorageProof},
@@ -40,6 +42,14 @@ impl<Provider: DBProvider> AccountReader for LatestStateProviderRef<'_, Provider
     /// Get basic account information.
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
         self.tx().get_by_encoded_key::<tables::PlainAccountState>(address).map_err(Into::into)
+    }
+}
+
+impl<Provider: BlockNumberToBlockIdReader> BlockNumberToBlockIdReader
+    for LatestStateProviderRef<'_, Provider>
+{
+    fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        self.0.block_id_by_number(number)
     }
 }
 
@@ -148,7 +158,7 @@ impl<Provider: DBProvider + Sync> HashedPostStateProvider for LatestStateProvide
     }
 }
 
-impl<Provider: DBProvider + BlockHashReader> StateProvider
+impl<Provider: DBProvider + BlockHashReader + BlockNumberToBlockIdReader> StateProvider
     for LatestStateProviderRef<'_, Provider>
 {
     /// Get storage.
@@ -194,7 +204,7 @@ impl<Provider: DBProvider> LatestStateProvider<Provider> {
 }
 
 // Delegates all provider impls to [LatestStateProviderRef]
-delegate_provider_impls!(LatestStateProvider<Provider> where [Provider: DBProvider + BlockHashReader ]);
+delegate_provider_impls!(LatestStateProvider<Provider> where [Provider: DBProvider + BlockHashReader + BlockNumberToBlockIdReader]);
 
 #[cfg(test)]
 mod tests {
@@ -202,7 +212,9 @@ mod tests {
 
     const fn assert_state_provider<T: StateProvider>() {}
     #[expect(dead_code)]
-    const fn assert_latest_state_provider<T: DBProvider + BlockHashReader>() {
+    const fn assert_latest_state_provider<
+        T: DBProvider + BlockHashReader + BlockNumberToBlockIdReader,
+    >() {
         assert_state_provider::<LatestStateProvider<T>>();
     }
 }
