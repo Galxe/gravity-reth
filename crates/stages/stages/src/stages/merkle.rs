@@ -15,6 +15,8 @@ use reth_stages_api::{
     BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
+use reth_trie::{IntermediateStateRootState, StateRoot, StateRootProgress, StoredSubNode};
+use reth_trie_db::DatabaseStateRoot;
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use std::fmt::Debug;
 

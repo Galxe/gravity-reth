@@ -230,7 +230,7 @@ impl revm::DatabaseRef for StateCacheDbRefMutWrapper<'_> {
 }
 
 impl revm::DatabaseCommit for StateCacheDbRefMutWrapper<'_> {
-    fn commit(&mut self, changes: alloy_primitives::map::HashMap<Address, revm::state::Account>) {
+    fn commit(&mut self, changes: revm::state::EvmState) {
         self.0.commit(changes)
     }
 }

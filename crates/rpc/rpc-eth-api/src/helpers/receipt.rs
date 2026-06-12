@@ -1,6 +1,7 @@
 //! Loads a receipt from database. Helper trait for `eth_` block and transaction RPC methods, that
 //! loads receipt data w.r.t. network.
 
+use reth_primitives_traits::SignerRecoverable;
 use std::sync::Arc;
 
 use crate::{EthApiTypes, RpcNodeCoreExt, RpcReceipt};
