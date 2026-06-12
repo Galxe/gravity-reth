@@ -554,7 +554,13 @@ impl<Storage: GravityStorage> Core<Storage> {
             "state trie merklized"
         );
         block.header.state_root = state_root;
-        block.header.difficulty = randomness;
+        if !self
+            .chain_spec
+            .gravity_hardforks()
+            .is_fork_active_at_timestamp(GravityHardfork::Alpha, block.header.timestamp)
+        {
+            block.header.difficulty = randomness;
+        }
 
         // Seal the block
         let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
