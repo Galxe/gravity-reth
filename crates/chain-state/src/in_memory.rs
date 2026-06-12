@@ -982,8 +982,9 @@ mod tests {
     use reth_ethereum_primitives::{EthPrimitives, Receipt};
     use reth_primitives_traits::{Account, Bytecode};
     use reth_storage_api::{
-        AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider,
-        StateProofProvider, StateProvider, StateRootProvider, StorageRootProvider,
+        AccountReader, BlockHashReader, BlockNumberToBlockIdReader, BytecodeReader,
+        HashedPostStateProvider, StateProofProvider, StateProvider, StateRootProvider,
+        StorageRootProvider,
     };
     use reth_trie::{
         AccountProof, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
@@ -1050,6 +1051,12 @@ mod tests {
             _end: BlockNumber,
         ) -> ProviderResult<Vec<B256>> {
             Ok(vec![])
+        }
+    }
+
+    impl BlockNumberToBlockIdReader for MockStateProvider {
+        fn block_id_by_number(&self, _number: BlockNumber) -> ProviderResult<Option<B256>> {
+            Ok(None)
         }
     }
 
