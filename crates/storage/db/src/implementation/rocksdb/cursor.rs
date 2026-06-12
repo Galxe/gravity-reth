@@ -409,8 +409,7 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
         let mut last_value = None;
         // First capture the current value
         if let Some(value) = self.iterator.value() {
-            last_value =
-                Some(T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?);
+            last_value = Some(T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?);
         }
         loop {
             self.iterator.next();
@@ -419,9 +418,8 @@ impl<K: TransactionKind, T: DupSort> DbDupCursorRO<T> for Cursor<K, T> {
             {
                 let main_key = Self::extract_main_key(key)?;
                 if main_key == current_main_key {
-                    last_value = Some(
-                        T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?,
-                    );
+                    last_value =
+                        Some(T::Value::decompress(value).map_err(|_| DatabaseError::Decode)?);
                 } else {
                     // Moved past the current key, go back one
                     self.iterator.prev();

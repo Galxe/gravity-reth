@@ -76,9 +76,9 @@ pub mod database_metrics;
 
 pub mod mock;
 
+mod scale;
 /// Table traits
 pub mod table;
-mod scale;
 
 pub mod tables;
 pub use tables::*;

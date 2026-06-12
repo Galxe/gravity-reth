@@ -20,9 +20,8 @@ use reth_network_p2p::BlockClient;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
-    StorageSettingsCache,
     providers::{BlockchainProvider, ProviderNodeTypes},
-    ProviderFactory,
+    ProviderFactory, StorageSettingsCache,
 };
 use reth_prune::PrunerWithFactory;
 use reth_stages_api::{MetricEventsSender, Pipeline};

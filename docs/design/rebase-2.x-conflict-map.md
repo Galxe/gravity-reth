@@ -27,3 +27,27 @@ abstraction.
 NEXT after bin/reth greens: cargo +nightly fmt, full-workspace clippy/test
 triage, then Phase-6 mainnet block-replay state-root parity (consensus
 gate) + pipe-exec author review of the engine merge.
+
+## 13. MILESTONE: full workspace compiles (2026-06-09)
+
+`cargo check --workspace` (excl. reth-bb / bench tools): **0 errors**, on
+`feat/transplant-reth-2.2.0-1.11`. The complete gravity-reth — RocksDB
+storage, NestedStateRoot/TrieV2, pipe-exec engine, grevm parallel
+execution, all precompiles, rpc, node-builder, the `reth` binary, and all
+examples — compiles against upstream reth v2.2.0 + the Galxe revm-38 forks.
+
+Final-stretch adaptations: gravity precompiles (bls PoP-verify + G mint)
+migrated to revm 38's reworked precompile interface (soft input-validation
+failures are now non-fatal `PrecompileHalt`s at the provider level —
+`PrecompileError` is fatal-only; success uses `PrecompileOutput::new`);
+NextBlockEnvAttributes gains `slot_number: None` (post-Amsterdam, N/A to
+Gravity); removed v2.2.0-obsoleted carriers (stateless, ress, mdbx-only
+migrate-v2 subcommand); greth root re-exports updated.
+
+NOT yet done (the verification phase):
+1. `cargo nextest` triage across the workspace (unit/integration tests).
+2. Phase-6 mainnet block-replay state-root parity — the consensus gate.
+3. Author review: pipe-exec engine both-sides merge (tree/mod.rs),
+   GRETH-001 system-tx receipt fallback relocation, rocksdb dup-sort
+   subkey paths (incl. PackedStorageTrieEntry's 33-byte prefix).
+4. Pin fork branches to commit SHAs before any rollout.

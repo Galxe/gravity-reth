@@ -19,9 +19,8 @@ use reth_db_api::{
 use parking_lot::Mutex;
 use reth_primitives_traits::Account;
 use reth_provider::{PersistBlockCache, ProviderError, ProviderResult};
-use reth_trie::nested_trie::DatabaseError;
 use reth_trie::{
-    nested_trie::{Node, Trie, TrieReader, MIN_PARALLEL_NODES},
+    nested_trie::{DatabaseError, Node, Trie, TrieReader, MIN_PARALLEL_NODES},
     AccountProof, HashedPostState, HashedStorage, MultiProofTargets, Nibbles, StorageTrieUpdatesV2,
     StoredNibbles, StoredNibblesSubKey, EMPTY_ROOT_HASH,
 };
@@ -325,7 +324,14 @@ where
                                     .as_ref()
                                     .map(|s| s.storage.len() > MIN_PARALLEL_NODES)
                                     .unwrap_or(false);
-                                let mut storage_trie = Trie::new(trie_reader, parallel).map_err(|e| ProviderError::Database(reth_storage_errors::db::DatabaseError::Other(e.to_string())))?;
+                                let mut storage_trie =
+                                    Trie::new(trie_reader, parallel).map_err(|e| {
+                                        ProviderError::Database(
+                                            reth_storage_errors::db::DatabaseError::Other(
+                                                e.to_string(),
+                                            ),
+                                        )
+                                    })?;
                                 if let Some(storage) = storage {
                                     for (hashed_slot, value) in storage.storage {
                                         let nibbles = Nibbles::unpack(hashed_slot);
@@ -340,7 +346,14 @@ where
                                     }
                                 }
                                 storage_trie
-                                    .parallel_update(updated_storage_nodes, create_reader).map_err(|e| ProviderError::Database(reth_storage_errors::db::DatabaseError::Other(e.to_string())))?;
+                                    .parallel_update(updated_storage_nodes, create_reader)
+                                    .map_err(|e| {
+                                        ProviderError::Database(
+                                            reth_storage_errors::db::DatabaseError::Other(
+                                                e.to_string(),
+                                            ),
+                                        )
+                                    })?;
                                 let account = account.into_trie_account(storage_trie.hash());
                                 updated_account_nodes.push((
                                     path,
@@ -391,8 +404,15 @@ where
             Ok(AccountTrieReader(cursor, self.cache.clone()))
         };
         let cursor = self.tx.cursor_read::<tables::AccountsTrieV2>()?;
-        let mut account_trie = Trie::new(AccountTrieReader(cursor, self.cache.clone()), true).map_err(|e| ProviderError::Database(reth_storage_errors::db::DatabaseError::Other(e.to_string())))?;
-        account_trie.parallel_update(updated_account_nodes, create_reader).map_err(|e| ProviderError::Database(reth_storage_errors::db::DatabaseError::Other(e.to_string())))?;
+        let mut account_trie = Trie::new(AccountTrieReader(cursor, self.cache.clone()), true)
+            .map_err(|e| {
+                ProviderError::Database(reth_storage_errors::db::DatabaseError::Other(
+                    e.to_string(),
+                ))
+            })?;
+        account_trie.parallel_update(updated_account_nodes, create_reader).map_err(|e| {
+            ProviderError::Database(reth_storage_errors::db::DatabaseError::Other(e.to_string()))
+        })?;
 
         let root_hash = account_trie.hash();
         if need_update {

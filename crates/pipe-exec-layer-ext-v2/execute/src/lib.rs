@@ -28,7 +28,7 @@ use gravity_primitives::get_gravity_config;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chain_state::ExecutedBlock;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
-use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
+use reth_ethereum_primitives::{Block, BlockBody, EthPrimitives, Receipt, TransactionSigned};
 use reth_evm::{
     execute::BlockExecutionError, precompiles::DynPrecompile, ConfigureEvm, IntoTxEnv,
     NextBlockEnvAttributes, ParallelDatabase,
@@ -39,11 +39,9 @@ use reth_pipe_exec_layer_event_bus::{
     MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus, WaitForPersistenceEvent,
     PIPE_EXEC_LAYER_EVENT_BUS,
 };
-use reth_ethereum_primitives::EthPrimitives;
-use reth_primitives_traits::Recovered;
 use reth_primitives_traits::{
     proofs::{self},
-    Block as _, RecoveredBlock,
+    Block as _, Recovered, RecoveredBlock,
 };
 use reth_provider::{OriginalValuesKnown, PersistBlockCache, PERSIST_BLOCK_CACHE};
 use reth_rpc_eth_api::RpcTypes;
@@ -930,6 +928,8 @@ impl<Storage: GravityStorage> Core<Storage> {
                     parent_beacon_block_root: Some(ordered_block.parent_id),
                     withdrawals: Some(ordered_block.withdrawals.clone()),
                     extra_data: Default::default(),
+                    // Post-Amsterdam payload slot; not applicable to Gravity blocks.
+                    slot_number: None,
                 },
             )
             .unwrap();
@@ -1064,11 +1064,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     /// Calculate the receipts root, logs bloom, and transactions root, etc. and fill them into the
     /// block header.
-    fn calculate_roots(
-        &self,
-        block: &mut Block,
-        execution_output: &BlockExecutionOutput<Receipt>,
-    ) {
+    fn calculate_roots(&self, block: &mut Block, execution_output: &BlockExecutionOutput<Receipt>) {
         // only determine cancun fields when active
         if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
             block.header.requests_hash = Some(execution_output.requests.requests_hash());
@@ -1080,10 +1076,13 @@ impl<Storage: GravityStorage> Core<Storage> {
         if self.chain_spec.is_byzantium_active_at_block(block.number()) {
             block.header.receipts_root =
                 Receipt::calculate_receipt_root_no_memo(&execution_output.result.receipts);
-            block.header.logs_bloom =
-                alloy_primitives::logs_bloom(
-                    execution_output.result.receipts.iter().flat_map(|r| r.logs.iter().map(|l| l.as_ref()))
-                );
+            block.header.logs_bloom = alloy_primitives::logs_bloom(
+                execution_output
+                    .result
+                    .receipts
+                    .iter()
+                    .flat_map(|r| r.logs.iter().map(|l| l.as_ref())),
+            );
         }
     }
 

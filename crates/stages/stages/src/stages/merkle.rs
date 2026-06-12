@@ -219,10 +219,8 @@ where
                 provider.count_entries::<tables::HashedStorages>()?)
                 as u64;
 
-            let entities_checkpoint = EntitiesCheckpoint {
-                processed: total_hashed_entries,
-                total: total_hashed_entries,
-            };
+            let entities_checkpoint =
+                EntitiesCheckpoint { processed: total_hashed_entries, total: total_hashed_entries };
 
             (final_root, entities_checkpoint)
         };

@@ -1,8 +1,7 @@
 //! Traits for parallel execution of EVM blocks.
 
+use alloc::{sync::Arc, vec::Vec};
 use core::marker::PhantomData;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use crate::execute::Executor;
 use alloy_evm::{precompiles::DynPrecompile, Database, EvmEnv};

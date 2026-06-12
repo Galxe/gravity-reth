@@ -4,7 +4,9 @@ use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::BlockHeader;
 use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
 use alloy_evm::{
-    block::{calc, BlockExecutorFactory, StateChangePostBlockSource, StateChangeSource, SystemCaller},
+    block::{
+        calc, BlockExecutorFactory, StateChangePostBlockSource, StateChangeSource, SystemCaller,
+    },
     eth::{dao_fork, eip6110, spec::EthExecutorSpec},
     precompiles::DynPrecompile,
     EvmEnv, EvmFactory,
@@ -51,7 +53,18 @@ pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
 
 impl<DB, EvmConfig, ChainSpec> GrevmExecutor<DB, EvmConfig, ChainSpec>
 where
-    EvmConfig: Clone + ConfigureEvm<Primitives = EthPrimitives, BlockExecutorFactory: BlockExecutorFactory<EvmFactory: EvmFactory<Spec = SpecId, Tx = TxEnv, HaltReason = HaltReason, BlockEnv = BlockEnv>>>,
+    EvmConfig: Clone
+        + ConfigureEvm<
+            Primitives = EthPrimitives,
+            BlockExecutorFactory: BlockExecutorFactory<
+                EvmFactory: EvmFactory<
+                    Spec = SpecId,
+                    Tx = TxEnv,
+                    HaltReason = HaltReason,
+                    BlockEnv = BlockEnv,
+                >,
+            >,
+        >,
     DB: ParallelDatabase,
     ChainSpec: EthExecutorSpec + EthChainSpec + Hardforks + 'static,
 {
@@ -208,7 +221,12 @@ where
     EvmConfig: ConfigureEvm<
         Primitives = EthPrimitives,
         BlockExecutorFactory: BlockExecutorFactory<
-            EvmFactory: EvmFactory<Spec = SpecId, Tx = TxEnv, HaltReason = HaltReason, BlockEnv = BlockEnv>,
+            EvmFactory: EvmFactory<
+                Spec = SpecId,
+                Tx = TxEnv,
+                HaltReason = HaltReason,
+                BlockEnv = BlockEnv,
+            >,
         >,
     >,
     DB: ParallelDatabase,

@@ -9,7 +9,9 @@ use reth_db_api::{
 };
 use reth_etl::Collector;
 use reth_primitives_traits::Account;
-use reth_provider::{AccountExtReader, DBProvider, HashingWriter, StorageSettingsCache, StatsReader};
+use reth_provider::{
+    AccountExtReader, DBProvider, HashingWriter, StatsReader, StorageSettingsCache,
+};
 use reth_stages_api::{
     AccountHashingCheckpoint, BlockRangeOutput, EntitiesCheckpoint, ExecInput, ExecOutput, Stage,
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,

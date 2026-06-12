@@ -300,8 +300,8 @@ pub mod test_utils {
     pub fn create_test_rw_db_with_path<P: AsRef<Path>>(path: P) -> Arc<TempDatabase<DatabaseEnv>> {
         let path = path.as_ref().to_path_buf();
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
-        let db = init_db(path.as_path(), DatabaseArguments::new(ClientVersion::default()))
-            .expect(&emsg);
+        let db =
+            init_db(path.as_path(), DatabaseArguments::new(ClientVersion::default())).expect(&emsg);
         Arc::new(TempDatabase::new(db, path))
     }
 

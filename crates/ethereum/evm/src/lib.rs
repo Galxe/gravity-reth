@@ -79,7 +79,6 @@ pub mod execute {
 
 pub mod parallel_execute;
 
-
 mod build;
 pub use build::EthBlockAssembler;
 
@@ -176,7 +175,6 @@ where
             self.chain_spec().blob_params_at_timestamp(header.timestamp),
         ))
     }
-
 
     fn next_evm_env(
         &self,

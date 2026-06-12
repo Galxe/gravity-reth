@@ -1,6 +1,9 @@
 //! Implements [`Compress`] and [`Decompress`] for [`IntegerList`]
 
-use crate::{table::{Compress, Decompress}, DatabaseError};
+use crate::{
+    table::{Compress, Decompress},
+    DatabaseError,
+};
 use bytes::BufMut;
 use core::fmt;
 use derive_more::Deref;

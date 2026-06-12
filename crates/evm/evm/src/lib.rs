@@ -80,7 +80,6 @@ impl<T> ParallelDatabase for T where
 {
 }
 
-
 /// A complete configuration of EVM for Reth.
 ///
 /// This trait encapsulates complete configuration required for transaction execution and block

@@ -28,7 +28,6 @@ use reth_transaction_pool::TransactionPool;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     fs,
-
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -430,7 +429,6 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
         let header = provider
             .header_by_number(head)?
             .expect("the header for the latest block is missing, database is corrupt");
-
 
         let hash = provider
             .block_hash(head)?

@@ -1,14 +1,13 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
+use crate::SubkeyContainedValue;
 use alloy_primitives::{keccak256, Bytes, B256};
-use alloy_rlp::{length_of_length, BufMut, Encodable, Header, EMPTY_STRING_CODE};
+use alloy_rlp::{bytes::BytesMut, length_of_length, BufMut, Encodable, Header, EMPTY_STRING_CODE};
 use alloy_trie::{
     nodes::{encode_path_leaf, BranchNode, ExtensionNode, LeafNode, RlpNode, TrieNode},
     BranchNodeCompact, TrieMask,
 };
-use alloy_rlp::bytes::BytesMut;
 use nybbles::Nibbles;
-use crate::SubkeyContainedValue;
 
 use crate::StoredNibblesSubKey;
 

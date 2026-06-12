@@ -6,7 +6,7 @@
 
 use alloy_primitives::Bytes;
 use reth_evm::precompiles::{DynPrecompile, PrecompileInput};
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::warn;
 
 /// BLS12-381 public key size in bytes (G1 point, compressed)
@@ -80,8 +80,13 @@ pub fn bls_pop_verify_handler_raw(data: &[u8]) -> PrecompileResult {
             expected = EXPECTED_INPUT_LEN,
             "Invalid input length"
         );
-        return Err(PrecompileError::Other(
-            format!("expected exactly {} bytes, got {}", EXPECTED_INPUT_LEN, data.len()).into(),
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other(format!(
+                "expected exactly {} bytes, got {}",
+                EXPECTED_INPUT_LEN,
+                data.len()
+            )),
+            0,
         ));
     }
 
@@ -98,12 +103,7 @@ pub fn bls_pop_verify_handler_raw(data: &[u8]) -> PrecompileResult {
         output[31] = 1;
     }
 
-    Ok(PrecompileOutput {
-        gas_used: POP_VERIFY_GAS,
-        gas_refunded: 0,
-        bytes: Bytes::copy_from_slice(&output),
-        reverted: false,
-    })
+    Ok(PrecompileOutput::new(POP_VERIFY_GAS, Bytes::copy_from_slice(&output), 0))
 }
 
 /// Verify BLS12-381 proof-of-possession using the `blst` crate.

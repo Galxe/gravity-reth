@@ -154,7 +154,6 @@ impl Command {
         Ok(table)
     }
 
-
     fn static_files_stats_table<N: NodePrimitives>(
         &self,
         data_dir: ChainPath<DataDirPath>,

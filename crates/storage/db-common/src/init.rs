@@ -29,10 +29,9 @@ use reth_provider::{
     errors::provider::ProviderResult, providers::StaticFileWriter, BlockHashReader, BlockNumReader,
     BundleStateInit, ChainSpecProvider, DBProvider, DatabaseProviderFactory, EitherWriter,
     ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter, NodePrimitivesProvider,
-    OriginalValuesKnown, ProviderError, RevertsInit,
-    RocksDBProviderFactory, StageCheckpointReader, StageCheckpointWriter, StateWriteConfig,
-    StateWriter, StaticFileProviderFactory, StorageSettings, StorageSettingsCache, TrieWriter,
-    TrieWriterV2,
+    OriginalValuesKnown, ProviderError, RevertsInit, RocksDBProviderFactory, StageCheckpointReader,
+    StageCheckpointWriter, StateWriteConfig, StateWriter, StaticFileProviderFactory,
+    StorageSettings, StorageSettingsCache, TrieWriter, TrieWriterV2,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;

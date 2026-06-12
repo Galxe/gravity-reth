@@ -28,15 +28,15 @@ use reth_engine_primitives::{
     SlowBlockInfo,
 };
 use reth_errors::{ConsensusError, ProviderResult};
-use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_evm::ConfigureEvm;
+use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 use reth_payload_primitives::{BuiltPayload, NewPayloadError, PayloadTypes};
-use reth_primitives_traits::{
-    FastInstant as Instant, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
-};
 use reth_pipe_exec_layer_event_bus::{
     get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, WaitForPersistenceEvent,
+};
+use reth_primitives_traits::{
+    FastInstant as Instant, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
 };
 use reth_provider::{
     BlockReader, ChangeSetReader, DatabaseProviderFactory, HashedPostStateProvider, ProviderError,
@@ -465,8 +465,10 @@ where
         changeset_cache: ChangesetCache,
         runtime: reth_tasks::Runtime,
         use_hashed_state: bool,
-    ) -> (crossbeam_channel::Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>, UnboundedReceiver<EngineApiEvent<N>>)
-    {
+    ) -> (
+        crossbeam_channel::Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>,
+        UnboundedReceiver<EngineApiEvent<N>>,
+    ) {
         let best_block_number = provider.best_block_number().unwrap_or(0);
         let header = provider.sealed_header(best_block_number).ok().flatten().unwrap_or_default();
 
@@ -594,7 +596,9 @@ where
     }
 
     /// Returns a new [`Sender`] to send messages to this type.
-    pub fn sender(&self) -> crossbeam_channel::Sender<FromEngine<EngineApiRequest<T, N>, N::Block>> {
+    pub fn sender(
+        &self,
+    ) -> crossbeam_channel::Sender<FromEngine<EngineApiRequest<T, N>, N::Block>> {
         self.incoming_tx.clone()
     }
 
@@ -3551,7 +3555,6 @@ enum PersistTarget {
     /// Persist all blocks up to and including the canonical head.
     Head,
 }
-
 
 /// Result of waiting for caches to become available.
 #[derive(Debug, Clone, Copy, Default)]

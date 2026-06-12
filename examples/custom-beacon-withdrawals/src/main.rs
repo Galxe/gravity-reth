@@ -133,6 +133,18 @@ impl ConfigureEvm for CustomEvmConfig {
         self
     }
 
+    fn parallel_executor<'a, DB: reth_ethereum::evm::primitives::ParallelDatabase + 'a>(
+        &self,
+        _db: DB,
+    ) -> Box<
+        dyn reth_ethereum::evm::primitives::parallel_execute::ParallelExecutor<
+                Primitives = Self::Primitives,
+                Error = BlockExecutionError,
+            > + 'a,
+    > {
+        unimplemented!("parallel execution is not used by this example")
+    }
+
     fn block_assembler(&self) -> &Self::BlockAssembler {
         self.inner.block_assembler()
     }

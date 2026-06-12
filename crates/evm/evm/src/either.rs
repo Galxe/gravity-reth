@@ -1,7 +1,7 @@
 //! Helper type that represents one of two possible executor types
 
-use alloc::vec::Vec;
 use crate::{execute::Executor, Database, OnStateHook};
+use alloc::vec::Vec;
 
 use alloy_evm::{precompiles::DynPrecompile, EvmEnv};
 use alloy_primitives::Address;

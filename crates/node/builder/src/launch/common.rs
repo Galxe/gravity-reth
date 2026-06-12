@@ -76,7 +76,6 @@ use reth_provider::{
     ProviderFactory, ProviderResult, StageCheckpointReader, StateProviderFactory,
     StaticFileProviderFactory,
 };
-use reth_trie_db::ChangesetCache;
 use reth_prune::{PruneModes, PrunerBuilder};
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_layer::JwtSecret;
@@ -88,6 +87,7 @@ use reth_static_file::StaticFileProducer;
 use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::{debug, error, info, warn};
 use reth_transaction_pool::TransactionPool;
+use reth_trie_db::ChangesetCache;
 use std::{num::NonZeroUsize, sync::Arc, thread::available_parallelism, time::Duration};
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedSender},
@@ -568,9 +568,9 @@ where
                 let (_, result) = pipeline.run_as_fut(Some(unwind_target)).await;
                 let _ = tx.send(result);
             });
-            rx.await?.inspect_err(|err| {
-                error!(target: "reth::cli", %unwind_target, %err, "failed to run unwind")
-            })?;
+            rx.await?.inspect_err(
+                |err| error!(target: "reth::cli", %unwind_target, %err, "failed to run unwind"),
+            )?;
         }
 
         // In pipe execution mode (disable_pipe_execution = false), we need to recover
