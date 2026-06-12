@@ -379,8 +379,10 @@ where
         self.inner().validator()
     }
 
-    /// Validates the given transaction
-    async fn validate(
+    /// Validates all transactions with their individual origins.
+    ///
+    /// This returns the validated transactions in the same order as input.
+    async fn validate_all_with_origins(
         &self,
         origin: TransactionOrigin,
         transaction: V::Transaction,
@@ -487,7 +489,7 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> PoolResult<TransactionEvents> {
-        let tx = self.validate(origin, transaction).await;
+        let tx = self.validate_all_with_origins(origin, transaction).await;
         self.pool.add_transaction_and_subscribe(origin, tx)
     }
 
@@ -496,7 +498,7 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> PoolResult<AddedTransactionOutcome> {
-        let tx = self.validate(origin, transaction).await;
+        let tx = self.validate_all_with_origins(origin, transaction).await;
         let mut results = self.pool.add_transactions(origin, std::iter::once(tx));
         results.pop().expect("result length is the same as the input")
     }

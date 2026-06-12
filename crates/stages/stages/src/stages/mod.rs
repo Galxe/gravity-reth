@@ -38,6 +38,7 @@ pub use sender_recovery::*;
 pub use tx_lookup::*;
 
 mod utils;
+
 use utils::*;
 
 #[cfg(test)]
@@ -50,7 +51,6 @@ mod tests {
     };
     use alloy_rlp::Decodable;
     use reth_chainspec::ChainSpecBuilder;
-    use reth_db::mdbx::{cursor::Cursor, RW};
     use reth_db_api::{
         cursor::{DbCursorRO, DbCursorRW},
         table::Table,
@@ -196,7 +196,7 @@ mod tests {
                 assert!(acc_indexing_stage.execute(&provider, input).is_err());
             } else {
                 acc_indexing_stage.execute(&provider, input).unwrap();
-                let mut account_history: Cursor<RW, AccountsHistory> =
+                let mut account_history =
                     provider.tx_ref().cursor_read::<tables::AccountsHistory>().unwrap();
                 assert_eq!(account_history.walk(None).unwrap().count(), expect_num_acc_changesets);
             }
@@ -347,7 +347,7 @@ mod tests {
         assert!(matches!(
             db.factory
                 .static_file_provider()
-                .check_consistency(&db.factory.database_provider_ro().unwrap(),),
+                .check_consistency(&db.factory.database_provider_ro().unwrap()),
             Ok(e) if e == expected
         ));
     }

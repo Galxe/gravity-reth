@@ -1,5 +1,5 @@
 use alloy_primitives::Address;
-use reth_primitives_traits::{Account, ValueWithSubKey};
+use reth_primitives_traits::{Account, SubkeyContainedValue, ValueWithSubKey};
 
 /// Account as it is saved in the database.
 ///
@@ -20,6 +20,12 @@ impl ValueWithSubKey for AccountBeforeTx {
 
     fn get_subkey(&self) -> Self::SubKey {
         self.address
+    }
+}
+
+impl SubkeyContainedValue for AccountBeforeTx {
+    fn subkey_length(&self) -> Option<usize> {
+        Some(20)
     }
 }
 

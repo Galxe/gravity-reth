@@ -27,28 +27,25 @@ use reth_primitives_traits::{
 };
 use reth_provider::{
     errors::provider::ProviderResult, providers::StaticFileWriter, BlockHashReader, BlockNumReader,
-    BundleStateInit, ChainSpecProvider, DBProvider, DatabaseProviderFactory, ExecutionOutcome,
-    HashingWriter, HeaderProvider, HistoryWriter, MetadataProvider, MetadataWriter,
-    NodePrimitivesProvider, OriginalValuesKnown, ProviderError, RevertsInit,
+    BundleStateInit, ChainSpecProvider, DBProvider, DatabaseProviderFactory, EitherWriter,
+    ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter, NodePrimitivesProvider,
+    OriginalValuesKnown, ProviderError, RevertsInit,
     RocksDBProviderFactory, StageCheckpointReader, StageCheckpointWriter, StateWriteConfig,
     StateWriter, StaticFileProviderFactory, StorageSettings, StorageSettingsCache, TrieWriter,
+    TrieWriterV2,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_trie::{
-    prefix_set::TriePrefixSets, IntermediateStateRootState, StateRoot as StateRootComputer,
-    StateRootProgress,
+    prefix_set::{TriePrefixSets, TriePrefixSetsMut},
+    HashedPostState, HashedStorage, IntermediateStateRootState, Nibbles,
+    StateRoot as StateRootComputer, StateRootProgress,
 };
 use reth_trie_db::DatabaseStateRoot;
-
-type DbStateRoot<'a, TX, A> = StateRootComputer<
-    reth_trie_db::DatabaseTrieCursorFactory<&'a TX, A>,
-    reth_trie_db::DatabaseHashedCursorFactory<&'a TX>,
->;
-
+use reth_trie_parallel::nested_hash::NestedStateRoot;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace};
 
 pub use reth_provider::init::{
     insert_account_history, insert_genesis_account_history, insert_genesis_history,
@@ -112,8 +109,7 @@ where
         + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
         + ChainSpecProvider
         + StageCheckpointReader
-        + BlockNumReader
-        + MetadataProvider
+        + BlockHashReader
         + StorageSettingsCache,
     PF::ProviderRW: StaticFileProviderFactory<Primitives = PF::Primitives>
         + StageCheckpointWriter
@@ -121,8 +117,8 @@ where
         + HeaderProvider
         + HashingWriter
         + StateWriter
+        + TrieWriterV2
         + TrieWriter
-        + MetadataWriter
         + ChainSpecProvider
         + StorageSettingsCache
         + RocksDBProviderFactory
@@ -143,8 +139,7 @@ where
         + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
         + ChainSpecProvider
         + StageCheckpointReader
-        + BlockNumReader
-        + MetadataProvider
+        + BlockHashReader
         + StorageSettingsCache,
     PF::ProviderRW: StaticFileProviderFactory<Primitives = PF::Primitives>
         + StageCheckpointWriter
@@ -152,8 +147,8 @@ where
         + HeaderProvider
         + HashingWriter
         + StateWriter
+        + TrieWriterV2
         + TrieWriter
-        + MetadataWriter
         + ChainSpecProvider
         + StorageSettingsCache
         + RocksDBProviderFactory
@@ -182,16 +177,6 @@ where
                     return Err(InitStorageError::UninitializedDatabase)
                 }
 
-                let stored = factory.storage_settings()?.unwrap_or_else(StorageSettings::v1);
-                if stored != genesis_storage_settings {
-                    warn!(
-                        target: "reth::storage",
-                        ?stored,
-                        requested = ?genesis_storage_settings,
-                        "Storage settings mismatch detected. Using the stored settings from the existing database."
-                    );
-                }
-
                 debug!("Genesis already written, skipping.");
                 return Ok(hash)
             }
@@ -216,29 +201,7 @@ where
 
     // use transaction to insert genesis header
     let provider_rw = factory.database_provider_rw()?;
-
-    // Behaviour reserved only for new nodes should be set in the storage settings.
-    provider_rw.write_storage_settings(genesis_storage_settings)?;
-
-    // For non-zero genesis blocks, set expected_block_start BEFORE insert_genesis_state.
-    // When block_range is None, next_block_number() uses expected_block_start. By default,
-    // expected_block_start comes from find_fixed_range which returns the file range start (0),
-    // not the genesis block number. This would cause increment_block(N) to fail.
-    let static_file_provider = provider_rw.static_file_provider();
-    if genesis_block_number > 0 {
-        if genesis_storage_settings.storage_v2 {
-            static_file_provider
-                .get_writer(genesis_block_number, StaticFileSegment::AccountChangeSets)?
-                .user_header_mut()
-                .set_expected_block_start(genesis_block_number);
-        }
-        if genesis_storage_settings.storage_v2 {
-            static_file_provider
-                .get_writer(genesis_block_number, StaticFileSegment::StorageChangeSets)?
-                .user_header_mut()
-                .set_expected_block_start(genesis_block_number);
-        }
-    }
+    insert_world_trie(&provider_rw, alloc.iter())?;
 
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
     insert_genesis_history(&provider_rw, alloc.iter())?;
@@ -421,6 +384,171 @@ where
     Ok(())
 }
 
+/// Insert the genesis world trie
+pub fn insert_world_trie<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
+) -> ProviderResult<()>
+where
+    Provider: DBProvider<Tx: DbTxMut> + TrieWriterV2,
+{
+    let mut accounts = HashMap::default();
+    let mut storages = HashMap::default();
+
+    for (address, account) in alloc {
+        let hashed_address = keccak256(*address);
+        accounts.insert(hashed_address, Some(Account::from(account)));
+        let mut hashed_storages = HashedStorage::default();
+        if let Some(storage) = account.storage.as_ref() {
+            for (slot, slot_value) in storage.clone() {
+                hashed_storages.storage.insert(keccak256(slot), slot_value.into());
+            }
+        }
+        storages.insert(hashed_address, hashed_storages);
+    }
+    let hashed_state = HashedPostState { accounts, storages };
+    let tx = provider.tx_ref();
+    let nested_hash = NestedStateRoot::new(tx, None);
+    let (root_hash, trie_updates) = nested_hash.calculate(&hashed_state)?;
+
+    provider.write_trie_updatesv2(&trie_updates)?;
+    info!(target: "reth::cli",
+    root_hash=?root_hash,
+    "Inserted world trie");
+    Ok(())
+}
+
+/// Inserts history indices for genesis accounts and storage.
+///
+/// Writes to either MDBX or `RocksDB` based on storage settings configuration,
+/// using [`EitherWriter`] to abstract over the storage backend.
+pub fn insert_genesis_history<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
+) -> ProviderResult<()>
+where
+    Provider: DBProvider<Tx: DbTxMut>
+        + HistoryWriter
+        + ChainSpecProvider
+        + StorageSettingsCache
+        + RocksDBProviderFactory
+        + NodePrimitivesProvider,
+{
+    let genesis_block_number = provider.chain_spec().genesis_header().number();
+    insert_history(provider, alloc, genesis_block_number)
+}
+
+/// Inserts account history indices for genesis accounts.
+pub fn insert_genesis_account_history<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)>,
+) -> ProviderResult<()>
+where
+    Provider: DBProvider<Tx: DbTxMut>
+        + HistoryWriter
+        + ChainSpecProvider
+        + StorageSettingsCache
+        + RocksDBProviderFactory
+        + NodePrimitivesProvider,
+{
+    let genesis_block_number = provider.chain_spec().genesis_header().number();
+    insert_account_history(provider, alloc, genesis_block_number)
+}
+
+/// Inserts storage history indices for genesis accounts.
+pub fn insert_genesis_storage_history<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)>,
+) -> ProviderResult<()>
+where
+    Provider: DBProvider<Tx: DbTxMut>
+        + HistoryWriter
+        + ChainSpecProvider
+        + StorageSettingsCache
+        + RocksDBProviderFactory
+        + NodePrimitivesProvider,
+{
+    let genesis_block_number = provider.chain_spec().genesis_header().number();
+    insert_storage_history(provider, alloc, genesis_block_number)
+}
+
+/// Inserts history indices for genesis accounts and storage.
+///
+/// Writes to either MDBX or `RocksDB` based on storage settings configuration,
+/// using [`EitherWriter`] to abstract over the storage backend.
+pub fn insert_history<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
+    block: u64,
+) -> ProviderResult<()>
+where
+    Provider: DBProvider<Tx: DbTxMut>
+        + HistoryWriter
+        + StorageSettingsCache
+        + RocksDBProviderFactory
+        + NodePrimitivesProvider,
+{
+    insert_account_history(provider, alloc.clone(), block)?;
+    insert_storage_history(provider, alloc, block)?;
+    Ok(())
+}
+
+/// Inserts account history indices at the given block.
+pub fn insert_account_history<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)>,
+    block: u64,
+) -> ProviderResult<()>
+where
+    Provider: DBProvider<Tx: DbTxMut>
+        + HistoryWriter
+        + StorageSettingsCache
+        + RocksDBProviderFactory
+        + NodePrimitivesProvider,
+{
+    provider.with_rocksdb_batch(|batch| {
+        let mut writer = EitherWriter::new_accounts_history(provider, batch)?;
+        let list = BlockNumberList::new([block]).expect("single block always fits");
+        for (addr, _) in alloc {
+            writer.upsert_account_history(ShardedKey::last(*addr), &list)?;
+        }
+        trace!(target: "reth::cli", "Inserted account history");
+        Ok(((), writer.into_raw_rocksdb_batch()))
+    })?;
+
+    Ok(())
+}
+
+/// Inserts storage history indices at the given block.
+pub fn insert_storage_history<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)>,
+    block: u64,
+) -> ProviderResult<()>
+where
+    Provider: DBProvider<Tx: DbTxMut>
+        + HistoryWriter
+        + StorageSettingsCache
+        + RocksDBProviderFactory
+        + NodePrimitivesProvider,
+{
+    provider.with_rocksdb_batch(|batch| {
+        let mut writer = EitherWriter::new_storages_history(provider, batch)?;
+        let list = BlockNumberList::new([block]).expect("single block always fits");
+        for (addr, account) in alloc {
+            if let Some(storage) = &account.storage {
+                for key in storage.keys() {
+                    writer.upsert_storage_history(StorageShardedKey::last(*addr, *key), &list)?;
+                }
+            }
+        }
+        trace!(target: "reth::cli", "Inserted storage history");
+        Ok(((), writer.into_raw_rocksdb_batch()))
+    })?;
+
+    Ok(())
+}
+
 /// Inserts header for the genesis state.
 pub fn insert_genesis_header<Provider, Spec>(
     provider: &Provider,
@@ -441,21 +569,15 @@ where
         Ok(None) | Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, _)) => {
             let difficulty = header.difficulty();
 
-            // For genesis blocks with non-zero block numbers, we need to ensure they are stored
-            // in the correct static file range. We use get_writer() with the genesis block number
-            // to ensure the genesis block is stored in the correct static file range.
             let mut writer = static_file_provider
                 .get_writer(genesis_block_number, StaticFileSegment::Headers)?;
 
-            // For non-zero genesis blocks, we need to set block range to genesis_block_number and
-            // append header without increment block
             if genesis_block_number > 0 {
                 writer
                     .user_header_mut()
                     .set_block_range(genesis_block_number, genesis_block_number);
                 writer.append_header_direct(header, difficulty, &block_hash)?;
             } else {
-                // For zero genesis blocks, use normal append_header
                 writer.append_header(header, &block_hash)?;
             }
         }

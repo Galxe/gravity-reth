@@ -42,6 +42,7 @@ reth-static-file-types.workspace = true
 reth-tasks.workspace = true
 reth-trie = { workspace = true, features = ["metrics"] }
 reth-trie-db = { workspace = true, features = ["metrics"] }
+reth-trie-parallel = { workspace = true, optional = true }
 
 reth-testing-utils = { workspace = true, optional = true }
 
@@ -81,7 +82,6 @@ reth-static-file.workspace = true
 reth-stages-api = { workspace = true, features = ["test-utils"] }
 reth-storage-api.workspace = true
 reth-testing-utils.workspace = true
-reth-trie = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-network-peers.workspace = true
 
@@ -97,6 +97,8 @@ paste.workspace = true
 tempfile.workspace = true
 
 [features]
+default = ["reth-trie-parallel"]
+reth-trie-parallel = ["dep:reth-trie-parallel"]
 test-utils = [
     "reth-network-p2p/test-utils",
     "reth-db/test-utils",

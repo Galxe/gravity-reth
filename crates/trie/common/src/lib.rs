@@ -6,7 +6,7 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -101,3 +101,9 @@ pub mod serde_bincode_compat {
 pub use alloy_trie::{
     nodes::*, proof, BranchNodeCompact, HashBuilder, TrieMask, TrieMaskIter, EMPTY_ROOT_HASH,
 };
+#[cfg(feature = "nested-trie")]
+pub use updates::{StorageTrieUpdatesV2, TrieUpdatesV2};
+
+/// Nested trie for merklization
+#[cfg(feature = "nested-trie")]
+pub mod nested_trie;

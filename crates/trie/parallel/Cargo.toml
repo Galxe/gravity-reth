@@ -37,6 +37,9 @@ thiserror.workspace = true
 derive_more.workspace = true
 rayon.workspace = true
 itertools.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 crossbeam-channel.workspace = true
 crossbeam-utils.workspace = true
 
@@ -59,6 +62,8 @@ reth-trie = { workspace = true, features = ["test-utils"] }
 
 # misc
 rand.workspace = true
+rayon.workspace = true
+criterion.workspace = true
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
@@ -72,6 +77,7 @@ trie-debug = [
     "reth-trie-sparse?/trie-debug",
 ]
 test-utils = [
+    "reth-db-api/test-utils",
     "reth-primitives-traits/test-utils",
     "reth-provider/test-utils",
     "reth-trie-db/test-utils",

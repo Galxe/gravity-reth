@@ -89,15 +89,17 @@ mod block_indices;
 pub use block_indices::*;
 
 #[cfg(feature = "std")]
+mod cache;
+#[cfg(feature = "std")]
+pub use cache::*;
+
+#[cfg(feature = "std")]
 mod block_writer;
 #[cfg(feature = "std")]
 pub use block_writer::*;
 
 mod state_writer;
 pub use state_writer::*;
-
-mod header_sync_gap;
-pub use header_sync_gap::HeaderSyncGapProvider;
 
 #[cfg(feature = "db-api")]
 pub mod metadata;
@@ -107,6 +109,9 @@ pub use metadata::StoragePath;
 pub use metadata::{MetadataProvider, MetadataWriter, StorageSettingsCache};
 #[cfg(feature = "db-api")]
 pub use reth_db_api::models::StorageSettings;
+
+mod header_sync_gap;
+pub use header_sync_gap::HeaderSyncGapProvider;
 
 mod full;
 pub use full::*;

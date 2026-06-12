@@ -34,17 +34,20 @@ use crate::{
     hooks::OnComponentInitializedHook,
     BuilderContext, ExExLauncher, NodeAdapter, PrimitivesTy,
 };
+use alloy_consensus::BlockHeader as _;
 use alloy_eips::eip2124::Head;
 use alloy_primitives::{BlockNumber, B256};
 use eyre::Context;
+use gravity_primitives::get_gravity_config;
 use rayon::ThreadPoolBuilder;
-use reth_chainspec::{Chain, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{Chain, EthChainSpec, EthereumHardfork, EthereumHardforks};
 use reth_config::{config::EtlConfig, PruneConfig};
 use reth_consensus::noop::NoopConsensus;
 use reth_db_api::{database::Database, database_metrics::DatabaseMetrics};
-use reth_db_common::init::{init_genesis_with_settings, InitStorageError};
+use reth_db_common::init::{init_genesis, InitStorageError};
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
 use reth_engine_local::MiningMode;
+use reth_engine_tree::recovery::StorageRecoveryHelper;
 use reth_evm::{noop::NoopEvmConfig, ConfigureEvm};
 use reth_exex::ExExManagerHandle;
 use reth_fs_util as fs;
@@ -65,11 +68,15 @@ use reth_node_metrics::{
     version::VersionInfo,
 };
 use reth_provider::{
-    providers::{NodeTypesForProvider, ProviderNodeTypes, RocksDBProvider, StaticFileProvider},
-    BlockHashReader, BlockNumReader, ProviderError, ProviderFactory, ProviderResult,
-    RocksDBProviderFactory, StageCheckpointReader, StaticFileProviderBuilder,
+    providers::{
+        NodeTypesForProvider, ProviderNodeTypes, RocksDBProvider, StaticFileProvider,
+        StaticFileProviderBuilder,
+    },
+    BlockHashReader, BlockNumReader, BlockReaderIdExt, ChainSpecProvider, ProviderError,
+    ProviderFactory, ProviderResult, StageCheckpointReader, StateProviderFactory,
     StaticFileProviderFactory,
 };
+use reth_trie_db::ChangesetCache;
 use reth_prune::{PruneModes, PrunerBuilder};
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_layer::JwtSecret;
@@ -79,10 +86,7 @@ use reth_stages::{
 };
 use reth_static_file::StaticFileProducer;
 use reth_tasks::TaskExecutor;
-use reth_tracing::{
-    throttle,
-    tracing::{debug, error, info, warn},
-};
+use reth_tracing::tracing::{debug, error, info, warn};
 use reth_transaction_pool::TransactionPool;
 use reth_trie_db::ChangesetCache;
 use std::{num::NonZeroUsize, sync::Arc, thread::available_parallelism, time::Duration};
@@ -515,16 +519,13 @@ where
         .with_changeset_cache(changeset_cache);
 
         // Check consistency between the database and static files, returning
-        // the unwind targets for each storage layer if inconsistencies are
-        // found.
+        // the unwind targets for each storage layer if inconsistencies are found.
         let (rocksdb_unwind, static_file_unwind) = factory.check_consistency()?;
 
         // Take the minimum block number to ensure all storage layers are consistent.
         let unwind_target = [rocksdb_unwind, static_file_unwind].into_iter().flatten().min();
 
         if let Some(unwind_block) = unwind_target {
-            // Highly unlikely to happen, and given its destructive nature, it's better to panic
-            // instead. Unwinding to 0 would leave MDBX with a huge free list size.
             let inconsistency_source = match (rocksdb_unwind, static_file_unwind) {
                 (Some(_), Some(_)) => "RocksDB and static file",
                 (Some(_), None) => "RocksDB",
@@ -538,8 +539,7 @@ where
             );
 
             let unwind_target = PipelineTarget::Unwind(unwind_block);
-
-            info!(target: "reth::cli", %unwind_target, %inconsistency_source, "Executing unwind after consistency check.");
+            info!(target: "reth::cli", %unwind_target, "Executing an unwind after a failed storage consistency check.");
 
             let (_tip_tx, tip_rx) = watch::channel(B256::ZERO);
 
@@ -570,8 +570,15 @@ where
                 let _ = tx.send(result);
             });
             rx.await?.inspect_err(|err| {
-                error!(target: "reth::cli", %unwind_target, %inconsistency_source, %err, "failed to run unwind")
+                error!(target: "reth::cli", %unwind_target, %err, "failed to run unwind")
             })?;
+        }
+
+        // In pipe execution mode (disable_pipe_execution = false), we need to recover
+        // any interrupted block writes from checkpoints
+        if !get_gravity_config().disable_pipe_execution {
+            info!(target: "reth::cli", "Checking for interrupted block writes and recovering if needed");
+            StorageRecoveryHelper::new(&factory).check_and_recover()?;
         }
 
         Ok(factory)
@@ -644,7 +651,20 @@ where
                 },
                 ChainSpecInfo { name: self.chain_id().to_string() },
                 self.task_executor().clone(),
-                metrics_hooks(self.provider_factory()),
+                Hooks::builder()
+                    .with_hook({
+                        let db = self.database().clone();
+                        move || db.report_metrics()
+                    })
+                    .with_hook({
+                        let sfp = self.static_file_provider();
+                        move || {
+                            if let Err(error) = sfp.report_metrics() {
+                                error!(%error, "Failed to report metrics for the static file provider");
+                            }
+                        }
+                    })
+                    .build(),
                 self.data_dir().pprof_dumps(),
             )
             .with_push_gateway(
@@ -660,13 +680,13 @@ where
 
     /// Convenience function to [`Self::init_genesis`]
     pub fn with_genesis(self) -> Result<Self, InitStorageError> {
-        init_genesis_with_settings(self.provider_factory(), self.node_config().storage_settings())?;
+        init_genesis(self.provider_factory())?;
         Ok(self)
     }
 
     /// Write the genesis block and state if it has not already been written
     pub fn init_genesis(&self) -> Result<B256, InitStorageError> {
-        init_genesis_with_settings(self.provider_factory(), self.node_config().storage_settings())
+        init_genesis(self.provider_factory())
     }
 
     /// Creates a new `WithMeteredProvider` container and attaches it to the
@@ -1002,6 +1022,41 @@ where
         Ok(None)
     }
 
+    /// Expire the pre-merge transactions if the node is configured to do so and the chain has a
+    /// merge block.
+    ///
+    /// If the node is configured to prune pre-merge transactions and it has synced past the merge
+    /// block, it will delete the pre-merge transaction static files if they still exist.
+    pub fn expire_pre_merge_transactions(&self) -> eyre::Result<()>
+    where
+        T: FullNodeTypes<Provider: StaticFileProviderFactory>,
+    {
+        use reth_provider::StaticFileSegment;
+
+        if self.node_config().pruning.bodies_pre_merge &&
+            let Some(merge_block) = self
+                .chain_spec()
+                .ethereum_fork_activation(EthereumHardfork::Paris)
+                .block_number()
+        {
+            // Ensure we only expire transactions after we synced past the merge block.
+            let Some(latest) = self.blockchain_db().latest_header()? else { return Ok(()) };
+            if latest.number() > merge_block {
+                let provider = self.blockchain_db().static_file_provider();
+                if provider
+                    .get_lowest_range_start(StaticFileSegment::Transactions)
+                    .is_some_and(|lowest| lowest < merge_block)
+                {
+                    info!(target: "reth::cli", merge_block, "Pre-merge transaction expiry configured but not yet supported after v1.11.3 merge");
+                } else {
+                    debug!(target: "reth::cli", merge_block, "No pre-merge transactions to expire");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Returns the metrics sender.
     pub fn sync_metrics_tx(&self) -> UnboundedSender<MetricEvent> {
         self.right().db_provider_container.metrics_sender.clone()
@@ -1049,6 +1104,8 @@ where
             installed_exex,
             self.configs().clone(),
         )
+        .launch()
+        .await
     }
 
     /// Creates the ERA import source based on node configuration.
@@ -1109,7 +1166,7 @@ where
 
         let ethstats = EthStatsService::new(url, network, provider, pool).await?;
 
-        // If engine events are provided, spawn listener for new payload reporting
+        // Spawn listener for new payload reporting
         let ethstats_for_events = ethstats.clone();
         let task_executor = self.task_executor().clone();
         task_executor.spawn_task(async move {
@@ -1130,9 +1187,7 @@ where
                             );
                         }
                     }
-                    _ => {
-                        // Ignore other event types for ethstats reporting
-                    }
+                    _ => {}
                 }
             }
         });
@@ -1142,6 +1197,19 @@ where
 
         Ok(())
     }
+}
+
+impl<T, CB>
+    LaunchContextWith<
+        Attached<WithConfigs<<T::Types as NodeTypes>::ChainSpec>, WithComponents<T, CB>>,
+    >
+where
+    T: FullNodeTypes<
+        Provider: StateProviderFactory + ChainSpecProvider,
+        Types: NodeTypesForProvider,
+    >,
+    CB: NodeComponentsBuilder<T>,
+{
 }
 
 /// Joins two attachments together, preserving access to both values.
@@ -1250,21 +1318,15 @@ pub fn metrics_hooks<N: NodeTypesWithDB>(provider_factory: &ProviderFactory<N>) 
     Hooks::builder()
         .with_hook({
             let db = provider_factory.db_ref().clone();
-            move || throttle!(Duration::from_secs(5 * 60), || db.report_metrics())
+            move || db.report_metrics()
         })
         .with_hook({
             let sfp = provider_factory.static_file_provider();
             move || {
-                throttle!(Duration::from_secs(5 * 60), || {
-                    if let Err(error) = sfp.report_metrics() {
-                        error!(%error, "Failed to report metrics from static file provider");
-                    }
-                })
+                if let Err(error) = sfp.report_metrics() {
+                    error!(%error, "Failed to report metrics from static file provider");
+                }
             }
-        })
-        .with_hook({
-            let rocksdb = provider_factory.rocksdb_provider();
-            move || throttle!(Duration::from_secs(5 * 60), || rocksdb.report_metrics())
         })
         .build()
 }

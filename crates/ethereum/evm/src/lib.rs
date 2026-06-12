@@ -17,43 +17,55 @@
 
 extern crate alloc;
 
-use alloc::{borrow::Cow, sync::Arc};
+use crate::parallel_execute::GrevmExecutor;
+use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::Header;
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
-    EthEvmFactory, FromRecoveredTx, FromTxWithEncoded,
+    precompiles::DynPrecompile,
+    EthEvmFactory,
 };
+use alloy_primitives::{Address, Bytes, U256};
+use alloy_rpc_types_engine::ExecutionData;
 use core::{convert::Infallible, fmt::Debug};
-use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
-use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
+use gravity_primitives::get_gravity_config;
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
+use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
-    eth::NextEvmEnvAttributes, precompiles::PrecompilesMap, ConfigureEvm, EvmEnv, EvmFactory,
-    NextBlockEnvAttributes, TransactionEnvMut,
+    eth::NextEvmEnvAttributes,
+    execute::{BasicBlockExecutor, BlockExecutionError},
+    parallel_execute::{ParallelExecutor, WrapExecutor},
+    precompiles::PrecompilesMap,
+    ConfigureEvm, EvmEnv, EvmEnvFor, EvmFactory, ExecutionCtxFor, NextBlockEnvAttributes,
+    ParallelDatabase,
 };
-use reth_primitives_traits::{SealedBlock, SealedHeader};
-use revm::{context::BlockEnv, primitives::hardfork::SpecId};
+use reth_primitives_traits::{
+    constants::MAX_TX_GAS_LIMIT_OSAKA, SealedBlock, SealedHeader, SignedTransaction, TxTy,
+};
+use reth_storage_errors::any::AnyError;
+use revm::{
+    context::{
+        result::{ExecutionResult, HaltReason},
+        BlockEnv, CfgEnv,
+    },
+    context_interface::block::BlobExcessGasAndPrice,
+    database::{State, WrapDatabaseRef},
+    primitives::hardfork::SpecId,
+};
 
 #[cfg(feature = "std")]
 use reth_evm::{ConfigureEngineEvm, ExecutableTxIterator};
+
 #[allow(unused_imports)]
-use {
-    alloy_eips::Decodable2718,
-    alloy_primitives::{Bytes, U256},
-    alloy_rpc_types_engine::ExecutionData,
-    reth_chainspec::EthereumHardforks,
-    reth_evm::{EvmEnvFor, ExecutionCtxFor},
-    reth_primitives_traits::{constants::MAX_TX_GAS_LIMIT_OSAKA, SignedTransaction, TxTy},
-    reth_storage_errors::any::AnyError,
-    revm::context::CfgEnv,
-    revm::context_interface::block::BlobExcessGasAndPrice,
-};
+use alloy_eips::Decodable2718;
 
 pub use alloy_evm::EthEvm;
 
 mod config;
-use alloy_evm::eth::spec::EthExecutorSpec;
+use alloy_evm::{eth::spec::EthExecutorSpec, Database, Evm};
 pub use config::{revm_spec, revm_spec_by_timestamp_and_block_number};
 use reth_ethereum_forks::Hardforks;
+use revm::{context::TxEnv, DatabaseCommit};
 
 /// Helper type with backwards compatible methods to obtain Ethereum executor
 /// providers.
@@ -64,6 +76,9 @@ pub mod execute {
     #[deprecated(note = "Use `EthEvmConfig` instead")]
     pub type EthExecutorProvider = EthEvmConfig;
 }
+
+pub mod parallel_execute;
+
 
 mod build;
 pub use build::EthBlockAssembler;
@@ -127,9 +142,8 @@ impl<ChainSpec, EvmF> ConfigureEvm for EthEvmConfig<ChainSpec, EvmF>
 where
     ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
     EvmF: EvmFactory<
-            Tx: TransactionEnvMut
-                    + FromRecoveredTx<TransactionSigned>
-                    + FromTxWithEncoded<TransactionSigned>,
+            Tx = TxEnv,
+            HaltReason = HaltReason,
             Spec = SpecId,
             BlockEnv = BlockEnv,
             Precompiles = PrecompilesMap,
@@ -162,6 +176,7 @@ where
             self.chain_spec().blob_params_at_timestamp(header.timestamp),
         ))
     }
+
 
     fn next_evm_env(
         &self,
@@ -214,6 +229,39 @@ where
             slot_number: attributes.slot_number,
         })
     }
+
+    fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+    ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
+    {
+        if get_gravity_config().disable_grevm {
+            Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
+        } else {
+            Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
+        }
+    }
+
+    fn transact_system_txn<DB: Database>(
+        &self,
+        db: &mut State<DB>,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
+        let (execution_result, evm_state) = {
+            let mut evm = self.evm_with_env(&mut *db, evm_env);
+            for (addr, precompile) in precompiles {
+                Evm::precompiles_mut(&mut evm).apply_precompile(&addr, move |_| Some(precompile));
+            }
+            let result = Evm::transact_raw(&mut evm, tx_env).map_err(|e| {
+                BlockExecutionError::msg(alloc::format!("system txn execution failed: {e:?}"))
+            })?;
+            (result.result, result.state)
+        };
+        db.commit(evm_state);
+        Ok(execution_result)
+    }
 }
 
 #[cfg(feature = "std")]
@@ -221,9 +269,8 @@ impl<ChainSpec, EvmF> ConfigureEngineEvm<ExecutionData> for EthEvmConfig<ChainSp
 where
     ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
     EvmF: EvmFactory<
-            Tx: TransactionEnvMut
-                    + FromRecoveredTx<TransactionSigned>
-                    + FromTxWithEncoded<TransactionSigned>,
+            Tx = TxEnv,
+            HaltReason = HaltReason,
             Spec = SpecId,
             BlockEnv = BlockEnv,
             Precompiles = PrecompilesMap,

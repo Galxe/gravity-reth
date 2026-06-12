@@ -175,6 +175,7 @@ impl<N: NodePrimitives> StorageRootProvider for MemoryOverlayStateProviderRef<'_
         let merged = self.merged_hashed_storage(address, storage);
         self.historical.storage_multiproof(address, slots, merged)
     }
+
 }
 
 impl<N: NodePrimitives> StateProofProvider for MemoryOverlayStateProviderRef<'_, N> {

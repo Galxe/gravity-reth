@@ -465,7 +465,6 @@ impl NetworkArgs {
             bootnodes.into_iter().filter_map(|node| node.resolve_blocking().ok()).collect()
         })
     }
-
     /// Returns the max inbound peers (2:1 ratio).
     pub fn resolved_max_inbound_peers(&self) -> Option<usize> {
         if let Some(max_peers) = self.max_peers {

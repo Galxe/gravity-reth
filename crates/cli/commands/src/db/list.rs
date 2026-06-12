@@ -97,13 +97,14 @@ impl<N: NodeTypes> TableViewer<()> for ListTableViewer<'_, N> {
     type Error = eyre::Report;
 
     fn view<T: Table>(&self) -> Result<(), Self::Error> {
-        self.tool.provider_factory.db_ref().view(|tx| {
+        self.tool.provider_factory.db_ref().view(|tx: &mut <DatabaseEnv as Database>::TX| {
             // We may be using the tui for a long time
             tx.disable_long_read_transaction_safety();
 
-            let table_db = tx.inner().open_db(Some(self.args.table.name())).wrap_err("Could not open db.")?;
-                    let stats = tx.inner().db_stat(table_db.dbi()).wrap_err(format!("Could not find table: {}", self.args.table.name()))?;
-            let total_entries = stats.entries();
+            let total_entries = tx.entries::<T>().wrap_err(format!(
+                "Could not get entry count for table: {}",
+                self.args.table.name()
+            ))?;
             let final_entry_idx = total_entries.saturating_sub(1);
             if self.args.skip > final_entry_idx {
                 error!(
@@ -116,7 +117,6 @@ impl<N: NodeTypes> TableViewer<()> for ListTableViewer<'_, N> {
                 return Ok(())
             }
 
-
             let list_filter = self.args.list_filter()?;
 
             if self.args.json || self.args.count {
@@ -125,7 +125,10 @@ impl<N: NodeTypes> TableViewer<()> for ListTableViewer<'_, N> {
                 if self.args.count {
                     println!("{count} entries found.")
                 } else if self.args.raw {
-                    let list = list.into_iter().map(|row| (row.0, RawValue::new(row.1).into_value())).collect::<Vec<_>>();
+                    let list = list
+                        .into_iter()
+                        .map(|row: (T::Key, T::Value)| (row.0, RawValue::new(row.1).into_value()))
+                        .collect::<Vec<_>>();
                     println!("{}", serde_json::to_string_pretty(&list)?);
                 } else {
                     println!("{}", serde_json::to_string_pretty(&list)?);

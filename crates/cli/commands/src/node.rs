@@ -2,6 +2,7 @@
 
 use crate::launcher::Launcher;
 use clap::{value_parser, Args, Parser};
+use gravity_primitives::init_gravity_config;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_runner::CliContext;
@@ -9,7 +10,7 @@ use reth_db::init_db;
 use reth_node_builder::NodeBuilder;
 use reth_node_core::{
     args::{
-        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, EraArgs, MetricArgs,
+        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, EraArgs, GravityArgs, MetricArgs,
         NetworkArgs, PayloadBuilderArgs, PruningArgs, RpcServerArgs, StaticFilesArgs, StorageArgs,
         TxPoolArgs,
     },
@@ -103,6 +104,10 @@ pub struct NodeCommand<C: ChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs
     #[command(flatten)]
     pub pruning: PruningArgs,
 
+    /// All gravity related arguments
+    #[command(flatten)]
+    pub gravity: GravityArgs,
+
     /// Engine cli arguments
     #[command(flatten, next_help_heading = "Engine")]
     pub engine: EngineArgs,
@@ -173,12 +178,17 @@ where
             pruning,
             engine,
             era,
+            gravity,
             static_files,
             storage,
             ext,
         } = self;
 
         engine.validate()?;
+        // Initialize global gravity config
+        let gravity_config = gravity.to_config();
+        tracing::info!(target: "reth::cli", gravity_config = ?gravity_config, "Initializing global gravity config");
+        init_gravity_config(gravity_config);
 
         // set up node config
         let mut node_config = NodeConfig {
@@ -197,6 +207,7 @@ where
             pruning,
             engine,
             era,
+            gravity,
             static_files,
             storage,
         };
@@ -205,7 +216,7 @@ where
         let db_path = data_dir.db();
 
         tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
-        let database = init_db(db_path.clone(), self.db.database_args())?.with_metrics();
+        let database = init_db(db_path.clone(), db.database_args())?;
 
         if with_unused_ports {
             node_config = node_config.with_unused_ports();
@@ -225,7 +236,6 @@ impl<C: ChainSpecParser, Ext: clap::Args + fmt::Debug> NodeCommand<C, Ext> {
         Some(&self.chain)
     }
 }
-
 /// No Additional arguments
 #[derive(Debug, Clone, Copy, Default, Args)]
 #[non_exhaustive]

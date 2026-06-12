@@ -129,8 +129,15 @@ impl reth_codecs::Compact for StoredNibblesSubKey {
     }
 
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        let len = buf[64] as usize;
-        (Self(Nibbles::from_nibbles_unchecked(&buf[..len])), &buf[65..])
+        let encoded_len = buf[0];
+        let odd = encoded_len.is_multiple_of(2);
+        let pack_len = (encoded_len / 2) as usize;
+        let mut nibbles = Nibbles::unpack(&buf[1..1 + pack_len]);
+        if odd {
+            nibbles.pop();
+        }
+
+        (Self(nibbles), &buf[pack_len + 1..])
     }
 }
 

@@ -52,6 +52,11 @@
 
 // Used in feature flags only (`asm-keccak`, `keccak-cache-global`)
 use alloy_primitives as _;
+// Used transitively by submodules
+use eyre as _;
+use reth_ethereum_primitives as _;
+use reth_tokio_util as _;
+use tokio as _;
 
 pub mod cli;
 

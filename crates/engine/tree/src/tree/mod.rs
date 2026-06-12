@@ -1,3 +1,7 @@
+// !!! GRAVITY-TRANSPLANT: engine/tree pipe-exec integration (gravity-1.11 base).
+// This is the deep, liveness-critical pipe-exec engine loop. Took gravity's 1.11
+// version; the reth 1.11->2.2 engine-tree API delta still needs adaptation +
+// pipe-exec-author review + Phase-6 verification. See conflict-map doc.
 use crate::{
     backfill::{BackfillAction, BackfillSyncState},
     chain::FromOrchestrator,
@@ -11,38 +15,48 @@ use alloy_primitives::B256;
 use alloy_rpc_types_engine::{
     ForkchoiceState, PayloadStatus, PayloadStatusEnum, PayloadValidationError,
 };
-use error::{InsertBlockError, InsertBlockFatalError, InsertBlockValidationError};
+use error::{InsertBlockError, InsertBlockFatalError};
+use gravity_primitives::get_gravity_config;
 use reth_chain_state::{
-    CanonicalInMemoryState, ComputedTrieData, ExecutedBlock, ExecutionTimingStats,
+    CanonicalInMemoryState, ComputedTrieData, ExecutedBlock,
     MemoryOverlayStateProvider, NewCanonicalChain,
 };
 use reth_consensus::{Consensus, FullConsensus};
 use reth_engine_primitives::{
     BeaconEngineMessage, BeaconOnNewPayloadError, ConsensusEngineEvent, ExecutionPayload,
-    ForkchoiceStateTracker, NewPayloadTimings, OnForkChoiceUpdated, SlowBlockInfo,
+    ForkchoiceStateTracker, ForkchoiceStatus, OnForkChoiceUpdated,
 };
 use reth_errors::{ConsensusError, ProviderResult};
+use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_evm::ConfigureEvm;
 use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 use reth_payload_primitives::{BuiltPayload, NewPayloadError, PayloadTypes};
 use reth_primitives_traits::{
     FastInstant as Instant, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
 };
+use reth_pipe_exec_layer_event_bus::{
+    get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, WaitForPersistenceEvent,
+};
+use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader};
 use reth_provider::{
-    BlockExecutionOutput, BlockExecutionResult, BlockReader, ChangeSetReader,
-    DatabaseProviderFactory, HashedPostStateProvider, ProviderError, StageCheckpointReader,
-    StateProviderBox, StateProviderFactory, StateReader, StorageChangeSetReader,
-    StorageSettingsCache, TransactionVariant,
+    BlockReader, ChangeSetReader, DatabaseProviderFactory, HashedPostStateProvider, ProviderError,
+    StageCheckpointReader, StateProviderBox, StateProviderFactory, StateReader,
+    StorageChangeSetReader, StorageSettingsCache, TransactionVariant,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::ControlFlow;
 use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
 use reth_trie_db::ChangesetCache;
-use revm::interpreter::debug_unreachable;
 use state::TreeState;
-use std::{collections::HashMap, fmt::Debug, ops, sync::Arc, time::Duration};
-
-use crossbeam_channel::{Receiver, Sender};
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    sync::{
+        mpsc::{RecvError, RecvTimeoutError},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     oneshot,
@@ -255,6 +269,23 @@ pub enum TreeAction {
     },
 }
 
+#[derive(Default)]
+struct PersistenceWaiters {
+    /// The block number that the waiters are waiting for.
+    waiters: BTreeMap<u64, oneshot::Sender<()>>,
+}
+
+impl PersistenceWaiters {
+    /// Adds a new waiter for the given block number.
+    fn add_waiter(&mut self, block_number: u64, tx: oneshot::Sender<()>) {
+        self.waiters.insert(block_number, tx);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.waiters.is_empty()
+    }
+}
+
 /// The engine API tree handler implementation.
 ///
 /// This type is responsible for processing engine API requests, maintaining the canonical state and
@@ -278,9 +309,9 @@ where
     /// them one by one so that we can handle incoming engine API in between and don't become
     /// unresponsive. This can happen during live sync transition where we're trying to close the
     /// gap (up to 3 epochs of blocks in the worst case).
-    incoming_tx: Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>,
+    incoming_tx: crossbeam_channel::Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>,
     /// Incoming engine API requests.
-    incoming: Receiver<FromEngine<EngineApiRequest<T, N>, N::Block>>,
+    incoming: crossbeam_channel::Receiver<FromEngine<EngineApiRequest<T, N>, N::Block>>,
     /// Outgoing events that are emitted to the handler.
     outgoing: UnboundedSender<EngineApiEvent<N>>,
     /// Channels to the persistence layer.
@@ -305,15 +336,10 @@ where
     evm_config: C,
     /// Changeset cache for in-memory trie changesets
     changeset_cache: ChangesetCache,
-    /// Timing statistics for executed blocks, keyed by block hash.
-    /// Stored here (not in `ExecutedBlock`) to avoid leaking observability concerns into the block
-    /// type. Entries are removed when blocks are persisted or invalidated.
-    execution_timing_stats: HashMap<B256, Box<ExecutionTimingStats>>,
-    /// Set when an FCU with payload attributes is received, cleared on the next FCU without.
-    /// Suppresses persistence cycles during payload building.
-    building_payload: bool,
-    /// Task runtime for spawning blocking work on named, reusable threads.
-    runtime: reth_tasks::Runtime,
+    /// Whether the node uses hashed state as canonical storage (v2 mode).
+    use_hashed_state: bool,
+    /// Persistence waiters that are waiting for the block to be persisted.
+    persistence_waiters: PersistenceWaiters,
 }
 
 impl<N, P: Debug, T: PayloadTypes + Debug, V: Debug, C> std::fmt::Debug
@@ -402,9 +428,8 @@ where
             engine_kind,
             evm_config,
             changeset_cache,
-            execution_timing_stats: HashMap::new(),
-            building_payload: false,
-            runtime,
+            use_hashed_state,
+            persistence_waiters: Default::default(),
         }
     }
 
@@ -425,8 +450,8 @@ where
         kind: EngineApiKind,
         evm_config: C,
         changeset_cache: ChangesetCache,
-        runtime: reth_tasks::Runtime,
-    ) -> (Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>, UnboundedReceiver<EngineApiEvent<N>>)
+        use_hashed_state: bool,
+    ) -> (crossbeam_channel::Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>, UnboundedReceiver<EngineApiEvent<N>>)
     {
         let best_block_number = provider.best_block_number().unwrap_or(0);
         let header = provider.sealed_header(best_block_number).ok().flatten().unwrap_or_default();
@@ -469,16 +494,84 @@ where
         (incoming, outgoing)
     }
 
-    /// Returns a [`TreeOutcome`] indicating the forkchoice head is valid and canonical.
-    fn valid_outcome(state: ForkchoiceState) -> TreeOutcome<OnForkChoiceUpdated> {
-        TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::new(
-            PayloadStatusEnum::Valid,
-            Some(state.head_block_hash),
-        )))
+    fn try_recv_pipe_exec_event(
+        &self,
+        event_rx: &std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>,
+    ) -> Result<Option<PipeExecLayerEvent<N>>, RecvError> {
+        if self.persistence_state.in_progress() {
+            // wait for a shorter duration if there are waiters
+            match event_rx.recv_timeout(std::time::Duration::from_millis(
+                if self.persistence_waiters.is_empty() { 500 } else { 10 },
+            )) {
+                Ok(event) => Ok(Some(event)),
+                Err(err) => match err {
+                    RecvTimeoutError::Timeout => Ok(None),
+                    RecvTimeoutError::Disconnected => Err(RecvError),
+                },
+            }
+        } else {
+            event_rx.recv().map(Some)
+        }
+    }
+
+    fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent<N>) {
+        match event {
+            PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }) => {
+                let block_number = executed_block.recovered_block.number();
+                debug!(target: "on_pipe_exec_event",
+                    block_number=%block_number,
+                    block_hash=%executed_block.recovered_block.hash(),
+                    "Received make canonical event");
+                self.make_executed_block_canonical(executed_block);
+                tx.send(()).expect("Failed to send make canonical event");
+            }
+            PipeExecLayerEvent::WaitForPersistence(WaitForPersistenceEvent {
+                block_number,
+                tx,
+            }) => {
+                info!(target: "on_pipe_exec_event",
+                    block_number=%block_number,
+                    "Received wait for persistence event");
+                if self.persistence_state.last_persisted_block.number < block_number {
+                    // The block is not yet persisted, so we add a waiter for the block number
+                    self.persistence_waiters.add_waiter(block_number, tx);
+                } else {
+                    // The block is already persisted, so we can notify the sender immediately
+                    tx.send(()).expect("Failed to send wait for persistence event");
+                }
+            }
+        }
+    }
+
+    fn make_executed_block_canonical(&mut self, block: ExecutedBlock<N>) {
+        let block_number = block.recovered_block.number();
+        let block_hash = block.recovered_block.hash();
+        let sealed_header = block.recovered_block.clone_sealed_header();
+
+        self.state.tree_state.insert_executed(block);
+
+        self.state.forkchoice_state_tracker.set_latest(
+            ForkchoiceState {
+                head_block_hash: block_hash,
+                safe_block_hash: block_hash,
+                finalized_block_hash: block_hash,
+            },
+            ForkchoiceStatus::Valid,
+        );
+
+        self.make_canonical(block_hash).unwrap_or_else(|err| {
+            panic!(
+                "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
+            )
+        });
+
+        // deterministic consensus means canonical block is immediately safe and finalized
+        self.canonical_in_memory_state.set_safe(sealed_header.clone());
+        self.canonical_in_memory_state.set_finalized(sealed_header);
     }
 
     /// Returns a new [`Sender`] to send messages to this type.
-    pub fn sender(&self) -> Sender<FromEngine<EngineApiRequest<T, N>, N::Block>> {
+    pub fn sender(&self) -> crossbeam_channel::Sender<FromEngine<EngineApiRequest<T, N>, N::Block>> {
         self.incoming_tx.clone()
     }
 
@@ -503,7 +596,48 @@ where
     /// Run the engine API handler.
     ///
     /// This will block the current thread and process incoming messages.
-    pub fn run(mut self) {
+    pub fn run(self) {
+        if get_gravity_config().disable_pipe_execution {
+            self.run_inner();
+        } else {
+            self.pipe_run_inner();
+        }
+    }
+
+    fn pipe_run_inner(mut self) {
+        // Safety guard: assert N == EthPrimitives at runtime to prevent silent UB
+        // from the transmute below. This is feasible because NodePrimitives has a
+        // 'static bound, and keeps the reth upstream generic signature chain intact.
+        assert_eq!(
+            std::any::TypeId::of::<N>(),
+            std::any::TypeId::of::<reth_ethereum_primitives::EthPrimitives>(),
+            "pipe_run_inner requires N = EthPrimitives"
+        );
+        let pipe_event_rx =
+            get_pipe_exec_layer_event_bus().event_rx.lock().unwrap().take().unwrap();
+        // Safety: The TypeId assertion above guarantees N == EthPrimitives,
+        // so Receiver<PipeExecLayerEvent<EthPrimitives>> and Receiver<PipeExecLayerEvent<N>>
+        // are the same type at runtime.
+        let pipe_event_rx: std::sync::mpsc::Receiver<PipeExecLayerEvent<N>> =
+            unsafe { std::mem::transmute(pipe_event_rx) };
+        loop {
+            match self.try_recv_pipe_exec_event(&pipe_event_rx) {
+                Ok(Some(event)) => self.on_pipe_exec_event(event),
+                Ok(None) => {}
+                Err(RecvError) => {
+                    error!(target: "engine::tree", "Pipe exec layer channel disconnected");
+                    return
+                }
+            }
+
+            if let Err(err) = self.advance_persistence() {
+                error!(target: "engine::tree", %err, "Advancing persistence failed");
+                return
+            }
+        }
+    }
+
+    fn run_inner(mut self) {
         loop {
             // Each iteration has three phases:
             //
@@ -558,8 +692,8 @@ where
                 LoopEvent::EngineMessage(msg) => {
                     debug!(target: "engine::tree", %msg, "received new engine message");
                     match self.on_engine_message(msg) {
-                        Ok(ops::ControlFlow::Break(())) => return,
-                        Ok(ops::ControlFlow::Continue(())) => {}
+                        Ok(std::ops::ControlFlow::Break(())) => return,
+                        Ok(std::ops::ControlFlow::Continue(())) => {}
                         Err(fatal) => {
                             error!(target: "engine::tree", %fatal, "insert block fatal error");
                             return
@@ -1074,13 +1208,14 @@ where
         &self,
         canonical_header: &SealedHeader<N::BlockHeader>,
     ) -> ProviderResult<()> {
-        // Load the block into memory if it's not already present
-        self.ensure_block_in_memory(canonical_header.number(), canonical_header.hash())?;
+        let new_head_number = canonical_header.number();
+        let new_head_hash = canonical_header.hash();
 
         // Update the canonical head header
         self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
 
-        Ok(())
+        // Load the block into memory if it's not already present
+        self.ensure_block_in_memory(new_head_number, new_head_hash)
     }
 
     /// Ensures a block is loaded into memory if not already present.
@@ -1104,6 +1239,18 @@ where
 
         Ok(())
     }
+
+    /// Determines if the given block is part of a fork by checking that these
+    /// conditions are true:
+    /// * walking back from the target hash to verify that the target hash is not part of an
+    ///   extension of the canonical chain.
+    /// * walking back from the current head to verify that the target hash is not already part of
+    ///   the canonical chain.
+    ///
+    /// The header is required as an arg, because we might be checking that the header is a fork
+    /// block before it's in the tree state and before it's in the database.
+    // NOTE: is_fork and persisting_kind_for removed during v1.11.3 merge — upstream
+    // no longer has them. Re-add if needed for gravity parallel state root.
 
     /// Invoked when we receive a new forkchoice update message. Calls into the blockchain tree
     /// to resolve chain forks and ensure that the Execution Layer is working with the latest valid
@@ -1528,7 +1675,7 @@ where
     fn on_engine_message(
         &mut self,
         msg: FromEngine<EngineApiRequest<T, N>, N::Block>,
-    ) -> Result<ops::ControlFlow<()>, InsertBlockFatalError> {
+    ) -> Result<std::ops::ControlFlow<()>, InsertBlockFatalError> {
         match msg {
             FromEngine::Event(event) => match event {
                 FromOrchestrator::BackfillSyncStarted => {
@@ -1543,7 +1690,7 @@ where
                     if let Err(err) = self.finish_termination(tx) {
                         error!(target: "engine::tree", %err, "Termination failed");
                     }
-                    return Ok(ops::ControlFlow::Break(()))
+                    return Ok(std::ops::ControlFlow::Break(()))
                 }
             },
             FromEngine::Request(request) => {
@@ -1552,7 +1699,7 @@ where
                         let block_num_hash = block.recovered_block().num_hash();
                         if block_num_hash.number <= self.state.tree_state.canonical_block_number() {
                             // outdated block that can be skipped
-                            return Ok(ops::ControlFlow::Continue(()))
+                            return Ok(std::ops::ControlFlow::Continue(()))
                         }
 
                         debug!(target: "engine::tree", block=?block_num_hash, "inserting already executed block");
@@ -1746,7 +1893,7 @@ where
                 }
             }
         }
-        Ok(ops::ControlFlow::Continue(()))
+        Ok(std::ops::ControlFlow::Continue(()))
     }
 
     /// Invoked if the backfill sync has finished to target.
@@ -2034,9 +2181,18 @@ where
     }
 
     /// Returns a batch of consecutive canonical blocks to persist in the range
-    /// `(last_persisted_number .. target]`. The expected order is oldest -> newest.
+    /// `(last_persisted_number .. canonical_head - threshold]`. The expected
+    /// order is oldest -> newest.
+    ///
+    /// If any blocks are missing trie updates, all blocks are persisted, not taking `threshold`
+    /// into account.
+    ///
+    /// For those blocks that didn't have the trie updates calculated, runs the state root
+    /// calculation, and saves the trie updates.
+    ///
+    /// Returns an error if the state root calculation fails.
     fn get_canonical_blocks_to_persist(
-        &self,
+        &mut self,
         target: PersistTarget,
     ) -> Result<Vec<ExecutedBlock<N>>, AdvancePersistenceError> {
         // We will calculate the state root using the database, so we need to be sure there are no
@@ -2047,7 +2203,6 @@ where
         let mut current_hash = self.state.tree_state.canonical_block_hash();
         let last_persisted_number = self.persistence_state.last_persisted_block.number;
         let canonical_head_number = self.state.tree_state.canonical_block_number();
-
         let target_number = match target {
             PersistTarget::Head => canonical_head_number,
             PersistTarget::Threshold => {
@@ -2667,7 +2822,7 @@ where
                 self.metrics.tree.reorgs.head.increment(1);
             }
         } else {
-            debug_unreachable!("Reorged chain doesn't have any blocks");
+            debug_assert!(false, "Reorged chain doesn't have any blocks");
         }
         self.metrics.tree.latest_reorg_depth.set(old_chain_length as f64);
     }
@@ -2881,8 +3036,7 @@ where
             &mut V,
             Input,
             TreeCtx<'_, N>,
-        )
-            -> Result<(ExecutedBlock<N>, Option<Box<ExecutionTimingStats>>), Err>,
+        ) -> Result<ExecutedBlock<N>, Err>,
         convert_to_block: impl FnOnce(&mut Self, Input) -> Result<SealedBlock<N::Block>, Err>,
     ) -> Result<InsertPayloadOk, Err>
     where
@@ -3374,22 +3528,3 @@ enum PersistTarget {
     Head,
 }
 
-/// Result of waiting for caches to become available.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CacheWaitDurations {
-    /// Time spent waiting for the execution cache lock.
-    pub execution_cache: Duration,
-    /// Time spent waiting for the sparse trie lock.
-    pub sparse_trie: Duration,
-}
-
-/// Trait for types that can wait for caches to become available.
-///
-/// This is used by `reth_newPayload` endpoint to ensure that payload processing
-/// waits for any ongoing operations to complete before starting.
-pub trait WaitForCaches {
-    /// Waits for cache updates to complete.
-    ///
-    /// Returns the time spent waiting for each cache separately.
-    fn wait_for_caches(&self) -> CacheWaitDurations;
-}

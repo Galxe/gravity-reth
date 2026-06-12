@@ -2062,7 +2062,7 @@ public:
 
   MDBX_CXX20_CONSTEXPR
   buffer(const char *c_str, const allocator_type &allocator = allocator_type())
-      : buffer(::mdbx::slice(c_str), allocator) {}
+      : buffer(::mdbx::slice(c_str), allocator){}
 
 #if defined(DOXYGEN) || (defined(__cpp_lib_string_view) && __cpp_lib_string_view >= 201606L)
   template <class CHAR, class T>

@@ -21,6 +21,9 @@ pub const DEFAULT_INVALID_HEADER_HIT_EVICTION_THRESHOLD: u8 = 128;
 /// Gas threshold below which the small block chunk size is used.
 pub const SMALL_BLOCK_GAS_THRESHOLD: u64 = 20_000_000;
 
+/// Default maximum concurrency for proof tasks
+pub const DEFAULT_MAX_PROOF_TASK_CONCURRENCY: u64 = 256;
+
 /// Default number of reserved CPU cores for non-reth processes.
 ///
 /// This will be deducted from the thread count of main reth global threadpool.
@@ -121,6 +124,10 @@ pub struct TreeConfig {
     /// Whether to always compare trie updates from the state root task to the trie updates from
     /// the regular state root calculation.
     always_compare_trie_updates: bool,
+    /// Whether to disable cross-block caching and parallel prewarming.
+    disable_caching_and_prewarming: bool,
+    /// Whether to disable the parallel sparse trie state root algorithm.
+    disable_parallel_sparse_trie: bool,
     /// Whether to disable state cache.
     disable_state_cache: bool,
     /// Whether to disable parallel prewarming.
@@ -218,6 +225,8 @@ impl Default for TreeConfig {
             max_execute_block_batch_size: DEFAULT_MAX_EXECUTE_BLOCK_BATCH_SIZE,
             legacy_state_root: false,
             always_compare_trie_updates: false,
+            disable_caching_and_prewarming: false,
+            disable_parallel_sparse_trie: false,
             disable_state_cache: false,
             disable_prewarming: false,
             state_provider_metrics: false,
@@ -261,6 +270,8 @@ impl TreeConfig {
         max_execute_block_batch_size: usize,
         legacy_state_root: bool,
         always_compare_trie_updates: bool,
+        disable_caching_and_prewarming: bool,
+        disable_parallel_sparse_trie: bool,
         disable_state_cache: bool,
         disable_prewarming: bool,
         state_provider_metrics: bool,
@@ -295,6 +306,8 @@ impl TreeConfig {
             max_execute_block_batch_size,
             legacy_state_root,
             always_compare_trie_updates,
+            disable_caching_and_prewarming,
+            disable_parallel_sparse_trie,
             disable_state_cache,
             disable_prewarming,
             state_provider_metrics,
@@ -386,6 +399,16 @@ impl TreeConfig {
     /// Returns whether or not state provider metrics are enabled.
     pub const fn state_provider_metrics(&self) -> bool {
         self.state_provider_metrics
+    }
+
+    /// Returns whether or not the parallel sparse trie is disabled.
+    pub const fn disable_parallel_sparse_trie(&self) -> bool {
+        self.disable_parallel_sparse_trie
+    }
+
+    /// Returns whether or not cross-block caching and parallel prewarming should be used.
+    pub const fn disable_caching_and_prewarming(&self) -> bool {
+        self.disable_caching_and_prewarming
     }
 
     /// Returns whether or not state cache is disabled.
@@ -508,6 +531,15 @@ impl TreeConfig {
     /// Setter for whether to use the legacy state root calculation method.
     pub const fn with_legacy_state_root(mut self, legacy_state_root: bool) -> Self {
         self.legacy_state_root = legacy_state_root;
+        self
+    }
+
+    /// Setter for whether to disable cross-block caching and parallel prewarming.
+    pub const fn without_caching_and_prewarming(
+        mut self,
+        disable_caching_and_prewarming: bool,
+    ) -> Self {
+        self.disable_caching_and_prewarming = disable_caching_and_prewarming;
         self
     }
 

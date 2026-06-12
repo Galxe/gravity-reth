@@ -1,4 +1,4 @@
-use reth_db_api::{table::Value, transaction::DbTxMut};
+use reth_db_api::{table::Value, transaction::{DbTx, DbTxMut}};
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
     BlockReader, ChainStateBlockReader, DBProvider, PruneCheckpointReader, PruneCheckpointWriter,
@@ -63,6 +63,7 @@ where
             .build::<Provider>(provider.static_file_provider());
 
         let result = pruner.run_with_provider(provider, input.target())?;
+        provider.tx_ref().commit_view()?;
         if result.progress.is_finished() {
             Ok(ExecOutput { checkpoint: StageCheckpoint::new(input.target()), done: true })
         } else {

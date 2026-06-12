@@ -3,7 +3,7 @@ use parking_lot::Mutex;
 use reth_metrics::{metrics::Counter, Metrics};
 use reth_trie::{
     updates::{TrieUpdates, TrieUpdatesSorted},
-    HashedPostState, HashedPostStateSorted, TrieInputSorted,
+    HashedPostState, HashedPostStateSorted, TrieInputSorted, TrieUpdatesV2,
 };
 use std::{
     fmt,
@@ -33,6 +33,9 @@ pub struct ComputedTrieData {
     pub trie_updates: Arc<TrieUpdatesSorted>,
     /// Trie input bundled with its anchor hash, if available.
     pub anchored_trie_input: Option<AnchoredTrieInput>,
+    /// Gravity V2 trie updates from NestedStateRoot computation.
+    /// Only populated in the pipe execution path; `None` for upstream engine paths.
+    pub trie_updates_v2: Option<Arc<TrieUpdatesV2>>,
 }
 
 /// Trie input bundled with its anchor hash.
@@ -402,6 +405,7 @@ impl ComputedTrieData {
             hashed_state,
             trie_updates,
             anchored_trie_input: Some(AnchoredTrieInput { anchor_hash, trie_input }),
+            trie_updates_v2: None,
         }
     }
 
@@ -417,7 +421,7 @@ impl ComputedTrieData {
         hashed_state: Arc<HashedPostStateSorted>,
         trie_updates: Arc<TrieUpdatesSorted>,
     ) -> Self {
-        Self { hashed_state, trie_updates, anchored_trie_input: None }
+        Self { hashed_state, trie_updates, anchored_trie_input: None, trie_updates_v2: None }
     }
 
     /// Returns the anchor hash, if present.
@@ -448,6 +452,7 @@ mod tests {
             hashed_state: Arc::default(),
             trie_updates: Arc::default(),
             anchored_trie_input: None,
+            trie_updates_v2: None,
         }
     }
 
@@ -547,6 +552,7 @@ mod tests {
                 anchor_hash: B256::with_last_byte(1),
                 trie_input: Arc::new(TrieInputSorted::default()),
             }),
+            trie_updates_v2: None,
         };
         let ancestor = DeferredTrieData::ready(ancestor_bundle);
 
@@ -583,11 +589,13 @@ mod tests {
             hashed_state: Arc::new(oldest_state),
             trie_updates: Arc::default(),
             anchored_trie_input: None,
+            trie_updates_v2: None,
         };
         let newest = ComputedTrieData {
             hashed_state: Arc::new(newest_state),
             trie_updates: Arc::default(),
             anchored_trie_input: None,
+            trie_updates_v2: None,
         };
 
         // Pass ancestors oldest -> newest; newest should take precedence
@@ -622,6 +630,7 @@ mod tests {
                 anchor_hash,
                 trie_input: Arc::new(overlay),
             }),
+            trie_updates_v2: None,
         })
     }
 
@@ -733,6 +742,7 @@ mod tests {
             hashed_state: Arc::new(parent_state),
             trie_updates: Arc::default(),
             anchored_trie_input: None, // No anchored input
+            trie_updates_v2: None,
         });
 
         // Create child - should rebuild from parent's hashed_state

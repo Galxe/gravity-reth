@@ -1298,7 +1298,7 @@ mod tests {
             block1.recovered_block().hash()
         );
 
-        let chain = NewCanonicalChain::Reorg { new: vec![block2.clone()], old: vec![block1] };
+        let chain = NewCanonicalChain::Reorg { new: vec![block2.clone()], old: vec![block1.block] };
         state.update_chain(chain);
         assert_eq!(
             state.head_state().unwrap().block_ref().recovered_block().hash(),
@@ -1587,7 +1587,7 @@ mod tests {
         // Test reorg notification
         let chain_reorg = NewCanonicalChain::Reorg {
             new: vec![block1a.clone(), block2a.clone()],
-            old: vec![block1.clone(), block2.clone()],
+            old: vec![block1.block.clone(), block2.block.clone()],
         };
 
         // Build expected trie data for old chain

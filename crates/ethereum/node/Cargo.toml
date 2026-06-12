@@ -113,3 +113,4 @@ test-utils = [
     "reth-stages-types/test-utils",
     "reth-tasks/test-utils",
 ]
+failpoints = ["reth-node-builder/failpoints"]

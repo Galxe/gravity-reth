@@ -39,7 +39,7 @@ use reth_payload_primitives::PayloadTypes;
 use reth_primitives_traits::{NodePrimitives, TxTy};
 use reth_rpc::{
     AdminApi, DebugApi, EngineEthApi, EthApi, EthApiBuilder, EthBundle, MinerApi, NetApi,
-    OtterscanApi, RPCApi, RethApi, TraceApi, TxPoolApi, Web3Api,
+    OtterscanApi, RPCApi, RethApi, TraceApi, TxPoolApi, ValidationApiConfig, Web3Api,
 };
 use reth_rpc_api::servers::*;
 use reth_rpc_engine_api::RethEngineApi;
@@ -423,6 +423,8 @@ impl<N: NodePrimitives> Default for RpcModuleBuilder<N, (), (), (), (), ()> {
 pub struct RpcModuleConfig {
     /// `eth` namespace settings
     eth: EthConfig,
+    /// `flashbots` namespace settings
+    flashbots: ValidationApiConfig,
 }
 
 // === impl RpcModuleConfig ===
@@ -434,8 +436,8 @@ impl RpcModuleConfig {
     }
 
     /// Returns a new RPC module config given the eth namespace config
-    pub const fn new(eth: EthConfig) -> Self {
-        Self { eth }
+    pub const fn new(eth: EthConfig, flashbots: ValidationApiConfig) -> Self {
+        Self { eth, flashbots }
     }
 
     /// Get a reference to the eth namespace config
@@ -453,6 +455,7 @@ impl RpcModuleConfig {
 #[derive(Clone, Debug, Default)]
 pub struct RpcModuleConfigBuilder {
     eth: Option<EthConfig>,
+    flashbots: Option<ValidationApiConfig>,
 }
 
 // === impl RpcModuleConfigBuilder ===
@@ -464,10 +467,16 @@ impl RpcModuleConfigBuilder {
         self
     }
 
+    /// Configures a custom flashbots namespace config
+    pub fn flashbots(mut self, flashbots: ValidationApiConfig) -> Self {
+        self.flashbots = Some(flashbots);
+        self
+    }
+
     /// Consumes the type and creates the [`RpcModuleConfig`]
     pub fn build(self) -> RpcModuleConfig {
-        let Self { eth } = self;
-        RpcModuleConfig { eth: eth.unwrap_or_default() }
+        let Self { eth, flashbots } = self;
+        RpcModuleConfig { eth: eth.unwrap_or_default(), flashbots: flashbots.unwrap_or_default() }
     }
 
     /// Get a reference to the eth namespace config, if any

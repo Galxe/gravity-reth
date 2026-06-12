@@ -45,6 +45,16 @@ pub trait LoadReceipt:
             let (gas_used, next_log_index) =
                 calculate_gas_used_and_next_log_index(meta.index, &all_receipts);
 
+            // Gravity fallback (GRETH-001): system transactions may have empty/invalid
+            // signatures — use SYSTEM_CALLER instead of erroring out.
+            const SYSTEM_CALLER: alloy_primitives::Address =
+                alloy_primitives::address!("00000000000000000000000000000001625f0000");
+            let signer = tx
+                .recover_signer_unchecked()
+                .unwrap_or(SYSTEM_CALLER);
+            let recovered_tx =
+                reth_primitives_traits::Recovered::new_unchecked(tx, signer);
+
             Ok(self
                 .converter()
                 .convert_receipts(vec![ConvertReceiptInput {

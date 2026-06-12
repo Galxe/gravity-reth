@@ -1,3 +1,5 @@
+#[cfg(feature = "nested-trie")]
+use crate::nested_trie::Node;
 use crate::{
     utils::{extend_sorted_vec, kway_merge_sorted},
     BranchNodeCompact, HashBuilder, Nibbles,
@@ -10,6 +12,42 @@ use alloy_primitives::{
     map::{B256Map, B256Set, HashMap, HashSet},
     FixedBytes, B256,
 };
+
+/// The aggregation of nested trie updates
+#[cfg(feature = "nested-trie")]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct TrieUpdatesV2 {
+    /// Collection of updated intermediate account nodes indexed by full path.
+    pub account_nodes: HashMap<Nibbles, Node>,
+    /// Collection of removed intermediate account nodes indexed by full path.
+    pub removed_nodes: HashSet<Nibbles>,
+    /// Collection of updated storage tries indexed by the hashed address.
+    pub storage_tries: B256Map<StorageTrieUpdatesV2>,
+}
+
+/// Trie updates for nested storage trie of a single account.
+#[cfg(feature = "nested-trie")]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct StorageTrieUpdatesV2 {
+    /// Flag indicating whether the trie was deleted.
+    pub is_deleted: bool,
+    /// Collection of updated storage trie nodes.
+    pub storage_nodes: HashMap<Nibbles, Node>,
+    /// Collection of removed storage trie nodes.
+    pub removed_nodes: HashSet<Nibbles>,
+}
+
+#[cfg(feature = "nested-trie")]
+impl StorageTrieUpdatesV2 {
+    /// Returns empty storage trie updates with `deleted` set to `true`.
+    pub fn deleted() -> Self {
+        Self {
+            is_deleted: true,
+            storage_nodes: HashMap::default(),
+            removed_nodes: HashSet::default(),
+        }
+    }
+}
 
 /// The aggregation of trie updates.
 #[derive(PartialEq, Eq, Clone, Default, Debug)]
@@ -158,6 +196,17 @@ impl TrieUpdates {
 
     /// Converts trie updates into [`TrieUpdatesSorted`].
     pub fn into_sorted(mut self) -> TrieUpdatesSorted {
+        self.drain_into_sorted()
+    }
+
+    /// Converts trie updates into [`TrieUpdatesSorted`], but keeping the maps allocated by
+    /// draining.
+    ///
+    /// This effectively clears all the fields in the [`TrieUpdatesSorted`].
+    ///
+    /// This allows us to reuse the allocated space. This allocates new space for the sorted
+    /// updates, like `into_sorted`.
+    pub fn drain_into_sorted(&mut self) -> TrieUpdatesSorted {
         let mut account_nodes = self
             .account_nodes
             .drain()
@@ -206,7 +255,7 @@ impl TrieUpdates {
     }
 
     /// Converts trie updates into [`TrieUpdatesSortedRef`].
-    pub fn into_sorted_ref(&self) -> TrieUpdatesSortedRef<'_> {
+    pub fn into_sorted_ref<'a>(&'a self) -> TrieUpdatesSortedRef<'a> {
         let mut account_nodes = self.account_nodes.iter().collect::<Vec<_>>();
         account_nodes.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
@@ -216,7 +265,7 @@ impl TrieUpdates {
             storage_tries: self
                 .storage_tries
                 .iter()
-                .map(|m| (*m.0, m.1.into_sorted_ref()))
+                .map(|m| (*m.0, m.1.into_sorted_ref().clone()))
                 .collect(),
         }
     }
@@ -550,9 +599,9 @@ pub struct TrieUpdatesSortedRef<'a> {
 pub struct TrieUpdatesSorted {
     /// Sorted collection of updated state nodes with corresponding paths. None indicates that a
     /// node was removed.
-    account_nodes: Vec<(Nibbles, Option<BranchNodeCompact>)>,
+    pub account_nodes: Vec<(Nibbles, Option<BranchNodeCompact>)>,
     /// Storage tries stored by hashed address of the account the trie belongs to.
-    storage_tries: B256Map<StorageTrieUpdatesSorted>,
+    pub storage_tries: B256Map<StorageTrieUpdatesSorted>,
 }
 
 impl TrieUpdatesSorted {

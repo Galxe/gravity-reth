@@ -116,7 +116,6 @@ pub use events::{FullTransactionEvent, NewTransactionEvent, TransactionEvent};
 pub use listener::{AllTransactionsEvents, TransactionEvents, TransactionListenerKind};
 pub use parked::{BasefeeOrd, ParkedOrd, ParkedPool, QueuedOrd};
 pub use pending::PendingPool;
-
 mod best;
 pub use best::BestTransactions;
 

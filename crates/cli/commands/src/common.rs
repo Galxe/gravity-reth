@@ -4,6 +4,7 @@ pub use reth_primitives_traits::header::HeaderMut;
 
 use alloy_primitives::B256;
 use clap::Parser;
+use gravity_primitives::get_gravity_config;
 use reth_chainspec::EthChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_config::{config::EtlConfig, Config};
@@ -11,6 +12,7 @@ use reth_consensus::noop::NoopConsensus;
 use reth_db::{init_db, open_db_read_only, DatabaseEnv};
 use reth_db_common::init::init_genesis_with_settings;
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
+use reth_engine_tree::recovery::StorageRecoveryHelper;
 use reth_eth_wire::NetPrimitivesFor;
 use reth_evm::{noop::NoopEvmConfig, ConfigureEvm};
 use reth_network::NetworkEventListenerProvider;
@@ -210,7 +212,7 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             let Some(unwind_target) =
                 factory.static_file_provider().check_consistency(&factory.provider()?)?
         {
-            if factory.db_ref().is_read_only()? {
+            if factory.db_ref().is_read_only() {
                 warn!(target: "reth::cli", ?unwind_target, "Inconsistent storage. Restart node to heal.");
                 return Ok(factory)
             }
@@ -248,6 +250,13 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             // Move all applicable data from database to static files.
             pipeline.move_to_static_files()?;
             pipeline.unwind(unwind_target.unwind_target().expect("should exist"), None)?;
+        }
+
+        // In pipe execution mode (disable_pipe_execution = false), we need to recover
+        // any interrupted block writes from checkpoints
+        if !get_gravity_config().disable_pipe_execution {
+            info!(target: "reth::cli", "Checking for interrupted block writes and recovering if needed");
+            StorageRecoveryHelper::new(&factory).check_and_recover()?;
         }
 
         Ok(factory)
@@ -295,6 +304,17 @@ type FullTypesAdapter<T> = FullNodeTypesAdapter<
     DatabaseEnv,
     BlockchainProvider<NodeTypesWithDBAdapter<T, DatabaseEnv>>,
 >;
+
+/// Trait for block headers that can be modified through CLI operations.
+pub trait CliHeader {
+    fn set_number(&mut self, number: u64);
+}
+
+impl CliHeader for alloy_consensus::Header {
+    fn set_number(&mut self, number: u64) {
+        self.number = number;
+    }
+}
 
 /// Helper trait with a common set of requirements for the
 /// [`NodeTypes`] in CLI.

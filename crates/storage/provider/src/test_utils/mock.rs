@@ -294,7 +294,8 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + 'static> DBProvider
     }
 
     fn commit(self) -> ProviderResult<()> {
-        Ok(self.tx.commit()?)
+        self.tx.commit()?;
+        Ok(())
     }
 
     fn prune_modes_ref(&self) -> &PruneModes {

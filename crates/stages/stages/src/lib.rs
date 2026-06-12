@@ -82,6 +82,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// Used in nested state root computation (merkle stage)
+use reth_trie_db as _;
+
 #[expect(missing_docs)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

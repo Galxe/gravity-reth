@@ -32,3 +32,15 @@ read-tx-timeouts = ["dep:dashmap"]
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[bench]]
+name = "cursor"
+harness = false
+
+[[bench]]
+name = "transaction"
+harness = false
+
+[[bench]]
+name = "mdbx_bench_tool"
+harness = false

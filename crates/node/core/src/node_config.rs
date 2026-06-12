@@ -2,8 +2,8 @@
 
 use crate::{
     args::{
-        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, NetworkArgs, PayloadBuilderArgs,
-        PruningArgs, RpcServerArgs, StaticFilesArgs, StorageArgs, TxPoolArgs,
+        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, GravityArgs, NetworkArgs,
+        PayloadBuilderArgs, PruningArgs, RpcServerArgs, StaticFilesArgs, StorageArgs, TxPoolArgs,
     },
     dirs::{ChainPath, DataDirPath},
     utils::get_single_header,
@@ -28,6 +28,7 @@ use reth_transaction_pool::TransactionPool;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     fs,
+
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -35,7 +36,8 @@ use tracing::*;
 
 use crate::args::{EraArgs, MetricArgs};
 pub use reth_engine_primitives::{
-    DEFAULT_MEMORY_BLOCK_BUFFER_TARGET, DEFAULT_PERSISTENCE_THRESHOLD, DEFAULT_RESERVED_CPU_CORES,
+    DEFAULT_MAX_PROOF_TASK_CONCURRENCY, DEFAULT_MEMORY_BLOCK_BUFFER_TARGET,
+    DEFAULT_PERSISTENCE_THRESHOLD, DEFAULT_RESERVED_CPU_CORES,
 };
 
 /// Default size of cross-block cache in megabytes.
@@ -149,6 +151,9 @@ pub struct NodeConfig<ChainSpec> {
     /// All ERA import related arguments with --era prefix
     pub era: EraArgs,
 
+    /// All gravity related arguments with --gravity prefix
+    pub gravity: GravityArgs,
+
     /// All static files related arguments
     pub static_files: StaticFilesArgs,
 
@@ -184,6 +189,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             datadir: DatadirArgs::default(),
             engine: EngineArgs::default(),
             era: EraArgs::default(),
+            gravity: GravityArgs::default(),
             static_files: StaticFilesArgs::default(),
             storage: StorageArgs::default(),
         }
@@ -261,6 +267,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             era,
             static_files,
             storage,
+            gravity,
             ..
         } = self;
         NodeConfig {
@@ -281,6 +288,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             era,
             static_files,
             storage,
+            gravity,
         }
     }
 
@@ -422,6 +430,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
         let header = provider
             .header_by_number(head)?
             .expect("the header for the latest block is missing, database is corrupt");
+
 
         let hash = provider
             .block_hash(head)?
@@ -577,6 +586,7 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
             pruning: self.pruning,
             engine: self.engine,
             era: self.era,
+            gravity: self.gravity,
             static_files: self.static_files,
             storage: self.storage,
         }
@@ -619,6 +629,7 @@ impl<ChainSpec> Clone for NodeConfig<ChainSpec> {
             datadir: self.datadir.clone(),
             engine: self.engine.clone(),
             era: self.era.clone(),
+            gravity: self.gravity.clone(),
             static_files: self.static_files,
             storage: self.storage,
         }

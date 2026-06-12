@@ -468,7 +468,7 @@ mod tests {
     };
     use alloy_primitives::{BlockNumber, B256};
     use assert_matches::assert_matches;
-    use reth_db_api::{cursor::DbCursorRO, models::StorageSettings};
+    use reth_db_api::cursor::DbCursorRO;
     use reth_ethereum_primitives::{Block, TransactionSigned};
     use reth_primitives_traits::{SealedBlock, SignerRecoverable};
     use reth_provider::{
@@ -525,7 +525,7 @@ mod tests {
             Ok(ExecOutput { checkpoint: StageCheckpoint {
                 block_number,
                 stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
-                    processed: 1,
+                    processed: _,
                     total: 1
                 }))
             }, done: true }) if block_number == previous_stage

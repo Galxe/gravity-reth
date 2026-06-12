@@ -1,3 +1,5 @@
+use reth_primitives_traits::SubkeyContainedValue;
+
 use super::{BranchNodeCompact, PackedStoredNibblesSubKey, StoredNibblesSubKey};
 use reth_primitives_traits::ValueWithSubKey;
 
@@ -18,6 +20,12 @@ impl ValueWithSubKey for StorageTrieEntry {
 
     fn get_subkey(&self) -> Self::SubKey {
         self.nibbles.clone()
+    }
+}
+
+impl SubkeyContainedValue for StorageTrieEntry {
+    fn subkey_length(&self) -> Option<usize> {
+        Some(self.nibbles.len().div_ceil(2) + 1)
     }
 }
 

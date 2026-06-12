@@ -44,6 +44,8 @@ pub type PipelineFut<N> = Pin<Box<dyn Future<Output = PipelineWithResult<N>> + S
 /// The pipeline type itself with the result of [`Pipeline::run_as_fut`]
 pub type PipelineWithResult<N> = (Pipeline<N>, Result<ControlFlow, PipelineError>);
 
+type DatabaseProviderRW<N> = <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW;
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A staged sync pipeline.
 ///
@@ -70,7 +72,7 @@ pub struct Pipeline<N: ProviderNodeTypes> {
     /// Provider factory.
     provider_factory: ProviderFactory<N>,
     /// All configured stages in the order they will be executed.
-    stages: Vec<BoxedStage<<ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW>>,
+    stages: Vec<BoxedStage<DatabaseProviderRW<N>>>,
     /// The maximum block number to sync to.
     max_block: Option<BlockNumber>,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
@@ -96,8 +98,7 @@ pub struct Pipeline<N: ProviderNodeTypes> {
 
 impl<N: ProviderNodeTypes> Pipeline<N> {
     /// Construct a pipeline using a [`PipelineBuilder`].
-    pub fn builder() -> PipelineBuilder<<ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW>
-    {
+    pub fn builder() -> PipelineBuilder<DatabaseProviderRW<N>> {
         PipelineBuilder::default()
     }
 
@@ -356,7 +357,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 let input = UnwindInput { checkpoint, unwind_to: to, bad_block };
                 self.event_sender.notify(PipelineEvent::Unwind { stage_id, input });
 
-                let output = stage.unwind(&provider_rw, input);
+                let output = { stage.unwind(&provider_rw, input) };
                 match output {
                     Ok(unwind_output) => {
                         checkpoint = unwind_output.checkpoint;
@@ -494,6 +495,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 target,
             });
 
+            let start = Instant::now();
             match self.stage(stage_index).execute(&provider_rw, exec_input) {
                 Ok(out @ ExecOutput { checkpoint, done }) => {
                     // Update stage checkpoint.
@@ -501,6 +503,14 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
                     // Commit processed data to the database.
                     provider_rw.commit()?;
+                    info!(
+                        target: "sync::pipeline",
+                        stage = %stage_id,
+                        prev_block = prev_checkpoint.map(|progress| progress.block_number),
+                        exec_output = ?out,
+                        execute_duration_ms = start.elapsed().as_millis(),
+                        "Stage has executed, and reached the target block."
+                    );
 
                     // Invoke stage post commit hook.
                     self.stage(stage_index).post_execute_commit()?;

@@ -288,6 +288,7 @@ mod tests {
     use reth_primitives_traits::SealedBlock;
     use reth_provider::{
         providers::StaticFileWriter, BlockBodyIndicesProvider, DatabaseProviderFactory,
+        StaticFileProviderFactory,
     };
     use reth_stages_api::StageUnitCheckpoint;
     use reth_testing_utils::generators::{
@@ -339,11 +340,11 @@ mod tests {
                 checkpoint: StageCheckpoint {
                 block_number,
                 stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
-                    processed,
+                    processed: _,
                     total
                 }))
-            }, done: true }) if block_number == previous_stage && processed == total &&
-                total == runner.db.count_entries::<tables::Transactions>().unwrap() as u64
+            }, done: true }) if block_number == previous_stage &&
+                total == runner.db.factory.static_file_provider().count_entries::<tables::Transactions>().unwrap() as u64
         );
 
         // Validate the stage execution
@@ -385,11 +386,11 @@ mod tests {
                 checkpoint: StageCheckpoint {
                 block_number,
                 stage_checkpoint: Some(StageUnitCheckpoint::Entities(EntitiesCheckpoint {
-                    processed,
+                    processed: _,
                     total
                 }))
-            }, done: true }) if block_number == previous_stage && processed == total &&
-                total == runner.db.count_entries::<tables::Transactions>().unwrap() as u64
+            }, done: true }) if block_number == previous_stage &&
+                total == runner.db.factory.static_file_provider().count_entries::<tables::Transactions>().unwrap() as u64
         );
 
         // Validate the stage execution

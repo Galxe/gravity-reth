@@ -68,9 +68,13 @@ pub use benchmark_args::{BenchmarkArgs, RpcBlockFetchRetries, WaitForPersistence
 mod engine;
 pub use engine::{DefaultEngineValues, EngineArgs};
 
-/// `EraArgs` for configuring ERA files import.
-mod era;
-pub use era::{DefaultEraHost, EraArgs, EraSourceArgs};
+/// GravityArgs for configuring gravity features
+mod gravity;
+pub use gravity::GravityArgs;
+
+/// `RessArgs` for configuring ress subprotocol.
+mod ress_args;
+pub use ress_args::RessArgs;
 
 /// `StaticFilesArgs` for configuring static files.
 mod static_files;
@@ -79,6 +83,10 @@ pub use static_files::{StaticFilesArgs, MINIMAL_BLOCKS_PER_FILE};
 /// `StorageArgs` for configuring storage settings.
 mod storage;
 pub use storage::{DefaultStorageValues, StorageArgs};
+
+/// `EraArgs` for configuring ERA files import.
+mod era;
+pub use era::{DefaultEraHost, EraArgs, EraSourceArgs};
 
 mod error;
 pub mod types;

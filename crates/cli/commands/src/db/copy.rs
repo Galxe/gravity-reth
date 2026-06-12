@@ -1,5 +1,5 @@
 use clap::Parser;
-use reth_db::mdbx::{self, ffi};
+use reth_db::mdbx;
 use std::path::PathBuf;
 
 /// Copies the MDBX database to a new location.
@@ -25,37 +25,15 @@ pub struct Command {
 
 impl Command {
     /// Execute `db copy` command
-    pub fn execute(self, db: &mdbx::DatabaseEnv) -> eyre::Result<()> {
-        let mut flags: ffi::MDBX_copy_flags_t = ffi::MDBX_CP_DEFAULTS;
-        if self.compact {
-            flags |= ffi::MDBX_CP_COMPACT;
-        }
-        if self.force_dynamic_size {
-            flags |= ffi::MDBX_CP_FORCE_DYNAMIC_SIZE;
-        }
-        if self.throttle_mvcc {
-            flags |= ffi::MDBX_CP_THROTTLE_MVCC;
-        }
-
-        let dest = self
-            .dest
-            .to_str()
-            .ok_or_else(|| eyre::eyre!("destination path must be valid UTF-8"))?;
-        let dest_cstr = std::ffi::CString::new(dest)?;
-
-        println!("Copying database to {} ...", self.dest.display());
-
-        let rc = db.with_raw_env_ptr(|env_ptr| unsafe {
-            ffi::mdbx_env_copy(env_ptr, dest_cstr.as_ptr(), flags)
-        });
-
-        if rc != 0 {
-            eyre::bail!("mdbx_env_copy failed with error code {rc}: {}", unsafe {
-                std::ffi::CStr::from_ptr(ffi::mdbx_strerror(rc)).to_string_lossy()
-            });
-        }
-
-        println!("Done.");
-        Ok(())
+    pub fn execute(self, _db: &mdbx::DatabaseEnv) -> eyre::Result<()> {
+        // This gravity fork uses RocksDB as the database backend.
+        // MDBX-specific copy (mdbx_env_copy) is not supported for RocksDB databases.
+        // Use filesystem-level copy tools (cp -r, rsync) to copy the RocksDB directory instead.
+        eyre::bail!(
+            "The `db copy` command is not supported for the RocksDB backend used by this node. \
+             To copy the database, stop the node and use a filesystem copy tool such as \
+             `cp -r` or `rsync` to copy the database directory to {:?}.",
+            self.dest
+        )
     }
 }

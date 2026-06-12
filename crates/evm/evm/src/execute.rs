@@ -7,6 +7,7 @@ use alloy_eips::eip2718::WithEncoded;
 pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory, GasOutput};
 use alloy_evm::{
     block::{CommitChanges, ExecutableTxParts},
+    precompiles::DynPrecompile,
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
 };
 use alloy_primitives::{Address, B256};
@@ -21,7 +22,13 @@ use reth_primitives_traits::{
 use reth_storage_api::StateProvider;
 pub use reth_storage_errors::provider::ProviderError;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
-use revm::database::{states::bundle_state::BundleRetention, BundleState, State};
+use revm::{
+    context::{
+        result::{ExecutionResult, HaltReason},
+        TxEnv,
+    },
+    database::{states::bundle_state::BundleRetention, BundleState, State},
+};
 
 /// A type that knows how to execute a block. It is assumed to operate on a
 /// [`crate::Evm`] internally and use [`State`] as database.
@@ -141,10 +148,22 @@ pub trait Executor<DB: Database>: Sized {
     /// Consumes the executor and returns the [`State`] containing all state changes.
     fn into_state(self) -> State<DB>;
 
+    /// Takes the `BundleState` changeset from the State, replacing it with an empty one.
+    fn take_bundle(&mut self) -> BundleState;
+
     /// The size hint of the batch's tracked state size.
     ///
     /// This is used to optimize DB commits depending on the size of the state.
     fn size_hint(&self) -> usize;
+
+    /// Executes a single system transaction on the executor's own internal state and commits
+    /// the resulting state changes immediately.
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error>;
 }
 
 /// Input for block building. Consumed by [`BlockAssembler`].
@@ -589,8 +608,22 @@ where
         self.db
     }
 
+    fn take_bundle(&mut self) -> BundleState {
+        self.db.merge_transitions(BundleRetention::Reverts);
+        self.db.take_bundle()
+    }
+
     fn size_hint(&self) -> usize {
         self.db.bundle_state.size_hint()
+    }
+
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        self.strategy_factory.transact_system_txn(&mut self.db, evm_env, precompiles, tx_env)
     }
 }
 
@@ -694,8 +727,21 @@ mod tests {
             unreachable!()
         }
 
+        fn take_bundle(&mut self) -> BundleState {
+            unreachable!()
+        }
+
         fn size_hint(&self) -> usize {
             0
+        }
+
+        fn transact_system_txn(
+            &mut self,
+            _evm_env: EvmEnv,
+            _precompiles: Vec<(Address, DynPrecompile)>,
+            _tx_env: TxEnv,
+        ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+            unreachable!()
         }
     }
 

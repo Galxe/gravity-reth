@@ -92,6 +92,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// Gravity sparse parallel trie - used via tree config
+use reth_trie_sparse_parallel as _;
+
 /// Support for backfill sync mode.
 pub mod backfill;
 /// The type that drives the chain forward.
@@ -106,6 +109,8 @@ pub mod launch;
 pub mod metrics;
 /// The background writer service, coordinating write operations on static files and the database.
 pub mod persistence;
+/// Storage recovery helper for interrupted block writes.
+pub mod recovery;
 /// Support for interacting with the blockchain tree.
 pub mod tree;
 

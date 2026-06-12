@@ -18,7 +18,7 @@ use crate::{
     PruneCheckpointReader, PruneCheckpointWriter, RawRocksDBBatch, RevertsInit, RocksBatchArg,
     RocksDBProviderFactory, StageCheckpointReader, StateProviderBox, StateWriter,
     StaticFileProviderFactory, StatsReader, StorageReader, StorageTrieWriter, TransactionVariant,
-    TransactionsProvider, TransactionsProviderExt, TrieWriter,
+    TransactionsProvider, TransactionsProviderExt, TrieWriter, TrieWriterV2,
 };
 use alloy_consensus::{
     transaction::{SignerRecoverable, TransactionMeta, TxHashRef},
@@ -46,7 +46,7 @@ use reth_db_api::{
     table::Table,
     tables,
     transaction::{DbTx, DbTxMut},
-    BlockNumberList,
+    BlockNumberList, DatabaseError, PlainAccountState, PlainStorageState,
 };
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult, Chain, ExecutionOutcome};
 use reth_node_types::{BlockTy, BodyTy, HeaderTy, NodeTypes, ReceiptTy, TxTy};
@@ -66,8 +66,9 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::{ProviderResult, StaticFileWriterError};
 use reth_trie::{
-    updates::{StorageTrieUpdatesSorted, TrieUpdatesSorted},
-    HashedPostStateSorted,
+    nested_trie::StorageNodeEntry,
+    updates::{StorageTrieUpdatesSorted, TrieUpdatesSorted, TrieUpdatesV2},
+    HashedPostStateSorted, StoredNibbles, StoredNibblesSubKey,
 };
 use reth_trie_db::{ChangesetCache, DatabaseStorageTrieCursor, TrieTableAdapter};
 use revm_database::states::{
@@ -80,6 +81,8 @@ use std::{
     ops::{Deref, DerefMut, Range, RangeBounds, RangeInclusive},
     path::PathBuf,
     sync::Arc,
+    thread,
+    time::Instant,
 };
 use tracing::{debug, instrument, trace};
 
@@ -735,6 +738,13 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
                     self.write_trie_updates_sorted(&merged_trie)?;
                 }
                 timings.write_trie_updates += start.elapsed();
+
+                // Write gravity V2 trie updates (from pipe execution NestedStateRoot)
+                for block in &blocks {
+                    if let Some(v2) = &block.trie_data().trie_updates_v2 {
+                        self.write_trie_updatesv2(v2)?;
+                    }
+                }
             }
 
             // Full mode: update history indices
@@ -1802,6 +1812,13 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
 
     fn last_block_number(&self) -> ProviderResult<BlockNumber> {
         self.static_file_provider.last_block_number()
+    }
+
+    fn recover_block_number(&self) -> ProviderResult<BlockNumber> {
+        Ok(self
+            .get_stage_checkpoint(StageId::Execution)?
+            .map(|checkpoint| checkpoint.block_number)
+            .unwrap_or_default())
     }
 
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
@@ -3162,6 +3179,56 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> StorageTrieWriter for DatabaseP
             Self::write_storage_tries::<A>(self.tx_ref(), storage_tries, &mut num_entries)?;
         });
         Ok(num_entries)
+    }
+}
+
+impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvider<TX, N> {
+    fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError> {
+        let tx = self.tx_ref();
+        let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrieV2>()?;
+        let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrieV2>()?;
+        thread::scope(|scope| -> Result<usize, DatabaseError> {
+            let account_handle = scope.spawn(|| -> Result<usize, DatabaseError> {
+                let mut num_updated = 0;
+                for path in &input.removed_nodes {
+                    account_trie_cursor.delete_by_key((*path).into())?;
+                    num_updated += 1;
+                }
+                for (path, node) in &input.account_nodes {
+                    account_trie_cursor.upsert((*path).into(), &node.clone().into())?;
+                    num_updated += 1;
+                }
+                Ok(num_updated)
+            });
+            let storage_handle = scope.spawn(|| -> Result<usize, DatabaseError> {
+                let mut num_updated = 0;
+                for (hashed_address, storage_trie_update) in &input.storage_tries {
+                    if storage_trie_update.is_deleted {
+                        // self-destruct
+                        storage_trie_cursor.delete_by_key(*hashed_address)?;
+                        num_updated += 1;
+                    } else {
+                        for path in &storage_trie_update.removed_nodes {
+                            let path = StoredNibblesSubKey(*path);
+                            storage_trie_cursor.delete_by_key_subkey(*hashed_address, path)?;
+                            num_updated += 1;
+                        }
+                        for (path, node) in &storage_trie_update.storage_nodes {
+                            let path = StoredNibblesSubKey(*path);
+                            storage_trie_cursor.upsert(
+                                *hashed_address,
+                                &StorageNodeEntry::new(path, node.clone()),
+                            )?;
+                            num_updated += 1;
+                        }
+                    }
+                }
+                Ok(num_updated)
+            });
+            let num_updated_accounts = account_handle.join().unwrap()?;
+            let num_updated_storage = storage_handle.join().unwrap()?;
+            Ok(num_updated_accounts + num_updated_storage)
+        })
     }
 }
 

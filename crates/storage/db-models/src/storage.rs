@@ -1,5 +1,5 @@
 use alloy_primitives::{Address, B256, U256};
-use reth_primitives_traits::ValueWithSubKey;
+use reth_primitives_traits::{SubkeyContainedValue, ValueWithSubKey};
 
 /// Storage entry as it is saved in the static files.
 ///
@@ -22,6 +22,12 @@ impl ValueWithSubKey for StorageBeforeTx {
 
     fn get_subkey(&self) -> Self::SubKey {
         self.key
+    }
+}
+
+impl SubkeyContainedValue for StorageBeforeTx {
+    fn subkey_length(&self) -> Option<usize> {
+        Some(52)
     }
 }
 

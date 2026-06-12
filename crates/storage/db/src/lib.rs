@@ -1,7 +1,7 @@
-//! MDBX implementation for reth's database abstraction layer.
+//! Database implementations for reth's database abstraction layer.
 //!
-//! This crate is an implementation of `reth-db-api` for MDBX, as well as a few other common
-//! database types.
+//! This crate provides implementations of `reth-db-api` for multiple database backends,
+//! including MDBX and `RocksDB`.
 //!
 //! # Overview
 //!
@@ -15,35 +15,135 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+// Suppress unused-crate warnings for MDBX-era dependencies still in Cargo.toml
+use page_size as _;
+use reth_libmdbx as _;
+use tracing as _;
+
+pub mod database;
 mod implementation;
 pub mod lockfile;
-#[cfg(feature = "mdbx")]
-mod metrics;
 pub mod static_file;
-#[cfg(feature = "mdbx")]
-mod utils;
 pub mod version;
 
-#[cfg(feature = "mdbx")]
-pub mod mdbx;
+// Backend-specific modules are now handled through the unified database module
+
+pub mod generic;
+
+/// Compatibility module that re-exports database types under the `mdbx` path.
+///
+/// The gravity fork uses RocksDB as the primary backend, but some code still references
+/// `reth_db::mdbx::*` for historical reasons. This module provides the necessary re-exports.
+pub mod mdbx {
+    pub use crate::{
+        create_db, init_db, open_db, open_db_read_only, DatabaseArguments, DatabaseEnv,
+        DatabaseEnvKind,
+    };
+
+    /// Read transaction duration configuration (no-op for RocksDB backend).
+    #[derive(Debug, Clone, Copy)]
+    pub enum MaxReadTransactionDuration {
+        /// No timeout for read transactions.
+        Unbounded,
+        /// Set a specific duration (ignored in RocksDB backend).
+        Set(std::time::Duration),
+    }
+
+    /// Sync mode compatibility shim (no-op for RocksDB backend).
+    ///
+    /// MDBX has various sync modes that control durability vs performance trade-offs.
+    /// For RocksDB, these are not applicable -- WAL and sync settings are configured differently.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SyncMode {
+        /// Fully durable writes.
+        Durable,
+        /// Don't sync meta pages.
+        NoMetaSync,
+        /// Safe no-sync mode.
+        SafeNoSync,
+        /// Utterly no-sync mode (fastest but least durable).
+        UtterlyNoSync,
+    }
+
+    impl Default for SyncMode {
+        fn default() -> Self {
+            Self::Durable
+        }
+    }
+
+    impl std::fmt::Display for SyncMode {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Durable => write!(f, "durable"),
+                Self::NoMetaSync => write!(f, "nometasync"),
+                Self::SafeNoSync => write!(f, "safenosync"),
+                Self::UtterlyNoSync => write!(f, "utterlynosync"),
+            }
+        }
+    }
+
+    impl std::str::FromStr for SyncMode {
+        type Err = String;
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            match s.to_lowercase().as_str() {
+                "durable" => Ok(Self::Durable),
+                "nometasync" => Ok(Self::NoMetaSync),
+                "safenosync" => Ok(Self::SafeNoSync),
+                "utterlynosync" => Ok(Self::UtterlyNoSync),
+                _ => Err(format!("Unknown sync mode: {s}")),
+            }
+        }
+    }
+}
 
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
-#[cfg(feature = "mdbx")]
-pub use utils::is_database_empty;
 
-#[cfg(feature = "mdbx")]
-pub use mdbx::{create_db, init_db, open_db, open_db_read_only, DatabaseEnv, DatabaseEnvKind};
+pub use generic::{create_db, init_db, open_db, open_db_read_only};
+
+// Always use RocksDB implementation
+pub use crate::implementation::rocksdb::{
+    DatabaseArguments, DatabaseEnv, DatabaseEnvKind, ShardingDirectories,
+};
 
 pub use models::ClientVersion;
 pub use reth_db_api::*;
+
+/// Generic failpoint injection macro that panics when triggered.
+/// When `failpoints` feature is enabled, this triggers the failpoint and panics if activated.
+/// When disabled, this is a no-op (compiles to nothing).
+///
+/// # Example
+/// ```ignore
+/// set_fail_point!("my::failpoint::name");
+/// ```
+///
+/// To trigger via RPC: `debug_setFailpoint("my::failpoint::name", "panic")`
+#[cfg(feature = "failpoints")]
+#[macro_export]
+macro_rules! set_fail_point {
+    ($name:expr) => {
+        fail::fail_point!($name, |_| {
+            panic!("failpoint triggered: {}", $name);
+        });
+    };
+}
+
+/// No-op version when failpoints feature is disabled.
+#[cfg(not(feature = "failpoints"))]
+#[macro_export]
+macro_rules! set_fail_point {
+    ($name:expr) => {};
+}
 
 /// Collection of database test utilities
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     use super::*;
-    use crate::mdbx::DatabaseArguments;
+    use crate::DatabaseArguments;
     use parking_lot::RwLock;
-    use reth_db_api::{database::Database, database_metrics::DatabaseMetrics};
+    use reth_db_api::{
+        database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
+    };
     use reth_fs_util;
     use std::{
         fmt::Formatter,
@@ -188,7 +288,7 @@ pub mod test_utils {
         let path = tempdir_path();
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
 
-        let db = init_db(&path, DatabaseArguments::test()).expect(&emsg);
+        let db = init_db(&path, DatabaseArguments::new(ClientVersion::default())).expect(&emsg);
 
         Arc::new(TempDatabase::new(db, path))
     }
@@ -198,7 +298,8 @@ pub mod test_utils {
     pub fn create_test_rw_db_with_path<P: AsRef<Path>>(path: P) -> Arc<TempDatabase<DatabaseEnv>> {
         let path = path.as_ref().to_path_buf();
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
-        let db = init_db(path.as_path(), DatabaseArguments::test()).expect(&emsg);
+        let db = init_db(path.as_path(), DatabaseArguments::new(ClientVersion::default()))
+            .expect(&emsg);
         Arc::new(TempDatabase::new(db, path))
     }
 
@@ -213,14 +314,14 @@ pub mod test_utils {
         let datadir = datadir.as_ref().to_path_buf();
         let db_path = datadir.join("db");
         let emsg = format!("{ERROR_DB_CREATION}: {db_path:?}");
-        let db = init_db(&db_path, DatabaseArguments::test()).expect(&emsg);
+        let db = init_db(&db_path, DatabaseArguments::new(ClientVersion::default())).expect(&emsg);
         Arc::new(TempDatabase::new(db, datadir))
     }
 
     /// Create read only database for testing
     #[track_caller]
     pub fn create_test_ro_db() -> Arc<TempDatabase<DatabaseEnv>> {
-        let args = DatabaseArguments::test();
+        let args = DatabaseArguments::new(ClientVersion::default());
 
         let path = tempdir_path();
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
@@ -256,16 +357,14 @@ pub mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::{
-        init_db,
-        mdbx::DatabaseArguments,
-        open_db, tables,
+        init_db, open_db, tables,
         version::{db_version_file_path, DatabaseVersionError},
+        DatabaseArguments,
     };
     use assert_matches::assert_matches;
     use reth_db_api::{
         cursor::DbCursorRO, database::Database, models::ClientVersion, transaction::DbTx,
     };
-    use reth_libmdbx::MaxReadTransactionDuration;
     use std::time::Duration;
     use tempfile::tempdir;
 
@@ -291,8 +390,7 @@ mod tests {
     fn db_version() {
         let path = tempdir().unwrap();
 
-        let args = DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
+        let args = DatabaseArguments::new(ClientVersion::default());
 
         // Database is empty
         {

@@ -10,6 +10,9 @@
 use reth_revm as _;
 use revm as _;
 
+use reth_revm as _;
+use revm as _;
+
 pub mod case;
 pub mod result;
 pub mod suite;

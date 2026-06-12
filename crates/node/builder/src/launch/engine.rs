@@ -125,6 +125,9 @@ impl EngineNodeLauncher {
             })?
             .with_components(components_builder, on_component_initialized).await?;
 
+        // Try to expire pre-merge transaction history if configured
+        ctx.expire_pre_merge_transactions()?;
+
         // spawn exexs if any
         let maybe_exex_manager_handle = ctx.launch_exex(installed_exex).await?;
 
@@ -205,6 +208,7 @@ impl EngineNodeLauncher {
                 ctx.blockchain_db().clone(),
                 ctx.components().evm_config().clone(),
                 || async {
+                    let reorg_cache = ChangesetCache::new();
                     validator_builder
                         .build_tree_validator(
                             &add_ons_ctx,

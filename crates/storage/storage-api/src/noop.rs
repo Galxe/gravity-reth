@@ -684,7 +684,8 @@ impl<ChainSpec: Send + Sync, N: NodePrimitives> DBProvider for NoopProvider<Chai
     fn commit(self) -> ProviderResult<()> {
         use reth_db_api::transaction::DbTx;
 
-        Ok(self.tx.commit()?)
+        self.tx.commit()?;
+        Ok(())
     }
 }
 

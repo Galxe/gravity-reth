@@ -18,7 +18,7 @@ pub type CursorMutTy<TX, T> = <TX as DbTxMut>::CursorMut<T>;
 pub type DupCursorMutTy<TX, T> = <TX as DbTxMut>::DupCursorMut<T>;
 
 /// Read only transaction
-pub trait DbTx: Debug + Send {
+pub trait DbTx: Debug + Send + Sync {
     /// Cursor type for this read-only transaction
     type Cursor<T: Table>: DbCursorRO<T> + Send;
     /// `DupCursor` type for this read-only transaction
@@ -35,7 +35,11 @@ pub trait DbTx: Debug + Send {
     ) -> Result<Option<T::Value>, DatabaseError>;
     /// Commit for read only transaction will consume and free transaction and allows
     /// freeing of memory pages
-    fn commit(self) -> Result<(), DatabaseError>;
+    fn commit(self) -> Result<bool, DatabaseError>;
+    /// Commit data to let other readers read.
+    fn commit_view(&self) -> Result<bool, DatabaseError> {
+        unimplemented!("Not support")
+    }
     /// Aborts transaction
     fn abort(self);
     /// Iterate over read only values in table.

@@ -147,11 +147,9 @@ struct TestHarness {
         BasicEngineValidator<MockEthProvider, MockEvmConfig, MockEngineValidator>,
         MockEvmConfig,
     >,
-    to_tree_tx: crossbeam_channel::Sender<
-        FromEngine<EngineApiRequest<EthEngineTypes, EthPrimitives>, Block>,
-    >,
+    to_tree_tx: Sender<FromEngine<EngineApiRequest<EthEngineTypes, EthPrimitives>, Block>>,
     from_tree_rx: UnboundedReceiver<EngineApiEvent>,
-    blocks: Vec<ExecutedBlock>,
+    blocks: Vec<ExecutedBlockWithTrieUpdates>,
     action_rx: Receiver<PersistenceAction>,
     block_builder: TestBlockBuilder,
     provider: MockEthProvider,
@@ -243,12 +241,12 @@ impl TestHarness {
         }
     }
 
-    fn with_blocks(mut self, blocks: Vec<ExecutedBlock>) -> Self {
-        let mut blocks_by_hash = B256Map::default();
+    fn with_blocks(mut self, blocks: Vec<ExecutedBlockWithTrieUpdates>) -> Self {
+        let mut blocks_by_hash = HashMap::default();
         let mut blocks_by_number = BTreeMap::new();
-        let mut state_by_hash = B256Map::default();
+        let mut state_by_hash = HashMap::default();
         let mut hash_by_number = BTreeMap::new();
-        let mut parent_to_child: B256Map<B256Set> = B256Map::default();
+        let mut parent_to_child: HashMap<B256, HashSet<B256>> = HashMap::default();
         let mut parent_hash = B256::ZERO;
 
         for block in &blocks {
@@ -912,23 +910,29 @@ fn test_tree_state_on_new_head_deep_fork() {
     let chain_a = test_block_builder.create_fork(&last_block, 10);
     let chain_b = test_block_builder.create_fork(&last_block, 10);
 
-    let empty_trie_data = ComputedTrieData::default;
-
     for block in &chain_a {
-        test_harness.tree.state.tree_state.insert_executed(ExecutedBlock::new(
-            Arc::new(block.clone()),
-            Arc::new(BlockExecutionOutput::default()),
-            empty_trie_data(),
-        ));
+        test_harness.tree.state.tree_state.insert_executed(ExecutedBlockWithTrieUpdates {
+            block: ExecutedBlock {
+                recovered_block: Arc::new(block.clone()),
+                execution_output: Arc::new(ExecutionOutcome::default()),
+                hashed_state: Arc::new(HashedPostState::default()),
+            },
+            trie: ExecutedTrieUpdates::empty(),
+            triev2: Default::default(),
+        });
     }
     test_harness.tree.state.tree_state.set_canonical_head(chain_a.last().unwrap().num_hash());
 
     for block in &chain_b {
-        test_harness.tree.state.tree_state.insert_executed(ExecutedBlock::new(
-            Arc::new(block.clone()),
-            Arc::new(BlockExecutionOutput::default()),
-            empty_trie_data(),
-        ));
+        test_harness.tree.state.tree_state.insert_executed(ExecutedBlockWithTrieUpdates {
+            block: ExecutedBlock {
+                recovered_block: Arc::new(block.clone()),
+                execution_output: Arc::new(ExecutionOutcome::default()),
+                hashed_state: Arc::new(HashedPostState::default()),
+            },
+            trie: ExecutedTrieUpdates::empty(),
+            triev2: Default::default(),
+        });
     }
 
     // for each block in chain_b, reorg to it and then back to canonical

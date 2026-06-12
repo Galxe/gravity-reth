@@ -12,7 +12,7 @@ use reth_exex::{ExExManagerHandle, ExExNotification, ExExNotificationSource};
 use reth_primitives_traits::{format_gas_throughput, BlockBody, NodePrimitives};
 use reth_provider::{
     providers::{StaticFileProvider, StaticFileWriter},
-    BlockHashReader, BlockReader, DBProvider, EitherWriter, ExecutionOutcome, HeaderProvider,
+    BlockHashReader, BlockReader, DBProvider, ExecutionOutcome, HeaderProvider,
     LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateWriteConfig, StateWriter,
     StaticFileProviderFactory, StatsReader, StoragePath, StorageSettingsCache, TransactionVariant,
 };
@@ -172,7 +172,7 @@ where
         // We can only prune changesets if we're not executing MerkleStage from scratch (by
         // threshold or first-sync)
         Ok(max_block - start_block > self.external_clean_threshold ||
-            provider.count_entries::<tables::AccountsTrie>()?.is_zero())
+            provider.count_entries::<tables::AccountsTrieV2>()?.is_zero())
     }
 
     /// Performs consistency check on static files.
@@ -190,15 +190,11 @@ where
         unwind_to: Option<u64>,
     ) -> Result<(), StageError>
     where
-        Provider: StaticFileProviderFactory
-            + DBProvider
-            + BlockReader
-            + HeaderProvider
-            + StorageSettingsCache,
+        Provider: StaticFileProviderFactory + DBProvider + BlockReader + HeaderProvider,
     {
-        // On old nodes, if there's any receipts pruning configured, receipts are written directly
-        // to database and inconsistencies are expected.
-        if EitherWriter::receipts_destination(provider).is_database() {
+        // If there's any receipts pruning configured, receipts are written directly to database and
+        // inconsistencies are expected.
+        if provider.prune_modes_ref().has_receipts_pruning() {
             return Ok(())
         }
 
@@ -750,7 +746,7 @@ mod tests {
     use assert_matches::assert_matches;
     use reth_chainspec::{ChainSpecBuilder, EthereumHardfork, ForkCondition};
     use reth_db_api::{
-        models::{metadata::StorageSettings, AccountBeforeTx},
+        models::AccountBeforeTx,
         transaction::{DbTx, DbTxMut},
     };
     use reth_ethereum_consensus::EthBeaconConsensus;
@@ -1120,7 +1116,6 @@ mod tests {
         provider.commit().unwrap();
 
         // execute
-        let mut provider = factory.database_provider_rw().unwrap();
 
         // If there is a pruning configuration, then it's forced to use the database.
         // This way we test both cases.
@@ -1155,6 +1150,7 @@ mod tests {
                     UnwindInput { checkpoint: result.checkpoint, unwind_to: 0, bad_block: None },
                 )
                 .unwrap();
+            provider.commit_view().unwrap();
 
             provider.static_file_provider().commit().unwrap();
 

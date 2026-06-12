@@ -1,11 +1,21 @@
 //! Helper type that represents one of two possible executor types
 
+use alloc::vec::Vec;
 use crate::{execute::Executor, Database, OnStateHook};
 
+use alloy_evm::{precompiles::DynPrecompile, EvmEnv};
+use alloy_primitives::Address;
 // re-export Either
 pub use futures_util::future::Either;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
+use revm::{
+    context::{
+        result::{ExecutionResult, HaltReason},
+        TxEnv,
+    },
+    database::BundleState,
+};
 
 impl<A, B, DB> Executor<DB> for Either<A, B>
 where
@@ -73,10 +83,29 @@ where
         }
     }
 
+    fn take_bundle(&mut self) -> BundleState {
+        match self {
+            Self::Left(a) => a.take_bundle(),
+            Self::Right(b) => b.take_bundle(),
+        }
+    }
+
     fn size_hint(&self) -> usize {
         match self {
             Self::Left(a) => a.size_hint(),
             Self::Right(b) => b.size_hint(),
+        }
+    }
+
+    fn transact_system_txn(
+        &mut self,
+        evm_env: EvmEnv,
+        precompiles: Vec<(Address, DynPrecompile)>,
+        tx_env: TxEnv,
+    ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        match self {
+            Self::Left(a) => a.transact_system_txn(evm_env, precompiles, tx_env),
+            Self::Right(b) => b.transact_system_txn(evm_env, precompiles, tx_env),
         }
     }
 }

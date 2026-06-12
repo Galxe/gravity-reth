@@ -106,8 +106,8 @@ impl DbTx for TxMock {
     ///
     /// **Mock behavior**: Always returns `Ok(())`, indicating successful commit.
     /// No actual data is persisted since this is a mock implementation.
-    fn commit(self) -> Result<(), DatabaseError> {
-        Ok(())
+    fn commit(self) -> Result<bool, DatabaseError> {
+        Ok(true)
     }
 
     /// Aborts the transaction.
@@ -349,7 +349,7 @@ impl<T: DupSort> DbDupCursorRO<T> for CursorMock {
         _key: Option<<T>::Key>,
         _subkey: Option<<T as DupSort>::SubKey>,
     ) -> Result<DupWalker<'_, T, Self>, DatabaseError> {
-        Ok(DupWalker { cursor: self, start: None })
+        Ok(DupWalker { cursor: self, start: None, is_done: true })
     }
 }
 
