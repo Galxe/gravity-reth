@@ -82,7 +82,6 @@ use std::{
     path::PathBuf,
     sync::Arc,
     thread,
-    time::Instant,
 };
 use tracing::{debug, instrument, trace};
 

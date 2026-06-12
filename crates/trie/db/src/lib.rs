@@ -4,7 +4,6 @@
 
 mod changesets;
 pub use changesets::*;
-mod commitment;
 mod hashed_cursor;
 mod prefix_set;
 mod proof;
@@ -12,7 +11,6 @@ mod state;
 mod storage;
 mod trie_cursor;
 
-pub use commitment::{MerklePatriciaTrie, StateCommitment};
 pub use hashed_cursor::{
     DatabaseHashedAccountCursor, DatabaseHashedCursorFactory, DatabaseHashedStorageCursor,
 };
