@@ -139,11 +139,3 @@ arbitrary = [
 rayon = ["dep:rayon"]
 nested-trie = ["std", "dep:rayon"]
 
-[[bench]]
-name = "prefix_set"
-harness = false
-
-[[bench]]
-name = "hashed_state"
-harness = false
-required-features = ["rayon"]
