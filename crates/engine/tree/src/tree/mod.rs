@@ -131,6 +131,14 @@ where
     P: BlockReader + StateProviderFactory + StateReader + Clone,
 {
     /// Creates a new state provider from this builder.
+    ///
+    /// **Race-window note**: the in-memory `block_ids` snapshot is not threaded through here,
+    /// so EVM `BLOCKHASH(n)` over the `overlay` window falls back to `historical` for the
+    /// brief window between `MakeCanonical` and `advance_persistence`. This builder is used
+    /// by the upstream-reth `run_inner` payload-validation path (opt-in via
+    /// `GRETH_DISABLE_PIPE_EXECUTION`); the gravity-default `pipe_run_inner` path does NOT
+    /// route through here. Closing this gap requires plumbing a `CanonicalInMemoryState`
+    /// handle into the builder; deferred until needed.
     pub fn build(&self) -> ProviderResult<StateProviderBox> {
         let mut provider = self.provider_factory.state_by_block_hash(self.historical)?;
         if let Some(overlay) = self.overlay.clone() {
@@ -491,12 +499,24 @@ where
     /// node rather than silently leaving a broken engine tree running.
     fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent<N>) {
         match event {
-            PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }) => {
+            PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent {
+                executed_block,
+                block_id,
+                tx,
+            }) => {
                 let block_number = executed_block.recovered_block.number();
                 debug!(target: "on_pipe_exec_event",
                     block_number=%block_number,
                     block_hash=%executed_block.recovered_block.hash(),
+                    block_id=%block_id,
                     "Received make canonical event");
+                // Insert the block_id index BEFORE `make_executed_block_canonical`
+                // (which calls `make_canonical` → `set_canonical_head` and exposes
+                // block N as canonical-in-memory). This guarantees that any RPC
+                // observer that sees block N as canonical can immediately resolve
+                // `gravity_blockIdByNumber(N)` and `BLOCKHASH(N)` via the index,
+                // closing the race window with `advance_persistence`.
+                self.canonical_in_memory_state.insert_block_id(block_number, block_id);
                 self.make_executed_block_canonical(executed_block);
                 tx.send(()).expect("Failed to send make canonical event");
             }
@@ -1887,10 +1907,13 @@ where
 
         let finalized = self.state.forkchoice_state_tracker.last_valid_finalized();
         self.remove_before(self.persistence_state.last_persisted_block, finalized)?;
+        let persisted_num = self.persistence_state.last_persisted_block.number;
         self.canonical_in_memory_state.remove_persisted_blocks(BlockNumHash {
-            number: self.persistence_state.last_persisted_block.number,
+            number: persisted_num,
             hash: self.persistence_state.last_persisted_block.hash,
         });
+        // Evict in-memory `block_id` entries that now live in `tables::BlockNumberToBlockId`.
+        self.canonical_in_memory_state.remove_persisted_block_ids(persisted_num);
         Ok(())
     }
 

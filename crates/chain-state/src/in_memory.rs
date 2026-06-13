@@ -144,6 +144,22 @@ pub(crate) struct CanonicalInMemoryStateInner<N: NodePrimitives> {
     pub(crate) in_memory_state: InMemoryState<N>,
     /// A broadcast stream that emits events when the canonical chain is updated.
     pub(crate) canon_state_notification_sender: CanonStateNotificationSender<N>,
+    /// Index from canonical block number to Aptos consensus `block_id` for blocks that are
+    /// canonical in-memory but not yet persisted to MDBX.
+    ///
+    /// This closes the race window between `MakeCanonical` (when the block becomes
+    /// canonical in-memory) and `advance_persistence` (when `tables::BlockNumberToBlockId`
+    /// is written). Without this index, RPC `gravity_blockIdByNumber(N)` and EVM
+    /// `BLOCKHASH(N)` would observe `null`/`0x0` during that window.
+    ///
+    /// Entries are inserted by the engine tree when a block becomes canonical
+    /// in-memory, and evicted by [`CanonicalInMemoryState::remove_persisted_block_ids`]
+    /// after the corresponding row has been committed to MDBX.
+    ///
+    /// `BTreeMap` is used because the eviction path uses range semantics
+    /// (`split_off(persisted_num + 1)`); short-lived snapshot views taken via
+    /// `snapshot_block_ids_for` use a plain `HashMap` since they only need point lookups.
+    pub(crate) block_ids: RwLock<BTreeMap<BlockNumber, B256>>,
 }
 
 impl<N: NodePrimitives> CanonicalInMemoryStateInner<N> {
@@ -155,6 +171,7 @@ impl<N: NodePrimitives> CanonicalInMemoryStateInner<N> {
             let mut blocks = self.in_memory_state.blocks.write();
             numbers.clear();
             blocks.clear();
+            self.block_ids.write().clear();
             self.in_memory_state.pending.send_modify(|p| {
                 p.take();
             });
@@ -197,6 +214,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
                 chain_info_tracker,
                 in_memory_state,
                 canon_state_notification_sender,
+                block_ids: RwLock::new(BTreeMap::new()),
             }),
         }
     }
@@ -221,6 +239,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
             chain_info_tracker,
             in_memory_state,
             canon_state_notification_sender,
+            block_ids: RwLock::new(BTreeMap::new()),
         };
 
         Self { inner: Arc::new(inner) }
@@ -307,6 +326,54 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
                 self.update_blocks(new, old);
             }
         }
+    }
+
+    /// Inserts the Aptos consensus `block_id` for a canonical in-memory block.
+    ///
+    /// Callers must invoke this **before** any RPC observer can see block `number` as
+    /// canonical, so that `gravity_blockIdByNumber(number)` and EVM `BLOCKHASH(number)`
+    /// see the entry as soon as the block becomes canonical in-memory.
+    pub fn insert_block_id(&self, number: BlockNumber, block_id: B256) {
+        self.inner.block_ids.write().insert(number, block_id);
+    }
+
+    /// Returns the Aptos consensus `block_id` for a canonical in-memory block.
+    pub fn block_id_by_number(&self, number: BlockNumber) -> Option<B256> {
+        self.inner.block_ids.read().get(&number).copied()
+    }
+
+    /// Evicts all `block_id` entries at or below `persisted_num` from the in-memory
+    /// index.
+    ///
+    /// Called after the persistence task has committed the corresponding
+    /// `tables::BlockNumberToBlockId` rows, so the canonical mapping for those blocks
+    /// now lives in MDBX and the in-memory entries are no longer needed.
+    pub fn remove_persisted_block_ids(&self, persisted_num: BlockNumber) {
+        let mut block_ids = self.inner.block_ids.write();
+        match persisted_num.checked_add(1) {
+            Some(threshold) => {
+                // split_off returns the right half [threshold ..); keep it.
+                let kept = block_ids.split_off(&threshold);
+                *block_ids = kept;
+            }
+            // persisted_num == u64::MAX: every possible BlockNumber is at or below,
+            // so we evict everything.
+            None => block_ids.clear(),
+        }
+    }
+
+    /// Returns a snapshot of `(number, block_id)` for every block number in the given
+    /// iterator that has an in-memory entry.
+    ///
+    /// Used by `MemoryOverlayStateProviderRef` constructors to embed a frozen view of
+    /// the in-memory window into the overlay; the snapshot's lifetime ends with the
+    /// overlay (typically a single `eth_call`).
+    pub fn snapshot_block_ids_for(
+        &self,
+        numbers: impl IntoIterator<Item = BlockNumber>,
+    ) -> HashMap<BlockNumber, B256> {
+        let block_ids = self.inner.block_ids.read();
+        numbers.into_iter().filter_map(|n| block_ids.get(&n).map(|id| (n, *id))).collect()
     }
 
     /// Removes blocks from the in memory state that are persisted to the given height.
@@ -517,18 +584,24 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     ///
     /// This merges the state of all blocks that are part of the chain that the requested block is
     /// the head of. This includes all blocks that connect back to the canonical block on disk.
+    ///
+    /// The returned overlay carries a snapshot of the in-memory `block_id` index so that
+    /// EVM `BLOCKHASH(n)` resolves correctly for blocks that are canonical in-memory but
+    /// not yet persisted to MDBX.
     pub fn state_provider(
         &self,
         hash: B256,
         historical: StateProviderBox,
     ) -> MemoryOverlayStateProvider<N> {
-        let in_memory = if let Some(state) = self.state_by_hash(hash) {
+        let in_memory: Vec<_> = if let Some(state) = self.state_by_hash(hash) {
             state.chain().map(|block_state| block_state.block()).collect()
         } else {
             Vec::new()
         };
 
-        MemoryOverlayStateProvider::new(historical, in_memory)
+        let block_ids =
+            self.snapshot_block_ids_for(in_memory.iter().map(|b| b.recovered_block().number()));
+        MemoryOverlayStateProvider::new(historical, in_memory).with_block_ids(block_ids)
     }
 
     /// Returns an iterator over all __canonical blocks__ in the in-memory state, from newest to
@@ -687,6 +760,14 @@ impl<N: NodePrimitives> BlockState<N> {
     ///
     /// This merges the state of all blocks that are part of the chain that the this block is
     /// the head of. This includes all blocks that connect back to the canonical block on disk.
+    ///
+    /// **Race-window note**: the returned overlay has an empty `block_ids` snapshot, so EVM
+    /// `BLOCKHASH(n)` for blocks that are canonical in-memory but not yet persisted to
+    /// `tables::BlockNumberToBlockId` will fall back to `historical` (MDBX) and may return
+    /// `None`/`0x0` during the brief window between `MakeCanonical` and `advance_persistence`.
+    /// Callers that own a [`CanonicalInMemoryState`] should chain
+    /// [`MemoryOverlayStateProviderRef::with_block_ids`] using
+    /// [`CanonicalInMemoryState::snapshot_block_ids_for`] to close that window.
     pub fn state_provider(&self, historical: StateProviderBox) -> MemoryOverlayStateProvider<N> {
         let in_memory = self.chain().map(|block_state| block_state.block()).collect();
 
@@ -976,7 +1057,7 @@ mod tests {
     use super::*;
     use crate::test_utils::TestBlockBuilder;
     use alloy_eips::eip7685::Requests;
-    use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue};
+    use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, U256};
     use rand::Rng;
     use reth_errors::ProviderResult;
     use reth_ethereum_primitives::{EthPrimitives, Receipt};
@@ -1575,5 +1656,95 @@ mod tests {
                 ))
             }
         );
+    }
+
+    #[test]
+    fn test_canonical_in_memory_state_block_ids_insert_and_lookup() {
+        let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
+        let id_5 = B256::from(U256::from(0x55u64));
+        let id_7 = B256::from(U256::from(0x77u64));
+
+        assert_eq!(state.block_id_by_number(5), None);
+        state.insert_block_id(5, id_5);
+        state.insert_block_id(7, id_7);
+        assert_eq!(state.block_id_by_number(5), Some(id_5));
+        assert_eq!(state.block_id_by_number(7), Some(id_7));
+        assert_eq!(state.block_id_by_number(6), None);
+    }
+
+    #[test]
+    fn test_canonical_in_memory_state_remove_persisted_block_ids_evicts_inclusive() {
+        let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
+        for n in 1..=5u64 {
+            state.insert_block_id(n, B256::from(U256::from(n)));
+        }
+
+        // Evict everything <= 3. Per the contract: 1, 2, 3 gone; 4, 5 kept.
+        state.remove_persisted_block_ids(3);
+
+        for n in 1..=3u64 {
+            assert_eq!(state.block_id_by_number(n), None, "expected block {n} to be evicted");
+        }
+        for n in 4..=5u64 {
+            assert_eq!(
+                state.block_id_by_number(n),
+                Some(B256::from(U256::from(n))),
+                "block {n} should still be in-memory"
+            );
+        }
+    }
+
+    #[test]
+    fn test_canonical_in_memory_state_remove_persisted_block_ids_idempotent_zero() {
+        // Evicting `persisted_num = 0` when nothing is persisted yet must not panic
+        // and must drop only block 0 if present, leaving everything else.
+        let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
+        state.insert_block_id(0, B256::from(U256::from(1u64)));
+        state.insert_block_id(1, B256::from(U256::from(2u64)));
+        state.remove_persisted_block_ids(0);
+        assert_eq!(state.block_id_by_number(0), None);
+        assert_eq!(state.block_id_by_number(1), Some(B256::from(U256::from(2u64))));
+    }
+
+    #[test]
+    fn test_canonical_in_memory_state_remove_persisted_block_ids_u64_max() {
+        // `persisted_num = u64::MAX` must NOT panic (used to overflow with `+1`) and
+        // must evict every entry — by definition every BlockNumber is `<= u64::MAX`.
+        let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
+        state.insert_block_id(1, B256::from(U256::from(1u64)));
+        state.insert_block_id(u64::MAX, B256::from(U256::from(2u64)));
+        state.remove_persisted_block_ids(u64::MAX);
+        assert_eq!(state.block_id_by_number(1), None);
+        assert_eq!(state.block_id_by_number(u64::MAX), None);
+    }
+
+    #[test]
+    fn test_canonical_in_memory_state_snapshot_block_ids_for() {
+        let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
+        let id_5 = B256::from(U256::from(0x55u64));
+        let id_7 = B256::from(U256::from(0x77u64));
+        state.insert_block_id(5, id_5);
+        state.insert_block_id(7, id_7);
+
+        // Snapshot covering some present + some absent numbers.
+        let snap = state.snapshot_block_ids_for([4u64, 5, 6, 7]);
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.get(&5).copied(), Some(id_5));
+        assert_eq!(snap.get(&7).copied(), Some(id_7));
+        assert!(!snap.contains_key(&4));
+        assert!(!snap.contains_key(&6));
+
+        // Empty input → empty snapshot.
+        let empty = state.snapshot_block_ids_for(std::iter::empty::<u64>());
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_canonical_in_memory_state_clear_state_clears_block_ids() {
+        let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
+        state.insert_block_id(5, B256::from(U256::from(0x55u64)));
+        assert_eq!(state.block_id_by_number(5), Some(B256::from(U256::from(0x55u64))));
+        state.clear_state();
+        assert_eq!(state.block_id_by_number(5), None);
     }
 }

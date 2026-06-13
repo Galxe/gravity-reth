@@ -9,7 +9,7 @@ use crate::{
     StageCheckpointReader, StateProviderBox, StateProviderFactory, StateReader,
     StaticFileProviderFactory, TransactionVariant, TransactionsProvider,
 };
-use alloy_consensus::{transaction::TransactionMeta, Header};
+use alloy_consensus::{transaction::TransactionMeta, BlockHeader, Header};
 use alloy_eips::{
     eip4895::{Withdrawal, Withdrawals},
     BlockHashOrNumber, BlockId, BlockNumHash, BlockNumberOrTag,
@@ -137,13 +137,22 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
     }
 
     /// This uses a given [`BlockState`] to initialize a state provider for that block.
+    ///
+    /// The returned overlay is decorated with a snapshot of the in-memory `block_id` index
+    /// covering the in-memory ancestor window, so EVM `BLOCKHASH(n)` resolves to the
+    /// Aptos consensus `block_id` even for blocks that are canonical in-memory but not
+    /// yet persisted to MDBX.
     fn block_state_provider(
         &self,
         state: &BlockState<N::Primitives>,
     ) -> ProviderResult<MemoryOverlayStateProvider<N::Primitives>> {
         let anchor_hash = state.anchor().hash;
         let latest_historical = self.database.history_by_block_hash(anchor_hash)?;
-        Ok(state.state_provider(latest_historical))
+        let in_memory: Vec<_> = state.chain().map(|s| s.block()).collect();
+        let block_ids = self
+            .canonical_in_memory_state
+            .snapshot_block_ids_for(in_memory.iter().map(|b| b.recovered_block().number()));
+        Ok(MemoryOverlayStateProvider::new(latest_historical, in_memory).with_block_ids(block_ids))
     }
 
     /// Return the last N blocks of state, recreating the [`ExecutionOutcome`].
@@ -246,21 +255,15 @@ impl<N: ProviderNodeTypes> BlockHashReader for BlockchainProvider<N> {
 
 impl<N: ProviderNodeTypes> BlockNumberToBlockIdReader for BlockchainProvider<N> {
     fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
-        // KNOWN RACE — `CanonicalInMemoryState` is not consulted here.
-        //
-        // In the Gravity pipe-exec flow, `BlockViewStorage::update_canonical`
-        // persists the `(block_number, block_id)` row to MDBX **before**
-        // `make_canonical` returns, so by the time any subsequent RPC observes
-        // block N as canonical the persisted table already has the row. So in
-        // practice the race window is closed.
-        //
-        // The upstream-reth path (`MakeCanonical` engine event with async
-        // `advance_persistence`) can open a window where block N is canonical
-        // in-memory but its `block_id` is not yet persisted — in that window
-        // `gravity_blockIdByNumber(N)` returns `null` and EVM `BLOCKHASH(N)`
-        // returns `0x0`. Mitigation is design doc §6.4: thread block_id through
-        // `CanonicalInMemoryState` so this reader can consult it before falling
-        // back to MDBX. Deferred to a follow-up; tracked in checklist §1.4.
+        // Two-stage lookup: in-memory window first, then MDBX. The in-memory index
+        // is populated by the engine tree the moment a block becomes canonical
+        // in-memory (see `on_pipe_exec_event`), and evicted after the corresponding
+        // row is committed to `tables::BlockNumberToBlockId` by the persistence
+        // task. This closes the race window where `gravity_blockIdByNumber(N)`
+        // and EVM `BLOCKHASH(N)` would otherwise observe `null`/`0x0`.
+        if let Some(id) = self.canonical_in_memory_state.block_id_by_number(number) {
+            return Ok(Some(id));
+        }
         self.consistent_provider()?.block_id_by_number(number)
     }
 }
@@ -535,9 +538,15 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
         if let Some(state) = self.canonical_in_memory_state.head_state() {
             trace!(target: "providers::blockchain", "Using head state for latest state provider");
             if get_gravity_config().validator_node_only {
-                // Only supply latest view if current node is a validator
+                // Only supply latest view if current node is a validator.
+                // Decorate the overlay with the in-memory `block_id` snapshot for
+                // race-window-safe BLOCKHASH (mirrors `block_state_provider`).
                 let latest_historical = self.database.latest()?;
-                Ok(state.state_provider(latest_historical).boxed())
+                let in_memory_numbers =
+                    state.chain().map(|s| s.block_ref().recovered_block().number());
+                let block_ids =
+                    self.canonical_in_memory_state.snapshot_block_ids_for(in_memory_numbers);
+                Ok(state.state_provider(latest_historical).with_block_ids(block_ids).boxed())
             } else {
                 Ok(self.block_state_provider(&state)?.boxed())
             }

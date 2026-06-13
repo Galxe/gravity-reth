@@ -392,14 +392,23 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
     }
 
     /// This uses a given [`BlockState`] to initialize a state provider for that block.
+    ///
+    /// The returned overlay is decorated with a snapshot of the in-memory `block_id` index
+    /// covering the in-memory ancestor window, so EVM `BLOCKHASH(n)` resolves to the
+    /// Aptos consensus `block_id` even for blocks that are canonical in-memory but not
+    /// yet persisted to MDBX.
     fn block_state_provider_ref(
         &self,
         state: &BlockState<N::Primitives>,
     ) -> ProviderResult<MemoryOverlayStateProviderRef<'_, N::Primitives>> {
         let anchor_hash = state.anchor().hash;
         let latest_historical = self.history_by_block_hash_ref(anchor_hash)?;
-        let in_memory = state.chain().map(|block_state| block_state.block()).collect();
-        Ok(MemoryOverlayStateProviderRef::new(latest_historical, in_memory))
+        let in_memory: Vec<_> = state.chain().map(|block_state| block_state.block()).collect();
+        let block_ids = self
+            .canonical_in_memory_state
+            .snapshot_block_ids_for(in_memory.iter().map(|b| b.recovered_block().number()));
+        Ok(MemoryOverlayStateProviderRef::new(latest_historical, in_memory)
+            .with_block_ids(block_ids))
     }
 
     /// Fetches data from either in-memory state or persistent storage for a range of transactions.
@@ -607,7 +616,16 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         {
             let anchor_hash = block_state.anchor().hash;
             let latest_historical = into_history_at_block_hash(anchor_hash)?;
-            return Ok(Box::new(block_state.state_provider(latest_historical)));
+            // Decorate the overlay with a snapshot of the in-memory `block_id` index
+            // so EVM `BLOCKHASH(n)` resolves correctly for blocks that are canonical
+            // in-memory but not yet persisted to MDBX.
+            let in_memory_numbers =
+                block_state.chain().map(|s| s.block_ref().recovered_block().number());
+            let block_ids =
+                self.canonical_in_memory_state.snapshot_block_ids_for(in_memory_numbers);
+            return Ok(Box::new(
+                block_state.state_provider(latest_historical).with_block_ids(block_ids),
+            ));
         }
         into_history_at_block_hash(block_hash)
     }

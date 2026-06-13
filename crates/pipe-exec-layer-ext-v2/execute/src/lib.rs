@@ -1230,7 +1230,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         let start_time = Instant::now();
         let (tx, rx) = oneshot::channel();
         self.event_tx
-            .send(PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent { executed_block, tx }))
+            .send(PipeExecLayerEvent::MakeCanonical(MakeCanonicalEvent {
+                executed_block,
+                block_id: *block_id,
+                tx,
+            }))
             .unwrap();
         rx.await.unwrap();
         self.storage.update_canonical(block_number, block_hash);

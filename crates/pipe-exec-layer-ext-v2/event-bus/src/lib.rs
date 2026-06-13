@@ -1,6 +1,6 @@
 //! Event bus for the pipe execution layer.
 
-use alloy_primitives::TxHash;
+use alloy_primitives::{TxHash, B256};
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_primitives::NodePrimitives;
@@ -41,6 +41,12 @@ pub fn get_pipe_exec_layer_event_bus() -> &'static PipeExecLayerEventBus<EthPrim
 pub struct MakeCanonicalEvent<N: NodePrimitives> {
     /// The executed block with trie updates
     pub executed_block: ExecutedBlockWithTrieUpdates<N>,
+    /// Aptos consensus `block_id` for this block.
+    ///
+    /// Threaded through so the engine tree can populate
+    /// `CanonicalInMemoryState::block_ids` before sending the ack on `tx`,
+    /// closing the race window between MakeCanonical and `advance_persistence`.
+    pub block_id: B256,
     /// A sender to notify when event processing is complete
     pub tx: oneshot::Sender<()>,
 }

@@ -142,6 +142,13 @@ where
         };
 
         // Execute all gathered blocks to gather accesses state.
+        //
+        // Race-window note: the in-memory `block_ids` snapshot is not threaded through here,
+        // so `BLOCKHASH(n)` over `executed_ancestors` may return `0x0` if the corresponding
+        // `tables::BlockNumberToBlockId` row hasn't yet been persisted. The ress witness
+        // recorder is a stateless light-client-style path used outside the gravity hot
+        // path; closing this gap would require plumbing a `CanonicalInMemoryState` handle
+        // through `RethRessProtocolProvider`. Deferred until needed.
         let mut db = StateWitnessRecorderDatabase::new(StateProviderDatabase::new(
             MemoryOverlayStateProvider::new(historical, executed_ancestors.clone()),
         ));
