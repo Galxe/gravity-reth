@@ -45,7 +45,7 @@ pub struct MakeCanonicalEvent<N: NodePrimitives> {
     ///
     /// Threaded through so the engine tree can populate
     /// `CanonicalInMemoryState::block_ids` before sending the ack on `tx`,
-    /// closing the race window between MakeCanonical and `advance_persistence`.
+    /// closing the race window between `MakeCanonical` and `advance_persistence`.
     pub block_id: B256,
     /// A sender to notify when event processing is complete
     pub tx: oneshot::Sender<()>,
