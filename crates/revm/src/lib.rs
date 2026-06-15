@@ -21,11 +21,6 @@ pub mod cancelled;
 /// Contains glue code for integrating reth database into revm's [Database].
 pub mod database;
 
-/// Override wrapper that makes the EVM `BLOCKHASH` opcode return Gravity's
-/// Aptos consensus `block_id` instead of the canonical keccak header hash.
-pub mod blockid_override;
-pub use blockid_override::BlockIdOverrideDb;
-
 pub use revm::{database as db, inspector};
 
 /// Common test helpers
