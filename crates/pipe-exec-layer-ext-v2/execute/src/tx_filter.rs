@@ -1,8 +1,9 @@
 //! Pre-execution transaction filtering.
 //!
 //! Mirrors the cheap pool-side guards that `OrderedBlock` txs skipped (nonce, balance,
-//! cumulative gas, EIP-7702 intrinsic gas floor) so non-pool-injected txs cannot reach grevm with
-//! a state that would make the executor panic.
+//! cumulative gas, EIP-7702 intrinsic gas floor, EIP-7702 pre-Prague reject, EIP-4844 reject,
+//! EIP-3860 init-code size) so non-pool-injected txs cannot reach grevm with a state that
+//! would make the executor panic.
 
 use alloy_consensus::Transaction;
 use alloy_primitives::{
@@ -15,8 +16,8 @@ use reth_ethereum_primitives::TransactionSigned;
 use reth_evm::ParallelDatabase;
 use reth_evm_ethereum::revm_spec_by_timestamp_and_block_number;
 use revm::state::AccountInfo;
-use revm_primitives::hardfork::SpecId;
-use tracing::warn;
+use revm_primitives::{eip3860::MAX_INITCODE_SIZE, hardfork::SpecId};
+use tracing::info;
 
 /// Return the invalid transaction indexes.
 ///
@@ -50,7 +51,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                 tx_gas_limit_sum = new_sum;
             }
             _ => {
-                warn!(target: "filter_invalid_txs",
+                info!(target: "filter_invalid_txs",
                     tx_hash=?txs[idx].hash(),
                     sender=?senders[idx],
                     block_gas_limit=?gas_limit,
@@ -70,7 +71,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
 
     let is_tx_valid = |tx: &TransactionSigned, sender: &Address, account: &mut AccountInfo| {
         if account.nonce != tx.nonce() {
-            warn!(target: "filter_invalid_txs",
+            info!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 nonce=?tx.nonce(),
@@ -88,11 +89,38 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         // `lib.rs:1067-1073`. Closes the boundary called out in the acceptance
         // design as P-2.
         if tx.is_eip7702() && !spec_id.is_enabled_in(SpecId::PRAGUE) {
-            warn!(target: "filter_invalid_txs",
+            info!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 spec_id=?spec_id,
                 "EIP-7702 tx in pre-Prague block"
+            );
+            return false;
+        }
+        // Gravity does not support EIP-4844. revm tx-level validation can reject a type-3
+        // tx with `EmptyBlobs` / `BlobVersionNotSupported` / `TooManyBlobs` /
+        // `BlobVersionedHashesNotSupported` / `BlobGasPriceGreaterThanMax` /
+        // `MaxFeePerBlobGasNotSupported` / `BlobCreateTransaction`; any of these reaches the
+        // executor as `EVMError` and panics. Drop the whole tx type here so a byzantine
+        // proposer cannot reach grevm via this surface. Closes gravity-audit#696 trigger 2.
+        if tx.is_eip4844() {
+            info!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                "EIP-4844 blob tx rejected — unsupported on Gravity"
+            );
+            return false;
+        }
+        // EIP-3860 init-code cap. A Create tx with `input.len() > MAX_INITCODE_SIZE` is
+        // rejected by revm with `CreateInitCodeSizeLimit` at tx-level validation, which the
+        // executor cannot recover from. Gate it before grevm sees it. Closes
+        // gravity-audit#696 trigger 4.
+        if tx.is_create() && tx.input().len() > MAX_INITCODE_SIZE {
+            info!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                init_code_size=?tx.input().len(),
+                "init code exceeds EIP-3860 limit"
             );
             return false;
         }
@@ -110,7 +138,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
             tx.authorization_list().map(|l| l.len()).unwrap_or_default() as u64,
         );
         if tx.gas_limit() < intrinsic.initial_gas || tx.gas_limit() < intrinsic.floor_gas {
-            warn!(target: "filter_invalid_txs",
+            info!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 gas_limit=?tx.gas_limit(),
@@ -124,7 +152,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
             .saturating_mul(U256::from(tx.gas_limit()));
         let total_spent = gas_spent.saturating_add(tx.value());
         if account.balance < total_spent {
-            warn!(target: "filter_invalid_txs",
+            info!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 balance=?account.balance,
@@ -148,7 +176,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                     .collect()
             } else {
                 // Sender does not exist in the state trie, balance is 0
-                warn!(target: "filter_invalid_txs",
+                info!(target: "filter_invalid_txs",
                     tx_hash=?txs[idxs[0]].hash(),
                     sender=?sender,
                     "insufficient balance"
@@ -164,9 +192,9 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{TxEip7702, TxLegacy};
+    use alloy_consensus::{TxEip4844, TxEip7702, TxLegacy};
     use alloy_eips::eip7702::{Authorization, SignedAuthorization};
-    use alloy_primitives::{Address, Signature, TxKind, B256};
+    use alloy_primitives::{Address, Bytes, Signature, TxKind, B256};
     use reth_chainspec::{ChainSpec, ChainSpecBuilder, MAINNET};
     use reth_ethereum_primitives::{Transaction, TransactionSigned};
     use reth_revm::state::{AccountInfo, Bytecode};
@@ -733,6 +761,137 @@ mod tests {
         assert!(
             invalid_idxs.is_empty(),
             "legacy 21k-gas tx must not be regressed by the 7702 intrinsic fix: {invalid_idxs:?}"
+        );
+    }
+
+    /// Build a type-3 (EIP-4844) tx with the given nonce / gas_limit. Other fields default —
+    /// the filter rejects the whole tx type, so the inner shape doesn't matter for the test.
+    fn create_test_4844_transaction(nonce: u64, gas_limit: u64) -> TransactionSigned {
+        TransactionSigned::new_unhashed(
+            Transaction::Eip4844(TxEip4844 {
+                nonce,
+                gas_limit,
+                max_fee_per_gas: 1,
+                max_priority_fee_per_gas: 0,
+                ..Default::default()
+            }),
+            Signature::test_signature(),
+        )
+    }
+
+    /// Build a Create tx with `input_size` bytes of init code. Uses a 1559 envelope so the
+    /// intrinsic-gas math is the standard `21_000 + 32_000 + 16 * len + EIP-3860 word cost`.
+    fn create_test_oversize_initcode_transaction(
+        nonce: u64,
+        gas_limit: u64,
+        input_size: usize,
+    ) -> TransactionSigned {
+        use alloy_consensus::TxEip1559;
+        TransactionSigned::new_unhashed(
+            Transaction::Eip1559(TxEip1559 {
+                nonce,
+                gas_limit,
+                max_fee_per_gas: 1,
+                max_priority_fee_per_gas: 0,
+                to: TxKind::Create,
+                input: Bytes::from(vec![0u8; input_size]),
+                ..Default::default()
+            }),
+            Signature::test_signature(),
+        )
+    }
+
+    /// gravity-audit#696 trigger 2: Gravity does not support EIP-4844. Any type-3 tx —
+    /// regardless of its blob_versioned_hashes shape — must be dropped by the filter so it
+    /// never reaches grevm with a malformed blob payload that would panic the executor.
+    #[test]
+    fn test_filter_invalid_txs_eip4844_rejected() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: B256::default(),
+                code: None,
+            },
+        );
+
+        // Default TxEip4844 has empty blob_versioned_hashes — revm would reject it with
+        // `EmptyBlobs` at tx-level validation, panicking the executor without this filter.
+        let tx = create_test_4844_transaction(0, 100_000);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        assert_eq!(invalid_idxs.len(), 1, "type-3 (blob) tx must be discarded on Gravity");
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    /// gravity-audit#696 trigger 4: a Create tx with init code larger than
+    /// `MAX_INITCODE_SIZE` (49152) is rejected by revm with `CreateInitCodeSizeLimit`,
+    /// which the executor cannot recover from. The filter must drop it first.
+    #[test]
+    fn test_filter_invalid_txs_eip3860_oversized_init_code_rejected() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: B256::default(),
+                code: None,
+            },
+        );
+
+        // 1 byte over the EIP-3860 cap; gas_limit deliberately high so the intrinsic check
+        // wouldn't reject it — the size check is what must fire.
+        let tx = create_test_oversize_initcode_transaction(0, 30_000_000, MAX_INITCODE_SIZE + 1);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        assert_eq!(
+            invalid_idxs.len(),
+            1,
+            "Create tx with init_code.len() > MAX_INITCODE_SIZE must be discarded"
+        );
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    /// Boundary: a Create tx with `input.len() == MAX_INITCODE_SIZE` is within EIP-3860
+    /// and must NOT be rejected by the size check. (The tx may still be rejected for other
+    /// reasons — gas/balance — but not by the init-code-size gate.)
+    #[test]
+    fn test_filter_invalid_txs_eip3860_init_code_at_limit_not_rejected_by_size() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: B256::default(),
+                code: None,
+            },
+        );
+
+        // gas_limit large enough to cover 21_000 + 32_000 + word-cost + calldata for 49152 zero
+        // bytes (4 gas/byte). Block gas_limit raised in lockstep so the cumulative-gas truncation
+        // check doesn't kick in first.
+        let tx = create_test_oversize_initcode_transaction(0, 5_000_000, MAX_INITCODE_SIZE);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 10_000_000, &prague_chain_spec(), 0, 0);
+        assert!(
+            invalid_idxs.is_empty(),
+            "Create tx at exactly MAX_INITCODE_SIZE must pass the size gate: {invalid_idxs:?}"
         );
     }
 }

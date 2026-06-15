@@ -118,13 +118,18 @@ where
                 self.custom_precompiles.clone(),
             );
             executor.parallel_execute(None).map_err(|e| {
+                // `e.txid` is grevm's per-tx index; for block-level errors it can be a
+                // sentinel or out-of-bounds value. Use a saturating lookup so the error
+                // path itself cannot panic (closes gravity-audit#696 trigger 4 fallout —
+                // a `.unwrap()` here would re-panic on the very `EVMError` that the
+                // filter is supposed to keep out, masking the original diagnostics).
+                let hash = block
+                    .transactions_with_sender()
+                    .nth(e.txid)
+                    .map(|(_, tx)| tx.recalculate_hash())
+                    .unwrap_or_default();
                 BlockExecutionError::Internal(InternalBlockExecutionError::EVM {
-                    hash: block
-                        .transactions_with_sender()
-                        .nth(e.txid)
-                        .unwrap()
-                        .1
-                        .recalculate_hash(),
+                    hash,
                     error: Box::new(e.error),
                 })
             })?;
