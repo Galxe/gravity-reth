@@ -75,10 +75,10 @@ impl<'a, N: NodePrimitives> MemoryOverlayStateProviderRef<'a, N> {
     /// Callers should pass the result of
     /// `CanonicalInMemoryState::snapshot_block_ids_for(...)` covering the in-memory
     /// window so that `block_id_by_number` can serve EVM `BLOCKHASH(n)` for blocks
-    /// that are canonical in-memory but not yet persisted to MDBX. The snapshot is
-    /// frozen at construction time; the overlay's lifetime is one `eth_call` /
-    /// trace invocation, so we deliberately don't hold a lock or Arc back to
-    /// `CanonicalInMemoryState`.
+    /// that are canonical in-memory but not yet persisted to
+    /// `tables::BlockNumberToBlockId`. The snapshot is frozen at construction time;
+    /// the overlay's lifetime is one `eth_call` / trace invocation, so we
+    /// deliberately don't hold a lock or Arc back to `CanonicalInMemoryState`.
     pub fn with_block_ids(mut self, block_ids: HashMap<BlockNumber, B256>) -> Self {
         self.block_ids = block_ids;
         self
@@ -113,7 +113,7 @@ impl<N: NodePrimitives> BlockNumberToBlockIdReader for MemoryOverlayStateProvide
         if let Some(id) = self.block_ids.get(&number) {
             return Ok(Some(*id));
         }
-        // Fall back to historical (MDBX `tables::BlockNumberToBlockId`).
+        // Fall back to historical (`tables::BlockNumberToBlockId`).
         self.historical.block_id_by_number(number)
     }
 }

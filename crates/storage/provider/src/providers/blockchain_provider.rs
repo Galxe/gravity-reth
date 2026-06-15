@@ -141,7 +141,7 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
     /// The returned overlay is decorated with a snapshot of the in-memory `block_id` index
     /// covering the in-memory ancestor window, so EVM `BLOCKHASH(n)` resolves to the
     /// Aptos consensus `block_id` even for blocks that are canonical in-memory but not
-    /// yet persisted to MDBX.
+    /// yet persisted to `tables::BlockNumberToBlockId`.
     fn block_state_provider(
         &self,
         state: &BlockState<N::Primitives>,
@@ -255,12 +255,12 @@ impl<N: ProviderNodeTypes> BlockHashReader for BlockchainProvider<N> {
 
 impl<N: ProviderNodeTypes> BlockNumberToBlockIdReader for BlockchainProvider<N> {
     fn block_id_by_number(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
-        // Two-stage lookup: in-memory window first, then MDBX. The in-memory index
-        // is populated by the engine tree the moment a block becomes canonical
-        // in-memory (see `on_pipe_exec_event`), and evicted after the corresponding
-        // row is committed to `tables::BlockNumberToBlockId` by the persistence
-        // task. This closes the race window where `gravity_blockIdByNumber(N)`
-        // and EVM `BLOCKHASH(N)` would otherwise observe `null`/`0x0`.
+        // Two-stage lookup: in-memory window first, then `tables::BlockNumberToBlockId`.
+        // The in-memory index is populated by the engine tree the moment a block
+        // becomes canonical in-memory (see `on_pipe_exec_event`), and evicted after
+        // the corresponding row is committed to the table by the persistence task.
+        // This closes the race window where `gravity_blockIdByNumber(N)` and EVM
+        // `BLOCKHASH(N)` would otherwise observe `null`/`0x0`.
         if let Some(id) = self.canonical_in_memory_state.block_id_by_number(number) {
             return Ok(Some(id));
         }

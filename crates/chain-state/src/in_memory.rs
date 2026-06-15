@@ -145,7 +145,7 @@ pub(crate) struct CanonicalInMemoryStateInner<N: NodePrimitives> {
     /// A broadcast stream that emits events when the canonical chain is updated.
     pub(crate) canon_state_notification_sender: CanonStateNotificationSender<N>,
     /// Index from canonical block number to Aptos consensus `block_id` for blocks that are
-    /// canonical in-memory but not yet persisted to MDBX.
+    /// canonical in-memory but not yet persisted to `tables::BlockNumberToBlockId`.
     ///
     /// This closes the race window between `MakeCanonical` (when the block becomes
     /// canonical in-memory) and `advance_persistence` (when `tables::BlockNumberToBlockId`
@@ -154,7 +154,7 @@ pub(crate) struct CanonicalInMemoryStateInner<N: NodePrimitives> {
     ///
     /// Entries are inserted by the engine tree when a block becomes canonical
     /// in-memory, and evicted by [`CanonicalInMemoryState::remove_persisted_block_ids`]
-    /// after the corresponding row has been committed to MDBX.
+    /// after the corresponding row has been committed to the persisted table.
     ///
     /// `BTreeMap` is used because the eviction path uses range semantics
     /// (`split_off(persisted_num + 1)`); short-lived snapshot views taken via
@@ -347,7 +347,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     ///
     /// Called after the persistence task has committed the corresponding
     /// `tables::BlockNumberToBlockId` rows, so the canonical mapping for those blocks
-    /// now lives in MDBX and the in-memory entries are no longer needed.
+    /// now lives in the persisted table and the in-memory entries are no longer needed.
     pub fn remove_persisted_block_ids(&self, persisted_num: BlockNumber) {
         let mut block_ids = self.inner.block_ids.write();
         match persisted_num.checked_add(1) {
@@ -587,7 +587,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     ///
     /// The returned overlay carries a snapshot of the in-memory `block_id` index so that
     /// EVM `BLOCKHASH(n)` resolves correctly for blocks that are canonical in-memory but
-    /// not yet persisted to MDBX.
+    /// not yet persisted to `tables::BlockNumberToBlockId`.
     pub fn state_provider(
         &self,
         hash: B256,
@@ -763,8 +763,9 @@ impl<N: NodePrimitives> BlockState<N> {
     ///
     /// **Race-window note**: the returned overlay has an empty `block_ids` snapshot, so EVM
     /// `BLOCKHASH(n)` for blocks that are canonical in-memory but not yet persisted to
-    /// `tables::BlockNumberToBlockId` will fall back to `historical` (MDBX) and may return
-    /// `None`/`0x0` during the brief window between `MakeCanonical` and `advance_persistence`.
+    /// `tables::BlockNumberToBlockId` will fall back to `historical` (the persisted table)
+    /// and may return `None`/`0x0` during the brief window between `MakeCanonical` and
+    /// `advance_persistence`.
     /// Callers that own a [`CanonicalInMemoryState`] should chain
     /// [`MemoryOverlayStateProviderRef::with_block_ids`] using
     /// [`CanonicalInMemoryState::snapshot_block_ids_for`] to close that window.

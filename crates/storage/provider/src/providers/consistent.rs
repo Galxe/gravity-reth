@@ -396,7 +396,7 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
     /// The returned overlay is decorated with a snapshot of the in-memory `block_id` index
     /// covering the in-memory ancestor window, so EVM `BLOCKHASH(n)` resolves to the
     /// Aptos consensus `block_id` even for blocks that are canonical in-memory but not
-    /// yet persisted to MDBX.
+    /// yet persisted to `tables::BlockNumberToBlockId`.
     fn block_state_provider_ref(
         &self,
         state: &BlockState<N::Primitives>,
@@ -618,7 +618,7 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
             let latest_historical = into_history_at_block_hash(anchor_hash)?;
             // Decorate the overlay with a snapshot of the in-memory `block_id` index
             // so EVM `BLOCKHASH(n)` resolves correctly for blocks that are canonical
-            // in-memory but not yet persisted to MDBX.
+            // in-memory but not yet persisted to `tables::BlockNumberToBlockId`.
             let in_memory_numbers =
                 block_state.chain().map(|s| s.block_ref().recovered_block().number());
             let block_ids =
