@@ -35,9 +35,13 @@ pub type StateProviderBox = Box<dyn StateProvider>;
 /// opcode path ([`StateProviderDatabase`](https://docs.rs/reth-revm/latest/reth_revm/database/struct.StateProviderDatabase.html))
 /// can resolve a block number to Gravity's Aptos consensus `block_id`. Production
 /// `StateProvider` impls (e.g. `LatestStateProviderRef`, `HistoricalStateProviderRef`,
-/// `BlockchainProvider`) query the `BlockNumberToBlockId` MDBX table. Test stubs
-/// (`MockEthProvider`, `MockStateProvider`, `NoopProvider`) alias to
-/// `BlockHashReader::block_hash` to preserve their existing semantics.
+/// `BlockchainProvider`) query `tables::BlockNumberToBlockId`. Most test stubs
+/// (`MockEthProvider`, `MockStateProvider`, `NoopProvider`) return `Ok(None)` —
+/// the default mock has no `block_id` recording surface, so tests that need a
+/// specific `block_id` value provide their own impl. `StateProviderTest` in
+/// `reth-revm` aliases to `BlockHashReader::block_hash` because legacy tests
+/// there insert hashes via `insert_block_hash` and assert the EVM `BLOCKHASH`
+/// value flows back unchanged.
 #[auto_impl(&, Arc, Box)]
 pub trait StateProvider:
     BlockHashReader

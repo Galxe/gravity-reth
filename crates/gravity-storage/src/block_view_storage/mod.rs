@@ -105,10 +105,10 @@ where
     }
 
     fn update_canonical(&self, block_number: u64, _block_hash: B256) {
-        // Persist the (block_number, block_id) mapping to MDBX so that historical
-        // `eth_call` / `debug_trace*` paths (which don't share the in-memory
-        // BlockViewStorage map) see the same `block_id` the live EVM executor
-        // saw.
+        // Persist the (block_number, block_id) mapping to
+        // `tables::BlockNumberToBlockId` so that historical `eth_call` /
+        // `debug_trace*` paths (which don't share the in-memory BlockViewStorage
+        // map) see the same `block_id` the live EVM executor saw.
         //
         // The in-memory map already holds `block_id` (populated by
         // `insert_block_id` when the ordered block arrived). We persist here
@@ -117,13 +117,14 @@ where
         //
         // **Trade-off — synchronous DB write on the make_canonical hot path.**
         // `make_canonical` is async (see pipe-exec-layer `Core::make_canonical`).
-        // Opening a fresh MDBX RW transaction inside a sync trait method blocks
-        // the calling tokio worker for the commit duration (typically <1ms for a
+        // Opening a fresh RW transaction inside a sync trait method blocks the
+        // calling tokio worker for the commit duration (typically <1ms for a
         // ~40 byte put). For Gravity's throughput target (~10 blk/s) this is
         // tolerable but not ideal — it also serializes against the engine-tree
-        // persistence task's RW tx on MDBX's single-writer lock. A future
-        // optimization is to batch this with the engine-tree persistence write
-        // (see design doc §7 Open Question 1) or `spawn_blocking` it.
+        // persistence task's RW tx on the persistence backend's single-writer
+        // lock. A future optimization is to batch this with the engine-tree
+        // persistence write (see design doc §7 Open Question 1) or
+        // `spawn_blocking` it.
         let block_id = self.block_number_to_id.lock().unwrap().get(&block_number).copied();
         if let Some(block_id) = block_id {
             if let Err(err) = self.persist_block_id(block_number, block_id) {
