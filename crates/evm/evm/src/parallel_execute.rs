@@ -84,7 +84,7 @@ pub trait ParallelExecutor {
     /// Applies custom precompiled contracts to the executor.
     ///
     /// These precompiles will be available during transaction execution alongside
-    /// the standard Ethereum precompiles. This is a no-op by default.
+    /// the standard Ethereum precompiles.
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>);
 }
 

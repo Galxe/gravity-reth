@@ -161,11 +161,7 @@ pub trait Executor<DB: Database>: Sized {
     fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error>;
 
     /// Registers custom precompiles for subsequent user transaction execution.
-    fn apply_custom_precompiles(
-        &mut self,
-        _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
-    ) {
-    }
+    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>);
 }
 
 /// Helper type for the output of executing a block.
@@ -805,6 +801,12 @@ mod tests {
 
         fn apply_state_change(&mut self, _state_diff: EvmState) -> Result<(), Self::Error> {
             unreachable!()
+        }
+
+        fn apply_custom_precompiles(
+            &mut self,
+            _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+        ) {
         }
     }
 

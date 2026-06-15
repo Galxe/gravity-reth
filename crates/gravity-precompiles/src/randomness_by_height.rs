@@ -149,10 +149,10 @@ where
             expected = RANDOMNESS_BY_HEIGHT_INPUT_LEN,
             "invalid input length"
         );
-        return Err(PrecompileError::Other(
-            format!("expected exactly {RANDOMNESS_BY_HEIGHT_INPUT_LEN} bytes, got {}", data.len())
-                .into(),
-        ));
+        return Err(PrecompileError::Other(format!(
+            "expected exactly {RANDOMNESS_BY_HEIGHT_INPUT_LEN} bytes, got {}",
+            data.len()
+        )));
     }
 
     let height = U256::from_be_slice(data);
@@ -166,7 +166,7 @@ where
 
     let lookup = provider
         .randomness_by_height(height.to::<u64>())
-        .map_err(|err| PrecompileError::Other(format!("randomness lookup failed: {err}").into()))?;
+        .map_err(|err| PrecompileError::Other(format!("randomness lookup failed: {err}")))?;
     Ok(PrecompileOutput {
         gas_used: lookup.gas_used,
         bytes: match lookup.value {

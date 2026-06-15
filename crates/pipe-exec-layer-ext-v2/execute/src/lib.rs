@@ -230,6 +230,7 @@ struct Core<Storage: GravityStorage> {
     storage: Arc<Storage>,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
+    bls_pop_verify_precompile: DynPrecompile,
     pre_alpha_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
@@ -390,7 +391,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         ));
 
         Arc::new(vec![
-            (BLS_PRECOMPILE_ADDR, create_bls_pop_verify_precompile()),
+            (BLS_PRECOMPILE_ADDR, self.bls_pop_verify_precompile.clone()),
             (
                 RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
                 create_randomness_by_height_precompile(execution_provider),
@@ -1440,8 +1441,9 @@ where
         "new pipe exec layer api"
     );
 
+    let bls_pop_verify_precompile = create_bls_pop_verify_precompile();
     let pre_alpha_precompiles =
-        Arc::new(vec![(BLS_PRECOMPILE_ADDR, create_bls_pop_verify_precompile())]);
+        Arc::new(vec![(BLS_PRECOMPILE_ADDR, bls_pop_verify_precompile.clone())]);
     let start_time = Instant::now();
     let service = PipeExecService {
         core: Arc::new(Core {
@@ -1450,6 +1452,7 @@ where
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
+            bls_pop_verify_precompile,
             pre_alpha_precompiles,
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
