@@ -96,6 +96,7 @@ members = [
     "crates/exex/types/",
     "crates/gravity-storage/",
     "crates/gravity-primitives/",
+    "crates/gravity-precompiles/",
     "crates/metrics/",
     "crates/net/banlist/",
     "crates/net/discv4/",
@@ -511,6 +512,7 @@ reth-pipe-exec-layer-event-bus = { path = "crates/pipe-exec-layer-ext-v2/event-b
 reth-pipe-exec-layer-relayer = { path = "crates/pipe-exec-layer-ext-v2/relayer" }
 gravity-storage = { path = "crates/gravity-storage" }
 gravity-primitives = { path = "crates/gravity-primitives" }
+gravity-precompiles = { path = "crates/gravity-precompiles" }
 reth-trie-sparse = { path = "crates/trie/sparse", default-features = false }
 reth-trie-sparse-parallel = { path = "crates/trie/sparse-parallel" }
 reth-zstd-compressors = { path = "crates/storage/zstd-compressors", default-features = false }

@@ -2,6 +2,7 @@
 
 use crate::{execute::Executor, Database, OnStateHook};
 
+use alloc::sync::Arc;
 use alloy_evm::{precompiles::DynPrecompile, EvmEnv};
 use alloy_primitives::Address;
 pub use futures_util::future::Either;
@@ -112,6 +113,13 @@ where
         match self {
             Self::Left(a) => a.apply_state_change(state_diff),
             Self::Right(b) => b.apply_state_change(state_diff),
+        }
+    }
+
+    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
+        match self {
+            Self::Left(a) => a.apply_custom_precompiles(custom_precompiles),
+            Self::Right(b) => b.apply_custom_precompiles(custom_precompiles),
         }
     }
 }

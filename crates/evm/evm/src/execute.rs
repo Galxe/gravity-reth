@@ -1,13 +1,13 @@
 //! Traits for execution.
 
 use crate::{ConfigureEvm, Database, OnStateHook, TxEnvFor};
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header};
 use alloy_eips::eip2718::WithEncoded;
 pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory};
 use alloy_evm::{
     block::{CommitChanges, ExecutableTx},
-    precompiles::DynPrecompile,
+    precompiles::{DynPrecompile, PrecompilesMap},
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
 };
 use alloy_primitives::{Address, B256};
@@ -159,6 +159,9 @@ pub trait Executor<DB: Database>: Sized {
     ///
     /// [`take_bundle`]: Self::take_bundle
     fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error>;
+
+    /// Registers custom precompiles for subsequent user transaction execution.
+    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>);
 }
 
 /// Helper type for the output of executing a block.
@@ -562,6 +565,8 @@ pub struct BasicBlockExecutor<F, DB> {
     pub(crate) strategy_factory: F,
     /// Database.
     pub(crate) db: State<DB>,
+    /// Custom precompiled contracts to inject into user transaction execution.
+    pub(crate) custom_precompiles: Option<Arc<Vec<(Address, DynPrecompile)>>>,
 }
 
 impl<F, DB: Database> BasicBlockExecutor<F, DB> {
@@ -569,7 +574,7 @@ impl<F, DB: Database> BasicBlockExecutor<F, DB> {
     pub fn new(strategy_factory: F, db: DB) -> Self {
         let db =
             State::builder().with_database(db).with_bundle_update().without_state_clear().build();
-        Self { strategy_factory, db }
+        Self { strategy_factory, db, custom_precompiles: None }
     }
 }
 
@@ -586,10 +591,16 @@ where
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
+        let custom_precompiles = self.custom_precompiles.clone();
+        let evm_env =
+            self.strategy_factory.evm_env(block.header()).map_err(BlockExecutionError::other)?;
+        let mut evm = self.strategy_factory.evm_with_env(&mut self.db, evm_env);
+        apply_custom_precompiles_to_evm(&mut evm, custom_precompiles.as_deref());
+        let ctx =
+            self.strategy_factory.context_for_block(block).map_err(BlockExecutionError::other)?;
         let result = self
             .strategy_factory
-            .executor_for_block(&mut self.db, block)
-            .map_err(BlockExecutionError::other)?
+            .create_executor(evm, ctx)
             .execute_block(block.transactions_recovered())?;
 
         self.db.merge_transitions(BundleRetention::Reverts);
@@ -605,10 +616,16 @@ where
     where
         H: OnStateHook + 'static,
     {
+        let custom_precompiles = self.custom_precompiles.clone();
+        let evm_env =
+            self.strategy_factory.evm_env(block.header()).map_err(BlockExecutionError::other)?;
+        let mut evm = self.strategy_factory.evm_with_env(&mut self.db, evm_env);
+        apply_custom_precompiles_to_evm(&mut evm, custom_precompiles.as_deref());
+        let ctx =
+            self.strategy_factory.context_for_block(block).map_err(BlockExecutionError::other)?;
         let result = self
             .strategy_factory
-            .executor_for_block(&mut self.db, block)
-            .map_err(BlockExecutionError::other)?
+            .create_executor(evm, ctx)
             .with_state_hook(Some(Box::new(state_hook)))
             .execute_block(block.transactions_recovered())?;
 
@@ -653,6 +670,23 @@ where
         }
         self.db.commit(state_diff);
         Ok(())
+    }
+
+    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
+        self.custom_precompiles = Some(custom_precompiles);
+    }
+}
+
+fn apply_custom_precompiles_to_evm<Evm>(
+    evm: &mut Evm,
+    custom_precompiles: Option<&Vec<(Address, DynPrecompile)>>,
+) where
+    Evm: crate::Evm<Precompiles = PrecompilesMap>,
+{
+    if let Some(custom_precompiles) = custom_precompiles {
+        for (addr, precompile) in custom_precompiles.iter().cloned() {
+            evm.precompiles_mut().apply_precompile(&addr, move |_| Some(precompile));
+        }
     }
 }
 
@@ -767,6 +801,12 @@ mod tests {
 
         fn apply_state_change(&mut self, _state_diff: EvmState) -> Result<(), Self::Error> {
             unreachable!()
+        }
+
+        fn apply_custom_precompiles(
+            &mut self,
+            _custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+        ) {
         }
     }
 

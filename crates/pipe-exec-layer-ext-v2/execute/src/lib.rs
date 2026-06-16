@@ -6,6 +6,7 @@ mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
+pub mod randomness_precompile;
 mod tx_filter;
 use alloy_sol_types::SolEvent;
 
@@ -23,9 +24,10 @@ use alloy_consensus::{
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{Address, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
+use gravity_precompiles::randomness_by_height::randomness_by_height_gas_policy_at_block;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
-use reth_chainspec::{ChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
     execute::BlockExecutionError, precompiles::DynPrecompile, ConfigureEvm, IntoTxEnv,
@@ -72,7 +74,12 @@ use crate::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         types::DataRecorded,
-        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
+        RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+    },
+    randomness_precompile::{
+        create_randomness_by_height_precompile, ExecutionRandomnessProvider,
+        GravityStorageRandomnessProvider,
     },
 };
 
@@ -223,7 +230,8 @@ struct Core<Storage: GravityStorage> {
     storage: Arc<Storage>,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
-    custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+    bls_pop_verify_precompile: DynPrecompile,
+    pre_alpha_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
@@ -353,6 +361,42 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     fn execute_height(&self) -> u64 {
         self.execute_height.load(Ordering::Acquire)
+    }
+
+    fn custom_precompiles_for_ordered_block(
+        &self,
+        ordered_block: &OrderedBlock,
+        parent_header: &Header,
+    ) -> Arc<Vec<(Address, DynPrecompile)>> {
+        let block_number = ordered_block.number;
+        let block_timestamp = ordered_block.timestamp_us / 1_000_000;
+        if !self
+            .chain_spec
+            .gravity_hardforks()
+            .is_fork_active_at_timestamp(GravityHardfork::Alpha, block_timestamp)
+        {
+            return self.pre_alpha_precompiles.clone()
+        }
+
+        let canonical_provider = GravityStorageRandomnessProvider::new(self.storage.clone());
+        let gas_policy =
+            randomness_by_height_gas_policy_at_block(self.chain_spec.as_ref(), block_number);
+        let execution_provider = Arc::new(ExecutionRandomnessProvider::new_with_gas_policy(
+            canonical_provider,
+            block_number,
+            ordered_block.prev_randao,
+            parent_header.number,
+            parent_header.mix_hash(),
+            gas_policy,
+        ));
+
+        Arc::new(vec![
+            (BLS_PRECOMPILE_ADDR, self.bls_pop_verify_precompile.clone()),
+            (
+                RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+                create_randomness_by_height_precompile(execution_provider),
+            ),
+        ])
     }
 
     /// DESIGN: All `.unwrap()` calls on barrier wait/notify, state root, and
@@ -511,7 +555,13 @@ impl<Storage: GravityStorage> Core<Storage> {
             "state trie merklized"
         );
         block.header.state_root = state_root;
-        block.header.difficulty = randomness;
+        if !self
+            .chain_spec
+            .gravity_hardforks()
+            .is_fork_active_at_timestamp(GravityHardfork::Alpha, block.header.timestamp)
+        {
+            block.header.difficulty = randomness;
+        }
 
         // Seal the block
         let parent_hash = self.seal_barrier.wait(block_number - 1).await.unwrap();
@@ -993,7 +1043,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         // Create executor with state. System transactions will commit directly to its
         // ParallelState, so there is a single source of truth for both system and user txns.
         let mut executor = self.evm_config.parallel_executor(state);
-        executor.apply_custom_precompiles(self.custom_precompiles.clone());
+        executor.apply_custom_precompiles(
+            self.custom_precompiles_for_ordered_block(&ordered_block, parent_header),
+        );
 
         // EIP-2935 (Prague) boundary state change: deploy `HISTORY_STORAGE_ADDRESS`
         // on the Prague activation block. Idempotency is gated by
@@ -1389,6 +1441,9 @@ where
         "new pipe exec layer api"
     );
 
+    let bls_pop_verify_precompile = create_bls_pop_verify_precompile();
+    let pre_alpha_precompiles =
+        Arc::new(vec![(BLS_PRECOMPILE_ADDR, bls_pop_verify_precompile.clone())]);
     let start_time = Instant::now();
     let service = PipeExecService {
         core: Arc::new(Core {
@@ -1397,10 +1452,8 @@ where
             storage: storage.clone(),
             evm_config: EthEvmConfig::new(chain_spec.clone()),
             chain_spec,
-            custom_precompiles: Arc::new(vec![(
-                BLS_PRECOMPILE_ADDR,
-                create_bls_pop_verify_precompile(),
-            )]),
+            bls_pop_verify_precompile,
+            pre_alpha_precompiles,
             event_tx: event_tx.clone(),
             execute_block_barrier: Channel::new_with_states([(
                 (epoch, latest_block_number),

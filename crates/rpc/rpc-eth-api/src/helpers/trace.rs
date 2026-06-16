@@ -9,8 +9,10 @@ use futures::Future;
 use reth_chainspec::ChainSpecProvider;
 use reth_errors::ProviderError;
 use reth_evm::{
-    evm::EvmFactoryExt, system_calls::SystemCaller, tracing::TracingCtx, ConfigureEvm, Database,
-    Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
+    system_calls::SystemCaller,
+    tracing::{TracingCtx, TxTracer},
+    ConfigureEvm, Database, Evm, EvmEnvFor, EvmFactory, EvmFor, HaltReasonFor, InspectorFor,
+    TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
 use reth_revm::{database::StateProviderDatabase, db::CacheDB};
@@ -35,10 +37,20 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         inspector: I,
     ) -> Result<ResultAndState<HaltReasonFor<Self::Evm>>, Self::Error>
     where
+        Self: Call,
         DB: Database<Error = ProviderError>,
         I: InspectorFor<Self::Evm, DB>,
     {
+        let block_number = evm_env.block_env.number;
+        let block_timestamp = evm_env.block_env.timestamp;
+        let current_randomness = evm_env.block_env.prevrandao;
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
+        self.register_custom_precompiles(
+            &mut evm,
+            block_number,
+            block_timestamp,
+            current_randomness,
+        );
         evm.transact(tx_env).map_err(Self::Error::from_evm_err)
     }
 
@@ -221,7 +233,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         f: F,
     ) -> impl Future<Output = Result<Option<Vec<R>>, Self::Error>> + Send
     where
-        Self: LoadBlock,
+        Self: LoadBlock + Call,
         F: Fn(
                 TransactionInfo,
                 TracingCtx<
@@ -262,7 +274,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         f: F,
     ) -> impl Future<Output = Result<Option<Vec<R>>, Self::Error>> + Send
     where
-        Self: LoadBlock,
+        Self: LoadBlock + Call,
         F: Fn(
                 TransactionInfo,
                 TracingCtx<
@@ -323,10 +335,22 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
 
                 let mut idx = 0;
 
-                let results = this
-                    .evm_config()
-                    .evm_factory()
-                    .create_tracer(StateCacheDbRefMutWrapper(&mut db), evm_env, inspector_setup())
+                let evm_block_number = evm_env.block_env.number;
+                let evm_block_timestamp = evm_env.block_env.timestamp;
+                let current_randomness = evm_env.block_env.prevrandao;
+                let mut evm = this.evm_config().evm_factory().create_evm_with_inspector(
+                    StateCacheDbRefMutWrapper(&mut db),
+                    evm_env,
+                    inspector_setup(),
+                );
+                this.register_custom_precompiles(
+                    &mut evm,
+                    evm_block_number,
+                    evm_block_timestamp,
+                    current_randomness,
+                );
+
+                let results = TxTracer::new(evm)
                     .try_trace_many(block.transactions_recovered().take(max_transactions), |ctx| {
                         let tx_info = TransactionInfo {
                             hash: Some(*ctx.tx.tx_hash()),
@@ -365,7 +389,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         f: F,
     ) -> impl Future<Output = Result<Option<Vec<R>>, Self::Error>> + Send
     where
-        Self: LoadBlock,
+        Self: LoadBlock + Call,
         // This is the callback that's invoked for each transaction with the inspector, the result,
         // state and db
         F: Fn(
@@ -405,7 +429,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         f: F,
     ) -> impl Future<Output = Result<Option<Vec<R>>, Self::Error>> + Send
     where
-        Self: LoadBlock,
+        Self: LoadBlock + Call,
         // This is the callback that's invoked for each transaction with the inspector, the result,
         // state and db
         F: Fn(

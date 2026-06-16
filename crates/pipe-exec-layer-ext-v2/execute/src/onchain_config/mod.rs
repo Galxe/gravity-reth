@@ -90,6 +90,7 @@ pub const ORACLE_REQUEST_QUEUE_ADDR: Address = address!("00000000000000000000000
 pub const NATIVE_MINT_PRECOMPILE_ADDR: Address =
     address!("00000000000000000000000000000001625f5000");
 pub const BLS_PRECOMPILE_ADDR: Address = address!("00000000000000000000000000000001625f5001");
+pub use gravity_precompiles::randomness_by_height::RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR;
 
 // Legacy aliases (for backward compatibility)
 pub const SYSTEM_CONTRACT_ADDRESS: Address = SYSTEM_CALLER;

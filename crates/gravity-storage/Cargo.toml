@@ -31,3 +31,9 @@ thiserror.workspace = true
 once_cell.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true
+
+[dev-dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+reth-chainspec.workspace = true
+reth-provider = { workspace = true, features = ["test-utils"] }

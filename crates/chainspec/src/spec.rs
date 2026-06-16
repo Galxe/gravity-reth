@@ -761,11 +761,15 @@ impl From<Genesis> for ChainSpec {
         let hardforks = ChainHardforks::new(ordered_hardforks);
 
         // Gravity-specific hardforks from genesis extra_fields
+        let mut gravity_hardforks = Vec::new();
+        if let Some(alpha_time) =
+            genesis.config.extra_fields.get("alphaTime").and_then(|v| v.as_u64())
+        {
+            gravity_hardforks
+                .push((GravityHardfork::Alpha.boxed(), ForkCondition::Timestamp(alpha_time)));
+        }
+
         let gravity_hardfork_opts = [
-            (
-                GravityHardfork::Alpha.boxed(),
-                genesis.config.extra_fields.get("alphaBlock").and_then(|v| v.as_u64()),
-            ),
             (
                 GravityHardfork::Beta.boxed(),
                 genesis.config.extra_fields.get("betaBlock").and_then(|v| v.as_u64()),
@@ -779,12 +783,12 @@ impl From<Genesis> for ChainSpec {
                 genesis.config.extra_fields.get("deltaBlock").and_then(|v| v.as_u64()),
             ),
         ];
-        let gravity_hardforks = ChainHardforks::new(
+        gravity_hardforks.extend(
             gravity_hardfork_opts
                 .into_iter()
-                .filter_map(|(fork, opt)| opt.map(|block| (fork, ForkCondition::Block(block))))
-                .collect(),
+                .filter_map(|(fork, opt)| opt.map(|block| (fork, ForkCondition::Block(block)))),
         );
+        let gravity_hardforks = ChainHardforks::new(gravity_hardforks);
 
         // Gravity protocol minimum base fee floor (wei). Presence marks the chainspec
         // as Gravity; absence keeps upstream EIP-1559 semantics (e.g. Ethereum mainnet

@@ -1,0 +1,18 @@
+[package]
+name = "gravity-precompiles"
+version.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Gravity precompile implementations."
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+reth-evm = { workspace = true, features = ["std"] }
+revm.workspace = true
+tracing.workspace = true

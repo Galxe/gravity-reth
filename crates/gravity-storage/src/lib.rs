@@ -27,4 +27,9 @@ pub trait GravityStorage: Send + Sync + 'static {
 
     /// Update canonical to `block_number` and reclaim the intermediate result cache
     fn update_canonical(&self, block_number: u64, block_hash: B256);
+
+    /// Get canonical block randomness by height.
+    ///
+    /// Post-Merge randomness is stored in the header `mix_hash` / `prev_randao` field.
+    fn randomness_by_height(&self, block_number: u64) -> ProviderResult<Option<B256>>;
 }

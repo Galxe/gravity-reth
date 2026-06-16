@@ -1,6 +1,7 @@
 use crate::GravityStorage;
 use alloy_primitives::{Address, B256, U256};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx, Database};
+use reth_primitives_traits::AlloyBlockHeader;
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
     PersistBlockCache, ProviderError, ProviderResult, StateProviderBox, PERSIST_BLOCK_CACHE,
@@ -114,6 +115,11 @@ where
                 break;
             }
         }
+    }
+
+    fn randomness_by_height(&self, block_number: u64) -> ProviderResult<Option<B256>> {
+        let provider = self.client.database_provider_ro()?;
+        Ok(provider.header_by_number(block_number)?.and_then(|header| header.mix_hash()))
     }
 }
 
@@ -269,7 +275,112 @@ impl DatabaseRef for BlockViewProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_db_api::mock::TxMock;
+    use alloy_consensus::Header;
+    use alloy_eips::BlockNumHash;
+    use reth_chainspec::ChainInfo;
+    use reth_db_api::mock::{DatabaseMock, TxMock};
+    use reth_provider::{test_utils::MockEthProvider, BlockHashReader, BlockIdReader};
+
+    #[derive(Clone, Debug)]
+    struct TestClient {
+        provider: MockEthProvider,
+    }
+
+    impl DatabaseProviderFactory for TestClient {
+        type DB = DatabaseMock;
+        type Provider = MockEthProvider;
+        type ProviderRW = MockEthProvider;
+
+        fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
+            Ok(self.provider.clone())
+        }
+
+        fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
+            Ok(self.provider.clone())
+        }
+    }
+
+    impl BlockHashReader for TestClient {
+        fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
+            self.provider.block_hash(number)
+        }
+
+        fn canonical_hashes_range(&self, start: u64, end: u64) -> ProviderResult<Vec<B256>> {
+            self.provider.canonical_hashes_range(start, end)
+        }
+    }
+
+    impl BlockNumReader for TestClient {
+        fn chain_info(&self) -> ProviderResult<ChainInfo> {
+            self.provider.chain_info()
+        }
+
+        fn best_block_number(&self) -> ProviderResult<u64> {
+            self.provider.best_block_number()
+        }
+
+        fn last_block_number(&self) -> ProviderResult<u64> {
+            self.provider.last_block_number()
+        }
+
+        fn block_number(&self, hash: B256) -> ProviderResult<Option<u64>> {
+            self.provider.block_number(hash)
+        }
+    }
+
+    impl BlockIdReader for TestClient {
+        fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+            self.provider.pending_block_num_hash()
+        }
+
+        fn safe_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+            self.provider.safe_block_num_hash()
+        }
+
+        fn finalized_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+            self.provider.finalized_block_num_hash()
+        }
+    }
+
+    impl StateProviderFactory for TestClient {
+        fn latest(&self) -> ProviderResult<StateProviderBox> {
+            self.provider.latest()
+        }
+
+        fn state_by_block_number_or_tag(
+            &self,
+            number_or_tag: alloy_eips::BlockNumberOrTag,
+        ) -> ProviderResult<StateProviderBox> {
+            self.provider.state_by_block_number_or_tag(number_or_tag)
+        }
+
+        fn history_by_block_number(&self, block: u64) -> ProviderResult<StateProviderBox> {
+            self.provider.history_by_block_number(block)
+        }
+
+        fn history_by_block_hash(&self, block: B256) -> ProviderResult<StateProviderBox> {
+            self.provider.history_by_block_hash(block)
+        }
+
+        fn state_by_block_hash(&self, block: B256) -> ProviderResult<StateProviderBox> {
+            self.provider.state_by_block_hash(block)
+        }
+
+        fn pending(&self) -> ProviderResult<StateProviderBox> {
+            self.provider.pending()
+        }
+
+        fn pending_state_by_hash(
+            &self,
+            block_hash: B256,
+        ) -> ProviderResult<Option<StateProviderBox>> {
+            self.provider.pending_state_by_hash(block_hash)
+        }
+
+        fn maybe_pending(&self) -> ProviderResult<Option<StateProviderBox>> {
+            self.provider.maybe_pending()
+        }
+    }
 
     #[test]
     fn test_block_hash_ref() {
@@ -302,5 +413,31 @@ mod tests {
             err.downcast_other_ref::<BlockHashError>().unwrap(),
             BlockHashError::BlockTooOld(99)
         ));
+    }
+
+    #[test]
+    fn randomness_by_height_returns_header_mix_hash_for_known_block() {
+        let provider = MockEthProvider::new();
+        let block_hash = B256::repeat_byte(0x11);
+        let randomness = B256::repeat_byte(0x22);
+        provider.add_header(
+            block_hash,
+            Header { number: 7, mix_hash: randomness, ..Default::default() },
+        );
+        let storage = BlockViewStorage::new(TestClient { provider });
+
+        assert_eq!(GravityStorage::randomness_by_height(&storage, 7).unwrap(), Some(randomness));
+    }
+
+    #[test]
+    fn randomness_by_height_returns_none_for_unknown_block() {
+        let provider = MockEthProvider::new();
+        provider.add_header(
+            B256::repeat_byte(0x11),
+            Header { number: 7, mix_hash: B256::repeat_byte(0x22), ..Default::default() },
+        );
+        let storage = BlockViewStorage::new(TestClient { provider });
+
+        assert_eq!(GravityStorage::randomness_by_height(&storage, 8).unwrap(), None);
     }
 }

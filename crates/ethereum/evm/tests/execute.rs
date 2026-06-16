@@ -8,12 +8,13 @@ use alloy_eips::{
     eip7002::{WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE},
     eip7685::EMPTY_REQUESTS_HASH,
 };
-use alloy_evm::block::BlockValidationError;
-use alloy_primitives::{b256, fixed_bytes, keccak256, Bytes, TxKind, B256, U256};
+use alloy_evm::block::{BlockValidationError, NoopHook};
+use alloy_primitives::{b256, fixed_bytes, keccak256, Address, Bytes, TxKind, B256, U256};
 use reth_chainspec::{ChainSpecBuilder, EthereumHardfork, ForkCondition, MAINNET};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction};
 use reth_evm::{
     execute::{BasicBlockExecutor, Executor},
+    precompiles::{DynPrecompile, PrecompileInput},
     ConfigureEvm,
 };
 use reth_evm_ethereum::EthEvmConfig;
@@ -24,11 +25,16 @@ use reth_primitives_traits::{
 use reth_testing_utils::generators::{self, sign_tx_with_key_pair};
 use revm::{
     database::{CacheDB, EmptyDB, TransitionState},
+    precompile::{PrecompileId, PrecompileOutput, PrecompileResult},
     primitives::address,
     state::{AccountInfo, Bytecode, EvmState},
     Database,
 };
 use std::sync::{mpsc, Arc};
+
+const CUSTOM_PRECOMPILE_ADDR: Address = address!("0000000000000000000000000000000000000999");
+const CUSTOM_PRECOMPILE_GAS: u64 = 777;
+const CUSTOM_PRECOMPILE_TX_GAS_USED: u64 = 21_000 + CUSTOM_PRECOMPILE_GAS;
 
 fn create_database_with_beacon_root_contract() -> CacheDB<EmptyDB> {
     let mut db = CacheDB::new(Default::default());
@@ -61,6 +67,94 @@ fn create_database_with_withdrawal_requests_contract() -> CacheDB<EmptyDB> {
     );
 
     db
+}
+
+fn create_custom_precompile() -> DynPrecompile {
+    (
+        PrecompileId::custom("test_custom_precompile"),
+        |_input: PrecompileInput<'_>| -> PrecompileResult {
+            Ok(PrecompileOutput {
+                gas_used: CUSTOM_PRECOMPILE_GAS,
+                bytes: Bytes::from(vec![0x42; 64]),
+                reverted: false,
+            })
+        },
+    )
+        .into()
+}
+
+fn custom_precompile_call_block(
+    chain_spec: &reth_chainspec::ChainSpec,
+) -> (RecoveredBlock<Block>, Address) {
+    let sender_key_pair = generators::generate_key(&mut generators::rng());
+    let sender_address = public_key_to_address(sender_key_pair.public_key());
+    let mut header = chain_spec.genesis_header().clone();
+    header.gas_limit = 100_000;
+    header.gas_used = CUSTOM_PRECOMPILE_TX_GAS_USED;
+
+    let tx = sign_tx_with_key_pair(
+        sender_key_pair,
+        Transaction::Legacy(TxLegacy {
+            chain_id: Some(chain_spec.chain.id()),
+            nonce: 0,
+            gas_price: header.base_fee_per_gas.unwrap_or_default().into(),
+            gas_limit: header.gas_limit,
+            to: TxKind::Call(CUSTOM_PRECOMPILE_ADDR),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        }),
+    );
+
+    (
+        Block { header, body: BlockBody { transactions: vec![tx], ..Default::default() } }
+            .try_into_recovered()
+            .unwrap(),
+        sender_address,
+    )
+}
+
+fn create_custom_precompile_executor_and_block(
+) -> (BasicBlockExecutor<EthEvmConfig, CacheDB<EmptyDB>>, RecoveredBlock<Block>) {
+    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).shanghai_activated().build());
+    let mut db = CacheDB::new(EmptyDB::default());
+
+    let (block, sender_address) = custom_precompile_call_block(&chain_spec);
+    db.insert_account_info(
+        sender_address,
+        AccountInfo { balance: U256::from(ETH_TO_WEI), ..Default::default() },
+    );
+
+    let provider = EthEvmConfig::new(chain_spec);
+    let mut executor = BasicBlockExecutor::new(provider, db);
+    executor.apply_custom_precompiles(Arc::new(vec![(
+        CUSTOM_PRECOMPILE_ADDR,
+        create_custom_precompile(),
+    )]));
+
+    (executor, block)
+}
+
+#[test]
+fn basic_block_executor_execute_one_applies_custom_precompiles() {
+    let (mut executor, block) = create_custom_precompile_executor_and_block();
+
+    let BlockExecutionResult { receipts, .. } = executor.execute_one(&block).unwrap();
+
+    let receipt = receipts.first().expect("transaction should produce a receipt");
+    assert!(receipt.success);
+    assert_eq!(receipt.cumulative_gas_used, CUSTOM_PRECOMPILE_TX_GAS_USED);
+}
+
+#[test]
+fn basic_block_executor_execute_one_with_state_hook_applies_custom_precompiles() {
+    let (mut executor, block) = create_custom_precompile_executor_and_block();
+
+    let BlockExecutionResult { receipts, .. } =
+        executor.execute_one_with_state_hook(&block, NoopHook::default()).unwrap();
+
+    let receipt = receipts.first().expect("transaction should produce a receipt");
+    assert!(receipt.success);
+    assert_eq!(receipt.cumulative_gas_used, CUSTOM_PRECOMPILE_TX_GAS_USED);
 }
 
 #[test]

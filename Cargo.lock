@@ -4299,6 +4299,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gravity-precompiles"
+version = "1.8.3"
+dependencies = [
+ "alloy-primitives",
+ "reth-evm",
+ "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "tracing",
+]
+
+[[package]]
 name = "gravity-primitives"
 version = "1.8.3"
 
@@ -4306,10 +4316,13 @@ version = "1.8.3"
 name = "gravity-storage"
 version = "1.8.3"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "async-trait",
  "metrics",
  "once_cell",
+ "reth-chainspec",
  "reth-db-api",
  "reth-evm",
  "reth-metrics",
@@ -9997,6 +10010,7 @@ dependencies = [
  "blst",
  "codspeed-criterion-compat",
  "eyre",
+ "gravity-precompiles",
  "gravity-primitives",
  "gravity-storage",
  "grevm",
@@ -10325,6 +10339,7 @@ dependencies = [
  "dyn-clone",
  "fail",
  "futures",
+ "gravity-precompiles",
  "http",
  "http-body",
  "hyper",

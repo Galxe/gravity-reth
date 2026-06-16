@@ -260,7 +260,16 @@ where
                 let mut refundable_value = U256::ZERO;
                 let mut body_logs: Vec<SimBundleLogs> = Vec::new();
 
+                let block_number = evm_env.block_env.number;
+                let block_timestamp = evm_env.block_env.timestamp;
+                let current_randomness = evm_env.block_env.prevrandao;
                 let mut evm = eth_api.evm_config().evm_with_env(db, evm_env);
+                eth_api.register_custom_precompiles(
+                    &mut evm,
+                    block_number,
+                    block_timestamp,
+                    current_randomness,
+                );
                 let mut log_index = 0;
 
                 for (tx_index, item) in flattened_bundle.iter().enumerate() {

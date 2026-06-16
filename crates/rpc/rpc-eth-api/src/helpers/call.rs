@@ -20,8 +20,8 @@ use alloy_rpc_types_eth::{
 use futures::Future;
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor, SpecFor, TransactionEnv,
-    TxEnvFor,
+    precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor,
+    SpecFor, TransactionEnv, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
@@ -163,13 +163,22 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .context_for_next_block(&parent, this.next_env_attributes(&parent)?)
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
+                    let block_number = evm_env.block_env.number;
+                    let block_timestamp = evm_env.block_env.timestamp;
+                    let current_randomness = evm_env.block_env.prevrandao;
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs
                         let inspector = TransferInspector::new(false).with_logs(true);
-                        let evm = this
+                        let mut evm = this
                             .evm_config()
                             .evm_with_env_and_inspector(&mut db, evm_env, inspector);
+                        this.register_custom_precompiles(
+                            &mut evm,
+                            block_number,
+                            block_timestamp,
+                            current_randomness,
+                        );
                         let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
                         simulate::execute_transactions(
                             builder,
@@ -179,7 +188,13 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             this.tx_resp_builder(),
                         )?
                     } else {
-                        let evm = this.evm_config().evm_with_env(&mut db, evm_env);
+                        let mut evm = this.evm_config().evm_with_env(&mut db, evm_env);
+                        this.register_custom_precompiles(
+                            &mut evm,
+                            block_number,
+                            block_timestamp,
+                            current_randomness,
+                        );
                         let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
                         simulate::execute_transactions(
                             builder,
@@ -475,6 +490,18 @@ pub trait Call:
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
 
+    /// Registers chain-specific precompiles for this EVM block.
+    fn register_custom_precompiles<EV>(
+        &self,
+        _evm: &mut EV,
+        _block_number: U256,
+        _block_timestamp: U256,
+        _current_randomness: Option<B256>,
+    ) where
+        EV: Evm<Precompiles = PrecompilesMap>,
+    {
+    }
+
     /// Returns the max gas limit that the caller can afford given a transaction environment.
     fn caller_gas_allowance(
         &self,
@@ -514,7 +541,16 @@ pub trait Call:
     where
         DB: Database<Error = ProviderError> + fmt::Debug,
     {
+        let block_number = evm_env.block_env.number;
+        let block_timestamp = evm_env.block_env.timestamp;
+        let current_randomness = evm_env.block_env.prevrandao;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
+        self.register_custom_precompiles(
+            &mut evm,
+            block_number,
+            block_timestamp,
+            current_randomness,
+        );
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -533,7 +569,16 @@ pub trait Call:
         DB: Database<Error = ProviderError> + fmt::Debug,
         I: InspectorFor<Self::Evm, DB>,
     {
+        let block_number = evm_env.block_env.number;
+        let block_timestamp = evm_env.block_env.timestamp;
+        let current_randomness = evm_env.block_env.prevrandao;
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
+        self.register_custom_precompiles(
+            &mut evm,
+            block_number,
+            block_timestamp,
+            current_randomness,
+        );
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -695,7 +740,16 @@ pub trait Call:
         DB: Database<Error = ProviderError> + DatabaseCommit + core::fmt::Debug,
         I: IntoIterator<Item = Recovered<&'a ProviderTx<Self::Provider>>>,
     {
+        let block_number = evm_env.block_env.number;
+        let block_timestamp = evm_env.block_env.timestamp;
+        let current_randomness = evm_env.block_env.prevrandao;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
+        self.register_custom_precompiles(
+            &mut evm,
+            block_number,
+            block_timestamp,
+            current_randomness,
+        );
         let mut index = 0;
         for tx in transactions {
             if *tx.tx_hash() == target_tx_hash {
