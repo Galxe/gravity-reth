@@ -11,9 +11,42 @@
 //! (`revm-handler/src/validation.rs::validate_tx_env` +
 //! `pre_execution.rs::validate_account_nonce_and_code` +
 //! `validate_against_state_and_deduct_caller`). Each guard below maps to a specific
-//! `InvalidTransaction::*` variant and cites the audit issue that motivated it. When
-//! upgrading revm, audit the `InvalidTransaction` enum for new variants and either add
-//! a matching guard or document why it is unreachable on Gravity.
+//! `InvalidTransaction::*` variant and cites the audit issue that motivated it.
+//!
+//! ## Variants pinned as unreachable on revm 10.0.1
+//!
+//! The following `InvalidTransaction::*` variants exist in the enum (kept for
+//! ABI/back-compat with downstream `match` arms) but have **no `return Err(...)`
+//! construction site** anywhere in `revm-handler-10.0.1` /
+//! `revm-context-interface-10.2.0` — the legacy validation paths that raised them
+//! were removed upstream. revm cannot return them at runtime regardless of input on
+//! this version pin, so the filter deliberately does NOT gate them:
+//!
+//! - `AccessListNotSupported` — legacy `env.rs` validation site removed.
+//! - `MaxFeePerBlobGasNotSupported` / `BlobVersionedHashesNotSupported` /
+//!   `BlobCreateTransaction` — removed; 4844 type rejected wholesale below regardless.
+//! - `AuthorizationListNotSupported` — type-gating now flows through
+//!   `Eip7702NotSupported`, which the pre-Prague guard below pre-empts.
+//! - `AuthorizationListInvalidFields` — validation moved to 7702 auth-list
+//!   processing (during execution, after balance deduct); not raised from
+//!   `validate_tx_env` / `validate_against_state_and_deduct_caller`.
+//!
+//! ## Upgrade-time audit checklist
+//!
+//! Re-run on every revm bump (`Cargo.toml: revm = ...`). Each forward-watch entry
+//! below is currently unreachable but will become reachable on the listed bump and
+//! MUST be paired with a new guard at that time:
+//!
+//! - `NonceOverflowInTransaction` — re-introduced in `revm-handler 18.1.0`
+//!   (`validation.rs:232`). Bumping past `10.0.1` requires adding
+//!   `tx.nonce() != u64::MAX` plus overflow-safe `account.nonce += 1`.
+//! - `Eip7873NotSupported` / `Eip7873MissingTarget` — activates on OSAKA. Adding
+//!   Osaka requires an init-code-tx type gate.
+//!
+//! Procedure on upgrade: `grep 'return Err(InvalidTransaction::'` in
+//! `revm-handler/src/` for the new pin, diff against the "unreachable" list above,
+//! and either add a guard or move the variant from the unreachable list to the
+//! forward-watch list with a citation.
 //!
 //! Closed audit issues: gravity-audit#668 / #696 / #710.
 
