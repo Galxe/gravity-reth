@@ -31,7 +31,8 @@ use reth_evm::{ConfigureEvm, EvmEnv};
 use reth_execution_types::ExecutionOutcome;
 use reth_node_types::{BlockTy, HeaderTy, NodeTypesWithDB, ReceiptTy, TxTy};
 use reth_primitives_traits::{
-    Account, BlockBody, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader, StorageEntry,
+    Account, BlockBody, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
+    SealedOrRecoveredBlock, StorageEntry,
 };
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
@@ -337,6 +338,14 @@ impl<N: ProviderNodeTypes> BlockReader for BlockchainProvider<N> {
         source: BlockSource,
     ) -> ProviderResult<Option<Self::Block>> {
         self.consistent_provider()?.find_block_by_hash(hash, source)
+    }
+
+    fn find_sealed_or_recovered_block(
+        &self,
+        hash: B256,
+        source: BlockSource,
+    ) -> ProviderResult<Option<SealedOrRecoveredBlock<Self::Block>>> {
+        self.consistent_provider()?.find_sealed_or_recovered_block(hash, source)
     }
 
     fn block(&self, id: BlockHashOrNumber) -> ProviderResult<Option<Self::Block>> {
