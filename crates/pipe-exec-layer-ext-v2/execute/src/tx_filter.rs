@@ -23,13 +23,13 @@
 //! this version pin, so the filter deliberately does NOT gate them:
 //!
 //! - `AccessListNotSupported` — legacy `env.rs` validation site removed.
-//! - `MaxFeePerBlobGasNotSupported` / `BlobVersionedHashesNotSupported` /
-//!   `BlobCreateTransaction` — removed; 4844 type rejected wholesale below regardless.
-//! - `AuthorizationListNotSupported` — type-gating now flows through
-//!   `Eip7702NotSupported`, which the pre-Prague guard below pre-empts.
-//! - `AuthorizationListInvalidFields` — validation moved to 7702 auth-list
-//!   processing (during execution, after balance deduct); not raised from
-//!   `validate_tx_env` / `validate_against_state_and_deduct_caller`.
+//! - `MaxFeePerBlobGasNotSupported` / `BlobVersionedHashesNotSupported` / `BlobCreateTransaction` —
+//!   removed; 4844 type rejected wholesale below regardless.
+//! - `AuthorizationListNotSupported` — type-gating now flows through `Eip7702NotSupported`, which
+//!   the pre-Prague guard below pre-empts.
+//! - `AuthorizationListInvalidFields` — validation moved to 7702 auth-list processing (during
+//!   execution, after balance deduct); not raised from `validate_tx_env` /
+//!   `validate_against_state_and_deduct_caller`.
 //!
 //! ## Upgrade-time audit checklist
 //!
@@ -37,11 +37,11 @@
 //! below is currently unreachable but will become reachable on the listed bump and
 //! MUST be paired with a new guard at that time:
 //!
-//! - `NonceOverflowInTransaction` — re-introduced in `revm-handler 18.1.0`
-//!   (`validation.rs:232`). Bumping past `10.0.1` requires adding
-//!   `tx.nonce() != u64::MAX` plus overflow-safe `account.nonce += 1`.
-//! - `Eip7873NotSupported` / `Eip7873MissingTarget` — activates on OSAKA. Adding
-//!   Osaka requires an init-code-tx type gate.
+//! - `NonceOverflowInTransaction` — re-introduced in `revm-handler 18.1.0` (`validation.rs:232`).
+//!   Bumping past `10.0.1` requires adding `tx.nonce() != u64::MAX` plus overflow-safe
+//!   `account.nonce += 1`.
+//! - `Eip7873NotSupported` / `Eip7873MissingTarget` — activates on OSAKA. Adding Osaka requires an
+//!   init-code-tx type gate.
 //!
 //! Procedure on upgrade: `grep 'return Err(InvalidTransaction::'` in
 //! `revm-handler/src/` for the new pin, diff against the "unreachable" list above,
