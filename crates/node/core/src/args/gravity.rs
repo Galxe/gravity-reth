@@ -14,10 +14,6 @@ pub struct GravityArgs {
     #[arg(long = "gravity.disable-grevm", default_value = "false")]
     pub disable_grevm: bool,
 
-    /// The gas limit for pipe block. default `1_000_000_000`.
-    #[arg(long = "gravity.pipe-block-gas-limit", default_value_t = 1_000_000_000, value_parser = clap::value_parser!(u64).range(1_000_000..=500_000_000_000))]
-    pub pipe_block_gas_limit: u64,
-
     /// The max block height between merged and pesist block height.
     #[arg(long = "gravity.cache.max-persist-gap", default_value_t = 64)]
     pub cache_max_persist_gap: u64,
@@ -44,7 +40,6 @@ impl Default for GravityArgs {
         Self {
             disable_pipe_execution: false,
             disable_grevm: false,
-            pipe_block_gas_limit: 1_000_000_000,
             cache_max_persist_gap: 64,
             cache_capacity: 2_000_000,
             report_db_metrics: false,
@@ -60,7 +55,6 @@ impl GravityArgs {
         gravity_primitives::Config {
             disable_pipe_execution: self.disable_pipe_execution,
             disable_grevm: self.disable_grevm,
-            pipe_block_gas_limit: self.pipe_block_gas_limit,
             cache_max_persist_gap: self.cache_max_persist_gap,
             cache_capacity: self.cache_capacity,
             report_db_metrics: self.report_db_metrics,

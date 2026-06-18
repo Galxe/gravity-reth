@@ -25,7 +25,7 @@ use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{Address, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_precompiles::randomness_by_height::randomness_by_height_gas_policy_at_block;
-use gravity_primitives::get_gravity_config;
+use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
@@ -641,6 +641,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         base_fee: u64,
         state: &Storage::StateView,
         mut validator_txns: Vec<TransactionSigned>,
+        // System-txn gas already consumed before this block runs; subtracted from the user
+        // filter budget so `header.gas_used` stays `≤ header.gas_limit` after metadata +
+        // validator receipts are appended. Closes gravity-audit#621.
+        sum_system_gas: u64,
     ) -> (RecoveredBlock<Block>, Vec<TxInfo>) {
         assert_eq!(ordered_block.transactions.len(), ordered_block.senders.len());
         let mut block = Block {
@@ -654,7 +658,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,
-                gas_limit: get_gravity_config().pipe_block_gas_limit,
+                gas_limit: PIPE_BLOCK_GAS_LIMIT,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
                 nonce: BEACON_NONCE.into(),
                 ..Default::default()
@@ -688,14 +692,18 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.header.blob_gas_used = Some(0);
         }
 
-        // Discard the invalid txs
+        // Discard the invalid txs.
+        // `saturating_sub`: a byzantine proposer (or a future system-txn addition that
+        // overshoots) yields budget=0, dropping every user tx — the only safe fallback
+        // when `sum_system_gas ≥ block.gas_limit`.
+        let user_gas_budget = block.gas_limit.saturating_sub(sum_system_gas);
         let start_time = Instant::now();
         let (txs, senders, txs_info) = self.filter_invalid_txs(
             state,
             ordered_block.transactions,
             ordered_block.senders,
             base_fee,
-            block.gas_limit,
+            user_gas_budget,
             block.timestamp,
             block.number,
         );
@@ -1020,7 +1028,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                     timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
                     suggested_fee_recipient: ordered_block.coinbase,
                     prev_randao: ordered_block.prev_randao,
-                    gas_limit: get_gravity_config().pipe_block_gas_limit,
+                    gas_limit: PIPE_BLOCK_GAS_LIMIT,
                     parent_beacon_block_root: Some(ordered_block.parent_id),
                     withdrawals: Some(ordered_block.withdrawals.clone()),
                 },
@@ -1096,9 +1104,20 @@ impl<Storage: GravityStorage> Core<Storage> {
         //     `ParallelExecutor` trait.
         //   - Before calling `filter_invalid_txs`, query each sender's account via
         //     `executor.basic_ref(sender)` and collect overrides into a HashMap.
+        // Pre-execution system-txn gas is now known and exact (these txns already ran
+        // against the executor). Pass it down so the user-tx filter reserves the same
+        // amount, keeping `header.gas_used ≤ header.gas_limit` once metadata + validator
+        // receipts get appended below. Closes gravity-audit#621.
+        let sum_system_gas = metadata_txn_result.result.gas_used() +
+            validator_txn_results.iter().map(|r| r.result.gas_used()).sum::<u64>();
         let state_for_block = self.storage.get_state_view().unwrap();
-        let (block, txs_info) =
-            self.create_block_for_executor(ordered_block, base_fee, &state_for_block, vec![]);
+        let (block, txs_info) = self.create_block_for_executor(
+            ordered_block,
+            base_fee,
+            &state_for_block,
+            vec![],
+            sum_system_gas,
+        );
 
         info!(target: "execute_ordered_block",
             id=?block_id,

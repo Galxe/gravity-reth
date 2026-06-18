@@ -11,7 +11,7 @@ use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::Bytes;
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
-use gravity_primitives::get_gravity_config;
+use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
 use reth_evm::Evm;
@@ -88,7 +88,7 @@ impl SystemTxnResult {
                 mix_hash: ordered_block.prev_randao,
                 base_fee_per_gas: Some(base_fee),
                 number: ordered_block.number,
-                gas_limit: get_gravity_config().pipe_block_gas_limit,
+                gas_limit: PIPE_BLOCK_GAS_LIMIT,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
                 nonce: BEACON_NONCE.into(),
                 gas_used,
