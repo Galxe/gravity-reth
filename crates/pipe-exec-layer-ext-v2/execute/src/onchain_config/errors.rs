@@ -53,8 +53,10 @@ sol! {
     error DKGNotInitialized();
 
     // -------------------- NativeOracle Errors --------------------
-    /// @notice Nonce must be strictly increasing for each source
-    error NonceNotIncreasing(uint32 sourceType, uint256 sourceId, uint128 currentNonce, uint128 providedNonce);
+    /// @notice Oracle nonce must be sequential (== currentNonce + 1) for each source.
+    /// Thrown by NativeOracle._updateNonce when a duplicate / already-committed
+    /// attestation is replayed; matches NativeOracle.sol (selector 0x32e429cd).
+    error NonceNotSequential(uint32 sourceType, uint256 sourceId, uint128 expectedNonce, uint128 providedNonce);
 
     /// @notice Batch arrays have mismatched lengths
     error OracleBatchArrayLengthMismatch(uint256 noncesLength, uint256 payloadsLength, uint256 gasLimitsLength);
@@ -214,13 +216,13 @@ pub fn decode_revert_error(output: &Bytes) -> Option<SystemTxnError> {
             severity: ErrorSeverity::Recoverable,
         }),
 
-        s if s == NonceNotIncreasing::SELECTOR => {
-            let err = NonceNotIncreasing::abi_decode(output).ok()?;
+        s if s == NonceNotSequential::SELECTOR => {
+            let err = NonceNotSequential::abi_decode(output).ok()?;
             Some(SystemTxnError {
-                name: "NonceNotIncreasing".into(),
+                name: "NonceNotSequential".into(),
                 details: format!(
-                    "Oracle nonce not increasing: sourceType={}, sourceId={}, current={}, provided={}",
-                    err.sourceType, err.sourceId, err.currentNonce, err.providedNonce
+                    "Oracle nonce not sequential (duplicate/replayed attestation rejected by the nonce guard): sourceType={}, sourceId={}, expected={}, provided={}",
+                    err.sourceType, err.sourceId, err.expectedNonce, err.providedNonce
                 ),
                 severity: ErrorSeverity::Recoverable,
             })
@@ -318,19 +320,21 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_nonce_not_increasing() {
-        let error = NonceNotIncreasing {
-            sourceType: 1,
-            sourceId: alloy_primitives::U256::from(42),
-            currentNonce: 10,
-            providedNonce: 5,
+    fn test_decode_nonce_not_sequential() {
+        // expected = currentNonce + 1, provided = currentNonce: the duplicate-attestation
+        // replay shape seen in production (selector 0x32e429cd, classified Recoverable).
+        let error = NonceNotSequential {
+            sourceType: 0,
+            sourceId: alloy_primitives::U256::from(1),
+            expectedNonce: 11,
+            providedNonce: 10,
         };
         let encoded = error.abi_encode();
         let result = decode_revert_error(&encoded.into());
 
         assert!(result.is_some());
         let err = result.unwrap();
-        assert_eq!(err.name, "NonceNotIncreasing");
+        assert_eq!(err.name, "NonceNotSequential");
         assert_eq!(err.severity, ErrorSeverity::Recoverable);
     }
 
