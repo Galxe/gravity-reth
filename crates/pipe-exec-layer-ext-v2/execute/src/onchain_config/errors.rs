@@ -56,7 +56,14 @@ sol! {
     /// @notice Oracle nonce must be sequential (== currentNonce + 1) for each source.
     /// Thrown by NativeOracle._updateNonce when a duplicate / already-committed
     /// attestation is replayed; matches NativeOracle.sol (selector 0x32e429cd).
+    /// This is what the currently deployed contract reverts with.
     error NonceNotSequential(uint32 sourceType, uint256 sourceId, uint128 expectedNonce, uint128 providedNonce);
+
+    /// @notice Legacy oracle-nonce error (selector 0xc778b1a4). The deployed contract
+    /// no longer throws this — `NonceNotSequential` superseded it — but it is kept in
+    /// the decode table so that a node running against an older contract build still
+    /// classifies the revert as Recoverable instead of falling through to ERROR.
+    error NonceNotIncreasing(uint32 sourceType, uint256 sourceId, uint128 currentNonce, uint128 providedNonce);
 
     /// @notice Batch arrays have mismatched lengths
     error OracleBatchArrayLengthMismatch(uint256 noncesLength, uint256 payloadsLength, uint256 gasLimitsLength);
@@ -116,6 +123,26 @@ pub enum SystemTxnExecutionResult {
 /// Decode a revert output into a known error type
 ///
 /// Uses 4-byte selector matching for O(1) lookup, then decodes only the matched error.
+///
+/// Severity classification (drives the log level at the call sites — Fatal => ERROR,
+/// Recoverable => WARN). Keep this list in sync with the match arms below:
+///
+/// - **Fatal** (a real protocol violation / bug — should never happen in normal operation):
+///   - `Unauthorized` — system call from a non-system caller.
+///   - `TimestampMustAdvance` / `TimestampMustEqual` — block timestamp invariant broken.
+///   - `ValidatorIndexOutOfBounds` — validator index outside the active set.
+///   - `ReconfigurationNotInitialized` / `DKGNotInitialized` — required module not initialized.
+///   - `OracleBatchArrayLengthMismatch` — malformed oracle batch (nonces/payloads/gas mismatched).
+///
+/// - **Recoverable** (expected under benign races / replays — safe to ignore, logged at WARN):
+///   - `ReconfigurationNotInProgress` / `ReconfigurationInProgress` — epoch-transition state race.
+///   - `DKGNotInProgress` / `DKGInProgress` — DKG-session state race.
+///   - `NonceNotSequential` — duplicate/already-committed oracle attestation rejected by the
+///     sequential-nonce replay guard (current contract; selector 0x32e429cd).
+///   - `NonceNotIncreasing` — legacy form of the same oracle-nonce replay rejection, superseded
+///     by `NonceNotSequential`; kept for compatibility with older contract builds.
+///
+/// An unknown selector returns `None`, which the call sites log at ERROR.
 pub fn decode_revert_error(output: &Bytes) -> Option<SystemTxnError> {
     // Need at least 4 bytes for selector
     if output.len() < 4 {
@@ -228,6 +255,21 @@ pub fn decode_revert_error(output: &Bytes) -> Option<SystemTxnError> {
             })
         }
 
+        // Legacy oracle-nonce error. The deployed contract emits NonceNotSequential
+        // instead, but keep this arm so a node run against an older contract build
+        // still classifies the replay rejection as Recoverable.
+        s if s == NonceNotIncreasing::SELECTOR => {
+            let err = NonceNotIncreasing::abi_decode(output).ok()?;
+            Some(SystemTxnError {
+                name: "NonceNotIncreasing".into(),
+                details: format!(
+                    "Oracle nonce not increasing (legacy; superseded by NonceNotSequential): sourceType={}, sourceId={}, current={}, provided={}",
+                    err.sourceType, err.sourceId, err.currentNonce, err.providedNonce
+                ),
+                severity: ErrorSeverity::Recoverable,
+            })
+        }
+
         // Unknown selector
         _ => None,
     }
@@ -335,6 +377,24 @@ mod tests {
         assert!(result.is_some());
         let err = result.unwrap();
         assert_eq!(err.name, "NonceNotSequential");
+        assert_eq!(err.severity, ErrorSeverity::Recoverable);
+    }
+
+    #[test]
+    fn test_decode_nonce_not_increasing_legacy() {
+        // Legacy selector (0xc778b1a4), kept for older contract builds; still Recoverable.
+        let error = NonceNotIncreasing {
+            sourceType: 1,
+            sourceId: alloy_primitives::U256::from(42),
+            currentNonce: 10,
+            providedNonce: 5,
+        };
+        let encoded = error.abi_encode();
+        let result = decode_revert_error(&encoded.into());
+
+        assert!(result.is_some());
+        let err = result.unwrap();
+        assert_eq!(err.name, "NonceNotIncreasing");
         assert_eq!(err.severity, ErrorSeverity::Recoverable);
     }
 
