@@ -73,15 +73,183 @@ use crate::{
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
+        system_txns_into_executed_ordered_block_result,
         types::DataRecorded,
-        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
-        RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, BLS_PRECOMPILE_ADDR, DKG_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
+        NATIVE_ORACLE_ADDR, RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
     randomness_precompile::{
         create_randomness_by_height_precompile, ExecutionRandomnessProvider,
         GravityStorageRandomnessProvider,
     },
 };
+
+fn extract_gravity_events_from_system_receipts(
+    receipts: &[Receipt],
+    block_number: u64,
+    epoch: u64,
+) -> Vec<GravityEvent> {
+    use gravity_api_types::on_chain_config::jwks::ProviderJWKs;
+
+    let mut gravity_events = vec![];
+    // Map from (sourceType, sourceId) to latest nonce
+    let mut data_records: BTreeMap<(u32, U256), u128> = BTreeMap::new();
+
+    for receipt in receipts {
+        debug!(target: "execute_ordered_block",
+            number=?block_number,
+            logs_len=?receipt.logs.len(),
+            "extract gravity events from receipt"
+        );
+        for log in &receipt.logs {
+            // Parse DataRecorded events only from NativeOracle.
+            if log.address == NATIVE_ORACLE_ADDR {
+                if let Ok(event) = DataRecorded::decode_log(&log) {
+                    info!(target: "execute_ordered_block",
+                        number=?block_number,
+                        source_type=?event.sourceType,
+                        source_id=?event.sourceId,
+                        nonce=?event.nonce,
+                        "data recorded event"
+                    );
+                    // Keep only the latest nonce for each (sourceType, sourceId)
+                    let key = (event.sourceType, event.sourceId);
+                    data_records
+                        .entry(key)
+                        .and_modify(|existing_nonce| {
+                            if event.nonce > *existing_nonce {
+                                *existing_nonce = event.nonce;
+                            }
+                        })
+                        .or_insert(event.nonce);
+                }
+            }
+
+            // Parse DKG events only from the DKG contract.
+            if log.address == DKG_ADDR {
+                if let Ok(event) = DKGStartEvent::decode_log(&log) {
+                    info!(target: "execute_ordered_block",
+                        number=?block_number,
+                        dealer_epoch=?event.dealerEpoch,
+                        "dkg start"
+                    );
+                    gravity_events.push(GravityEvent::DKG(convert_dkg_start_event_to_api(&event)));
+                }
+            }
+        }
+    }
+
+    // Convert collected DataRecorded events to ProviderJWKs
+    if !data_records.is_empty() {
+        let api_jwks: Vec<ProviderJWKs> = data_records
+            .into_iter()
+            .map(|((source_type, source_id), nonce)| {
+                // issuer format: "gravity://sourceType/sourceId"
+                let issuer = format!("gravity://{}/{}", source_type, source_id);
+                ProviderJWKs {
+                    issuer: issuer.into_bytes(),
+                    version: nonce as u64, // nonce as version
+                    jwks: vec![gravity_api_types::on_chain_config::jwks::JWKStruct {
+                        // gaptos reads gravity:// oracle progress from Any.data as a raw
+                        // 16-byte nonce. The GravityEvent adapter only preserves raw bytes
+                        // for known JWK wrappers, so this entry is a nonce carrier rather
+                        // than an RSA key.
+                        type_name: "0x1::jwks::RSA_JWK".to_string(),
+                        data: nonce.to_be_bytes().to_vec(),
+                    }],
+                }
+            })
+            .collect();
+
+        info!(target: "execute_ordered_block",
+            number=?block_number,
+            epoch=?epoch,
+            provider_count=?api_jwks.len(),
+            "constructed ProviderJWKs from DataRecorded events"
+        );
+
+        gravity_events.push(GravityEvent::ObservedJWKsUpdated(epoch, api_jwks));
+    }
+
+    gravity_events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::onchain_config::dkg::{
+        ConfigV2Data, ConfigVariant, DKGSessionMetadata, DKGStartEvent, RandomnessConfigData,
+    };
+    use alloy_primitives::{Address, Log};
+    use alloy_sol_types::SolEvent;
+
+    fn receipt_with_log(address: Address, data: alloy_primitives::LogData) -> Receipt {
+        Receipt {
+            success: true,
+            cumulative_gas_used: 0,
+            logs: vec![Log { address, data }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn extract_gravity_events_ignores_data_recorded_from_wrong_emitter() {
+        let event = DataRecorded {
+            sourceType: 1,
+            sourceId: U256::from(2),
+            nonce: 3,
+            dataLength: U256::ZERO,
+        };
+        let forged_receipts =
+            vec![receipt_with_log(Address::from([0x42; 20]), event.encode_log_data())];
+
+        let events = extract_gravity_events_from_system_receipts(&forged_receipts, 10, 7);
+        assert!(events.is_empty(), "forged DataRecorded emitter must not produce GravityEvent");
+
+        let valid_receipts = vec![receipt_with_log(NATIVE_ORACLE_ADDR, event.encode_log_data())];
+        let events = extract_gravity_events_from_system_receipts(&valid_receipts, 10, 7);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            GravityEvent::ObservedJWKsUpdated(epoch, jwks) => {
+                assert_eq!(*epoch, 7);
+                assert_eq!(jwks.len(), 1);
+                assert_eq!(jwks[0].version, 3);
+            }
+            other => panic!("expected ObservedJWKsUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_gravity_events_ignores_dkg_start_from_wrong_emitter() {
+        let event = DKGStartEvent {
+            dealerEpoch: 9,
+            startTimeUs: 123,
+            metadata: DKGSessionMetadata {
+                dealerEpoch: 9,
+                randomnessConfig: RandomnessConfigData {
+                    variant: ConfigVariant::Off,
+                    configV2: ConfigV2Data {
+                        secrecyThreshold: 0,
+                        reconstructionThreshold: 0,
+                        fastPathSecrecyThreshold: 0,
+                    },
+                },
+                dealerValidatorSet: vec![],
+                targetValidatorSet: vec![],
+            },
+        };
+        let forged_receipts =
+            vec![receipt_with_log(Address::from([0x24; 20]), event.encode_log_data())];
+
+        let events = extract_gravity_events_from_system_receipts(&forged_receipts, 10, 7);
+        assert!(events.is_empty(), "forged DKGStartEvent emitter must not produce GravityEvent");
+
+        let valid_receipts = vec![receipt_with_log(DKG_ADDR, event.encode_log_data())];
+        let events = extract_gravity_events_from_system_receipts(&valid_receipts, 10, 7);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], GravityEvent::DKG(_)));
+    }
+}
 
 /// Metadata about an executed block
 #[derive(Debug, Clone, Copy)]
@@ -205,6 +373,8 @@ pub struct ExecutionResult {
     pub block_id: B256,
     /// Block number of the executed block
     pub block_number: u64,
+    /// Epoch of the executed block.
+    pub epoch: u64,
     /// Block hash of the executed block
     /// This is the block hash generated by EL after execution and merklization
     pub block_hash: B256,
@@ -311,7 +481,7 @@ struct ExecuteOrderedBlockResult {
 /// This enum represents both outcomes.
 enum SystemTxnExecutionOutcome {
     /// Normal execution completed, continue with block processing
-    Continue { metadata_result: SystemTxnResult, validator_results: Vec<SystemTxnResult> },
+    Continue { metadata_result: Option<SystemTxnResult>, validator_results: Vec<SystemTxnResult> },
     /// Epoch changed, return early with the result
     EpochChanged(ExecuteOrderedBlockResult),
 }
@@ -588,7 +758,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             Arc::new(trie_updates),
         );
         let execution_result =
-            ExecutionResult { block_id, block_number, block_hash, txs_info, gravity_events };
+            ExecutionResult { block_id, block_number, epoch, block_hash, txs_info, gravity_events };
 
         self.verify_executed_block_hash(execution_result).await.unwrap();
         self.make_canonical(&block_id, executed_block).await;
@@ -721,10 +891,10 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
     /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
     ///
-    /// DESIGN: The `unwrap_or_else(|e| panic!(...))` calls on system transaction
-    /// execution are intentional. These are unrecoverable failures; in the gravity-sdk
-    /// integration the panic handler aborts the process, preventing partial-state
-    /// corruption.
+    /// DESIGN: system transaction failures must not prevent user transaction execution.
+    /// EVM-level revert/halt results are kept as failed receipts in the block. Rust-level
+    /// execution errors do not produce a valid receipt, so they are logged and the offending
+    /// system transaction is skipped.
     fn execute_system_transactions(
         executor: &mut dyn ParallelExecutor<
             Primitives = EthPrimitives,
@@ -739,6 +909,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         parent_id: B256,
         block_number: u64,
         initial_nonce: u64,
+        is_alpha_active: bool,
     ) -> SystemTxnExecutionOutcome {
         let mint_precompile = create_mint_token_precompile();
         let bls_precompile = create_bls_pop_verify_precompile();
@@ -758,19 +929,35 @@ impl<Storage: GravityStorage> Core<Storage> {
             ordered_block.proposer_index,
             &ordered_block.failed_proposer_indices,
         );
-        current_nonce = metadata_txn.nonce() + 1;
 
         let metadata_tx_env =
             Recovered::new_unchecked(metadata_txn.clone(), SYSTEM_CALLER).into_tx_env();
-        let metadata_execution_result = executor
-            .transact_system_txn(evm_env.clone(), system_precompiles.clone(), metadata_tx_env)
-            .unwrap_or_else(|e| panic!("metadata txn execution failed: {e:?}"));
-
-        let metadata_txn_result =
-            SystemTxnResult { result: metadata_execution_result, txn: metadata_txn };
+        let metadata_txn_result = match executor.transact_system_txn(
+            evm_env.clone(),
+            system_precompiles.clone(),
+            metadata_tx_env,
+        ) {
+            Ok(metadata_execution_result) => {
+                current_nonce = metadata_txn.nonce() + 1;
+                Some(SystemTxnResult { result: metadata_execution_result, txn: metadata_txn })
+            }
+            Err(error) => {
+                if !is_alpha_active {
+                    panic!("metadata txn execution failed: {error:?}");
+                }
+                error!(target: "execute_ordered_block",
+                    block_number=?block_number,
+                    error=?error,
+                    "metadata system transaction execution failed, skipping"
+                );
+                None
+            }
+        };
 
         // Check for epoch change from metadata txn
-        if let Some((new_epoch, validators)) = metadata_txn_result.emit_new_epoch() {
+        if let Some((new_epoch, validators)) =
+            metadata_txn_result.as_ref().and_then(SystemTxnResult::emit_new_epoch)
+        {
             assert_eq!(new_epoch, epoch + 1);
             info!(target: "execute_ordered_block",
                 id=?block_id,
@@ -783,7 +970,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             // so take_bundle() returns the complete bundle with all system-txn changes.
             let bundle = executor.take_bundle();
             return SystemTxnExecutionOutcome::EpochChanged(
-                metadata_txn_result.into_executed_ordered_block_result(
+                system_txns_into_executed_ordered_block_result(
+                    vec![
+                        metadata_txn_result.expect("metadata result exists when it emits NewEpoch")
+                    ],
                     chain_spec,
                     ordered_block,
                     base_fee,
@@ -793,19 +983,21 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
         }
 
-        if !metadata_txn_result.result.is_success() {
-            error!(target: "execute_ordered_block",
-                block_number=?block_number,
-                gas_used=?metadata_txn_result.result.gas_used(),
-                output=?metadata_txn_result.result.output(),
-                "metadata system transaction reverted"
+        if let Some(metadata_txn_result) = metadata_txn_result.as_ref() {
+            if !metadata_txn_result.result.is_success() {
+                error!(target: "execute_ordered_block",
+                    block_number=?block_number,
+                    gas_used=?metadata_txn_result.result.gas_used(),
+                    output=?metadata_txn_result.result.output(),
+                    "metadata system transaction reverted"
+                );
+            }
+
+            debug!(target: "execute_ordered_block",
+                metadata_txn_result=?metadata_txn_result,
+                "metadata transaction result"
             );
         }
-
-        debug!(target: "execute_ordered_block",
-            metadata_txn_result=?metadata_txn_result,
-            "metadata transaction result"
-        );
 
         // -----------------------------------------------------------------------
         // Validator transactions (DKG and JWK) — sorted: DKG first, JWK second
@@ -824,6 +1016,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 extra_data,
                 current_nonce,
                 base_fee as u128,
+                is_alpha_active,
             ) {
                 Ok(txn) => txn,
                 Err(e) => {
@@ -837,7 +1030,6 @@ impl<Storage: GravityStorage> Core<Storage> {
                     continue;
                 }
             };
-            current_nonce += 1;
 
             debug!(target: "execute_ordered_block",
                 index=?index,
@@ -848,10 +1040,28 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
 
             let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
-            let execution_result = executor
-                .transact_system_txn(evm_env.clone(), system_precompiles.clone(), tx_env)
-                .unwrap_or_else(|e| panic!("validator txn execution failed: {e:?}"));
+            let execution_result = match executor.transact_system_txn(
+                evm_env.clone(),
+                system_precompiles.clone(),
+                tx_env,
+            ) {
+                Ok(execution_result) => execution_result,
+                Err(error) => {
+                    if !is_alpha_active {
+                        panic!("validator txn execution failed: {error:?}");
+                    }
+                    error!(target: "execute_ordered_block",
+                        index=?index,
+                        is_dkg=?is_dkg,
+                        block_number=?block_number,
+                        error=?error,
+                        "validator system transaction execution failed, skipping"
+                    );
+                    continue;
+                }
+            };
 
+            current_nonce += 1;
             let validator_result = SystemTxnResult { result: execution_result, txn };
 
             if !validator_result.result.is_success() {
@@ -876,8 +1086,31 @@ impl<Storage: GravityStorage> Core<Storage> {
                             "DKG triggered new epoch, discard the block"
                         );
                         let bundle = executor.take_bundle();
+                        if !is_alpha_active {
+                            return SystemTxnExecutionOutcome::EpochChanged(
+                                system_txns_into_executed_ordered_block_result(
+                                    vec![validator_result],
+                                    chain_spec,
+                                    ordered_block,
+                                    base_fee,
+                                    bundle,
+                                    validators,
+                                ),
+                            );
+                        }
+                        let mut epoch_change_results = Vec::with_capacity(
+                            usize::from(metadata_txn_result.is_some()) +
+                                validator_txn_results.len() +
+                                1,
+                        );
+                        if let Some(metadata_txn_result) = metadata_txn_result {
+                            epoch_change_results.push(metadata_txn_result);
+                        }
+                        epoch_change_results.extend(validator_txn_results);
+                        epoch_change_results.push(validator_result);
                         return SystemTxnExecutionOutcome::EpochChanged(
-                            validator_result.into_executed_ordered_block_result(
+                            system_txns_into_executed_ordered_block_result(
+                                epoch_change_results,
                                 chain_spec,
                                 ordered_block,
                                 base_fee,
@@ -907,96 +1140,16 @@ impl<Storage: GravityStorage> Core<Storage> {
     }
 
     /// Extract gravity events from execution receipts
-    /// Returns gravity_events containing DKG events and ObservedJWKsUpdated from DataRecorded
-    /// events TODO(gravity): Currently, it executes the entire block and then parses all logs
-    /// from the whole block. Theoretically, it could only parse metadata and validator
-    /// transactions.
+    /// Returns gravity_events containing DKG events and ObservedJWKsUpdated from system-contract
+    /// receipts. Emitter addresses are checked here so the function remains safe even if its
+    /// caller's receipt slice changes.
     fn extract_gravity_events_from_receipts(
         &self,
         receipts: &[Receipt],
         block_number: u64,
         epoch: u64,
     ) -> Vec<GravityEvent> {
-        use gravity_api_types::on_chain_config::jwks::ProviderJWKs;
-        use std::collections::BTreeMap;
-
-        let mut gravity_events = vec![];
-        // Map from (sourceType, sourceId) to latest nonce
-        let mut data_records: BTreeMap<(u32, alloy_primitives::U256), u128> = BTreeMap::new();
-
-        for receipt in receipts {
-            debug!(target: "execute_ordered_block",
-                number=?block_number,
-                logs_len=?receipt.logs.len(),
-                "extract gravity events from receipt"
-            );
-            for log in &receipt.logs {
-                // Parse DataRecorded events from NativeOracle
-                if let Ok(event) = DataRecorded::decode_log(&log) {
-                    info!(target: "execute_ordered_block",
-                        number=?block_number,
-                        source_type=?event.sourceType,
-                        source_id=?event.sourceId,
-                        nonce=?event.nonce,
-                        "data recorded event"
-                    );
-                    // Keep only the latest nonce for each (sourceType, sourceId)
-                    let key = (event.sourceType, event.sourceId);
-                    data_records
-                        .entry(key)
-                        .and_modify(|existing_nonce| {
-                            if event.nonce > *existing_nonce {
-                                *existing_nonce = event.nonce;
-                            }
-                        })
-                        .or_insert(event.nonce);
-                }
-
-                // Parse DKG events (unchanged)
-                if let Ok(event) = DKGStartEvent::decode_log(&log) {
-                    info!(target: "execute_ordered_block",
-                        number=?block_number,
-                        dealer_epoch=?event.dealerEpoch,
-                        "dkg start"
-                    );
-                    gravity_events.push(GravityEvent::DKG(convert_dkg_start_event_to_api(&event)));
-                }
-            }
-        }
-
-        // Convert collected DataRecorded events to ProviderJWKs
-        if !data_records.is_empty() {
-            let api_jwks: Vec<ProviderJWKs> = data_records
-                .into_iter()
-                .map(|((source_type, source_id), nonce)| {
-                    // issuer format: "gravity://sourceType/sourceId"
-                    let issuer = format!("gravity://{}/{}", source_type, source_id);
-                    ProviderJWKs {
-                        issuer: issuer.into_bytes(),
-                        version: nonce as u64, // nonce as version
-                        jwks: vec![gravity_api_types::on_chain_config::jwks::JWKStruct {
-                            // gaptos reads gravity:// oracle progress from Any.data as a raw
-                            // 16-byte nonce. The GravityEvent adapter only preserves raw bytes
-                            // for known JWK wrappers, so this entry is a nonce carrier rather
-                            // than an RSA key.
-                            type_name: "0x1::jwks::RSA_JWK".to_string(),
-                            data: nonce.to_be_bytes().to_vec(),
-                        }],
-                    }
-                })
-                .collect();
-
-            info!(target: "execute_ordered_block",
-                number=?block_number,
-                epoch=?epoch,
-                provider_count=?api_jwks.len(),
-                "constructed ProviderJWKs from DataRecorded events"
-            );
-
-            gravity_events.push(GravityEvent::ObservedJWKsUpdated(epoch, api_jwks));
-        }
-
-        gravity_events
+        extract_gravity_events_from_system_receipts(receipts, block_number, epoch)
     }
 
     fn execute_ordered_block(
@@ -1059,6 +1212,11 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number,
         );
 
+        let is_alpha_active = self.chain_spec.gravity_hardforks().is_fork_active_at_timestamp(
+            GravityHardfork::Alpha,
+            ordered_block.timestamp_us / 1_000_000,
+        );
+
         // Execute system transactions (metadata, DKG, JWK) sequentially.
         // State changes are committed directly into executor's ParallelState.
         let (metadata_txn_result, validator_txn_results) = match Self::execute_system_transactions(
@@ -1072,6 +1230,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             parent_id,
             block_number,
             initial_nonce,
+            is_alpha_active,
         ) {
             SystemTxnExecutionOutcome::EpochChanged(result) => return result,
             SystemTxnExecutionOutcome::Continue { metadata_result, validator_results } => {
@@ -1135,12 +1294,16 @@ impl<Storage: GravityStorage> Core<Storage> {
             gravity_events: vec![],
             epoch,
         };
-        let n_system_receipts = 1 + validator_txn_results.len();
-        metadata_txn_result.insert_to_executed_ordered_block_result(&mut result, 0);
-        // Insert validator transaction results one by one after the metadata transaction
-        // Position 1 is right after the metadata transaction at position 0
+        let has_metadata_result = metadata_txn_result.is_some();
+        let n_system_receipts = usize::from(has_metadata_result) + validator_txn_results.len();
+        if let Some(metadata_txn_result) = metadata_txn_result {
+            metadata_txn_result.insert_to_executed_ordered_block_result(&mut result, 0);
+        }
+        // Insert validator transaction results one by one after the metadata transaction,
+        // or at the front if the metadata transaction failed before producing a receipt.
         for (index, validator_result) in validator_txn_results.into_iter().enumerate() {
-            validator_result.insert_to_executed_ordered_block_result(&mut result, 1 + index);
+            let insert_position = usize::from(has_metadata_result) + index;
+            validator_result.insert_to_executed_ordered_block_result(&mut result, insert_position);
         }
         debug!(target: "execute_ordered_block",
             number=?result.block.number,

@@ -21,6 +21,7 @@ pub mod validator_set;
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
 pub use consensus_config::ConsensusConfigFetcher;
 pub use epoch::EpochFetcher;
+pub(crate) use metadata_txn::system_txns_into_executed_ordered_block_result;
 pub use metadata_txn::{construct_metadata_txn, transact_system_txn, SystemTxnResult};
 pub use types::{
     convert_active_validators_to_bcs, convert_validator_consensus_info, ValidatorConsensusInfo,
@@ -116,6 +117,7 @@ pub fn construct_validator_txns_envelope(
     extra_data: &Vec<gravity_api_types::ExtraDataType>,
     system_caller_nonce: u64,
     gas_price: u128,
+    is_alpha_active: bool,
 ) -> Result<Vec<EthereumTxEnvelope<TxEip4844>>, String> {
     let system_caller_nonce = system_caller_nonce + 1;
     let mut txns = Vec::new();
@@ -124,7 +126,12 @@ pub fn construct_validator_txns_envelope(
         let current_nonce = system_caller_nonce + index as u64;
 
         // Process data based on ExtraDataType variant
-        match construct_validator_txn_from_extra_data(data, current_nonce, gas_price) {
+        match construct_validator_txn_from_extra_data(
+            data,
+            current_nonce,
+            gas_price,
+            is_alpha_active,
+        ) {
             Ok(transaction) => txns.push(transaction),
             Err(e) => {
                 return Err(format!("Failed to process extra data at index {}: {}", index, e));
@@ -144,6 +151,7 @@ pub fn construct_validator_txn_from_extra_data(
     data: &gravity_api_types::ExtraDataType,
     nonce: u64,
     gas_price: u128,
+    is_alpha_active: bool,
 ) -> Result<TransactionSigned, String> {
     match data {
         gravity_api_types::ExtraDataType::JWK(data_bytes) => {
@@ -167,7 +175,7 @@ pub fn construct_validator_txn_from_extra_data(
             >(data_bytes)
             .map_err(|e| format!("Failed to deserialize DKG data: {}", e))?;
             debug!("Processing DKG transcript for epoch: {:?}", dkg_transcript);
-            dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price)
+            dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price, is_alpha_active)
         }
     }
 }
