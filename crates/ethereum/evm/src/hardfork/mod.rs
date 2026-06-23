@@ -1,11 +1,7 @@
 //! Gravity-specific hardfork state changes.
 //!
-//! Each hardfork (alpha, beta, gamma, ...) should be added as a submodule
-//! on the corresponding release branch. The `common` module provides shared
-//! traits and types that all hardfork modules implement.
+//! Concrete hardfork modules should be added on the corresponding release
+//! branch. The `common` module provides shared traits and types that hardfork
+//! modules can implement.
 
-pub mod alpha;
-pub mod beta;
 pub mod common;
-pub mod delta;
-pub mod gamma;
