@@ -200,39 +200,10 @@ where
             *balance_increments.entry(dao_fork::DAO_HARDFORK_BENEFICIARY).or_default() +=
                 drained_balance;
         }
-        // Gravity hardforks: apply bytecode upgrades and storage patches
-        {
-            use crate::hardfork::{
-                alpha::AlphaHardfork, beta::BetaHardfork, common::apply_hardfork_upgrades,
-            };
-
-            let hf = self.chain_spec.gravity_hardforks();
-            if hf.fork(GravityHardfork::Alpha).active_at_timestamp(block.timestamp) {
-                apply_hardfork_upgrades(&AlphaHardfork, state)?;
-            }
-            if hf.fork(GravityHardfork::Beta).transitions_at_block(block.number()) {
-                apply_hardfork_upgrades(&BetaHardfork, state)?;
-            }
-        }
-
         // increment balances
         state
             .increment_balances(balance_increments.clone())
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-
-        {
-            use crate::hardfork::{
-                common::apply_hardfork_upgrades, delta::DeltaHardfork, gamma::GammaHardfork,
-            };
-
-            let hf = self.chain_spec.gravity_hardforks();
-            if hf.fork(GravityHardfork::Gamma).transitions_at_block(block.number()) {
-                apply_hardfork_upgrades(&GammaHardfork, state)?;
-            }
-            if hf.fork(GravityHardfork::Delta).transitions_at_block(block.number()) {
-                apply_hardfork_upgrades(&DeltaHardfork, state)?;
-            }
-        }
 
         // call state hook with changes due to balance increments.
         self.system_caller.try_on_state_with(|| {
