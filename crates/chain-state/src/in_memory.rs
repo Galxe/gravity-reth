@@ -952,7 +952,7 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
             Self::Commit { new } => {
                 let new = Arc::new(new.iter().fold(Chain::default(), |mut chain, exec| {
                     chain.append_block(
-                        exec.recovered_block().clone(),
+                        Arc::clone(&exec.recovered_block),
                         exec.execution_outcome().clone(),
                     );
                     chain
@@ -962,14 +962,14 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
             Self::Reorg { new, old } => {
                 let new = Arc::new(new.iter().fold(Chain::default(), |mut chain, exec| {
                     chain.append_block(
-                        exec.recovered_block().clone(),
+                        Arc::clone(&exec.recovered_block),
                         exec.execution_outcome().clone(),
                     );
                     chain
                 }));
                 let old = Arc::new(old.iter().fold(Chain::default(), |mut chain, exec| {
                     chain.append_block(
-                        exec.recovered_block().clone(),
+                        Arc::clone(&exec.recovered_block),
                         exec.execution_outcome().clone(),
                     );
                     chain
