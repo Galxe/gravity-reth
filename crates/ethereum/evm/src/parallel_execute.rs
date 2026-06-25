@@ -274,13 +274,14 @@ where
         // serial `EthEvmConfig::transact_system_txn`; the two MUST stay in lockstep or system-tx
         // blocks fork the state root. Compute the gate before borrowing `self.state` mutably.
         let mut evm_env = evm_env;
-        if self
-            .chain_spec
-            .gravity_hardforks()
-            .is_fork_active_at_timestamp(GravityHardfork::Epsilon, evm_env.block_env.timestamp)
-        {
+        let mut tx_env = tx_env;
+        if self.chain_spec.gravity_hardforks().is_fork_active_at_timestamp(
+            GravityHardfork::Epsilon,
+            evm_env.block_env.timestamp.saturating_to(),
+        ) {
             evm_env.cfg_env.disable_base_fee = true;
-            evm_env.cfg_env.disable_balance_check = true;
+            tx_env.gas_price = 0;
+            tx_env.gas_priority_fee = None;
         }
         let state = self.state.as_mut().unwrap();
         // Phase 1: execute with WrapDatabaseRef(state).

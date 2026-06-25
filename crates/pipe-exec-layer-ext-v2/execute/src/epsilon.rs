@@ -12,7 +12,7 @@
 
 use crate::onchain_config::SYSTEM_CALLER;
 use alloy_primitives::U256;
-use reth_chainspec::{ChainSpec, EthChainSpec, GravityHardfork, Hardforks};
+use reth_chainspec::{ChainSpec, EthChainSpec, GravityHardfork};
 use reth_evm::{execute::BlockExecutionError, parallel_execute::ParallelExecutor};
 use reth_primitives::EthPrimitives;
 use revm::state::{Account, AccountInfo, AccountStatus, EvmState};

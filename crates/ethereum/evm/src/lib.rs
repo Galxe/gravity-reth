@@ -317,18 +317,21 @@ where
         // (e.g. the zero-reward coinbase) that grevm prunes, forking the state root on
         // system-tx blocks.
         db.set_state_clear_flag(evm_env.cfg_env.spec >= SpecId::SPURIOUS_DRAGON);
-        // Epsilon: system transactions are gas-exempt — no base-fee charge and no balance
-        // requirement on SYSTEM_CALLER (gas is still metered). This stops burning base fee
-        // from SYSTEM_CALLER's sentinel balance. MUST mirror the grevm path
-        // (`GrevmExecutor::transact_system_txn`) exactly, or system-tx blocks fork the state root.
+        // Epsilon: system transactions become gas-exempt. A zero gas price (plus letting it sit
+        // below the base fee) makes the system tx pay nothing — so it needs no balance and burns
+        // nothing, which is the whole point: stop draining SYSTEM_CALLER's sentinel balance. Gas
+        // is still metered. MUST mirror the grevm path (`GrevmExecutor::transact_system_txn`)
+        // exactly, or system-tx blocks fork the state root. (revm's `CfgEnv` has no
+        // `disable_balance_check`; a zero price makes it unnecessary.)
         let mut evm_env = evm_env;
-        if self
-            .chain_spec()
-            .gravity_hardforks()
-            .is_fork_active_at_timestamp(GravityHardfork::Epsilon, evm_env.block_env.timestamp)
-        {
+        let mut tx_env = tx_env;
+        if self.chain_spec().gravity_hardforks().is_fork_active_at_timestamp(
+            GravityHardfork::Epsilon,
+            evm_env.block_env.timestamp.saturating_to(),
+        ) {
             evm_env.cfg_env.disable_base_fee = true;
-            evm_env.cfg_env.disable_balance_check = true;
+            tx_env.gas_price = 0;
+            tx_env.gas_priority_fee = None;
         }
         let (execution_result, evm_state) = {
             let mut evm = self.evm_with_env(&mut *db, evm_env);

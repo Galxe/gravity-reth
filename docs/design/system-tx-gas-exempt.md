@@ -43,13 +43,14 @@ receipt + fully free + zero balance).
 
 When the Epsilon fork is active at the block timestamp, set on the system-tx EVM env:
 
-- `cfg_env.disable_base_fee = true`
-- `cfg_env.disable_balance_check = true`
-- (`gas_price = 0` optional; the tip is already 0)
-- keep `disable_nonce_check = false` (the nonce sequence keeps incrementing)
+- `cfg_env.disable_base_fee = true` — allow a gas price below the base fee.
+- `tx_env.gas_price = 0`, `tx_env.gas_priority_fee = None` — the system tx pays **nothing**, so it
+  needs no balance and burns nothing (which is the whole point). revm's `CfgEnv` has no
+  `disable_balance_check` field, and a zero price makes one unnecessary.
+- keep `disable_nonce_check = false` (the nonce sequence keeps incrementing).
 
 Execution / calldata / state / receipts / `gas_used` are unchanged — only fee accounting is
-skipped. Reuses the revm cfg flags already used in `rpc-eth-api` (eth_call / estimate / prewarm).
+skipped. Same fee-less semantics `rpc-eth-api` already uses for eth_call / estimate.
 
 **Status: implemented** in both backends (must stay in lockstep):
 - serial: `crates/ethereum/evm/src/lib.rs` → `EthEvmConfig::transact_system_txn`
