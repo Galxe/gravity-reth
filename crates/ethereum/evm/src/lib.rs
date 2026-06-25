@@ -31,7 +31,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_engine::ExecutionData;
 use core::{convert::Infallible, fmt::Debug};
 use gravity_primitives::get_gravity_config;
-use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
     execute::{BasicBlockExecutor, BlockExecutionError},
@@ -310,6 +310,22 @@ where
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
+        // Epsilon: system transactions become gas-exempt. A zero gas price (plus letting it sit
+        // below the base fee) makes the system tx pay nothing — so it needs no balance and burns
+        // nothing, which is the whole point: stop draining SYSTEM_CALLER's sentinel balance. Gas
+        // is still metered. MUST mirror the grevm path (`GrevmExecutor::transact_system_txn`)
+        // exactly, or system-tx blocks fork the state root. (revm's `CfgEnv` has no
+        // `disable_balance_check`; a zero price makes it unnecessary.)
+        let mut evm_env = evm_env;
+        let mut tx_env = tx_env;
+        if self.chain_spec().gravity_hardforks().is_fork_active_at_timestamp(
+            GravityHardfork::Epsilon,
+            evm_env.block_env.timestamp.saturating_to(),
+        ) {
+            evm_env.cfg_env.disable_base_fee = true;
+            tx_env.gas_price = 0;
+            tx_env.gas_priority_fee = None;
+        }
         let (execution_result, evm_state) = {
             let mut evm = self.evm_with_env(&mut *db, evm_env);
             for (addr, precompile) in precompiles {
