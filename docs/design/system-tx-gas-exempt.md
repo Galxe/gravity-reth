@@ -60,26 +60,30 @@ skipped. Reuses the revm cfg flags already used in `rpc-eth-api` (eth_call / est
 At the Epsilon activation block, perform a deterministic state write `SYSTEM_CALLER.balance = 0`.
 The nonce is preserved (> 0 → not empty → not pruned by EIP-161 state-clear).
 
-**Status: TODO** — apply alongside the existing Gravity hardfork-transition mechanism
-(`crates/ethereum/evm/src/hardfork/common.rs::apply_hardfork_upgrades`, invoked from
-`apply_post_execution_changes`), or a dedicated pre-execution hook at the transition block. Must be
-applied identically in the serial and grevm pre/post-execution paths.
+**Status: implemented** — `crates/pipe-exec-layer-ext-v2/execute/src/epsilon.rs`, applied via the
+backend-agnostic `ParallelExecutor::apply_state_change` in `execute_ordered_block` (right after the
+EIP-2935 boundary change it mirrors). One call site → serial (`WrapExecutor`) and grevm get the
+identical change, no per-backend duplication. The activation time is parsed from genesis
+`epsilonTime` → `GravityHardfork::Epsilon` (`crates/chainspec/src/spec.rs`).
 
 ## Correctness checklist
 
 - [x] serial + grevm `transact_system_txn` gas-exempt gate (Epsilon) — kept in lockstep (cf. #363)
-- [ ] zero `SYSTEM_CALLER.balance` at the Epsilon transition block (both backends)
+- [x] zero `SYSTEM_CALLER.balance` at the Epsilon transition block (single backend-agnostic call)
+- [x] `epsilonTime` genesis wiring → `GravityHardfork::Epsilon` (unit-tested) — else fork is inert
+- [x] nonce preserved (account stays non-empty / EIP-161), no code/storage on the account
 - [ ] confirm no contract/logic depends on `SYSTEM_CALLER`'s balance (it is an identity /
       `msg.sender`, not funds)
-- [ ] nonce sequence preserved, receipts unchanged
-- [ ] coinbase unaffected (already no tip)
-- [ ] gas limit still enforced (free != unbounded)
-- [ ] fork-gated; pre-fork behavior unchanged
+- [ ] coinbase unaffected (already no tip) — confirm in e2e
+- [ ] gas limit still enforced (free != unbounded) — confirm in e2e
+- [x] fork-gated; pre-fork behavior unchanged (gates default false with no `epsilonTime`)
 
 ## Test & rollout
 
-- [ ] e2e (testnet first): after fork — balance stays 0, system txs execute with correct receipts,
-      no base fee burned, **serial == grevm state root**, nonce continuity, deterministic balance
-      zeroing at the transition block, total supply returns to the real value
+- [x] unit: `epsilonTime` parsing + activation/transition semantics (`spec.rs` tests)
+- [ ] e2e (testnet first, mirror `gravity_eip2935_test`): after fork — balance stays 0, system txs
+      execute with correct receipts, no base fee burned, **serial == grevm state root**, nonce
+      continuity, deterministic balance zeroing at the transition block, total supply returns to the
+      real value
 - [ ] staging → mainnet via the hardfork SOP (single PR + atomic image swap + >=24h lead, new fork
       activation time)
