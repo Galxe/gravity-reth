@@ -31,7 +31,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_engine::ExecutionData;
 use core::{convert::Infallible, fmt::Debug};
 use gravity_primitives::get_gravity_config;
-use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
     execute::{BasicBlockExecutor, BlockExecutionError},
@@ -317,6 +317,19 @@ where
         // (e.g. the zero-reward coinbase) that grevm prunes, forking the state root on
         // system-tx blocks.
         db.set_state_clear_flag(evm_env.cfg_env.spec >= SpecId::SPURIOUS_DRAGON);
+        // Epsilon: system transactions are gas-exempt — no base-fee charge and no balance
+        // requirement on SYSTEM_CALLER (gas is still metered). This stops burning base fee
+        // from SYSTEM_CALLER's sentinel balance. MUST mirror the grevm path
+        // (`GrevmExecutor::transact_system_txn`) exactly, or system-tx blocks fork the state root.
+        let mut evm_env = evm_env;
+        if self
+            .chain_spec()
+            .gravity_hardforks()
+            .is_fork_active_at_timestamp(GravityHardfork::Epsilon, evm_env.block_env.timestamp)
+        {
+            evm_env.cfg_env.disable_base_fee = true;
+            evm_env.cfg_env.disable_balance_check = true;
+        }
         let (execution_result, evm_state) = {
             let mut evm = self.evm_with_env(&mut *db, evm_env);
             for (addr, precompile) in precompiles {

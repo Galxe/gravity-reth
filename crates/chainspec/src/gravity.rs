@@ -13,5 +13,9 @@ hardfork!(
         Gamma,
         /// Delta hardfork: activate Governance contract by setting Ownable._owner
         Delta,
+        /// Epsilon hardfork: system transactions become gas-exempt (no base-fee charge and no
+        /// balance requirement on `SYSTEM_CALLER`; gas is still metered) and the `SYSTEM_CALLER`
+        /// sentinel genesis balance is zeroed. See gravity-reth#364 / gravity-audit#720.
+        Epsilon,
     }
 );

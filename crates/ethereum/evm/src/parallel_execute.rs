@@ -269,6 +269,19 @@ where
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        // Epsilon: system transactions are gas-exempt — no base-fee charge and no balance
+        // requirement on SYSTEM_CALLER (gas is still metered). This is the exact mirror of the
+        // serial `EthEvmConfig::transact_system_txn`; the two MUST stay in lockstep or system-tx
+        // blocks fork the state root. Compute the gate before borrowing `self.state` mutably.
+        let mut evm_env = evm_env;
+        if self
+            .chain_spec
+            .gravity_hardforks()
+            .is_fork_active_at_timestamp(GravityHardfork::Epsilon, evm_env.block_env.timestamp)
+        {
+            evm_env.cfg_env.disable_base_fee = true;
+            evm_env.cfg_env.disable_balance_check = true;
+        }
         let state = self.state.as_mut().unwrap();
         // Phase 1: execute with WrapDatabaseRef(state).
         let (execution_result, evm_state) = {

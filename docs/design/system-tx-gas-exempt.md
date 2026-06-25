@@ -1,61 +1,85 @@
 # System Transactions: gas-exempt + zero-balance SYSTEM_CALLER
 
-> **Status: Draft / skeleton.** 实现追踪 [gravity-reth#364](https://github.com/Galxe/gravity-reth/issues/364) ·
-> 分析 [gravity-audit#720](https://github.com/Galxe/gravity-audit/issues/720)。
-> 本文件是 hardfork 实现的设计骨架,代码尚未落地(见下方落点地图 + checklist)。
+> Implementation tracking: [gravity-reth#364](https://github.com/Galxe/gravity-reth/issues/364) ·
+> analysis: [gravity-audit#720](https://github.com/Galxe/gravity-audit/issues/720).
+> Gated behind the **Epsilon** Gravity hardfork — inert until a chainspec/genesis sets its
+> activation time.
 
-## 问题
+## Problem
 
-系统交易发送账户 `SYSTEM_CALLER`（`0x00000000000000000000000000000001625f0000`）在 genesis 被预分配「哨兵级无穷大」余额（≈ 1.16×10⁵⁸ G），用来支付每块系统交易的 base fee（实测系统 tx `gas_price=baseFee`、无 tip，base fee 从该账户余额烧掉 ~0.006 G/块）。
+The system-transaction sender `SYSTEM_CALLER` (`0x00000000000000000000000000000001625f0000`,
+defined in `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/mod.rs`) is pre-funded in
+genesis with a sentinel "infinite" balance (≈ 1.16e58 G) so it can pay the base fee of the system
+transactions the protocol injects every block. On-chain measurement: each system tx has
+`gas_price = baseFee` with no tip, so its base fee is burned from `SYSTEM_CALLER`'s balance
+(~0.006 G/block; the balance only decreases).
 
-虽然已验证假供应未流通、footgun 未触发,但带来 4 个问题:污染供应核算 / 增发 footgun（任何余额外流的 bug = 无上限增发真 G）/ 为系统 tx 从假账户烧 base fee / 软不变量。
+The fake supply has been verified **not** to circulate and the footgun has **not** fired, but the
+design carries four issues:
 
-## 生产先例
+1. **Supply-accounting pollution** — every total/circulating-supply computation must special-case
+   the 1.16e58 sentinel.
+2. **Unbounded-mint footgun** — any bug that lets value leave this account mints real G without
+   bound.
+3. **Conceptual muddle** — base fee is burned from a fake account for the protocol's own txs.
+4. **Soft invariant** — relies on "1e58 never runs out" instead of a hard "system txs are gas-free"
+   rule.
 
-| 维度 | EIP-4788/2935 | Arbitrum `0x6a` ArbInternalTx | Gravity 现状 | 本方案 |
+## Production precedents
+
+| | EIP-4788/2935 | Arbitrum `0x6a` ArbInternalTx | Gravity (today) | This change |
 | --- | --- | --- | --- | --- |
-| receipt / 入块可见 | 无（幽灵） | 有（实测 status=0x1） | 有 | 保留 |
-| nonce 自增 | 否 | 否（恒 0，from=`0xA4B05`） | 是（≈块高） | 是（保留；可选改静态） |
-| gas / fee | 免费、计量 | 全免（gasPrice/gasUsed=0） | 收 base fee（烧假余额） | 免费、计量 |
-| 发送方余额 | 0 | 0 | 1.16×10⁵⁸ 哨兵 | fork 后清 0 |
+| Receipt / visible in block | none (phantom) | yes (`status=0x1`) | yes | kept |
+| Sender nonce increments | no | no (stays 0, `0xA4B05`) | yes (≈ height) | yes (kept; static optional) |
+| Gas / fee | free, metered | fully free (`gasUsed=0`) | charges base fee | free, metered |
+| Sender balance | 0 | 0 | 1.16e58 sentinel | zeroed at fork |
 
-费用语义与 4788/2935 一致;与 Arbitrum 最接近（真交易 + receipt + 完全免费 + 零余额）。
+The fee semantics match EIP-4788/2935's `SYSTEM_ADDRESS` pattern; closest to Arbitrum (real tx +
+receipt + fully free + zero balance).
 
-## 方案（必须 hardfork —— 改状态根,须全节点在同一 fork 高度原子切换）
+## Plan (hardfork — changes the state root, must switch atomically across all nodes)
 
-### ① 执行层:系统 tx 免 fee/balance（保留 gas 计量）
+### 1. Execution layer: gas-exempt system txs (gas still metered)
 
-fork 激活后,对系统 tx 的 EVM env:
+When the Epsilon fork is active at the block timestamp, set on the system-tx EVM env:
+
 - `cfg_env.disable_base_fee = true`
 - `cfg_env.disable_balance_check = true`
-- 系统 tx `gas_price = 0`
-- `disable_nonce_check` 保持 `false`（nonce 序列照常自增）
+- (`gas_price = 0` optional; the tip is already 0)
+- keep `disable_nonce_check = false` (the nonce sequence keeps incrementing)
 
-执行 / calldata / state / receipt / gas_used 全照旧,只是不记账收费。复用仓库已有的 revm cfg 标志。
+Execution / calldata / state / receipts / `gas_used` are unchanged — only fee accounting is
+skipped. Reuses the revm cfg flags already used in `rpc-eth-api` (eth_call / estimate / prewarm).
 
-### ② 状态迁移:fork 块把 SYSTEM_CALLER 余额清 0
+**Status: implemented** in both backends (must stay in lockstep):
+- serial: `crates/ethereum/evm/src/lib.rs` → `EthEvmConfig::transact_system_txn`
+- grevm: `crates/ethereum/evm/src/parallel_execute.rs` → `GrevmExecutor::transact_system_txn`
 
-fork 激活块做一次确定性状态写 `SYSTEM_CALLER.balance = 0`。nonce 保留（>0 → 非空,不被 EIP-161 裁剪）。
+### 2. State migration: zero `SYSTEM_CALLER`'s balance at the fork block
 
-## 代码落点地图（实现者参考）
+At the Epsilon activation block, perform a deterministic state write `SYSTEM_CALLER.balance = 0`.
+The nonce is preserved (> 0 → not empty → not pruned by EIP-161 state-clear).
 
-| 改动点 | 位置 |
-| --- | --- |
-| `SYSTEM_CALLER` 常量 | `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/mod.rs:55` |
-| 系统 tx 执行（设 cfg 标志）| `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/metadata_txn.rs` → `transact_system_txn` |
-| serial 后端系统 tx 路径 | `crates/ethereum/evm/src/lib.rs`（#363 在此加 `set_state_clear_flag`,同处加 fee/balance 豁免）|
-| grevm 并行后端系统 tx 路径 | `crates/ethereum/evm/src/parallel_execute.rs`（**必须同 serial 一起改**，否则状态根分叉）|
-| revm cfg 标志参考用法 | `crates/rpc/rpc-eth-api/src/helpers/call.rs`（`disable_base_fee` / `disable_nonce_check` 已在用）|
-| fork 块清零余额 | block 执行的 `apply_pre_execution_changes` / fork hook |
-| hardfork 注册 | chainspec 的 fork time（参考 `pragueTime` 接法）|
+**Status: TODO** — apply alongside the existing Gravity hardfork-transition mechanism
+(`crates/ethereum/evm/src/hardfork/common.rs::apply_hardfork_upgrades`, invoked from
+`apply_post_execution_changes`), or a dedicated pre-execution hook at the transition block. Must be
+applied identically in the serial and grevm pre/post-execution paths.
 
-## Checklist
+## Correctness checklist
 
-- [ ] serial（disable-grevm）与 grevm 两路同样改（同 #363，否则系统-tx 块状态根分叉）
-- [ ] 确认无合约/逻辑依赖 SYSTEM_CALLER 余额（它是身份 `msg.sender`，非钱）
-- [ ] nonce 序列保持、receipt 不变
-- [ ] coinbase 不受影响（本就无 tip）
-- [ ] gas 上限仍在（免费 != 不限制）
-- [ ] fork 门控 + pre-fork 行为不变
-- [ ] e2e（testnet）：fork 后余额恒 0、系统 tx 执行+receipt 正确、无 base fee、serial==parallel 状态根、nonce 连续、fork-transition 块确定性清零、总供应量回真实值
-- [ ] staging → mainnet 走 hardfork SOP（单 PR + atomic image swap + >=24h lead）
+- [x] serial + grevm `transact_system_txn` gas-exempt gate (Epsilon) — kept in lockstep (cf. #363)
+- [ ] zero `SYSTEM_CALLER.balance` at the Epsilon transition block (both backends)
+- [ ] confirm no contract/logic depends on `SYSTEM_CALLER`'s balance (it is an identity /
+      `msg.sender`, not funds)
+- [ ] nonce sequence preserved, receipts unchanged
+- [ ] coinbase unaffected (already no tip)
+- [ ] gas limit still enforced (free != unbounded)
+- [ ] fork-gated; pre-fork behavior unchanged
+
+## Test & rollout
+
+- [ ] e2e (testnet first): after fork — balance stays 0, system txs execute with correct receipts,
+      no base fee burned, **serial == grevm state root**, nonce continuity, deterministic balance
+      zeroing at the transition block, total supply returns to the real value
+- [ ] staging → mainnet via the hardfork SOP (single PR + atomic image swap + >=24h lead, new fork
+      activation time)
