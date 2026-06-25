@@ -768,6 +768,12 @@ impl From<Genesis> for ChainSpec {
             gravity_hardforks
                 .push((GravityHardfork::Alpha.boxed(), ForkCondition::Timestamp(alpha_time)));
         }
+        if let Some(epsilon_time) =
+            genesis.config.extra_fields.get("epsilonTime").and_then(|v| v.as_u64())
+        {
+            gravity_hardforks
+                .push((GravityHardfork::Epsilon.boxed(), ForkCondition::Timestamp(epsilon_time)));
+        }
 
         let gravity_hardfork_opts = [
             (
@@ -2379,6 +2385,28 @@ Post-merge hard forks (timestamp based):
         assert_eq!(got_forkid, expected_forkid);
         // Check that paris block and final difficulty are set correctly
         assert_eq!(chainspec.paris_block_and_final_difficulty, Some((72, U256::from(9454784))));
+    }
+
+    #[test]
+    fn test_gravity_epsilon_hardfork_from_genesis() {
+        // `epsilonTime` in genesis config activates GravityHardfork::Epsilon at that timestamp,
+        // mirroring `alphaTime`. Guards the gas-exempt + balance-zero gating (gravity-reth#364).
+        let s = r#"{"config":{"chainId":127001,"epsilonTime":1000},"alloc":{}}"#;
+        let spec = ChainSpec::from(serde_json::from_str::<Genesis>(s).unwrap());
+        let gh = spec.gravity_hardforks();
+        assert!(!gh.is_fork_active_at_timestamp(GravityHardfork::Epsilon, 999));
+        assert!(gh.is_fork_active_at_timestamp(GravityHardfork::Epsilon, 1000));
+        assert!(gh.is_fork_active_at_timestamp(GravityHardfork::Epsilon, 1001));
+        // transition fires exactly on the activation block, not the block after.
+        assert!(gh.fork(GravityHardfork::Epsilon).transitions_at_timestamp(1000, 999));
+        assert!(!gh.fork(GravityHardfork::Epsilon).transitions_at_timestamp(1001, 1000));
+        // absent `epsilonTime` ⇒ never active.
+        let none = ChainSpec::from(
+            serde_json::from_str::<Genesis>(r#"{"config":{"chainId":127001},"alloc":{}}"#).unwrap(),
+        );
+        assert!(!none
+            .gravity_hardforks()
+            .is_fork_active_at_timestamp(GravityHardfork::Epsilon, u64::MAX));
     }
 
     #[test]

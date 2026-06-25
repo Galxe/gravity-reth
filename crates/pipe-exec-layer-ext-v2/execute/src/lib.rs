@@ -3,6 +3,7 @@
 mod channel;
 pub mod bls_precompile;
 mod eip_2935;
+mod epsilon;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
@@ -1064,6 +1065,18 @@ impl<Storage: GravityStorage> Core<Storage> {
             &self.chain_spec,
             ordered_block.timestamp_us / 1_000_000,
             parent_header.timestamp,
+            block_number,
+        );
+
+        // Epsilon (Gravity) boundary state change: zero SYSTEM_CALLER's sentinel balance on the
+        // Epsilon activation block. `initial_nonce` is SYSTEM_CALLER's nonce before the system
+        // txns run; gated by `transitions_at_timestamp` so it fires exactly once. See `epsilon`.
+        epsilon::apply_state_changes_for_block(
+            &mut *executor,
+            &self.chain_spec,
+            ordered_block.timestamp_us / 1_000_000,
+            parent_header.timestamp,
+            initial_nonce,
             block_number,
         );
 
