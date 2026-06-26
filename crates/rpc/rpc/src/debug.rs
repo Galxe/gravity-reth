@@ -17,7 +17,9 @@ use alloy_rpc_types_trace::geth::{
 };
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{
+    ChainSpecProvider, EthChainSpec, EthereumHardforks, GravityHardfork, SYSTEM_CALLER,
+};
 use reth_errors::RethError;
 use reth_evm::{execute::Executor, ConfigureEvm, EvmEnvFor, TxEnvFor};
 use reth_primitives_traits::{Block as _, BlockBody, ReceiptWithBloom, RecoveredBlock};
@@ -103,16 +105,38 @@ where
 
                 this.eth_api().apply_pre_execution_changes(&block, &mut db, &evm_env)?;
 
+                // Gravity Alpha (system-tx gas-exempt) RPC block-family wiring,
+                // single-tx branch. Each tx already clones `evm_env` per-iteration
+                // (so this loop is naturally per-tx cfg-isolated); we just toggle
+                // the disables on the clone for txs whose recovered sender ==
+                // SYSTEM_CALLER, gated on the replayed block's timestamp.
+                let exempt_fork_active = this
+                    .eth_api()
+                    .provider()
+                    .chain_spec()
+                    .gravity_hardforks()
+                    .is_fork_active_at_timestamp(
+                        GravityHardfork::Alpha,
+                        evm_env.block_env.timestamp.saturating_to::<u64>(),
+                    );
+
                 let mut transactions = block.transactions_recovered().enumerate().peekable();
                 let mut inspector = None;
                 while let Some((index, tx)) = transactions.next() {
                     let tx_hash = *tx.tx_hash();
+                    let tx_sender_is_system_caller = tx.signer() == SYSTEM_CALLER;
+
+                    let mut per_tx_evm_env = evm_env.clone();
+                    if exempt_fork_active && tx_sender_is_system_caller {
+                        per_tx_evm_env.cfg_env.disable_base_fee = true;
+                        per_tx_evm_env.cfg_env.disable_balance_check = true;
+                    }
 
                     let tx_env = this.eth_api().evm_config().tx_env(tx);
 
                     let (result, state_changes) = this.trace_transaction(
                         &opts,
-                        evm_env.clone(),
+                        per_tx_evm_env,
                         tx_env,
                         &mut db,
                         Some(TransactionContext {
