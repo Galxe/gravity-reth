@@ -765,7 +765,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // See system-tx gas-exempt design §3.2.
         let block_ts = evm_env.block_env.timestamp.saturating_to::<u64>();
         let system_tx_gas_price: u128 =
-            if reth_evm_ethereum::is_system_tx_gas_exempt(chain_spec, block_ts) {
+            if reth_chainspec::is_system_tx_gas_exempt(chain_spec, block_ts) {
                 0
             } else {
                 base_fee as u128

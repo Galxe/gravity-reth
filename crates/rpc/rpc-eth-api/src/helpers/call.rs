@@ -18,7 +18,7 @@ use alloy_rpc_types_eth::{
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork, SYSTEM_CALLER};
+use reth_chainspec::{is_system_tx_gas_exempt, ChainSpecProvider, SYSTEM_CALLER};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor,
@@ -751,11 +751,10 @@ pub trait Call:
         // active for the replayed block, we need cfg disables on the EVM that
         // commits that tx. The fork gate keys off the replayed block's
         // timestamp (matches the block-family path in `trace.rs`).
-        let exempt_fork_active =
-            self.provider().chain_spec().gravity_hardforks().is_fork_active_at_timestamp(
-                GravityHardfork::Alpha,
-                block_timestamp.saturating_to::<u64>(),
-            );
+        let exempt_fork_active = is_system_tx_gas_exempt(
+            self.provider().chain_spec().as_ref(),
+            block_timestamp.saturating_to::<u64>(),
+        );
 
         // Build the initial EVM with disables OFF — the typical block hands the
         // target tx the user-segment cfg, and if the first replay tx happens to

@@ -31,7 +31,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_engine::ExecutionData;
 use core::{convert::Infallible, fmt::Debug};
 use gravity_primitives::get_gravity_config;
-use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork, MAINNET};
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
     execute::{BasicBlockExecutor, BlockExecutionError},
@@ -83,23 +83,14 @@ pub mod parallel_execute;
 // the cfg-side fee/balance disables on the SAME predicate, queried against the
 // timestamp of the block being executed/replayed. See the
 // `system-tx-gas-exempt` design doc §3.4 for the load-bearing invariant.
+//
+// The predicate itself (`is_system_tx_gas_exempt`) is defined in `reth-chainspec`
+// alongside `SYSTEM_CALLER`/`is_gravity_system_caller`, so every callsite (this
+// crate's serial + grevm twins, the pipe layer's system-tx construction, and all
+// RPC replay paths in `reth-rpc-eth-api` / `reth-rpc`) reuses a single function
+// without crate-edge gymnastics.
 
-/// Returns `true` when `block_ts` falls on or after the activation of the
-/// Gravity Alpha hardfork, which bundles:
-///   - randomness precompile registration,
-///   - system-tx gas-exemption (this gate),
-///   - one-shot SYSTEM_CALLER balance migration to zero.
-///
-/// Single source of truth for the L1 (cfg-side) and L2 (construction-side)
-/// gas-exempt gating; all callsites — serial executor, grevm executor, pipe
-/// system-tx construction, RPC trace replay — MUST route their fork check
-/// through this helper to keep the predicate uniform.
-#[inline]
-pub fn is_system_tx_gas_exempt<S: EthChainSpec>(chain_spec: &S, block_ts: u64) -> bool {
-    chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Alpha, block_ts)
-}
-
-pub use reth_chainspec::{is_gravity_system_caller, SYSTEM_CALLER};
+pub use reth_chainspec::{is_gravity_system_caller, is_system_tx_gas_exempt, SYSTEM_CALLER};
 
 mod build;
 pub use build::EthBlockAssembler;

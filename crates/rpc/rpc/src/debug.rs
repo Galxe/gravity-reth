@@ -18,7 +18,7 @@ use alloy_rpc_types_trace::geth::{
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
 use reth_chainspec::{
-    ChainSpecProvider, EthChainSpec, EthereumHardforks, GravityHardfork, SYSTEM_CALLER,
+    is_system_tx_gas_exempt, ChainSpecProvider, EthChainSpec, EthereumHardforks, SYSTEM_CALLER,
 };
 use reth_errors::RethError;
 use reth_evm::{execute::Executor, ConfigureEvm, EvmEnvFor, TxEnvFor};
@@ -110,15 +110,10 @@ where
                 // (so this loop is naturally per-tx cfg-isolated); we just toggle
                 // the disables on the clone for txs whose recovered sender ==
                 // SYSTEM_CALLER, gated on the replayed block's timestamp.
-                let exempt_fork_active = this
-                    .eth_api()
-                    .provider()
-                    .chain_spec()
-                    .gravity_hardforks()
-                    .is_fork_active_at_timestamp(
-                        GravityHardfork::Alpha,
-                        evm_env.block_env.timestamp.saturating_to::<u64>(),
-                    );
+                let exempt_fork_active = is_system_tx_gas_exempt(
+                    this.eth_api().provider().chain_spec().as_ref(),
+                    evm_env.block_env.timestamp.saturating_to::<u64>(),
+                );
 
                 let mut transactions = block.transactions_recovered().enumerate().peekable();
                 let mut inspector = None;

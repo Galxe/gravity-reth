@@ -28,7 +28,9 @@ pub use alloy_chains::{Chain, ChainKind, NamedChain};
 pub use reth_ethereum_forks::*;
 
 pub use api::EthChainSpec;
-pub use gravity::{is_gravity_system_caller, GravityHardfork, SYSTEM_CALLER};
+pub use gravity::{
+    is_gravity_system_caller, is_system_tx_gas_exempt, GravityHardfork, SYSTEM_CALLER,
+};
 pub use info::ChainInfo;
 #[cfg(any(test, feature = "test-utils"))]
 pub use spec::test_fork_ids;
