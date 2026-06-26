@@ -28,18 +28,19 @@ use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use std::sync::Arc;
 
 // ============================================================================
-// `GravityTracingCtx` — local mirror of `alloy_evm::tracing::TracingCtx` whose
-// `fused_inspector` / `was_fused` fields are pub so the handwritten loop in
-// `trace_block_until_with_inspector` can construct it. See system-tx
-// gas-exempt design §3.5.4 / R-A2 verify trail for the choice of (a) over
-// (b) (the alternative — fork alloy-evm to pub-ify those two fields).
+// `GravityTracingCtx` — local callback ctx for the handwritten block-family
+// tracing loop. Mirrors the 5 pub fields of `alloy_evm::tracing::TracingCtx`
+// without carrying the upstream `fused_inspector` / `was_fused` snapshot pair:
 //
-// Field shape, lifetimes and `take_inspector` semantics are byte-equivalent to
-// `TracingCtx`; the only diff is that the last two fields carry `pub`.
+// the handwritten loop re-seeds the inspector slot via `inspector_setup()`
+// after every tx, which R-A1 verify §1.5 proved equivalent to cloning a
+// `fused_inspector` snapshot (TracingInspector::new(config) ==
+// fused_inspector.clone()). The per-tx reset is unconditional and works
+// whether the closure took the inspector or not — `was_fused` bookkeeping
+// is unnecessary.
 // ============================================================================
 
-/// Container type for context exposed during block-family tracing, mirroring
-/// `alloy_evm::tracing::TracingCtx` with all fields publicly constructible.
+/// Container type for context exposed during block-family tracing.
 #[derive(Debug)]
 pub struct GravityTracingCtx<'a, T, E: Evm> {
     /// The transaction that was just executed.
@@ -52,19 +53,22 @@ pub struct GravityTracingCtx<'a, T, E: Evm> {
     pub inspector: &'a mut E::Inspector,
     /// Database used when executing the transaction, _before_ committing the state changes.
     pub db: &'a mut E::DB,
-    /// Fused inspector snapshot — `take_inspector` resets `inspector` to a clone of this.
-    pub fused_inspector: &'a E::Inspector,
-    /// Set by `take_inspector` so the surrounding loop can skip the default fuse step.
-    pub was_fused: &'a mut bool,
 }
 
-impl<'a, T, E: Evm<Inspector: Clone>> GravityTracingCtx<'a, T, E> {
-    /// Fuses the inspector and returns the current inspector state.
+impl<'a, T, E> GravityTracingCtx<'a, T, E>
+where
+    E: Evm,
+    E::Inspector: Default,
+{
+    /// Takes the inspector out of the ctx, leaving a default-constructed
+    /// replacement behind for the surrounding loop to re-seed via
+    /// `inspector_setup()`.
     ///
-    /// Byte-equivalent to `alloy_evm::tracing::TracingCtx::take_inspector`.
+    /// Closures that consume the inspector (e.g. `.into_parity_builder()`)
+    /// call this; closures that read traces in place use `ctx.inspector`
+    /// directly.
     pub fn take_inspector(&mut self) -> E::Inspector {
-        *self.was_fused = true;
-        core::mem::replace(self.inspector, self.fused_inspector.clone())
+        core::mem::take(self.inspector)
     }
 }
 
@@ -344,7 +348,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
             + Send
             + 'static,
         Setup: FnMut() -> Insp + Send + 'static,
-        Insp: Clone + for<'a, 'b> InspectorFor<Self::Evm, StateCacheDbRefMutWrapper<'a, 'b>>,
+        Insp: Default + for<'a, 'b> InspectorFor<Self::Evm, StateCacheDbRefMutWrapper<'a, 'b>>,
         R: Send + 'static,
     {
         async move {
@@ -443,12 +447,6 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 );
                 let mut current_kind_system_exempt = first_kind_system_exempt;
 
-                // Snapshot a fused inspector base for the in-loop fuse pattern —
-                // mirrors `alloy_evm::tracing::TxTracer::new`'s initial snapshot
-                // so per-tx tracing semantics match canonical (each tx's hook
-                // receives a fresh inspector unless it `take_inspector`-ed).
-                let mut fused_inspector: Insp = current_evm.inspector().clone();
-
                 let mut results: Vec<R> = Vec::with_capacity(max_transactions);
 
                 while let Some(tx) = txs_iter.next() {
@@ -470,9 +468,6 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                             evm_block_timestamp,
                             current_randomness,
                         );
-                        // Refresh the fused base so subsequent fuses go back to
-                        // a fresh inspector consistent with the new EVM.
-                        fused_inspector = current_evm.inspector().clone();
                         current_kind_system_exempt = tx_is_system_exempt;
                     }
 
@@ -484,7 +479,6 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                         };
 
                     let (db_ref, inspector_ref, _) = current_evm.components_mut();
-                    let mut was_fused = false;
                     let tx_info = TransactionInfo {
                         hash: Some(tx_hash),
                         index: Some(idx),
@@ -500,8 +494,6 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                         state: &state,
                         inspector: inspector_ref,
                         db: db_ref,
-                        fused_inspector: &fused_inspector,
-                        was_fused: &mut was_fused,
                     };
                     let output = f(tx_info, ctx)?;
                     results.push(output);
@@ -513,14 +505,14 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                         db_ref.commit(state);
                     }
 
-                    // Fuse the inspector for the next tx unless the hook already
-                    // took ownership via `take_inspector` (which sets `was_fused`).
-                    if !was_fused {
-                        let _ = core::mem::replace(
-                            current_evm.inspector_mut(),
-                            fused_inspector.clone(),
-                        );
-                    }
+                    // Per-tx fuse: re-seed the inspector slot via
+                    // `inspector_setup()`. R-A1 verify §1.5 proves this is
+                    // equivalent to cloning a fused snapshot
+                    // (`TracingInspector::new(config)` ==
+                    // `fused_inspector.clone()`), and works whether the closure
+                    // took the inspector or not — no `was_fused` bookkeeping
+                    // needed.
+                    let _ = core::mem::replace(current_evm.inspector_mut(), inspector_setup());
                 }
 
                 Ok(Some(results))
@@ -601,7 +593,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
             + Send
             + 'static,
         Setup: FnMut() -> Insp + Send + 'static,
-        Insp: Clone + for<'a, 'b> InspectorFor<Self::Evm, StateCacheDbRefMutWrapper<'a, 'b>>,
+        Insp: Default + for<'a, 'b> InspectorFor<Self::Evm, StateCacheDbRefMutWrapper<'a, 'b>>,
         R: Send + 'static,
     {
         self.trace_block_until_with_inspector(block_id, block, None, insp_setup, f)
