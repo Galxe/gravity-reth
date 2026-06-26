@@ -270,10 +270,23 @@ where
 
     fn transact_system_txn(
         &mut self,
-        evm_env: EvmEnv,
+        mut evm_env: EvmEnv,
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        // Gravity Alpha hardfork: gas-exempt the `SYSTEM_CALLER`-sourced system
+        // transactions on the L1 (cfg-side) lever. MUST stay byte-identical with
+        // the serial twin in `EthEvmConfig::transact_system_txn` — any drift
+        // between serial / grevm here forks state root on system-tx blocks
+        // (system-tx gas-exempt design §3.1, the "承重墙" callout).
+        let block_ts: u64 = evm_env.block_env.timestamp.saturating_to();
+        if crate::is_system_tx_gas_exempt(self.chain_spec.as_ref(), block_ts) {
+            evm_env.cfg_env.disable_base_fee = true;
+            evm_env.cfg_env.disable_balance_check = true;
+            // `disable_nonce_check` deliberately left `false` — SYSTEM_CALLER's
+            // nonce sequence is part of the protocol contract.
+        }
+
         let state = self.state.as_mut().unwrap();
         // Phase 1: execute with WrapDatabaseRef(state).
         let (execution_result, evm_state) = {
