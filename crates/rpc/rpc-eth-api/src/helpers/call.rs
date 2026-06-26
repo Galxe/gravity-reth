@@ -756,12 +756,21 @@ pub trait Call:
             block_timestamp.saturating_to::<u64>(),
         );
 
-        // Build the initial EVM with disables OFF — the typical block hands the
-        // target tx the user-segment cfg, and if the first replay tx happens to
-        // be a system tx we rebuild on entry via the same `finish()` path used
-        // for the system→user transition below.
-        let mut current_kind_system_exempt = false;
-        let mut evm = self.evm_config().evm_with_env(db, evm_env);
+        // Peek the first replay tx so we can seed the initial EVM with the cfg
+        // kind it actually wants. In the common case the prelude leads with
+        // SYSTEM_CALLER metadata + validator txs, so starting with disables OFF
+        // would force an immediate `finish()` + rebuild on entry; pre-toggling
+        // the initial cfg avoids that wasted rebuild + `register_custom_precompiles`
+        // call. Matches the block-family path in `trace.rs` (`first_kind_system_exempt`).
+        let mut transactions = transactions.into_iter().peekable();
+        let first_kind_system_exempt = exempt_fork_active &&
+            transactions.peek().map(|tx| is_gravity_system_caller(tx.signer())).unwrap_or(false);
+
+        let mut current_kind_system_exempt = first_kind_system_exempt;
+        let mut initial_env = evm_env;
+        initial_env.cfg_env.disable_base_fee = first_kind_system_exempt;
+        initial_env.cfg_env.disable_balance_check = first_kind_system_exempt;
+        let mut evm = self.evm_config().evm_with_env(db, initial_env);
         self.register_custom_precompiles(
             &mut evm,
             block_number,
