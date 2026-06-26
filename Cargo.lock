@@ -10369,6 +10369,7 @@ dependencies = [
  "reth-network-peers",
  "reth-network-types",
  "reth-node-api",
+ "reth-pipe-exec-layer-ext-v2",
  "reth-primitives-traits",
  "reth-provider",
  "reth-revm",
