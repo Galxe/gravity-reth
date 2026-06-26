@@ -334,7 +334,7 @@ where
     fn transact_system_txn<DB: Database>(
         &self,
         db: &mut State<DB>,
-        evm_env: EvmEnv,
+        mut evm_env: EvmEnv,
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
@@ -345,6 +345,23 @@ where
         // (e.g. the zero-reward coinbase) that grevm prunes, forking the state root on
         // system-tx blocks.
         db.set_state_clear_flag(evm_env.cfg_env.spec >= SpecId::SPURIOUS_DRAGON);
+
+        // Gravity Alpha hardfork: gas-exempt the `SYSTEM_CALLER`-sourced system
+        // transactions on the L1 (cfg-side) lever. Combined with the L2
+        // (construction-side) `gas_price = 0` at the pipe layer, this drops the
+        // SYSTEM_CALLER fee bill to zero while preserving gas metering, calldata,
+        // state writes, receipts and `gas_used` (system-tx gas-exempt design §3.1).
+        //
+        // MUST stay byte-identical with the grevm twin in
+        // `parallel_execute.rs::transact_system_txn`. Any drift forks state root.
+        let block_ts: u64 = evm_env.block_env.timestamp.saturating_to();
+        if is_system_tx_gas_exempt(self.chain_spec().as_ref(), block_ts) {
+            evm_env.cfg_env.disable_base_fee = true;
+            evm_env.cfg_env.disable_balance_check = true;
+            // `disable_nonce_check` deliberately left `false` — SYSTEM_CALLER's
+            // nonce sequence is part of the protocol contract.
+        }
+
         let (execution_result, evm_state) = {
             let mut evm = self.evm_with_env(&mut *db, evm_env);
             for (addr, precompile) in precompiles {

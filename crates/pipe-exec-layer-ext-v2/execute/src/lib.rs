@@ -755,13 +755,28 @@ impl<Storage: GravityStorage> Core<Storage> {
             (BLS_PRECOMPILE_ADDR, bls_precompile),
         ];
 
+        // Gravity Alpha hardfork: gas-exempt system transactions (L2 — construction
+        // side). When the lever is on, every protocol-injected system tx is built
+        // with `gas_price = 0`; the L1 (cfg-side) `disable_base_fee` set in
+        // `transact_system_txn` then accepts `gas_price < basefee`. Result: fee
+        // == gas_used × 0 == 0, SYSTEM_CALLER balance is not touched, gas metering
+        // / calldata / state / receipts / gas_used otherwise unchanged.
+        // See system-tx gas-exempt design §3.2.
+        let block_ts = evm_env.block_env.timestamp.saturating_to::<u64>();
+        let system_tx_gas_price: u128 =
+            if reth_evm_ethereum::is_system_tx_gas_exempt(chain_spec, block_ts) {
+                0
+            } else {
+                base_fee as u128
+            };
+
         let mut current_nonce = initial_nonce;
         // -----------------------------------------------------------------------
         // Metadata transaction (onBlockStart)
         // -----------------------------------------------------------------------
         let metadata_txn = construct_metadata_txn(
             current_nonce,
-            base_fee as u128,
+            system_tx_gas_price,
             ordered_block.timestamp_us,
             ordered_block.proposer_index,
             &ordered_block.failed_proposer_indices,
@@ -831,7 +846,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             let txn = match construct_validator_txn_from_extra_data(
                 extra_data,
                 current_nonce,
-                base_fee as u128,
+                system_tx_gas_price,
             ) {
                 Ok(txn) => txn,
                 Err(e) => {
