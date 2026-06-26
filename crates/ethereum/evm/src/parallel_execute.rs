@@ -841,4 +841,216 @@ mod tests {
         assert_eq!(info.balance, U256::ZERO, "SYSTEM_CALLER balance must stay zero (gas-exempt)");
         assert_eq!(info.nonce, 2, "SYSTEM_CALLER nonce must reflect both system txs");
     }
+
+    // --- U-7: fee归零 + 余额不动 + coinbase 不收 tip (matrix §1.2) ---
+
+    /// `u7`: under Alpha gate, SYSTEM_CALLER balance is preserved bit-for-bit
+    /// across a system tx (no fee debit) and coinbase does NOT receive any
+    /// tip (gas_price == 0). Both invariants together constitute the
+    /// "gas-exempt without breaking gas metering" property — gas_used is
+    /// still observable in the execution result.
+    ///
+    /// Picks an obviously non-zero sentinel for SYSTEM_CALLER's pre-state so
+    /// any silent debit would change the post-tx balance.
+    #[test]
+    fn u7_test_system_tx_fee_zero_balance_unchanged() {
+        let chain_spec = alpha_active_chainspec(1);
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let header = alpha_block_header(1);
+        let evm_env = evm_config.evm_env(&header).expect("evm_env must build");
+
+        // Sentinel pre-balance: 10^18 (1 G). Any silent fee debit would make
+        // the post-balance < 10^18; the gas-exempt design must keep it at
+        // exactly 10^18.
+        let sentinel = U256::from(1_000_000_000_000_000_000_u128);
+
+        let mut serial =
+            WrapExecutor::new(BasicBlockExecutor::new(evm_config.clone(), seeded_db(sentinel, 0)));
+        let result = serial
+            .transact_system_txn(evm_env.clone(), Vec::new(), system_tx_env(0, chain_id))
+            .expect("system tx must succeed under Alpha gate");
+
+        // Gas IS still metered — the gate only zeros fee accounting, not gas.
+        assert!(
+            result.is_success(),
+            "system tx execution must succeed (no insufficient-funds / GasPriceLessThanBasefee)"
+        );
+        assert!(
+            result.gas_used() > 0,
+            "gas_used must stay positive — gas metering is not bypassed"
+        );
+
+        let bundle = serial.take_bundle();
+        let acc = bundle
+            .state
+            .get(&SYSTEM_CALLER)
+            .expect("SYSTEM_CALLER must be in bundle after system tx");
+        let info = acc.info.as_ref().expect("info present");
+        assert_eq!(
+            info.balance, sentinel,
+            "SYSTEM_CALLER balance must stay at sentinel — no fee was debited"
+        );
+        assert_eq!(info.nonce, 1, "nonce must bump by 1 (protocol contract still enforced)");
+
+        // Coinbase tip: gas_price == 0  ⇒  no tip flows to beneficiary. The
+        // EvmEnv's beneficiary is `header.beneficiary()` which we left as
+        // Address::ZERO. Verify it's not in the bundle with a positive
+        // balance.
+        assert!(
+            bundle
+                .state
+                .get(&Address::ZERO)
+                .and_then(|a| a.info.as_ref())
+                .is_none_or(|i| i.balance == U256::ZERO),
+            "coinbase (Address::ZERO) must not receive tip when gas_price == 0"
+        );
+    }
+
+    /// `u7b`: gas_used is invariant across pre-Alpha (gate inactive,
+    /// gas_price = base_fee) and post-Alpha (gate active, gas_price = 0)
+    /// runs of the same system tx. The L1+L2 gas-exempt levers must change
+    /// **only** fee accounting, never gas metering — receipts, gas_used,
+    /// state writes, calldata effects must all remain identical.
+    #[test]
+    fn u7b_test_system_tx_gas_used_equivalent_to_pre_fork() {
+        // Pre-Alpha chainspec: Alpha = Timestamp(100), block_ts = 1  ⇒ gate inactive.
+        let chain_spec_pre = alpha_active_chainspec(100);
+        let evm_config_pre = EthEvmConfig::new(chain_spec_pre.clone());
+        let chain_id = chain_spec_pre.chain().id();
+        let header_pre = alpha_block_header(1);
+        let evm_env_pre = evm_config_pre.evm_env(&header_pre).expect("evm_env pre");
+        assert!(
+            !is_system_tx_gas_exempt(chain_spec_pre.as_ref(), 1),
+            "test fixture sanity: Alpha must NOT be active at ts=1 with Alpha=100"
+        );
+
+        // Pre-Alpha tx uses base_fee gas_price (production fallback path).
+        let basefee = evm_env_pre.block_env.basefee as u128;
+        let tx_pre = TxEnv {
+            caller: SYSTEM_CALLER,
+            gas_limit: 1_000_000,
+            gas_price: basefee,
+            kind: TxKind::Call(SYSTEM_CALLER),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            nonce: 0,
+            chain_id: Some(chain_id),
+            ..TxEnv::default()
+        };
+
+        // Need a large enough balance to cover base_fee × gas_limit for the
+        // pre-fork run; pick a generous one so the test isn't fragile.
+        let funded = U256::from(u128::MAX);
+        let mut pre_executor = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config_pre.clone(),
+            seeded_db(funded, 0),
+        ));
+        let result_pre = pre_executor
+            .transact_system_txn(evm_env_pre, Vec::new(), tx_pre)
+            .expect("pre-Alpha system tx must succeed (production fallback path)");
+        let gas_used_pre = result_pre.gas_used();
+        assert!(result_pre.is_success(), "pre-Alpha system tx must succeed");
+
+        // Post-Alpha chainspec: Alpha = Timestamp(1), block_ts = 1 ⇒ gate active.
+        let chain_spec_post = alpha_active_chainspec(1);
+        let evm_config_post = EthEvmConfig::new(chain_spec_post.clone());
+        let header_post = alpha_block_header(1);
+        let evm_env_post = evm_config_post.evm_env(&header_post).expect("evm_env post");
+        assert!(
+            is_system_tx_gas_exempt(chain_spec_post.as_ref(), 1),
+            "test fixture sanity: Alpha must be active at ts=1 with Alpha=1"
+        );
+
+        let tx_post = system_tx_env(0, chain_id);
+        let mut post_executor = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config_post.clone(),
+            seeded_db(U256::ZERO, 0),
+        ));
+        let result_post = post_executor
+            .transact_system_txn(evm_env_post, Vec::new(), tx_post)
+            .expect("post-Alpha system tx must succeed (gas-exempt path)");
+        let gas_used_post = result_post.gas_used();
+        assert!(result_post.is_success(), "post-Alpha system tx must succeed");
+
+        // The core invariant: gas metering doesn't change across the fork.
+        assert_eq!(
+            gas_used_pre, gas_used_post,
+            "system tx gas_used must be invariant across Alpha boundary (lever changes accounting, not metering)"
+        );
+    }
+
+    // --- U-8: `disable_balance_check` 防御性 verify (matrix §1.3) ---
+
+    /// `u8`: `disable_balance_check = true` must be a no-op (zero
+    /// collateral) when `gas_price = 0` and `disable_base_fee = true`.
+    /// Verifies the "second belt" — even without `disable_balance_check`,
+    /// the upfront cost is 0 × gas_limit = 0, so the balance check is
+    /// trivially satisfied. Test exercises both cfg variants and asserts
+    /// byte-equal bundles, pinning that the extra flag has no state-diff
+    /// side-effect today (R5 verify).
+    #[test]
+    fn u8_test_disable_balance_check_zero_collateral() {
+        let chain_spec = alpha_active_chainspec(1);
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let header = alpha_block_header(1);
+        let evm_env_base = evm_config.evm_env(&header).expect("evm_env must build");
+
+        // Variant A: both flags set (production default for system tx under
+        // Alpha gate). The serial `transact_system_txn` sets both.
+        let mut exec_a = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config.clone(),
+            seeded_db(U256::ZERO, 0),
+        ));
+        exec_a
+            .transact_system_txn(evm_env_base.clone(), Vec::new(), system_tx_env(0, chain_id))
+            .expect("variant A (both flags set) must succeed");
+        let bundle_a = exec_a.take_bundle();
+
+        // Variant B: disable_base_fee=true, disable_balance_check=false.
+        // Build a fresh evm_env, then bypass the gate (i.e. emulate "what
+        // happens if `disable_balance_check` ever gets reverted") by hand-
+        // crafting the cfg. We do this by simulating a pre-Alpha chainspec
+        // (gate inactive at this ts) and overriding the cfg fields ourselves
+        // after calling evm_env.
+        let chain_spec_b = alpha_active_chainspec(u64::MAX); // gate never fires
+        let evm_config_b = EthEvmConfig::new(chain_spec_b.clone());
+        let mut evm_env_b = evm_config_b.evm_env(&header).expect("evm_env B");
+        evm_env_b.cfg_env.disable_base_fee = true;
+        // explicitly DO NOT set disable_balance_check
+        assert!(
+            !evm_env_b.cfg_env.disable_balance_check,
+            "control case: leave disable_balance_check off"
+        );
+        assert!(
+            !is_system_tx_gas_exempt(chain_spec_b.as_ref(), 1),
+            "control case: gate must be inactive so `transact_system_txn` does not auto-flip the flags"
+        );
+
+        let mut exec_b = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config_b.clone(),
+            seeded_db(U256::ZERO, 0),
+        ));
+        exec_b
+            .transact_system_txn(evm_env_b, Vec::new(), system_tx_env(0, chain_id))
+            .expect("variant B (only disable_base_fee) must still succeed — upfront cost is 0×gas_limit = 0");
+        let bundle_b = exec_b.take_bundle();
+
+        // Bundles must match: `disable_balance_check` is a no-op when the
+        // upfront cost is already zero (R5 verify long-term defence —
+        // protects against a future revm prepay-path change).
+        assert_eq!(
+            bundle_a.state, bundle_b.state,
+            "state map drift between disable_balance_check on/off"
+        );
+        assert_eq!(
+            bundle_a.contracts, bundle_b.contracts,
+            "contracts drift between disable_balance_check on/off"
+        );
+        assert_eq!(
+            bundle_a.state_size, bundle_b.state_size,
+            "state_size drift between disable_balance_check on/off"
+        );
+    }
 }
