@@ -11,6 +11,9 @@ use gravity_precompiles::randomness_by_height::{
 use reth_chainspec::{is_system_tx_gas_exempt, ChainSpecProvider};
 use reth_errors::ProviderError;
 use reth_evm::{precompiles::PrecompilesMap, Evm, SpecFor, TxEnvFor};
+use reth_pipe_exec_layer_ext_v2::{
+    bls_precompile::create_bls_pop_verify_precompile, onchain_config::BLS_PRECOMPILE_ADDR,
+};
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_api::{
     helpers::{estimate::EstimateCall, Call, EthCall},
@@ -111,6 +114,14 @@ where
     ) where
         EV: Evm<Precompiles = PrecompilesMap>,
     {
+        // BLS pop-verify precompile is registered **unconditionally** to mirror the pipe
+        // execution layer, which has registered it both pre-Alpha (via `pre_alpha_precompiles`)
+        // and post-Alpha. Gating it behind Alpha would cause RPC replay (debug_trace*, trace_*)
+        // to diverge from canonical for any historical block — pre- *or* post-Alpha — that
+        // calls `0x…625f5001`. See gravity-audit §3.5.0.
+        let bls_precompile = create_bls_pop_verify_precompile();
+        evm.precompiles_mut().apply_precompile(&BLS_PRECOMPILE_ADDR, move |_| Some(bls_precompile));
+
         let Ok(block_number) = u64::try_from(block_number) else { return };
         let Ok(block_timestamp) = u64::try_from(block_timestamp) else { return };
         let chain_spec = self.provider().chain_spec();
@@ -118,6 +129,8 @@ where
             return
         }
 
+        // Randomness-by-height is Alpha-gated to match the pipe's post-Alpha registration
+        // (`pipe-exec-layer-ext-v2/execute/src/lib.rs` post-Alpha branch).
         // For RPC calls the gas tier is anchored to the EVM block environment being simulated.
         // This keeps eth_call, estimateGas, and debug tracing aligned with the execution context.
         let precompile =

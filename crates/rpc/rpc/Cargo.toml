@@ -41,6 +41,7 @@ reth-consensus-common.workspace = true
 reth-node-api.workspace = true
 reth-trie-common.workspace = true
 gravity-precompiles.workspace = true
+reth-pipe-exec-layer-ext-v2.workspace = true
 
 # ethereum
 alloy-evm = { workspace = true, features = ["overrides"] }
