@@ -28,7 +28,7 @@ use revm::{
         TxEnv,
     },
     database::{states::bundle_state::BundleRetention, BundleState, State},
-    state::EvmState,
+    state::{AccountInfo, EvmState},
     Database as RevmDatabase, DatabaseCommit,
 };
 
@@ -159,6 +159,14 @@ pub trait Executor<DB: Database>: Sized {
     ///
     /// [`take_bundle`]: Self::take_bundle
     fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error>;
+
+    /// Reads the current `AccountInfo` for `address` from the executor's in-memory state
+    /// without committing any change. Used by irregular-state-change hooks that need to
+    /// inspect existing nonce / code to preserve them in the diff they then submit via
+    /// [`apply_state_change`](Self::apply_state_change) (e.g. the Gravity Alpha
+    /// `SYSTEM_CALLER` balance migration in
+    /// `pipe-exec-layer-ext-v2/.../system_caller_migration.rs`).
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error>;
 
     /// Registers custom precompiles for subsequent user transaction execution.
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>);
@@ -672,6 +680,11 @@ where
         Ok(())
     }
 
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        RevmDatabase::basic(&mut self.db, address)
+            .map_err(|e| BlockExecutionError::msg(alloc::format!("basic {address}: {e:?}")))
+    }
+
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
         self.custom_precompiles = Some(custom_precompiles);
     }
@@ -800,6 +813,10 @@ mod tests {
         }
 
         fn apply_state_change(&mut self, _state_diff: EvmState) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        fn basic(&mut self, _address: Address) -> Result<Option<AccountInfo>, Self::Error> {
             unreachable!()
         }
 

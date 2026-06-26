@@ -14,7 +14,7 @@ use revm::{
         TxEnv,
     },
     database::BundleState,
-    state::EvmState,
+    state::{AccountInfo, EvmState},
 };
 
 impl<A, B, DB> Executor<DB> for Either<A, B>
@@ -113,6 +113,13 @@ where
         match self {
             Self::Left(a) => a.apply_state_change(state_diff),
             Self::Right(b) => b.apply_state_change(state_diff),
+        }
+    }
+
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        match self {
+            Self::Left(a) => a.basic(address),
+            Self::Right(b) => b.basic(address),
         }
     }
 

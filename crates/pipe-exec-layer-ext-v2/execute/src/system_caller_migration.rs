@@ -44,17 +44,15 @@ type Executor<'a> =
 /// across `alphaTime`), zero the `SYSTEM_CALLER` balance while preserving its
 /// nonce and code. No-op on every other block.
 ///
-/// `prev_account` is the SYSTEM_CALLER `AccountInfo` read from the pre-execution
-/// state by the caller (alongside the existing `initial_nonce` read at the
-/// pipe-layer entry to `execute_ordered_block`). It is consumed here only when
-/// the fork transition actually fires, so callers pay no penalty for the read
-/// on non-activation blocks.
+/// The hook reads SYSTEM_CALLER's current `AccountInfo` via the executor's
+/// `ParallelExecutor::basic` accessor, so callers stay decoupled from the
+/// hook's data needs and non-activation blocks pay nothing beyond the gating
+/// check.
 ///
 /// Panics on `apply_state_change` failure: in the gravity-sdk integration the
 /// panic handler aborts the process, preventing partial-state corruption.
 pub(crate) fn apply_state_changes_for_block(
     executor: Executor<'_>,
-    prev_account: Option<AccountInfo>,
     chain_spec: &ChainSpec,
     current_ts: u64,
     parent_ts: u64,
@@ -71,7 +69,10 @@ pub(crate) fn apply_state_changes_for_block(
     // `unwrap_or_default` covers degenerate test fixtures where the genesis alloc
     // omits SYSTEM_CALLER — we still wind up writing balance=0 with nonce=0 and
     // no code, which is the natural "empty" terminal state.
-    let prev = prev_account.unwrap_or_default();
+    let prev = executor
+        .basic(SYSTEM_CALLER)
+        .expect("Alpha migration: failed to read SYSTEM_CALLER account")
+        .unwrap_or_default();
     let prev_balance = prev.balance;
     let prev_nonce = prev.nonce;
 

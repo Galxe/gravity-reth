@@ -1209,16 +1209,16 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         let base_fee = evm_env.block_env.basefee;
 
-        // Read SYSTEM_CALLER nonce and gas price from state BEFORE moving state into executor.
+        // Read SYSTEM_CALLER nonce from state BEFORE moving state into executor.
         // ParallelDatabase (Storage::StateView) implements DatabaseRef, so we can read directly.
-        //
-        // We hold the full `AccountInfo` (not just nonce) so the Alpha-activation
-        // balance migration below has access to the up-to-date nonce / code to
-        // preserve in its diff (see `system_caller_migration`).
-        let system_caller_account = state
+        // The Alpha balance migration below reads SYSTEM_CALLER independently via the
+        // executor's own `basic` accessor (see `system_caller_migration`), so this read
+        // only serves `execute_system_transactions` nonce sequencing.
+        let initial_nonce = state
             .basic_ref(SYSTEM_CALLER)
-            .expect("failed to read SYSTEM_CALLER account from state");
-        let initial_nonce = system_caller_account.as_ref().map(|a| a.nonce).unwrap_or(0);
+            .expect("failed to read SYSTEM_CALLER account from state")
+            .map(|a| a.nonce)
+            .unwrap_or(0);
 
         // Create executor with state. System transactions will commit directly to its
         // ParallelState, so there is a single source of truth for both system and user txns.
@@ -1251,7 +1251,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         // the account non-empty under EIP-161 (design §3.3, R5).
         system_caller_migration::apply_state_changes_for_block(
             &mut *executor,
-            system_caller_account,
             &self.chain_spec,
             ordered_block.timestamp_us / 1_000_000,
             parent_header.timestamp,
