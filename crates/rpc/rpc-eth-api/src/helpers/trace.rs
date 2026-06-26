@@ -6,7 +6,7 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork, SYSTEM_CALLER};
+use reth_chainspec::{is_system_tx_gas_exempt, ChainSpecProvider, SYSTEM_CALLER};
 use reth_errors::ProviderError;
 use reth_evm::{
     system_calls::SystemCaller, ConfigureEvm, Database, Evm, EvmEnvFor, EvmFactory, EvmFor,
@@ -252,11 +252,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 // the `evm_env` we pass to `inspect`. Gate keys off the replayed
                 // block's timestamp (same predicate as the block family and the
                 // pre-target replay loop in `replay_transactions_until`).
-                let exempt_fork_active =
-                    this.provider().chain_spec().gravity_hardforks().is_fork_active_at_timestamp(
-                        GravityHardfork::Alpha,
-                        evm_env.block_env.timestamp.saturating_to::<u64>(),
-                    );
+                let exempt_fork_active = is_system_tx_gas_exempt(
+                    this.provider().chain_spec().as_ref(),
+                    evm_env.block_env.timestamp.saturating_to::<u64>(),
+                );
                 let mut target_evm_env = evm_env;
                 if exempt_fork_active && tx.signer() == SYSTEM_CALLER {
                     target_evm_env.cfg_env.disable_base_fee = true;
@@ -413,11 +412,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 // (not the node tip) so pre-Alpha blocks under archive replay
                 // see their historical, non-zero SYSTEM_CALLER balance and don't
                 // need the disables.
-                let exempt_fork_active =
-                    this.provider().chain_spec().gravity_hardforks().is_fork_active_at_timestamp(
-                        GravityHardfork::Alpha,
-                        evm_block_timestamp.saturating_to::<u64>(),
-                    );
+                let exempt_fork_active = is_system_tx_gas_exempt(
+                    this.provider().chain_spec().as_ref(),
+                    evm_block_timestamp.saturating_to::<u64>(),
+                );
 
                 // Classify the first transaction to pick the initial cfg.
                 // If the block is empty post-take we already returned above.
