@@ -34,9 +34,9 @@ use reth_transaction_pool::{
 };
 use std::{sync::Arc, time::Duration};
 
-/// See `crates/pipe-exec-layer-ext-v2/execute/src/onchain_config/mod.rs`
-const SYSTEM_CALLER: Address =
-    alloy_primitives::address!("00000000000000000000000000000001625f0000");
+// Re-use the single source-of-truth `SYSTEM_CALLER` constant defined in
+// `reth_chainspec::gravity` (mirrors `pipe-exec-layer-ext-v2/.../onchain_config/mod.rs`).
+use reth_chainspec::SYSTEM_CALLER;
 
 /// Transaction related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
