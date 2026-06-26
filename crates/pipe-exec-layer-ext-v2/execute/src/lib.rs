@@ -1,7 +1,6 @@
 //! Pipeline execution layer extension
 #[macro_use]
 mod channel;
-pub mod bls_precompile;
 mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
@@ -25,7 +24,10 @@ use alloy_consensus::{
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{Address, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
-use gravity_precompiles::randomness_by_height::randomness_by_height_gas_policy_at_block;
+use gravity_precompiles::{
+    bls_pop_verify::{create_bls_pop_verify_precompile, BLS_PRECOMPILE_ADDR},
+    randomness_by_height::randomness_by_height_gas_policy_at_block,
+};
 use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
@@ -69,14 +71,13 @@ use tokio::sync::{
 use tracing::*;
 
 use crate::{
-    bls_precompile::create_bls_pop_verify_precompile,
     mint_precompile::create_mint_token_precompile,
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         types::DataRecorded,
-        SystemTxnResult, BLS_PRECOMPILE_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
-        RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, NATIVE_MINT_PRECOMPILE_ADDR, RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+        SYSTEM_CALLER,
     },
     randomness_precompile::{
         create_randomness_by_height_precompile, ExecutionRandomnessProvider,
@@ -762,7 +763,6 @@ impl<Storage: GravityStorage> Core<Storage> {
         // `transact_system_txn` then accepts `gas_price < basefee`. Result: fee
         // == gas_used × 0 == 0, SYSTEM_CALLER balance is not touched, gas metering
         // / calldata / state / receipts / gas_used otherwise unchanged.
-        // See system-tx gas-exempt design §3.2.
         let block_ts = evm_env.block_env.timestamp.saturating_to::<u64>();
         let system_tx_gas_price: u128 =
             if reth_chainspec::is_system_tx_gas_exempt(chain_spec, block_ts) {
@@ -1090,7 +1090,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         // `SYSTEM_CALLER.balance` once, on the Alpha activation block. Runs
         // BEFORE system transactions in the same block so the post-execution
         // bundle reflects the zero balance — preserving nonce and code keeps
-        // the account non-empty under EIP-161 (design §3.3, R5).
+        // the account non-empty under EIP-161 so it is not pruned by state-clear.
         system_caller_migration::apply_state_changes_for_block(
             &mut *executor,
             &self.chain_spec,

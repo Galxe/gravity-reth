@@ -41,7 +41,6 @@ reth-consensus-common.workspace = true
 reth-node-api.workspace = true
 reth-trie-common.workspace = true
 gravity-precompiles.workspace = true
-reth-pipe-exec-layer-ext-v2.workspace = true
 
 # ethereum
 alloy-evm = { workspace = true, features = ["overrides"] }
@@ -98,6 +97,7 @@ itertools.workspace = true
 
 [dev-dependencies]
 reth-ethereum-primitives.workspace = true
+reth-pipe-exec-layer-ext-v2.workspace = true
 reth-testing-utils.workspace = true
 reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }

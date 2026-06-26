@@ -3,17 +3,17 @@
 use crate::EthApi;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, U256};
-use gravity_precompiles::randomness_by_height::{
-    create_randomness_by_height_precompile, randomness_by_height_gas_policy_at_block,
-    RandomnessByHeightGasPolicy, RandomnessByHeightLookup, RandomnessByHeightProvider,
-    RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+use gravity_precompiles::{
+    bls_pop_verify::{create_bls_pop_verify_precompile, BLS_PRECOMPILE_ADDR},
+    randomness_by_height::{
+        create_randomness_by_height_precompile, randomness_by_height_gas_policy_at_block,
+        RandomnessByHeightGasPolicy, RandomnessByHeightLookup, RandomnessByHeightProvider,
+        RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
+    },
 };
 use reth_chainspec::{is_system_tx_gas_exempt, ChainSpecProvider};
 use reth_errors::ProviderError;
 use reth_evm::{precompiles::PrecompilesMap, Evm, SpecFor, TxEnvFor};
-use reth_pipe_exec_layer_ext_v2::{
-    bls_precompile::create_bls_pop_verify_precompile, onchain_config::BLS_PRECOMPILE_ADDR,
-};
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_api::{
     helpers::{estimate::EstimateCall, Call, EthCall},
