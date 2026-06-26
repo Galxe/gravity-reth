@@ -18,6 +18,7 @@ use alloy_rpc_types_eth::{
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork, SYSTEM_CALLER};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor,
@@ -743,6 +744,24 @@ pub trait Call:
         let block_number = evm_env.block_env.number;
         let block_timestamp = evm_env.block_env.timestamp;
         let current_randomness = evm_env.block_env.prevrandao;
+
+        // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring — see
+        // system-tx gas-exempt design §3.5.3 (single-tx family row). When the
+        // sender of a pre-target replay tx is `SYSTEM_CALLER` and Alpha is
+        // active for the replayed block, we need cfg disables on the EVM that
+        // commits that tx. The fork gate keys off the replayed block's
+        // timestamp (matches the block-family path in `trace.rs`).
+        let exempt_fork_active =
+            self.provider().chain_spec().gravity_hardforks().is_fork_active_at_timestamp(
+                GravityHardfork::Alpha,
+                block_timestamp.saturating_to::<u64>(),
+            );
+
+        // Build the initial EVM with disables OFF — the typical block hands the
+        // target tx the user-segment cfg, and if the first replay tx happens to
+        // be a system tx we rebuild on entry via the same `finish()` path used
+        // for the system→user transition below.
+        let mut current_kind_system_exempt = false;
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
         self.register_custom_precompiles(
             &mut evm,
@@ -750,11 +769,27 @@ pub trait Call:
             block_timestamp,
             current_randomness,
         );
+
         let mut index = 0;
         for tx in transactions {
             if *tx.tx_hash() == target_tx_hash {
                 // reached the target transaction
                 break
+            }
+
+            let tx_is_system_exempt = exempt_fork_active && tx.signer() == SYSTEM_CALLER;
+            if tx_is_system_exempt != current_kind_system_exempt {
+                let (db_taken, mut env_taken) = evm.finish();
+                env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;
+                env_taken.cfg_env.disable_balance_check = tx_is_system_exempt;
+                evm = self.evm_config().evm_with_env(db_taken, env_taken);
+                self.register_custom_precompiles(
+                    &mut evm,
+                    block_number,
+                    block_timestamp,
+                    current_randomness,
+                );
+                current_kind_system_exempt = tx_is_system_exempt;
             }
 
             let tx_env = self.evm_config().tx_env(tx);

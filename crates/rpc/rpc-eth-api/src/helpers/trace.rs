@@ -247,10 +247,26 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 // replay all transactions prior to the targeted transaction
                 this.replay_transactions_until(&mut db, evm_env.clone(), block_txs, *tx.tx_hash())?;
 
+                // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring —
+                // if the *target* tx itself is system-sender, toggle disables on
+                // the `evm_env` we pass to `inspect`. Gate keys off the replayed
+                // block's timestamp (same predicate as the block family and the
+                // pre-target replay loop in `replay_transactions_until`).
+                let exempt_fork_active =
+                    this.provider().chain_spec().gravity_hardforks().is_fork_active_at_timestamp(
+                        GravityHardfork::Alpha,
+                        evm_env.block_env.timestamp.saturating_to::<u64>(),
+                    );
+                let mut target_evm_env = evm_env;
+                if exempt_fork_active && tx.signer() == SYSTEM_CALLER {
+                    target_evm_env.cfg_env.disable_base_fee = true;
+                    target_evm_env.cfg_env.disable_balance_check = true;
+                }
+
                 let tx_env = this.evm_config().tx_env(tx);
                 let res = this.inspect(
                     StateCacheDbRefMutWrapper(&mut db),
-                    evm_env,
+                    target_evm_env,
                     tx_env,
                     &mut inspector,
                 )?;
