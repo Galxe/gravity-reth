@@ -33,11 +33,10 @@ use std::sync::Arc;
 // without carrying the upstream `fused_inspector` / `was_fused` snapshot pair:
 //
 // the handwritten loop re-seeds the inspector slot via `inspector_setup()`
-// after every tx, which R-A1 verify §1.5 proved equivalent to cloning a
-// `fused_inspector` snapshot (TracingInspector::new(config) ==
-// fused_inspector.clone()). The per-tx reset is unconditional and works
-// whether the closure took the inspector or not — `was_fused` bookkeeping
-// is unnecessary.
+// after every tx — `TracingInspector::new(config)` is byte-equivalent to a
+// cloned `fused_inspector` snapshot, so the per-tx reset is unconditional
+// and works whether the closure took the inspector or not — `was_fused`
+// bookkeeping is unnecessary.
 // ============================================================================
 
 /// Container type for context exposed during block-family tracing.
@@ -401,9 +400,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 let evm_block_timestamp = evm_env.block_env.timestamp;
                 let current_randomness = evm_env.block_env.prevrandao;
 
-                // Gravity Alpha (system-tx gas-exempt) RPC block-family wiring,
-                // sketch A1 — see system-tx gas-exempt design §3.5.4 + route doc
-                // `_local/drafts/system-tx-gas-exempt/rpc-block-family-routes-A-vs-B-extend.md`.
+                // Gravity Alpha (system-tx gas-exempt) RPC block-family wiring.
                 //
                 // System transactions (sender == SYSTEM_CALLER) are positionally
                 // pinned at the front of the block by the pipe layer
@@ -506,10 +503,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                     }
 
                     // Per-tx fuse: re-seed the inspector slot via
-                    // `inspector_setup()`. R-A1 verify §1.5 proves this is
-                    // equivalent to cloning a fused snapshot
-                    // (`TracingInspector::new(config)` ==
-                    // `fused_inspector.clone()`), and works whether the closure
+                    // `inspector_setup()`. This is byte-equivalent to cloning a
+                    // fused snapshot (`TracingInspector::new(config)` ==
+                    // `fused_inspector.clone()`) and works whether the closure
                     // took the inspector or not — no `was_fused` bookkeeping
                     // needed.
                     let _ = core::mem::replace(current_evm.inspector_mut(), inspector_setup());

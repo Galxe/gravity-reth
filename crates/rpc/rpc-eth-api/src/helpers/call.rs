@@ -745,8 +745,7 @@ pub trait Call:
         let block_timestamp = evm_env.block_env.timestamp;
         let current_randomness = evm_env.block_env.prevrandao;
 
-        // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring — see
-        // system-tx gas-exempt design §3.5.3 (single-tx family row). When the
+        // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring. When the
         // sender of a pre-target replay tx is `SYSTEM_CALLER` and Alpha is
         // active for the replayed block, we need cfg disables on the EVM that
         // commits that tx. The fork gate keys off the replayed block's
