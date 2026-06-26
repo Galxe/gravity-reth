@@ -4281,6 +4281,7 @@ name = "gravity-precompiles"
 version = "1.8.3"
 dependencies = [
  "alloy-primitives",
+ "blst",
  "reth-evm",
  "revm",
  "tracing",
@@ -9978,7 +9979,6 @@ dependencies = [
  "alloy-sol-types",
  "api-types",
  "bcs 0.1.6",
- "blst",
  "codspeed-criterion-compat",
  "eyre",
  "gravity-precompiles",

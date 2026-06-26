@@ -4,10 +4,13 @@
 //! proof-of-possession (PoP), preventing rogue-key attacks. This mirrors the
 //! Aptos `bls12381::public_key_from_bytes_with_pop` logic used in `stake.move`.
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{address, Address, Bytes};
 use reth_evm::precompiles::{DynPrecompile, PrecompileInput};
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::warn;
+
+/// Address of Gravity's BLS12-381 PoP verification precompile.
+pub const BLS_PRECOMPILE_ADDR: Address = address!("00000000000000000000000000000001625f5001");
 
 /// BLS12-381 public key size in bytes (G1 point, compressed)
 const BLS_PUBKEY_LEN: usize = 48;

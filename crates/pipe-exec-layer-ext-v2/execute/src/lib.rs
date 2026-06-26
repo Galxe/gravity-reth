@@ -1,7 +1,6 @@
 //! Pipeline execution layer extension
 #[macro_use]
 mod channel;
-pub mod bls_precompile;
 mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
@@ -25,7 +24,10 @@ use alloy_consensus::{
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{Address, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
-use gravity_precompiles::randomness_by_height::randomness_by_height_gas_policy_at_block;
+use gravity_precompiles::{
+    bls_pop_verify::{create_bls_pop_verify_precompile, BLS_PRECOMPILE_ADDR},
+    randomness_by_height::randomness_by_height_gas_policy_at_block,
+};
 use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
@@ -69,15 +71,14 @@ use tokio::sync::{
 use tracing::*;
 
 use crate::{
-    bls_precompile::create_bls_pop_verify_precompile,
     mint_precompile::create_mint_token_precompile,
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         system_txns_into_executed_ordered_block_result,
         types::DataRecorded,
-        SystemTxnResult, BLS_PRECOMPILE_ADDR, DKG_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
-        NATIVE_ORACLE_ADDR, RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, DKG_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, NATIVE_ORACLE_ADDR,
+        RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
     randomness_precompile::{
         create_randomness_by_height_precompile, ExecutionRandomnessProvider,
