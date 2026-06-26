@@ -7,6 +7,7 @@ mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
 pub mod randomness_precompile;
+mod system_caller_migration;
 mod tx_filter;
 use alloy_sol_types::SolEvent;
 
@@ -1210,11 +1211,14 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Read SYSTEM_CALLER nonce and gas price from state BEFORE moving state into executor.
         // ParallelDatabase (Storage::StateView) implements DatabaseRef, so we can read directly.
-        let initial_nonce = state
+        //
+        // We hold the full `AccountInfo` (not just nonce) so the Alpha-activation
+        // balance migration below has access to the up-to-date nonce / code to
+        // preserve in its diff (see `system_caller_migration`).
+        let system_caller_account = state
             .basic_ref(SYSTEM_CALLER)
-            .expect("failed to read SYSTEM_CALLER account from state")
-            .map(|a| a.nonce)
-            .unwrap_or(0);
+            .expect("failed to read SYSTEM_CALLER account from state");
+        let initial_nonce = system_caller_account.as_ref().map(|a| a.nonce).unwrap_or(0);
 
         // Create executor with state. System transactions will commit directly to its
         // ParallelState, so there is a single source of truth for both system and user txns.
@@ -1238,6 +1242,20 @@ impl<Storage: GravityStorage> Core<Storage> {
         let is_alpha_active = self.chain_spec.gravity_hardforks().is_fork_active_at_timestamp(
             GravityHardfork::Alpha,
             ordered_block.timestamp_us / 1_000_000,
+        );
+
+        // Gravity Alpha (system-tx gas-exempt) boundary state change: zero
+        // `SYSTEM_CALLER.balance` once, on the Alpha activation block. Runs
+        // BEFORE system transactions in the same block so the post-execution
+        // bundle reflects the zero balance — preserving nonce and code keeps
+        // the account non-empty under EIP-161 (design §3.3, R5).
+        system_caller_migration::apply_state_changes_for_block(
+            &mut *executor,
+            system_caller_account,
+            &self.chain_spec,
+            ordered_block.timestamp_us / 1_000_000,
+            parent_header.timestamp,
+            block_number,
         );
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.
