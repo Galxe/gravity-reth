@@ -6,13 +6,11 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
-use reth_chainspec::ChainSpecProvider;
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork, SYSTEM_CALLER};
 use reth_errors::ProviderError;
 use reth_evm::{
-    system_calls::SystemCaller,
-    tracing::{TracingCtx, TxTracer},
-    ConfigureEvm, Database, Evm, EvmEnvFor, EvmFactory, EvmFor, HaltReasonFor, InspectorFor,
-    TxEnvFor,
+    system_calls::SystemCaller, ConfigureEvm, Database, Evm, EvmEnvFor, EvmFactory, EvmFor,
+    HaltReasonFor, InspectorFor, TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
 use reth_revm::{database::StateProviderDatabase, db::CacheDB};
@@ -21,9 +19,54 @@ use reth_rpc_eth_types::{
     EthApiError,
 };
 use reth_storage_api::{ProviderBlock, ProviderTx};
-use revm::{context_interface::result::ResultAndState, DatabaseCommit};
+use revm::{
+    context::result::{ExecutionResult, ResultAndState},
+    state::EvmState,
+    DatabaseCommit,
+};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use std::sync::Arc;
+
+// ============================================================================
+// `GravityTracingCtx` — local mirror of `alloy_evm::tracing::TracingCtx` whose
+// `fused_inspector` / `was_fused` fields are pub so the handwritten loop in
+// `trace_block_until_with_inspector` can construct it. See system-tx
+// gas-exempt design §3.5.4 / R-A2 verify trail for the choice of (a) over
+// (b) (the alternative — fork alloy-evm to pub-ify those two fields).
+//
+// Field shape, lifetimes and `take_inspector` semantics are byte-equivalent to
+// `TracingCtx`; the only diff is that the last two fields carry `pub`.
+// ============================================================================
+
+/// Container type for context exposed during block-family tracing, mirroring
+/// `alloy_evm::tracing::TracingCtx` with all fields publicly constructible.
+#[derive(Debug)]
+pub struct GravityTracingCtx<'a, T, E: Evm> {
+    /// The transaction that was just executed.
+    pub tx: T,
+    /// Result of transaction execution.
+    pub result: ExecutionResult<E::HaltReason>,
+    /// State changes after transaction.
+    pub state: &'a EvmState,
+    /// Inspector state after transaction.
+    pub inspector: &'a mut E::Inspector,
+    /// Database used when executing the transaction, _before_ committing the state changes.
+    pub db: &'a mut E::DB,
+    /// Fused inspector snapshot — `take_inspector` resets `inspector` to a clone of this.
+    pub fused_inspector: &'a E::Inspector,
+    /// Set by `take_inspector` so the surrounding loop can skip the default fuse step.
+    pub was_fused: &'a mut bool,
+}
+
+impl<'a, T, E: Evm<Inspector: Clone>> GravityTracingCtx<'a, T, E> {
+    /// Fuses the inspector and returns the current inspector state.
+    ///
+    /// Byte-equivalent to `alloy_evm::tracing::TracingCtx::take_inspector`.
+    pub fn take_inspector(&mut self) -> E::Inspector {
+        *self.was_fused = true;
+        core::mem::replace(self.inspector, self.fused_inspector.clone())
+    }
+}
 
 /// Executes CPU heavy tasks.
 pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
@@ -236,7 +279,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         Self: LoadBlock + Call,
         F: Fn(
                 TransactionInfo,
-                TracingCtx<
+                GravityTracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
                     EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, TracingInspector>,
@@ -277,7 +320,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         Self: LoadBlock + Call,
         F: Fn(
                 TransactionInfo,
-                TracingCtx<
+                GravityTracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
                     EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, Insp>,
@@ -333,37 +376,134 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                     },
                 );
 
-                let mut idx = 0;
+                let mut idx = 0u64;
 
                 let evm_block_number = evm_env.block_env.number;
                 let evm_block_timestamp = evm_env.block_env.timestamp;
                 let current_randomness = evm_env.block_env.prevrandao;
-                let mut evm = this.evm_config().evm_factory().create_evm_with_inspector(
+
+                // Gravity Alpha (system-tx gas-exempt) RPC block-family wiring,
+                // sketch A1 — see system-tx gas-exempt design §3.5.4 + route doc
+                // `_local/drafts/system-tx-gas-exempt/rpc-block-family-routes-A-vs-B-extend.md`.
+                //
+                // System transactions (sender == SYSTEM_CALLER) are positionally
+                // pinned at the front of the block by the pipe layer
+                // (`metadata_txn.rs:120/:185`). Run them under a cfg with
+                // `disable_base_fee = true` + `disable_balance_check = true` to
+                // match the canonical execution path, then `finish()` the EVM
+                // once, flip the cfg back, and rebuild for the user-tx tail.
+                //
+                // The fork gate keys off the replayed block's timestamp
+                // (not the node tip) so pre-Alpha blocks under archive replay
+                // see their historical, non-zero SYSTEM_CALLER balance and don't
+                // need the disables.
+                let exempt_fork_active =
+                    this.provider().chain_spec().gravity_hardforks().is_fork_active_at_timestamp(
+                        GravityHardfork::Alpha,
+                        evm_block_timestamp.saturating_to::<u64>(),
+                    );
+
+                // Classify the first transaction to pick the initial cfg.
+                // If the block is empty post-take we already returned above.
+                let mut txs_iter = block.transactions_recovered().take(max_transactions).peekable();
+                let first_kind_system_exempt = exempt_fork_active &&
+                    txs_iter.peek().map(|tx| tx.signer() == SYSTEM_CALLER).unwrap_or(false);
+
+                // Build the initial EVM with cfg pre-toggled per the first tx's kind.
+                let mut initial_env = evm_env;
+                initial_env.cfg_env.disable_base_fee = first_kind_system_exempt;
+                initial_env.cfg_env.disable_balance_check = first_kind_system_exempt;
+                let mut current_evm = this.evm_config().evm_factory().create_evm_with_inspector(
                     StateCacheDbRefMutWrapper(&mut db),
-                    evm_env,
+                    initial_env,
                     inspector_setup(),
                 );
                 this.register_custom_precompiles(
-                    &mut evm,
+                    &mut current_evm,
                     evm_block_number,
                     evm_block_timestamp,
                     current_randomness,
                 );
+                let mut current_kind_system_exempt = first_kind_system_exempt;
 
-                let results = TxTracer::new(evm)
-                    .try_trace_many(block.transactions_recovered().take(max_transactions), |ctx| {
-                        let tx_info = TransactionInfo {
-                            hash: Some(*ctx.tx.tx_hash()),
-                            index: Some(idx),
-                            block_hash: Some(block_hash),
-                            block_number: Some(block_number),
-                            base_fee: Some(base_fee),
+                // Snapshot a fused inspector base for the in-loop fuse pattern —
+                // mirrors `alloy_evm::tracing::TxTracer::new`'s initial snapshot
+                // so per-tx tracing semantics match canonical (each tx's hook
+                // receives a fresh inspector unless it `take_inspector`-ed).
+                let mut fused_inspector: Insp = current_evm.inspector().clone();
+
+                let mut results: Vec<R> = Vec::with_capacity(max_transactions);
+
+                while let Some(tx) = txs_iter.next() {
+                    // Per-tx classification + EVM rebuild on transition.
+                    let tx_is_system_exempt = exempt_fork_active && tx.signer() == SYSTEM_CALLER;
+                    if tx_is_system_exempt != current_kind_system_exempt {
+                        let (db_taken, mut env_taken) = current_evm.finish();
+                        env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;
+                        env_taken.cfg_env.disable_balance_check = tx_is_system_exempt;
+                        current_evm = this.evm_config().evm_factory().create_evm_with_inspector(
+                            db_taken,
+                            env_taken,
+                            inspector_setup(),
+                        );
+                        this.register_custom_precompiles(
+                            &mut current_evm,
+                            evm_block_number,
+                            evm_block_timestamp,
+                            current_randomness,
+                        );
+                        // Refresh the fused base so subsequent fuses go back to
+                        // a fresh inspector consistent with the new EVM.
+                        fused_inspector = current_evm.inspector().clone();
+                        current_kind_system_exempt = tx_is_system_exempt;
+                    }
+
+                    let tx_hash = *tx.tx_hash();
+                    let ResultAndState { result, state, .. } =
+                        match current_evm.transact(tx.clone()) {
+                            Ok(r) => r,
+                            Err(e) => return Err(Self::Error::from_evm_err(e)),
                         };
-                        idx += 1;
 
-                        f(tx_info, ctx)
-                    })
-                    .collect::<Result<_, _>>()?;
+                    let (db_ref, inspector_ref, _) = current_evm.components_mut();
+                    let mut was_fused = false;
+                    let tx_info = TransactionInfo {
+                        hash: Some(tx_hash),
+                        index: Some(idx),
+                        block_hash: Some(block_hash),
+                        block_number: Some(block_number),
+                        base_fee: Some(base_fee),
+                    };
+                    idx += 1;
+
+                    let ctx = GravityTracingCtx {
+                        tx,
+                        result,
+                        state: &state,
+                        inspector: inspector_ref,
+                        db: db_ref,
+                        fused_inspector: &fused_inspector,
+                        was_fused: &mut was_fused,
+                    };
+                    let output = f(tx_info, ctx)?;
+                    results.push(output);
+
+                    // Match `TxTracer::try_trace_many` default (`skip_last_commit
+                    // = true`): commit only when there's a follow-up tx.
+                    let has_more = txs_iter.peek().is_some();
+                    if has_more {
+                        db_ref.commit(state);
+                    }
+
+                    // Fuse the inspector for the next tx unless the hook already
+                    // took ownership via `take_inspector` (which sets `was_fused`).
+                    if !was_fused {
+                        let _ = core::mem::replace(
+                            current_evm.inspector_mut(),
+                            fused_inspector.clone(),
+                        );
+                    }
+                }
 
                 Ok(Some(results))
             })
@@ -394,7 +534,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         // state and db
         F: Fn(
                 TransactionInfo,
-                TracingCtx<
+                GravityTracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
                     EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, TracingInspector>,
@@ -434,7 +574,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         // state and db
         F: Fn(
                 TransactionInfo,
-                TracingCtx<
+                GravityTracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
                     EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, Insp>,
