@@ -18,7 +18,8 @@ use alloy_rpc_types_trace::geth::{
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
 use reth_chainspec::{
-    is_system_tx_gas_exempt, ChainSpecProvider, EthChainSpec, EthereumHardforks, SYSTEM_CALLER,
+    is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider, EthChainSpec,
+    EthereumHardforks,
 };
 use reth_errors::RethError;
 use reth_evm::{execute::Executor, ConfigureEvm, EvmEnvFor, TxEnvFor};
@@ -119,7 +120,7 @@ where
                 let mut inspector = None;
                 while let Some((index, tx)) = transactions.next() {
                     let tx_hash = *tx.tx_hash();
-                    let tx_sender_is_system_caller = tx.signer() == SYSTEM_CALLER;
+                    let tx_sender_is_system_caller = is_gravity_system_caller(tx.signer());
 
                     let mut per_tx_evm_env = evm_env.clone();
                     if exempt_fork_active && tx_sender_is_system_caller {

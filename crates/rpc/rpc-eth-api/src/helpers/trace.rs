@@ -6,7 +6,7 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
-use reth_chainspec::{is_system_tx_gas_exempt, ChainSpecProvider, SYSTEM_CALLER};
+use reth_chainspec::{is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider};
 use reth_errors::ProviderError;
 use reth_evm::{
     system_calls::SystemCaller, ConfigureEvm, Database, Evm, EvmEnvFor, EvmFactory, EvmFor,
@@ -257,7 +257,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                     evm_env.block_env.timestamp.saturating_to::<u64>(),
                 );
                 let mut target_evm_env = evm_env;
-                if exempt_fork_active && tx.signer() == SYSTEM_CALLER {
+                if exempt_fork_active && is_gravity_system_caller(tx.signer()) {
                     target_evm_env.cfg_env.disable_base_fee = true;
                     target_evm_env.cfg_env.disable_balance_check = true;
                 }
@@ -421,7 +421,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 // If the block is empty post-take we already returned above.
                 let mut txs_iter = block.transactions_recovered().take(max_transactions).peekable();
                 let first_kind_system_exempt = exempt_fork_active &&
-                    txs_iter.peek().map(|tx| tx.signer() == SYSTEM_CALLER).unwrap_or(false);
+                    txs_iter
+                        .peek()
+                        .map(|tx| is_gravity_system_caller(tx.signer()))
+                        .unwrap_or(false);
 
                 // Build the initial EVM with cfg pre-toggled per the first tx's kind.
                 let mut initial_env = evm_env;
@@ -450,7 +453,8 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
 
                 while let Some(tx) = txs_iter.next() {
                     // Per-tx classification + EVM rebuild on transition.
-                    let tx_is_system_exempt = exempt_fork_active && tx.signer() == SYSTEM_CALLER;
+                    let tx_is_system_exempt =
+                        exempt_fork_active && is_gravity_system_caller(tx.signer());
                     if tx_is_system_exempt != current_kind_system_exempt {
                         let (db_taken, mut env_taken) = current_evm.finish();
                         env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;

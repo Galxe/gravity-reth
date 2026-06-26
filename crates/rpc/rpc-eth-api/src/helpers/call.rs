@@ -18,7 +18,7 @@ use alloy_rpc_types_eth::{
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
-use reth_chainspec::{is_system_tx_gas_exempt, ChainSpecProvider, SYSTEM_CALLER};
+use reth_chainspec::{is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor,
@@ -776,7 +776,7 @@ pub trait Call:
                 break
             }
 
-            let tx_is_system_exempt = exempt_fork_active && tx.signer() == SYSTEM_CALLER;
+            let tx_is_system_exempt = exempt_fork_active && is_gravity_system_caller(tx.signer());
             if tx_is_system_exempt != current_kind_system_exempt {
                 let (db_taken, mut env_taken) = evm.finish();
                 env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;
