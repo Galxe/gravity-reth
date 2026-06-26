@@ -81,8 +81,8 @@ pub mod parallel_execute;
 // + grevm `parallel_execute.rs::transact_system_txn`) and every RPC replay path
 // that re-executes a persisted system tx (sender == `SYSTEM_CALLER`) MUST gate
 // the cfg-side fee/balance disables on the SAME predicate, queried against the
-// timestamp of the block being executed/replayed. See the
-// `system-tx-gas-exempt` design doc §3.4 for the load-bearing invariant.
+// timestamp of the block being executed/replayed. Any drift between callsites
+// forks state root on system-tx blocks.
 //
 // The predicate itself (`is_system_tx_gas_exempt`) is defined in `reth-chainspec`
 // alongside `SYSTEM_CALLER`/`is_gravity_system_caller`, so every callsite (this
@@ -341,7 +341,7 @@ where
         // transactions on the L1 (cfg-side) lever. Combined with the L2
         // (construction-side) `gas_price = 0` at the pipe layer, this drops the
         // SYSTEM_CALLER fee bill to zero while preserving gas metering, calldata,
-        // state writes, receipts and `gas_used` (system-tx gas-exempt design §3.1).
+        // state writes, receipts and `gas_used`.
         //
         // MUST stay byte-identical with the grevm twin in
         // `parallel_execute.rs::transact_system_txn`. Any drift forks state root.

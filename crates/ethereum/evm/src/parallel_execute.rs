@@ -277,8 +277,7 @@ where
         // Gravity Alpha hardfork: gas-exempt the `SYSTEM_CALLER`-sourced system
         // transactions on the L1 (cfg-side) lever. MUST stay byte-identical with
         // the serial twin in `EthEvmConfig::transact_system_txn` — any drift
-        // between serial / grevm here forks state root on system-tx blocks
-        // (system-tx gas-exempt design §3.1, the "承重墙" callout).
+        // between serial / grevm here forks state root on system-tx blocks.
         let block_ts: u64 = evm_env.block_env.timestamp.saturating_to();
         if crate::is_system_tx_gas_exempt(self.chain_spec.as_ref(), block_ts) {
             evm_env.cfg_env.disable_base_fee = true;

@@ -26,7 +26,7 @@
 //!   - Only `balance` is set to `U256::ZERO`.
 //!
 //! With `nonce > 0`, the EIP-161 `is_empty` predicate stays false post-migration
-//! and the account is never pruned by state-clear (design §3.3, R5 verify).
+//! and the account is never pruned by state-clear.
 
 use alloy_primitives::U256;
 use reth_chainspec::{ChainSpec, EthChainSpec, GravityHardfork, SYSTEM_CALLER};
