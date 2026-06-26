@@ -34,7 +34,7 @@ use revm::{
     database::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
-    state::{Account, AccountStatus, EvmState},
+    state::{Account, AccountInfo, AccountStatus, EvmState},
     Database, DatabaseCommit,
 };
 
@@ -316,6 +316,14 @@ where
         }
         state.commit(state_diff);
         Ok(())
+    }
+
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        self.state
+            .as_mut()
+            .unwrap()
+            .basic(address)
+            .map_err(|e| BlockExecutionError::msg(alloc::format!("basic {address}: {e:?}")))
     }
 
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
