@@ -1,7 +1,7 @@
 //! BLS12-381 Consensus Key Proof-of-Possession Verification Precompile
 //!
 //! This precompile verifies that a BLS12-381 consensus public key has a valid
-//! proof-of-possession (PoP), preventing rogue-key attacks. This mirrors the
+//! proof-of-possession (`PoP`), preventing rogue-key attacks. This mirrors the
 //! Aptos `bls12381::public_key_from_bytes_with_pop` logic used in `stake.move`.
 
 use alloy_primitives::{address, Address, Bytes};
@@ -9,7 +9,7 @@ use reth_evm::precompiles::{DynPrecompile, PrecompileInput};
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::warn;
 
-/// Address of Gravity's BLS12-381 PoP verification precompile.
+/// Address of Gravity's BLS12-381 `PoP` verification precompile.
 pub const BLS_PRECOMPILE_ADDR: Address = address!("00000000000000000000000000000001625f5001");
 
 /// BLS12-381 public key size in bytes (G1 point, compressed)
@@ -21,7 +21,7 @@ const BLS_POP_LEN: usize = 96;
 /// Expected input length: pubkey (48) + pop (96) = 144 bytes
 const EXPECTED_INPUT_LEN: usize = BLS_PUBKEY_LEN + BLS_POP_LEN;
 
-/// Gas cost for PoP verification (2 bilinear pairings + hash-to-curve).
+/// Gas cost for `PoP` verification (2 bilinear pairings + hash-to-curve).
 ///
 /// Benchmark results (`cargo bench --bench bls_pop_verify_bench`):
 ///   - `verify_pop` (valid):    ~2.12 ms
@@ -38,14 +38,14 @@ const EXPECTED_INPUT_LEN: usize = BLS_PUBKEY_LEN + BLS_POP_LEN;
 /// Rounded to 110,000 to align with EIP-2537 BLS pairing (2 pairs) pricing.
 const POP_VERIFY_GAS: u64 = 110_000;
 
-/// Domain separation tag for BLS PoP verification
-/// Matches the IETF standard for BLS12-381 PoP
+/// Domain separation tag for BLS `PoP` verification
+/// Matches the IETF standard for BLS12-381 `PoP`
 const POP_DST: &[u8] = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Creates a BLS12-381 proof-of-possession verification precompile.
 ///
 /// This is a stateless precompile that verifies a consensus public key
-/// has a valid PoP. Any address can call it.
+/// has a valid `PoP`. Any address can call it.
 ///
 /// # Input format (144 bytes)
 ///
@@ -66,7 +66,7 @@ pub fn create_bls_pop_verify_precompile() -> DynPrecompile {
         .into()
 }
 
-/// BLS PoP verification handler
+/// BLS `PoP` verification handler
 fn bls_pop_verify_handler(input: PrecompileInput<'_>) -> PrecompileResult {
     // Charge-gas check before running the verification logic. This precompile
     // charges a flat `POP_VERIFY_GAS`, and the EVM dispatcher executes
@@ -82,7 +82,7 @@ fn bls_pop_verify_handler(input: PrecompileInput<'_>) -> PrecompileResult {
     bls_pop_verify_handler_raw(input.data)
 }
 
-/// Core BLS PoP verification logic operating on raw input bytes.
+/// Core BLS `PoP` verification logic operating on raw input bytes.
 ///
 /// Separated from the `PrecompileInput` wrapper to facilitate unit testing and benchmarking.
 pub fn bls_pop_verify_handler_raw(data: &[u8]) -> PrecompileResult {
