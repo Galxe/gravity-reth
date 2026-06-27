@@ -469,11 +469,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                     }
 
                     let tx_hash = *tx.tx_hash();
-                    let ResultAndState { result, state, .. } =
-                        match current_evm.transact(tx.clone()) {
-                            Ok(r) => r,
-                            Err(e) => return Err(Self::Error::from_evm_err(e)),
-                        };
+                    let ResultAndState { result, state, .. } = match current_evm.transact(tx) {
+                        Ok(r) => r,
+                        Err(e) => return Err(Self::Error::from_evm_err(e)),
+                    };
 
                     let (db_ref, inspector_ref, _) = current_evm.components_mut();
                     let tx_info = TransactionInfo {
