@@ -94,9 +94,11 @@ pub fn bls_pop_verify_handler_raw(data: &[u8]) -> PrecompileResult {
             expected = EXPECTED_INPUT_LEN,
             "Invalid input length"
         );
-        return Err(PrecompileError::Other(
-            format!("expected exactly {} bytes, got {}", EXPECTED_INPUT_LEN, data.len()).into(),
-        ));
+        return Err(PrecompileError::Other(format!(
+            "expected exactly {} bytes, got {}",
+            EXPECTED_INPUT_LEN,
+            data.len()
+        )));
     }
 
     // 2. Parse pubkey (bytes 0..48) and PoP (bytes 48..144)
