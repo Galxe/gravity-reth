@@ -40,7 +40,7 @@ pub fn is_gravity_system_caller(addr: Address) -> bool {
 /// Gravity Alpha hardfork, which bundles:
 ///   - randomness precompile registration,
 ///   - system-tx gas-exemption (this gate),
-///   - one-shot SYSTEM_CALLER balance migration to zero.
+///   - one-shot [`SYSTEM_CALLER`] balance migration to zero.
 ///
 /// Single source of truth for the L1 (cfg-side) and L2 (construction-side)
 /// gas-exempt gating; all callsites — serial executor, grevm executor, pipe
