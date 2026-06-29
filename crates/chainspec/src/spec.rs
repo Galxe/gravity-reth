@@ -733,6 +733,14 @@ impl From<Genesis> for ChainSpec {
 
         hardforks.append(&mut time_hardforks);
 
+        // Gravity mainnet hardcoded Ethereum-side hardfork schedule. No-op for
+        // any other chain id. See `crates/chainspec/src/gravity.rs` for the
+        // gated-fork table and rationale.
+        crate::gravity::apply_gravity_mainnet_eth_overrides(
+            genesis.config.chain_id,
+            &mut hardforks,
+        );
+
         // Ordered Hardforks
         let mainnet_hardforks: ChainHardforks = EthereumHardfork::mainnet().into();
         let mainnet_order = mainnet_hardforks.forks_iter();
@@ -788,6 +796,14 @@ impl From<Genesis> for ChainSpec {
                 .into_iter()
                 .filter_map(|(fork, opt)| opt.map(|block| (fork, ForkCondition::Block(block)))),
         );
+
+        // Gravity mainnet hardcoded Gravity-side hardfork schedule. No-op for
+        // any other chain id. See `crates/chainspec/src/gravity.rs`.
+        crate::gravity::apply_gravity_mainnet_gravity_overrides(
+            genesis.config.chain_id,
+            &mut gravity_hardforks,
+        );
+
         let gravity_hardforks = ChainHardforks::new(gravity_hardforks);
 
         // Gravity protocol minimum base fee floor (wei). Presence marks the chainspec
