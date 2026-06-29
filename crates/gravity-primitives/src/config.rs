@@ -2,6 +2,13 @@
 
 use std::sync::OnceLock;
 
+/// Consensus-critical gas limit for every pipe-executed block.
+///
+/// Must be identical on every node — a per-node flag would let validators with different
+/// values produce different block hashes from the same ordered block. Closes
+/// gravity-audit#712.
+pub const PIPE_BLOCK_GAS_LIMIT: u64 = 1_000_000_000;
+
 /// Configuration options for the Gravity Reth.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -9,18 +16,17 @@ pub struct Config {
     pub disable_pipe_execution: bool,
     /// Whether to disable the Grevm executor. default false.
     pub disable_grevm: bool,
-    /// The gas limit for pipe block. default `1_000_000_000`.
-    pub pipe_block_gas_limit: u64,
     /// The max block height between merged and pesist block height.
     pub cache_max_persist_gap: u64,
+    /// Persist consecutive blocks as one merged commit per group (amortizes the per-commit
+    /// fsync, much faster catch-up) instead of committing every block. default false.
+    pub persist_merge_blocks: bool,
     /// The max size of cached items
     pub cache_capacity: u64,
     /// Report db metrics
     pub report_db_metrics: bool,
     /// Max parallel levels in nested hash
     pub trie_parallel_levels: u64,
-    /// Worker as a validator node only, not supply history service.
-    pub validator_node_only: bool,
 }
 
 /// Global configuration instance, initialized once.
@@ -36,11 +42,10 @@ pub fn get_gravity_config() -> &'static Config {
     GLOBAL_CONFIG.get_or_init(|| Config {
         disable_pipe_execution: std::env::var("GRETH_DISABLE_PIPE_EXECUTION").is_ok(),
         disable_grevm: std::env::var("GRETH_DISABLE_GREVM").is_ok(),
-        pipe_block_gas_limit: 1_000_000_000,
-        cache_max_persist_gap: 64,
+        cache_max_persist_gap: 128,
+        persist_merge_blocks: false,
         cache_capacity: 2_000_000,
         report_db_metrics: false,
         trie_parallel_levels: 1,
-        validator_node_only: false,
     })
 }

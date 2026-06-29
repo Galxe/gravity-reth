@@ -129,7 +129,17 @@ where
     let precompile_id = PrecompileId::custom("randomness_by_height");
 
     (precompile_id, move |input: PrecompileInput<'_>| -> PrecompileResult {
-        randomness_by_height_handler_raw(input.data, provider.as_ref())
+        // Gas guard (mirrors `bls_precompile`): explicitly enforce the precompile's gas and
+        // return OutOfGas when the call forwarded less than `gas_used`, instead of letting the
+        // precompile dispatcher underflow-panic on `record_cost`. Without this, any user
+        // transaction that calls this precompile with insufficient forwarded gas panics every
+        // node — a network-wide consensus halt. The lookup itself is cheap, so charging after
+        // computing the (data-dependent) gas tier is fine.
+        let output = randomness_by_height_handler_raw(input.data, provider.as_ref())?;
+        if output.gas_used > input.gas {
+            return Err(PrecompileError::OutOfGas);
+        }
+        Ok(output)
     })
         .into()
 }

@@ -7,7 +7,6 @@
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::BlockNumber;
-use gravity_primitives::get_gravity_config;
 use reth_db::{
     tables,
     transaction::{DbTx, DbTxMut},
@@ -130,9 +129,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         self.recover_merkle(recover_block_number)?;
 
         // Stage 3: Recover IndexAccountHistory
-        if !get_gravity_config().validator_node_only {
-            self.recover_history_indices(recover_block_number)?;
-        }
+        self.recover_history_indices(recover_block_number)?;
 
         let provider_rw = self.factory.database_provider_rw()?;
         provider_rw.update_pipeline_stages(recover_block_number, false)?;
@@ -276,12 +273,11 @@ mod tests {
             init_gravity_config(GravityConfig {
                 disable_pipe_execution: false,
                 disable_grevm: false,
-                pipe_block_gas_limit: 1_000_000_000,
-                cache_max_persist_gap: 64,
+                cache_max_persist_gap: 128,
+                persist_merge_blocks: false,
                 cache_capacity: 2_000_000,
                 report_db_metrics: false,
                 trie_parallel_levels: 1,
-                validator_node_only: false,
             });
         });
     }

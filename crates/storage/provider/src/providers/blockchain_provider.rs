@@ -16,7 +16,6 @@ use alloy_eips::{
 };
 use alloy_primitives::{Address, BlockHash, BlockNumber, Sealable, TxHash, TxNumber, B256, U256};
 use alloy_rpc_types_engine::ForkchoiceState;
-use gravity_primitives::get_gravity_config;
 use reth_chain_state::{
     BlockState, CanonicalInMemoryState, ForkChoiceNotifications, ForkChoiceSubscriptions,
     MemoryOverlayStateProvider,
@@ -512,22 +511,12 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
         // use latest state provider if the head state exists
         if let Some(state) = self.canonical_in_memory_state.head_state() {
             trace!(target: "providers::blockchain", "Using head state for latest state provider");
-            if get_gravity_config().validator_node_only {
-                // Only supply latest view if current node is a validator
-                let latest_historical = self.database.latest()?;
-                Ok(state.state_provider(latest_historical).boxed())
-            } else {
-                Ok(self.block_state_provider(&state)?.boxed())
-            }
+            Ok(self.block_state_provider(&state)?.boxed())
         } else {
             trace!(target: "providers::blockchain", "Using database state for latest state provider");
-            if get_gravity_config().validator_node_only {
-                self.database.latest()
-            } else {
-                // Always return historical provider in Rocksdb
-                let best_block_number = self.database.best_block_number()?;
-                self.database.history_by_block_number(best_block_number)
-            }
+            // Always return historical provider in Rocksdb
+            let best_block_number = self.database.best_block_number()?;
+            self.database.history_by_block_number(best_block_number)
         }
     }
 

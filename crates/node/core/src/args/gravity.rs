@@ -14,13 +14,14 @@ pub struct GravityArgs {
     #[arg(long = "gravity.disable-grevm", default_value = "false")]
     pub disable_grevm: bool,
 
-    /// The gas limit for pipe block. default `1_000_000_000`.
-    #[arg(long = "gravity.pipe-block-gas-limit", default_value_t = 1_000_000_000, value_parser = clap::value_parser!(u64).range(1_000_000..=500_000_000_000))]
-    pub pipe_block_gas_limit: u64,
-
     /// The max block height between merged and pesist block height.
-    #[arg(long = "gravity.cache.max-persist-gap", default_value_t = 64)]
+    #[arg(long = "gravity.cache.max-persist-gap", default_value_t = 128)]
     pub cache_max_persist_gap: u64,
+
+    /// Persist consecutive blocks as one merged commit per group to amortize the per-commit
+    /// fsync (much faster from-genesis catch-up). default false.
+    #[arg(long = "gravity.persist.merge-blocks", default_value = "false")]
+    pub persist_merge_blocks: bool,
 
     /// The max size of cached items
     #[arg(long = "gravity.cache.capacity", default_value_t = 2_000_000, value_parser = clap::value_parser!(u64).range(1_000..=100_000_000))]
@@ -33,10 +34,6 @@ pub struct GravityArgs {
     /// Max parallel level in nested hash
     #[arg(long = "gravity.trie.parallel-level", default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=64))]
     pub trie_parallel_levels: u64,
-
-    /// Worker as a validator node only, not supply history service.
-    #[arg(long = "gravity.validator-node-only", default_value = "false")]
-    pub validator_node_only: bool,
 }
 
 impl Default for GravityArgs {
@@ -44,12 +41,11 @@ impl Default for GravityArgs {
         Self {
             disable_pipe_execution: false,
             disable_grevm: false,
-            pipe_block_gas_limit: 1_000_000_000,
-            cache_max_persist_gap: 64,
+            cache_max_persist_gap: 128,
+            persist_merge_blocks: false,
             cache_capacity: 2_000_000,
             report_db_metrics: false,
             trie_parallel_levels: 1,
-            validator_node_only: false,
         }
     }
 }
@@ -60,12 +56,11 @@ impl GravityArgs {
         gravity_primitives::Config {
             disable_pipe_execution: self.disable_pipe_execution,
             disable_grevm: self.disable_grevm,
-            pipe_block_gas_limit: self.pipe_block_gas_limit,
             cache_max_persist_gap: self.cache_max_persist_gap,
+            persist_merge_blocks: self.persist_merge_blocks,
             cache_capacity: self.cache_capacity,
             report_db_metrics: self.report_db_metrics,
             trie_parallel_levels: self.trie_parallel_levels,
-            validator_node_only: self.validator_node_only,
         }
     }
 }

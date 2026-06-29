@@ -618,6 +618,44 @@ mod tests {
         assert!(invalid_idxs.contains(&1));
     }
 
+    // Models the `create_block_for_executor` byzantine path from gravity-audit#621 Fix A:
+    // when `sum_system_gas ≥ block.gas_limit`, the call site's `saturating_sub` collapses
+    // the user-tx budget to 0, and the filter must reject *every* user tx — otherwise
+    // `header.gas_used > header.gas_limit` once system-txn receipts are appended.
+    #[test]
+    fn test_filter_invalid_txs_zero_budget_drops_all() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            },
+        );
+
+        let tx1 = create_test_transaction(0, 21_000, 25_000_000_000);
+        let tx2 = create_test_transaction(1, 21_000, 25_000_000_000);
+        let txs = vec![tx1, tx2];
+        let senders = vec![sender, sender];
+
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            20_000_000_000u64,
+            0, // user budget collapsed by saturating_sub
+            &prague_chain_spec(),
+            0,
+            0,
+        );
+        assert_eq!(invalid_idxs.len(), 2);
+        assert!(invalid_idxs.contains(&0));
+        assert!(invalid_idxs.contains(&1));
+    }
+
     #[test]
     fn test_filter_invalid_txs_valid_transactions() {
         let mut db = MockDatabase::new();

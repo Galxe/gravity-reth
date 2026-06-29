@@ -1792,10 +1792,18 @@ where
             .all(|block| block.trie_updates().is_some());
 
         let target_number = if all_blocks_have_trie_updates {
-            // Persist only up to block buffer target if all blocks have trie updates
+            // Persist only up to block buffer target if all blocks have trie updates.
+            // With merged-block persistence, drain more blocks per cycle (bounded by
+            // `cache_max_persist_gap`) so each merged group is large enough to amortize its commit.
+            let cfg = get_gravity_config();
+            let max_blocks_to_persist = if cfg.persist_merge_blocks {
+                cfg.cache_max_persist_gap.max(MAX_BLOCKS_TO_PERSIST)
+            } else {
+                MAX_BLOCKS_TO_PERSIST
+            };
             canonical_head_number
                 .saturating_sub(self.config.memory_block_buffer_target())
-                .min(last_persisted_number + MAX_BLOCKS_TO_PERSIST)
+                .min(last_persisted_number + max_blocks_to_persist)
         } else {
             // Persist all blocks if any block is missing trie updates
             canonical_head_number

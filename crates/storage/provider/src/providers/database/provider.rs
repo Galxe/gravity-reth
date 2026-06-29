@@ -2808,76 +2808,88 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider + 'static> BlockWrite
         block: RecoveredBlock<Self::Block>,
         write_to: StorageLocation,
     ) -> ProviderResult<StoredBlockBodyIndices> {
-        let block_number = block.number();
+        Ok(self
+            .insert_blocks(vec![block], write_to)?
+            .pop()
+            .expect("insert_blocks yields one entry per input block"))
+    }
 
-        let mut durations_recorder = metrics::DurationsRecorder::default();
-
-        // total difficulty
-        let ttd = if block_number == 0 {
-            block.header().difficulty()
-        } else {
-            let parent_block_number = block_number - 1;
-            let parent_ttd = self.header_td_by_number(parent_block_number)?.unwrap_or_default();
-            durations_recorder.record_relative(metrics::Action::GetParentTD);
-            parent_ttd + block.header().difficulty()
-        };
-
-        if write_to.database() {
-            self.tx.put::<tables::CanonicalHeaders>(block_number, block.hash())?;
-            durations_recorder.record_relative(metrics::Action::InsertCanonicalHeaders);
-
-            // Put header with canonical hashes.
-            self.tx.put::<tables::Headers<HeaderTy<N>>>(block_number, block.header().clone())?;
-            durations_recorder.record_relative(metrics::Action::InsertHeaders);
-
-            self.tx.put::<tables::HeaderTerminalDifficulties>(block_number, ttd.into())?;
-            durations_recorder.record_relative(metrics::Action::InsertHeaderTerminalDifficulties);
+    fn insert_blocks(
+        &self,
+        blocks: Vec<RecoveredBlock<Self::Block>>,
+        write_to: StorageLocation,
+    ) -> ProviderResult<Vec<StoredBlockBodyIndices>> {
+        if blocks.is_empty() {
+            return Ok(Vec::new());
         }
 
-        if write_to.static_files() {
-            let mut writer =
-                self.static_file_provider.get_writer(block_number, StaticFileSegment::Headers)?;
-            writer.append_header(block.header(), ttd, &block.hash())?;
-        }
-
-        self.tx.put::<tables::HeaderNumbers>(block.hash(), block_number)?;
-        durations_recorder.record_relative(metrics::Action::InsertHeaderNumbers);
-
+        // Seed the running transaction number and parent total difficulty once from committed
+        // state, then thread both across the batch in memory. A provider transaction is backed by
+        // a RocksDB `WriteBatch`, which does not surface its own pending writes to later reads, so
+        // re-reading `TransactionBlocks` / `HeaderTerminalDifficulties` per block would return the
+        // stale pre-batch value for every block and collapse them onto the same tx number.
         let mut next_tx_num = self
             .tx
             .cursor_read::<tables::TransactionBlocks>()?
             .last()?
             .map(|(n, _)| n + 1)
             .unwrap_or_default();
-        durations_recorder.record_relative(metrics::Action::GetNextTxNum);
-        let first_tx_num = next_tx_num;
+        let first_number = blocks[0].number();
+        let mut parent_ttd = if first_number == 0 {
+            U256::ZERO
+        } else {
+            self.header_td_by_number(first_number - 1)?.unwrap_or_default()
+        };
 
-        let tx_count = block.body().transaction_count() as u64;
+        let mut indices = Vec::with_capacity(blocks.len());
+        let mut bodies = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let block_number = block.number();
+            let ttd = parent_ttd + block.header().difficulty();
 
-        // Ensures we have all the senders for the block's transactions.
-        for (transaction, sender) in block.body().transactions_iter().zip(block.senders_iter()) {
-            let hash = transaction.tx_hash();
-
-            if self.prune_modes.sender_recovery.as_ref().is_none_or(|m| !m.is_full()) {
-                self.tx.put::<tables::TransactionSenders>(next_tx_num, *sender)?;
+            if write_to.database() {
+                self.tx.put::<tables::CanonicalHeaders>(block_number, block.hash())?;
+                self.tx
+                    .put::<tables::Headers<HeaderTy<N>>>(block_number, block.header().clone())?;
+                self.tx.put::<tables::HeaderTerminalDifficulties>(block_number, ttd.into())?;
             }
 
-            if self.prune_modes.transaction_lookup.is_none_or(|m| !m.is_full()) {
-                self.tx.put::<tables::TransactionHashNumbers>(*hash, next_tx_num)?;
+            if write_to.static_files() {
+                let mut writer = self
+                    .static_file_provider
+                    .get_writer(block_number, StaticFileSegment::Headers)?;
+                writer.append_header(block.header(), ttd, &block.hash())?;
             }
-            next_tx_num += 1;
+
+            self.tx.put::<tables::HeaderNumbers>(block.hash(), block_number)?;
+
+            // `TransactionSenders` / `TransactionHashNumbers` are keyed by transaction number;
+            // advance the running counter so each block gets a distinct, contiguous tx range.
+            let first_tx_num = next_tx_num;
+            let tx_count = block.body().transaction_count() as u64;
+            for (transaction, sender) in block.body().transactions_iter().zip(block.senders_iter())
+            {
+                let hash = transaction.tx_hash();
+                if self.prune_modes.sender_recovery.as_ref().is_none_or(|m| !m.is_full()) {
+                    self.tx.put::<tables::TransactionSenders>(next_tx_num, *sender)?;
+                }
+                if self.prune_modes.transaction_lookup.is_none_or(|m| !m.is_full()) {
+                    self.tx.put::<tables::TransactionHashNumbers>(*hash, next_tx_num)?;
+                }
+                next_tx_num += 1;
+            }
+
+            indices.push(StoredBlockBodyIndices { first_tx_num, tx_count });
+            parent_ttd = ttd;
+            bodies.push((block_number, Some(block.into_body())));
         }
 
-        self.append_block_bodies(vec![(block_number, Some(block.into_body()))], write_to)?;
+        // Write every body in one call: `append_block_bodies` derives its tx counter from the same
+        // committed `TransactionBlocks` value and threads it across `bodies`, producing tx numbers
+        // identical to the senders / lookups written above.
+        self.append_block_bodies(bodies, write_to)?;
 
-        debug!(
-            target: "providers::db",
-            ?block_number,
-            actions = ?durations_recorder.actions,
-            "Inserted block"
-        );
-
-        Ok(StoredBlockBodyIndices { first_tx_num, tx_count })
+        Ok(indices)
     }
 
     fn append_block_bodies(

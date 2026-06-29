@@ -31,6 +31,15 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info};
 
+/// When `persist_merge_blocks` is on, close the current merged group once its accumulated
+/// `gas_used` crosses this threshold (a cheap proxy for transaction/receipt write volume).
+const MERGE_GROUP_MAX_GAS: u64 = 1_000_000_000;
+/// Also close the group once the accumulated number of changed hashed accounts crosses this
+/// threshold. This bounds the in-memory write batch and the trie/state write volume by actual
+/// state churn rather than a raw block count (mostly-empty catch-up blocks coalesce freely; a
+/// burst of state-heavy blocks closes the group sooner).
+const MERGE_GROUP_MAX_STATE: usize = 10_000;
+
 /// Writes parts of reth's in memory tree state to the database and static files.
 ///
 /// This is meant to be a spawned service that listens for various incoming persistence operations,
@@ -203,148 +212,12 @@ where
             let last_block_number = last_block.number();
             debug!(target: "provider::storage_writer", block_count = blocks.len(), "Writing blocks and execution data to storage");
 
-            for ExecutedBlockWithTrieUpdates {
-                block: ExecutedBlock { recovered_block, execution_output, hashed_state },
-                trie,
-                triev2,
-            } in blocks
-            {
-                let block_number = recovered_block.number();
-                let block_hash = recovered_block.hash();
-                let inner_provider = &self.provider;
-                info!(target: "persistence::save_block", block_number = block_number, "Write block updates into DB");
-
-                // Parallel execution of state and trie updates is safe because the database is
-                // split into three separate RocksDB instances: state_db (for state and history),
-                // account_db (for account trie), and storage_db (for storage trie). This allows
-                // concurrent writes and commits across different DB instances without conflicts.
-                // The `write_trie_updatesv2` implementation also parallelizes writes to account_db
-                // and storage_db internally. For fault tolerance, stage checkpoints ensure
-                // idempotency - each stage's checkpoint is verified before writing, guaranteeing
-                // exactly-once execution even if the process crashes mid-block.
-                thread::scope(|scope| -> Result<(), PersistenceError> {
-                    let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
-                        let start = Instant::now();
-                        let provider_rw = inner_provider.database_provider_rw()?;
-                        let ck = Self::get_checkpoint(
-                            provider_rw.tx_ref(),
-                            StageId::Execution,
-                            Some(block_number),
-                        )?;
-                        let body_indices = provider_rw.insert_block(
-                            Arc::unwrap_or_clone(recovered_block),
-                            StorageLocation::Both,
-                        )?;
-                        set_fail_point!("persistence::after_write_state");
-                        // Write state and changesets to the database.
-                        // Must be written after blocks because of the receipt lookup.
-                        provider_rw.write_state_with_indices(
-                            &execution_output,
-                            OriginalValuesKnown::No,
-                            StorageLocation::StaticFiles,
-                            Some(vec![body_indices]),
-                        )?;
-                        Self::update_checkpoint(
-                            provider_rw.tx_ref(),
-                            StageId::Execution,
-                            StageCheckpoint { block_number, ..ck },
-                        )?;
-                        provider_rw.static_file_provider().commit()?;
-                        provider_rw.commit()?;
-                        set_fail_point!("persistence::after_state_commit");
-                        metrics::histogram!("save_blocks_time", &[("process", "write_state")])
-                            .record(start.elapsed());
-
-                        let start = Instant::now();
-                        let provider_rw = inner_provider.database_provider_rw()?;
-                        let ck = Self::get_checkpoint(
-                            provider_rw.tx_ref(),
-                            StageId::AccountHashing,
-                            Some(block_number),
-                        )?;
-                        // insert hashes and intermediate merkle nodes
-                        provider_rw.write_hashed_state(
-                            &Arc::unwrap_or_clone(hashed_state).into_sorted(),
-                        )?;
-                        set_fail_point!("persistence::after_hashed_state");
-                        Self::update_checkpoint(
-                            provider_rw.tx_ref(),
-                            StageId::AccountHashing,
-                            StageCheckpoint { block_number, ..ck },
-                        )?;
-                        provider_rw.commit()?;
-                        set_fail_point!("persistence::after_hashed_state_commit");
-                        metrics::histogram!(
-                            "save_blocks_time",
-                            &[("process", "write_hashed_state")]
-                        )
-                        .record(start.elapsed());
-
-                        if !get_gravity_config().validator_node_only {
-                            let start = Instant::now();
-                            let provider_rw = inner_provider.database_provider_rw()?;
-                            let ck = Self::get_checkpoint(
-                                provider_rw.tx_ref(),
-                                StageId::IndexAccountHistory,
-                                Some(block_number),
-                            )?;
-                            provider_rw.update_history_indices(block_number..=block_number)?;
-                            set_fail_point!("persistence::after_history_indices");
-                            Self::update_checkpoint(
-                                provider_rw.tx_ref(),
-                                StageId::IndexAccountHistory,
-                                StageCheckpoint { block_number, ..ck },
-                            )?;
-                            provider_rw.commit()?;
-                            set_fail_point!("persistence::after_history_commit");
-                            metrics::histogram!(
-                                "save_blocks_time",
-                                &[("process", "update_history_indices")]
-                            )
-                            .record(start.elapsed());
-                        }
-                        Ok(())
-                    });
-                    let trie_handle = scope.spawn(|| -> Result<(), PersistenceError> {
-                        let start = Instant::now();
-                        let provider_rw = inner_provider.database_provider_rw()?;
-                        let ck = Self::get_checkpoint(
-                            provider_rw.tx_ref(),
-                            StageId::MerkleExecute,
-                            None,
-                        )?;
-                        if ck.block_number + 1 != block_number {
-                            info!(target: "persistence::trie_update",
-                                checkpoint = ck.block_number,
-                                block_number = block_number,
-                                "Detected interrupted trie update, but trie has idempotency");
-                        }
-                        provider_rw.write_trie_updates(
-                            trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
-                        )?;
-                        provider_rw
-                            .write_trie_updatesv2(triev2.as_ref())
-                            .map_err(ProviderError::Database)?;
-                        set_fail_point!("persistence::after_trie_update");
-                        Self::update_checkpoint(
-                            provider_rw.tx_ref(),
-                            StageId::MerkleExecute,
-                            StageCheckpoint { block_number, ..ck },
-                        )?;
-                        provider_rw.commit()?;
-                        set_fail_point!("persistence::after_trie_commit");
-                        metrics::histogram!(
-                            "save_blocks_time",
-                            &[("process", "write_trie_updatesv2")]
-                        )
-                        .record(start.elapsed());
-                        Ok(())
-                    });
-                    state_handle.join().unwrap()?;
-                    trie_handle.join().unwrap()
-                })?;
-                PERSIST_BLOCK_CACHE.persist_tip(block_number);
+            if get_gravity_config().persist_merge_blocks {
+                self.save_merged_blocks(blocks)?;
+            } else {
+                self.save_blocks_per_block(blocks)?;
             }
+
             // Update pipeline progress
             let start_time = Instant::now();
             let provider_rw = self.provider.database_provider_rw()?;
@@ -361,6 +234,275 @@ where
             .save_duration_per_block_seconds
             .record(elapsed.as_secs_f64() / num_blocks as f64);
         Ok(last_block_hash_num)
+    }
+
+    /// Persist `blocks` one at a time, committing each block per stage (state / hashed / history /
+    /// trie) before moving on. This is the durable default: a crash never loses more than the
+    /// single block in flight.
+    fn save_blocks_per_block(
+        &self,
+        blocks: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
+    ) -> Result<(), PersistenceError> {
+        for ExecutedBlockWithTrieUpdates {
+            block: ExecutedBlock { recovered_block, execution_output, hashed_state },
+            trie,
+            triev2,
+        } in blocks
+        {
+            let block_number = recovered_block.number();
+            let block_hash = recovered_block.hash();
+            let inner_provider = &self.provider;
+            info!(target: "persistence::save_block", block_number = block_number, "Write block updates into DB");
+
+            // Parallel execution of state and trie updates is safe because the database is
+            // split into three separate RocksDB instances: state_db (for state and history),
+            // account_db (for account trie), and storage_db (for storage trie). This allows
+            // concurrent writes and commits across different DB instances without conflicts.
+            // The `write_trie_updatesv2` implementation also parallelizes writes to account_db
+            // and storage_db internally. For fault tolerance, stage checkpoints ensure
+            // idempotency - each stage's checkpoint is verified before writing, guaranteeing
+            // exactly-once execution even if the process crashes mid-block.
+            thread::scope(|scope| -> Result<(), PersistenceError> {
+                let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
+                    let start = Instant::now();
+                    let provider_rw = inner_provider.database_provider_rw()?;
+                    let ck = Self::get_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::Execution,
+                        Some(block_number),
+                    )?;
+                    let body_indices = provider_rw.insert_block(
+                        Arc::unwrap_or_clone(recovered_block),
+                        StorageLocation::Both,
+                    )?;
+                    set_fail_point!("persistence::after_write_state");
+                    // Write state and changesets to the database.
+                    // Must be written after blocks because of the receipt lookup.
+                    provider_rw.write_state_with_indices(
+                        &execution_output,
+                        OriginalValuesKnown::No,
+                        StorageLocation::StaticFiles,
+                        Some(vec![body_indices]),
+                    )?;
+                    Self::update_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::Execution,
+                        StageCheckpoint { block_number, ..ck },
+                    )?;
+                    provider_rw.static_file_provider().commit()?;
+                    provider_rw.commit()?;
+                    set_fail_point!("persistence::after_state_commit");
+                    metrics::histogram!("save_blocks_time", &[("process", "write_state")])
+                        .record(start.elapsed());
+
+                    let start = Instant::now();
+                    let provider_rw = inner_provider.database_provider_rw()?;
+                    let ck = Self::get_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::AccountHashing,
+                        Some(block_number),
+                    )?;
+                    // insert hashes and intermediate merkle nodes
+                    provider_rw
+                        .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
+                    set_fail_point!("persistence::after_hashed_state");
+                    Self::update_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::AccountHashing,
+                        StageCheckpoint { block_number, ..ck },
+                    )?;
+                    provider_rw.commit()?;
+                    set_fail_point!("persistence::after_hashed_state_commit");
+                    metrics::histogram!("save_blocks_time", &[("process", "write_hashed_state")])
+                        .record(start.elapsed());
+
+                    let start = Instant::now();
+                    let provider_rw = inner_provider.database_provider_rw()?;
+                    let ck = Self::get_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::IndexAccountHistory,
+                        Some(block_number),
+                    )?;
+                    provider_rw.update_history_indices(block_number..=block_number)?;
+                    set_fail_point!("persistence::after_history_indices");
+                    Self::update_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::IndexAccountHistory,
+                        StageCheckpoint { block_number, ..ck },
+                    )?;
+                    provider_rw.commit()?;
+                    set_fail_point!("persistence::after_history_commit");
+                    metrics::histogram!(
+                        "save_blocks_time",
+                        &[("process", "update_history_indices")]
+                    )
+                    .record(start.elapsed());
+                    Ok(())
+                });
+                let trie_handle = scope.spawn(|| -> Result<(), PersistenceError> {
+                    let start = Instant::now();
+                    let provider_rw = inner_provider.database_provider_rw()?;
+                    let ck =
+                        Self::get_checkpoint(provider_rw.tx_ref(), StageId::MerkleExecute, None)?;
+                    if ck.block_number + 1 != block_number {
+                        info!(target: "persistence::trie_update",
+                            checkpoint = ck.block_number,
+                            block_number = block_number,
+                            "Detected interrupted trie update, but trie has idempotency");
+                    }
+                    provider_rw.write_trie_updates(
+                        trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
+                    )?;
+                    provider_rw
+                        .write_trie_updatesv2(triev2.as_ref())
+                        .map_err(ProviderError::Database)?;
+                    set_fail_point!("persistence::after_trie_update");
+                    Self::update_checkpoint(
+                        provider_rw.tx_ref(),
+                        StageId::MerkleExecute,
+                        StageCheckpoint { block_number, ..ck },
+                    )?;
+                    provider_rw.commit()?;
+                    set_fail_point!("persistence::after_trie_commit");
+                    metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")])
+                        .record(start.elapsed());
+                    Ok(())
+                });
+                state_handle.join().unwrap()?;
+                trie_handle.join().unwrap()
+            })?;
+            PERSIST_BLOCK_CACHE.persist_tip(block_number);
+        }
+        Ok(())
+    }
+
+    /// Persist `blocks` as a sequence of merged groups, each committed once. Groups are bounded by
+    /// [`MERGE_GROUP_MAX_GAS`] and [`MERGE_GROUP_MAX_STATE`] so the in-flight write batch and the
+    /// crash-replay window stay bounded.
+    fn save_merged_blocks(
+        &self,
+        blocks: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
+    ) -> Result<(), PersistenceError> {
+        let mut group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>> = Vec::new();
+        let mut group_gas = 0u64;
+        let mut group_state = 0usize;
+        for block in blocks {
+            let gas = block.recovered_block().header().gas_used();
+            let state = block.hashed_state().accounts.len();
+            // Close the current (non-empty) group before it would cross a bound; a single block
+            // that alone exceeds a bound becomes its own group.
+            if !group.is_empty() &&
+                (group_gas.saturating_add(gas) > MERGE_GROUP_MAX_GAS ||
+                    group_state.saturating_add(state) > MERGE_GROUP_MAX_STATE)
+            {
+                self.commit_block_group(std::mem::take(&mut group))?;
+                group_gas = 0;
+                group_state = 0;
+            }
+            group_gas = group_gas.saturating_add(gas);
+            group_state = group_state.saturating_add(state);
+            group.push(block);
+        }
+        self.commit_block_group(group)
+    }
+
+    /// Write one contiguous group of executed blocks and commit it once.
+    ///
+    /// The whole group is written into a single transaction and committed together, so the
+    /// per-commit fsync is paid once per group instead of once per block. The group is atomic: a
+    /// crash before the commit rolls it back and recovery re-executes it idempotently from the
+    /// stage checkpoints, with consensus re-supplying anything past the persisted tip. Batching the
+    /// per-block `write_*` calls is safe because state/hashed/trie writes are last-writer-wins puts
+    /// and receipts use the indices returned by `insert_blocks`, so none of them depends on
+    /// observing earlier uncommitted writes within the transaction.
+    fn commit_block_group(
+        &self,
+        group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
+    ) -> Result<(), PersistenceError> {
+        let Some(first) = group.first() else { return Ok(()) };
+        let group_first = first.recovered_block().number();
+        let group_last = group.last().unwrap().recovered_block().number();
+        let block_count = group.len() as u32;
+        info!(target: "persistence::save_block", group_first, group_last, count = block_count, "Write merged block group into DB");
+        let start = Instant::now();
+
+        // Split the group into the per-stage artifacts each writer consumes.
+        let mut recovered_blocks = Vec::with_capacity(group.len());
+        let mut execution_outputs = Vec::with_capacity(group.len());
+        let mut hashed_states = Vec::with_capacity(group.len());
+        let mut trie_updates = Vec::with_capacity(group.len());
+        for ExecutedBlockWithTrieUpdates {
+            block: ExecutedBlock { recovered_block, execution_output, hashed_state },
+            trie,
+            triev2,
+        } in group
+        {
+            let block_hash = recovered_block.hash();
+            recovered_blocks.push(Arc::unwrap_or_clone(recovered_block));
+            execution_outputs.push(execution_output);
+            hashed_states.push(hashed_state);
+            trie_updates.push((trie, triev2, block_hash));
+        }
+
+        let provider_rw = self.provider.database_provider_rw()?;
+
+        // Headers / bodies / senders / tx lookups for the whole group (transaction numbers threaded
+        // across the batch in memory by `insert_blocks`).
+        let body_indices = provider_rw.insert_blocks(recovered_blocks, StorageLocation::Both)?;
+
+        // Receipts, state changesets and hashed state, per block.
+        for ((execution_output, hashed_state), body_index) in
+            execution_outputs.into_iter().zip(hashed_states).zip(body_indices)
+        {
+            provider_rw.write_state_with_indices(
+                &execution_output,
+                OriginalValuesKnown::No,
+                StorageLocation::StaticFiles,
+                Some(vec![body_index]),
+            )?;
+            provider_rw.write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
+        }
+
+        // Trie updates, per block.
+        for (trie, triev2, block_hash) in &trie_updates {
+            provider_rw.write_trie_updates(
+                trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(*block_hash))?,
+            )?;
+            provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
+        }
+
+        // History indices for the whole range, once.
+        provider_rw.update_history_indices(group_first..=group_last)?;
+
+        // Advance every written stage's checkpoint to the group tip, then commit the group once.
+        // `MerkleExecute` passes `None` (trie writes are idempotent and may resume mid-range); the
+        // rest assert checkpoint continuity from `group_first`.
+        let tx = provider_rw.tx_ref();
+        Self::advance_checkpoint(tx, StageId::Execution, Some(group_first), group_last)?;
+        Self::advance_checkpoint(tx, StageId::AccountHashing, Some(group_first), group_last)?;
+        Self::advance_checkpoint(tx, StageId::IndexAccountHistory, Some(group_first), group_last)?;
+        Self::advance_checkpoint(tx, StageId::MerkleExecute, None, group_last)?;
+
+        provider_rw.static_file_provider().commit()?;
+        provider_rw.commit()?;
+        PERSIST_BLOCK_CACHE.persist_tip(group_last);
+
+        metrics::histogram!("save_blocks_time", &[("process", "merge_block")])
+            .record(start.elapsed() / block_count);
+        Ok(())
+    }
+
+    /// Read `stage_id`'s checkpoint (asserting continuity when `check_next` is set) and re-write it
+    /// at block `to`. Lets [`commit_block_group`](Self::commit_block_group) advance every stage to
+    /// the group tip within the single group commit.
+    fn advance_checkpoint<TX: DbTx + DbTxMut>(
+        tx: &TX,
+        stage_id: StageId,
+        check_next: Option<u64>,
+        to: u64,
+    ) -> Result<(), ProviderError> {
+        let ck = Self::get_checkpoint(tx, stage_id, check_next)?;
+        Self::update_checkpoint(tx, stage_id, StageCheckpoint { block_number: to, ..ck })
     }
 }
 

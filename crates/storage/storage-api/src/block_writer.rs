@@ -76,6 +76,24 @@ pub trait BlockWriter: Send + Sync {
         write_to: StorageLocation,
     ) -> ProviderResult<StoredBlockBodyIndices>;
 
+    /// Insert a batch of consecutive blocks in one transaction, returning the
+    /// [`StoredBlockBodyIndices`] of each block in order.
+    ///
+    /// Unlike calling [`insert_block`](Self::insert_block) in a loop, this threads the running
+    /// transaction number through the batch in memory rather than re-reading it from the database
+    /// between blocks. The numbering therefore stays correct even when the whole batch is committed
+    /// only once and the backend does not observe its own uncommitted writes within a transaction
+    /// (e.g. a `RocksDB` `WriteBatch`).
+    ///
+    /// The default implementation inserts each block in turn.
+    fn insert_blocks(
+        &self,
+        blocks: Vec<RecoveredBlock<Self::Block>>,
+        write_to: StorageLocation,
+    ) -> ProviderResult<Vec<StoredBlockBodyIndices>> {
+        blocks.into_iter().map(|block| self.insert_block(block, write_to)).collect()
+    }
+
     /// Appends a batch of block bodies extending the canonical chain. This is invoked during
     /// `Bodies` stage and does not write to `TransactionHashNumbers` and `TransactionSenders`
     /// tables which are populated on later stages.
