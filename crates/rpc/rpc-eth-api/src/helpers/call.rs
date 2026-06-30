@@ -777,6 +777,12 @@ pub trait Call:
             current_randomness,
         );
 
+        // Protocol invariant pin: same rationale as `trace.rs`'s block-family loop —
+        // pipe pins SYSTEM_CALLER-signed txs to a contiguous block-head prefix, the
+        // cfg-rebuild optimization below relies on monotonic system→user transition.
+        // Matching unit-tested predicate: `reth_chainspec::system_txs_form_head_prefix`.
+        let mut saw_non_system_caller_tx = false;
+
         let mut index = 0;
         for tx in transactions {
             if *tx.tx_hash() == target_tx_hash {
@@ -784,7 +790,16 @@ pub trait Call:
                 break
             }
 
-            let tx_is_system_exempt = exempt_fork_active && is_gravity_system_caller(tx.signer());
+            let is_system_caller = is_gravity_system_caller(tx.signer());
+            debug_assert!(
+                !(is_system_caller && saw_non_system_caller_tx),
+                "RPC trace replay invariant violated: SYSTEM_CALLER-signed tx at index {index} appears after a non-system-caller tx in block #{block_number}",
+            );
+            if !is_system_caller {
+                saw_non_system_caller_tx = true;
+            }
+
+            let tx_is_system_exempt = exempt_fork_active && is_system_caller;
             if tx_is_system_exempt != current_kind_system_exempt {
                 let (db_taken, mut env_taken) = evm.finish();
                 env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;

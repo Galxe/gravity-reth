@@ -444,12 +444,31 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 );
                 let mut current_kind_system_exempt = first_kind_system_exempt;
 
+                // Protocol invariant pin: the pipe layer pins SYSTEM_CALLER-signed
+                // txs (metadata + DKG/JWK validator txs) to a contiguous block-head
+                // prefix (`pipe-exec-layer-ext-v2/.../metadata_txn.rs:120` / `:185`).
+                // The cfg-rebuild optimization below ("at most one rebuild on the
+                // system→user boundary") relies on monotonic system→user transition;
+                // a violation would silently degrade to multi-rebuild in release
+                // and almost certainly indicate a pipe-layer regression (forging a
+                // SYSTEM_CALLER signature being impossible). The matching unit-tested
+                // predicate is `reth_chainspec::system_txs_form_head_prefix`.
+                let mut saw_non_system_caller_tx = false;
+
                 let mut results: Vec<R> = Vec::with_capacity(max_transactions);
 
                 while let Some(tx) = txs_iter.next() {
                     // Per-tx classification + EVM rebuild on transition.
-                    let tx_is_system_exempt =
-                        exempt_fork_active && is_gravity_system_caller(tx.signer());
+                    let is_system_caller = is_gravity_system_caller(tx.signer());
+                    debug_assert!(
+                        !(is_system_caller && saw_non_system_caller_tx),
+                        "RPC trace replay invariant violated: SYSTEM_CALLER-signed tx at idx {idx} appears after a non-system-caller tx in block #{block_number}",
+                    );
+                    if !is_system_caller {
+                        saw_non_system_caller_tx = true;
+                    }
+
+                    let tx_is_system_exempt = exempt_fork_active && is_system_caller;
                     if tx_is_system_exempt != current_kind_system_exempt {
                         let (db_taken, mut env_taken) = current_evm.finish();
                         env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;
