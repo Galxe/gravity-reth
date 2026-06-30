@@ -733,13 +733,11 @@ impl From<Genesis> for ChainSpec {
 
         hardforks.append(&mut time_hardforks);
 
-        // Gravity mainnet hardcoded Ethereum-side hardfork schedule. No-op for
-        // any other chain id. See `crates/chainspec/src/gravity.rs` for the
-        // gated-fork table and rationale.
-        crate::gravity::apply_gravity_mainnet_eth_overrides(
-            genesis.config.chain_id,
-            &mut hardforks,
-        );
+        // Hardcoded Ethereum-side hardfork schedule for chain ids the binary
+        // owns (today: gravity mainnet only). No-op for any other chain id.
+        // See `crates/chainspec/src/gravity.rs` for the dispatch table and
+        // rationale.
+        crate::gravity::apply_hardcoded_eth_overrides(genesis.config.chain_id, &mut hardforks);
 
         // Ordered Hardforks
         let mainnet_hardforks: ChainHardforks = EthereumHardfork::mainnet().into();
@@ -797,9 +795,9 @@ impl From<Genesis> for ChainSpec {
                 .filter_map(|(fork, opt)| opt.map(|block| (fork, ForkCondition::Block(block)))),
         );
 
-        // Gravity mainnet hardcoded Gravity-side hardfork schedule. No-op for
-        // any other chain id. See `crates/chainspec/src/gravity.rs`.
-        crate::gravity::apply_gravity_mainnet_gravity_overrides(
+        // Hardcoded Gravity-side hardfork schedule for chain ids the binary
+        // owns (today: gravity mainnet only). No-op for any other chain id.
+        crate::gravity::apply_hardcoded_gravity_overrides(
             genesis.config.chain_id,
             &mut gravity_hardforks,
         );

@@ -1,13 +1,17 @@
-//! Gravity-specific hardforks and gravity-mainnet hardcoded overrides.
+//! Gravity-specific hardforks and per-chain hardcoded hardfork overrides.
 //!
 //! The [`GravityHardfork`] enum is the consensus-interface set of
 //! Gravity-named hardforks.
 //!
-//! On gravity mainnet (chain id [`GRAVITY_MAINNET_CHAIN_ID`]), the tables
-//! [`GRAVITY_MAINNET_GATED_ETH_FORKS`] and
-//! [`GRAVITY_MAINNET_GATED_GRAVITY_FORKS`] are the authoritative source for
-//! the listed hardforks; values supplied in `genesis.json` are ignored for
-//! forks in those tables. For any other chain id, the override is a no-op.
+//! For each chain id that the binary owns, the dispatch maps
+//! [`HARDCODED_ETH_FORK_OVERRIDES`] and [`HARDCODED_GRAVITY_FORK_OVERRIDES`]
+//! are the authoritative source for the listed hardforks; values supplied
+//! in `genesis.json` are ignored for forks in those tables. For any chain
+//! id not in the dispatch map, the override is a no-op and genesis-driven
+//! behaviour is unchanged.
+//!
+//! Today the only entry is gravity mainnet ([`GRAVITY_MAINNET_CHAIN_ID`]).
+//! Adding another chain id is a one-tuple change inside each dispatch map.
 //!
 //! # Override semantics
 //!
@@ -62,46 +66,66 @@ hardfork!(
 /// Gravity mainnet chain id.
 pub const GRAVITY_MAINNET_CHAIN_ID: u64 = 127_001;
 
-/// Standard Ethereum timestamp-based hardforks gated by the binary on gravity
-/// mainnet. Entry semantics:
+/// Per-chain hardcoded override table for a single hardfork kind. Each outer
+/// tuple is `(chain_id, &[entries])`; each inner entry is `(fork, Some(ts))`
+/// to upsert with [`ForkCondition::Timestamp`] or `(fork, None)` to remove.
+type HardcodedOverrideMap<H> = &'static [(u64, &'static [(H, Option<u64>)])];
+
+/// Per-chain hardcoded overrides for standard Ethereum timestamp-based
+/// hardforks. Entry semantics per inner-table tuple:
 ///
 /// * `Some(ts)` → activate at `ts`; ignore any value in genesis.
 /// * `None`     → never activate; ignore any value in genesis. The entry is *removed* from the
 ///   runtime hardforks vec (see the module-level doc for why removal rather than
 ///   [`ForkCondition::Never`]).
 ///
-/// Forks **not** in this table fall through to genesis (current behaviour).
+/// Forks **not** in the inner table fall through to genesis (current behaviour),
+/// and chain ids **not** in the outer dispatch are entirely untouched.
 ///
-/// Adding or modifying an entry is a mainnet consensus change. The PR doing
-/// so must reference the onchain governance or coordination record that
-/// authorised the timestamp. Existing entries must never be removed —
-/// promoting `None` to `Some(ts)` is the only allowed transition.
-const GRAVITY_MAINNET_GATED_ETH_FORKS: &[(EthereumHardfork, Option<u64>)] = &[
-    // Prague activation timestamp on gravity mainnet, pinned to the value
-    // shipped in the deployed mainnet genesis (`gravity-mainet-gitops /
-    // genesis.json` → `config.pragueTime`). Changing this value requires
-    // onchain governance / network-wide coordination.
-    (EthereumHardfork::Prague, Some(1_782_709_200)),
+/// Adding or modifying an entry on an already-shipped chain id is a
+/// consensus change. The PR doing so must reference the onchain governance
+/// or coordination record that authorised the timestamp. Existing entries
+/// must never be removed — promoting `None` to `Some(ts)` is the only
+/// allowed transition.
+const HARDCODED_ETH_FORK_OVERRIDES: HardcodedOverrideMap<EthereumHardfork> = &[
+    // Gravity mainnet.
+    (
+        GRAVITY_MAINNET_CHAIN_ID,
+        &[
+            // Prague activation timestamp on gravity mainnet, pinned to the value
+            // shipped in the deployed mainnet genesis (`gravity-mainet-gitops /
+            // genesis.json` → `config.pragueTime`). Changing this value requires
+            // onchain governance / network-wide coordination.
+            (EthereumHardfork::Prague, Some(1_782_709_200)),
+        ],
+    ),
 ];
 
-/// Gravity-specific timestamp-based hardforks gated by the binary on gravity
-/// mainnet. Same semantics as [`GRAVITY_MAINNET_GATED_ETH_FORKS`].
+/// Per-chain hardcoded overrides for Gravity-specific timestamp-based
+/// hardforks. Same semantics as [`HARDCODED_ETH_FORK_OVERRIDES`].
 ///
 /// Note: only **timestamp-based** Gravity hardforks belong here. Beta, Gamma
 /// and Delta are *block-based* on the wire (read from `betaBlock` /
 /// `gammaBlock` / `deltaBlock`); gating those would need a parallel
-/// block-keyed table and a different `ForkCondition` mapping. That's an
+/// block-keyed dispatch and a different `ForkCondition` mapping. That's an
 /// explicit non-goal for v1.
-const GRAVITY_MAINNET_GATED_GRAVITY_FORKS: &[(GravityHardfork, Option<u64>)] = &[
-    // Alpha is forward-defended: no timestamp has been chosen onchain, so
-    // an operator-supplied `alphaTime` in mainnet genesis must NOT activate
-    // it. When governance picks a timestamp, change this entry to Some(ts)
-    // in the release that ships the activation.
-    (GravityHardfork::Alpha, None),
+const HARDCODED_GRAVITY_FORK_OVERRIDES: HardcodedOverrideMap<GravityHardfork> = &[
+    // Gravity mainnet.
+    (
+        GRAVITY_MAINNET_CHAIN_ID,
+        &[
+            // Alpha is forward-defended: no timestamp has been chosen onchain,
+            // so an operator-supplied `alphaTime` in mainnet genesis must NOT
+            // activate it. When governance picks a timestamp, change this
+            // entry to Some(ts) in the release that ships the activation.
+            (GravityHardfork::Alpha, None),
+        ],
+    ),
 ];
 
-/// Apply the gravity-mainnet hardcoded **Ethereum-side** hardfork schedule
-/// to `hardforks`. No-op for any chain id other than [`GRAVITY_MAINNET_CHAIN_ID`].
+/// Apply the hardcoded **Ethereum-side** hardfork overrides for `chain_id`
+/// to `hardforks`. No-op if `chain_id` is not present in
+/// [`HARDCODED_ETH_FORK_OVERRIDES`].
 ///
 /// **Caller invariant** (see `into_ethereum_chain_spec` in
 /// `crates/chainspec/src/spec.rs`): pass the **fully-populated** Vec —
@@ -110,15 +134,18 @@ const GRAVITY_MAINNET_GATED_GRAVITY_FORKS: &[(GravityHardfork, Option<u64>)] = &
 ///
 /// See the module-level doc on the override invariants
 /// (`None` ⇒ remove, bypass risk, no-runtime-input rule).
-pub(crate) fn apply_gravity_mainnet_eth_overrides(
+pub(crate) fn apply_hardcoded_eth_overrides(
     chain_id: u64,
     hardforks: &mut Vec<(Box<dyn Hardfork>, ForkCondition)>,
 ) {
-    apply_overrides_from_table(chain_id, hardforks, GRAVITY_MAINNET_GATED_ETH_FORKS);
+    if let Some(table) = lookup_overrides(HARDCODED_ETH_FORK_OVERRIDES, chain_id) {
+        apply_overrides_from_table(hardforks, table);
+    }
 }
 
-/// Apply the gravity-mainnet hardcoded **Gravity-side** hardfork schedule
-/// to `gravity_hardforks`. No-op for any chain id other than [`GRAVITY_MAINNET_CHAIN_ID`].
+/// Apply the hardcoded **Gravity-side** hardfork overrides for `chain_id`
+/// to `gravity_hardforks`. No-op if `chain_id` is not present in
+/// [`HARDCODED_GRAVITY_FORK_OVERRIDES`].
 ///
 /// **Caller invariant** (see `into_ethereum_chain_spec` in
 /// `crates/chainspec/src/spec.rs`): pass the **fully-populated** Vec —
@@ -127,24 +154,26 @@ pub(crate) fn apply_gravity_mainnet_eth_overrides(
 /// [`reth_ethereum_forks::ChainHardforks`].
 ///
 /// See the module-level doc on the override invariants.
-pub(crate) fn apply_gravity_mainnet_gravity_overrides(
+pub(crate) fn apply_hardcoded_gravity_overrides(
     chain_id: u64,
     gravity_hardforks: &mut Vec<(Box<dyn Hardfork>, ForkCondition)>,
 ) {
-    apply_overrides_from_table(chain_id, gravity_hardforks, GRAVITY_MAINNET_GATED_GRAVITY_FORKS);
+    if let Some(table) = lookup_overrides(HARDCODED_GRAVITY_FORK_OVERRIDES, chain_id) {
+        apply_overrides_from_table(gravity_hardforks, table);
+    }
 }
 
-/// The override loop, generic over hardfork kind and parameterised on the
-/// table so unit tests can exercise the `Some` and `None` branches
-/// independently of whatever the production tables currently hold.
+/// Look up the per-chain override table for `chain_id` in a dispatch map.
+fn lookup_overrides<H>(map: &'static [(u64, &'static [H])], chain_id: u64) -> Option<&'static [H]> {
+    map.iter().find_map(|(id, table)| (*id == chain_id).then_some(*table))
+}
+
+/// The override loop, generic over hardfork kind. Pure transform on the
+/// supplied `table` — chain-id dispatch happens before this call.
 fn apply_overrides_from_table<H: Hardfork + Copy>(
-    chain_id: u64,
     hardforks: &mut Vec<(Box<dyn Hardfork>, ForkCondition)>,
     table: &[(H, Option<u64>)],
 ) {
-    if chain_id != GRAVITY_MAINNET_CHAIN_ID {
-        return;
-    }
     for &(fork, ts) in table {
         if let Some(t) = ts {
             upsert(hardforks, Box::new(fork), ForkCondition::Timestamp(t));
@@ -207,15 +236,16 @@ mod tests {
         genesis.into()
     }
 
-    /// Look up Prague's table value without hard-coding it; the dedicated
-    /// `gravity_mainnet_prague_timestamp_pinned_to_governance_value` test is
-    /// the single tripwire for the specific value.
+    /// Look up Prague's table value for gravity mainnet without hard-coding
+    /// it; the dedicated `gravity_mainnet_prague_timestamp_pinned_to_governance_value`
+    /// test is the single tripwire for the specific value.
     fn table_prague_timestamp() -> u64 {
-        GRAVITY_MAINNET_GATED_ETH_FORKS
+        lookup_overrides(HARDCODED_ETH_FORK_OVERRIDES, GRAVITY_MAINNET_CHAIN_ID)
+            .expect("gravity mainnet must have an eth override table")
             .iter()
             .find(|(f, _)| *f == EthereumHardfork::Prague)
             .and_then(|(_, ts)| *ts)
-            .expect("Prague must be a Some(_) entry in the gated table")
+            .expect("Prague must be a Some(_) entry in the gravity-mainnet table")
     }
 
     // ---------- Ethereum-side: Prague override ----------
@@ -430,11 +460,7 @@ mod tests {
     #[test]
     fn apply_overrides_writes_timestamp_when_absent() {
         let mut hardforks: Vec<(Box<dyn Hardfork>, ForkCondition)> = Vec::new();
-        apply_overrides_from_table(
-            GRAVITY_MAINNET_CHAIN_ID,
-            &mut hardforks,
-            &[(EthereumHardfork::Prague, Some(12_345))],
-        );
+        apply_overrides_from_table(&mut hardforks, &[(EthereumHardfork::Prague, Some(12_345))]);
         assert_eq!(hardforks.len(), 1);
         assert_eq!(hardforks[0].0.name(), EthereumHardfork::Prague.name());
         assert_eq!(hardforks[0].1, ForkCondition::Timestamp(12_345));
@@ -444,11 +470,7 @@ mod tests {
     fn apply_overrides_replaces_existing_entry_with_some() {
         let mut hardforks: Vec<(Box<dyn Hardfork>, ForkCondition)> =
             vec![(EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(999))];
-        apply_overrides_from_table(
-            GRAVITY_MAINNET_CHAIN_ID,
-            &mut hardforks,
-            &[(EthereumHardfork::Prague, Some(42))],
-        );
+        apply_overrides_from_table(&mut hardforks, &[(EthereumHardfork::Prague, Some(42))]);
         assert_eq!(hardforks.len(), 1);
         assert_eq!(hardforks[0].1, ForkCondition::Timestamp(42));
     }
@@ -457,19 +479,11 @@ mod tests {
     fn apply_overrides_with_none_removes_existing_entry() {
         let mut hardforks: Vec<(Box<dyn Hardfork>, ForkCondition)> =
             vec![(EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(999))];
-        apply_overrides_from_table(
-            GRAVITY_MAINNET_CHAIN_ID,
-            &mut hardforks,
-            &[(EthereumHardfork::Prague, None)],
-        );
+        apply_overrides_from_table(&mut hardforks, &[(EthereumHardfork::Prague, None)]);
         assert!(hardforks.is_empty(), "None entry must remove the matching fork");
 
         // No-op when the fork is not present.
-        apply_overrides_from_table(
-            GRAVITY_MAINNET_CHAIN_ID,
-            &mut hardforks,
-            &[(EthereumHardfork::Prague, None)],
-        );
+        apply_overrides_from_table(&mut hardforks, &[(EthereumHardfork::Prague, None)]);
         assert!(hardforks.is_empty());
     }
 
@@ -477,25 +491,34 @@ mod tests {
     #[test]
     fn apply_overrides_works_for_gravity_hardforks() {
         let mut hardforks: Vec<(Box<dyn Hardfork>, ForkCondition)> = Vec::new();
-        apply_overrides_from_table(
-            GRAVITY_MAINNET_CHAIN_ID,
-            &mut hardforks,
-            &[(GravityHardfork::Alpha, Some(777))],
-        );
+        apply_overrides_from_table(&mut hardforks, &[(GravityHardfork::Alpha, Some(777))]);
         assert_eq!(hardforks.len(), 1);
         assert_eq!(hardforks[0].0.name(), GravityHardfork::Alpha.name());
         assert_eq!(hardforks[0].1, ForkCondition::Timestamp(777));
     }
 
-    /// Non-mainnet chain id is a no-op even for the helper.
+    /// Chain-id dispatch: an unknown chain id makes both public entry points
+    /// no-op without ever reaching `apply_overrides_from_table`.
     #[test]
-    fn apply_overrides_is_noop_for_non_mainnet_chain_id() {
-        let mut hardforks: Vec<(Box<dyn Hardfork>, ForkCondition)> = Vec::new();
-        apply_overrides_from_table(
-            7_771_625, // testnet
-            &mut hardforks,
-            &[(EthereumHardfork::Prague, Some(42))],
-        );
-        assert!(hardforks.is_empty(), "non-mainnet must not be touched");
+    fn hardcoded_overrides_are_noop_for_unknown_chain_id() {
+        let mut eth: Vec<(Box<dyn Hardfork>, ForkCondition)> = Vec::new();
+        let mut gravity: Vec<(Box<dyn Hardfork>, ForkCondition)> = Vec::new();
+        apply_hardcoded_eth_overrides(7_771_625 /* gravity testnet */, &mut eth);
+        apply_hardcoded_gravity_overrides(7_771_625, &mut gravity);
+        assert!(eth.is_empty());
+        assert!(gravity.is_empty());
+    }
+
+    #[test]
+    fn lookup_overrides_finds_gravity_mainnet_eth_table() {
+        let table = lookup_overrides(HARDCODED_ETH_FORK_OVERRIDES, GRAVITY_MAINNET_CHAIN_ID);
+        assert!(table.is_some(), "gravity mainnet must have an eth dispatch entry");
+        assert!(!table.unwrap().is_empty());
+    }
+
+    #[test]
+    fn lookup_overrides_returns_none_for_unknown_chain_id() {
+        assert!(lookup_overrides(HARDCODED_ETH_FORK_OVERRIDES, 999_999).is_none());
+        assert!(lookup_overrides(HARDCODED_GRAVITY_FORK_OVERRIDES, 999_999).is_none());
     }
 }
