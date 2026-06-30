@@ -172,7 +172,7 @@ pub fn verify_pop(pubkey_bytes: &[u8], pop_bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    /// Generate a BLS12-381 keypair and PoP for testing
+    /// Generate a BLS12-381 keypair and `PoP` for testing
     fn generate_test_keypair() -> (Vec<u8>, Vec<u8>) {
         use blst::min_pk::SecretKey;
 
