@@ -61,7 +61,7 @@ pub fn is_system_tx_gas_exempt<S: EthChainSpec>(chain_spec: &S, block_ts: u64) -
 /// `0..k`), with all non-system txs appearing only at positions `k..`.
 ///
 /// The pipe layer pins protocol-injected system txs (metadata `onBlockStart`
-/// + DKG/JWK validator txns) to the front of the block at construction time
+/// plus DKG/JWK validator txns) to the front of the block at construction time
 /// (`pipe-exec-layer-ext-v2/execute/src/onchain_config/metadata_txn.rs:120` /
 /// `:185`). Both RPC replay paths — block-family
 /// `trace_block_until_with_inspector` and single-tx
