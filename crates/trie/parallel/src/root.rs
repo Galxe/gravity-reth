@@ -4,30 +4,21 @@ use crate::{stats::ParallelTrieTracker, storage_root_targets::StorageRootTargets
 use alloy_primitives::B256;
 use alloy_rlp::{BufMut, Encodable};
 use itertools::Itertools;
-use reth_execution_errors::StorageRootError;
-use reth_provider::{
-    providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, ProviderError,
-};
+use reth_execution_errors::{SparseTrieError, StateProofError, StorageRootError};
+use reth_provider::{DatabaseProviderROFactory, ProviderError};
 use reth_storage_errors::db::DatabaseError;
+use reth_tasks::Runtime;
 use reth_trie::{
-    hashed_cursor::{HashedCursorFactory, HashedPostStateCursorFactory},
+    hashed_cursor::HashedCursorFactory,
     node_iter::{TrieElement, TrieNodeIter},
-    trie_cursor::{InMemoryTrieCursorFactory, TrieCursorFactory},
+    prefix_set::TriePrefixSets,
+    trie_cursor::TrieCursorFactory,
     updates::TrieUpdates,
     walker::TrieWalker,
-    HashBuilder, Nibbles, StorageRoot, TrieInput, TRIE_ACCOUNT_RLP_MAX_SIZE,
+    HashBuilder, Nibbles, StorageRoot, TRIE_ACCOUNT_RLP_MAX_SIZE,
 };
-use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc, Arc, OnceLock,
-    },
-    time::Duration,
-};
+use std::{collections::HashMap, sync::mpsc};
 use thiserror::Error;
-use tokio::runtime::{Builder, Handle, Runtime};
 use tracing::*;
 
 /// Parallel incremental state root calculator.
@@ -37,20 +28,17 @@ use tracing::*;
 /// nodes in the process. Upon encountering a leaf node, it will poll the storage root
 /// task for the corresponding hashed address.
 ///
-/// Internally, the calculator uses [`ConsistentDbView`] since
-/// it needs to rely on database state saying the same until
-/// the last transaction is open.
-/// See docs of using [`ConsistentDbView`] for caveats.
-///
 /// Note: This implementation only serves as a fallback for the sparse trie-based
 /// state root calculation. The sparse trie approach is more efficient as it avoids traversing
 /// the entire trie, only operating on the modified parts.
 #[derive(Debug)]
 pub struct ParallelStateRoot<Factory> {
-    /// Consistent view of the database.
-    view: ConsistentDbView<Factory>,
-    /// Trie input.
-    input: TrieInput,
+    /// Factory for creating state providers.
+    factory: Factory,
+    // Prefix sets indicating which portions of the trie need to be recomputed.
+    prefix_sets: TriePrefixSets,
+    /// The runtime handle for spawning blocking tasks.
+    runtime: Runtime,
     /// Parallel state root metrics.
     #[cfg(feature = "metrics")]
     metrics: ParallelStateRootMetrics,
@@ -58,10 +46,11 @@ pub struct ParallelStateRoot<Factory> {
 
 impl<Factory> ParallelStateRoot<Factory> {
     /// Create new parallel state root calculator.
-    pub fn new(view: ConsistentDbView<Factory>, input: TrieInput) -> Self {
+    pub fn new(factory: Factory, prefix_sets: TriePrefixSets, runtime: Runtime) -> Self {
         Self {
-            view,
-            input,
+            factory,
+            prefix_sets,
+            runtime,
             #[cfg(feature = "metrics")]
             metrics: ParallelStateRootMetrics::default(),
         }
@@ -70,7 +59,10 @@ impl<Factory> ParallelStateRoot<Factory> {
 
 impl<Factory> ParallelStateRoot<Factory>
 where
-    Factory: DatabaseProviderFactory<Provider: BlockReader> + Clone + Send + Sync + 'static,
+    Factory: DatabaseProviderROFactory<Provider: TrieCursorFactory + HashedCursorFactory>
+        + Clone
+        + Send
+        + 'static,
 {
     /// Calculate incremental state root in parallel.
     pub fn incremental_root(self) -> Result<B256, ParallelStateRootError> {
@@ -91,12 +83,12 @@ where
         retain_updates: bool,
     ) -> Result<(B256, TrieUpdates), ParallelStateRootError> {
         let mut tracker = ParallelTrieTracker::default();
-        let trie_nodes_sorted = Arc::new(self.input.nodes.into_sorted());
-        let hashed_state_sorted = Arc::new(self.input.state.into_sorted());
-        let prefix_sets = self.input.prefix_sets.freeze();
         let storage_root_targets = StorageRootTargets::new(
-            prefix_sets.account_prefix_set.iter().map(|nibbles| B256::from_slice(&nibbles.pack())),
-            prefix_sets.storage_prefix_sets,
+            self.prefix_sets
+                .account_prefix_set
+                .iter()
+                .map(|nibbles| B256::from_slice(&nibbles.pack())),
+            self.prefix_sets.storage_prefix_sets,
         );
 
         // Pre-calculate storage roots in parallel for accounts which were changed.
@@ -104,15 +96,12 @@ where
         debug!(target: "trie::parallel_state_root", len = storage_root_targets.len(), "pre-calculating storage roots");
         let mut storage_roots = HashMap::with_capacity(storage_root_targets.len());
 
-        // Get runtime handle once outside the loop
-        let handle = get_runtime_handle();
+        let handle = self.runtime.handle().clone();
 
         for (hashed_address, prefix_set) in
             storage_root_targets.into_iter().sorted_unstable_by_key(|(address, _)| *address)
         {
-            let view = self.view.clone();
-            let hashed_state_sorted = hashed_state_sorted.clone();
-            let trie_nodes_sorted = trie_nodes_sorted.clone();
+            let factory = self.factory.clone();
             #[cfg(feature = "metrics")]
             let metrics = self.metrics.storage_trie.clone();
 
@@ -121,18 +110,10 @@ where
             // Spawn a blocking task to calculate account's storage root from database I/O
             drop(handle.spawn_blocking(move || {
                 let result = (|| -> Result<_, ParallelStateRootError> {
-                    let provider_ro = view.provider_ro()?;
-                    let trie_cursor_factory = InMemoryTrieCursorFactory::new(
-                        DatabaseTrieCursorFactory::new(provider_ro.tx_ref()),
-                        &trie_nodes_sorted,
-                    );
-                    let hashed_state = HashedPostStateCursorFactory::new(
-                        DatabaseHashedCursorFactory::new(provider_ro.tx_ref()),
-                        &hashed_state_sorted,
-                    );
+                    let provider = factory.database_provider_ro()?;
                     Ok(StorageRoot::new_hashed(
-                        trie_cursor_factory,
-                        hashed_state,
+                        &provider,
+                        &provider,
                         hashed_address,
                         prefix_set,
                         #[cfg(feature = "metrics")]
@@ -148,24 +129,16 @@ where
         trace!(target: "trie::parallel_state_root", "calculating state root");
         let mut trie_updates = TrieUpdates::default();
 
-        let provider_ro = self.view.provider_ro()?;
-        let trie_cursor_factory = InMemoryTrieCursorFactory::new(
-            DatabaseTrieCursorFactory::new(provider_ro.tx_ref()),
-            &trie_nodes_sorted,
-        );
-        let hashed_cursor_factory = HashedPostStateCursorFactory::new(
-            DatabaseHashedCursorFactory::new(provider_ro.tx_ref()),
-            &hashed_state_sorted,
-        );
+        let provider = self.factory.database_provider_ro()?;
 
         let walker = TrieWalker::<_>::state_trie(
-            trie_cursor_factory.account_trie_cursor().map_err(ProviderError::Database)?,
-            prefix_sets.account_prefix_set,
+            provider.account_trie_cursor().map_err(ProviderError::Database)?,
+            self.prefix_sets.account_prefix_set,
         )
         .with_deletions_retained(retain_updates);
         let mut account_node_iter = TrieNodeIter::state_trie(
             walker,
-            hashed_cursor_factory.hashed_account_cursor().map_err(ProviderError::Database)?,
+            provider.hashed_account_cursor().map_err(ProviderError::Database)?,
         );
 
         let mut hash_builder = HashBuilder::default().with_updates(retain_updates);
@@ -189,8 +162,8 @@ where
                         None => {
                             tracker.inc_missed_leaves();
                             StorageRoot::new_hashed(
-                                trie_cursor_factory.clone(),
-                                hashed_cursor_factory.clone(),
+                                &provider,
+                                &provider,
                                 hashed_address,
                                 Default::default(),
                                 #[cfg(feature = "metrics")]
@@ -226,7 +199,7 @@ where
         let root = hash_builder.root();
 
         let removed_keys = account_node_iter.walker.take_removed_keys();
-        trie_updates.finalize(hash_builder, removed_keys, prefix_sets.destroyed_accounts);
+        trie_updates.finalize(hash_builder, removed_keys, self.prefix_sets.destroyed_accounts);
 
         let stats = tracker.finish();
 
@@ -257,6 +230,9 @@ pub enum ParallelStateRootError {
     /// Provider error.
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    /// Sparse trie error.
+    #[error(transparent)]
+    SparseTrie(#[from] SparseTrieError),
     /// Other unspecified error.
     #[error("{_0}")]
     Other(String),
@@ -269,6 +245,7 @@ impl From<ParallelStateRootError> for ProviderError {
             ParallelStateRootError::StorageRoot(StorageRootError::Database(error)) => {
                 Self::Database(error)
             }
+            ParallelStateRootError::SparseTrie(error) => Self::other(error),
             ParallelStateRootError::Other(other) => Self::Database(DatabaseError::Other(other)),
         }
     }
@@ -280,30 +257,16 @@ impl From<alloy_rlp::Error> for ParallelStateRootError {
     }
 }
 
-/// Gets or creates a tokio runtime handle for spawning blocking tasks.
-/// This ensures we always have a runtime available for I/O operations.
-fn get_runtime_handle() -> Handle {
-    Handle::try_current().unwrap_or_else(|_| {
-        // Create a new runtime if no runtime is available
-        static RT: OnceLock<Runtime> = OnceLock::new();
-        static THREAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-        let rt = RT.get_or_init(|| {
-            Builder::new_multi_thread()
-                // Keep the threads alive for at least the block time (12 seconds) plus buffer.
-                // This prevents the costly process of spawning new threads on every
-                // new block, and instead reuses the existing threads.
-                .thread_keep_alive(Duration::from_secs(15))
-                .thread_name_fn(|| {
-                    let id = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    format!("tokio-trie-{id}")
-                })
-                .build()
-                .expect("Failed to create tokio runtime")
-        });
-
-        rt.handle().clone()
-    })
+impl From<StateProofError> for ParallelStateRootError {
+    fn from(error: StateProofError) -> Self {
+        match error {
+            StateProofError::Database(err) => Self::Provider(ProviderError::Database(err)),
+            StateProofError::Rlp(err) => Self::Provider(ProviderError::Rlp(err)),
+            StateProofError::TrieInconsistency(msg) => {
+                Self::Provider(ProviderError::TrieWitnessError(msg))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -311,14 +274,29 @@ mod tests {
     use super::*;
     use alloy_primitives::{keccak256, Address, U256};
     use rand::Rng;
-    use reth_primitives_traits::{Account, StorageEntry};
-    use reth_provider::{test_utils::create_test_provider_factory, HashingWriter};
+    use reth_chainspec::{ChainSpec, EthChainSpec};
+    use reth_ethereum_primitives::{Block, BlockBody};
+    use reth_primitives_traits::{Account, RecoveredBlock, SealedBlock, StorageEntry};
+    use reth_provider::{
+        test_utils::create_test_provider_factory_with_chain_spec, BlockWriter, ExecutionOutcome,
+        HashingWriter,
+    };
     use reth_trie::{test_utils, HashedPostState, HashedStorage};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn random_parallel_root() {
-        let factory = create_test_provider_factory();
-        let consistent_view = ConsistentDbView::new(factory.clone(), None);
+        let chain_spec = Arc::new(ChainSpec::default());
+        let anchor_hash = chain_spec.genesis_hash();
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec.clone());
+        let changeset_cache = reth_trie_db::ChangesetCache::new();
+        let overlay_builder = reth_provider::providers::OverlayBuilder::<
+            reth_ethereum_primitives::EthPrimitives,
+        >::new(anchor_hash, changeset_cache);
+        let mut overlay_factory = reth_provider::providers::OverlayStateProviderFactory::new(
+            factory.clone(),
+            overlay_builder.clone(),
+        );
 
         let mut rng = rand::rng();
         let mut state = (0..100)
@@ -342,6 +320,20 @@ mod tests {
 
         {
             let provider_rw = factory.provider_rw().unwrap();
+            let genesis_block = RecoveredBlock::new_sealed(
+                SealedBlock::<Block>::seal_parts(
+                    chain_spec.genesis_header().clone(),
+                    BlockBody::default(),
+                ),
+                vec![],
+            );
+            provider_rw
+                .append_blocks_with_state(
+                    vec![genesis_block],
+                    &ExecutionOutcome::default(),
+                    Default::default(),
+                )
+                .unwrap();
             provider_rw
                 .insert_account_for_hashing(
                     state.iter().map(|(address, (account, _))| (*address, Some(*account))),
@@ -360,8 +352,9 @@ mod tests {
             provider_rw.commit().unwrap();
         }
 
+        let runtime = reth_tasks::Runtime::test();
         assert_eq!(
-            ParallelStateRoot::new(consistent_view.clone(), Default::default())
+            ParallelStateRoot::new(overlay_factory.clone(), Default::default(), runtime.clone())
                 .incremental_root()
                 .unwrap(),
             test_utils::state_root(state.clone())
@@ -392,8 +385,14 @@ mod tests {
             }
         }
 
+        let prefix_sets = hashed_state.construct_prefix_sets();
+        overlay_factory = reth_provider::providers::OverlayStateProviderFactory::new(
+            factory,
+            overlay_builder.with_hashed_state_overlay(Some(Arc::new(hashed_state.into_sorted()))),
+        );
+
         assert_eq!(
-            ParallelStateRoot::new(consistent_view, TrieInput::from_state(hashed_state))
+            ParallelStateRoot::new(overlay_factory, prefix_sets.freeze(), runtime)
                 .incremental_root()
                 .unwrap(),
             test_utils::state_root(state)

@@ -2,18 +2,27 @@ use crate::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
 use clap::{Parser, Subcommand};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
+use reth_cli_runner::CliContext;
 use reth_db::version::{get_db_version, DatabaseVersionError, DB_VERSION};
 use reth_db_common::DbTool;
 use std::{
     io::{self, Write},
     sync::Arc,
 };
+mod account_storage;
 mod checksum;
 mod clear;
+mod copy;
 mod diff;
 mod get;
 mod list;
+mod migrate_v2;
+mod prune_checkpoints;
 mod repair_trie;
+mod settings;
+mod stage_checkpoints;
+mod state;
+mod static_file_header;
 mod stats;
 /// DB List TUI
 mod tui;
@@ -35,8 +44,10 @@ pub enum Subcommands {
     Stats(stats::Command),
     /// Lists the contents of a table
     List(list::Command),
-    /// Calculates the content checksum of a table
+    /// Calculates the content checksum of a table or static file segment
     Checksum(checksum::Command),
+    /// Copies the MDBX database to a new location (bundled mdbx_copy)
+    Copy(copy::Command),
     /// Create a diff between two database tables or two entire databases.
     Diff(diff::Command),
     /// Gets the content of a table for the given key
@@ -51,64 +62,94 @@ pub enum Subcommands {
     Clear(clear::Command),
     /// Verifies trie consistency and outputs any inconsistencies
     RepairTrie(repair_trie::Command),
+    /// Reads and displays the static file segment header
+    StaticFileHeader(static_file_header::Command),
     /// Lists current and local database versions
     Version,
     /// Returns the full database path
     Path,
-}
-
-/// `db_ro_exec` opens a database in read-only mode, and then execute with the provided command
-macro_rules! db_ro_exec {
-    ($env:expr, $tool:ident, $N:ident, $command:block) => {
-        let Environment { provider_factory, .. } = $env.init::<$N>(AccessRights::RO)?;
-
-        let $tool = DbTool::new(provider_factory.clone())?;
-        $command;
-    };
+    /// Manage storage settings
+    Settings(settings::Command),
+    /// View or set prune checkpoints
+    PruneCheckpoints(prune_checkpoints::Command),
+    // View or set stage checkpoints
+    StageCheckpoints(stage_checkpoints::Command),
+    /// Gets storage size information for an account
+    AccountStorage(account_storage::Command),
+    /// Gets account state and storage at a specific block
+    State(state::Command),
+    /// Migrate storage layout from v1 (MDBX-only) to v2 (static files + RocksDB)
+    #[command(name = "migrate-v2")]
+    MigrateV2(migrate_v2::Command),
 }
 
 impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C> {
     /// Execute `db` command
-    pub async fn execute<N: CliNodeTypes<ChainSpec = C::ChainSpec>>(self) -> eyre::Result<()> {
+    pub async fn execute<N: CliNodeTypes<ChainSpec = C::ChainSpec>>(
+        self,
+        ctx: CliContext,
+    ) -> eyre::Result<()> {
+        /// Initializes a provider factory with specified access rights, and then executes the
+        /// provided command.
+        macro_rules! db_exec {
+            ($env:expr, $tool:ident, $N:ident, $access_rights:expr, $command:block) => {
+                let Environment { provider_factory, .. } =
+                    $env.init::<$N>($access_rights, ctx.task_executor.clone())?;
+
+                let $tool = DbTool::new(provider_factory)?;
+                $command;
+            };
+        }
+
         let data_dir = self.env.datadir.clone().resolve_datadir(self.env.chain.chain());
         let db_path = data_dir.db();
         let static_files_path = data_dir.static_files();
         let exex_wal_path = data_dir.exex_wal();
 
-        // ensure the provided datadir exist
+        // ensure the provided datadir exists
         eyre::ensure!(
             data_dir.data_dir().is_dir(),
             "Datadir does not exist: {:?}",
             data_dir.data_dir()
         );
 
-        // ensure the provided database exist
+        // ensure the provided database exists
         eyre::ensure!(db_path.is_dir(), "Database does not exist: {:?}", db_path);
 
         match self.command {
             // TODO: We'll need to add this on the DB trait.
             Subcommands::Stats(command) => {
-                db_ro_exec!(self.env, tool, N, {
+                let access_rights = if command.skip_consistency_checks {
+                    AccessRights::RoInconsistent
+                } else {
+                    AccessRights::RO
+                };
+                db_exec!(self.env, tool, N, access_rights, {
                     command.execute(data_dir, &tool)?;
                 });
             }
             Subcommands::List(command) => {
-                db_ro_exec!(self.env, tool, N, {
+                db_exec!(self.env, tool, N, AccessRights::RO, {
                     command.execute(&tool)?;
                 });
             }
             Subcommands::Checksum(command) => {
-                db_ro_exec!(self.env, tool, N, {
+                db_exec!(self.env, tool, N, AccessRights::RO, {
                     command.execute(&tool)?;
                 });
             }
+            Subcommands::Copy(command) => {
+                db_exec!(self.env, tool, N, AccessRights::RO, {
+                    command.execute(tool.provider_factory.db_ref())?;
+                });
+            }
             Subcommands::Diff(command) => {
-                db_ro_exec!(self.env, tool, N, {
+                db_exec!(self.env, tool, N, AccessRights::RO, {
                     command.execute(&tool)?;
                 });
             }
             Subcommands::Get(command) => {
-                db_ro_exec!(self.env, tool, N, {
+                db_exec!(self.env, tool, N, AccessRights::RO, {
                     command.execute(&tool)?;
                 });
             }
@@ -130,19 +171,26 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
                     }
                 }
 
-                let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
-                let tool = DbTool::new(provider_factory)?;
-                tool.drop(db_path, static_files_path, exex_wal_path)?;
+                db_exec!(self.env, tool, N, AccessRights::RW, {
+                    tool.drop(db_path, static_files_path, exex_wal_path)?;
+                });
             }
             Subcommands::Clear(command) => {
-                let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
-                command.execute(provider_factory)?;
+                db_exec!(self.env, tool, N, AccessRights::RW, {
+                    command.execute(&tool)?;
+                });
             }
             Subcommands::RepairTrie(command) => {
                 let access_rights =
                     if command.dry_run { AccessRights::RO } else { AccessRights::RW };
-                let Environment { provider_factory, .. } = self.env.init::<N>(access_rights)?;
-                command.execute(provider_factory)?;
+                db_exec!(self.env, tool, N, access_rights, {
+                    command.execute(&tool, ctx.task_executor, &data_dir)?;
+                });
+            }
+            Subcommands::StaticFileHeader(command) => {
+                db_exec!(self.env, tool, N, AccessRights::RoInconsistent, {
+                    command.execute(&tool)?;
+                });
             }
             Subcommands::Version => {
                 let local_db_version = match get_db_version(&db_path) {
@@ -161,6 +209,38 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
             }
             Subcommands::Path => {
                 println!("{}", db_path.display());
+            }
+            Subcommands::Settings(command) => {
+                db_exec!(self.env, tool, N, command.access_rights(), {
+                    command.execute(&tool)?;
+                });
+            }
+            Subcommands::PruneCheckpoints(command) => {
+                db_exec!(self.env, tool, N, command.access_rights(), {
+                    command.execute(&tool)?;
+                });
+            }
+            Subcommands::StageCheckpoints(command) => {
+                db_exec!(self.env, tool, N, command.access_rights(), {
+                    command.execute(&tool)?;
+                });
+            }
+            Subcommands::AccountStorage(command) => {
+                db_exec!(self.env, tool, N, AccessRights::RO, {
+                    command.execute(&tool)?;
+                });
+            }
+            Subcommands::State(command) => {
+                db_exec!(self.env, tool, N, AccessRights::RO, {
+                    command.execute(&tool)?;
+                });
+            }
+            Subcommands::MigrateV2(command) => {
+                let Environment { provider_factory, .. } =
+                    self.env.init::<N>(AccessRights::RW, ctx.task_executor.clone())?;
+
+                // Migrate changesets+receipts, clear tables, compact MDBX
+                command.execute::<N>(provider_factory).await?;
             }
         }
 

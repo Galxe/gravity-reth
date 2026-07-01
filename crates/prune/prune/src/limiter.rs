@@ -52,7 +52,7 @@ impl PruneTimeLimit {
 
 impl PruneLimiter {
     /// Sets the limit on the number of deleted entries (rows in the database).
-    /// If the limit was already set, it will be overwritten.
+    /// If the limit was already set, it will be overwritten but the deleted count preserved.
     pub const fn set_deleted_entries_limit(mut self, limit: usize) -> Self {
         if let Some(deleted_entries_limit) = self.deleted_entries_limit.as_mut() {
             deleted_entries_limit.limit = limit;
@@ -96,7 +96,7 @@ impl PruneLimiter {
 
     /// Returns the number of deleted entries left before the limit is reached.
     pub fn deleted_entries_limit_left(&self) -> Option<usize> {
-        self.deleted_entries_limit.as_ref().map(|limit| limit.limit - limit.deleted)
+        self.deleted_entries_limit.as_ref().map(|limit| limit.limit.saturating_sub(limit.deleted))
     }
 
     /// Returns the limit on the number of deleted entries (rows in the database).
@@ -233,18 +233,17 @@ mod tests {
     fn test_set_deleted_entries_limit_when_limit_is_reached() {
         let mut pruner = PruneLimiter::default().set_deleted_entries_limit(5);
         assert!(pruner.deleted_entries_limit.is_some());
-        let mut deleted_entries_limit = pruner.deleted_entries_limit.clone().unwrap();
 
-        // Simulate deletion of entries
-        deleted_entries_limit.deleted = 5;
-        assert!(deleted_entries_limit.is_limit_reached());
+        // Simulate deletion of entries on the actual limiter
+        pruner.increment_deleted_entries_count_by(5);
+        assert!(pruner.is_deleted_entries_limit_reached());
 
-        // Overwrite the limit and check if it resets correctly
+        // Overwrite the limit - deleted count is preserved (needed for cross-segment tracking)
         pruner = pruner.set_deleted_entries_limit(10);
-        deleted_entries_limit = pruner.deleted_entries_limit.unwrap();
+        let deleted_entries_limit = pruner.deleted_entries_limit.unwrap();
         assert_eq!(deleted_entries_limit.limit, 10);
-        // Deletion count should reset
-        assert_eq!(deleted_entries_limit.deleted, 0);
+        // Deleted count is preserved, not reset
+        assert_eq!(deleted_entries_limit.deleted, 5);
         assert!(!deleted_entries_limit.is_limit_reached());
     }
 
@@ -410,5 +409,36 @@ mod tests {
         // Sleep for another 10 milliseconds (totaling 15 milliseconds)
         sleep(Duration::new(0, 10_000_000)); // 10 milliseconds
         assert!(limiter.is_limit_reached(), "Limit should be reached when time limit is reached");
+    }
+
+    #[test]
+    fn test_deleted_entries_limit_left_saturation_and_normal() {
+        // less than limit → no saturation
+        let mut limiter = PruneLimiter::default().set_deleted_entries_limit(10);
+        limiter.increment_deleted_entries_count_by(3);
+        assert_eq!(limiter.deleted_entries_limit_left(), Some(7));
+
+        // equal to limit → saturates to 0
+        let mut limiter = PruneLimiter::default().set_deleted_entries_limit(3);
+        limiter.increment_deleted_entries_count_by(3);
+        assert_eq!(limiter.deleted_entries_limit_left(), Some(0));
+
+        // overrun past limit → saturates to 0
+        let mut limiter = PruneLimiter::default().set_deleted_entries_limit(10);
+        limiter.increment_deleted_entries_count_by(12);
+        assert_eq!(limiter.deleted_entries_limit_left(), Some(0));
+
+        // lowering limit via set → saturates to 0 if below deleted
+        let mut limiter = PruneLimiter::default().set_deleted_entries_limit(20);
+        limiter.increment_deleted_entries_count_by(15);
+        let limiter = limiter.set_deleted_entries_limit(10);
+        assert_eq!(limiter.deleted_entries_limit_left(), Some(0));
+
+        // lowering limit via floor → saturates to 0 if below deleted
+        let mut limiter = PruneLimiter::default().set_deleted_entries_limit(15);
+        limiter.increment_deleted_entries_count_by(14);
+        let denominator = NonZeroUsize::new(8).unwrap();
+        let limiter = limiter.floor_deleted_entries_limit_to_multiple_of(denominator);
+        assert_eq!(limiter.deleted_entries_limit_left(), Some(0));
     }
 }

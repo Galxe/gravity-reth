@@ -33,7 +33,7 @@ Reth includes a `jemalloc` feature to explicitly use jemalloc instead of the sys
 cargo build --features jemalloc
 ```
 
-While the `jemalloc` feature does enable jemalloc, reth has an additional feature, `profiling`, that must be used to enable heap profiling. This feature implicitly enables the `jemalloc`
+While the `jemalloc` feature does enable jemalloc, reth has an additional feature, `jemalloc-prof`, that must be used to enable heap profiling. This feature implicitly enables the `jemalloc`
 feature as well:
 
 ```
@@ -139,25 +139,38 @@ cgexec -g memory:rethMemory reth node
 
 ### Understanding allocation with jeprof
 
-When reth is built with the `jemalloc-prof` feature and debug symbols, the profiling still needs to be configured and enabled at runtime. This is done with the `_RJEM_MALLOC_CONF` environment variable. Take the following
-command to launch reth with jemalloc profiling enabled:
+When reth is built with the `jemalloc-prof` feature, profiling is already enabled at compile time — the binary embeds `prof:true,prof_active:true,lg_prof_sample:19` via a `malloc_conf` static. No environment variable is needed to turn on profiling.
+
+To configure additional options like `lg_prof_interval` at runtime, use the `MALLOC_CONF` environment variable:
 
 ```
-_RJEM_MALLOC_CONF=prof:true,lg_prof_interval:32,lg_prof_sample:19 reth node
+MALLOC_CONF=lg_prof_interval:32 reth node
 ```
 
-If reth is not built properly, you will see this when you try to run reth:
+If you see errors like this:
 
 ```
-~/p/reth (dan/managing-memory)> _RJEM_MALLOC_CONF=prof:true,lg_prof_interval:32,lg_prof_sample:19 reth node
 <jemalloc>: Invalid conf pair: prof:true
-<jemalloc>: Invalid conf pair: lg_prof_interval:32
-<jemalloc>: Invalid conf pair: lg_prof_sample:19
 ```
 
-If this happens, jemalloc likely needs to be rebuilt with the `jemalloc-prof` feature enabled.
+It means reth was not built with the `jemalloc-prof` feature, so jemalloc does not have profiling support compiled in. Rebuild with:
+
+```
+cargo build --features jemalloc-prof
+```
 
 If everything is working, this will output `jeprof.*.heap` files while reth is running.
 [The jemalloc website](https://jemalloc.net/jemalloc.3.html#opt.abort) has a helpful overview of the options available, for example `lg_prof_interval`, `lg_prof_sample`, `prof_leak`, and `prof_final`.
 
 Now that we have the heap snapshots, we can analyze them using `jeprof`. An example of jeprof usage and output can be seen on the jemalloc github repository: https://github.com/jemalloc/jemalloc/wiki/Use-Case:-Leak-Checking
+
+### HTTP pprof endpoint
+
+When built with the `jemalloc-prof` feature, reth exposes a heap profiling endpoint on the metrics server (default port 9001) at `/debug/pprof/heap`. This endpoint returns heap profiles in [pprof format](https://github.com/google/pprof), which is compatible with the standard `pprof` toolchain.
+
+By default, the pprof output contains raw addresses that require external symbolization. You need either `addr2line` or `llvm-addr2line` in your PATH for `pprof` to resolve function names.
+
+For pre-symbolized profiles (useful on macOS or when external tools are unavailable), build with the `jemalloc-symbols` feature:
+```
+cargo build --features jemalloc-prof,jemalloc-symbols --profile profiling
+```

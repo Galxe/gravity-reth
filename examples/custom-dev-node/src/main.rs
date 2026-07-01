@@ -17,12 +17,12 @@ use reth_ethereum::{
     },
     provider::CanonStateSubscriptions,
     rpc::api::eth::helpers::EthTransactions,
-    tasks::TaskManager,
+    tasks::Runtime,
 };
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    let tasks = TaskManager::current();
+    let runtime = Runtime::test();
 
     // create node config
     let node_config = NodeConfig::test()
@@ -31,9 +31,9 @@ async fn main() -> eyre::Result<()> {
         .with_chain(custom_chain());
 
     let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
-        .testing_node(tasks.executor())
+        .testing_node(runtime)
         .node(EthereumNode::default())
-        .launch()
+        .launch_with_debug_capabilities()
         .await?;
 
     let mut notifications = node.provider.canonical_state_stream();

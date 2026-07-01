@@ -1,13 +1,14 @@
 //! Support for handling events emitted by node components.
 
 use crate::cl::ConsensusLayerHealthEvent;
-use alloy_consensus::{constants::GWEI_TO_WEI, BlockHeader};
+use alloy_consensus::{
+    constants::{GWEI_TO_WEI, MGAS_TO_GAS},
+    BlockHeader,
+};
 use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::ForkchoiceState;
 use futures::Stream;
-use reth_engine_primitives::{
-    ConsensusEngineEvent, ConsensusEngineLiveSyncProgress, ForkchoiceStatus,
-};
+use reth_engine_primitives::{ConsensusEngineEvent, ForkchoiceStatus, SlowBlockInfo};
 use reth_network_api::PeersInfo;
 use reth_primitives_traits::{format_gas, format_gas_throughput, BlockBody, NodePrimitives};
 use reth_prune_types::PrunerEvent;
@@ -37,14 +38,14 @@ struct NodeState {
     current_stage: Option<CurrentStage>,
     /// The latest block reached by either pipeline or consensus engine.
     latest_block: Option<BlockNumber>,
-    /// The time of the latest block seen by the pipeline
-    latest_block_time: Option<u64>,
     /// Hash of the head block last set by fork choice update
     head_block_hash: Option<B256>,
     /// Hash of the safe block last set by fork choice update
     safe_block_hash: Option<B256>,
     /// Hash of finalized block last set by fork choice update
     finalized_block_hash: Option<B256>,
+    /// The time when we last logged a status message
+    last_status_log_time: Option<u64>,
 }
 
 impl NodeState {
@@ -56,10 +57,10 @@ impl NodeState {
             peers_info,
             current_stage: None,
             latest_block,
-            latest_block_time: None,
             head_block_hash: None,
             safe_block_hash: None,
             finalized_block_hash: None,
+            last_status_log_time: None,
         }
     }
 
@@ -208,6 +209,10 @@ impl NodeState {
 
                 self.current_stage = Some(current_stage);
             }
+            PipelineEvent::Unwound { stage_id, result } => {
+                info!(stage = %stage_id, checkpoint = %result.checkpoint.block_number, "Unwound stage");
+                self.current_stage = None;
+            }
             _ => (),
         }
     }
@@ -233,20 +238,6 @@ impl NodeState {
                 self.safe_block_hash = Some(safe_block_hash);
                 self.finalized_block_hash = Some(finalized_block_hash);
             }
-            ConsensusEngineEvent::LiveSyncProgress(live_sync_progress) => {
-                match live_sync_progress {
-                    ConsensusEngineLiveSyncProgress::DownloadingBlocks {
-                        remaining_blocks,
-                        target,
-                    } => {
-                        info!(
-                            remaining_blocks,
-                            target_block_hash=?target,
-                            "Live sync in progress, downloading blocks"
-                        );
-                    }
-                }
-            }
             ConsensusEngineEvent::CanonicalBlockAdded(executed, elapsed) => {
                 let block = executed.sealed_block();
                 let mut full = block.gas_used() as f64 * 100.0 / block.gas_limit() as f64;
@@ -271,20 +262,89 @@ impl NodeState {
             }
             ConsensusEngineEvent::CanonicalChainCommitted(head, elapsed) => {
                 self.latest_block = Some(head.number());
-                self.latest_block_time = Some(head.timestamp());
-
                 info!(number=head.number(), hash=?head.hash(), ?elapsed, "Canonical chain committed");
             }
             ConsensusEngineEvent::ForkBlockAdded(executed, elapsed) => {
                 let block = executed.sealed_block();
                 info!(number=block.number(), hash=?block.hash(), ?elapsed, "Block added to fork chain");
             }
-            ConsensusEngineEvent::InvalidBlock(block) => {
-                warn!(number=block.number(), hash=?block.hash(), "Encountered invalid block");
+            ConsensusEngineEvent::InvalidBlock { block, error } => {
+                warn!(number=block.number(), hash=?block.hash(), %error, "Encountered invalid block");
             }
             ConsensusEngineEvent::BlockReceived(num_hash) => {
-                info!(number=num_hash.number, hash=?num_hash.hash, "Received block from consensus engine");
+                info!(number=num_hash.number, hash=?num_hash.hash, "Received new payload from consensus engine");
             }
+            ConsensusEngineEvent::SlowBlock(info) => {
+                Self::log_slow_block(&info);
+            }
+        }
+    }
+
+    fn log_slow_block(info: &SlowBlockInfo) {
+        fn hit_rate(hits: usize, misses: usize) -> f64 {
+            let total = hits + misses;
+            if total > 0 {
+                (hits as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            }
+        }
+
+        let stats = &info.stats;
+        let processing_secs =
+            stats.execution_duration.as_secs_f64() + stats.state_hash_duration.as_secs_f64();
+        let mgas_per_sec = if processing_secs > 0.0 {
+            (stats.gas_used as f64 / MGAS_TO_GAS as f64) / processing_secs
+        } else {
+            0.0
+        };
+
+        // Macro for the shared fields — commit_ms is only included when known
+        // (after persistence), omitted entirely for the immediate post-execution emit.
+        macro_rules! log_slow_block_fields {
+            ($($commit_field:tt)*) => {
+                warn!(
+                    target: "reth::slow_block",
+                    message = "Slow block",
+                    block.number = stats.block_number,
+                    block.hash = ?stats.block_hash,
+                    block.gas_used = stats.gas_used,
+                    block.tx_count = stats.tx_count,
+                    timing.execution_ms = stats.execution_duration.as_millis(),
+                    timing.state_read_ms = stats.state_read_duration.as_millis(),
+                    timing.state_hash_ms = stats.state_hash_duration.as_millis(),
+                    $($commit_field)*
+                    timing.total_ms = info.total_duration.as_millis(),
+                    throughput.mgas_per_sec = format!("{:.2}", mgas_per_sec),
+                    state_reads.accounts = stats.accounts_read,
+                    state_reads.storage_slots = stats.storage_read,
+                    state_reads.code = stats.code_read,
+                    state_reads.code_bytes = stats.code_bytes_read,
+                    state_writes.accounts = stats.accounts_changed,
+                    state_writes.accounts_deleted = stats.accounts_deleted,
+                    state_writes.storage_slots = stats.storage_slots_changed,
+                    state_writes.storage_slots_deleted = stats.storage_slots_deleted,
+                    state_writes.code = stats.bytecodes_changed,
+                    state_writes.code_bytes = stats.code_bytes_written,
+                    state_writes.eip7702_delegations_set = stats.eip7702_delegations_set,
+                    state_writes.eip7702_delegations_cleared = stats.eip7702_delegations_cleared,
+                    cache.account.hits = stats.account_cache_hits,
+                    cache.account.misses = stats.account_cache_misses,
+                    cache.account.hit_rate = format!("{:.2}", hit_rate(stats.account_cache_hits, stats.account_cache_misses)),
+                    cache.storage.hits = stats.storage_cache_hits,
+                    cache.storage.misses = stats.storage_cache_misses,
+                    cache.storage.hit_rate = format!("{:.2}", hit_rate(stats.storage_cache_hits, stats.storage_cache_misses)),
+                    cache.code.hits = stats.code_cache_hits,
+                    cache.code.misses = stats.code_cache_misses,
+                    cache.code.hit_rate = format!("{:.2}", hit_rate(stats.code_cache_hits, stats.code_cache_misses)),
+                );
+            }
+        }
+
+        if let Some(commit_dur) = info.commit_duration {
+            log_slow_block_fields!(timing.commit_ms = commit_dur.as_millis(),);
+        } else {
+            log_slow_block_fields!();
         }
     }
 
@@ -296,17 +356,6 @@ impl NodeState {
                 ConsensusLayerHealthEvent::NeverSeen => {
                     warn!(
                         "Post-merge network, but never seen beacon client. Please launch one to follow the chain!"
-                    )
-                }
-                ConsensusLayerHealthEvent::HasNotBeenSeenForAWhile(period) => {
-                    warn!(
-                        ?period,
-                        "Post-merge network, but no beacon client seen for a while. Please launch one to follow the chain!"
-                    )
-                }
-                ConsensusLayerHealthEvent::NeverReceivedUpdates => {
-                    warn!(
-                        "Beacon client online, but never received consensus updates. Please ensure your beacon client is operational to follow the chain!"
                     )
                 }
                 ConsensusLayerHealthEvent::HaveNotReceivedUpdatesForAWhile(period) => {
@@ -483,25 +532,28 @@ where
                         )
                     }
                 }
-            } else if let Some(latest_block) = this.state.latest_block {
+            } else {
                 let now =
                     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                if now.saturating_sub(this.state.latest_block_time.unwrap_or(0)) > 60 {
-                    // Once we start receiving consensus nodes, don't emit status unless stalled for
-                    // 1 minute
-                    info!(
-                        target: "reth::cli",
-                        connected_peers = this.state.num_connected_peers(),
-                        %latest_block,
-                        "Status"
-                    );
+
+                // Only log status if we haven't logged recently
+                if now.saturating_sub(this.state.last_status_log_time.unwrap_or(0)) > 60 {
+                    if let Some(latest_block) = this.state.latest_block {
+                        info!(
+                            target: "reth::cli",
+                            connected_peers = this.state.num_connected_peers(),
+                            %latest_block,
+                            "Status"
+                        );
+                    } else {
+                        info!(
+                            target: "reth::cli",
+                            connected_peers = this.state.num_connected_peers(),
+                            "Status"
+                        );
+                    }
+                    this.state.last_status_log_time = Some(now);
                 }
-            } else {
-                info!(
-                    target: "reth::cli",
-                    connected_peers = this.state.num_connected_peers(),
-                    "Status"
-                );
             }
         }
 
@@ -606,6 +658,8 @@ impl Display for Eta {
                     f,
                     "{}",
                     humantime::format_duration(Duration::from_secs(remaining.as_secs()))
+                        .to_string()
+                        .replace(' ', "")
                 )
             }
         }
@@ -631,6 +685,6 @@ mod tests {
         }
         .to_string();
 
-        assert_eq!(eta, "13m 37s");
+        assert_eq!(eta, "13m37s");
     }
 }

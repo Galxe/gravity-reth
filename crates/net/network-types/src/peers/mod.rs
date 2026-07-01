@@ -8,6 +8,8 @@ pub use config::{ConnectionsConfig, PeersConfig};
 pub use reputation::{Reputation, ReputationChange, ReputationChangeKind, ReputationChangeWeights};
 
 use alloy_eip2124::ForkId;
+use reth_network_peers::{NodeRecord, PeerId};
+use std::time::{Duration, Instant};
 use tracing::trace;
 
 use crate::{
@@ -24,8 +26,10 @@ pub struct Peer {
     pub reputation: i32,
     /// The state of the connection, if any.
     pub state: PeerConnectionState,
+    /// When the current session was established.
+    pub connected_at: Option<Instant>,
     /// The [`ForkId`] that the peer announced via discovery.
-    pub fork_id: Option<ForkId>,
+    pub fork_id: Option<Box<ForkId>>,
     /// Whether the entry should be removed after an existing session was terminated.
     pub remove_after_disconnect: bool,
     /// The kind of peer
@@ -55,11 +59,28 @@ impl Peer {
         self.reputation
     }
 
+    /// Marks this peer as connected.
+    pub fn mark_connected(&mut self) {
+        self.connected_at = Some(Instant::now());
+    }
+
+    /// Clears the current connection timestamp.
+    pub const fn mark_disconnected(&mut self) {
+        self.connected_at = None;
+    }
+
+    /// Returns `true` if the current connection has been active for at least `min_uptime`.
+    pub fn connected_for_at_least(&self, now: Instant, min_uptime: Duration) -> bool {
+        self.connected_at
+            .is_some_and(|connected_at| now.saturating_duration_since(connected_at) >= min_uptime)
+    }
+
     /// Returns a new peer for given [`PeerAddr`] and [`PeerConnectionState`].
     pub fn with_state(addr: PeerAddr, state: PeerConnectionState) -> Self {
         Self {
             addr,
             state,
+            connected_at: None,
             reputation: DEFAULT_REPUTATION,
             fork_id: None,
             remove_after_disconnect: false,
@@ -138,5 +159,35 @@ impl Peer {
     #[inline]
     pub const fn is_static(&self) -> bool {
         matches!(self.kind, PeerKind::Static)
+    }
+}
+
+/// Peer info persisted to disk.
+///
+/// Contains richer metadata than a plain [`NodeRecord`], preserving the peer's kind, fork ID,
+/// and reputation across restarts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PersistedPeerInfo {
+    /// The node record (id, address, ports).
+    pub record: NodeRecord,
+    /// The kind of peer.
+    pub kind: PeerKind,
+    /// The [`ForkId`] that the peer announced via discovery.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub fork_id: Option<ForkId>,
+    /// The peer's reputation at the time of persisting.
+    pub reputation: i32,
+}
+
+impl PersistedPeerInfo {
+    /// Returns the peer id.
+    pub const fn peer_id(&self) -> PeerId {
+        self.record.id
+    }
+
+    /// Converts a legacy [`NodeRecord`] into a [`PersistedPeerInfo`] with default metadata.
+    pub const fn from_node_record(record: NodeRecord) -> Self {
+        Self { record, kind: PeerKind::Basic, fork_id: None, reputation: DEFAULT_REPUTATION }
     }
 }

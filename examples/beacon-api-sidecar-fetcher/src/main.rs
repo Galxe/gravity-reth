@@ -32,7 +32,7 @@ pub mod mined_sidecar;
 
 fn main() {
     Cli::<EthereumChainSpecParser, BeaconSidecarConfig>::parse()
-        .run(|builder, beacon_config| async move {
+        .run(async move |builder, beacon_config| {
             // launch the node
             let NodeHandle { node, node_exit_future } =
                 builder.node(EthereumNode::default()).launch().await?;
@@ -42,7 +42,7 @@ fn main() {
 
             let pool = node.pool.clone();
 
-            node.task_executor.spawn(async move {
+            node.task_executor.spawn_task(async move {
                 let mut sidecar_stream = MinedSidecarStream {
                     events: notifications,
                     pool,
@@ -85,10 +85,7 @@ pub struct BeaconSidecarConfig {
 impl Default for BeaconSidecarConfig {
     /// Default setup for lighthouse client
     fn default() -> Self {
-        Self {
-            cl_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), // Equivalent to Ipv4Addr::LOCALHOST
-            cl_port: 5052,
-        }
+        Self { cl_addr: IpAddr::V4(Ipv4Addr::LOCALHOST), cl_port: 5052 }
     }
 }
 

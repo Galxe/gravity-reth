@@ -8,22 +8,18 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
-pub mod block;
-mod fees;
-pub mod receipt;
 mod rpc;
 pub mod transaction;
 
-pub use block::TryFromBlockResponse;
-pub use fees::{CallFees, CallFeesError};
-pub use receipt::TryFromReceiptResponse;
 pub use rpc::*;
-pub use transaction::{
-    EthTxEnvError, IntoRpcTx, RpcConvert, RpcConverter, TransactionConversionError,
-    TryFromTransactionResponse, TryIntoSimTx, TxInfoMapper,
-};
+pub use transaction::{RpcConvert, RpcConverter, TransactionConversionError};
 
-#[cfg(feature = "op")]
-pub use transaction::op::*;
+pub use alloy_evm::rpc::{CallFees, CallFeesError, EthTxEnvError, TryIntoTxEnv};
+
+// Re-export traits from reth-rpc-traits
+pub use reth_rpc_traits::{
+    FromConsensusHeader, FromConsensusTx, SignTxRequestError, SignableTxRequest, TryIntoSimTx,
+    TxInfoMapper,
+};

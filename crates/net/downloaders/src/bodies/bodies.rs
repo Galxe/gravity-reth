@@ -5,7 +5,7 @@ use alloy_primitives::BlockNumber;
 use futures::Stream;
 use futures_util::StreamExt;
 use reth_config::BodiesConfig;
-use reth_consensus::{Consensus, ConsensusError};
+use reth_consensus::Consensus;
 use reth_network_p2p::{
     bodies::{
         client::BodiesClient,
@@ -14,14 +14,13 @@ use reth_network_p2p::{
     },
     error::{DownloadError, DownloadResult},
 };
-use reth_primitives_traits::{size::InMemorySize, Block, SealedHeader};
+use reth_primitives_traits::{Block, InMemorySize, SealedHeader};
 use reth_storage_api::HeaderProvider;
-use reth_tasks::{TaskSpawner, TokioTaskExecutor};
+use reth_tasks::Runtime;
 use std::{
     cmp::Ordering,
     collections::BinaryHeap,
     fmt::Debug,
-    mem,
     ops::RangeInclusive,
     pin::Pin,
     sync::Arc,
@@ -42,7 +41,7 @@ pub struct BodiesDownloader<
     /// The bodies client
     client: Arc<C>,
     /// The consensus client
-    consensus: Arc<dyn Consensus<B, Error = ConsensusError>>,
+    consensus: Arc<dyn Consensus<B>>,
     /// The database handle
     provider: Provider,
     /// The maximum number of non-empty blocks per one request
@@ -215,9 +214,7 @@ where
 
     /// Adds a new response to the internal buffer
     fn buffer_bodies_response(&mut self, response: Vec<BlockResponse<B>>) {
-        // take into account capacity
-        let size = response.iter().map(BlockResponse::size).sum::<usize>() +
-            response.capacity() * mem::size_of::<BlockResponse<B>>();
+        let size = response.iter().map(BlockResponse::size).sum::<usize>();
 
         let response = OrderedBodiesResponse { resp: response, size };
         let response_len = response.len();
@@ -288,17 +285,9 @@ where
     C: BodiesClient<Body = B::Body> + 'static,
     Provider: HeaderProvider<Header = B::Header> + Unpin + 'static,
 {
-    /// Spawns the downloader task via [`tokio::task::spawn`]
-    pub fn into_task(self) -> TaskDownloader<B> {
-        self.into_task_with(&TokioTaskExecutor::default())
-    }
-
-    /// Convert the downloader into a [`TaskDownloader`] by spawning it via the given spawner.
-    pub fn into_task_with<S>(self, spawner: &S) -> TaskDownloader<B>
-    where
-        S: TaskSpawner,
-    {
-        TaskDownloader::spawn_with(self, spawner)
+    /// Convert the downloader into a [`TaskDownloader`] by spawning it via the given [`Runtime`].
+    pub fn into_task_with(self, runtime: &Runtime) -> TaskDownloader<B> {
+        TaskDownloader::spawn_with(self, runtime)
     }
 }
 
@@ -310,12 +299,14 @@ where
 {
     type Block = B;
 
-    /// Set a new download range (exclusive).
+    /// Set a new download range (inclusive).
     ///
-    /// This method will drain all queued bodies, filter out ones outside the range and put them
-    /// back into the buffer.
-    /// If there are any bodies between the range start and last queued body that have not been
-    /// downloaded or are not in progress, they will be re-requested.
+    /// If the provided range is a suffix of the current range with the same end block, the
+    /// existing download already covers it and the call is a no-op.
+    /// If the range starts immediately after the current range, it is treated as the next
+    /// consecutive range and appended without resetting the in-flight state.
+    /// For all other ranges, the downloader state is cleared and the new range replaces the old
+    /// one.
     fn set_download_range(&mut self, range: RangeInclusive<BlockNumber>) -> DownloadResult<()> {
         // Check if the range is valid.
         if range.is_empty() {
@@ -347,6 +338,12 @@ where
         // written by external services (e.g. BlockchainTree).
         tracing::trace!(target: "downloaders::bodies", ?range, prev_range = ?self.download_range, "Download range reset");
         info!(target: "downloaders::bodies", count, ?range, "Downloading bodies");
+        // Increment out-of-order requests metric if the new start is below the last returned block
+        if let Some(last_returned) = self.latest_queued_block_number &&
+            *range.start() < last_returned
+        {
+            self.metrics.out_of_order_requests.increment(1);
+        }
         self.clear();
         self.download_range = range;
         Ok(())
@@ -574,7 +571,7 @@ impl BodiesDownloaderBuilder {
     pub fn build<B, C, Provider>(
         self,
         client: C,
-        consensus: Arc<dyn Consensus<B, Error = ConsensusError>>,
+        consensus: Arc<dyn Consensus<B>>,
         provider: Provider,
     ) -> BodiesDownloader<B, C, Provider>
     where
@@ -616,41 +613,31 @@ mod tests {
         bodies::test_utils::{insert_headers, zip_blocks},
         test_utils::{generate_bodies, TestBodiesClient},
     };
-    use alloy_primitives::B256;
+    use alloy_primitives::{map::B256Map, B256};
     use assert_matches::assert_matches;
-    use reth_chainspec::MAINNET;
     use reth_consensus::test_utils::TestConsensus;
-    use reth_db::test_utils::{create_test_rw_db, create_test_static_files_dir};
-    use reth_provider::{
-        providers::StaticFileProvider, test_utils::MockNodeTypesWithDB, ProviderFactory,
-    };
+    use reth_provider::test_utils::create_test_provider_factory;
     use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
-    use std::collections::HashMap;
 
     // Check that the blocks are emitted in order of block number, not in order of
     // first-downloaded
     #[tokio::test]
     async fn streams_bodies_in_order() {
         // Generate some random blocks
-        let db = create_test_rw_db();
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=19);
 
-        insert_headers(db.db(), &headers);
+        insert_headers(&factory, &headers);
 
         let client = Arc::new(
             TestBodiesClient::default().with_bodies(bodies.clone()).with_should_delay(true),
         );
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
 
         let mut downloader = BodiesDownloaderBuilder::default()
             .build::<reth_ethereum_primitives::Block, _, _>(
                 client.clone(),
                 Arc::new(TestConsensus::default()),
-                ProviderFactory::<MockNodeTypesWithDB>::new(
-                    db,
-                    MAINNET.clone(),
-                    StaticFileProvider::read_write(static_dir_path).unwrap(),
-                ),
+                factory,
             );
         downloader.set_download_range(0..=19).expect("failed to set download range");
 
@@ -666,7 +653,7 @@ mod tests {
     #[tokio::test]
     async fn requests_correct_number_of_times() {
         // Generate some random blocks
-        let db = create_test_rw_db();
+        let factory = create_test_provider_factory();
         let mut rng = generators::rng();
         let blocks = random_block_range(
             &mut rng,
@@ -678,24 +665,19 @@ mod tests {
         let bodies = blocks
             .into_iter()
             .map(|block| (block.hash(), block.into_body()))
-            .collect::<HashMap<_, _>>();
+            .collect::<B256Map<_>>();
 
-        insert_headers(db.db(), &headers);
+        insert_headers(&factory, &headers);
 
         let request_limit = 10;
         let client = Arc::new(TestBodiesClient::default().with_bodies(bodies.clone()));
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
 
         let mut downloader = BodiesDownloaderBuilder::default()
             .with_request_limit(request_limit)
             .build::<reth_ethereum_primitives::Block, _, _>(
             client.clone(),
             Arc::new(TestConsensus::default()),
-            ProviderFactory::<MockNodeTypesWithDB>::new(
-                db,
-                MAINNET.clone(),
-                StaticFileProvider::read_write(static_dir_path).unwrap(),
-            ),
+            factory,
         );
         downloader.set_download_range(0..=199).expect("failed to set download range");
 
@@ -708,28 +690,23 @@ mod tests {
     #[tokio::test]
     async fn streams_bodies_in_order_after_range_reset() {
         // Generate some random blocks
-        let db = create_test_rw_db();
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=99);
 
-        insert_headers(db.db(), &headers);
+        insert_headers(&factory, &headers);
 
         let stream_batch_size = 20;
         let request_limit = 10;
         let client = Arc::new(
             TestBodiesClient::default().with_bodies(bodies.clone()).with_should_delay(true),
         );
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
         let mut downloader = BodiesDownloaderBuilder::default()
             .with_stream_batch_size(stream_batch_size)
             .with_request_limit(request_limit)
             .build::<reth_ethereum_primitives::Block, _, _>(
                 client.clone(),
                 Arc::new(TestConsensus::default()),
-                ProviderFactory::<MockNodeTypesWithDB>::new(
-                    db,
-                    MAINNET.clone(),
-                    StaticFileProvider::read_write(static_dir_path).unwrap(),
-                ),
+                factory,
             );
 
         let mut range_start = 0;
@@ -750,24 +727,19 @@ mod tests {
     #[tokio::test]
     async fn can_download_new_range_after_termination() {
         // Generate some random blocks
-        let db = create_test_rw_db();
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=199);
 
-        insert_headers(db.db(), &headers);
+        insert_headers(&factory, &headers);
 
         let client = Arc::new(TestBodiesClient::default().with_bodies(bodies.clone()));
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
 
         let mut downloader = BodiesDownloaderBuilder::default()
             .with_stream_batch_size(100)
             .build::<reth_ethereum_primitives::Block, _, _>(
             client.clone(),
             Arc::new(TestConsensus::default()),
-            ProviderFactory::<MockNodeTypesWithDB>::new(
-                db,
-                MAINNET.clone(),
-                StaticFileProvider::read_write(static_dir_path).unwrap(),
-            ),
+            factory,
         );
 
         // Set and download the first range
@@ -792,14 +764,13 @@ mod tests {
     #[tokio::test]
     async fn can_download_after_exceeding_limit() {
         // Generate some random blocks
-        let db = create_test_rw_db();
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=199);
 
-        insert_headers(db.db(), &headers);
+        insert_headers(&factory, &headers);
 
         let client = Arc::new(TestBodiesClient::default().with_bodies(bodies.clone()));
 
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
         // Set the max buffered block size to 1 byte, to make sure that every response exceeds the
         // limit
         let mut downloader = BodiesDownloaderBuilder::default()
@@ -809,11 +780,7 @@ mod tests {
             .build::<reth_ethereum_primitives::Block, _, _>(
                 client.clone(),
                 Arc::new(TestConsensus::default()),
-                ProviderFactory::<MockNodeTypesWithDB>::new(
-                    db,
-                    MAINNET.clone(),
-                    StaticFileProvider::read_write(static_dir_path).unwrap(),
-                ),
+                factory,
             );
 
         // Set and download the entire range
@@ -829,16 +796,15 @@ mod tests {
     #[tokio::test]
     async fn can_tolerate_empty_responses() {
         // Generate some random blocks
-        let db = create_test_rw_db();
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=99);
 
-        insert_headers(db.db(), &headers);
+        insert_headers(&factory, &headers);
 
         // respond with empty bodies for every other request.
         let client = Arc::new(
             TestBodiesClient::default().with_bodies(bodies.clone()).with_empty_responses(2),
         );
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
 
         let mut downloader = BodiesDownloaderBuilder::default()
             .with_request_limit(3)
@@ -846,11 +812,7 @@ mod tests {
             .build::<reth_ethereum_primitives::Block, _, _>(
                 client.clone(),
                 Arc::new(TestConsensus::default()),
-                ProviderFactory::<MockNodeTypesWithDB>::new(
-                    db,
-                    MAINNET.clone(),
-                    StaticFileProvider::read_write(static_dir_path).unwrap(),
-                ),
+                factory,
             );
 
         // Download the requested range

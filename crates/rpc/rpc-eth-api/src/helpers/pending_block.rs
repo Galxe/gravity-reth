@@ -6,14 +6,15 @@ use crate::{EthApiTypes, FromEthApiError, FromEvmError, RpcNodeCore};
 use alloy_consensus::{BlockHeader, Transaction};
 use alloy_eips::eip7840::BlobParams;
 use alloy_primitives::{B256, U256};
-use alloy_rpc_types_eth::BlockNumberOrTag;
+use alloy_rpc_types_eth::{BlockNumberOrTag, BlockOverrides};
 use futures::Future;
-use reth_chain_state::{BlockState, ExecutedBlock};
-use reth_chainspec::{ChainSpecProvider, EthChainSpec};
+use reth_chain_state::{BlockState, ComputedTrieData, ExecutedBlock};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::{BlockExecutionError, BlockValidationError, ProviderError, RethError};
 use reth_evm::{
-    execute::{BlockBuilder, BlockBuilderOutcome, ExecutionOutcome},
-    ConfigureEvm, Evm, NextBlockEnvAttributes, SpecFor,
+    block::TxResult,
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
+    ConfigureEvm, Evm, EvmEnvFor, NextBlockEnvAttributes,
 };
 use reth_primitives_traits::{transaction::error::InvalidTransactionError, HeaderTy, SealedHeader};
 use reth_revm::{database::StateProviderDatabase, db::State};
@@ -23,14 +24,14 @@ use reth_rpc_eth_types::{
     PendingBlockEnv, PendingBlockEnvOrigin,
 };
 use reth_storage_api::{
-    noop::NoopProvider, BlockReader, BlockReaderIdExt, ProviderBlock, ProviderHeader,
-    ProviderReceipt, ProviderTx, ReceiptProvider, StateProviderBox, StateProviderFactory,
+    noop::NoopProvider, BlockReader, BlockReaderIdExt, ProviderHeader, ProviderTx,
+    StateProviderBox, StateProviderFactory,
 };
 use reth_transaction_pool::{
     error::InvalidPoolTransactionError, BestTransactions, BestTransactionsAttributes,
     PoolTransaction, TransactionPool,
 };
-use revm::context_interface::Block;
+use revm::context_interface::{Block, Cfg as _};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -61,22 +62,9 @@ pub trait LoadPendingBlock:
     /// Configures the [`PendingBlockEnv`] for the pending block
     ///
     /// If no pending block is available, this will derive it from the `latest` block
-    #[expect(clippy::type_complexity)]
-    fn pending_block_env_and_cfg(
-        &self,
-    ) -> Result<
-        PendingBlockEnv<
-            ProviderBlock<Self::Provider>,
-            ProviderReceipt<Self::Provider>,
-            SpecFor<Self::Evm>,
-        >,
-        Self::Error,
-    > {
-        if let Some(block) = self.provider().pending_block().map_err(Self::Error::from_eth_err)? &&
-            let Some(receipts) = self
-                .provider()
-                .receipts_by_block(block.hash().into())
-                .map_err(Self::Error::from_eth_err)?
+    fn pending_block_env_and_cfg(&self) -> Result<PendingBlockEnv<Self::Evm>, Self::Error> {
+        if let Some((block, receipts)) =
+            self.provider().pending_block_and_receipts().map_err(Self::Error::from_eth_err)?
         {
             // Note: for the PENDING block we assume it is past the known merge block and
             // thus this will not fail when looking up the total
@@ -115,7 +103,7 @@ pub trait LoadPendingBlock:
         &self,
         parent: &SealedHeader<ProviderHeader<Self::Provider>>,
     ) -> Result<<Self::Evm as ConfigureEvm>::NextBlockEnvCtx, Self::Error> {
-        Ok(self.pending_env_builder().pending_env_attributes(parent)?)
+        Ok(self.pending_env_builder().pending_env_attributes(parent, None)?)
     }
 
     /// Returns a [`StateProviderBox`] on a mem-pool built pending block overlaying latest.
@@ -158,6 +146,23 @@ pub trait LoadPendingBlock:
                 PendingBlockEnvOrigin::DerivedFromLatest(parent) => parent,
             };
 
+            self.build_pool_pending_block(parent, pending.evm_env).await
+        }
+    }
+
+    /// Builds or returns a cached pending block from the transaction pool.
+    ///
+    /// This is the shared implementation used by both [`Self::pool_pending_block`] and
+    /// [`Self::local_pending_block`] to avoid resolving the pending block environment twice.
+    fn build_pool_pending_block(
+        &self,
+        parent: SealedHeader<ProviderHeader<Self::Provider>>,
+        evm_env: EvmEnvFor<Self::Evm>,
+    ) -> impl Future<Output = Result<Option<PendingBlock<Self::Primitives>>, Self::Error>> + Send
+    where
+        Self: SpawnBlocking,
+    {
+        async move {
             // we couldn't find the real pending block, so we need to build it ourselves
             let mut lock = self.pending_block().lock().await;
 
@@ -166,7 +171,7 @@ pub trait LoadPendingBlock:
             // Is the pending block cached?
             if let Some(pending_block) = lock.as_ref() {
                 // Is the cached block not expired and latest is its parent?
-                if pending.evm_env.block_env.number == U256::from(pending_block.block().number()) &&
+                if evm_env.block_env.number() == U256::from(pending_block.block().number()) &&
                     parent.hash() == pending_block.block().parent_hash() &&
                     now <= pending_block.expires_at
                 {
@@ -219,19 +224,21 @@ pub trait LoadPendingBlock:
                 PendingBlockEnvOrigin::ActualPending(block, receipts) => {
                     Some(BlockAndReceipts { block, receipts })
                 }
-                PendingBlockEnvOrigin::DerivedFromLatest(..) => {
-                    self.pool_pending_block().await?.map(PendingBlock::into_block_and_receipts)
-                }
+                PendingBlockEnvOrigin::DerivedFromLatest(parent) => self
+                    .build_pool_pending_block(parent, pending.evm_env)
+                    .await?
+                    .map(PendingBlock::into_block_and_receipts),
             })
         }
     }
 
-    /// Builds a pending block using the configured provider and pool.
+    /// Builds a locally derived pending block using the configured provider and pool.
     ///
-    /// If the origin is the actual pending block, the block is built with withdrawals.
+    /// This is used when no execution-layer pending block is available and a pending block is
+    /// derived from the latest canonical header, using the provided parent.
     ///
-    /// After Cancun, if the origin is the actual pending block, the block includes the EIP-4788 pre
-    /// block contract call using the parent beacon block root received from the CL.
+    /// Withdrawals and any fork-specific behavior (such as EIP-4788 pre-block contract calls) are
+    /// determined by the EVM environment and chain specification used during construction.
     fn build_block(
         &self,
         parent: &SealedHeader<ProviderHeader<Self::Provider>>,
@@ -245,7 +252,7 @@ pub trait LoadPendingBlock:
             .provider()
             .history_by_block_hash(parent.hash())
             .map_err(Self::Error::from_eth_err)?;
-        let state = StateProviderDatabase::new(&state_provider);
+        let state = StateProviderDatabase::new(state_provider);
         let mut db = State::builder().with_database(state).with_bundle_update().build();
 
         let mut builder = self
@@ -256,39 +263,67 @@ pub trait LoadPendingBlock:
 
         builder.apply_pre_execution_changes().map_err(Self::Error::from_eth_err)?;
 
-        let block_env = builder.evm_mut().block().clone();
+        let block_gas_limit: u64 = builder.evm().block().gas_limit();
+        let is_amsterdam = self
+            .provider()
+            .chain_spec()
+            .is_amsterdam_active_at_timestamp(builder.evm().block().timestamp().saturating_to());
+        let basefee = builder.evm().block().basefee();
+        let blob_gasprice = builder.evm().block().blob_gasprice().map(|p| p as u64);
 
         let blob_params = self
             .provider()
             .chain_spec()
             .blob_params_at_timestamp(parent.timestamp())
             .unwrap_or_else(BlobParams::cancun);
-        let mut cumulative_gas_used = 0;
+        let mut cumulative_tx_gas_used = 0;
+        let mut block_regular_gas_used = 0;
+        let mut block_state_gas_used = 0;
         let mut sum_blob_gas_used = 0;
-        let block_gas_limit: u64 = block_env.gas_limit;
+        let tx_gas_limit_cap = builder.evm().cfg_env().tx_gas_limit_cap();
 
         // Only include transactions if not configured as Empty
         if !self.pending_block_kind().is_empty() {
             let mut best_txs = self
                 .pool()
                 .best_transactions_with_attributes(BestTransactionsAttributes::new(
-                    block_env.basefee,
-                    block_env.blob_gasprice().map(|gasprice| gasprice as u64),
+                    basefee,
+                    blob_gasprice,
                 ))
                 // freeze to get a block as fast as possible
                 .without_updates();
 
             while let Some(pool_tx) = best_txs.next() {
                 // ensure we still have capacity for this transaction
-                if cumulative_gas_used + pool_tx.gas_limit() > block_gas_limit {
+                let exceeds_gas_limit = if is_amsterdam {
+                    let regular_available_gas =
+                        block_gas_limit.saturating_sub(block_regular_gas_used);
+                    let state_available_gas = block_gas_limit.saturating_sub(block_state_gas_used);
+                    let regular_tx_gas_limit = pool_tx.gas_limit().min(tx_gas_limit_cap);
+
+                    if regular_tx_gas_limit > regular_available_gas {
+                        Some((regular_tx_gas_limit, regular_available_gas))
+                    } else if pool_tx.gas_limit() > state_available_gas {
+                        Some((pool_tx.gas_limit(), state_available_gas))
+                    } else {
+                        None
+                    }
+                } else {
+                    let block_available_gas =
+                        block_gas_limit.saturating_sub(cumulative_tx_gas_used);
+                    (pool_tx.gas_limit() > block_available_gas)
+                        .then_some((pool_tx.gas_limit(), block_available_gas))
+                };
+
+                if let Some((transaction_gas_limit, block_available_gas)) = exceeds_gas_limit {
                     // we can't fit this transaction into the block, so we need to mark it as
                     // invalid which also removes all dependent transaction from
                     // the iterator before we can continue
                     best_txs.mark_invalid(
                         &pool_tx,
                         InvalidPoolTransactionError::ExceedsGasLimit(
-                            pool_tx.gas_limit(),
-                            block_gas_limit,
+                            transaction_gas_limit,
+                            block_available_gas,
                         ),
                     );
                     continue
@@ -312,7 +347,8 @@ pub trait LoadPendingBlock:
 
                 // There's only limited amount of blob space available per block, so we need to
                 // check if the EIP-4844 can still fit in the block
-                if let Some(tx_blob_gas) = tx.blob_gas_used() &&
+                let tx_blob_gas = tx.blob_gas_used();
+                if let Some(tx_blob_gas) = tx_blob_gas &&
                     sum_blob_gas_used + tx_blob_gas > blob_params.max_blob_gas_per_block()
                 {
                     // we can't fit this _blob_ transaction into the block, so we mark it as
@@ -329,32 +365,51 @@ pub trait LoadPendingBlock:
                     continue
                 }
 
-                let gas_used = match builder.execute_transaction(tx.clone()) {
-                    Ok(gas_used) => gas_used,
-                    Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                        error,
-                        ..
-                    })) => {
-                        if error.is_nonce_too_low() {
-                            // if the nonce is too low, we can skip this transaction
-                        } else {
-                            // if the transaction is invalid, we can skip it and all of its
-                            // descendants
+                let mut tx_regular_gas_used = 0;
+                let gas_output =
+                    match builder.execute_transaction_with_result_closure(tx, |result| {
+                        tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+                    }) {
+                        Ok(gas_output) => gas_output,
+                        Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                            error,
+                            ..
+                        })) => {
+                            if error.is_nonce_too_low() {
+                                // if the nonce is too low, we can skip this transaction
+                            } else {
+                                // if the transaction is invalid, we can skip it and all of its
+                                // descendants
+                                best_txs.mark_invalid(
+                                    &pool_tx,
+                                    InvalidPoolTransactionError::Consensus(
+                                        InvalidTransactionError::TxTypeNotSupported,
+                                    ),
+                                );
+                            }
+                            continue
+                        }
+                        Err(BlockExecutionError::Validation(
+                            BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                                transaction_gas_limit,
+                                block_available_gas,
+                            },
+                        )) => {
                             best_txs.mark_invalid(
                                 &pool_tx,
-                                InvalidPoolTransactionError::Consensus(
-                                    InvalidTransactionError::TxTypeNotSupported,
+                                InvalidPoolTransactionError::ExceedsGasLimit(
+                                    transaction_gas_limit,
+                                    block_available_gas,
                                 ),
                             );
+                            continue
                         }
-                        continue
-                    }
-                    // this is an error that we should treat as fatal for this attempt
-                    Err(err) => return Err(Self::Error::from_eth_err(err)),
-                };
+                        // this is an error that we should treat as fatal for this attempt
+                        Err(err) => return Err(Self::Error::from_eth_err(err)),
+                    };
 
                 // add to the total blob gas used if the transaction successfully executed
-                if let Some(tx_blob_gas) = tx.blob_gas_used() {
+                if let Some(tx_blob_gas) = tx_blob_gas {
                     sum_blob_gas_used += tx_blob_gas;
 
                     // if we've reached the max data gas per block, we can skip blob txs entirely
@@ -363,36 +418,42 @@ pub trait LoadPendingBlock:
                     }
                 }
 
-                // add gas used by the transaction to cumulative gas used, before creating the
-                // receipt
-                cumulative_gas_used += gas_used;
+                // Track receipt gas and the Amsterdam block-capacity counter separately.
+                let gas_used = gas_output.tx_gas_used();
+                cumulative_tx_gas_used += gas_used;
+                block_regular_gas_used += tx_regular_gas_used;
+                block_state_gas_used += gas_output.state_gas_used();
             }
         }
 
-        let BlockBuilderOutcome { execution_result, block, hashed_state, .. } =
-            builder.finish(NoopProvider::default()).map_err(Self::Error::from_eth_err)?;
+        let BlockBuilderOutcome { execution_result, block, hashed_state, trie_updates, .. } =
+            builder.finish(NoopProvider::default(), None).map_err(Self::Error::from_eth_err)?;
 
-        let execution_outcome = ExecutionOutcome::new(
-            db.take_bundle(),
-            vec![execution_result.receipts],
-            block.number(),
-            vec![execution_result.requests],
-        );
+        let execution_outcome =
+            BlockExecutionOutput { state: db.take_bundle(), result: execution_result };
 
-        Ok(ExecutedBlock {
-            recovered_block: block.into(),
-            execution_output: Arc::new(execution_outcome),
-            hashed_state: Arc::new(hashed_state),
-        })
+        Ok(ExecutedBlock::new(
+            block.into(),
+            Arc::new(execution_outcome),
+            ComputedTrieData::new(
+                Arc::new(hashed_state.into_sorted()),
+                Arc::new(trie_updates.into_sorted()),
+            ),
+        ))
     }
 }
 
 /// A type that knows how to build a [`ConfigureEvm::NextBlockEnvCtx`] for a pending block.
 pub trait PendingEnvBuilder<Evm: ConfigureEvm>: Send + Sync + Unpin + 'static {
-    /// Builds a [`ConfigureEvm::NextBlockEnvCtx`] for pending block.
+    /// Builds a [`ConfigureEvm::NextBlockEnvCtx`] for a pending block.
+    ///
+    /// `block_overrides` can be used for values that need to be part of the next block context
+    /// before the EVM environment is constructed. Other block overrides are applied directly to the
+    /// EVM environment after construction.
     fn pending_env_attributes(
         &self,
         parent: &SealedHeader<HeaderTy<Evm::Primitives>>,
+        block_overrides: Option<&BlockOverrides>,
     ) -> Result<Evm::NextBlockEnvCtx, EthApiError>;
 }
 
@@ -402,8 +463,15 @@ pub trait PendingEnvBuilder<Evm: ConfigureEvm>: Send + Sync + Unpin + 'static {
 /// This assumes that next environment building doesn't require any additional context, for more
 /// complex implementations one should implement [`PendingEnvBuilder`] on their custom type.
 pub trait BuildPendingEnv<Header> {
-    /// Builds a [`ConfigureEvm::NextBlockEnvCtx`] for pending block.
-    fn build_pending_env(parent: &SealedHeader<Header>) -> Self;
+    /// Builds a [`ConfigureEvm::NextBlockEnvCtx`] for a pending block.
+    ///
+    /// `block_overrides` can be used for values that need to be part of the next block context
+    /// before the EVM environment is constructed. Other block overrides are applied directly to the
+    /// EVM environment after construction.
+    fn build_pending_env(
+        parent: &SealedHeader<Header>,
+        block_overrides: Option<&BlockOverrides>,
+    ) -> Self;
 }
 
 impl<Evm> PendingEnvBuilder<Evm> for ()
@@ -413,20 +481,89 @@ where
     fn pending_env_attributes(
         &self,
         parent: &SealedHeader<HeaderTy<Evm::Primitives>>,
+        block_overrides: Option<&BlockOverrides>,
     ) -> Result<Evm::NextBlockEnvCtx, EthApiError> {
-        Ok(Evm::NextBlockEnvCtx::build_pending_env(parent))
+        Ok(Evm::NextBlockEnvCtx::build_pending_env(parent, block_overrides))
     }
 }
 
 impl<H: BlockHeader> BuildPendingEnv<H> for NextBlockEnvAttributes {
-    fn build_pending_env(parent: &SealedHeader<H>) -> Self {
-        Self {
+    fn build_pending_env(
+        parent: &SealedHeader<H>,
+        block_overrides: Option<&BlockOverrides>,
+    ) -> Self {
+        let mut attributes = Self {
             timestamp: parent.timestamp().saturating_add(12),
             suggested_fee_recipient: parent.beneficiary(),
             prev_randao: B256::random(),
             gas_limit: parent.gas_limit(),
             parent_beacon_block_root: parent.parent_beacon_block_root().map(|_| B256::ZERO),
             withdrawals: parent.withdrawals_root().map(|_| Default::default()),
+            extra_data: parent.extra_data().clone(),
+            slot_number: parent.slot_number().map(|slot| slot.saturating_add(1)),
+        };
+
+        if attributes.parent_beacon_block_root.is_some() &&
+            let Some(beacon_root) = block_overrides.and_then(|overrides| overrides.beacon_root)
+        {
+            attributes.parent_beacon_block_root = Some(beacon_root);
         }
+
+        attributes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Header;
+    use alloy_primitives::B256;
+    use reth_primitives_traits::SealedHeader;
+
+    #[test]
+    fn pending_env_defaults_parent_beacon_root() {
+        let mut header = Header::default();
+        let beacon_root = B256::repeat_byte(0x42);
+        header.parent_beacon_block_root = Some(beacon_root);
+        let sealed = SealedHeader::new(header, B256::ZERO);
+
+        let attrs = NextBlockEnvAttributes::build_pending_env(&sealed, None);
+
+        assert_eq!(attrs.parent_beacon_block_root, Some(B256::ZERO));
+    }
+
+    #[test]
+    fn pending_env_applies_parent_beacon_root_override() {
+        let header = Header { parent_beacon_block_root: Some(B256::ZERO), ..Default::default() };
+        let sealed = SealedHeader::new(header, B256::ZERO);
+        let beacon_root = B256::repeat_byte(0x42);
+        let block_overrides =
+            BlockOverrides { beacon_root: Some(beacon_root), ..Default::default() };
+
+        let attrs = NextBlockEnvAttributes::build_pending_env(&sealed, Some(&block_overrides));
+
+        assert_eq!(attrs.parent_beacon_block_root, Some(beacon_root));
+    }
+
+    #[test]
+    fn pending_env_ignores_parent_beacon_root_override_before_fork() {
+        let sealed = SealedHeader::new(Header::default(), B256::ZERO);
+        let beacon_root = B256::repeat_byte(0x42);
+        let block_overrides =
+            BlockOverrides { beacon_root: Some(beacon_root), ..Default::default() };
+
+        let attrs = NextBlockEnvAttributes::build_pending_env(&sealed, Some(&block_overrides));
+
+        assert_eq!(attrs.parent_beacon_block_root, None);
+    }
+
+    #[test]
+    fn pending_env_increments_parent_slot_number() {
+        let header = Header { slot_number: Some(7), ..Default::default() };
+        let sealed = SealedHeader::new(header, B256::ZERO);
+
+        let attrs = NextBlockEnvAttributes::build_pending_env(&sealed, None);
+
+        assert_eq!(attrs.slot_number, Some(8));
     }
 }

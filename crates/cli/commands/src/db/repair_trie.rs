@@ -1,20 +1,42 @@
+use alloy_consensus::BlockHeader as AlloyBlockHeader;
 use clap::Parser;
+use metrics::{self, Counter};
+use reth_chainspec::EthChainSpec;
+use reth_cli_util::parse_socket_address;
 use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO},
     database::Database,
-    tables,
     transaction::{DbTx, DbTxMut},
 };
-use reth_node_builder::NodeTypesWithDB;
-use reth_provider::{providers::ProviderNodeTypes, ProviderFactory, StageCheckpointReader};
+use reth_db_common::DbTool;
+use reth_node_core::{
+    dirs::{ChainPath, DataDirPath},
+    version::version_metadata,
+};
+use reth_node_metrics::{
+    chain::ChainSpecInfo,
+    hooks::Hooks,
+    server::{MetricServer, MetricServerConfig},
+    version::VersionInfo,
+};
+use reth_provider::{
+    providers::ProviderNodeTypes, ChainSpecProvider, HeaderProvider, StageCheckpointReader,
+};
 use reth_stages::StageId;
+use reth_storage_api::StorageSettingsCache;
+use reth_tasks::TaskExecutor;
 use reth_trie::{
     verify::{Output, Verifier},
     Nibbles,
 };
-use reth_trie_common::{StorageTrieEntry, StoredNibbles, StoredNibblesSubKey};
-use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
-use std::time::{Duration, Instant};
+use reth_trie_db::{
+    DatabaseHashedCursorFactory, DatabaseStateRoot, DatabaseTrieCursorFactory,
+    StorageTrieEntryLike, TrieTableAdapter,
+};
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 use tracing::{info, warn};
 
 const PROGRESS_PERIOD: Duration = Duration::from_secs(5);
@@ -25,34 +47,90 @@ pub struct Command {
     /// Only show inconsistencies without making any repairs
     #[arg(long)]
     pub(crate) dry_run: bool,
+
+    /// Enable Prometheus metrics.
+    ///
+    /// The metrics will be served at the given interface and port.
+    #[arg(long = "metrics", value_name = "ADDR:PORT", value_parser = parse_socket_address)]
+    pub(crate) metrics: Option<SocketAddr>,
 }
 
 impl Command {
     /// Execute `db repair-trie` command
     pub fn execute<N: ProviderNodeTypes>(
         self,
-        provider_factory: ProviderFactory<N>,
+        tool: &DbTool<N>,
+        task_executor: TaskExecutor,
+        data_dir: &ChainPath<DataDirPath>,
     ) -> eyre::Result<()> {
-        if self.dry_run {
-            verify_only(provider_factory)?
+        // Set up metrics server if requested
+        let _metrics_handle = if let Some(listen_addr) = self.metrics {
+            let chain_name = tool.provider_factory.chain_spec().chain().to_string();
+            let executor = task_executor.clone();
+            let pprof_dump_dir = data_dir.pprof_dumps();
+
+            let handle = task_executor.spawn_critical_task("metrics server", async move {
+                let config = MetricServerConfig::new(
+                    listen_addr,
+                    VersionInfo {
+                        version: version_metadata().cargo_pkg_version.as_ref(),
+                        build_timestamp: version_metadata().vergen_build_timestamp.as_ref(),
+                        cargo_features: version_metadata().vergen_cargo_features.as_ref(),
+                        git_sha: version_metadata().vergen_git_sha.as_ref(),
+                        target_triple: version_metadata().vergen_cargo_target_triple.as_ref(),
+                        build_profile: version_metadata().build_profile_name.as_ref(),
+                    },
+                    ChainSpecInfo { name: chain_name },
+                    executor,
+                    Hooks::builder().build(),
+                    pprof_dump_dir,
+                );
+
+                // Spawn the metrics server
+                if let Err(e) = MetricServer::new(config).serve().await {
+                    tracing::error!("Metrics server error: {}", e);
+                }
+            });
+
+            Some(handle)
         } else {
-            verify_and_repair(provider_factory)?
+            None
+        };
+
+        if self.dry_run {
+            verify_only(tool)?
+        } else {
+            verify_and_repair(tool)?
         }
 
         Ok(())
     }
 }
 
-fn verify_only<N: NodeTypesWithDB>(provider_factory: ProviderFactory<N>) -> eyre::Result<()> {
+fn verify_only<N: ProviderNodeTypes>(tool: &DbTool<N>) -> eyre::Result<()> {
+    // Log the database block tip from Finish stage checkpoint
+    let finish_checkpoint = tool
+        .provider_factory
+        .provider()?
+        .get_stage_checkpoint(StageId::Finish)?
+        .unwrap_or_default();
+    info!("Database block tip: {}", finish_checkpoint.block_number);
+
     // Get a database transaction directly from the database
-    let db = provider_factory.db_ref();
+    let db = tool.provider_factory.db_ref();
     let mut tx = db.tx()?;
     tx.disable_long_read_transaction_safety();
 
+    reth_trie_db::with_adapter!(tool.provider_factory, |A| do_verify_only::<_, A>(&tx))
+}
+
+fn do_verify_only<TX: DbTx, A: TrieTableAdapter>(tx: &TX) -> eyre::Result<()> {
     // Create the verifier
-    let hashed_cursor_factory = DatabaseHashedCursorFactory::new(&tx);
-    let trie_cursor_factory = DatabaseTrieCursorFactory::new(&tx);
-    let verifier = Verifier::new(trie_cursor_factory, hashed_cursor_factory)?;
+    let hashed_cursor_factory = DatabaseHashedCursorFactory::new(tx);
+    let trie_cursor_factory = DatabaseTrieCursorFactory::<_, A>::new(tx);
+    let verifier = Verifier::new(&trie_cursor_factory, hashed_cursor_factory)?;
+
+    let metrics = RepairTrieMetrics::new();
 
     let mut inconsistent_nodes = 0;
     let start_time = Instant::now();
@@ -70,6 +148,21 @@ fn verify_only<N: NodeTypesWithDB>(provider_factory: ProviderFactory<N>) -> eyre
         } else {
             warn!("Inconsistency found: {output:?}");
             inconsistent_nodes += 1;
+
+            // Record metrics based on output type
+            match output {
+                Output::AccountExtra(_, _) |
+                Output::AccountWrong { .. } |
+                Output::AccountMissing(_, _) => {
+                    metrics.account_inconsistencies.increment(1);
+                }
+                Output::StorageExtra(_, _, _) |
+                Output::StorageWrong { .. } |
+                Output::StorageMissing(_, _, _) => {
+                    metrics.storage_inconsistencies.increment(1);
+                }
+                Output::Progress(_) => unreachable!(),
+            }
         }
     }
 
@@ -114,29 +207,54 @@ fn verify_checkpoints(provider: impl StageCheckpointReader) -> eyre::Result<()> 
     Ok(())
 }
 
-fn verify_and_repair<N: ProviderNodeTypes>(
-    provider_factory: ProviderFactory<N>,
-) -> eyre::Result<()> {
+fn verify_and_repair<N: ProviderNodeTypes>(tool: &DbTool<N>) -> eyre::Result<()> {
     // Get a read-write database provider
-    let mut provider_rw = provider_factory.provider_rw()?;
+    let mut provider_rw = tool.provider_factory.provider_rw()?;
+
+    // Log the database block tip from Finish stage checkpoint
+    let finish_checkpoint = provider_rw.get_stage_checkpoint(StageId::Finish)?.unwrap_or_default();
+    info!("Database block tip: {}", finish_checkpoint.block_number);
 
     // Check that a pipeline sync isn't in progress.
     verify_checkpoints(provider_rw.as_ref())?;
 
+    let inconsistent_nodes = reth_trie_db::with_adapter!(tool.provider_factory, |A| {
+        do_verify_and_repair::<_, A>(&mut provider_rw, finish_checkpoint.block_number)?
+    });
+
+    if inconsistent_nodes == 0 {
+        info!("No inconsistencies found");
+    } else {
+        provider_rw.commit()?;
+        info!("Repaired {} inconsistencies and committed changes", inconsistent_nodes);
+    }
+
+    Ok(())
+}
+
+fn do_verify_and_repair<N: ProviderNodeTypes, A: TrieTableAdapter>(
+    provider_rw: &mut reth_provider::DatabaseProviderRW<N::DB, N>,
+    block_number: u64,
+) -> eyre::Result<usize>
+where
+    <N::DB as reth_db_api::database::Database>::TXMut: DbTxMut + DbTx,
+{
+    // Create cursors for making modifications with
     let tx = provider_rw.tx_mut();
     tx.disable_long_read_transaction_safety();
+    let mut account_trie_cursor = tx.cursor_write::<A::AccountTrieTable>()?;
+    let mut storage_trie_cursor = tx.cursor_dup_write::<A::StorageTrieTable>()?;
 
-    // Create the hashed cursor factory
+    // Create the cursor factories. These cannot accept the `&mut` tx above because they
+    // require it to be AsRef.
+    let tx = provider_rw.tx_ref();
     let hashed_cursor_factory = DatabaseHashedCursorFactory::new(tx);
-
-    // Create the trie cursor factory
-    let trie_cursor_factory = DatabaseTrieCursorFactory::new(tx);
+    let trie_cursor_factory = DatabaseTrieCursorFactory::<_, A>::new(tx);
 
     // Create the verifier
-    let verifier = Verifier::new(trie_cursor_factory, hashed_cursor_factory)?;
+    let verifier = Verifier::new(&trie_cursor_factory, hashed_cursor_factory)?;
 
-    let mut account_trie_cursor = tx.cursor_write::<tables::AccountsTrie>()?;
-    let mut storage_trie_cursor = tx.cursor_dup_write::<tables::StoragesTrie>()?;
+    let metrics = RepairTrieMetrics::new();
 
     let mut inconsistent_nodes = 0;
     let start_time = Instant::now();
@@ -149,22 +267,37 @@ fn verify_and_repair<N: ProviderNodeTypes>(
         if !matches!(output, Output::Progress(_)) {
             warn!("Inconsistency found, will repair: {output:?}");
             inconsistent_nodes += 1;
+
+            // Record metrics based on output type
+            match &output {
+                Output::AccountExtra(_, _) |
+                Output::AccountWrong { .. } |
+                Output::AccountMissing(_, _) => {
+                    metrics.account_inconsistencies.increment(1);
+                }
+                Output::StorageExtra(_, _, _) |
+                Output::StorageWrong { .. } |
+                Output::StorageMissing(_, _, _) => {
+                    metrics.storage_inconsistencies.increment(1);
+                }
+                Output::Progress(_) => {}
+            }
         }
 
         match output {
             Output::AccountExtra(path, _node) => {
                 // Extra account node in trie, remove it
-                let nibbles = StoredNibbles(path);
-                if account_trie_cursor.seek_exact(nibbles)?.is_some() {
+                let key: A::AccountKey = path.into();
+                if account_trie_cursor.seek_exact(key)?.is_some() {
                     account_trie_cursor.delete_current()?;
                 }
             }
             Output::StorageExtra(account, path, _node) => {
                 // Extra storage node in trie, remove it
-                let nibbles = StoredNibblesSubKey(path);
+                let subkey: A::StorageSubKey = path.into();
                 if storage_trie_cursor
-                    .seek_by_key_subkey(account, nibbles.clone())?
-                    .filter(|e| e.nibbles == nibbles)
+                    .seek_by_key_subkey(account, subkey.clone())?
+                    .filter(|e| *e.nibbles() == subkey)
                     .is_some()
                 {
                     storage_trie_cursor.delete_current()?;
@@ -173,14 +306,23 @@ fn verify_and_repair<N: ProviderNodeTypes>(
             Output::AccountWrong { path, expected: node, .. } |
             Output::AccountMissing(path, node) => {
                 // Wrong/missing account node value, upsert it
-                let nibbles = StoredNibbles(path);
-                account_trie_cursor.upsert(nibbles, &node)?;
+                let key: A::AccountKey = path.into();
+                account_trie_cursor.upsert(key, &node)?;
             }
             Output::StorageWrong { account, path, expected: node, .. } |
             Output::StorageMissing(account, path, node) => {
                 // Wrong/missing storage node value, upsert it
-                let nibbles = StoredNibblesSubKey(path);
-                let entry = StorageTrieEntry { nibbles, node };
+                // (We can't just use `upsert` method with a dup cursor, it's not properly
+                // supported)
+                let subkey: A::StorageSubKey = path.into();
+                let entry = A::StorageValue::new(subkey.clone(), node);
+                if storage_trie_cursor
+                    .seek_by_key_subkey(account, subkey.clone())?
+                    .filter(|v| *v.nibbles() == subkey)
+                    .is_some()
+                {
+                    storage_trie_cursor.delete_current()?;
+                }
                 storage_trie_cursor.upsert(account, &entry)?;
             }
             Output::Progress(path) => {
@@ -192,11 +334,43 @@ fn verify_and_repair<N: ProviderNodeTypes>(
         }
     }
 
-    if inconsistent_nodes == 0 {
-        info!("No inconsistencies found");
-    } else {
-        info!("Repaired {} inconsistencies, committing changes", inconsistent_nodes);
-        provider_rw.commit()?;
+    drop(account_trie_cursor);
+    drop(storage_trie_cursor);
+
+    if inconsistent_nodes > 0 {
+        // Refuse to commit repaired trie tables unless they reproduce the canonical tip state
+        // root.
+        verify_repaired_state_root::<_, A>(provider_rw, block_number)?;
+    }
+
+    Ok(inconsistent_nodes as usize)
+}
+
+fn verify_repaired_state_root<N: ProviderNodeTypes, A: TrieTableAdapter>(
+    provider_rw: &reth_provider::DatabaseProviderRW<N::DB, N>,
+    block_number: u64,
+) -> eyre::Result<()>
+where
+    <N::DB as reth_db_api::database::Database>::TXMut: DbTxMut + DbTx,
+{
+    type DbStateRoot<'a, TX, A> = reth_trie::StateRoot<
+        DatabaseTrieCursorFactory<&'a TX, A>,
+        DatabaseHashedCursorFactory<&'a TX>,
+    >;
+
+    let expected_state_root = provider_rw
+        .header_by_number(block_number)?
+        .ok_or_else(|| {
+            eyre::eyre!("Missing canonical header at database block tip {block_number}")
+        })?
+        .state_root();
+
+    let computed_state_root = DbStateRoot::<_, A>::from_tx(provider_rw.tx_ref()).root()?;
+
+    if computed_state_root != expected_state_root {
+        return Err(eyre::eyre!(
+            "Repaired trie state root mismatch at block {block_number}: computed {computed_state_root}, header {expected_state_root}",
+        ))
     }
 
     Ok(())
@@ -237,4 +411,26 @@ fn output_progress(last_account: Nibbles, start_time: Instant, inconsistent_node
         inconsistent_nodes,
         "Repairing trie tables",
     );
+}
+
+/// Metrics for tracking trie repair inconsistencies
+#[derive(Debug)]
+struct RepairTrieMetrics {
+    account_inconsistencies: Counter,
+    storage_inconsistencies: Counter,
+}
+
+impl RepairTrieMetrics {
+    fn new() -> Self {
+        Self {
+            account_inconsistencies: metrics::counter!(
+                "db.repair_trie.inconsistencies_found",
+                "type" => "account"
+            ),
+            storage_inconsistencies: metrics::counter!(
+                "db.repair_trie.inconsistencies_found",
+                "type" => "storage"
+            ),
+        }
+    }
 }

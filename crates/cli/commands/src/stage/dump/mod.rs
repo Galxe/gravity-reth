@@ -3,7 +3,11 @@ use crate::common::{AccessRights, CliNodeComponents, CliNodeTypes, Environment, 
 use clap::Parser;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
+<<<<<<< HEAD
 use reth_db::{init_db, DatabaseArguments, DatabaseEnv};
+=======
+use reth_db::{init_db, mdbx::DatabaseArguments, DatabaseEnv};
+>>>>>>> v2.3.0
 use reth_db_api::{
     cursor::DbCursorRO, database::Database, models::ClientVersion, table::TableImporter, tables,
     transaction::DbTx,
@@ -29,7 +33,10 @@ use execution::dump_execution_stage;
 mod merkle;
 use merkle::dump_merkle_stage;
 
-/// `reth dump-stage` command
+/// `reth dump-stage` command.
+///
+/// Note: mutates the source datadir (unwinds hashing/merkle/execution before copying tables).
+/// Stop the node and back up the datadir first.
 #[derive(Debug, Parser)]
 pub struct Command<C: ChainSpecParser> {
     #[command(flatten)]
@@ -72,10 +79,11 @@ pub struct StageCommand {
 }
 
 macro_rules! handle_stage {
-    ($stage_fn:ident, $tool:expr, $command:expr) => {{
+    ($stage_fn:ident, $tool:expr, $command:expr, $runtime:expr) => {{
         let StageCommand { output_datadir, from, to, dry_run, .. } = $command;
         let output_datadir =
             output_datadir.with_chain($tool.chain().chain(), DatadirArgs::default());
+<<<<<<< HEAD
         $stage_fn($tool, *from, *to, output_datadir, *dry_run).await?
     }};
 
@@ -84,18 +92,39 @@ macro_rules! handle_stage {
         let output_datadir =
             output_datadir.with_chain($tool.chain().chain(), DatadirArgs::default());
         $stage_fn($tool, *from, *to, output_datadir, *dry_run, $executor, $consensus).await?
+=======
+        $stage_fn($tool, *from, *to, output_datadir, *dry_run, $runtime).await?
+    }};
+
+    ($stage_fn:ident, $tool:expr, $command:expr, $executor:expr, $consensus:expr, $runtime:expr) => {{
+        let StageCommand { output_datadir, from, to, dry_run, .. } = $command;
+        let output_datadir =
+            output_datadir.with_chain($tool.chain().chain(), DatadirArgs::default());
+        $stage_fn($tool, *from, *to, output_datadir, *dry_run, $executor, $consensus, $runtime)
+            .await?
+>>>>>>> v2.3.0
     }};
 }
 
 impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C> {
     /// Execute `dump-stage` command
+<<<<<<< HEAD
     pub async fn execute<N, Comp, F>(self, components: F) -> eyre::Result<()>
+=======
+    pub async fn execute<N, Comp, F>(
+        self,
+        components: F,
+        runtime: reth_tasks::Runtime,
+    ) -> eyre::Result<()>
+>>>>>>> v2.3.0
     where
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
         Comp: CliNodeComponents<N>,
         F: FnOnce(Arc<C::ChainSpec>) -> Comp,
     {
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
+        // `unwind_and_copy` opens a RW provider on the source datadir, so open RW here.
+        let Environment { provider_factory, .. } =
+            self.env.init::<N>(AccessRights::RW, runtime.clone())?;
         let tool = DbTool::new(provider_factory)?;
         let components = components(tool.chain());
         let evm_config = components.evm_config().clone();
@@ -103,6 +132,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
 
         match &self.command {
             Stages::Execution(cmd) => {
+<<<<<<< HEAD
                 handle_stage!(dump_execution_stage, &tool, cmd, evm_config, consensus)
             }
             Stages::StorageHashing(cmd) => handle_stage!(dump_hashing_storage_stage, &tool, cmd),
@@ -110,6 +140,26 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
             Stages::Merkle(cmd) => {
                 handle_stage!(dump_merkle_stage, &tool, cmd, evm_config, consensus)
             }
+=======
+                handle_stage!(
+                    dump_execution_stage,
+                    &tool,
+                    cmd,
+                    evm_config,
+                    consensus,
+                    runtime.clone()
+                )
+            }
+            Stages::StorageHashing(cmd) => {
+                handle_stage!(dump_hashing_storage_stage, &tool, cmd, runtime.clone())
+            }
+            Stages::AccountHashing(cmd) => {
+                handle_stage!(dump_hashing_account_stage, &tool, cmd, runtime.clone())
+            }
+            Stages::Merkle(cmd) => {
+                handle_stage!(dump_merkle_stage, &tool, cmd, evm_config, consensus, runtime.clone())
+            }
+>>>>>>> v2.3.0
         }
 
         Ok(())

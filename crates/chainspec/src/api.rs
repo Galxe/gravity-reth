@@ -1,7 +1,10 @@
 use crate::{ChainSpec, DepositContract};
 use alloc::{boxed::Box, vec::Vec};
 use alloy_chains::Chain;
+<<<<<<< HEAD
 use alloy_consensus::Header;
+=======
+>>>>>>> v2.3.0
 use alloy_eips::{calc_next_block_base_fee, eip1559::BaseFeeParams, eip7840::BlobParams};
 use alloy_genesis::Genesis;
 use alloy_primitives::{B256, U256};
@@ -64,6 +67,7 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
     /// Returns the final total difficulty if the Paris hardfork is known.
     fn final_paris_total_difficulty(&self) -> Option<U256>;
 
+<<<<<<< HEAD
     /// Returns the Gravity-specific hardforks and their activation conditions.
     ///
     /// Callers use the generic [`Hardforks`] trait to query activation:
@@ -108,6 +112,21 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
 
 impl EthChainSpec for ChainSpec {
     type Header = Header;
+=======
+    /// See [`calc_next_block_base_fee`].
+    fn next_block_base_fee(&self, parent: &Self::Header, target_timestamp: u64) -> Option<u64> {
+        Some(calc_next_block_base_fee(
+            parent.gas_used(),
+            parent.gas_limit(),
+            parent.base_fee_per_gas()?,
+            self.base_fee_params_at_timestamp(target_timestamp),
+        ))
+    }
+}
+
+impl<H: BlockHeader> EthChainSpec for ChainSpec<H> {
+    type Header = H;
+>>>>>>> v2.3.0
 
     fn chain(&self) -> Chain {
         self.chain
@@ -164,6 +183,7 @@ impl EthChainSpec for ChainSpec {
     }
 
     fn final_paris_total_difficulty(&self) -> Option<U256> {
+<<<<<<< HEAD
         self.paris_block_and_final_difficulty.map(|(_, final_difficulty)| final_difficulty)
     }
 
@@ -186,5 +206,8 @@ impl EthChainSpec for ChainSpec {
         } else {
             None
         }
+=======
+        self.get_final_paris_total_difficulty()
+>>>>>>> v2.3.0
     }
 }

@@ -1,18 +1,18 @@
 //! Merkle trie proofs.
 
-use crate::{Nibbles, TrieAccount};
-use alloc::{borrow::Cow, vec::Vec};
+use crate::{BranchNodeMasks, BranchNodeMasksMap, Nibbles, ProofTrieNodeV2, TrieAccount};
+use alloc::{borrow::Cow, collections::VecDeque, vec::Vec};
 use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_primitives::{
     keccak256,
-    map::{hash_map, B256Map, B256Set, HashMap},
+    map::{hash_map, B256Map, B256Set},
     Address, Bytes, B256, U256,
 };
 use alloy_rlp::{encode_fixed_size, Decodable, EMPTY_STRING_CODE};
 use alloy_trie::{
     nodes::TrieNode,
     proof::{verify_proof, DecodedProofNodes, ProofNodes, ProofVerificationError},
-    TrieMask, EMPTY_ROOT_HASH,
+    EMPTY_ROOT_HASH,
 };
 use derive_more::{Deref, DerefMut, IntoIterator};
 use itertools::Itertools;
@@ -79,7 +79,14 @@ impl MultiProofTargets {
 
     fn extend_inner(&mut self, other: Cow<'_, Self>) {
         for (hashed_address, hashed_slots) in other.iter() {
-            self.entry(*hashed_address).or_default().extend(hashed_slots);
+            match self.entry(*hashed_address) {
+                hash_map::Entry::Vacant(entry) => {
+                    entry.insert(hashed_slots.clone());
+                }
+                hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().extend(hashed_slots);
+                }
+            }
         }
     }
 
@@ -88,6 +95,11 @@ impl MultiProofTargets {
     /// See [`ChunkedMultiProofTargets`] for more information.
     pub fn chunks(self, size: usize) -> ChunkedMultiProofTargets {
         ChunkedMultiProofTargets::new(self, size)
+    }
+
+    /// Returns the number of items that will be considered during chunking in `[Self::chunks]`.
+    pub fn chunking_length(&self) -> usize {
+        self.values().map(|slots| 1 + slots.len().saturating_sub(1)).sum::<usize>()
     }
 }
 
@@ -133,7 +145,7 @@ impl ChunkedMultiProofTargets {
                     )
                 }
             })
-            .sorted();
+            .sorted_unstable();
         Self { flattened_targets, size }
     }
 }
@@ -168,10 +180,9 @@ impl Iterator for ChunkedMultiProofTargets {
 pub struct MultiProof {
     /// State trie multiproof for requested accounts.
     pub account_subtree: ProofNodes,
-    /// The hash masks of the branch nodes in the account proof.
-    pub branch_node_hash_masks: HashMap<Nibbles, TrieMask>,
-    /// The tree masks of the branch nodes in the account proof.
-    pub branch_node_tree_masks: HashMap<Nibbles, TrieMask>,
+    /// Consolidated branch node masks (`hash_mask`, `tree_mask`) for each path in the account
+    /// proof.
+    pub branch_node_masks: BranchNodeMasksMap,
     /// Storage trie multiproofs.
     pub storages: B256Map<StorageMultiProof>,
 }
@@ -180,8 +191,7 @@ impl MultiProof {
     /// Returns true if the multiproof is empty.
     pub fn is_empty(&self) -> bool {
         self.account_subtree.is_empty() &&
-            self.branch_node_hash_masks.is_empty() &&
-            self.branch_node_tree_masks.is_empty() &&
+            self.branch_node_masks.is_empty() &&
             self.storages.is_empty()
     }
 
@@ -262,18 +272,21 @@ impl MultiProof {
     /// proofs.
     pub fn extend(&mut self, other: Self) {
         self.account_subtree.extend_from(other.account_subtree);
+        self.branch_node_masks.extend(other.branch_node_masks);
 
-        self.branch_node_hash_masks.extend(other.branch_node_hash_masks);
-        self.branch_node_tree_masks.extend(other.branch_node_tree_masks);
-
+        let reserve = if self.storages.is_empty() {
+            other.storages.len()
+        } else {
+            other.storages.len().div_ceil(2)
+        };
+        self.storages.reserve(reserve);
         for (hashed_address, storage) in other.storages {
             match self.storages.entry(hashed_address) {
                 hash_map::Entry::Occupied(mut entry) => {
                     debug_assert_eq!(entry.get().root, storage.root);
                     let entry = entry.get_mut();
                     entry.subtree.extend_from(storage.subtree);
-                    entry.branch_node_hash_masks.extend(storage.branch_node_hash_masks);
-                    entry.branch_node_tree_masks.extend(storage.branch_node_tree_masks);
+                    entry.branch_node_masks.extend(storage.branch_node_masks);
                 }
                 hash_map::Entry::Vacant(entry) => {
                     entry.insert(storage);
@@ -297,10 +310,9 @@ impl MultiProof {
 pub struct DecodedMultiProof {
     /// State trie multiproof for requested accounts.
     pub account_subtree: DecodedProofNodes,
-    /// The hash masks of the branch nodes in the account proof.
-    pub branch_node_hash_masks: HashMap<Nibbles, TrieMask>,
-    /// The tree masks of the branch nodes in the account proof.
-    pub branch_node_tree_masks: HashMap<Nibbles, TrieMask>,
+    /// Consolidated branch node masks (`hash_mask`, `tree_mask`) for each path in the account
+    /// proof.
+    pub branch_node_masks: BranchNodeMasksMap,
     /// Storage trie multiproofs.
     pub storages: B256Map<DecodedStorageMultiProof>,
 }
@@ -309,8 +321,7 @@ impl DecodedMultiProof {
     /// Returns true if the multiproof is empty.
     pub fn is_empty(&self) -> bool {
         self.account_subtree.is_empty() &&
-            self.branch_node_hash_masks.is_empty() &&
-            self.branch_node_tree_masks.is_empty() &&
+            self.branch_node_masks.is_empty() &&
             self.storages.is_empty()
     }
 
@@ -390,18 +401,21 @@ impl DecodedMultiProof {
     /// proofs.
     pub fn extend(&mut self, other: Self) {
         self.account_subtree.extend_from(other.account_subtree);
+        self.branch_node_masks.extend(other.branch_node_masks);
 
-        self.branch_node_hash_masks.extend(other.branch_node_hash_masks);
-        self.branch_node_tree_masks.extend(other.branch_node_tree_masks);
-
+        let reserve = if self.storages.is_empty() {
+            other.storages.len()
+        } else {
+            other.storages.len().div_ceil(2)
+        };
+        self.storages.reserve(reserve);
         for (hashed_address, storage) in other.storages {
             match self.storages.entry(hashed_address) {
                 hash_map::Entry::Occupied(mut entry) => {
                     debug_assert_eq!(entry.get().root, storage.root);
                     let entry = entry.get_mut();
                     entry.subtree.extend_from(storage.subtree);
-                    entry.branch_node_hash_masks.extend(storage.branch_node_hash_masks);
-                    entry.branch_node_tree_masks.extend(storage.branch_node_tree_masks);
+                    entry.branch_node_masks.extend(storage.branch_node_masks);
                 }
                 hash_map::Entry::Vacant(entry) => {
                     entry.insert(storage);
@@ -432,13 +446,147 @@ impl TryFrom<MultiProof> for DecodedMultiProof {
             .into_iter()
             .map(|(address, storage)| Ok((address, storage.try_into()?)))
             .collect::<Result<B256Map<_>, alloy_rlp::Error>>()?;
-        Ok(Self {
-            account_subtree,
-            branch_node_hash_masks: multi_proof.branch_node_hash_masks,
-            branch_node_tree_masks: multi_proof.branch_node_tree_masks,
-            storages,
-        })
+        Ok(Self { account_subtree, branch_node_masks: multi_proof.branch_node_masks, storages })
     }
+}
+
+/// V2 decoded multiproof which contains the results of both account and storage V2 proof
+/// calculations.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct DecodedMultiProofV2 {
+    /// Account trie proof nodes
+    pub account_proofs: Vec<ProofTrieNodeV2>,
+    /// Storage trie proof nodes indexed by account
+    pub storage_proofs: B256Map<Vec<ProofTrieNodeV2>>,
+}
+
+impl DecodedMultiProofV2 {
+    /// Returns true if there are no proofs
+    pub fn is_empty(&self) -> bool {
+        self.account_proofs.is_empty() && self.storage_proofs.is_empty()
+    }
+
+    /// Builds a `DecodedMultiProofV2` from a flat witness map (hash → RLP-encoded trie node).
+    ///
+    /// This performs a BFS traversal starting from `state_root`, decoding each witness entry
+    /// as a trie node and organizing them into account and storage proof vectors. This is the
+    /// inverse of witness generation — it reconstructs the structured multiproof from the flat
+    /// format used in `ExecutionWitness`.
+    pub fn from_witness(
+        state_root: B256,
+        witness: &B256Map<impl AsRef<[u8]>>,
+    ) -> Result<Self, alloy_rlp::Error> {
+        let mut account_nodes: Vec<(Nibbles, TrieNode, Option<BranchNodeMasks>)> = Vec::new();
+        let mut storage_nodes: B256Map<Vec<(Nibbles, TrieNode, Option<BranchNodeMasks>)>> =
+            B256Map::default();
+
+        let mut queue: VecDeque<(B256, Nibbles, Option<B256>)> =
+            VecDeque::from([(state_root, Nibbles::default(), None)]);
+
+        while let Some((hash, path, maybe_account)) = queue.pop_front() {
+            let Some(rlp_bytes) = witness.get(&hash) else { continue };
+            let trie_node = TrieNode::decode(&mut rlp_bytes.as_ref())?;
+
+            match &trie_node {
+                TrieNode::Branch(branch) => {
+                    for (idx, maybe_child) in branch.as_ref().children() {
+                        if let Some(child_hash) =
+                            maybe_child.and_then(alloy_trie::nodes::RlpNode::as_hash)
+                        {
+                            let mut child_path = path;
+                            child_path.push_unchecked(idx);
+                            queue.push_back((child_hash, child_path, maybe_account));
+                        }
+                    }
+                }
+                TrieNode::Extension(ext) => {
+                    if let Some(child_hash) = ext.child.as_hash() {
+                        let mut child_path = path;
+                        child_path.extend(&ext.key);
+                        queue.push_back((child_hash, child_path, maybe_account));
+                    }
+                }
+                TrieNode::Leaf(leaf) => {
+                    if maybe_account.is_none() {
+                        let mut full_path = path;
+                        full_path.extend(&leaf.key);
+                        let hashed_address = B256::from_slice(&full_path.pack());
+                        let account = TrieAccount::decode(&mut &leaf.value[..])?;
+                        if account.storage_root != EMPTY_ROOT_HASH {
+                            queue.push_back((
+                                account.storage_root,
+                                Nibbles::default(),
+                                Some(hashed_address),
+                            ));
+                        }
+                    }
+                }
+                TrieNode::EmptyRoot => {}
+            }
+
+            if let Some(account) = maybe_account {
+                storage_nodes.entry(account).or_default().push((path, trie_node, None));
+            } else {
+                account_nodes.push((path, trie_node, None));
+            }
+        }
+
+        account_nodes.sort_by(|(a, _, _), (b, _, _)| b.cmp(a));
+        let account_proofs = ProofTrieNodeV2::from_sorted_trie_nodes(account_nodes);
+
+        let mut storage_proofs = B256Map::default();
+        for (account, mut nodes) in storage_nodes {
+            nodes.sort_by(|(a, _, _), (b, _, _)| b.cmp(a));
+            storage_proofs.insert(account, ProofTrieNodeV2::from_sorted_trie_nodes(nodes));
+        }
+
+        Ok(Self { account_proofs, storage_proofs })
+    }
+
+    /// Appends the given multiproof's data to this one.
+    ///
+    /// This implementation does not deduplicate redundant proofs.
+    pub fn extend(&mut self, other: Self) {
+        self.account_proofs.extend(other.account_proofs);
+        for (hashed_address, other_storage_proofs) in other.storage_proofs {
+            match self.storage_proofs.entry(hashed_address) {
+                hash_map::Entry::Vacant(entry) => {
+                    entry.insert(other_storage_proofs);
+                }
+                hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().extend(other_storage_proofs);
+                }
+            }
+        }
+    }
+}
+
+impl From<DecodedMultiProof> for DecodedMultiProofV2 {
+    fn from(proof: DecodedMultiProof) -> Self {
+        let account_proofs =
+            decoded_proof_nodes_to_v2(proof.account_subtree, &proof.branch_node_masks);
+        let storage_proofs = proof
+            .storages
+            .into_iter()
+            .map(|(address, storage)| {
+                (address, decoded_proof_nodes_to_v2(storage.subtree, &storage.branch_node_masks))
+            })
+            .collect();
+        Self { account_proofs, storage_proofs }
+    }
+}
+
+/// Converts a [`DecodedProofNodes`] (path → [`TrieNode`] map) into a `Vec<ProofTrieNodeV2>`,
+/// merging extension nodes into their child branch nodes.
+fn decoded_proof_nodes_to_v2(
+    nodes: DecodedProofNodes,
+    masks: &BranchNodeMasksMap,
+) -> Vec<ProofTrieNodeV2> {
+    let mut sorted: Vec<_> = nodes.into_inner().into_iter().collect();
+    sorted.sort_unstable_by(|a, b| crate::depth_first_cmp(&a.0, &b.0));
+    ProofTrieNodeV2::from_sorted_trie_nodes(
+        sorted.into_iter().map(|(path, node)| (path, node, masks.get(&path).copied())),
+    )
 }
 
 /// The merkle multiproof of storage trie.
@@ -448,10 +596,9 @@ pub struct StorageMultiProof {
     pub root: B256,
     /// Storage multiproof for requested slots.
     pub subtree: ProofNodes,
-    /// The hash masks of the branch nodes in the storage proof.
-    pub branch_node_hash_masks: HashMap<Nibbles, TrieMask>,
-    /// The tree masks of the branch nodes in the storage proof.
-    pub branch_node_tree_masks: HashMap<Nibbles, TrieMask>,
+    /// Consolidated branch node masks (`hash_mask`, `tree_mask`) for each path in the storage
+    /// proof.
+    pub branch_node_masks: BranchNodeMasksMap,
 }
 
 impl StorageMultiProof {
@@ -463,8 +610,7 @@ impl StorageMultiProof {
                 Nibbles::default(),
                 Bytes::from([EMPTY_STRING_CODE]),
             )]),
-            branch_node_hash_masks: HashMap::default(),
-            branch_node_tree_masks: HashMap::default(),
+            branch_node_masks: BranchNodeMasksMap::default(),
         }
     }
 
@@ -503,10 +649,9 @@ pub struct DecodedStorageMultiProof {
     pub root: B256,
     /// Storage multiproof for requested slots.
     pub subtree: DecodedProofNodes,
-    /// The hash masks of the branch nodes in the storage proof.
-    pub branch_node_hash_masks: HashMap<Nibbles, TrieMask>,
-    /// The tree masks of the branch nodes in the storage proof.
-    pub branch_node_tree_masks: HashMap<Nibbles, TrieMask>,
+    /// Consolidated branch node masks (`hash_mask`, `tree_mask`) for each path in the storage
+    /// proof.
+    pub branch_node_masks: BranchNodeMasksMap,
 }
 
 impl DecodedStorageMultiProof {
@@ -515,8 +660,7 @@ impl DecodedStorageMultiProof {
         Self {
             root: EMPTY_ROOT_HASH,
             subtree: DecodedProofNodes::from_iter([(Nibbles::default(), TrieNode::EmptyRoot)]),
-            branch_node_hash_masks: HashMap::default(),
-            branch_node_tree_masks: HashMap::default(),
+            branch_node_masks: BranchNodeMasksMap::default(),
         }
     }
 
@@ -555,8 +699,7 @@ impl TryFrom<StorageMultiProof> for DecodedStorageMultiProof {
         Ok(Self {
             root: multi_proof.root,
             subtree,
-            branch_node_hash_masks: multi_proof.branch_node_hash_masks,
-            branch_node_tree_masks: multi_proof.branch_node_tree_masks,
+            branch_node_masks: multi_proof.branch_node_masks,
         })
     }
 }
@@ -581,18 +724,48 @@ pub struct AccountProof {
 
 #[cfg(feature = "eip1186")]
 impl AccountProof {
-    /// Convert into an EIP-1186 account proof response
+    /// Convert into an EIP-1186 account proof response.
+    ///
+    /// For non-existent accounts, this returns `KECCAK_EMPTY` for `codeHash` and
+    /// `EMPTY_ROOT_HASH` for `storageHash`, matching reth's default behavior.
+    ///
+    /// Use [`Self::into_eip1186_response_with`] to customize the behavior for
+    /// non-existent accounts (e.g. returning `B256::ZERO` for geth compatibility).
     pub fn into_eip1186_response(
         self,
         slots: Vec<alloy_serde::JsonStorageKey>,
     ) -> alloy_rpc_types_eth::EIP1186AccountProofResponse {
+        self.into_eip1186_response_with(slots, false)
+    }
+
+    /// Convert into an EIP-1186 account proof response, with optional geth-compatible
+    /// zero hashes for non-existent accounts.
+    ///
+    /// When `zero_empty_account` is `true`, non-existent accounts return `B256::ZERO`
+    /// for both `codeHash` and `storageHash`, matching geth's behavior since v1.13.4
+    /// ([go-ethereum#28357](https://github.com/ethereum/go-ethereum/pull/28357)).
+    ///
+    /// When `false`, returns `KECCAK_EMPTY` / `EMPTY_ROOT_HASH` (reth default).
+    ///
+    /// See: <https://github.com/ethereum/go-ethereum/issues/28441>
+    pub fn into_eip1186_response_with(
+        self,
+        slots: Vec<alloy_serde::JsonStorageKey>,
+        zero_empty_account: bool,
+    ) -> alloy_rpc_types_eth::EIP1186AccountProofResponse {
+        let is_non_existent = self.info.is_none();
         let info = self.info.unwrap_or_default();
+        let (code_hash, storage_hash) = if is_non_existent && zero_empty_account {
+            (B256::ZERO, B256::ZERO)
+        } else {
+            (info.get_bytecode_hash(), self.storage_root)
+        };
         alloy_rpc_types_eth::EIP1186AccountProofResponse {
             address: self.address,
             balance: info.balance,
-            code_hash: info.get_bytecode_hash(),
+            code_hash,
             nonce: info.nonce,
-            storage_hash: self.storage_root,
+            storage_hash,
             account_proof: self.proof,
             storage_proof: self
                 .storage_proofs
@@ -625,11 +798,17 @@ impl AccountProof {
 
         let (storage_root, info) = if nonce == 0 &&
             balance.is_zero() &&
-            storage_hash.is_zero() &&
-            code_hash == KECCAK_EMPTY
+            (storage_hash.is_zero() || storage_hash == EMPTY_ROOT_HASH) &&
+            (code_hash == KECCAK_EMPTY || code_hash.is_zero())
         {
             // Account does not exist in state. Return `None` here to prevent proof
             // verification.
+            //
+            // Note: geth (since v1.13.4, go-ethereum#28357) returns `B256::ZERO` for
+            // both `codeHash` and `storageHash` in exclusion proofs, while reth
+            // returns `KECCAK_EMPTY` / `EMPTY_ROOT_HASH`. We accept both formats here
+            // so that proofs obtained from any client can be deserialized correctly.
+            // See: https://github.com/ethereum/go-ethereum/issues/28441
             (EMPTY_ROOT_HASH, None)
         } else {
             (storage_hash, Some(Account { nonce, balance, bytecode_hash: code_hash.into() }))
@@ -905,8 +1084,7 @@ mod tests {
             StorageMultiProof {
                 root,
                 subtree: subtree1,
-                branch_node_hash_masks: HashMap::default(),
-                branch_node_tree_masks: HashMap::default(),
+                branch_node_masks: BranchNodeMasksMap::default(),
             },
         );
 
@@ -920,8 +1098,7 @@ mod tests {
             StorageMultiProof {
                 root,
                 subtree: subtree2,
-                branch_node_hash_masks: HashMap::default(),
-                branch_node_tree_masks: HashMap::default(),
+                branch_node_masks: BranchNodeMasksMap::default(),
             },
         );
 
@@ -1066,5 +1243,119 @@ mod tests {
         acc.info.take();
         acc.storage_root = EMPTY_ROOT_HASH;
         assert_eq!(acc, inverse);
+    }
+
+    #[test]
+    #[cfg(feature = "eip1186")]
+    fn from_eip1186_proof_accepts_geth_zero_hashes() {
+        // geth (since v1.13.4) returns B256::ZERO for codeHash and storageHash
+        // in exclusion proofs for non-existent accounts, instead of
+        // KECCAK_EMPTY / EMPTY_ROOT_HASH. Verify that from_eip1186_proof
+        // correctly recognizes this format as a non-existent account.
+        let geth_proof = alloy_rpc_types_eth::EIP1186AccountProofResponse {
+            address: Address::random(),
+            balance: U256::ZERO,
+            code_hash: B256::ZERO,
+            nonce: 0,
+            storage_hash: B256::ZERO,
+            account_proof: vec![],
+            storage_proof: vec![],
+        };
+
+        let acc: AccountProof = geth_proof.into();
+        // Should be interpreted as a non-existent account (info = None)
+        assert!(acc.info.is_none());
+        assert_eq!(acc.storage_root, EMPTY_ROOT_HASH);
+    }
+
+    #[test]
+    #[cfg(feature = "eip1186")]
+    fn from_eip1186_proof_accepts_empty_hashes() {
+        let proof = alloy_rpc_types_eth::EIP1186AccountProofResponse {
+            address: Address::random(),
+            balance: U256::ZERO,
+            code_hash: KECCAK_EMPTY,
+            nonce: 0,
+            storage_hash: EMPTY_ROOT_HASH,
+            account_proof: vec![],
+            storage_proof: vec![],
+        };
+
+        let acc: AccountProof = proof.into();
+        assert!(acc.info.is_none());
+        assert_eq!(acc.storage_root, EMPTY_ROOT_HASH);
+    }
+
+    #[test]
+    #[cfg(feature = "eip1186")]
+    fn into_eip1186_response_zero_empty_account() {
+        // Non-existent account (info = None)
+        let acc = AccountProof {
+            address: Address::random(),
+            info: None,
+            proof: vec![],
+            storage_root: EMPTY_ROOT_HASH,
+            storage_proofs: vec![],
+        };
+
+        // Default behavior: KECCAK_EMPTY / EMPTY_ROOT_HASH
+        let rpc_default = acc.clone().into_eip1186_response(Vec::new());
+        assert_eq!(rpc_default.code_hash, KECCAK_EMPTY);
+        assert_eq!(rpc_default.storage_hash, EMPTY_ROOT_HASH);
+
+        // zero_empty_account = false: same as default
+        let rpc_compat_off = acc.clone().into_eip1186_response_with(Vec::new(), false);
+        assert_eq!(rpc_compat_off.code_hash, KECCAK_EMPTY);
+        assert_eq!(rpc_compat_off.storage_hash, EMPTY_ROOT_HASH);
+
+        // zero_empty_account = true: B256::ZERO (geth-compat)
+        let rpc_compat_on = acc.into_eip1186_response_with(Vec::new(), true);
+        assert_eq!(rpc_compat_on.code_hash, B256::ZERO);
+        assert_eq!(rpc_compat_on.storage_hash, B256::ZERO);
+
+        // Existing account should NOT be affected by zero_empty_account
+        let existing_acc = AccountProof {
+            address: Address::random(),
+            info: Some(Account {
+                nonce: 42,
+                balance: U256::from(100),
+                bytecode_hash: Some(KECCAK_EMPTY),
+            }),
+            proof: vec![],
+            storage_root: B256::random(),
+            storage_proofs: vec![],
+        };
+        let rpc_existing = existing_acc.clone().into_eip1186_response_with(Vec::new(), true);
+        assert_eq!(rpc_existing.code_hash, KECCAK_EMPTY);
+        assert_eq!(rpc_existing.storage_hash, existing_acc.storage_root);
+    }
+
+    #[test]
+    fn test_multiproof_targets_chunking_length() {
+        let mut targets = MultiProofTargets::default();
+        targets.insert(B256::with_last_byte(1), B256Set::default());
+        targets.insert(
+            B256::with_last_byte(2),
+            B256Set::from_iter([B256::with_last_byte(10), B256::with_last_byte(20)]),
+        );
+        targets.insert(
+            B256::with_last_byte(3),
+            B256Set::from_iter([
+                B256::with_last_byte(30),
+                B256::with_last_byte(31),
+                B256::with_last_byte(32),
+            ]),
+        );
+
+        let chunking_length = targets.chunking_length();
+        for size in 1..=targets.clone().chunks(1).count() {
+            let chunk_count = targets.clone().chunks(size).count();
+            let expected_count = chunking_length.div_ceil(size);
+            assert_eq!(
+                chunk_count, expected_count,
+                "chunking_length: {}, size: {}",
+                chunking_length, size
+            );
+        }
     }
 }

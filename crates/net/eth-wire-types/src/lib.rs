@@ -6,7 +6,7 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -37,6 +37,9 @@ pub use state::*;
 
 pub mod receipts;
 pub use receipts::*;
+
+pub mod block_access_lists;
+pub use block_access_lists::*;
 
 pub mod disconnect_reason;
 pub use disconnect_reason::*;

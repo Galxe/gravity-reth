@@ -5,17 +5,15 @@ use crate::{
     chain::{ChainHandler, FromOrchestrator, HandlerEvent},
     download::{BlockDownloader, DownloadAction, DownloadOutcome},
 };
-use alloy_primitives::B256;
+use alloy_primitives::{map::B256Set, B256};
+use crossbeam_channel::Sender;
 use futures::{Stream, StreamExt};
-use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_engine_primitives::{BeaconEngineMessage, ConsensusEngineEvent};
 use reth_ethereum_primitives::EthPrimitives;
-use reth_payload_primitives::PayloadTypes;
-use reth_primitives_traits::{Block, NodePrimitives, RecoveredBlock};
+use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadTypes};
+use reth_primitives_traits::{Block, NodePrimitives, SealedBlock};
 use std::{
-    collections::HashSet,
     fmt::Display,
-    sync::mpsc::Sender,
     task::{ready, Context, Poll},
 };
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -234,7 +232,7 @@ impl EngineApiKind {
         matches!(self, Self::Ethereum)
     }
 
-    /// Returns true if this is the ethereum variant
+    /// Returns true if this is the opstack variant
     pub const fn is_opstack(&self) -> bool {
         matches!(self, Self::OpStack)
     }
@@ -246,15 +244,15 @@ pub enum EngineApiRequest<T: PayloadTypes, N: NodePrimitives> {
     /// A request received from the consensus engine.
     Beacon(BeaconEngineMessage<T>),
     /// Request to insert an already executed block, e.g. via payload building.
-    InsertExecutedBlock(ExecutedBlockWithTrieUpdates<N>),
+    InsertExecutedBlock(BuiltPayloadExecutedBlock<N>),
 }
 
 impl<T: PayloadTypes, N: NodePrimitives> Display for EngineApiRequest<T, N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Beacon(msg) => msg.fmt(f),
-            Self::InsertExecutedBlock(block) => {
-                write!(f, "InsertExecutedBlock({:?})", block.recovered_block().num_hash())
+            Self::InsertExecutedBlock(payload) => {
+                write!(f, "InsertExecutedBlock({:?})", payload.recovered_block.num_hash())
             }
         }
     }
@@ -307,7 +305,7 @@ pub enum FromEngine<Req, B: Block> {
     /// Request from the engine.
     Request(Req),
     /// Downloaded blocks from the network.
-    DownloadedBlocks(Vec<RecoveredBlock<B>>),
+    DownloadedBlocks(Vec<SealedBlock<B>>),
 }
 
 impl<Req: Display, B: Block> Display for FromEngine<Req, B> {
@@ -341,7 +339,7 @@ pub enum RequestHandlerEvent<T> {
 #[derive(Debug)]
 pub enum DownloadRequest {
     /// Download the given set of blocks.
-    BlockSet(HashSet<B256>),
+    BlockSet(B256Set),
     /// Download the given range of blocks.
     BlockRange(B256, u64),
 }
@@ -349,6 +347,6 @@ pub enum DownloadRequest {
 impl DownloadRequest {
     /// Returns a [`DownloadRequest`] for a single block.
     pub fn single_block(hash: B256) -> Self {
-        Self::BlockSet(HashSet::from([hash]))
+        Self::BlockSet(B256Set::from_iter([hash]))
     }
 }

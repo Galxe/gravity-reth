@@ -1,10 +1,6 @@
 //! Helpers for testing.
 
-use crate::{
-    parallel_execute::ParallelExecutor, BlockExecutionError, ConfigureEvm, EvmEnvFor,
-    ParallelDatabase,
-};
-use alloc::boxed::Box;
+use crate::{ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::{BlockTy, HeaderTy, SealedBlock, SealedHeader};
 
 /// A no-op EVM config that panics on any call. Used as a typesystem hack to satisfy
@@ -73,12 +69,28 @@ where
     ) -> Result<crate::ExecutionCtxFor<'_, Self>, Self::Error> {
         self.inner().context_for_next_block(parent, attributes)
     }
+}
 
-    fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
+#[cfg(feature = "std")]
+impl<Inner, T> crate::ConfigureEngineEvm<T> for NoopEvmConfig<Inner>
+where
+    Inner: crate::ConfigureEngineEvm<T>,
+{
+    fn evm_env_for_payload(&self, payload: &T) -> Result<EvmEnvFor<Self>, Self::Error> {
+        self.inner().evm_env_for_payload(payload)
+    }
+
+    fn context_for_payload<'a>(
         &self,
-        db: DB,
-    ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
-    {
-        self.inner().parallel_executor(db)
+        payload: &'a T,
+    ) -> Result<crate::ExecutionCtxFor<'a, Self>, Self::Error> {
+        self.inner().context_for_payload(payload)
+    }
+
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &T,
+    ) -> Result<impl crate::ExecutableTxIterator<Self>, Self::Error> {
+        self.inner().tx_iterator_for_payload(payload)
     }
 }

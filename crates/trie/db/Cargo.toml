@@ -13,25 +13,46 @@ workspace = true
 
 [dependencies]
 # reth
+<<<<<<< HEAD
 reth-primitives-traits.workspace = true
 reth-execution-errors.workspace = true
 reth-db-api.workspace = true
 reth-storage-api = { workspace = true, features = ["std"] }
 reth-storage-errors.workspace = true
 reth-trie.workspace = true
+=======
+reth-primitives-traits = { workspace = true, features = ["std"] }
+reth-execution-errors.workspace = true
+reth-db-api.workspace = true
+reth-trie.workspace = true
+reth-trie-common.workspace = true
+reth-storage-api = { workspace = true, features = ["db-api"] }
+reth-storage-errors.workspace = true
+reth-stages-types.workspace = true
+reth-metrics = { workspace = true, optional = true }
+>>>>>>> v2.3.0
 
 # alloy
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 
+# misc
+parking_lot.workspace = true
+
+# metrics
+metrics = { workspace = true, optional = true }
+
 # tracing
 tracing.workspace = true
 
+<<<<<<< HEAD
 # misc
 once_cell.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true
 
+=======
+>>>>>>> v2.3.0
 [dev-dependencies]
 # reth
 reth-chainspec.workspace = true
@@ -57,13 +78,21 @@ similar-asserts.workspace = true
 rand.workspace = true
 
 [features]
+<<<<<<< HEAD
 metrics = ["reth-trie/metrics"]
+=======
+metrics = ["reth-trie/metrics", "dep:reth-metrics", "dep:metrics"]
+>>>>>>> v2.3.0
 serde = [
     "similar-asserts/serde",
     "alloy-consensus/serde",
     "alloy-primitives/serde",
     "parking_lot/serde",
+<<<<<<< HEAD
     "rand/serde",
+=======
+    "reth-stages-types/serde",
+>>>>>>> v2.3.0
     "reth-storage-api/serde",
     "reth-trie/serde",
     "reth-trie-common/serde",
@@ -78,5 +107,9 @@ test-utils = [
     "reth-db/test-utils",
     "reth-db-api/test-utils",
     "reth-provider/test-utils",
+<<<<<<< HEAD
+=======
+    "reth-stages-types/test-utils",
+>>>>>>> v2.3.0
     "reth-trie/test-utils",
 ]

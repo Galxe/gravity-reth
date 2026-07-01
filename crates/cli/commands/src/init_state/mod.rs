@@ -1,18 +1,19 @@
 //! Command that initializes the node from a genesis file.
 
-use crate::common::{AccessRights, CliHeader, CliNodeTypes, Environment, EnvironmentArgs};
+use crate::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
 use alloy_consensus::BlockHeader as AlloyBlockHeader;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Sealable, B256};
 use clap::Parser;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_db_common::init::init_from_state_dump;
 use reth_node_api::NodePrimitives;
-use reth_primitives_traits::{BlockHeader, SealedHeader};
+use reth_primitives_traits::{header::HeaderMut, SealedHeader};
 use reth_provider::{
-    BlockNumReader, DatabaseProviderFactory, StaticFileProviderFactory, StaticFileWriter,
+    BlockNumReader, DBProvider, DatabaseProviderFactory, StaticFileProviderFactory,
+    StaticFileWriter,
 };
-use std::{io::BufReader, path::PathBuf, str::FromStr, sync::Arc};
+use std::{io::BufReader, path::PathBuf, sync::Arc};
 use tracing::info;
 
 pub mod without_evm;
@@ -46,7 +47,7 @@ pub struct InitStateCommand<C: ChainSpecParser> {
     /// Specifies whether to initialize the state without relying on EVM historical data.
     ///
     /// When enabled, and before inserting the state, it creates a dummy chain up to the last EVM
-    /// block specified. It then, appends the first block provided block.
+    /// block specified. It then appends the first provided block.
     ///
     /// - **Note**: **Do not** import receipts and blocks beforehand, or this will fail or be
     ///   ignored.
@@ -57,46 +58,37 @@ pub struct InitStateCommand<C: ChainSpecParser> {
     #[arg(long, value_name = "HEADER_FILE", verbatim_doc_comment)]
     pub header: Option<PathBuf>,
 
-    /// Total difficulty of the header.
-    #[arg(long, value_name = "TOTAL_DIFFICULTY", verbatim_doc_comment)]
-    pub total_difficulty: Option<String>,
-
     /// Hash of the header.
     #[arg(long, value_name = "HEADER_HASH", verbatim_doc_comment)]
-    pub header_hash: Option<String>,
+    pub header_hash: Option<B256>,
 }
 
 impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> InitStateCommand<C> {
     /// Execute the `init` command
-    pub async fn execute<N>(self) -> eyre::Result<()>
+    pub async fn execute<N>(self, runtime: reth_tasks::Runtime) -> eyre::Result<()>
     where
         N: CliNodeTypes<
             ChainSpec = C::ChainSpec,
-            Primitives: NodePrimitives<BlockHeader: BlockHeader + CliHeader>,
+            Primitives: NodePrimitives<BlockHeader: HeaderMut>,
         >,
     {
         info!(target: "reth::cli", "Reth init-state starting");
 
-        let Environment { config, provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
+        let Environment { config, provider_factory, .. } =
+            self.env.init::<N>(AccessRights::RW, runtime)?;
 
         let static_file_provider = provider_factory.static_file_provider();
-        let provider_rw = provider_factory.database_provider_rw()?;
 
         if self.without_evm {
+            let provider_rw = provider_factory.database_provider_rw()?;
+
             // ensure header, total difficulty and header hash are provided
             let header = self.header.ok_or_else(|| eyre::eyre!("Header file must be provided"))?;
             let header = without_evm::read_header_from_file::<
                 <N::Primitives as NodePrimitives>::BlockHeader,
-            >(header)?;
+            >(&header)?;
 
-            let header_hash =
-                self.header_hash.ok_or_else(|| eyre::eyre!("Header hash must be provided"))?;
-            let header_hash = B256::from_str(&header_hash)?;
-
-            let total_difficulty = self
-                .total_difficulty
-                .ok_or_else(|| eyre::eyre!("Total difficulty must be provided"))?;
-            let total_difficulty = U256::from_str(&total_difficulty)?;
+            let header_hash = self.header_hash.unwrap_or_else(|| header.hash_slow());
 
             let last_block_number = provider_rw.last_block_number()?;
 
@@ -104,7 +96,6 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> InitStateC
                 without_evm::setup_without_evm(
                     &provider_rw,
                     SealedHeader::new(header, header_hash),
-                    total_difficulty,
                     |number| {
                         let mut header =
                             <<N::Primitives as NodePrimitives>::BlockHeader>::default();
@@ -116,23 +107,22 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> InitStateC
                 // SAFETY: it's safe to commit static files, since in the event of a crash, they
                 // will be unwound according to database checkpoints.
                 //
-                // Necessary to commit, so the header is accessible to provider_rw and
-                // init_state_dump
+                // Necessary to commit, so the header is accessible to init_from_state_dump
                 static_file_provider.commit()?;
             } else if last_block_number > 0 && last_block_number < header.number() {
                 return Err(eyre::eyre!(
-                    "Data directory should be empty when calling init-state with --without-evm-history."
+                    "Data directory should be empty when calling init-state with --without-evm."
                 ));
             }
+
+            provider_rw.commit()?;
         }
 
         info!(target: "reth::cli", "Initiating state dump");
 
         let reader = BufReader::new(reth_fs_util::open(self.state)?);
 
-        let hash = init_from_state_dump(reader, &provider_rw, config.stages.etl)?;
-
-        provider_rw.commit()?;
+        let hash = init_from_state_dump(reader, &provider_factory, config.stages.etl)?;
 
         info!(target: "reth::cli", hash = ?hash, "Genesis block written");
         Ok(())
@@ -143,5 +133,34 @@ impl<C: ChainSpecParser> InitStateCommand<C> {
     /// Returns the underlying chain being used to run this command
     pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
         Some(&self.env.chain)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::b256;
+    use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
+
+    #[test]
+    fn parse_init_state_command_with_without_evm() {
+        let cmd: InitStateCommand<EthereumChainSpecParser> = InitStateCommand::parse_from([
+            "reth",
+            "--chain",
+            "sepolia",
+            "--without-evm",
+            "--header",
+            "header.rlp",
+            "--header-hash",
+            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            "state.jsonl",
+        ]);
+        assert_eq!(cmd.state.to_str().unwrap(), "state.jsonl");
+        assert!(cmd.without_evm);
+        assert_eq!(cmd.header.unwrap().to_str().unwrap(), "header.rlp");
+        assert_eq!(
+            cmd.header_hash.unwrap(),
+            b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+        );
     }
 }

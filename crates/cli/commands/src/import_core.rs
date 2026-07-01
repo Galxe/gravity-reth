@@ -19,14 +19,15 @@ use reth_node_api::BlockTy;
 use reth_node_events::node::NodeEvent;
 use reth_provider::{
     providers::ProviderNodeTypes, BlockNumReader, HeaderProvider, ProviderError, ProviderFactory,
-    StageCheckpointReader,
+    RocksDBProviderFactory, StageCheckpointReader,
 };
 use reth_prune::PruneModes;
-use reth_stages::{prelude::*, Pipeline, StageId, StageSet};
+use reth_stages::{prelude::*, ControlFlow, Pipeline, StageId, StageSet};
 use reth_static_file::StaticFileProducer;
+use reth_storage_api::StorageSettingsCache;
 use std::{path::Path, sync::Arc};
 use tokio::sync::watch;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Configuration for importing blocks from RLP files.
 #[derive(Debug, Clone, Default)]
@@ -35,6 +36,9 @@ pub struct ImportConfig {
     pub no_state: bool,
     /// Chunk byte length to read from file.
     pub chunk_len: Option<u64>,
+    /// If true, fail immediately when an invalid block is encountered.
+    /// By default (false), the import stops at the last valid block and exits successfully.
+    pub fail_on_invalid_block: bool,
 }
 
 /// Result of an import operation.
@@ -48,6 +52,12 @@ pub struct ImportResult {
     pub total_imported_blocks: usize,
     /// Total number of transactions imported into the database.
     pub total_imported_txns: usize,
+    /// Whether the import was stopped due to an invalid block.
+    pub stopped_on_invalid_block: bool,
+    /// The block number that was invalid, if any.
+    pub bad_block: Option<u64>,
+    /// The last valid block number when stopped due to invalid block.
+    pub last_valid_block: Option<u64>,
 }
 
 impl ImportResult {
@@ -55,6 +65,14 @@ impl ImportResult {
     pub fn is_complete(&self) -> bool {
         self.total_decoded_blocks == self.total_imported_blocks &&
             self.total_decoded_txns == self.total_imported_txns
+    }
+
+    /// Returns true if the import was successful, considering stop-on-invalid-block mode.
+    ///
+    /// In stop-on-invalid-block mode, a partial import is considered successful if we
+    /// stopped due to an invalid block (leaving the DB at the last valid block).
+    pub fn is_successful(&self) -> bool {
+        self.is_complete() || self.stopped_on_invalid_block
     }
 }
 
@@ -69,9 +87,8 @@ pub async fn import_blocks_from_file<N>(
     provider_factory: ProviderFactory<N>,
     config: &Config,
     executor: impl ConfigureEvm<Primitives = N::Primitives> + 'static,
-    consensus: Arc<
-        impl FullConsensus<N::Primitives, Error = reth_consensus::ConsensusError> + 'static,
-    >,
+    consensus: Arc<impl FullConsensus<N::Primitives> + 'static>,
+    runtime: reth_tasks::Runtime,
 ) -> eyre::Result<ImportResult>
 where
     N: ProviderNodeTypes,
@@ -92,7 +109,11 @@ where
 
     let provider = provider_factory.provider()?;
     let init_blocks = provider.tx_ref().entries::<tables::HeaderNumbers>()?;
-    let init_txns = provider.tx_ref().entries::<tables::TransactionHashNumbers>()?;
+    let init_txns = if provider_factory.cached_storage_settings().storage_v2 {
+        provider_factory.rocksdb_provider().iter::<tables::TransactionHashNumbers>()?.count()
+    } else {
+        provider.tx_ref().entries::<tables::TransactionHashNumbers>()?
+    };
     drop(provider);
 
     let mut total_decoded_blocks = 0;
@@ -102,13 +123,32 @@ where
         .sealed_header(provider_factory.last_block_number()?)?
         .expect("should have genesis");
 
-    while let Some(file_client) =
-        reader.next_chunk::<BlockTy<N>>(consensus.clone(), Some(sealed_header)).await?
+    let static_file_producer =
+        StaticFileProducer::new(provider_factory.clone(), PruneModes::default());
+
+    // Track if we stopped due to an invalid block
+    let mut stopped_on_invalid_block = false;
+    let mut bad_block_number: Option<u64> = None;
+    let mut last_valid_block_number: Option<u64> = None;
+
+    let skip_invalid_blocks = !import_config.fail_on_invalid_block;
+    while let Some(file_client) = reader
+        .next_chunk_with_invalid_block_handling::<BlockTy<N>>(
+            consensus.clone(),
+            Some(sealed_header.clone()),
+            skip_invalid_blocks,
+        )
+        .await?
     {
         // create a new FileClient from chunk read from file
         info!(target: "reth::import",
             "Importing chain file chunk"
         );
+
+        if file_client.headers_len() == 0 {
+            debug!(target: "reth::import", "Skipping chain file chunk without valid blocks");
+            continue;
+        }
 
         let tip = file_client.tip().ok_or(eyre::eyre!("file client has no tip"))?;
         info!(target: "reth::import", "Chain file chunk read");
@@ -121,9 +161,10 @@ where
             provider_factory.clone(),
             &consensus,
             Arc::new(file_client),
-            StaticFileProducer::new(provider_factory.clone(), PruneModes::default()),
+            static_file_producer.clone(),
             import_config.no_state,
             executor.clone(),
+            runtime.clone(),
         )?;
 
         // override the tip
@@ -136,12 +177,51 @@ where
 
         // Run pipeline
         info!(target: "reth::import", "Starting sync pipeline");
-        tokio::select! {
-            res = pipeline.run() => res?,
-            _ = tokio::signal::ctrl_c() => {
-                info!(target: "reth::import", "Import interrupted by user");
-                break;
-            },
+        if import_config.fail_on_invalid_block {
+            // Original behavior: fail on unwind
+            tokio::select! {
+                res = pipeline.run() => res?,
+                _ = tokio::signal::ctrl_c() => {
+                    info!(target: "reth::import", "Import interrupted by user");
+                    break;
+                },
+            }
+        } else {
+            // Default behavior: Use run_loop() to handle unwinds gracefully
+            let result = tokio::select! {
+                res = pipeline.run_loop() => res,
+                _ = tokio::signal::ctrl_c() => {
+                    info!(target: "reth::import", "Import interrupted by user");
+                    break;
+                },
+            };
+
+            match result {
+                Ok(ControlFlow::Unwind { target, bad_block }) => {
+                    // An invalid block was encountered; stop at last valid block
+                    let bad = bad_block.block.number;
+                    warn!(
+                        target: "reth::import",
+                        bad_block = bad,
+                        last_valid_block = target,
+                        "Invalid block encountered during import; stopping at last valid block"
+                    );
+                    stopped_on_invalid_block = true;
+                    bad_block_number = Some(bad);
+                    last_valid_block_number = Some(target);
+                    break;
+                }
+                Ok(ControlFlow::Continue { block_number }) => {
+                    debug!(target: "reth::import", block_number, "Pipeline chunk completed");
+                }
+                Ok(ControlFlow::NoProgress { block_number }) => {
+                    debug!(target: "reth::import", ?block_number, "Pipeline made no progress");
+                }
+                Err(e) => {
+                    // Propagate other pipeline errors
+                    return Err(e.into());
+                }
+            }
         }
 
         sealed_header = provider_factory
@@ -151,17 +231,32 @@ where
 
     let provider = provider_factory.provider()?;
     let total_imported_blocks = provider.tx_ref().entries::<tables::HeaderNumbers>()? - init_blocks;
-    let total_imported_txns =
-        provider.tx_ref().entries::<tables::TransactionHashNumbers>()? - init_txns;
+    let current_txns = if provider_factory.cached_storage_settings().storage_v2 {
+        provider_factory.rocksdb_provider().iter::<tables::TransactionHashNumbers>()?.count()
+    } else {
+        provider.tx_ref().entries::<tables::TransactionHashNumbers>()?
+    };
+    let total_imported_txns = current_txns - init_txns;
 
     let result = ImportResult {
         total_decoded_blocks,
         total_decoded_txns,
         total_imported_blocks,
         total_imported_txns,
+        stopped_on_invalid_block,
+        bad_block: bad_block_number,
+        last_valid_block: last_valid_block_number,
     };
 
-    if !result.is_complete() {
+    if result.stopped_on_invalid_block {
+        info!(target: "reth::import",
+            total_imported_blocks,
+            total_imported_txns,
+            bad_block = ?result.bad_block,
+            last_valid_block = ?result.last_valid_block,
+            "Import stopped at last valid block due to invalid block"
+        );
+    } else if !result.is_complete() {
         error!(target: "reth::import",
             total_decoded_blocks,
             total_imported_blocks,
@@ -184,6 +279,7 @@ where
 ///
 /// If configured to execute, all stages will run. Otherwise, only stages that don't require state
 /// will run.
+#[expect(clippy::too_many_arguments)]
 pub fn build_import_pipeline_impl<N, C, E>(
     config: &Config,
     provider_factory: ProviderFactory<N>,
@@ -192,10 +288,11 @@ pub fn build_import_pipeline_impl<N, C, E>(
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
     disable_exec: bool,
     evm_config: E,
+    runtime: reth_tasks::Runtime,
 ) -> eyre::Result<(Pipeline<N>, impl futures::Stream<Item = NodeEvent<N::Primitives>> + use<N, C, E>)>
 where
     N: ProviderNodeTypes,
-    C: FullConsensus<N::Primitives, Error = reth_consensus::ConsensusError> + 'static,
+    C: FullConsensus<N::Primitives> + 'static,
     E: ConfigureEvm<Primitives = N::Primitives> + 'static,
 {
     if !file_client.has_canonical_blocks() {
@@ -210,7 +307,7 @@ where
 
     let mut header_downloader = ReverseHeadersDownloaderBuilder::new(config.stages.headers)
         .build(file_client.clone(), consensus.clone())
-        .into_task();
+        .into_task_with(&runtime);
     // TODO: The pipeline should correctly configure the downloader on its own.
     // Find the possibility to remove unnecessary pre-configuration.
     header_downloader.update_local_head(local_head);
@@ -218,7 +315,7 @@ where
 
     let mut body_downloader = BodiesDownloaderBuilder::new(config.stages.bodies)
         .build(file_client.clone(), consensus.clone(), provider_factory.clone())
-        .into_task();
+        .into_task_with(&runtime);
     // TODO: The pipeline should correctly configure the downloader on its own.
     // Find the possibility to remove unnecessary pre-configuration.
     body_downloader

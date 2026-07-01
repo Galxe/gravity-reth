@@ -16,9 +16,7 @@ thiserror.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
-alloy-rlp.workspace = true
-
-reth-ethereum-primitives.workspace = true
+alloy-rlp = { workspace = true, features = ["derive"] }
 
 # compression and decompression
 snap.workspace = true
@@ -26,12 +24,14 @@ snap.workspace = true
 # ssz encoding and decoding
 ethereum_ssz.workspace = true
 ethereum_ssz_derive.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 eyre.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 reth-era-downloader.workspace = true
+reth-ethereum-primitives.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "time", "rt-multi-thread"] }
 test-case.workspace = true

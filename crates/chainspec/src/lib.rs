@@ -6,7 +6,7 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -27,12 +27,14 @@ pub use alloy_chains::{Chain, ChainKind, NamedChain};
 /// Re-export for convenience
 pub use reth_ethereum_forks::*;
 
+pub use alloy_evm::EvmLimitParams;
 pub use api::EthChainSpec;
 pub use gravity::GravityHardfork;
 pub use info::ChainInfo;
 #[cfg(any(test, feature = "test-utils"))]
 pub use spec::test_fork_ids;
 pub use spec::{
+<<<<<<< HEAD
     make_genesis_header, BaseFeeParams, BaseFeeParamsKind, ChainSpec, ChainSpecBuilder,
     ChainSpecProvider, DepositContract, ForkBaseFeeParams, DEV, HOLESKY, HOODI, MAINNET, SEPOLIA,
 };
@@ -46,6 +48,13 @@ pub fn once_cell_set<T>(value: T) -> OnceLock<T> {
     once
 }
 
+=======
+    blob_params_to_schedule, create_chain_config, mainnet_chain_config, make_genesis_header,
+    BaseFeeParams, BaseFeeParamsKind, ChainSpec, ChainSpecBuilder, ChainSpecProvider,
+    DepositContract, ForkBaseFeeParams, DEV, HOLESKY, HOODI, MAINNET, SEPOLIA,
+};
+
+>>>>>>> v2.3.0
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +160,7 @@ mod tests {
 
     #[test]
     fn test_centralized_base_fee_calculation() {
+<<<<<<< HEAD
         use crate::{constants::GRAVITY_MIN_BASE_FEE, ChainSpec, EthChainSpec};
         use alloy_consensus::Header;
         use alloy_eips::eip1559::INITIAL_BASE_FEE;
@@ -161,11 +171,23 @@ mod tests {
                 gas_used: 15_000_000,
                 gas_limit: 30_000_000,
                 base_fee_per_gas: Some(base_fee),
+=======
+        use crate::{ChainSpec, EthChainSpec};
+        use alloy_consensus::Header;
+        use alloy_eips::eip1559::INITIAL_BASE_FEE;
+
+        fn parent_header() -> Header {
+            Header {
+                gas_used: 15_000_000,
+                gas_limit: 30_000_000,
+                base_fee_per_gas: Some(INITIAL_BASE_FEE),
+>>>>>>> v2.3.0
                 timestamp: 1_000,
                 ..Default::default()
             }
         }
 
+<<<<<<< HEAD
         // Scenario 1: chainspec has no Gravity floor configured (Ethereum mainnet
         // history sync). Result follows upstream EIP-1559 with no clamp.
         let upstream_spec = ChainSpec::default();
@@ -192,5 +214,19 @@ mod tests {
         let parent_above = parent_header(0, GRAVITY_MIN_BASE_FEE);
         let got_above = main_spec.next_block_base_fee(&parent_above, next_ts).unwrap_or_default();
         assert!(got_above >= GRAVITY_MIN_BASE_FEE, "main: stays above floor");
+=======
+        let spec = ChainSpec::default();
+        let parent = parent_header();
+
+        // For testing, assume next block has timestamp 12 seconds later
+        let next_timestamp = parent.timestamp + 12;
+
+        let expected = parent
+            .next_block_base_fee(spec.base_fee_params_at_timestamp(next_timestamp))
+            .unwrap_or_default();
+
+        let got = spec.next_block_base_fee(&parent, next_timestamp).unwrap_or_default();
+        assert_eq!(expected, got, "Base fee calculation does not match expected value");
+>>>>>>> v2.3.0
     }
 }

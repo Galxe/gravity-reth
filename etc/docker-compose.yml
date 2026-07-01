@@ -46,12 +46,33 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
 
+  loki:
+    restart: unless-stopped
+    image: grafana/loki:latest
+    ports:
+      - 3100:3100
+    volumes:
+      - ./loki/:/etc/loki/
+      - loki_data:/loki
+    command: -config.file=/etc/loki/loki.yml
+
+  promtail:
+    restart: unless-stopped
+    image: grafana/promtail:latest
+    depends_on:
+      - loki
+    volumes:
+      - ./promtail/:/etc/promtail/
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/promtail.yml
+
   grafana:
     restart: unless-stopped
     image: grafana/grafana:latest
     depends_on:
       - reth
       - prometheus
+      - loki
     ports:
       - 3000:3000
     environment:
@@ -61,11 +82,13 @@ services:
       - ./grafana/datasources:/etc/grafana/provisioning/datasources
       - ./grafana/dashboards:/etc/grafana/provisioning_temp/dashboards
     # 1. Copy dashboards from temp directory to prevent modifying original host files
-    # 2. Replace Prometheus datasource placeholder with the actual name
+    # 2. Replace Prometheus datasource placeholders with the actual name
     # 3. Run Grafana
     entrypoint: >
       sh -c "cp -r /etc/grafana/provisioning_temp/dashboards/. /etc/grafana/provisioning/dashboards &&
              find /etc/grafana/provisioning/dashboards/ -name '*.json' -exec sed -i 's/$${DS_PROMETHEUS}/Prometheus/g' {} \+ &&
+             find /etc/grafana/provisioning/dashboards/ -name '*.json' -exec sed -i 's/$${datasource}/Prometheus/g' {} \+ &&
+             find /etc/grafana/provisioning/dashboards/ -name '*.json' -exec sed -i 's/$${VAR_INSTANCE_LABEL}/instance/g' {} \+ &&
              /run.sh"
 
 volumes:
@@ -80,6 +103,8 @@ volumes:
   logs:
     driver: local
   prometheus_data:
+    driver: local
+  loki_data:
     driver: local
   grafana_data:
     driver: local

@@ -1,4 +1,5 @@
 ---
+<<<<<<<< HEAD:docs/vocs/docs/pages/run/faq/pruning.mdx
 description: Pruning and full node options in Reth.
 ---
 
@@ -9,15 +10,23 @@ Pruning and full node are new features of Reth,
 and we will be happy to hear about your experience using them either
 on [GitHub](https://github.com/paradigmxyz/reth/issues) or in the [Telegram group](https://t.me/paradigm_reth).
 :::
+========
+description: Pruning and node modes in Reth.
+---
 
-By default, Reth runs as an archive node. Such nodes have all historical blocks and the state at each of these blocks
-available for querying and tracing.
+# Pruning & Node Modes
+>>>>>>>> v2.3.0:docs/vocs/docs/pages/run/storage/pruning.mdx
 
-Reth also supports pruning of historical data and running as a full node. This chapter will walk through
-the steps for running Reth as a full node, what caveats to expect and how to configure your own pruned node.
+Reth supports archive, full, minimal, and custom-pruned nodes. Archive mode is
+the default when no pruning profile or pruning configuration is set.
+
+For new databases, these modes run on the default [storage V2 layout](/run/storage).
+Storage V2 controls where data is stored; pruning controls how much historical
+data is retained.
 
 ## Basic concepts
 
+<<<<<<<< HEAD:docs/vocs/docs/pages/run/faq/pruning.mdx
 -   Archive node – Reth node that has all historical data from genesis.
 -   Pruned node – Reth node that has its historical data pruned partially or fully through
     a [custom configuration](/run/configuration#the-prune-section).
@@ -26,11 +35,25 @@ the steps for running Reth as a full node, what caveats to expect and how to con
 
 The node type that was chosen when first [running a node](/run/overview) **cannot** be changed after
 the initial sync. Turning Archive into Pruned, or Pruned into Full is not supported.
+========
+-   Archive node - retains all historical data from genesis.
+-   Full node - keeps current state and a 10,064-block historical state window,
+    while pruning selected historical data.
+-   Minimal node - uses the most aggressive built-in pruning profile for small
+    disk usage.
+-   Custom-pruned node - uses [custom pruning configuration](/run/configuration#the-prune-section)
+    or individual `--prune.*` flags.
+
+Pruning is destructive. Once historical data has been pruned, Reth cannot serve
+that data again unless you restore it from a snapshot or resync with a mode that
+retains it.
+>>>>>>>> v2.3.0:docs/vocs/docs/pages/run/storage/pruning.mdx
 
 ## Modes
 
 ### Archive Node
 
+<<<<<<<< HEAD:docs/vocs/docs/pages/run/faq/pruning.mdx
 Default mode, follow the steps from the previous chapter on [how to run on mainnet or official testnets](/run/ethereum).
 
 ### Pruned Node
@@ -43,6 +66,19 @@ the previous chapter on [how to run on mainnet or official testnets](/run/ethere
 
 To run Reth as a full node, follow the steps from the previous chapter on
 [how to run on mainnet or official testnets](/run/ethereum), and add a `--full` flag. For example:
+========
+Archive mode is the default. Follow the steps from
+[Running Reth on Ethereum Mainnet or testnets](/run/ethereum) and start Reth
+without a pruning profile:
+
+```bash
+reth node
+```
+
+### Full Node
+
+Use `--full` to run the default full-node pruning profile:
+>>>>>>>> v2.3.0:docs/vocs/docs/pages/run/storage/pruning.mdx
 
 ```bash
 reth node \
@@ -52,14 +88,21 @@ reth node \
     --authrpc.port 8551
 ```
 
-## Size
+Full mode configures:
 
-All numbers are as of April 2024 at block number 19.6M for mainnet.
+-   sender recovery pruning: full
+-   transaction lookup pruning: disabled
+-   receipts pruning: retain the last 10,064 blocks
+-   account history pruning: retain the last 10,064 blocks
+-   storage history pruning: retain the last 10,064 blocks
+-   bodies pruning: prune pre-Merge bodies on chains with a Paris activation
 
-### Archive Node
+### Minimal Storage Mode
 
-Archive node occupies at least 2.14TB.
+Use [`--minimal`](/run/storage/minimal) to run the most aggressive built-in
+pruning profile:
 
+<<<<<<<< HEAD:docs/vocs/docs/pages/run/faq/pruning.mdx
 You can track the growth of Reth archive node size with our
 [public Ethereum Grafana dashboard](https://reth.ithaca.xyz/public-dashboards/a49fa110dc9149298fa6763d5c89c8c0).
 [public Base Grafana dashboard](https://reth.ithaca.xyz/public-dashboards/b3e9f2e668ee4b86960b7fac691b5e64).
@@ -98,10 +141,19 @@ storage_history = { distance = 10_064 }
 # Prune all receipts, leaving only those which contain logs from address `0x00000000219ab540356cbb839cbe05303d7705fa`,
 # starting from the block 11052984. This leaves receipts with the logs from the Beacon Deposit Contract.
 "0x00000000219ab540356cbb839cbe05303d7705fa" = { before = 11052984 }
+========
+```bash
+reth node \
+    --minimal \
+    --authrpc.jwtsecret /path/to/secret \
+    --authrpc.addr 127.0.0.1 \
+    --authrpc.port 8551
+>>>>>>>> v2.3.0:docs/vocs/docs/pages/run/storage/pruning.mdx
 ```
 
-Meaning, it prunes:
+Minimal mode configures:
 
+<<<<<<<< HEAD:docs/vocs/docs/pages/run/faq/pruning.mdx
 -   Account History and Storage History up to the last 10064 blocks
 -   All of Sender Recovery data. The caveat is that it's pruned gradually after the initial sync
     is completed, so the disk space is reclaimed slowly.
@@ -111,6 +163,31 @@ Meaning, it prunes:
 
 As it was mentioned in the [pruning configuration chapter](/run/configuration#the-prune-section), there are several segments which can be pruned
 independently of each other:
+========
+-   sender recovery pruning: full
+-   transaction lookup pruning: full
+-   receipts pruning: retain the last 64 blocks
+-   account history pruning: retain the last 10,064 blocks
+-   storage history pruning: retain the last 10,064 blocks
+-   bodies pruning: retain the last 10,064 blocks
+-   static file segments: 10,000 blocks per file
+
+### Custom Pruned Node
+
+Use `reth.toml` or individual `--prune.*` flags to configure each pruning
+segment yourself. See the [pruning configuration](/run/configuration#the-prune-section)
+reference for the TOML format.
+
+## Disk usage
+
+Disk usage changes as networks grow and depends on the selected node mode. For
+current storage V2 measurements, see [Storage V2](/run/storage#disk-savings).
+
+## RPC support
+
+The [pruning configuration](/run/configuration#the-prune-section) can prune
+several independent data segments:
+>>>>>>>> v2.3.0:docs/vocs/docs/pages/run/storage/pruning.mdx
 
 -   Sender Recovery
 -   Transaction Lookup
@@ -118,8 +195,8 @@ independently of each other:
 -   Account History
 -   Storage History
 
-Pruning of each of these segments disables different RPC methods, because the historical data or lookup indexes
-become unavailable.
+Pruning a segment limits RPC methods that need the removed historical data or
+lookup indexes.
 
 ### Full Node
 
@@ -127,18 +204,28 @@ The following tables describe RPC methods available in the full node.
 
 #### `debug` namespace
 
-| RPC                        | Note                                                       |
-| -------------------------- | ---------------------------------------------------------- |
-| `debug_getRawBlock`        |                                                            |
-| `debug_getRawHeader`       |                                                            |
-| `debug_getRawReceipts`     | Only for the last 10064 blocks and Beacon Deposit Contract |
-| `debug_getRawTransaction`  |                                                            |
-| `debug_traceBlock`         | Only for the last 10064 blocks                             |
-| `debug_traceBlockByHash`   | Only for the last 10064 blocks                             |
-| `debug_traceBlockByNumber` | Only for the last 10064 blocks                             |
-| `debug_traceCall`          | Only for the last 10064 blocks                             |
-| `debug_traceCallMany`      | Only for the last 10064 blocks                             |
-| `debug_traceTransaction`   | Only for the last 10064 blocks                             |
+| RPC                                 | Note                                                       |
+| ----------------------------------- | ---------------------------------------------------------- |
+| `debug_accountAt`                   | Only for the last 10064 blocks                             |
+| `debug_accountInfoAt`               | Only for the last 10064 blocks                             |
+| `debug_chainConfig`                 |                                                            |
+| `debug_codeByHash`                  | Only for the last 10064 blocks                             |
+| `debug_dbGet`                       |                                                            |
+| `debug_executionWitness`            | Only for the last 10064 blocks                             |
+| `debug_executionWitnessByBlockHash` | Only for the last 10064 blocks                             |
+| `debug_getBadBlocks`                |                                                            |
+| `debug_getRawBlock`                 |                                                            |
+| `debug_getRawHeader`                |                                                            |
+| `debug_getRawReceipts`              | Only for the last 10064 blocks                             |
+| `debug_getRawTransaction`           |                                                            |
+| `debug_getRawTransactions`          |                                                            |
+| `debug_stateRootWithUpdates`        | Only for the last 10064 blocks                             |
+| `debug_traceBlock`                  | Only for the last 10064 blocks                             |
+| `debug_traceBlockByHash`            | Only for the last 10064 blocks                             |
+| `debug_traceBlockByNumber`          | Only for the last 10064 blocks                             |
+| `debug_traceCall`                   | Only for the last 10064 blocks                             |
+| `debug_traceCallMany`               | Only for the last 10064 blocks                             |
+| `debug_traceTransaction`            | Only for the last 10064 blocks                             |
 
 #### `eth` namespace
 
@@ -155,19 +242,19 @@ The following tables describe RPC methods available in the full node.
 | `eth_getBalance`                          | Only for the last 10064 blocks                             |
 | `eth_getBlockByHash`                      |                                                            |
 | `eth_getBlockByNumber`                    |                                                            |
-| `eth_getBlockReceipts`                    | Only for the last 10064 blocks and Beacon Deposit Contract |
+| `eth_getBlockReceipts`                    | Only for the last 10064 blocks                             |
 | `eth_getBlockTransactionCountByHash`      |                                                            |
 | `eth_getBlockTransactionCountByNumber`    |                                                            |
 | `eth_getCode`                             |                                                            |
 | `eth_getFilterChanges`                    |                                                            |
-| `eth_getFilterLogs`                       | Only for the last 10064 blocks and Beacon Deposit Contract |
-| `eth_getLogs`                             | Only for the last 10064 blocks and Beacon Deposit Contract |
+| `eth_getFilterLogs`                       | Only for the last 10064 blocks                             |
+| `eth_getLogs`                             | Only for the last 10064 blocks                             |
 | `eth_getStorageAt`                        | Only for the last 10064 blocks                             |
 | `eth_getTransactionByBlockHashAndIndex`   |                                                            |
 | `eth_getTransactionByBlockNumberAndIndex` |                                                            |
 | `eth_getTransactionByHash`                |                                                            |
 | `eth_getTransactionCount`                 | Only for the last 10064 blocks                             |
-| `eth_getTransactionReceipt`               | Only for the last 10064 blocks and Beacon Deposit Contract |
+| `eth_getTransactionReceipt`               | Only for the last 10064 blocks                             |
 | `eth_getUncleByBlockHashAndIndex`         |                                                            |
 | `eth_getUncleByBlockNumberAndIndex`       |                                                            |
 | `eth_getUncleCountByBlockHash`            |                                                            |
@@ -201,13 +288,16 @@ The following tables describe RPC methods available in the full node.
 | RPC / Segment                   | Note                           |
 | ------------------------------- | ------------------------------ |
 | `trace_block`                   | Only for the last 10064 blocks |
+| `trace_blockOpcodeGas`          | Only for the last 10064 blocks |
 | `trace_call`                    | Only for the last 10064 blocks |
 | `trace_callMany`                | Only for the last 10064 blocks |
+| `trace_filter`                  | Only for the last 10064 blocks |
 | `trace_get`                     | Only for the last 10064 blocks |
 | `trace_rawTransaction`          | Only for the last 10064 blocks |
 | `trace_replayBlockTransactions` | Only for the last 10064 blocks |
 | `trace_replayTransaction`       | Only for the last 10064 blocks |
 | `trace_transaction`             | Only for the last 10064 blocks |
+| `trace_transactionOpcodeGas`    | Only for the last 10064 blocks |
 
 #### `txpool` namespace
 
@@ -227,18 +317,28 @@ The following tables describe the requirements for prune segments, per RPC metho
 
 #### `debug` namespace
 
-| RPC / Segment              | Sender Recovery | Transaction Lookup | Receipts | Account History | Storage History |
-| -------------------------- | --------------- | ------------------ | -------- | --------------- | --------------- |
-| `debug_getRawBlock`        | ✅              | ✅                 | ✅       | ✅              | ✅              |
-| `debug_getRawHeader`       | ✅              | ✅                 | ✅       | ✅              | ✅              |
-| `debug_getRawReceipts`     | ✅              | ✅                 | ❌       | ✅              | ✅              |
-| `debug_getRawTransaction`  | ✅              | ❌                 | ✅       | ✅              | ✅              |
-| `debug_traceBlock`         | ✅              | ✅                 | ✅       | ❌              | ❌              |
-| `debug_traceBlockByHash`   | ✅              | ✅                 | ✅       | ❌              | ❌              |
-| `debug_traceBlockByNumber` | ✅              | ✅                 | ✅       | ❌              | ❌              |
-| `debug_traceCall`          | ✅              | ✅                 | ✅       | ❌              | ❌              |
-| `debug_traceCallMany`      | ✅              | ✅                 | ✅       | ❌              | ❌              |
-| `debug_traceTransaction`   | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| RPC / Segment                       | Sender Recovery | Transaction Lookup | Receipts | Account History | Storage History |
+| ----------------------------------- | --------------- | ------------------ | -------- | --------------- | --------------- |
+| `debug_accountAt`                   | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_accountInfoAt`               | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_chainConfig`                 | ✅              | ✅                 | ✅       | ✅              | ✅              |
+| `debug_codeByHash`                  | ✅              | ✅                 | ✅       | ❌              | ✅              |
+| `debug_dbGet`                       | ✅              | ✅                 | ✅       | ✅              | ✅              |
+| `debug_executionWitness`            | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_executionWitnessByBlockHash` | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_getBadBlocks`                | ✅              | ✅                 | ✅       | ✅              | ✅              |
+| `debug_getRawBlock`                 | ✅              | ✅                 | ✅       | ✅              | ✅              |
+| `debug_getRawHeader`                | ✅              | ✅                 | ✅       | ✅              | ✅              |
+| `debug_getRawReceipts`              | ✅              | ✅                 | ❌       | ✅              | ✅              |
+| `debug_getRawTransaction`           | ✅              | ❌                 | ✅       | ✅              | ✅              |
+| `debug_getRawTransactions`          | ✅              | ✅                 | ✅       | ✅              | ✅              |
+| `debug_stateRootWithUpdates`        | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_traceBlock`                  | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_traceBlockByHash`            | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_traceBlockByNumber`          | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_traceCall`                   | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_traceCallMany`               | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `debug_traceTransaction`            | ✅              | ✅                 | ✅       | ❌              | ❌              |
 
 #### `eth` namespace
 
@@ -301,13 +401,16 @@ The following tables describe the requirements for prune segments, per RPC metho
 | RPC / Segment                   | Sender Recovery | Transaction Lookup | Receipts | Account History | Storage History |
 | ------------------------------- | --------------- | ------------------ | -------- | --------------- | --------------- |
 | `trace_block`                   | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `trace_blockOpcodeGas`          | ✅              | ✅                 | ✅       | ❌              | ❌              |
 | `trace_call`                    | ✅              | ✅                 | ✅       | ❌              | ❌              |
 | `trace_callMany`                | ✅              | ✅                 | ✅       | ❌              | ❌              |
+| `trace_filter`                  | ✅              | ✅                 | ✅       | ❌              | ❌              |
 | `trace_get`                     | ✅              | ❌                 | ✅       | ❌              | ❌              |
 | `trace_rawTransaction`          | ✅              | ✅                 | ✅       | ❌              | ❌              |
 | `trace_replayBlockTransactions` | ✅              | ✅                 | ✅       | ❌              | ❌              |
 | `trace_replayTransaction`       | ✅              | ❌                 | ✅       | ❌              | ❌              |
 | `trace_transaction`             | ✅              | ❌                 | ✅       | ❌              | ❌              |
+| `trace_transactionOpcodeGas`    | ✅              | ❌                 | ✅       | ❌              | ❌              |
 
 #### `txpool` namespace
 

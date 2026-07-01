@@ -3,6 +3,7 @@
 name: book
 
 on:
+<<<<<<< HEAD
   workflow_dispatch:
 #  push:
 #    branches: [main]
@@ -10,17 +11,40 @@ on:
 #    branches: [main]
 #    types: [opened, reopened, synchronize, closed]
 #  merge_group:
+=======
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, closed]
+  merge_group:
+>>>>>>> v2.3.0
+
+permissions: {}
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-8' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    timeout-minutes: 90
     steps:
       - name: Checkout
+<<<<<<< HEAD
         uses: actions/checkout@v5
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
+=======
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: v1.2.23
+>>>>>>> v2.3.0
 
       - name: Install Playwright browsers
         # Required for rehype-mermaid to render Mermaid diagrams during build
@@ -38,6 +62,7 @@ jobs:
       - name: Build Vocs
         run: |
           cd docs/vocs/ && bun run build
+<<<<<<< HEAD
           echo "Vocs Build Complete"
 
       - name: Setup Pages
@@ -47,6 +72,22 @@ jobs:
         uses: actions/upload-pages-artifact@v4
         with:
           path: "./docs/vocs/docs/dist"
+=======
+          test -f docs/dist/public/index.html
+          test -f docs/dist/public/overview/index.html
+          test -f docs/dist/public/sdk/index.html
+          test -f docs/dist/public/logo.png
+          test -f docs/dist/public/reth-prod.png
+          echo "Vocs Build Complete"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: "./docs/vocs/docs/dist/public"
+>>>>>>> v2.3.0
 
   deploy:
     # Only deploy if a push to main
@@ -68,4 +109,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

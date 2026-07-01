@@ -3,17 +3,24 @@ use alloy_primitives::{Address, Bytes, B256};
 #[cfg(feature = "db-api")]
 use reth_db_api::DatabaseError;
 use reth_storage_errors::provider::ProviderResult;
+<<<<<<< HEAD
 #[cfg(feature = "db-api")]
 use reth_trie_common::updates::TrieUpdatesV2;
 use reth_trie_common::{
     updates::{StorageTrieUpdates, TrieUpdates},
     AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
     StorageProof, TrieInput,
+=======
+use reth_trie_common::{
+    updates::{StorageTrieUpdatesSorted, TrieUpdates, TrieUpdatesSorted},
+    AccountProof, ExecutionWitnessMode, HashedPostState, HashedStorage, MultiProof,
+    MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
+>>>>>>> v2.3.0
 };
 
 /// A type that can compute the state root of a given post state.
 #[auto_impl::auto_impl(&, Box, Arc)]
-pub trait StateRootProvider: Send + Sync {
+pub trait StateRootProvider {
     /// Returns the state root of the `BundleState` on top of the current state.
     ///
     /// # Note
@@ -45,7 +52,7 @@ pub trait StateRootProvider: Send + Sync {
 
 /// A type that can compute the storage root for a given account.
 #[auto_impl::auto_impl(&, Box, Arc)]
-pub trait StorageRootProvider: Send + Sync {
+pub trait StorageRootProvider {
     /// Returns the storage root of the `HashedStorage` for target address on top of the current
     /// state.
     fn storage_root(&self, address: Address, hashed_storage: HashedStorage)
@@ -71,7 +78,7 @@ pub trait StorageRootProvider: Send + Sync {
 
 /// A type that can generate state proof on top of a given post state.
 #[auto_impl::auto_impl(&, Box, Arc)]
-pub trait StateProofProvider: Send + Sync {
+pub trait StateProofProvider {
     /// Get account and storage proofs of target keys in the `HashedPostState`
     /// on top of the current state.
     fn proof(
@@ -89,21 +96,47 @@ pub trait StateProofProvider: Send + Sync {
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof>;
 
+<<<<<<< HEAD
     /// Get trie witness for provided state.
     fn witness(&self, input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>>;
+=======
+    /// Get trie witness for provided state using the given witness generation mode.
+    fn witness(
+        &self,
+        input: TrieInput,
+        target: HashedPostState,
+        mode: ExecutionWitnessMode,
+    ) -> ProviderResult<Vec<Bytes>>;
+>>>>>>> v2.3.0
 }
 
 /// Trie Writer
 #[auto_impl::auto_impl(&, Arc, Box)]
+<<<<<<< HEAD
 pub trait TrieWriter: Send + Sync {
     /// Writes trie updates to the database.
     ///
     /// Returns the number of entries modified.
     fn write_trie_updates(&self, trie_updates: &TrieUpdates) -> ProviderResult<usize>;
+=======
+pub trait TrieWriter: Send {
+    /// Writes trie updates to the database.
+    ///
+    /// Returns the number of entries modified.
+    fn write_trie_updates(&self, trie_updates: TrieUpdates) -> ProviderResult<usize> {
+        self.write_trie_updates_sorted(&trie_updates.into_sorted())
+    }
+
+    /// Writes trie updates to the database with already sorted updates.
+    ///
+    /// Returns the number of entries modified.
+    fn write_trie_updates_sorted(&self, trie_updates: &TrieUpdatesSorted) -> ProviderResult<usize>;
+>>>>>>> v2.3.0
 }
 
 /// Storage Trie Writer
 #[auto_impl::auto_impl(&, Arc, Box)]
+<<<<<<< HEAD
 pub trait StorageTrieWriter: Send + Sync {
     /// Writes storage trie updates from the given storage trie map.
     ///
@@ -121,4 +154,16 @@ pub trait StorageTrieWriter: Send + Sync {
 pub trait TrieWriterV2 {
     /// Write trie updates for nested trie
     fn write_trie_updatesv2(&self, input: &TrieUpdatesV2) -> Result<usize, DatabaseError>;
+=======
+pub trait StorageTrieWriter: Send {
+    /// Writes storage trie updates from the given storage trie map with already sorted updates.
+    ///
+    /// Expects the storage trie updates to already be sorted by the hashed address key.
+    ///
+    /// Returns the number of entries modified.
+    fn write_storage_trie_updates_sorted<'a>(
+        &self,
+        storage_tries: impl Iterator<Item = (&'a B256, &'a StorageTrieUpdatesSorted)>,
+    ) -> ProviderResult<usize>;
+>>>>>>> v2.3.0
 }

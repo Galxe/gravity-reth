@@ -1,5 +1,9 @@
 use alloy_primitives::Address;
+<<<<<<< HEAD
 use reth_primitives_traits::{Account, SubkeyContainedValue};
+=======
+use reth_primitives_traits::{Account, ValueWithSubKey};
+>>>>>>> v2.3.0
 
 /// Account as it is saved in the database.
 ///
@@ -15,9 +19,17 @@ pub struct AccountBeforeTx {
     pub info: Option<Account>,
 }
 
+<<<<<<< HEAD
 impl SubkeyContainedValue for AccountBeforeTx {
     fn subkey_length(&self) -> Option<usize> {
         Some(20)
+=======
+impl ValueWithSubKey for AccountBeforeTx {
+    type SubKey = Address;
+
+    fn get_subkey(&self) -> Self::SubKey {
+        self.address
+>>>>>>> v2.3.0
     }
 }
 
@@ -51,3 +63,6 @@ impl reth_codecs::Compact for AccountBeforeTx {
         (Self { address, info }, buf)
     }
 }
+
+#[cfg(any(test, feature = "reth-codec"))]
+reth_codecs::impl_compression_for_compact!(AccountBeforeTx);

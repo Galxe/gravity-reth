@@ -4,6 +4,10 @@ use crate::testsuite::{Action, Environment};
 use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
 use eyre::Result;
 use futures_util::future::BoxFuture;
+<<<<<<< HEAD
+=======
+use reth_ethereum_primitives::TransactionSigned;
+>>>>>>> v2.3.0
 use reth_node_api::EngineTypes;
 use reth_rpc_api::clients::EthApiClient;
 use std::time::Duration;
@@ -74,18 +78,42 @@ where
             let node_b_client = &env.node_clients[self.node_b];
 
             // Get latest block from each node
+<<<<<<< HEAD
             let block_a = EthApiClient::<TransactionRequest, Transaction, Block, Receipt, Header>::block_by_number(
                 &node_a_client.rpc,
                 alloy_eips::BlockNumberOrTag::Latest,
                 false,
+=======
+            let block_a = EthApiClient::<
+                TransactionRequest,
+                Transaction,
+                Block,
+                Receipt,
+                Header,
+                TransactionSigned,
+            >::block_by_number(
+                &node_a_client.rpc, alloy_eips::BlockNumberOrTag::Latest, false
+>>>>>>> v2.3.0
             )
             .await?
             .ok_or_else(|| eyre::eyre!("Failed to get latest block from node {}", self.node_a))?;
 
+<<<<<<< HEAD
             let block_b = EthApiClient::<TransactionRequest, Transaction, Block, Receipt, Header>::block_by_number(
                 &node_b_client.rpc,
                 alloy_eips::BlockNumberOrTag::Latest,
                 false,
+=======
+            let block_b = EthApiClient::<
+                TransactionRequest,
+                Transaction,
+                Block,
+                Receipt,
+                Header,
+                TransactionSigned,
+            >::block_by_number(
+                &node_b_client.rpc, alloy_eips::BlockNumberOrTag::Latest, false
+>>>>>>> v2.3.0
             )
             .await?
             .ok_or_else(|| eyre::eyre!("Failed to get latest block from node {}", self.node_b))?;
@@ -278,6 +306,10 @@ where
                         Block,
                         Receipt,
                         Header,
+<<<<<<< HEAD
+=======
+                        TransactionSigned,
+>>>>>>> v2.3.0
                     >::block_by_number(
                         &node_a_client.rpc,
                         alloy_eips::BlockNumberOrTag::Latest,
@@ -294,6 +326,10 @@ where
                         Block,
                         Receipt,
                         Header,
+<<<<<<< HEAD
+=======
+                        TransactionSigned,
+>>>>>>> v2.3.0
                     >::block_by_number(
                         &node_b_client.rpc,
                         alloy_eips::BlockNumberOrTag::Latest,
@@ -380,6 +416,7 @@ where
         })
     }
 }
+<<<<<<< HEAD
 
 /// Action to verify safe and finalized blocks are correctly set via RPC.
 /// This is critical for Gravity Chain where deterministic consensus means
@@ -511,3 +548,5 @@ where
         })
     }
 }
+=======
+>>>>>>> v2.3.0

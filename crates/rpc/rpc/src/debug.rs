@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 use alloy_consensus::{
     transaction::{SignerRecoverable, TxHashRef},
     BlockHeader,
@@ -14,9 +15,26 @@ use alloy_rpc_types_trace::geth::{
     call::FlatCallFrame, BlockTraceResult, FourByteFrame, GethDebugBuiltInTracerType,
     GethDebugTracerType, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace,
     NoopFrame, TraceResult,
+=======
+use alloy_consensus::{constants::KECCAK_EMPTY, transaction::TxHashRef, BlockHeader};
+use alloy_eips::{eip2718::Encodable2718, BlockId, BlockNumberOrTag};
+use alloy_evm::{env::BlockEnvironment, Evm};
+use alloy_genesis::ChainConfig;
+use alloy_primitives::{hex::decode, uint, Address, Bytes, B256, U64};
+use alloy_rlp::{Decodable, Encodable};
+use alloy_rpc_types::BlockTransactionsKind;
+use alloy_rpc_types_debug::ExecutionWitness;
+use alloy_rpc_types_eth::{
+    state::EvmOverrides, Account, AccountInfo, BlockError, Bundle, Index, StateContext,
+};
+use alloy_rpc_types_trace::geth::{
+    BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
+>>>>>>> v2.3.0
 };
 use async_trait::async_trait;
+use futures::Stream;
 use jsonrpsee::core::RpcResult;
+<<<<<<< HEAD
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::RethError;
 use reth_evm::{execute::Executor, ConfigureEvm, EvmEnvFor, TxEnvFor};
@@ -26,15 +44,31 @@ use reth_revm::{
     db::{CacheDB, State},
     witness::ExecutionWitnessRecord,
 };
+=======
+use parking_lot::RwLock;
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_engine_primitives::ConsensusEngineEvent;
+use reth_errors::RethError;
+use reth_evm::{block::BlockExecutor, execute::Executor, ConfigureEvm, EvmEnvFor};
+use reth_primitives_traits::{
+    Block as BlockTrait, BlockBody, BlockTy, ReceiptWithBloom, RecoveredBlock,
+};
+use reth_revm::{db::State, witness::ExecutionWitnessRecord};
+>>>>>>> v2.3.0
 use reth_rpc_api::DebugApiServer;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
     helpers::{EthTransactions, TraceExt},
+<<<<<<< HEAD
     EthApiTypes, FromEthApiError, RpcNodeCore,
+=======
+    FromEthApiError, FromEvmError, RpcConvert, RpcNodeCore,
+>>>>>>> v2.3.0
 };
 use reth_rpc_eth_types::{EthApiError, StateCacheDb};
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use reth_storage_api::{
+<<<<<<< HEAD
     BlockIdReader, BlockReaderIdExt, HeaderProvider, ProviderBlock, ReceiptProviderIdExt,
     StateProofProvider, StateProviderFactory, StateRootProvider, TransactionVariant,
 };
@@ -45,11 +79,27 @@ use revm_inspectors::tracing::{
     FourByteInspector, MuxInspector, TracingInspector, TracingInspectorConfig, TransactionContext,
 };
 use std::sync::Arc;
+=======
+    BlockIdReader, BlockReaderIdExt, HashedPostStateProvider, HeaderProvider, ProviderBlock,
+    ReceiptProviderIdExt, StateProviderFactory, StateRootProvider, StorageRootProvider,
+    TransactionVariant,
+};
+use reth_tasks::{pool::BlockingTaskGuard, Runtime};
+use reth_trie_common::{
+    updates::TrieUpdates, ExecutionWitnessMode, HashedPostState, HashedStorage,
+};
+use revm::{database::states::bundle_state::BundleRetention, Database, DatabaseCommit};
+use revm_inspectors::tracing::{DebugInspector, TransactionContext};
+use serde::{Deserialize, Serialize};
+use std::{collections::VecDeque, sync::Arc};
+>>>>>>> v2.3.0
 use tokio::sync::{AcquireError, OwnedSemaphorePermit};
+use tokio_stream::StreamExt;
 
 /// `debug` API implementation.
 ///
 /// This type provides the functionality for handling `debug` related requests.
+<<<<<<< HEAD
 pub struct DebugApi<Eth> {
     inner: Arc<DebugApiInner<Eth>>,
 }
@@ -60,12 +110,52 @@ impl<Eth> DebugApi<Eth> {
     /// Create a new instance of the [`DebugApi`]
     pub fn new(eth_api: Eth, blocking_task_guard: BlockingTaskGuard) -> Self {
         let inner = Arc::new(DebugApiInner { eth_api, blocking_task_guard });
+=======
+pub struct DebugApi<Eth: RpcNodeCore> {
+    inner: Arc<DebugApiInner<Eth>>,
+}
+
+impl<Eth> DebugApi<Eth>
+where
+    Eth: RpcNodeCore,
+{
+    /// Create a new instance of the [`DebugApi`]
+    pub fn new(
+        eth_api: Eth,
+        blocking_task_guard: BlockingTaskGuard,
+        executor: &Runtime,
+        mut stream: impl Stream<Item = ConsensusEngineEvent<Eth::Primitives>> + Send + Unpin + 'static,
+    ) -> Self {
+        let bad_block_store = BadBlockStore::default();
+        let inner = Arc::new(DebugApiInner {
+            eth_api,
+            blocking_task_guard,
+            bad_block_store: bad_block_store.clone(),
+        });
+
+        // Spawn a task caching bad blocks
+        executor.spawn_task(async move {
+            while let Some(event) = stream.next().await {
+                if let ConsensusEngineEvent::InvalidBlock { block, error } = event &&
+                    let Ok(recovered) = RecoveredBlock::try_recover_sealed(*block)
+                {
+                    bad_block_store.insert(recovered, error);
+                }
+            }
+        });
+
+>>>>>>> v2.3.0
         Self { inner }
     }
 
     /// Access the underlying `Eth` API.
     pub fn eth_api(&self) -> &Eth {
         &self.inner.eth_api
+    }
+
+    /// Access the underlying provider.
+    pub fn provider(&self) -> &Eth::Provider {
+        self.inner.eth_api.provider()
     }
 }
 
@@ -80,7 +170,11 @@ impl<Eth: RpcNodeCore> DebugApi<Eth> {
 
 impl<Eth> DebugApi<Eth>
 where
+<<<<<<< HEAD
     Eth: EthApiTypes + TraceExt + 'static,
+=======
+    Eth: TraceExt,
+>>>>>>> v2.3.0
 {
     /// Acquires a permit to execute a tracing call.
     async fn acquire_trace_permit(&self) -> Result<OwnedSemaphorePermit, AcquireError> {
@@ -94,6 +188,7 @@ where
         evm_env: EvmEnvFor<Eth::Evm>,
         opts: GethDebugTracingOptions,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
+<<<<<<< HEAD
         // replay all transactions of the block
         let this = self.clone();
         self.eth_api()
@@ -120,16 +215,48 @@ where
                             tx_hash: Some(tx_hash),
                             tx_index: Some(index),
                         }),
+=======
+        self.eth_api()
+            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                let mut results = Vec::with_capacity(block.body().transactions().len());
+
+                eth_api.apply_pre_execution_changes(&block, &mut db)?;
+
+                let mut transactions = block.transactions_recovered().enumerate().peekable();
+                let mut inspector = DebugInspector::new(opts).map_err(Eth::Error::from_eth_err)?;
+                while let Some((index, tx)) = transactions.next() {
+                    let tx_hash = *tx.tx_hash();
+                    let tx_env = eth_api.evm_config().tx_env(tx);
+
+                    let res = eth_api.inspect(
+                        &mut db,
+                        evm_env.clone(),
+                        tx_env.clone(),
+>>>>>>> v2.3.0
                         &mut inspector,
                     )?;
+                    let result = inspector
+                        .get_result(
+                            Some(TransactionContext {
+                                block_hash: Some(block.hash()),
+                                tx_hash: Some(tx_hash),
+                                tx_index: Some(index),
+                            }),
+                            &tx_env,
+                            &evm_env.block_env,
+                            &res,
+                            &mut db,
+                        )
+                        .map_err(Eth::Error::from_eth_err)?;
 
                     inspector = inspector.map(|insp| insp.fused());
 
                     results.push(TraceResult::Success { result, tx_hash: Some(tx_hash) });
                     if transactions.peek().is_some() {
+                        inspector.fuse().map_err(Eth::Error::from_eth_err)?;
                         // need to apply the state changes of this transaction before executing the
                         // next transaction
-                        db.commit(state_changes)
+                        db.commit(res.state)
                     }
                 }
 
@@ -162,6 +289,7 @@ where
         // Depending on EIP-2 we need to recover the transactions differently
         let senders =
             if self.provider().chain_spec().is_homestead_active_at_block(block.header().number()) {
+<<<<<<< HEAD
                 block
                     .body()
                     .transactions()
@@ -180,6 +308,13 @@ where
                     .into_iter()
                     .collect()
             };
+=======
+                block.body().recover_signers()
+            } else {
+                block.body().recover_signers_unchecked()
+            }
+            .map_err(Eth::Error::from_eth_err)?;
+>>>>>>> v2.3.0
 
         self.trace_block(Arc::new(block.into_recovered_with_signers(senders)), evm_env, opts).await
     }
@@ -190,12 +325,21 @@ where
         block_id: BlockId,
         opts: GethDebugTracingOptions,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
+<<<<<<< HEAD
         let block_hash = self
             .provider()
             .block_hash_for_id(block_id)
             .map_err(Eth::Error::from_eth_err)?
+=======
+        let block = self
+            .eth_api()
+            .recovered_block(block_id)
+            .await?
+>>>>>>> v2.3.0
             .ok_or(EthApiError::HeaderNotFound(block_id))?;
+        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
 
+<<<<<<< HEAD
         let ((evm_env, _), block) = futures::try_join!(
             self.eth_api().evm_env_at(block_hash.into()),
             self.eth_api().recovered_block(block_hash.into()),
@@ -203,6 +347,8 @@ where
 
         let block = block.ok_or(EthApiError::HeaderNotFound(block_id))?;
 
+=======
+>>>>>>> v2.3.0
         self.trace_block(block, evm_env, opts).await
     }
 
@@ -218,33 +364,47 @@ where
             None => return Err(EthApiError::TransactionNotFound.into()),
             Some(res) => res,
         };
+<<<<<<< HEAD
         let (evm_env, _) = self.eth_api().evm_env_at(block.hash().into()).await?;
+=======
+        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+>>>>>>> v2.3.0
 
         // we need to get the state of the parent block because we're essentially replaying the
         // block the transaction is included in
         let state_at: BlockId = block.parent_hash().into();
         let block_hash = block.hash();
 
+<<<<<<< HEAD
         let this = self.clone();
         self.eth_api()
             .spawn_with_state_at_block(state_at, move |state| {
+=======
+        self.eth_api()
+            .spawn_with_state_at_block(state_at, move |eth_api, mut db| {
+>>>>>>> v2.3.0
                 let block_txs = block.transactions_recovered();
 
                 // configure env for the target transaction
                 let tx = transaction.into_recovered();
 
+<<<<<<< HEAD
                 let mut db = CacheDB::new(StateProviderDatabase::new(state));
 
                 this.eth_api().apply_pre_execution_changes(&block, &mut db, &evm_env)?;
+=======
+                eth_api.apply_pre_execution_changes(&block, &mut db)?;
+>>>>>>> v2.3.0
 
                 // replay all transactions prior to the targeted transaction
-                let index = this.eth_api().replay_transactions_until(
+                let index = eth_api.replay_transactions_until(
                     &mut db,
                     evm_env.clone(),
                     block_txs,
                     *tx.tx_hash(),
                 )?;
 
+<<<<<<< HEAD
                 let tx_env = this.eth_api().evm_config().tx_env(&tx);
 
                 this.trace_transaction(
@@ -260,12 +420,38 @@ where
                     &mut None,
                 )
                 .map(|(trace, _)| trace)
+=======
+                let tx_env = eth_api.evm_config().tx_env(&tx);
+
+                let mut inspector = DebugInspector::new(opts).map_err(Eth::Error::from_eth_err)?;
+                let res =
+                    eth_api.inspect(&mut db, evm_env.clone(), tx_env.clone(), &mut inspector)?;
+                let trace = inspector
+                    .get_result(
+                        Some(TransactionContext {
+                            block_hash: Some(block_hash),
+                            tx_index: Some(index),
+                            tx_hash: Some(*tx.tx_hash()),
+                        }),
+                        &tx_env,
+                        &evm_env.block_env,
+                        &res,
+                        &mut db,
+                    )
+                    .map_err(Eth::Error::from_eth_err)?;
+
+                Ok(trace)
+>>>>>>> v2.3.0
             })
             .await
     }
 
     /// The `debug_traceCall` method lets you run an `eth_call` within the context of the given
     /// block execution using the final state of parent block as the base.
+    ///
+    /// If `tx_index` is provided in opts, the call will be traced at the state after executing
+    /// transactions up to the specified index within the block (0-indexed).
+    /// If not provided, then uses the post-state (default behavior).
     ///
     /// Differences compare to `eth_call`:
     ///  - `debug_traceCall` executes with __enabled__ basefee check, `eth_call` does not: <https://github.com/paradigmxyz/reth/issues/6240>
@@ -277,11 +463,18 @@ where
     ) -> Result<GethTrace, Eth::Error> {
         let at = block_id.unwrap_or_default();
         let GethDebugTracingCallOptions {
+<<<<<<< HEAD
             tracing_options, state_overrides, block_overrides, ..
+=======
+            tracing_options,
+            state_overrides,
+            block_overrides,
+            tx_index,
+>>>>>>> v2.3.0
         } = opts;
         let overrides = EvmOverrides::new(state_overrides, block_overrides.map(Box::new));
-        let GethDebugTracingOptions { config, tracer, tracer_config, .. } = tracing_options;
 
+<<<<<<< HEAD
         let this = self.clone();
         if let Some(tracer) = tracer {
             #[allow(unreachable_patterns)]
@@ -473,16 +666,95 @@ where
                 let gas_limit = tx_env.gas_limit();
                 let res = this.eth_api().inspect(db, evm_env, tx_env, &mut inspector)?;
                 Ok((res, gas_limit, inspector))
-            })
-            .await?;
-        let gas_used = res.result.gas_used();
-        let return_value = res.result.into_output().unwrap_or_default();
-        let frame = inspector
-            .with_transaction_gas_limit(tx_gas_limit)
-            .into_geth_builder()
-            .geth_traces(gas_used, return_value, config);
+=======
+        // Check if we need to replay transactions for a specific tx_index
+        if let Some(tx_idx) = tx_index {
+            return self
+                .debug_trace_call_at_tx_index(call, at, tx_idx as usize, tracing_options, overrides)
+                .await;
+        }
 
-        Ok(frame.into())
+        let this = self.clone();
+        self.eth_api()
+            .spawn_with_call_at(call, at, overrides, move |db, evm_env, tx_env| {
+                let mut inspector =
+                    DebugInspector::new(tracing_options).map_err(Eth::Error::from_eth_err)?;
+                let res = this.eth_api().inspect(
+                    &mut *db,
+                    evm_env.clone(),
+                    tx_env.clone(),
+                    &mut inspector,
+                )?;
+                let trace = inspector
+                    .get_result(None, &tx_env, &evm_env.block_env, &res, db)
+                    .map_err(Eth::Error::from_eth_err)?;
+                Ok(trace)
+>>>>>>> v2.3.0
+            })
+            .await
+    }
+
+    /// Helper method to execute `debug_trace_call` at a specific transaction index within a block.
+    /// This replays transactions up to the specified index, then executes the trace call in that
+    /// state.
+    async fn debug_trace_call_at_tx_index(
+        &self,
+        call: RpcTxReq<Eth::NetworkTypes>,
+        block_id: BlockId,
+        tx_index: usize,
+        tracing_options: GethDebugTracingOptions,
+        overrides: EvmOverrides,
+    ) -> Result<GethTrace, Eth::Error> {
+        // Get the target block to check transaction count
+        let block = self
+            .eth_api()
+            .recovered_block(block_id)
+            .await?
+            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+
+        if tx_index >= block.transaction_count() {
+            // tx_index out of bounds
+            return Err(EthApiError::InvalidParams(format!(
+                "tx_index {} out of bounds for block with {} transactions",
+                tx_index,
+                block.transaction_count()
+            ))
+            .into())
+        }
+
+        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+
+        // execute after the parent block, replaying `tx_index` transactions
+        let state_at = block.parent_hash();
+
+        self.eth_api()
+            .spawn_with_state_at_block(state_at, move |eth_api, mut db| {
+                // 1. apply pre-execution changes
+                eth_api.apply_pre_execution_changes(&block, &mut db)?;
+
+                // 2. replay the required number of transactions
+                eth_api.replay_transactions_until(
+                    &mut db,
+                    evm_env.clone(),
+                    block.transactions_recovered(),
+                    *block.body().transactions()[tx_index].tx_hash(),
+                )?;
+
+                // 3. now execute the trace call on this state
+                let (evm_env, tx_env) =
+                    eth_api.prepare_call_env(evm_env, call, &mut db, overrides)?;
+
+                let mut inspector =
+                    DebugInspector::new(tracing_options).map_err(Eth::Error::from_eth_err)?;
+                let res =
+                    eth_api.inspect(&mut db, evm_env.clone(), tx_env.clone(), &mut inspector)?;
+                let trace = inspector
+                    .get_result(None, &tx_env, &evm_env.block_env, &res, &mut db)
+                    .map_err(Eth::Error::from_eth_err)?;
+
+                Ok(trace)
+            })
+            .await
     }
 
     /// The `debug_traceCallMany` method lets you run an `eth_callMany` within the context of the
@@ -502,13 +774,22 @@ where
         let transaction_index = transaction_index.unwrap_or_default();
 
         let target_block = block_number.unwrap_or_default();
+<<<<<<< HEAD
         let ((mut evm_env, _), block) = futures::try_join!(
             self.eth_api().evm_env_at(target_block),
             self.eth_api().recovered_block(target_block),
         )?;
+=======
+        let block = self
+            .eth_api()
+            .recovered_block(target_block)
+            .await?
+            .ok_or(EthApiError::HeaderNotFound(target_block))?;
+        let mut evm_env =
+            self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+>>>>>>> v2.3.0
 
         let opts = opts.unwrap_or_default();
-        let block = block.ok_or(EthApiError::HeaderNotFound(target_block))?;
         let GethDebugTracingCallOptions { tracing_options, mut state_overrides, .. } = opts;
 
         // we're essentially replaying the transactions in the block here, hence we need the state
@@ -527,29 +808,45 @@ where
             replay_block_txs = false;
         }
 
+<<<<<<< HEAD
         let this = self.clone();
 
         self.eth_api()
             .spawn_with_state_at_block(at.into(), move |state| {
+=======
+        self.eth_api()
+            .spawn_with_state_at_block(at, move |eth_api, mut db| {
+>>>>>>> v2.3.0
                 // the outer vec for the bundles
                 let mut all_bundles = Vec::with_capacity(bundles.len());
-                let mut db = CacheDB::new(StateProviderDatabase::new(state));
 
                 if replay_block_txs {
                     // only need to replay the transactions in the block if not all transactions are
                     // to be replayed
+<<<<<<< HEAD
+=======
+                    eth_api.apply_pre_execution_changes(&block, &mut db)?;
+
+>>>>>>> v2.3.0
                     let transactions = block.transactions_recovered().take(num_txs);
 
                     // Execute all transactions until index
                     for tx in transactions {
+<<<<<<< HEAD
                         let tx_env = this.eth_api().evm_config().tx_env(tx);
                         let res = this.eth_api().transact(&mut db, evm_env.clone(), tx_env)?;
+=======
+                        let tx_env = eth_api.evm_config().tx_env(tx);
+                        let res = eth_api.transact(&mut db, evm_env.clone(), tx_env)?;
+>>>>>>> v2.3.0
                         db.commit(res.state);
                     }
                 }
 
                 // Trace all bundles
                 let mut bundles = bundles.into_iter().peekable();
+                let mut inspector = DebugInspector::new(tracing_options.clone())
+                    .map_err(Eth::Error::from_eth_err)?;
                 while let Some(bundle) = bundles.next() {
                     let mut results = Vec::with_capacity(bundle.transactions.len());
                     let Bundle { transactions, block_override } = bundle;
@@ -563,6 +860,7 @@ where
                         let state_overrides = state_overrides.take();
                         let overrides = EvmOverrides::new(state_overrides, block_overrides.clone());
 
+<<<<<<< HEAD
                         let (evm_env, tx_env) = this.eth_api().prepare_call_env(
                             evm_env.clone(),
                             tx,
@@ -580,17 +878,37 @@ where
                         )?;
 
                         inspector = inspector.map(|insp| insp.fused());
+=======
+                        let (evm_env, tx_env) =
+                            eth_api.prepare_call_env(evm_env.clone(), tx, &mut db, overrides)?;
+
+                        let res = eth_api.inspect(
+                            &mut db,
+                            evm_env.clone(),
+                            tx_env.clone(),
+                            &mut inspector,
+                        )?;
+                        let trace = inspector
+                            .get_result(None, &tx_env, &evm_env.block_env, &res, &mut db)
+                            .map_err(Eth::Error::from_eth_err)?;
+>>>>>>> v2.3.0
 
                         // If there is more transactions, commit the database
                         // If there is no transactions, but more bundles, commit to the database too
                         if transactions.peek().is_some() || bundles.peek().is_some() {
-                            db.commit(state);
+                            inspector.fuse().map_err(Eth::Error::from_eth_err)?;
+                            db.commit(res.state);
                         }
                         results.push(trace);
                     }
                     // Increment block_env number and timestamp for the next bundle
+<<<<<<< HEAD
                     evm_env.block_env.number += uint!(1_U256);
                     evm_env.block_env.timestamp += uint!(12_U256);
+=======
+                    evm_env.block_env.inner_mut().number += uint!(1_U256);
+                    evm_env.block_env.inner_mut().timestamp += uint!(12_U256);
+>>>>>>> v2.3.0
 
                     all_bundles.push(results);
                 }
@@ -604,6 +922,10 @@ where
     pub async fn debug_execution_witness_by_block_hash(
         &self,
         hash: B256,
+<<<<<<< HEAD
+=======
+        mode: Option<ExecutionWitnessMode>,
+>>>>>>> v2.3.0
     ) -> Result<ExecutionWitness, Eth::Error> {
         let this = self.clone();
         let block = this
@@ -612,7 +934,11 @@ where
             .await?
             .ok_or(EthApiError::HeaderNotFound(hash.into()))?;
 
+<<<<<<< HEAD
         self.debug_execution_witness_for_block(block).await
+=======
+        self.debug_execution_witness_for_block(block, mode.unwrap_or_default()).await
+>>>>>>> v2.3.0
     }
 
     /// The `debug_executionWitness` method allows for re-execution of a block with the purpose of
@@ -622,6 +948,10 @@ where
     pub async fn debug_execution_witness(
         &self,
         block_id: BlockNumberOrTag,
+<<<<<<< HEAD
+=======
+        mode: Option<ExecutionWitnessMode>,
+>>>>>>> v2.3.0
     ) -> Result<ExecutionWitness, Eth::Error> {
         let this = self.clone();
         let block = this
@@ -630,13 +960,18 @@ where
             .await?
             .ok_or(EthApiError::HeaderNotFound(block_id.into()))?;
 
+<<<<<<< HEAD
         self.debug_execution_witness_for_block(block).await
+=======
+        self.debug_execution_witness_for_block(block, mode.unwrap_or_default()).await
+>>>>>>> v2.3.0
     }
 
     /// Generates an execution witness, using the given recovered block.
     pub async fn debug_execution_witness_for_block(
         &self,
         block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
+<<<<<<< HEAD
     ) -> Result<ExecutionWitness, Eth::Error> {
         let this = self.clone();
         let block_number = block.header().number();
@@ -665,6 +1000,26 @@ where
                     ExecutionWitness { state, codes, keys, ..Default::default() },
                     lowest_block_number,
                 ))
+=======
+        mode: ExecutionWitnessMode,
+    ) -> Result<ExecutionWitness, Eth::Error> {
+        let block_number = block.header().number();
+        self.eth_api()
+            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                let block_executor = eth_api.evm_config().executor(&mut db);
+
+                let mut witness_record = ExecutionWitnessRecord::default();
+
+                let _ = block_executor
+                    .execute_with_state_closure(&block, |statedb: &State<_>| {
+                        witness_record.record_executed_state(statedb, mode);
+                    })
+                    .map_err(|err| EthApiError::Internal(err.into()))?;
+
+                Ok(witness_record
+                    .into_execution_witness(&db.database.0, eth_api.provider(), block_number, mode)
+                    .map_err(EthApiError::from)?)
+>>>>>>> v2.3.0
             })
             .await?;
 
@@ -709,6 +1064,7 @@ where
             .map(|b| b.original_bytes()))
     }
 
+<<<<<<< HEAD
     /// Executes the configured transaction with the environment on the given database.
     ///
     /// It optionally takes fused inspector ([`TracingInspector::fused`]) to avoid re-creating the
@@ -885,8 +1241,190 @@ where
         let return_value = res.result.into_output().unwrap_or_default();
         inspector.set_transaction_gas_limit(gas_limit);
         let frame = inspector.geth_builder().geth_traces(gas_used, return_value, *config);
+=======
+    /// Returns account information, including the storage root, after replaying the block through
+    /// the transaction at the given index.
+    pub async fn debug_account_at(
+        &self,
+        block_id: BlockId,
+        tx_index: Index,
+        address: Address,
+    ) -> Result<Option<Account>, Eth::Error> {
+        self.replay_block_until(block_id, tx_index, move |db| Self::account(db, address))
+            .await
+            .map(Option::flatten)
+    }
 
-        Ok((frame.into(), res.state))
+    /// Returns account information after replaying the block through the transaction at the given
+    /// index.
+    pub async fn debug_account_info_at(
+        &self,
+        block_id: BlockId,
+        tx_index: Index,
+        address: Address,
+    ) -> Result<Option<AccountInfo>, Eth::Error> {
+        self.replay_block_until(block_id, tx_index, move |db| Self::account_info(db, address)).await
+    }
+
+    /// Replays a block through the transaction at the given index and calls `f` with the resulting
+    /// state.
+    async fn replay_block_until<F, R>(
+        &self,
+        block_id: BlockId,
+        tx_index: Index,
+        f: F,
+    ) -> Result<Option<R>, Eth::Error>
+    where
+        F: FnOnce(&mut StateCacheDb) -> Result<R, Eth::Error> + Send + 'static,
+        R: Send + 'static,
+    {
+        let block = self
+            .eth_api()
+            .recovered_block(block_id)
+            .await?
+            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+        let tx_index = usize::from(tx_index);
+        let transaction_count = block.transaction_count();
+        if tx_index >= transaction_count {
+            return Err(EthApiError::InvalidParams(format!(
+                "tx_index {tx_index} out of bounds for block with {transaction_count} transactions"
+            ))
+            .into())
+        }
+
+        self.eth_api()
+            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                let mut executor = eth_api
+                    .evm_config()
+                    .executor_for_block(&mut db, block.sealed_block())
+                    .map_err(RethError::other)
+                    .map_err(Eth::Error::from_eth_err)?;
+                executor.apply_pre_execution_changes().map_err(Eth::Error::from_eth_err)?;
+
+                for tx in block.transactions_recovered().take(tx_index + 1) {
+                    executor.execute_transaction(tx).map_err(Eth::Error::from_eth_err)?;
+                }
+                drop(executor);
+
+                f(&mut db)
+            })
+            .await
+            .map(Some)
+    }
+>>>>>>> v2.3.0
+
+    /// Retrieves the account's balance, nonce, code hash, and storage root from the given state.
+    fn account(db: &mut StateCacheDb, address: Address) -> Result<Option<Account>, Eth::Error> {
+        let account = db.basic(address).map_err(Eth::Error::from_eth_err)?;
+        let Some(account) = account else { return Ok(None) };
+
+        let balance = account.balance;
+        let nonce = account.nonce;
+        let code_hash = account.code_hash;
+        let hashed_storage = db
+            .cache
+            .accounts
+            .get(&address)
+            .and_then(|account| {
+                account.account.as_ref().map(|plain_account| {
+                    HashedStorage::from_plain_storage(account.status, plain_account.storage.iter())
+                })
+            })
+            .unwrap_or_default();
+        let storage_root =
+            db.database.storage_root(address, hashed_storage).map_err(Eth::Error::from_eth_err)?;
+
+        Ok(Some(Account { balance, nonce, code_hash, storage_root }))
+    }
+
+    /// Retrieves the account's balance, nonce, and code from the given state.
+    fn account_info<DB>(db: &mut DB, address: Address) -> Result<AccountInfo, Eth::Error>
+    where
+        DB: Database,
+        EthApiError: From<DB::Error>,
+    {
+        let account = db.basic(address).map_err(Eth::Error::from_eth_err)?.unwrap_or_default();
+        let code = if account.code_hash == KECCAK_EMPTY {
+            Default::default()
+        } else if let Some(code) = account.code {
+            code.original_bytes()
+        } else {
+            db.code_by_hash(account.code_hash).map_err(Eth::Error::from_eth_err)?.original_bytes()
+        };
+
+        Ok(AccountInfo { balance: account.balance, nonce: account.nonce, code })
+    }
+
+    /// Returns the code associated with a given hash at the specified block ID. If no code is
+    /// found, it returns None. If no block ID is provided, it defaults to the latest block.
+    pub async fn debug_code_by_hash(
+        &self,
+        hash: B256,
+        block_id: Option<BlockId>,
+    ) -> Result<Option<Bytes>, Eth::Error> {
+        Ok(self
+            .provider()
+            .state_by_block_id(block_id.unwrap_or_default())
+            .map_err(Eth::Error::from_eth_err)?
+            .bytecode_by_hash(&hash)
+            .map_err(Eth::Error::from_eth_err)?
+            .map(|b| b.original_bytes()))
+    }
+
+    /// Returns the state root of the `HashedPostState` on top of the state for the given block with
+    /// trie updates.
+    async fn debug_state_root_with_updates(
+        &self,
+        hashed_state: HashedPostState,
+        block_id: Option<BlockId>,
+    ) -> Result<(B256, TrieUpdates), Eth::Error> {
+        self.inner
+            .eth_api
+            .spawn_blocking_io(move |this| {
+                let state = this
+                    .provider()
+                    .state_by_block_id(block_id.unwrap_or_default())
+                    .map_err(Eth::Error::from_eth_err)?;
+                state.state_root_with_updates(hashed_state).map_err(Eth::Error::from_eth_err)
+            })
+            .await
+    }
+
+    /// Executes a block and returns the state root after each transaction.
+    pub async fn intermediate_roots(&self, block_hash: B256) -> Result<Vec<B256>, Eth::Error> {
+        let block = self
+            .eth_api()
+            .recovered_block(block_hash.into())
+            .await?
+            .ok_or(EthApiError::HeaderNotFound(block_hash.into()))?;
+        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+
+        self.eth_api()
+            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                // Enable transition tracking so that merge_transitions works
+                db.transition_state = Some(Default::default());
+
+                eth_api.apply_pre_execution_changes(&block, &mut db)?;
+
+                let mut roots = Vec::with_capacity(block.body().transactions().len());
+                for tx in block.transactions_recovered() {
+                    let tx_env = eth_api.evm_config().tx_env(tx);
+                    {
+                        let mut evm = eth_api.evm_config().evm_with_env(&mut db, evm_env.clone());
+                        evm.transact_commit(tx_env).map_err(Eth::Error::from_evm_err)?;
+                    }
+                    // Merge transitions into cumulative bundle_state
+                    db.merge_transitions(BundleRetention::PlainState);
+                    // Compute state root from the accumulated state changes
+                    let hashed_state = db.database.hashed_post_state(&db.bundle_state);
+                    let root =
+                        db.database.state_root(hashed_state).map_err(Eth::Error::from_eth_err)?;
+                    roots.push(root);
+                }
+
+                Ok(roots)
+            })
+            .await
     }
 
     /// Returns the state root of the `HashedPostState` on top of the state for the given block with
@@ -912,29 +1450,39 @@ where
 #[async_trait]
 impl<Eth> DebugApiServer<RpcTxReq<Eth::NetworkTypes>> for DebugApi<Eth>
 where
+<<<<<<< HEAD
     Eth: EthApiTypes + EthTransactions + TraceExt + 'static,
+=======
+    Eth: EthTransactions + TraceExt,
+>>>>>>> v2.3.0
 {
     /// Handler for `debug_getRawHeader`
     async fn raw_header(&self, block_id: BlockId) -> RpcResult<Bytes> {
         let header = match block_id {
+<<<<<<< HEAD
             BlockId::Hash(hash) => self.provider().header(&hash.into()).to_rpc_result()?,
+=======
+            BlockId::Hash(hash) => self.provider().header(hash.into()).to_rpc_result()?,
+>>>>>>> v2.3.0
             BlockId::Number(number_or_tag) => {
                 let number = self
                     .provider()
                     .convert_block_number(number_or_tag)
                     .to_rpc_result()?
+<<<<<<< HEAD
                     .ok_or_else(|| {
                     internal_rpc_err("Pending block not supported".to_string())
                 })?;
+=======
+                    .ok_or(EthApiError::HeaderNotFound(block_id))?;
+>>>>>>> v2.3.0
                 self.provider().header_by_number(number).to_rpc_result()?
             }
-        };
+        }
+        .ok_or(EthApiError::HeaderNotFound(block_id))?;
 
         let mut res = Vec::new();
-        if let Some(header) = header {
-            header.encode(&mut res);
-        }
-
+        header.encode(&mut res);
         Ok(res.into())
     }
 
@@ -962,7 +1510,11 @@ where
     /// Handler for `debug_getRawTransactions`
     /// Returns the bytes of the transaction for the given hash.
     async fn raw_transactions(&self, block_id: BlockId) -> RpcResult<Vec<Bytes>> {
+<<<<<<< HEAD
         let block = self
+=======
+        let block: RecoveredBlock<BlockTy<Eth::Primitives>> = self
+>>>>>>> v2.3.0
             .provider()
             .block_with_senders_by_id(block_id, TransactionVariant::NoHash)
             .to_rpc_result()?
@@ -976,15 +1528,51 @@ where
             .provider()
             .receipts_by_block_id(block_id)
             .to_rpc_result()?
-            .unwrap_or_default()
+            .ok_or(EthApiError::HeaderNotFound(block_id))?
             .into_iter()
             .map(|receipt| ReceiptWithBloom::from(receipt).encoded_2718().into())
             .collect())
     }
 
     /// Handler for `debug_getBadBlocks`
+<<<<<<< HEAD
     async fn bad_blocks(&self) -> RpcResult<Vec<RpcBlock>> {
         Ok(vec![])
+=======
+    async fn bad_blocks(&self) -> RpcResult<Vec<serde_json::Value>> {
+        let entries = self.inner.bad_block_store.all();
+        let mut bad_blocks = Vec::with_capacity(entries.len());
+
+        #[derive(Serialize, Deserialize)]
+        struct BadBlockSerde<T> {
+            block: T,
+            hash: B256,
+            rlp: Bytes,
+            reason: String,
+        }
+
+        for entry in entries {
+            let rlp = alloy_rlp::encode(entry.block.sealed_block()).into();
+            let hash = entry.block.hash();
+
+            let block = entry
+                .block
+                .clone_into_rpc_block(
+                    BlockTransactionsKind::Full,
+                    |tx, tx_info| self.eth_api().converter().fill(tx, tx_info),
+                    |header, size| self.eth_api().converter().convert_header(header, size),
+                )
+                .map_err(|err| Eth::Error::from(err).into())?;
+
+            let bad_block =
+                serde_json::to_value(BadBlockSerde { block, hash, rlp, reason: entry.reason })
+                    .map_err(|err| EthApiError::other(internal_rpc_err(err.to_string())))?;
+
+            bad_blocks.push(bad_block);
+        }
+
+        Ok(bad_blocks)
+>>>>>>> v2.3.0
     }
 
     /// Handler for `debug_traceChain`
@@ -1071,15 +1659,23 @@ where
     async fn debug_execution_witness(
         &self,
         block: BlockNumberOrTag,
+<<<<<<< HEAD
     ) -> RpcResult<ExecutionWitness> {
         let _permit = self.acquire_trace_permit().await;
         Self::debug_execution_witness(self, block).await.map_err(Into::into)
+=======
+        mode: Option<ExecutionWitnessMode>,
+    ) -> RpcResult<ExecutionWitness> {
+        let _permit = self.acquire_trace_permit().await;
+        Self::debug_execution_witness(self, block, mode).await.map_err(Into::into)
+>>>>>>> v2.3.0
     }
 
     /// Handler for `debug_executionWitnessByBlockHash`
     async fn debug_execution_witness_by_block_hash(
         &self,
         hash: B256,
+<<<<<<< HEAD
     ) -> RpcResult<ExecutionWitness> {
         let _permit = self.acquire_trace_permit().await;
         Self::debug_execution_witness_by_block_hash(self, hash).await.map_err(Into::into)
@@ -1087,6 +1683,34 @@ where
 
     async fn debug_backtrace_at(&self, _location: &str) -> RpcResult<()> {
         Ok(())
+=======
+        mode: Option<ExecutionWitnessMode>,
+    ) -> RpcResult<ExecutionWitness> {
+        let _permit = self.acquire_trace_permit().await;
+        Self::debug_execution_witness_by_block_hash(self, hash, mode).await.map_err(Into::into)
+    }
+
+    /// Handler for `debug_accountAt`
+    async fn debug_account_at(
+        &self,
+        block_id: BlockId,
+        tx_index: Index,
+        address: Address,
+    ) -> RpcResult<Option<Account>> {
+        let _permit = self.acquire_trace_permit().await;
+        Self::debug_account_at(self, block_id, tx_index, address).await.map_err(Into::into)
+    }
+
+    /// Handler for `debug_accountInfoAt`
+    async fn debug_account_info_at(
+        &self,
+        block_id: BlockId,
+        tx_index: Index,
+        address: Address,
+    ) -> RpcResult<Option<AccountInfo>> {
+        let _permit = self.acquire_trace_permit().await;
+        Self::debug_account_info_at(self, block_id, tx_index, address).await.map_err(Into::into)
+>>>>>>> v2.3.0
     }
 
     async fn debug_account_range(
@@ -1101,12 +1725,12 @@ where
         Ok(())
     }
 
-    async fn debug_block_profile(&self, _file: String, _seconds: u64) -> RpcResult<()> {
+    async fn debug_chaindb_compact(&self) -> RpcResult<()> {
         Ok(())
     }
 
-    async fn debug_chaindb_compact(&self) -> RpcResult<()> {
-        Ok(())
+    async fn debug_chain_config(&self) -> RpcResult<ChainConfig> {
+        Ok(self.provider().chain_spec().genesis().config.clone())
     }
 
     async fn debug_chain_config(&self) -> RpcResult<ChainConfig> {
@@ -1123,10 +1747,13 @@ where
         block_id: Option<BlockId>,
     ) -> RpcResult<Option<Bytes>> {
         Self::debug_code_by_hash(self, hash, block_id).await.map_err(Into::into)
+<<<<<<< HEAD
     }
 
     async fn debug_cpu_profile(&self, _file: String, _seconds: u64) -> RpcResult<()> {
         Ok(())
+=======
+>>>>>>> v2.3.0
     }
 
     async fn debug_db_ancient(&self, _kind: String, _number: u64) -> RpcResult<()> {
@@ -1137,8 +1764,38 @@ where
         Ok(())
     }
 
-    async fn debug_db_get(&self, _key: String) -> RpcResult<()> {
-        Ok(())
+    /// `debug_db_get` - database key lookup
+    ///
+    /// Currently supported:
+    /// * Contract bytecode associated with a code hash. The key format is: `<0x63><code_hash>`
+    ///     * Prefix byte: 0x63 (required)
+    ///     * Code hash: 32 bytes
+    ///   Must be provided as either:
+    ///     * Hex string: "0x63..." (66 hex characters after 0x)
+    ///     * Raw byte string: raw byte string (33 bytes)
+    ///   See Geth impl: <https://github.com/ethereum/go-ethereum/blob/737ffd1bf0cbee378d0111a5b17ae4724fb2216c/core/rawdb/schema.go#L120>
+    async fn debug_db_get(&self, key: String) -> RpcResult<Option<Bytes>> {
+        let key_bytes = if key.starts_with("0x") {
+            decode(&key).map_err(|_| EthApiError::InvalidParams("Invalid hex key".to_string()))?
+        } else {
+            key.into_bytes()
+        };
+
+        if key_bytes.len() != 33 {
+            return Err(EthApiError::InvalidParams(format!(
+                "Key must be 33 bytes, got {}",
+                key_bytes.len()
+            ))
+            .into());
+        }
+        if key_bytes[0] != 0x63 {
+            return Err(EthApiError::InvalidParams("Key prefix must be 0x63".to_string()).into());
+        }
+
+        let code_hash = B256::from_slice(&key_bytes[1..33]);
+
+        // No block ID is provided, so it defaults to the latest block
+        self.debug_code_by_hash(code_hash, None).await.map_err(Into::into)
     }
 
     async fn debug_dump_block(&self, _number: BlockId) -> RpcResult<()> {
@@ -1146,10 +1803,6 @@ where
     }
 
     async fn debug_free_os_memory(&self) -> RpcResult<()> {
-        Ok(())
-    }
-
-    async fn debug_freeze_client(&self, _node: String) -> RpcResult<()> {
         Ok(())
     }
 
@@ -1181,23 +1834,16 @@ where
         Ok(())
     }
 
-    async fn debug_go_trace(&self, _file: String, _seconds: u64) -> RpcResult<()> {
-        Ok(())
-    }
-
     async fn debug_intermediate_roots(
         &self,
-        _block_hash: B256,
+        block_hash: B256,
         _opts: Option<GethDebugTracingCallOptions>,
-    ) -> RpcResult<()> {
-        Ok(())
+    ) -> RpcResult<Vec<B256>> {
+        let _permit = self.acquire_trace_permit().await;
+        self.intermediate_roots(block_hash).await.map_err(Into::into)
     }
 
     async fn debug_mem_stats(&self) -> RpcResult<()> {
-        Ok(())
-    }
-
-    async fn debug_mutex_profile(&self, _file: String, _nsec: u64) -> RpcResult<()> {
         Ok(())
     }
 
@@ -1213,27 +1859,15 @@ where
         Ok(Default::default())
     }
 
-    async fn debug_set_block_profile_rate(&self, _rate: u64) -> RpcResult<()> {
-        Ok(())
-    }
-
     async fn debug_set_gc_percent(&self, _v: i32) -> RpcResult<()> {
         Ok(())
     }
 
-    async fn debug_set_head(&self, _number: u64) -> RpcResult<()> {
-        Ok(())
-    }
-
-    async fn debug_set_mutex_profile_fraction(&self, _rate: i32) -> RpcResult<()> {
+    async fn debug_set_head(&self, _number: U64) -> RpcResult<()> {
         Ok(())
     }
 
     async fn debug_set_trie_flush_interval(&self, _interval: String) -> RpcResult<()> {
-        Ok(())
-    }
-
-    async fn debug_stacks(&self) -> RpcResult<()> {
         Ok(())
     }
 
@@ -1253,6 +1887,7 @@ where
         Ok(())
     }
 
+<<<<<<< HEAD
     async fn debug_start_cpu_profile(&self, _file: String) -> RpcResult<()> {
         Ok(())
     }
@@ -1261,12 +1896,15 @@ where
         Ok(())
     }
 
+=======
+>>>>>>> v2.3.0
     async fn debug_state_root_with_updates(
         &self,
         hashed_state: HashedPostState,
         block_id: Option<BlockId>,
     ) -> RpcResult<(B256, TrieUpdates)> {
         Self::debug_state_root_with_updates(self, hashed_state, block_id).await.map_err(Into::into)
+<<<<<<< HEAD
     }
 
     async fn debug_stop_cpu_profile(&self) -> RpcResult<()> {
@@ -1275,6 +1913,8 @@ where
 
     async fn debug_stop_go_trace(&self) -> RpcResult<()> {
         Ok(())
+=======
+>>>>>>> v2.3.0
     }
 
     async fn debug_storage_range_at(
@@ -1290,30 +1930,25 @@ where
 
     async fn debug_trace_bad_block(
         &self,
-        _block_hash: B256,
-        _opts: Option<GethDebugTracingCallOptions>,
-    ) -> RpcResult<()> {
-        Ok(())
-    }
+        block_hash: B256,
+        opts: Option<GethDebugTracingCallOptions>,
+    ) -> RpcResult<Vec<TraceResult>> {
+        let _permit = self.acquire_trace_permit().await;
+        let entry = self
+            .inner
+            .bad_block_store
+            .get(block_hash)
+            .ok_or_else(|| internal_rpc_err("bad block not found in cache"))?;
 
-    async fn debug_verbosity(&self, _level: usize) -> RpcResult<()> {
-        Ok(())
-    }
+        let evm_env = self
+            .eth_api()
+            .evm_config()
+            .evm_env(entry.block.header())
+            .map_err(RethError::other)
+            .to_rpc_result()?;
 
-    async fn debug_vmodule(&self, _pattern: String) -> RpcResult<()> {
-        Ok(())
-    }
-
-    async fn debug_write_block_profile(&self, _file: String) -> RpcResult<()> {
-        Ok(())
-    }
-
-    async fn debug_write_mem_profile(&self, _file: String) -> RpcResult<()> {
-        Ok(())
-    }
-
-    async fn debug_write_mutex_profile(&self, _file: String) -> RpcResult<()> {
-        Ok(())
+        let opts = opts.map(|o| o.tracing_options).unwrap_or_default();
+        self.trace_block(entry.block.clone(), evm_env, opts).await.map_err(Into::into)
     }
 
     /// Handler for `debug_setFailpoint`
@@ -1334,21 +1969,91 @@ where
     }
 }
 
+<<<<<<< HEAD
 impl<Eth> std::fmt::Debug for DebugApi<Eth> {
+=======
+impl<Eth: RpcNodeCore> std::fmt::Debug for DebugApi<Eth> {
+>>>>>>> v2.3.0
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DebugApi").finish_non_exhaustive()
     }
 }
 
+<<<<<<< HEAD
 impl<Eth> Clone for DebugApi<Eth> {
+=======
+impl<Eth: RpcNodeCore> Clone for DebugApi<Eth> {
+>>>>>>> v2.3.0
     fn clone(&self) -> Self {
         Self { inner: Arc::clone(&self.inner) }
     }
 }
 
+<<<<<<< HEAD
 struct DebugApiInner<Eth> {
+=======
+struct DebugApiInner<Eth: RpcNodeCore> {
+>>>>>>> v2.3.0
     /// The implementation of `eth` API
     eth_api: Eth,
     // restrict the number of concurrent calls to blocking calls
     blocking_task_guard: BlockingTaskGuard,
+    /// Cache for bad blocks.
+    bad_block_store: BadBlockStore<BlockTy<Eth::Primitives>>,
+}
+
+/// A bounded, deduplicating store of recently observed bad blocks.
+#[derive(Clone, Debug)]
+struct BadBlockStore<B: BlockTrait> {
+    inner: Arc<RwLock<VecDeque<BadBlockEntry<B>>>>,
+    limit: usize,
+}
+
+/// A cached bad block paired with the reason it was rejected.
+#[derive(Clone, Debug)]
+struct BadBlockEntry<B: BlockTrait> {
+    block: Arc<RecoveredBlock<B>>,
+    reason: String,
+}
+
+impl<B: BlockTrait> BadBlockStore<B> {
+    /// Creates a new store with the given capacity.
+    fn new(limit: usize) -> Self {
+        Self { inner: Arc::new(RwLock::new(VecDeque::with_capacity(limit))), limit }
+    }
+
+    /// Inserts a recovered block with its rejection reason, keeping only the most recent `limit`
+    /// entries and deduplicating by block hash.
+    fn insert(&self, block: RecoveredBlock<B>, reason: String) {
+        let hash = block.hash();
+        let mut guard = self.inner.write();
+
+        // skip if we already recorded this bad block , and keep original ordering
+        if guard.iter().any(|entry| entry.block.hash() == hash) {
+            return;
+        }
+        guard.push_back(BadBlockEntry { block: Arc::new(block), reason });
+
+        while guard.len() > self.limit {
+            guard.pop_front();
+        }
+    }
+
+    /// Returns all cached bad block entries ordered from newest to oldest.
+    fn all(&self) -> Vec<BadBlockEntry<B>> {
+        let guard = self.inner.read();
+        guard.iter().rev().cloned().collect()
+    }
+
+    /// Returns the bad block entry with the given hash, if cached.
+    fn get(&self, hash: B256) -> Option<BadBlockEntry<B>> {
+        let guard = self.inner.read();
+        guard.iter().find(|entry| entry.block.hash() == hash).cloned()
+    }
+}
+
+impl<B: BlockTrait> Default for BadBlockStore<B> {
+    fn default() -> Self {
+        Self::new(64)
+    }
 }

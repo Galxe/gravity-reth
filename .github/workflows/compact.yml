@@ -6,6 +6,7 @@
 # 4) deserialize previously generated test vectors
 
 on:
+<<<<<<< HEAD
   workflow_dispatch:
 #  pull_request:
 #  merge_group:
@@ -20,10 +21,30 @@ jobs:
   compact-codec:
     runs-on:
       group: Reth
+=======
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: "sccache"
+
+name: compact-codec
+permissions: {}
+
+jobs:
+  compact-codec:
+    runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+>>>>>>> v2.3.0
     strategy:
       matrix:
         bin:
           - cargo run --bin reth --features "dev"
+<<<<<<< HEAD
           - cargo run --bin op-reth --features "dev" --manifest-path crates/optimism/bin/Cargo.toml
     steps:
       - uses: rui314/setup-mold@v1
@@ -35,14 +56,35 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ github.base_ref || 'main' }}
+=======
+    steps:
+      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+      - name: Checkout base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.base_ref || 'main' }}
+          persist-credentials: false
+>>>>>>> v2.3.0
       # On `main` branch, generates test vectors and serializes them to disk using `Compact`.
       - name: Generate compact vectors
         run: |
           ${{ matrix.bin }} -- test-vectors compact --write
       - name: Checkout PR
+<<<<<<< HEAD
         uses: actions/checkout@v5
         with:
           clean: false
+=======
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          clean: false
+          persist-credentials: false
+>>>>>>> v2.3.0
       # On incoming merge try to read and decode previously generated vectors with `Compact`
       - name: Read vectors
         run: ${{ matrix.bin }} -- test-vectors compact --read

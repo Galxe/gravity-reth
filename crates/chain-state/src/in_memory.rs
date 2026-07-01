@@ -2,25 +2,37 @@
 
 use crate::{
     CanonStateNotification, CanonStateNotificationSender, CanonStateNotifications,
-    ChainInfoTracker, MemoryOverlayStateProvider,
+    ChainInfoTracker, ComputedTrieData, DeferredTrieData, MemoryOverlayStateProvider,
 };
 use alloy_consensus::{transaction::TransactionMeta, BlockHeader};
 use alloy_eips::{BlockHashOrNumber, BlockNumHash};
+<<<<<<< HEAD
 use alloy_primitives::{map::HashMap, BlockNumber, TxHash, B256};
 use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_execution_types::{Chain, ExecutionOutcome};
+=======
+use alloy_primitives::{map::B256Map, BlockNumber, TxHash, B256};
+use parking_lot::RwLock;
+use reth_chainspec::ChainInfo;
+use reth_ethereum_primitives::EthPrimitives;
+use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult, Chain, ExecutionOutcome};
+>>>>>>> v2.3.0
 use reth_metrics::{metrics::Gauge, Metrics};
 use reth_primitives_traits::{
     BlockBody as _, IndexedTx, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
     SignedTransaction,
 };
 use reth_storage_api::StateProviderBox;
+<<<<<<< HEAD
 use reth_trie::{
     updates::{TrieUpdates, TrieUpdatesV2},
     HashedPostState,
 };
+=======
+use reth_trie::{updates::TrieUpdatesSorted, HashedPostStateSorted, LazyTrieData, SortedTrieData};
+>>>>>>> v2.3.0
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{broadcast, watch};
 
@@ -57,7 +69,11 @@ pub(crate) struct InMemoryStateMetrics {
 #[derive(Debug, Default)]
 pub(crate) struct InMemoryState<N: NodePrimitives = EthPrimitives> {
     /// All canonical blocks that are not on disk yet.
+<<<<<<< HEAD
     blocks: RwLock<HashMap<B256, Arc<BlockState<N>>>>,
+=======
+    blocks: RwLock<B256Map<Arc<BlockState<N>>>>,
+>>>>>>> v2.3.0
     /// Mapping of block numbers to block hashes.
     numbers: RwLock<BTreeMap<u64, B256>>,
     /// The pending block that has not yet been made canonical.
@@ -68,7 +84,11 @@ pub(crate) struct InMemoryState<N: NodePrimitives = EthPrimitives> {
 
 impl<N: NodePrimitives> InMemoryState<N> {
     pub(crate) fn new(
+<<<<<<< HEAD
         blocks: HashMap<B256, Arc<BlockState<N>>>,
+=======
+        blocks: B256Map<Arc<BlockState<N>>>,
+>>>>>>> v2.3.0
         numbers: BTreeMap<u64, B256>,
         pending: Option<BlockState<N>>,
     ) -> Self {
@@ -89,14 +109,20 @@ impl<N: NodePrimitives> InMemoryState<N> {
     ///
     /// This tries to acquire a read lock. Drop any write locks before calling this.
     pub(crate) fn update_metrics(&self) {
-        let numbers = self.numbers.read();
-        if let Some((earliest_block_number, _)) = numbers.first_key_value() {
-            self.metrics.earliest_block.set(*earliest_block_number as f64);
+        let (count, earliest, latest) = {
+            let numbers = self.numbers.read();
+            let count = numbers.len();
+            let earliest = numbers.first_key_value().map(|(number, _)| *number);
+            let latest = numbers.last_key_value().map(|(number, _)| *number);
+            (count, earliest, latest)
+        };
+        if let Some(earliest_block_number) = earliest {
+            self.metrics.earliest_block.set(earliest_block_number as f64);
         }
-        if let Some((latest_block_number, _)) = numbers.last_key_value() {
-            self.metrics.latest_block.set(*latest_block_number as f64);
+        if let Some(latest_block_number) = latest {
+            self.metrics.latest_block.set(latest_block_number as f64);
         }
-        self.metrics.num_blocks.set(numbers.len() as f64);
+        self.metrics.num_blocks.set(count as f64);
     }
 
     /// Returns the state for a given block hash.
@@ -178,7 +204,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// Create a new in-memory state with the given blocks, numbers, pending state, and optional
     /// finalized header.
     pub fn new(
+<<<<<<< HEAD
         blocks: HashMap<B256, Arc<BlockState<N>>>,
+=======
+        blocks: B256Map<Arc<BlockState<N>>>,
+>>>>>>> v2.3.0
         numbers: BTreeMap<u64, B256>,
         pending: Option<BlockState<N>>,
         finalized: Option<SealedHeader<N::BlockHeader>>,
@@ -203,7 +233,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
 
     /// Create an empty state.
     pub fn empty() -> Self {
+<<<<<<< HEAD
         Self::new(HashMap::default(), BTreeMap::new(), None, None, None)
+=======
+        Self::new(B256Map::default(), BTreeMap::new(), None, None, None)
+>>>>>>> v2.3.0
     }
 
     /// Create a new in memory state with the given local head and finalized header
@@ -245,7 +279,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// Updates the pending block with the given block.
     ///
     /// Note: This assumes that the parent block of the pending block is canonical.
+<<<<<<< HEAD
     pub fn set_pending_block(&self, pending: ExecutedBlockWithTrieUpdates<N>) {
+=======
+    pub fn set_pending_block(&self, pending: ExecutedBlock<N>) {
+>>>>>>> v2.3.0
         // fetch the state of the pending block's parent block
         let parent = self.state_by_hash(pending.recovered_block().parent_hash());
         let pending = BlockState::with_parent(pending, parent);
@@ -261,7 +299,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// them to their parent blocks.
     fn update_blocks<I, R>(&self, new_blocks: I, reorged: R)
     where
+<<<<<<< HEAD
         I: IntoIterator<Item = ExecutedBlockWithTrieUpdates<N>>,
+=======
+        I: IntoIterator<Item = ExecutedBlock<N>>,
+>>>>>>> v2.3.0
         R: IntoIterator<Item = ExecutedBlock<N>>,
     {
         {
@@ -314,6 +356,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// This will update the links between blocks and remove all blocks that are [..
     /// `persisted_height`].
     pub fn remove_persisted_blocks(&self, persisted_num_hash: BlockNumHash) {
+        self.set_persisted(persisted_num_hash);
         // if the persisted hash is not in the canonical in memory state, do nothing, because it
         // means canonical blocks were not actually persisted.
         //
@@ -441,6 +484,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
         self.inner.chain_info_tracker.set_finalized(header);
     }
 
+    /// Persisted block setter.
+    pub fn set_persisted(&self, num_hash: BlockNumHash) {
+        self.inner.chain_info_tracker.set_persisted(num_hash);
+    }
+
     /// Canonical head getter.
     pub fn get_canonical_head(&self) -> SealedHeader<N::BlockHeader> {
         self.inner.chain_info_tracker.get_canonical_head()
@@ -454,6 +502,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// Safe header getter.
     pub fn get_safe_header(&self) -> Option<SealedHeader<N::BlockHeader>> {
         self.inner.chain_info_tracker.get_safe_header()
+    }
+
+    /// Persisted block `BlockNumHash` getter.
+    pub fn get_persisted_num_hash(&self) -> Option<BlockNumHash> {
+        self.inner.chain_info_tracker.get_persisted_num_hash()
     }
 
     /// Returns the `SealedHeader` corresponding to the pending state.
@@ -506,6 +559,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
         &self,
     ) -> watch::Receiver<Option<SealedHeader<N::BlockHeader>>> {
         self.inner.chain_info_tracker.subscribe_finalized_block()
+    }
+
+    /// Subscribe to new persisted block events.
+    pub fn subscribe_persisted_block(&self) -> watch::Receiver<Option<BlockNumHash>> {
+        self.inner.chain_info_tracker.subscribe_persisted_block()
     }
 
     /// Attempts to send a new [`CanonStateNotification`] to all active Receiver handles.
@@ -568,25 +626,48 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
 
 /// State after applying the given block, this block is part of the canonical chain that partially
 /// stored in memory and can be traced back to a canonical block on disk.
+<<<<<<< HEAD
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct BlockState<N: NodePrimitives = EthPrimitives> {
     /// The executed block that determines the state after this block has been executed.
     block: ExecutedBlockWithTrieUpdates<N>,
+=======
+#[derive(Debug, Clone)]
+pub struct BlockState<N: NodePrimitives = EthPrimitives> {
+    /// The executed block that determines the state after this block has been executed.
+    block: ExecutedBlock<N>,
+>>>>>>> v2.3.0
     /// The block's parent block if it exists.
     parent: Option<Arc<Self>>,
 }
 
+<<<<<<< HEAD
 impl<N: NodePrimitives> BlockState<N> {
     /// [`BlockState`] constructor.
     pub const fn new(block: ExecutedBlockWithTrieUpdates<N>) -> Self {
+=======
+impl<N: NodePrimitives> PartialEq for BlockState<N> {
+    fn eq(&self, other: &Self) -> bool {
+        self.block == other.block && self.parent == other.parent
+    }
+}
+
+impl<N: NodePrimitives> BlockState<N> {
+    /// [`BlockState`] constructor.
+    pub const fn new(block: ExecutedBlock<N>) -> Self {
+>>>>>>> v2.3.0
         Self { block, parent: None }
     }
 
     /// [`BlockState`] constructor with parent.
+<<<<<<< HEAD
     pub const fn with_parent(
         block: ExecutedBlockWithTrieUpdates<N>,
         parent: Option<Arc<Self>>,
     ) -> Self {
+=======
+    pub const fn with_parent(block: ExecutedBlock<N>, parent: Option<Arc<Self>>) -> Self {
+>>>>>>> v2.3.0
         Self { block, parent }
     }
 
@@ -600,12 +681,20 @@ impl<N: NodePrimitives> BlockState<N> {
     }
 
     /// Returns the executed block that determines the state.
+<<<<<<< HEAD
     pub fn block(&self) -> ExecutedBlockWithTrieUpdates<N> {
+=======
+    pub fn block(&self) -> ExecutedBlock<N> {
+>>>>>>> v2.3.0
         self.block.clone()
     }
 
     /// Returns a reference to the executed block that determines the state.
+<<<<<<< HEAD
     pub const fn block_ref(&self) -> &ExecutedBlockWithTrieUpdates<N> {
+=======
+    pub const fn block_ref(&self) -> &ExecutedBlock<N> {
+>>>>>>> v2.3.0
         &self.block
     }
 
@@ -626,7 +715,11 @@ impl<N: NodePrimitives> BlockState<N> {
     }
 
     /// Returns the `Receipts` of executed block that determines the state.
+<<<<<<< HEAD
     pub fn receipts(&self) -> &Vec<Vec<N::Receipt>> {
+=======
+    pub fn receipts(&self) -> &Vec<N::Receipt> {
+>>>>>>> v2.3.0
         &self.block.execution_outcome().receipts
     }
 
@@ -634,6 +727,7 @@ impl<N: NodePrimitives> BlockState<N> {
     /// We assume that the `Receipts` in the executed block `ExecutionOutcome`
     /// has only one element corresponding to the executed block associated to
     /// the state.
+<<<<<<< HEAD
     pub fn executed_block_receipts(&self) -> Vec<N::Receipt> {
         let receipts = self.receipts();
 
@@ -655,13 +749,30 @@ impl<N: NodePrimitives> BlockState<N> {
     pub fn parent_state_chain(&self) -> Vec<&Self> {
         let mut parents = Vec::new();
         let mut current = self.parent.as_deref();
+=======
+    ///
+    /// This clones the vector of receipts. To avoid it, use [`Self::executed_block_receipts_ref`].
+    pub fn executed_block_receipts(&self) -> Vec<N::Receipt> {
+        self.receipts().clone()
+    }
 
-        while let Some(parent) = current {
-            parents.push(parent);
-            current = parent.parent.as_deref();
-        }
+    /// Returns a slice of `Receipt` of executed block that determines the state.
+    /// We assume that the `Receipts` in the executed block `ExecutionOutcome`
+    /// has only one element corresponding to the executed block associated to
+    /// the state.
+    pub fn executed_block_receipts_ref(&self) -> &[N::Receipt] {
+        self.receipts()
+    }
+>>>>>>> v2.3.0
 
-        parents
+    /// Returns an iterator over __parent__ `BlockStates`.
+    ///
+    /// The block state order is newest to oldest (highest to lowest):
+    /// `[5,4,3,2,1]`
+    ///
+    /// Note: This does not include self.
+    pub fn parent_state_chain(&self) -> impl Iterator<Item = &Self> + '_ {
+        std::iter::successors(self.parent.as_deref(), |state| state.parent.as_deref())
     }
 
     /// Returns a vector of `BlockStates` representing the entire in memory chain.
@@ -672,6 +783,11 @@ impl<N: NodePrimitives> BlockState<N> {
     }
 
     /// Appends the parent chain of this [`BlockState`] to the given vector.
+    ///
+    /// Parents are appended in order from newest to oldest (highest to lowest).
+    /// This does not include self, only the parent states.
+    ///
+    /// This is a convenience method equivalent to `chain.extend(self.parent_state_chain())`.
     pub fn append_parent_chain<'a>(&'a self, chain: &mut Vec<&'a Self>) {
         chain.extend(self.parent_state_chain());
     }
@@ -725,20 +841,34 @@ impl<N: NodePrimitives> BlockState<N> {
 }
 
 /// Represents an executed block stored in-memory.
+<<<<<<< HEAD
 #[derive(Clone, Debug, PartialEq, Eq)]
+=======
+#[derive(Clone, Debug)]
+>>>>>>> v2.3.0
 pub struct ExecutedBlock<N: NodePrimitives = EthPrimitives> {
     /// Recovered Block
     pub recovered_block: Arc<RecoveredBlock<N::Block>>,
     /// Block's execution outcome.
+<<<<<<< HEAD
     pub execution_output: Arc<ExecutionOutcome<N::Receipt>>,
     /// Block's hashed state.
     pub hashed_state: Arc<HashedPostState>,
+=======
+    pub execution_output: Arc<BlockExecutionOutput<N::Receipt>>,
+    /// Deferred trie data produced by execution.
+    ///
+    /// This allows deferring the computation of the trie data which can be expensive.
+    /// The data can be populated asynchronously after the block was validated.
+    pub trie_data: DeferredTrieData,
+>>>>>>> v2.3.0
 }
 
 impl<N: NodePrimitives> Default for ExecutedBlock<N> {
     fn default() -> Self {
         Self {
             recovered_block: Default::default(),
+<<<<<<< HEAD
             execution_output: Default::default(),
             hashed_state: Default::default(),
         }
@@ -750,8 +880,73 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
     #[inline]
     pub fn sealed_block(&self) -> &SealedBlock<N::Block> {
         self.recovered_block.sealed_block()
+=======
+            execution_output: Arc::new(BlockExecutionOutput {
+                result: BlockExecutionResult {
+                    receipts: Default::default(),
+                    requests: Default::default(),
+                    gas_used: 0,
+                    blob_gas_used: 0,
+                },
+                state: Default::default(),
+            }),
+            trie_data: DeferredTrieData::ready(ComputedTrieData::default()),
+        }
+>>>>>>> v2.3.0
+    }
+}
+
+<<<<<<< HEAD
+=======
+impl<N: NodePrimitives> PartialEq for ExecutedBlock<N> {
+    fn eq(&self, other: &Self) -> bool {
+        // Trie data is computed asynchronously and doesn't define block identity.
+        self.recovered_block == other.recovered_block &&
+            self.execution_output == other.execution_output
+    }
+}
+
+impl<N: NodePrimitives> ExecutedBlock<N> {
+    /// Create a new [`ExecutedBlock`] with already-computed trie data.
+    ///
+    /// Use this constructor when trie data is available immediately (e.g., sequencers,
+    /// payload builders). This is the safe default path.
+    pub fn new(
+        recovered_block: Arc<RecoveredBlock<N::Block>>,
+        execution_output: Arc<BlockExecutionOutput<N::Receipt>>,
+        trie_data: ComputedTrieData,
+    ) -> Self {
+        Self { recovered_block, execution_output, trie_data: DeferredTrieData::ready(trie_data) }
     }
 
+    /// Create a new [`ExecutedBlock`] with deferred trie data.
+    ///
+    /// This is useful if the trie data is populated somewhere else, e.g. asynchronously
+    /// after the block was validated.
+    ///
+    /// The [`DeferredTrieData`] handle allows expensive trie operations (sorting hashed state and
+    /// trie updates) to be performed outside the critical validation path by a background task.
+    /// This can improve latency for time-sensitive operations like block validation.
+    ///
+    /// If the data hasn't been populated when [`Self::trie_data()`] is called, the caller waits
+    /// for the background task to publish it.
+    ///
+    /// Use [`Self::new()`] instead when trie data is already computed and available immediately.
+    pub const fn with_deferred_trie_data(
+        recovered_block: Arc<RecoveredBlock<N::Block>>,
+        execution_output: Arc<BlockExecutionOutput<N::Receipt>>,
+        trie_data: DeferredTrieData,
+    ) -> Self {
+        Self { recovered_block, execution_output, trie_data }
+    }
+
+    /// Returns a reference to an inner [`SealedBlock`]
+    #[inline]
+    pub fn sealed_block(&self) -> &SealedBlock<N::Block> {
+        self.recovered_block.sealed_block()
+    }
+
+>>>>>>> v2.3.0
     /// Returns a reference to [`RecoveredBlock`]
     #[inline]
     pub fn recovered_block(&self) -> &RecoveredBlock<N::Block> {
@@ -760,6 +955,7 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
 
     /// Returns a reference to the block's execution outcome
     #[inline]
+<<<<<<< HEAD
     pub fn execution_outcome(&self) -> &ExecutionOutcome<N::Receipt> {
         &self.execution_output
     }
@@ -770,10 +966,53 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
         &self.hashed_state
     }
 
+=======
+    pub fn execution_outcome(&self) -> &BlockExecutionOutput<N::Receipt> {
+        &self.execution_output
+    }
+
+    /// Returns the trie data, waiting for the background task if not already cached.
+    ///
+    /// Uses `OnceLock::get_or_init` internally:
+    /// - If already computed: returns cached result immediately
+    /// - If not computed: first caller waits for the publishing task, others wait for that result
+    #[inline]
+    #[tracing::instrument(level = "debug", target = "engine::tree", name = "trie_data", skip_all)]
+    pub fn trie_data(&self) -> ComputedTrieData {
+        self.trie_data.wait_cloned()
+    }
+
+    /// Returns a clone of the deferred trie data handle.
+    ///
+    /// A handle is a lightweight reference that can be passed to descendants without
+    /// forcing trie data to be observed immediately. The actual work runs in the background task.
+    #[inline]
+    pub fn trie_data_handle(&self) -> DeferredTrieData {
+        self.trie_data.clone()
+    }
+
+    /// Returns the hashed state result of the execution outcome.
+    ///
+    /// May wait for trie data if the deferred task hasn't completed.
+    #[inline]
+    pub fn hashed_state(&self) -> Arc<HashedPostStateSorted> {
+        self.trie_data().hashed_state
+    }
+
+    /// Returns the trie updates resulting from the execution outcome.
+    ///
+    /// May wait for trie data if the deferred task hasn't completed.
+    #[inline]
+    pub fn trie_updates(&self) -> Arc<TrieUpdatesSorted> {
+        self.trie_data().trie_updates
+    }
+
+>>>>>>> v2.3.0
     /// Returns a [`BlockNumber`] of the block.
     #[inline]
     pub fn block_number(&self) -> BlockNumber {
         self.recovered_block.header().number()
+<<<<<<< HEAD
     }
 }
 
@@ -884,6 +1123,8 @@ impl<N: NodePrimitives> ExecutedBlockWithTrieUpdates<N> {
     pub fn into_sealed_block(self) -> SealedBlock<N::Block> {
         let block = Arc::unwrap_or_clone(self.block.recovered_block);
         block.into_sealed_block()
+=======
+>>>>>>> v2.3.0
     }
 }
 
@@ -893,18 +1134,27 @@ pub enum NewCanonicalChain<N: NodePrimitives = EthPrimitives> {
     /// A simple append to the current canonical head
     Commit {
         /// all blocks that lead back to the canonical head
+<<<<<<< HEAD
         new: Vec<ExecutedBlockWithTrieUpdates<N>>,
+=======
+        new: Vec<ExecutedBlock<N>>,
+>>>>>>> v2.3.0
     },
     /// A reorged chain consists of two chains that trace back to a shared ancestor block at which
     /// point they diverge.
     Reorg {
         /// All blocks of the _new_ chain
+<<<<<<< HEAD
         new: Vec<ExecutedBlockWithTrieUpdates<N>>,
         /// All blocks of the _old_ chain
         ///
         /// These are not [`ExecutedBlockWithTrieUpdates`] because we don't always have the trie
         /// updates for the old canonical chain. For example, in case of node being restarted right
         /// before the reorg [`TrieUpdates`] can't be fetched from database.
+=======
+        new: Vec<ExecutedBlock<N>>,
+        /// All blocks of the _old_ chain
+>>>>>>> v2.3.0
         old: Vec<ExecutedBlock<N>>,
     },
 }
@@ -929,6 +1179,7 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
     pub fn to_chain_notification(&self) -> CanonStateNotification<N> {
         match self {
             Self::Commit { new } => {
+<<<<<<< HEAD
                 let new = Arc::new(new.iter().fold(Chain::default(), |mut chain, exec| {
                     chain.append_block(
                         exec.recovered_block().clone(),
@@ -937,11 +1188,42 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
                     chain
                 }));
                 CanonStateNotification::Commit { new }
+=======
+                CanonStateNotification::Commit { new: Arc::new(Self::blocks_to_chain(new)) }
+>>>>>>> v2.3.0
             }
-            Self::Reorg { new, old } => {
-                let new = Arc::new(new.iter().fold(Chain::default(), |mut chain, exec| {
+            Self::Reorg { new, old } => CanonStateNotification::Reorg {
+                new: Arc::new(Self::blocks_to_chain(new)),
+                old: Arc::new(Self::blocks_to_chain(old)),
+            },
+        }
+    }
+
+    /// Converts a slice of executed blocks into a [`Chain`].
+    fn blocks_to_chain(blocks: &[ExecutedBlock<N>]) -> Chain<N> {
+        match blocks {
+            [] => Chain::default(),
+            [first, rest @ ..] => {
+                let trie_data_handle = first.trie_data_handle();
+                let mut chain = Chain::from_block(
+                    first.recovered_block().clone(),
+                    ExecutionOutcome::from((
+                        first.execution_outcome().clone(),
+                        first.block_number(),
+                    )),
+                    LazyTrieData::deferred(move || {
+                        let trie_data = trie_data_handle.wait_cloned();
+                        SortedTrieData {
+                            hashed_state: trie_data.hashed_state,
+                            trie_updates: trie_data.trie_updates,
+                        }
+                    }),
+                );
+                for exec in rest {
+                    let trie_data_handle = exec.trie_data_handle();
                     chain.append_block(
                         exec.recovered_block().clone(),
+<<<<<<< HEAD
                         exec.execution_outcome().clone(),
                     );
                     chain
@@ -954,6 +1236,22 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
                     chain
                 }));
                 CanonStateNotification::Reorg { new, old }
+=======
+                        ExecutionOutcome::from((
+                            exec.execution_outcome().clone(),
+                            exec.block_number(),
+                        )),
+                        LazyTrieData::deferred(move || {
+                            let trie_data = trie_data_handle.wait_cloned();
+                            SortedTrieData {
+                                hashed_state: trie_data.hashed_state,
+                                trie_updates: trie_data.trie_updates,
+                            }
+                        }),
+                    );
+                }
+                chain
+>>>>>>> v2.3.0
             }
         }
     }
@@ -962,7 +1260,11 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
     ///
     /// Returns the new tip for [`Self::Reorg`] and [`Self::Commit`] variants which commit at least
     /// 1 new block.
+<<<<<<< HEAD
     pub fn tip(&self) -> &SealedBlock<N::Block> {
+=======
+    pub fn tip(&self) -> &RecoveredBlock<N::Block> {
+>>>>>>> v2.3.0
         match self {
             Self::Commit { new } | Self::Reorg { new, .. } => {
                 new.last().expect("non empty blocks").recovered_block()
@@ -986,8 +1288,13 @@ mod tests {
         StateProofProvider, StateProvider, StateRootProvider, StorageRootProvider,
     };
     use reth_trie::{
+<<<<<<< HEAD
         AccountProof, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
         StorageProof, TrieInput,
+=======
+        updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
+        MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
+>>>>>>> v2.3.0
     };
 
     fn create_mock_state(
@@ -1139,6 +1446,10 @@ mod tests {
             &self,
             _input: TrieInput,
             _target: HashedPostState,
+<<<<<<< HEAD
+=======
+            _mode: reth_trie::ExecutionWitnessMode,
+>>>>>>> v2.3.0
         ) -> ProviderResult<Vec<Bytes>> {
             Ok(Vec::default())
         }
@@ -1146,7 +1457,11 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_state_by_hash() {
+<<<<<<< HEAD
         let mut state_by_hash = HashMap::default();
+=======
+        let mut state_by_hash = B256Map::default();
+>>>>>>> v2.3.0
         let number = rand::rng().random::<u64>();
         let mut test_block_builder: TestBlockBuilder = TestBlockBuilder::default();
         let state = Arc::new(create_mock_state(&mut test_block_builder, number, B256::random()));
@@ -1160,7 +1475,11 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_state_by_number() {
+<<<<<<< HEAD
         let mut state_by_hash = HashMap::default();
+=======
+        let mut state_by_hash = B256Map::default();
+>>>>>>> v2.3.0
         let mut hash_by_number = BTreeMap::new();
 
         let number = rand::rng().random::<u64>();
@@ -1179,7 +1498,11 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_head_state() {
+<<<<<<< HEAD
         let mut state_by_hash = HashMap::default();
+=======
+        let mut state_by_hash = B256Map::default();
+>>>>>>> v2.3.0
         let mut hash_by_number = BTreeMap::new();
         let mut test_block_builder: TestBlockBuilder = TestBlockBuilder::default();
         let state1 = Arc::new(create_mock_state(&mut test_block_builder, 1, B256::random()));
@@ -1207,7 +1530,11 @@ mod tests {
         let pending_hash = pending_state.hash();
 
         let in_memory_state =
+<<<<<<< HEAD
             InMemoryState::new(HashMap::default(), BTreeMap::new(), Some(pending_state));
+=======
+            InMemoryState::new(B256Map::default(), BTreeMap::new(), Some(pending_state));
+>>>>>>> v2.3.0
 
         let result = in_memory_state.pending_state();
         assert!(result.is_some());
@@ -1219,7 +1546,11 @@ mod tests {
     #[test]
     fn test_in_memory_state_impl_no_pending_state() {
         let in_memory_state: InMemoryState =
+<<<<<<< HEAD
             InMemoryState::new(HashMap::default(), BTreeMap::new(), None);
+=======
+            InMemoryState::new(B256Map::default(), BTreeMap::new(), None);
+>>>>>>> v2.3.0
 
         assert_eq!(in_memory_state.pending_state(), None);
     }
@@ -1247,7 +1578,7 @@ mod tests {
 
         let state = BlockState::new(block);
 
-        assert_eq!(state.receipts(), &receipts);
+        assert_eq!(state.receipts(), receipts.first().unwrap());
     }
 
     #[test]
@@ -1350,7 +1681,11 @@ mod tests {
         let state2 = Arc::new(BlockState::with_parent(block2.clone(), Some(state1.clone())));
         let state3 = Arc::new(BlockState::with_parent(block3.clone(), Some(state2.clone())));
 
+<<<<<<< HEAD
         let mut blocks = HashMap::default();
+=======
+        let mut blocks = B256Map::default();
+>>>>>>> v2.3.0
         blocks.insert(block1.recovered_block().hash(), state1);
         blocks.insert(block2.recovered_block().hash(), state2);
         blocks.insert(block3.recovered_block().hash(), state3);
@@ -1390,15 +1725,23 @@ mod tests {
     #[test]
     fn test_canonical_in_memory_state_canonical_chain_empty() {
         let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
+<<<<<<< HEAD
         let chain: Vec<_> = state.canonical_chain().collect();
         assert!(chain.is_empty());
+=======
+        assert!(state.canonical_chain().next().is_none());
+>>>>>>> v2.3.0
     }
 
     #[test]
     fn test_canonical_in_memory_state_canonical_chain_single_block() {
         let block = TestBlockBuilder::eth().get_executed_block_with_number(1, B256::random());
         let hash = block.recovered_block().hash();
+<<<<<<< HEAD
         let mut blocks = HashMap::default();
+=======
+        let mut blocks = B256Map::default();
+>>>>>>> v2.3.0
         blocks.insert(hash, Arc::new(BlockState::new(block)));
         let mut numbers = BTreeMap::new();
         numbers.insert(1, hash);
@@ -1460,19 +1803,18 @@ mod tests {
         let mut test_block_builder: TestBlockBuilder = TestBlockBuilder::default();
         let chain = create_mock_state_chain(&mut test_block_builder, 4);
 
-        let parents = chain[3].parent_state_chain();
+        let parents: Vec<_> = chain[3].parent_state_chain().collect();
         assert_eq!(parents.len(), 3);
         assert_eq!(parents[0].block().recovered_block().number, 3);
         assert_eq!(parents[1].block().recovered_block().number, 2);
         assert_eq!(parents[2].block().recovered_block().number, 1);
 
-        let parents = chain[2].parent_state_chain();
+        let parents: Vec<_> = chain[2].parent_state_chain().collect();
         assert_eq!(parents.len(), 2);
         assert_eq!(parents[0].block().recovered_block().number, 2);
         assert_eq!(parents[1].block().recovered_block().number, 1);
 
-        let parents = chain[0].parent_state_chain();
-        assert_eq!(parents.len(), 0);
+        assert_eq!(chain[0].parent_state_chain().count(), 0);
     }
 
     #[test]
@@ -1483,8 +1825,7 @@ mod tests {
             create_mock_state(&mut test_block_builder, single_block_number, B256::random());
         let single_block_hash = single_block.block().recovered_block().hash();
 
-        let parents = single_block.parent_state_chain();
-        assert_eq!(parents.len(), 0);
+        assert_eq!(single_block.parent_state_chain().count(), 0);
 
         let block_state_chain = single_block.chain().collect::<Vec<_>>();
         assert_eq!(block_state_chain.len(), 1);
@@ -1526,23 +1867,46 @@ mod tests {
             test_block_builder.get_executed_block_with_number(2, block1.recovered_block.hash());
         let block2a =
             test_block_builder.get_executed_block_with_number(2, block1.recovered_block.hash());
+<<<<<<< HEAD
 
         let sample_execution_outcome = ExecutionOutcome {
             receipts: vec![vec![], vec![]],
             requests: vec![Requests::default(), Requests::default()],
             ..Default::default()
         };
+=======
+>>>>>>> v2.3.0
 
         // Test commit notification
         let chain_commit = NewCanonicalChain::Commit { new: vec![block0.clone(), block1.clone()] };
+
+        // Build expected trie data map
+        let mut expected_trie_data = BTreeMap::new();
+        expected_trie_data
+            .insert(0, LazyTrieData::ready(block0.hashed_state(), block0.trie_updates()));
+        expected_trie_data
+            .insert(1, LazyTrieData::ready(block1.hashed_state(), block1.trie_updates()));
+
+        // Build expected execution outcome (first_block matches first block number)
+        let commit_execution_outcome = ExecutionOutcome {
+            receipts: vec![vec![], vec![]],
+            requests: vec![Requests::default(), Requests::default()],
+            first_block: 0,
+            ..Default::default()
+        };
 
         assert_eq!(
             chain_commit.to_chain_notification(),
             CanonStateNotification::Commit {
                 new: Arc::new(Chain::new(
                     vec![block0.recovered_block().clone(), block1.recovered_block().clone()],
+<<<<<<< HEAD
                     sample_execution_outcome.clone(),
                     None
+=======
+                    commit_execution_outcome,
+                    expected_trie_data,
+>>>>>>> v2.3.0
                 ))
             }
         );
@@ -1553,11 +1917,33 @@ mod tests {
             old: vec![block1.block.clone(), block2.block.clone()],
         };
 
+        // Build expected trie data for old chain
+        let mut old_trie_data = BTreeMap::new();
+        old_trie_data.insert(1, LazyTrieData::ready(block1.hashed_state(), block1.trie_updates()));
+        old_trie_data.insert(2, LazyTrieData::ready(block2.hashed_state(), block2.trie_updates()));
+
+        // Build expected trie data for new chain
+        let mut new_trie_data = BTreeMap::new();
+        new_trie_data
+            .insert(1, LazyTrieData::ready(block1a.hashed_state(), block1a.trie_updates()));
+        new_trie_data
+            .insert(2, LazyTrieData::ready(block2a.hashed_state(), block2a.trie_updates()));
+
+        // Build expected execution outcome for reorg chains (first_block matches first block
+        // number)
+        let reorg_execution_outcome = ExecutionOutcome {
+            receipts: vec![vec![], vec![]],
+            requests: vec![Requests::default(), Requests::default()],
+            first_block: 1,
+            ..Default::default()
+        };
+
         assert_eq!(
             chain_reorg.to_chain_notification(),
             CanonStateNotification::Reorg {
                 old: Arc::new(Chain::new(
                     vec![block1.recovered_block().clone(), block2.recovered_block().clone()],
+<<<<<<< HEAD
                     sample_execution_outcome.clone(),
                     None
                 )),
@@ -1565,6 +1951,15 @@ mod tests {
                     vec![block1a.recovered_block().clone(), block2a.recovered_block().clone()],
                     sample_execution_outcome,
                     None
+=======
+                    reorg_execution_outcome.clone(),
+                    old_trie_data,
+                )),
+                new: Arc::new(Chain::new(
+                    vec![block1a.recovered_block().clone(), block2a.recovered_block().clone()],
+                    reorg_execution_outcome,
+                    new_trie_data,
+>>>>>>> v2.3.0
                 ))
             }
         );

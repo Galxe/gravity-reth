@@ -1,7 +1,18 @@
 //! Collection of methods for block validation.
 
+<<<<<<< HEAD
 use alloy_consensus::{
     constants::MAXIMUM_EXTRA_DATA_SIZE, BlockHeader as _, Transaction, EMPTY_OMMER_ROOT_HASH,
+=======
+use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH};
+use alloy_eips::{eip4844::DATA_GAS_PER_BLOB, eip7840::BlobParams};
+use alloy_primitives::B256;
+use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks};
+use reth_consensus::ConsensusError;
+use reth_primitives_traits::{
+    constants::{GAS_LIMIT_BOUND_DIVISOR, MAXIMUM_GAS_LIMIT_BLOCK, MINIMUM_GAS_LIMIT},
+    Block, BlockBody, BlockHeader, GotExpected, SealedBlock, SealedHeader,
+>>>>>>> v2.3.0
 };
 use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip4844::DATA_GAS_PER_BLOB, eip7840::BlobParams};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks};
@@ -13,6 +24,13 @@ use reth_primitives_traits::{
     transaction::TxHashRef,
     Block, BlockBody, BlockHeader, GotExpected, SealedBlock, SealedHeader,
 };
+
+/// The maximum RLP length of a block, defined in [EIP-7934](https://eips.ethereum.org/EIPS/eip-7934).
+///
+/// Calculated as `MAX_BLOCK_SIZE` - `SAFETY_MARGIN` where
+/// `MAX_BLOCK_SIZE` = `10_485_760`
+/// `SAFETY_MARGIN` = `2_097_152`
+pub const MAX_RLP_BLOCK_SIZE: usize = 8_388_608;
 
 /// The maximum RLP length of a block, defined in [EIP-7934](https://eips.ethereum.org/EIPS/eip-7934).
 ///
@@ -148,13 +166,77 @@ pub fn validate_block_pre_execution<B, ChainSpec>(
 ) -> Result<(), ConsensusError>
 where
     B: Block,
+<<<<<<< HEAD
     ChainSpec: EthereumHardforks,
+{
+    post_merge_hardfork_fields(block, chain_spec)?;
+=======
+    ChainSpec: EthChainSpec + EthereumHardforks,
+{
+    validate_block_pre_execution_with_tx_root(block, chain_spec, None)
+}
+
+/// Validate a block without regard for state using an optional pre-computed transaction root.
+///
+/// - Compares the ommer hash in the block header to the block body
+/// - Compares the transactions root in the block header to the block body
+/// - Pre-execution transaction validation
+///
+/// If `transaction_root` is provided, it is used instead of recomputing the transaction trie
+/// root from the block body. The caller must ensure this value was derived from
+/// `block.body().calculate_tx_root()`.
+pub fn validate_block_pre_execution_with_tx_root<B, ChainSpec>(
+    block: &SealedBlock<B>,
+    chain_spec: &ChainSpec,
+    transaction_root: Option<B256>,
+) -> Result<(), ConsensusError>
+where
+    B: Block,
+    ChainSpec: EthChainSpec + EthereumHardforks,
 {
     post_merge_hardfork_fields(block, chain_spec)?;
 
     // Check transaction root
-    if let Err(error) = block.ensure_transaction_root_valid() {
-        return Err(ConsensusError::BodyTransactionRootDiff(error.into()))
+    let expected_transaction_root = block.header().transactions_root();
+    let calculated_transaction_root =
+        transaction_root.unwrap_or_else(|| block.body().calculate_tx_root());
+    if calculated_transaction_root != expected_transaction_root {
+        return Err(ConsensusError::BodyTransactionRootDiff(
+            GotExpected { got: calculated_transaction_root, expected: expected_transaction_root }
+                .into(),
+        ))
+    }
+>>>>>>> v2.3.0
+
+    Ok(())
+}
+
+/// Validates the ommers hash and other fork-specific fields.
+///
+/// These fork-specific validations are:
+/// * EIP-4895 withdrawals validation, if shanghai is active based on the given chainspec. See more
+///   information about the specific checks in [`validate_shanghai_withdrawals`].
+/// * EIP-4844 blob gas validation, if cancun is active based on the given chainspec. See more
+///   information about the specific checks in [`validate_cancun_gas`].
+/// * EIP-7934 block size limit validation, if osaka is active based on the given chainspec.
+pub fn post_merge_hardfork_fields<B, ChainSpec>(
+    block: &SealedBlock<B>,
+    chain_spec: &ChainSpec,
+) -> Result<(), ConsensusError>
+where
+    B: Block,
+    ChainSpec: EthereumHardforks,
+{
+    // Check ommers hash
+    let ommers_hash = block.body().calculate_ommers_root();
+    if Some(block.ommers_hash()) != ommers_hash {
+        return Err(ConsensusError::BodyOmmersHashDiff(
+            GotExpected {
+                got: ommers_hash.unwrap_or(EMPTY_OMMER_ROOT_HASH),
+                expected: block.ommers_hash(),
+            }
+            .into(),
+        ))
     }
     // EIP-7825 validation
     if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) {
@@ -225,13 +307,16 @@ where
 /// Validates that the EIP-4844 header fields exist and conform to the spec. This ensures that:
 ///
 ///  * `blob_gas_used` exists as a header field
-///  * `excess_blob_gas` exists as a header field
 ///  * `parent_beacon_block_root` exists as a header field
 ///  * `blob_gas_used` is a multiple of `DATA_GAS_PER_BLOB`
+<<<<<<< HEAD
 ///  * `excess_blob_gas` is a multiple of `DATA_GAS_PER_BLOB`
 ///  * `blob_gas_used` doesn't exceed the max allowed blob gas based on the given params
 ///
 /// Note: This does not enforce any restrictions on `blob_gas_used`
+=======
+///  * `blob_gas_used` doesn't exceed the max allowed blob gas based on the given params
+>>>>>>> v2.3.0
 pub fn validate_4844_header_standalone<H: BlockHeader>(
     header: &H,
     blob_params: BlobParams,
@@ -264,9 +349,18 @@ pub fn validate_4844_header_standalone<H: BlockHeader>(
 /// From yellow paper: extraData: An arbitrary byte array containing data relevant to this block.
 /// This must be 32 bytes or fewer; formally Hx.
 #[inline]
+<<<<<<< HEAD
 pub fn validate_header_extra_data<H: BlockHeader>(header: &H) -> Result<(), ConsensusError> {
     let extra_data_len = header.extra_data().len();
     if extra_data_len > MAXIMUM_EXTRA_DATA_SIZE {
+=======
+pub fn validate_header_extra_data<H: BlockHeader>(
+    header: &H,
+    max_size: usize,
+) -> Result<(), ConsensusError> {
+    let extra_data_len = header.extra_data().len();
+    if extra_data_len > max_size {
+>>>>>>> v2.3.0
         Err(ConsensusError::ExtraDataExceedsMax { len: extra_data_len })
     } else {
         Ok(())
@@ -282,6 +376,7 @@ pub fn validate_against_parent_hash_number<H: BlockHeader>(
     header: &H,
     parent: &SealedHeader<H>,
 ) -> Result<(), ConsensusError> {
+<<<<<<< HEAD
     // Parent number is consistent.
     if parent.number() + 1 != header.number() {
         return Err(ConsensusError::ParentBlockNumberMismatch {
@@ -294,6 +389,28 @@ pub fn validate_against_parent_hash_number<H: BlockHeader>(
         return Err(ConsensusError::ParentHashMismatch(
             GotExpected { got: header.parent_hash(), expected: parent.hash() }.into(),
         ))
+=======
+    if parent.hash() != header.parent_hash() {
+        return Err(ConsensusError::ParentHashMismatch(
+            GotExpected { got: header.parent_hash(), expected: parent.hash() }.into(),
+        ))
+    }
+
+    let Some(parent_number) = parent.number().checked_add(1) else {
+        // parent block already reached the maximum
+        return Err(ConsensusError::ParentBlockNumberMismatch {
+            parent_block_number: parent.number(),
+            block_number: u64::MAX,
+        })
+    };
+
+    // Parent number is consistent.
+    if parent_number != header.number() {
+        return Err(ConsensusError::ParentBlockNumberMismatch {
+            parent_block_number: parent.number(),
+            block_number: header.number(),
+        })
+>>>>>>> v2.3.0
     }
 
     Ok(())
@@ -313,7 +430,11 @@ pub fn validate_against_parent_eip1559_base_fee<ChainSpec: EthChainSpec + Ethere
             .ethereum_fork_activation(EthereumHardfork::London)
             .transitions_at_block(header.number())
         {
+<<<<<<< HEAD
             INITIAL_BASE_FEE
+=======
+            alloy_eips::eip1559::INITIAL_BASE_FEE
+>>>>>>> v2.3.0
         } else {
             chain_spec
                 .next_block_base_fee(parent, header.timestamp())
@@ -330,7 +451,7 @@ pub fn validate_against_parent_eip1559_base_fee<ChainSpec: EthChainSpec + Ethere
     Ok(())
 }
 
-/// Validates the timestamp against the parent to make sure it is in the past.
+/// Validates that the block timestamp is greater than the parent block timestamp.
 #[inline]
 pub fn validate_against_parent_timestamp<H: BlockHeader>(
     header: &H,
@@ -386,7 +507,11 @@ pub fn validate_against_parent_gas_limit<
         })
     }
     // Check if the self gas limit is below the minimum required limit.
+<<<<<<< HEAD
     else if header.gas_limit() < MINIMUM_GAS_LIMIT {
+=======
+    if header.gas_limit() < MINIMUM_GAS_LIMIT {
+>>>>>>> v2.3.0
         return Err(ConsensusError::GasLimitInvalidMinimum { child_gas_limit: header.gas_limit() })
     }
 
@@ -437,7 +562,11 @@ pub fn validate_against_parent_4844<H: BlockHeader>(
 mod tests {
     use super::*;
     use alloy_consensus::{BlockBody, Header, TxEip4844};
+<<<<<<< HEAD
     use alloy_eips::eip4895::Withdrawals;
+=======
+    use alloy_eips::{eip4844::DATA_GAS_PER_BLOB, eip4895::Withdrawals};
+>>>>>>> v2.3.0
     use alloy_primitives::{Address, Bytes, Signature, U256};
     use rand::Rng;
     use reth_chainspec::ChainSpecBuilder;
@@ -495,12 +624,89 @@ mod tests {
         let expected_blob_gas_used = 10 * DATA_GAS_PER_BLOB;
 
         // validate blob, it should fail blob gas used validation
-        assert_eq!(
-            validate_block_pre_execution(&block, &chain_spec),
-            Err(ConsensusError::BlobGasUsedDiff(GotExpected {
-                got: 1,
-                expected: expected_blob_gas_used
-            }))
+        assert!(matches!(
+            validate_block_pre_execution(&block, &chain_spec).unwrap_err(),
+            ConsensusError::BlobGasUsedDiff(diff)
+                if diff.got == 1 && diff.expected == expected_blob_gas_used
+        ));
+    }
+
+    #[test]
+    fn validate_header_extra_data_with_custom_limit() {
+        // Test with default 32 bytes - should pass
+        let header_32 = Header { extra_data: Bytes::from(vec![0; 32]), ..Default::default() };
+        assert!(validate_header_extra_data(&header_32, 32).is_ok());
+
+        // Test exceeding default - should fail
+        let header_33 = Header { extra_data: Bytes::from(vec![0; 33]), ..Default::default() };
+        assert!(matches!(
+            validate_header_extra_data(&header_33, 32).unwrap_err(),
+            ConsensusError::ExtraDataExceedsMax { len } if len == 33
+        ));
+
+        // Test with custom larger limit - should pass
+        assert!(validate_header_extra_data(&header_33, 64).is_ok());
+    }
+
+    #[test]
+    fn precomputed_tx_root_correct_passes() {
+        let chain_spec = ChainSpecBuilder::mainnet().cancun_activated().build();
+
+        let transaction = mock_blob_tx(1, 1);
+        let tx_root = proofs::calculate_transaction_root(std::slice::from_ref(&transaction));
+
+        let header = Header {
+            base_fee_per_gas: Some(1337),
+            withdrawals_root: Some(proofs::calculate_withdrawals_root(&[])),
+            transactions_root: tx_root,
+            blob_gas_used: Some(DATA_GAS_PER_BLOB),
+            excess_blob_gas: Some(0),
+            ..Default::default()
+        };
+        let body = BlockBody {
+            transactions: vec![transaction],
+            ommers: vec![],
+            withdrawals: Some(Withdrawals::default()),
+        };
+
+        let block = SealedBlock::seal_slow(alloy_consensus::Block { header, body });
+
+        // Some(correct_root) should pass just like None
+        assert!(
+            validate_block_pre_execution_with_tx_root(&block, &chain_spec, Some(tx_root)).is_ok()
         );
+        assert!(validate_block_pre_execution_with_tx_root(&block, &chain_spec, None).is_ok());
+    }
+
+    #[test]
+    fn precomputed_tx_root_wrong_fails() {
+        let chain_spec = ChainSpecBuilder::mainnet().cancun_activated().build();
+
+        let transaction = mock_blob_tx(1, 1);
+        let tx_root = proofs::calculate_transaction_root(std::slice::from_ref(&transaction));
+
+        let header = Header {
+            base_fee_per_gas: Some(1337),
+            withdrawals_root: Some(proofs::calculate_withdrawals_root(&[])),
+            transactions_root: tx_root,
+            blob_gas_used: Some(DATA_GAS_PER_BLOB),
+            excess_blob_gas: Some(0),
+            ..Default::default()
+        };
+        let body = BlockBody {
+            transactions: vec![transaction],
+            ommers: vec![],
+            withdrawals: Some(Withdrawals::default()),
+        };
+
+        let block = SealedBlock::seal_slow(alloy_consensus::Block { header, body });
+
+        let wrong_root = B256::repeat_byte(0xff);
+        assert!(matches!(
+            validate_block_pre_execution_with_tx_root(&block, &chain_spec, Some(wrong_root))
+                .unwrap_err(),
+            ConsensusError::BodyTransactionRootDiff(diff)
+                if diff.0.got == wrong_root && diff.0.expected == tx_root
+        ));
     }
 }

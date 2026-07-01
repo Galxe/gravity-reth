@@ -11,20 +11,36 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SEED: rustethereumethereumrust
+<<<<<<< HEAD
   CARGO_INCREMENTAL: 0
+=======
+  RUSTC_WRAPPER: "sccache"
+>>>>>>> v2.3.0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+<<<<<<< HEAD
 jobs:
   test:
     name: e2e-testsuite
     runs-on: ubuntu-latest
+=======
+permissions: {}
+
+jobs:
+  test:
+    name: e2e-testsuite
+    runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-4' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+>>>>>>> v2.3.0
     env:
       RUST_BACKTRACE: 1
     timeout-minutes: 90
     steps:
+<<<<<<< HEAD
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -39,15 +55,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
+=======
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: taiki-e/install-action@1f2425cdb59f8fffb99ee16a5968edf6f57a2b93 # v2.75.24
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+>>>>>>> v2.3.0
         with:
           cache-on-failure: true
       - name: Run e2e tests
         run: |
           cargo nextest run \
+<<<<<<< HEAD
+=======
+            --no-fail-fast \
+>>>>>>> v2.3.0
             --locked --features "asm-keccak" \
             --workspace \
             --exclude 'example-*' \
             --exclude 'exex-subscription' \
+<<<<<<< HEAD
             --exclude 'reth-bench' \
             --exclude 'ef-tests' \
             --exclude "op-reth" \
@@ -57,3 +89,36 @@ jobs:
             --exclude 'reth-pipe-exec-layer-*' \
             -E 'binary(e2e_testsuite)'
 
+=======
+            --exclude 'ef-tests' \
+            --exclude 'reth' \
+            -E 'binary(e2e_testsuite)'
+
+  rocksdb:
+    name: e2e-rocksdb
+    runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-4' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    env:
+      RUST_BACKTRACE: 1
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: taiki-e/install-action@1f2425cdb59f8fffb99ee16a5968edf6f57a2b93 # v2.75.24
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+      - name: Run RocksDB e2e tests
+        run: |
+          cargo nextest run \
+            --no-fail-fast \
+            --locked \
+            -p reth-e2e-test-utils \
+            -E 'binary(rocksdb)'
+>>>>>>> v2.3.0

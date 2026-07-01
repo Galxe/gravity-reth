@@ -1,50 +1,63 @@
-//! Contains a precompile cache that is backed by a moka cache.
+//! Contains a precompile cache backed by `schnellru::LruMap` (LRU by length).
 
-use alloy_primitives::Bytes;
-use parking_lot::Mutex;
+use alloy_primitives::{
+    map::{DefaultHashBuilder, FbBuildHasher},
+    Bytes,
+};
+use moka::policy::EvictionPolicy;
 use reth_evm::precompiles::{DynPrecompile, Precompile, PrecompileInput};
+use reth_primitives_traits::dashmap::DashMap;
 use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
 use revm_primitives::Address;
-use schnellru::LruMap;
-use std::{
-    collections::HashMap,
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::{hash::Hash, sync::Arc};
+use tracing::error;
 
 /// Default max cache size for [`PrecompileCache`]
-const MAX_CACHE_SIZE: u32 = 10_000;
+const MAX_CACHE_SIZE: u32 = 1024 * 1024;
 
 /// Stores caches for each precompile.
 #[derive(Debug, Clone, Default)]
-pub struct PrecompileCacheMap<S>(HashMap<Address, PrecompileCache<S>>)
+pub struct PrecompileCacheMap<S>(Arc<DashMap<Address, PrecompileCache<S>, FbBuildHasher<20>>>)
 where
-    S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone;
+    S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static;
 
 impl<S> PrecompileCacheMap<S>
 where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
-    pub(crate) fn cache_for_address(&mut self, address: Address) -> PrecompileCache<S> {
+    /// Get the precompile cache for the given address.
+    pub fn cache_for_address(&self, address: Address) -> PrecompileCache<S> {
+        // Try just using `.get` first to avoid acquiring a write lock.
+        if let Some(cache) = self.0.get(&address) {
+            return cache.clone();
+        }
+        // Otherwise, fallback to `.entry` and initialize the cache.
+        //
+        // This should be very rare as caches for all precompiles will be initialized as soon as
+        // first EVM is created.
         self.0.entry(address).or_default().clone()
     }
 }
 
 /// Cache for precompiles, for each input stores the result.
-///
-/// [`LruMap`] requires a mutable reference on `get` since it updates the LRU order,
-/// so we use a [`Mutex`] instead of an `RwLock`.
 #[derive(Debug, Clone)]
-pub struct PrecompileCache<S>(Arc<Mutex<LruMap<CacheKey<S>, CacheEntry>>>)
+pub struct PrecompileCache<S>(moka::sync::Cache<Bytes, CacheEntry<S>, DefaultHashBuilder>)
 where
-    S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone;
+    S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static;
 
 impl<S> Default for PrecompileCache<S>
 where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(LruMap::new(schnellru::ByLength::new(MAX_CACHE_SIZE)))))
+        Self(
+            moka::sync::CacheBuilder::new(MAX_CACHE_SIZE as u64)
+                .eviction_policy(EvictionPolicy::lru())
+                .weigher(|key: &Bytes, value: &CacheEntry<S>| {
+                    (key.len() + value.output.bytes.len()) as u32
+                })
+                .build_with_hasher(Default::default()),
+        )
     }
 }
 
@@ -52,69 +65,45 @@ impl<S> PrecompileCache<S>
 where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
-    fn get(&self, key: &CacheKeyRef<'_, S>) -> Option<CacheEntry> {
-        self.0.lock().get(key).cloned()
+    fn get(&self, input: &[u8], spec: S) -> Option<CacheEntry<S>> {
+        self.0.get(input).filter(|e| e.spec == spec)
     }
 
     /// Inserts the given key and value into the cache, returning the new cache size.
-    fn insert(&self, key: CacheKey<S>, value: CacheEntry) -> usize {
-        let mut cache = self.0.lock();
-        cache.insert(key, value);
-        cache.len()
+    fn insert(&self, input: Bytes, value: CacheEntry<S>) -> usize {
+        self.0.insert(input, value);
+        self.0.entry_count() as usize
     }
 }
 
-/// Cache key, spec id and precompile call input. spec id is included in the key to account for
-/// precompile repricing across fork activations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CacheKey<S>((S, Bytes));
-
-impl<S> CacheKey<S> {
-    const fn new(spec_id: S, input: Bytes) -> Self {
-        Self((spec_id, input))
-    }
-}
-
-/// Cache key reference, used to avoid cloning the input bytes when looking up using a [`CacheKey`].
+/// Cache entry for a successful precompile output.
+///
+/// We intentionally do not cache non-successful statuses or errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheKeyRef<'a, S>((S, &'a [u8]));
-
-impl<'a, S> CacheKeyRef<'a, S> {
-    const fn new(spec_id: S, input: &'a [u8]) -> Self {
-        Self((spec_id, input))
-    }
+pub struct CacheEntry<S> {
+    output: PrecompileOutput,
+    spec: S,
 }
 
-impl<S: PartialEq> PartialEq<CacheKey<S>> for CacheKeyRef<'_, S> {
-    fn eq(&self, other: &CacheKey<S>) -> bool {
-        self.0 .0 == other.0 .0 && self.0 .1 == other.0 .1.as_ref()
-    }
-}
-
-impl<'a, S: Hash> Hash for CacheKeyRef<'a, S> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0 .0.hash(state);
-        self.0 .1.hash(state);
-    }
-}
-
-/// Cache entry, precompile successful output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheEntry(PrecompileOutput);
-
-impl CacheEntry {
+impl<S> CacheEntry<S> {
     const fn gas_used(&self) -> u64 {
-        self.0.gas_used
+        self.output.gas_used
     }
 
-    fn to_precompile_result(&self) -> PrecompileResult {
-        Ok(self.0.clone())
+    /// Converts the cache entry to a precompile result. Accepts state gas reservoir as input.
+    ///
+    /// All cached precompiles are not expected to access/created state and thus reservoir is always
+    /// kept as is.
+    fn to_precompile_result(&self, reservoir: u64) -> PrecompileResult {
+        let mut output = self.output.clone();
+        output.reservoir = reservoir;
+        Ok(output)
     }
 }
 
 /// A cache for precompile inputs / outputs.
 #[derive(Debug)]
-pub(crate) struct CachedPrecompile<S>
+pub struct CachedPrecompile<S>
 where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
@@ -133,7 +122,7 @@ where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
     /// `CachedPrecompile` constructor.
-    pub(crate) const fn new(
+    pub const fn new(
         precompile: DynPrecompile,
         cache: PrecompileCache<S>,
         spec_id: S,
@@ -142,7 +131,8 @@ where
         Self { precompile, cache, spec_id, metrics }
     }
 
-    pub(crate) fn wrap(
+    /// Wrap the given precompile in a cached precompile.
+    pub fn wrap(
         precompile: DynPrecompile,
         cache: PrecompileCache<S>,
         spec_id: S,
@@ -190,24 +180,38 @@ where
     }
 
     fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
-        let key = CacheKeyRef::new(self.spec_id.clone(), input.data);
-
-        if let Some(entry) = &self.cache.get(&key) {
+        if let Some(entry) = &self.cache.get(input.data, self.spec_id.clone()) &&
+            input.gas >= entry.gas_used()
+        {
             self.increment_by_one_precompile_cache_hits();
-            if input.gas >= entry.gas_used() {
-                return entry.to_precompile_result()
-            }
+            return entry.to_precompile_result(input.reservoir);
         }
 
         let calldata = input.data;
+        let reservoir = input.reservoir;
         let result = self.precompile.call(input);
 
         match &result {
-            Ok(output) => {
-                let key = CacheKey::new(self.spec_id.clone(), Bytes::copy_from_slice(calldata));
-                let size = self.cache.insert(key, CacheEntry(output.clone()));
-                self.set_precompile_cache_size_metric(size as f64);
-                self.increment_by_one_precompile_cache_misses();
+            // Only successful outputs are cacheable. Non-success statuses and errors must execute
+            // again instead of poisoning the cache for subsequent calls.
+            Ok(output) if output.is_success() => {
+                // Sanity-check precompile output to ensure that it does not affect state gas in any
+                // way.
+                //
+                // This does not fully protect us from caching stateful precompiles but might make
+                // it obvious when the node is misconfigured.
+                if output.reservoir != reservoir {
+                    error!(target: "engine::tree", precompile_id = self.precompile.precompile_id().name(), "cacheable precompile decremented reservoir, skipping cache insertion");
+                } else if output.state_gas_used != 0 {
+                    error!(target: "engine::tree", precompile_id = self.precompile.precompile_id().name(), "cacheable precompile used state gas, skipping cache insertion");
+                } else {
+                    let size = self.cache.insert(
+                        Bytes::copy_from_slice(calldata),
+                        CacheEntry { output: output.clone(), spec: self.spec_id.clone() },
+                    );
+                    self.set_precompile_cache_size_metric(size as f64);
+                    self.increment_by_one_precompile_cache_misses();
+                }
             }
             _ => {
                 self.increment_by_one_precompile_errors();
@@ -220,18 +224,18 @@ where
 /// Metrics for the cached precompile.
 #[derive(reth_metrics::Metrics, Clone)]
 #[metrics(scope = "sync.caching")]
-pub(crate) struct CachedPrecompileMetrics {
+pub struct CachedPrecompileMetrics {
     /// Precompile cache hits
-    precompile_cache_hits: metrics::Counter,
+    pub precompile_cache_hits: metrics::Counter,
 
     /// Precompile cache misses
-    precompile_cache_misses: metrics::Counter,
+    pub precompile_cache_misses: metrics::Counter,
 
     /// Precompile cache size. Uses the LRU cache length as the size metric.
-    precompile_cache_size: metrics::Gauge,
+    pub precompile_cache_size: metrics::Gauge,
 
     /// Precompile execution errors.
-    precompile_errors: metrics::Counter,
+    pub precompile_errors: metrics::Counter,
 }
 
 impl CachedPrecompileMetrics {
@@ -239,60 +243,53 @@ impl CachedPrecompileMetrics {
     ///
     /// Adds address as an `address` label padded with zeros to at least two hex symbols, prefixed
     /// by `0x`.
-    pub(crate) fn new_with_address(address: Address) -> Self {
+    pub fn new_with_address(address: Address) -> Self {
         Self::new_with_labels(&[("address", format!("0x{address:02x}"))])
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::hash::DefaultHasher;
-
     use super::*;
     use reth_evm::{EthEvmFactory, Evm, EvmEnv, EvmFactory};
     use reth_revm::db::EmptyDB;
-    use revm::{context::TxEnv, precompile::PrecompileOutput};
+    use revm::{
+        context::TxEnv,
+        precompile::{PrecompileOutput, PrecompileStatus},
+    };
     use revm_primitives::hardfork::SpecId;
 
     #[test]
-    fn test_cache_key_ref_hash() {
-        let key1 = CacheKey::new(SpecId::PRAGUE, b"test_input".into());
-        let key2 = CacheKeyRef::new(SpecId::PRAGUE, b"test_input");
-        assert!(PartialEq::eq(&key2, &key1));
-
-        let mut hasher = DefaultHasher::new();
-        key1.hash(&mut hasher);
-        let hash1 = hasher.finish();
-
-        let mut hasher = DefaultHasher::new();
-        key2.hash(&mut hasher);
-        let hash2 = hasher.finish();
-
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
     fn test_precompile_cache_basic() {
-        let dyn_precompile: DynPrecompile = |_input: PrecompileInput<'_>| -> PrecompileResult {
-            Ok(PrecompileOutput { gas_used: 0, bytes: Bytes::default(), reverted: false })
-        }
+        let dyn_precompile: DynPrecompile = (|_input: PrecompileInput<'_>| -> PrecompileResult {
+            Ok(PrecompileOutput {
+                status: PrecompileStatus::Success,
+                gas_used: 0,
+                state_gas_used: 0,
+                reservoir: 0,
+                gas_refunded: 0,
+                bytes: Bytes::default(),
+            })
+        })
         .into();
 
         let cache =
             CachedPrecompile::new(dyn_precompile, PrecompileCache::default(), SpecId::PRAGUE, None);
 
         let output = PrecompileOutput {
+            status: PrecompileStatus::Success,
             gas_used: 50,
+            state_gas_used: 0,
+            reservoir: 0,
+            gas_refunded: 0,
             bytes: alloy_primitives::Bytes::copy_from_slice(b"cached_result"),
-            reverted: false,
         };
 
-        let key = CacheKey::new(SpecId::PRAGUE, b"test_input".into());
-        let expected = CacheEntry(output);
-        cache.cache.insert(key, expected.clone());
+        let input = b"test_input";
+        let expected = CacheEntry { output, spec: SpecId::PRAGUE };
+        cache.cache.insert(input.into(), expected.clone());
 
-        let key = CacheKeyRef::new(SpecId::PRAGUE, b"test_input");
-        let actual = cache.cache.get(&key).unwrap();
+        let actual = cache.cache.get(input, SpecId::PRAGUE).unwrap();
 
         assert_eq!(actual, expected);
     }
@@ -306,7 +303,7 @@ mod tests {
         let address1 = Address::repeat_byte(1);
         let address2 = Address::repeat_byte(2);
 
-        let mut cache_map = PrecompileCacheMap::default();
+        let cache_map = PrecompileCacheMap::default();
 
         // create the first precompile with a specific output
         let precompile1: DynPrecompile = (PrecompileId::custom("custom"), {
@@ -314,9 +311,12 @@ mod tests {
                 assert_eq!(input.data, input_data);
 
                 Ok(PrecompileOutput {
+                    status: PrecompileStatus::Success,
                     gas_used: 5000,
+                    state_gas_used: 0,
+                    reservoir: 0,
+                    gas_refunded: 0,
                     bytes: alloy_primitives::Bytes::copy_from_slice(b"output_from_precompile_1"),
-                    reverted: false,
                 })
             }
         })
@@ -328,9 +328,12 @@ mod tests {
                 assert_eq!(input.data, input_data);
 
                 Ok(PrecompileOutput {
+                    status: PrecompileStatus::Success,
                     gas_used: 7000,
+                    state_gas_used: 0,
+                    reservoir: 0,
+                    gas_refunded: 0,
                     bytes: alloy_primitives::Bytes::copy_from_slice(b"output_from_precompile_2"),
-                    reverted: false,
                 })
             }
         })

@@ -3,7 +3,7 @@
 use crate::{MessageValidationKind, PayloadAttributes};
 use alloc::vec::Vec;
 use alloy_eips::{eip1898::BlockWithParent, eip4895::Withdrawal, eip7685::Requests, BlockNumHash};
-use alloy_primitives::B256;
+use alloy_primitives::{Bytes, B256};
 use alloy_rpc_types_engine::ExecutionData;
 use core::fmt::Debug;
 use serde::{de::DeserializeOwned, Serialize};
@@ -40,6 +40,11 @@ pub trait ExecutionPayload:
     /// Returns `None` for pre-Shanghai blocks.
     fn withdrawals(&self) -> Option<&Vec<Withdrawal>>;
 
+    /// Returns the access list included in this payload.
+    ///
+    /// Returns `None` for pre-Amsterdam blocks.
+    fn block_access_list(&self) -> Option<&Bytes>;
+
     /// Returns the beacon block root associated with this payload.
     ///
     /// Returns `None` for pre-merge payloads.
@@ -50,6 +55,16 @@ pub trait ExecutionPayload:
 
     /// Returns the total gas consumed by all transactions in this block.
     fn gas_used(&self) -> u64;
+
+    /// Returns the total gas limit for this block.
+    fn gas_limit(&self) -> u64;
+
+    /// Returns the number of transactions in the payload.
+    fn transaction_count(&self) -> usize;
+    /// Returns the slot number included in this payload.
+    ///
+    /// Returns `None` for pre-Amsterdam blocks.
+    fn slot_number(&self) -> Option<u64>;
 }
 
 impl ExecutionPayload for ExecutionData {
@@ -69,6 +84,10 @@ impl ExecutionPayload for ExecutionData {
         self.payload.withdrawals()
     }
 
+    fn block_access_list(&self) -> Option<&Bytes> {
+        self.payload.block_access_list()
+    }
+
     fn parent_beacon_block_root(&self) -> Option<B256> {
         self.sidecar.parent_beacon_block_root()
     }
@@ -79,6 +98,18 @@ impl ExecutionPayload for ExecutionData {
 
     fn gas_used(&self) -> u64 {
         self.payload.as_v1().gas_used
+    }
+
+    fn gas_limit(&self) -> u64 {
+        self.payload.as_v1().gas_limit
+    }
+
+    fn transaction_count(&self) -> usize {
+        self.payload.as_v1().transactions.len()
+    }
+
+    fn slot_number(&self) -> Option<u64> {
+        self.payload.slot_number()
     }
 }
 
@@ -142,6 +173,30 @@ where
             Self::PayloadAttributes(_) => MessageValidationKind::PayloadAttributes,
         }
     }
+
+    /// Returns `block_access_list` from  payload.
+    pub fn block_access_list(&self) -> Option<&Bytes> {
+        match self {
+            Self::ExecutionPayload(payload) => payload.block_access_list(),
+            Self::PayloadAttributes(_attributes) => None,
+        }
+    }
+
+    /// Returns `slot_number` from  payload or attributes.
+    pub fn slot_number(&self) -> Option<u64> {
+        match self {
+            Self::ExecutionPayload(payload) => payload.slot_number(),
+            Self::PayloadAttributes(attributes) => attributes.slot_number(),
+        }
+    }
+
+    /// Returns `target_gas_limit` from payload attributes.
+    pub fn target_gas_limit(&self) -> Option<u64> {
+        match self {
+            Self::ExecutionPayload(_) => None,
+            Self::PayloadAttributes(attributes) => attributes.target_gas_limit(),
+        }
+    }
 }
 
 impl<'a, Payload, AttributesType> From<&'a AttributesType>
@@ -153,38 +208,6 @@ where
         Self::PayloadAttributes(attributes)
     }
 }
-
-#[cfg(feature = "op")]
-impl ExecutionPayload for op_alloy_rpc_types_engine::OpExecutionData {
-    fn parent_hash(&self) -> B256 {
-        self.parent_hash()
-    }
-
-    fn block_hash(&self) -> B256 {
-        self.block_hash()
-    }
-
-    fn block_number(&self) -> u64 {
-        self.block_number()
-    }
-
-    fn withdrawals(&self) -> Option<&Vec<Withdrawal>> {
-        self.payload.as_v2().map(|p| &p.withdrawals)
-    }
-
-    fn parent_beacon_block_root(&self) -> Option<B256> {
-        self.sidecar.parent_beacon_block_root()
-    }
-
-    fn timestamp(&self) -> u64 {
-        self.payload.as_v1().timestamp
-    }
-
-    fn gas_used(&self) -> u64 {
-        self.payload.as_v1().gas_used
-    }
-}
-
 /// Extended functionality for Ethereum execution payloads
 impl<Attributes> PayloadOrAttributes<'_, ExecutionData, Attributes>
 where

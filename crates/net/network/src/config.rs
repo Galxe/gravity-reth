@@ -6,7 +6,7 @@ use crate::{
     transactions::TransactionsManagerConfig,
     NetworkHandle, NetworkManager,
 };
-use alloy_primitives::B256;
+use alloy_eips::BlockNumHash;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, Hardforks};
 use reth_discv4::{Discv4Config, Discv4ConfigBuilder, NatResolver, DEFAULT_DISCOVERY_ADDRESS};
 use reth_discv5::NetworkStackId;
@@ -16,11 +16,14 @@ use reth_eth_wire::{
     EthNetworkPrimitives, HelloMessage, HelloMessageWithProtocols, NetworkPrimitives,
     UnifiedStatus,
 };
+use reth_eth_wire_types::message::MAX_MESSAGE_SIZE;
 use reth_ethereum_forks::{ForkFilter, Head};
 use reth_network_peers::{mainnet_nodes, pk2id, sepolia_nodes, PeerId, TrustedPeer};
 use reth_network_types::{PeersConfig, SessionsConfig};
-use reth_storage_api::{noop::NoopProvider, BlockNumReader, BlockReader, HeaderProvider};
-use reth_tasks::{TaskSpawner, TokioTaskExecutor};
+use reth_storage_api::{
+    noop::NoopProvider, BalProvider, BlockNumReader, BlockReader, HeaderProvider,
+};
+use reth_tasks::Runtime;
 use secp256k1::SECP256K1;
 use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
@@ -76,7 +79,7 @@ pub struct NetworkConfig<C, N: NetworkPrimitives = EthNetworkPrimitives> {
     /// The default mode of the network.
     pub network_mode: NetworkMode,
     /// The executor to use for spawning tasks.
-    pub executor: Box<dyn TaskSpawner>,
+    pub executor: Runtime,
     /// The `Status` message to send to peers at the beginning.
     pub status: UnifiedStatus,
     /// Sets the hello message for the p2p handshake in `RLPx`
@@ -94,34 +97,28 @@ pub struct NetworkConfig<C, N: NetworkPrimitives = EthNetworkPrimitives> {
     /// This can be overridden to support custom handshake logic via the
     /// [`NetworkConfigBuilder`].
     pub handshake: Arc<dyn EthRlpxHandshake>,
-    /// List of block hashes to check for required blocks.
+    /// Maximum allowed ETH message size for post-handshake ETH/Snap streams.
+    pub eth_max_message_size: usize,
+    /// List of block number-hash pairs to check for required blocks.
     /// If non-empty, peers that don't have these blocks will be filtered out.
-    pub required_block_hashes: Vec<B256>,
+    pub required_block_hashes: Vec<BlockNumHash>,
 }
 
 // === impl NetworkConfig ===
 
 impl<N: NetworkPrimitives> NetworkConfig<(), N> {
-    /// Convenience method for creating the corresponding builder type
-    pub fn builder(secret_key: SecretKey) -> NetworkConfigBuilder<N> {
-        NetworkConfigBuilder::new(secret_key)
+    /// Convenience method for creating the corresponding builder type.
+    pub fn builder(secret_key: SecretKey, executor: Runtime) -> NetworkConfigBuilder<N> {
+        NetworkConfigBuilder::new(secret_key, executor)
     }
 
     /// Convenience method for creating the corresponding builder type with a random secret key.
-    pub fn builder_with_rng_secret_key() -> NetworkConfigBuilder<N> {
-        NetworkConfigBuilder::with_rng_secret_key()
+    pub fn builder_with_rng_secret_key(executor: Runtime) -> NetworkConfigBuilder<N> {
+        NetworkConfigBuilder::with_rng_secret_key(executor)
     }
 }
 
 impl<C, N: NetworkPrimitives> NetworkConfig<C, N> {
-    /// Create a new instance with all mandatory fields set, rest is field with defaults.
-    pub fn new(client: C, secret_key: SecretKey) -> Self
-    where
-        C: ChainSpecProvider<ChainSpec: Hardforks>,
-    {
-        NetworkConfig::builder(secret_key).build(client)
-    }
-
     /// Apply a function to the config.
     pub fn apply<F>(self, f: F) -> Self
     where
@@ -162,7 +159,8 @@ where
 impl<C, N> NetworkConfig<C, N>
 where
     N: NetworkPrimitives,
-    C: BlockReader<Block = N::Block, Receipt = N::Receipt, Header = N::BlockHeader>
+    C: BalProvider
+        + BlockReader<Block = N::Block, Receipt = N::Receipt, Header = N::BlockHeader>
         + HeaderProvider
         + Clone
         + Unpin
@@ -206,7 +204,7 @@ pub struct NetworkConfigBuilder<N: NetworkPrimitives = EthNetworkPrimitives> {
     /// The default mode of the network.
     network_mode: NetworkMode,
     /// The executor to use for spawning tasks.
-    executor: Option<Box<dyn TaskSpawner>>,
+    executor: Runtime,
     /// Sets the hello message for the p2p handshake in `RLPx`
     hello_message: Option<HelloMessageWithProtocols>,
     /// The executor to use for spawning tasks.
@@ -224,14 +222,18 @@ pub struct NetworkConfigBuilder<N: NetworkPrimitives = EthNetworkPrimitives> {
     /// The Ethereum P2P handshake, see also:
     /// <https://github.com/ethereum/devp2p/blob/master/rlpx.md#initial-handshake>.
     handshake: Arc<dyn EthRlpxHandshake>,
+    /// Maximum allowed ETH message size for post-handshake ETH/Snap streams.
+    eth_max_message_size: usize,
     /// List of block hashes to check for required blocks.
-    required_block_hashes: Vec<B256>,
+    required_block_hashes: Vec<BlockNumHash>,
+    /// Optional network id
+    network_id: Option<u64>,
 }
 
 impl NetworkConfigBuilder<EthNetworkPrimitives> {
     /// Creates the `NetworkConfigBuilder` with [`EthNetworkPrimitives`] types.
-    pub fn eth(secret_key: SecretKey) -> Self {
-        Self::new(secret_key)
+    pub fn eth(secret_key: SecretKey, executor: Runtime) -> Self {
+        Self::new(secret_key, executor)
     }
 }
 
@@ -240,12 +242,12 @@ impl NetworkConfigBuilder<EthNetworkPrimitives> {
 #[expect(missing_docs)]
 impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
     /// Create a new builder instance with a random secret key.
-    pub fn with_rng_secret_key() -> Self {
-        Self::new(rng_secret_key())
+    pub fn with_rng_secret_key(executor: Runtime) -> Self {
+        Self::new(rng_secret_key(), executor)
     }
 
     /// Create a new builder instance with the given secret key.
-    pub fn new(secret_key: SecretKey) -> Self {
+    pub fn new(secret_key: SecretKey, executor: Runtime) -> Self {
         Self {
             secret_key,
             dns_discovery_config: Some(Default::default()),
@@ -257,7 +259,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             peers_config: None,
             sessions_config: None,
             network_mode: Default::default(),
-            executor: None,
+            executor,
             hello_message: None,
             extra_protocols: Default::default(),
             head: None,
@@ -266,7 +268,9 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             transactions_manager_config: Default::default(),
             nat: None,
             handshake: Arc::new(EthHandshake::default()),
+            eth_max_message_size: MAX_MESSAGE_SIZE,
             required_block_hashes: Vec::new(),
+            network_id: None,
         }
     }
 
@@ -337,10 +341,8 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
     }
 
     /// Sets the executor to use for spawning tasks.
-    ///
-    /// If `None`, then [`tokio::spawn`] is used for spawning tasks.
-    pub fn with_task_executor(mut self, executor: Box<dyn TaskSpawner>) -> Self {
-        self.executor = Some(executor);
+    pub fn with_task_executor(mut self, executor: Runtime) -> Self {
+        self.executor = executor;
         self
     }
 
@@ -430,7 +432,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
     pub fn external_ip_resolver(mut self, resolver: NatResolver) -> Self {
         self.discovery_v4_builder
             .get_or_insert_with(Discv4Config::builder)
-            .external_ip_resolver(Some(resolver));
+            .external_ip_resolver(Some(resolver.clone()));
         self.nat = Some(resolver);
         self
     }
@@ -481,7 +483,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
     }
 
     // Disable nat
-    pub const fn disable_nat(mut self) -> Self {
+    pub fn disable_nat(mut self) -> Self {
         self.nat = None;
         self
     }
@@ -552,7 +554,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
     }
 
     /// Sets the required block hashes for peer filtering.
-    pub fn required_block_hashes(mut self, hashes: Vec<B256>) -> Self {
+    pub fn required_block_hashes(mut self, hashes: Vec<BlockNumHash>) -> Self {
         self.required_block_hashes = hashes;
         self
     }
@@ -576,7 +578,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
     }
 
     /// Sets the NAT resolver for external IP.
-    pub const fn add_nat(mut self, nat: Option<NatResolver>) -> Self {
+    pub fn add_nat(mut self, nat: Option<NatResolver>) -> Self {
         self.nat = nat;
         self
     }
@@ -584,6 +586,29 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
     /// Overrides the default Eth `RLPx` handshake.
     pub fn eth_rlpx_handshake(mut self, handshake: Arc<dyn EthRlpxHandshake>) -> Self {
         self.handshake = handshake;
+        self
+    }
+
+    /// Sets the maximum allowed ETH message size for post-handshake ETH/Snap streams.
+    ///
+    /// This does not affect the initial status handshake, which continues to use
+    /// [`MAX_MESSAGE_SIZE`].
+    pub const fn eth_max_message_size(mut self, max_message_size: usize) -> Self {
+        self.eth_max_message_size = max_message_size;
+        self
+    }
+
+    /// Sets the maximum allowed ETH message size for post-handshake ETH/Snap streams if present.
+    pub const fn eth_max_message_size_opt(mut self, max_message_size: Option<usize>) -> Self {
+        if let Some(max_message_size) = max_message_size {
+            self.eth_max_message_size = max_message_size;
+        }
+        self
+    }
+
+    /// Set the optional network id.
+    pub const fn network_id(mut self, network_id: Option<u64>) -> Self {
+        self.network_id = network_id;
         self
     }
 
@@ -619,7 +644,9 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             transactions_manager_config,
             nat,
             handshake,
+            eth_max_message_size,
             required_block_hashes,
+            network_id,
         } = self;
 
         let head = head.unwrap_or_else(|| Head {
@@ -630,23 +657,35 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             total_difficulty: chain_spec.genesis().difficulty,
         });
 
+        let listener_addr = listener_addr.unwrap_or(DEFAULT_DISCOVERY_ADDRESS);
+        // Static NAT addresses (`extip`/`extaddr`) tell peers which IP to dial, but that IP may
+        // not exist on a local interface. Keep binding to `listener_addr` and use the NAT IP only
+        // as the ENR address.
+        let advertised_ip = nat.clone().and_then(|nat| nat.as_external_ip(listener_addr.port()));
+
         discovery_v5_builder = discovery_v5_builder.map(|mut builder| {
             if let Some(network_stack_id) = NetworkStackId::id(&chain_spec) {
                 let fork_id = chain_spec.fork_id(&head);
                 builder = builder.fork(network_stack_id, fork_id)
             }
 
+            if let Some(ip) = advertised_ip {
+                builder = builder.advertised_ip(ip);
+            }
+
             builder
         });
-
-        let listener_addr = listener_addr.unwrap_or(DEFAULT_DISCOVERY_ADDRESS);
 
         let mut hello_message =
             hello_message.unwrap_or_else(|| HelloMessage::builder(peer_id).build());
         hello_message.port = listener_addr.port();
 
         // set the status
-        let status = UnifiedStatus::spec_builder(&chain_spec, &head);
+        let mut status = UnifiedStatus::spec_builder(&chain_spec, &head);
+
+        if let Some(id) = network_id {
+            status.chain = id.into();
+        }
 
         // set a fork filter based on the chain spec and head
         let fork_filter = chain_spec.fork_filter(head);
@@ -677,7 +716,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             chain_id,
             block_import: block_import.unwrap_or_else(|| Box::<ProofOfStakeBlockImport>::default()),
             network_mode,
-            executor: executor.unwrap_or_else(|| Box::<TokioTaskExecutor>::default()),
+            executor,
             status,
             hello_message,
             extra_protocols,
@@ -686,6 +725,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             transactions_manager_config,
             nat,
             handshake,
+            eth_max_message_size,
             required_block_hashes,
         }
     }
@@ -731,7 +771,7 @@ mod tests {
 
     fn builder() -> NetworkConfigBuilder {
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
-        NetworkConfigBuilder::new(secret_key)
+        NetworkConfigBuilder::new(secret_key, Runtime::test())
     }
 
     #[test]

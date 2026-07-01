@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use super::setup;
-use alloy_primitives::BlockNumber;
+use alloy_primitives::{Address, BlockNumber};
 use eyre::Result;
 use reth_config::config::EtlConfig;
+<<<<<<< HEAD
 use reth_consensus::{ConsensusError, FullConsensus};
 use reth_db::DatabaseEnv;
 use reth_db_api::{database::Database, table::TableImporter, tables};
@@ -13,6 +14,18 @@ use reth_exex::ExExManagerHandle;
 use reth_node_core::dirs::{ChainPath, DataDirPath};
 use reth_provider::{
     providers::{ProviderNodeTypes, StaticFileProvider},
+=======
+use reth_consensus::FullConsensus;
+use reth_db::DatabaseEnv;
+use reth_db_api::{database::Database, models::BlockNumberAddress, table::TableImporter, tables};
+use reth_db_common::DbTool;
+use reth_evm::ConfigureEvm;
+use reth_exex::ExExManagerHandle;
+use reth_node_api::HeaderTy;
+use reth_node_core::dirs::{ChainPath, DataDirPath};
+use reth_provider::{
+    providers::{ProviderNodeTypes, RocksDBProvider, StaticFileProvider},
+>>>>>>> v2.3.0
     DatabaseProviderFactory, ProviderFactory,
 };
 use reth_stages::{
@@ -24,6 +37,10 @@ use reth_stages::{
 };
 use tracing::info;
 
+<<<<<<< HEAD
+=======
+#[expect(clippy::too_many_arguments)]
+>>>>>>> v2.3.0
 pub(crate) async fn dump_merkle_stage<N>(
     db_tool: &DbTool<N>,
     from: BlockNumber,
@@ -31,15 +48,23 @@ pub(crate) async fn dump_merkle_stage<N>(
     output_datadir: ChainPath<DataDirPath>,
     should_run: bool,
     evm_config: impl ConfigureEvm<Primitives = N::Primitives>,
+<<<<<<< HEAD
     consensus: impl FullConsensus<N::Primitives, Error = ConsensusError> + 'static,
 ) -> Result<()>
 where
     N: ProviderNodeTypes<DB = Arc<DatabaseEnv>>,
+=======
+    consensus: impl FullConsensus<N::Primitives> + 'static,
+    runtime: reth_tasks::Runtime,
+) -> Result<()>
+where
+    N: ProviderNodeTypes<DB = DatabaseEnv>,
+>>>>>>> v2.3.0
 {
     let (output_db, tip_block_number) = setup(from, to, &output_datadir.db(), db_tool)?;
 
     output_db.update(|tx| {
-        tx.import_table_with_range::<tables::Headers, _>(
+        tx.import_table_with_range::<tables::Headers<HeaderTy<N>>, _>(
             &db_tool.provider_factory.db_ref().tx()?,
             Some(from),
             to,
@@ -59,10 +84,16 @@ where
     if should_run {
         dry_run(
             ProviderFactory::<N>::new(
+<<<<<<< HEAD
                 Arc::new(output_db),
+=======
+                output_db,
+>>>>>>> v2.3.0
                 db_tool.chain(),
                 StaticFileProvider::read_write(output_datadir.static_files())?,
-            ),
+                RocksDBProvider::builder(output_datadir.rocksdb()).build()?,
+                runtime,
+            )?,
             to,
             from,
         )?;
@@ -78,7 +109,11 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
     tip_block_number: u64,
     output_db: &DatabaseEnv,
     evm_config: impl ConfigureEvm<Primitives = N::Primitives>,
+<<<<<<< HEAD
     consensus: impl FullConsensus<N::Primitives, Error = ConsensusError> + 'static,
+=======
+    consensus: impl FullConsensus<N::Primitives> + 'static,
+>>>>>>> v2.3.0
 ) -> eyre::Result<()> {
     let (from, to) = range;
     let provider = db_tool.provider_factory.database_provider_rw()?;
@@ -92,10 +127,8 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
         reth_stages::ExecInput { target: Some(to), checkpoint: Some(StageCheckpoint::new(from)) };
 
     // Unwind hashes all the way to FROM
-
-    StorageHashingStage::default().unwind(&provider, unwind).unwrap();
-    AccountHashingStage::default().unwind(&provider, unwind).unwrap();
-
+    StorageHashingStage::default().unwind(&provider, unwind)?;
+    AccountHashingStage::default().unwind(&provider, unwind)?;
     MerkleStage::default_unwind().unwind(&provider, unwind)?;
 
     // Bring Plainstate to TO (hashing stage execution requires it)
@@ -125,23 +158,27 @@ fn unwind_and_copy<N: ProviderNodeTypes>(
     AccountHashingStage {
         clean_threshold: u64::MAX,
         commit_threshold: u64::MAX,
+        commit_entries: u64::MAX,
         etl_config: EtlConfig::default(),
     }
-    .execute(&provider, execute_input)
-    .unwrap();
+    .execute(&provider, execute_input)?;
     StorageHashingStage {
         clean_threshold: u64::MAX,
         commit_threshold: u64::MAX,
+        commit_entries: u64::MAX,
         etl_config: EtlConfig::default(),
     }
-    .execute(&provider, execute_input)
-    .unwrap();
+    .execute(&provider, execute_input)?;
 
     let unwind_inner_tx = provider.into_tx();
 
-    // TODO optimize we can actually just get the entries we need
-    output_db
-        .update(|tx| tx.import_dupsort::<tables::StorageChangeSets, _>(&unwind_inner_tx))??;
+    output_db.update(|tx| {
+        tx.import_table_with_range::<tables::StorageChangeSets, _>(
+            &unwind_inner_tx,
+            Some(BlockNumberAddress((from, Address::ZERO))),
+            BlockNumberAddress((to, Address::repeat_byte(0xff))),
+        )
+    })??;
 
     output_db.update(|tx| tx.import_table::<tables::HashedAccounts, _>(&unwind_inner_tx))??;
     output_db.update(|tx| tx.import_dupsort::<tables::HashedStorages, _>(&unwind_inner_tx))??;
