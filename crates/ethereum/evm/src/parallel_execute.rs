@@ -13,9 +13,7 @@ use alloy_evm::{
 use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
 use grevm::{ParallelBundleState, ParallelState, Scheduler};
-use reth_chainspec::{
-    EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks,
-};
+use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
@@ -182,9 +180,16 @@ where
             Requests::default()
         };
 
-        // Gravity chain uses a deflationary model where rewards come solely from gas fees,
-        // so PoW block rewards (coinbase increments) are disabled to prevent inflation.
-        let mut balance_increments = HashMap::default();
+        // Standard post-block coinbase + withdrawal increments — identical to the serial
+        // (`disable-grevm`) / Ethereum history-sync path, so the two backends stay equivalent.
+        // For Gravity this resolves to an empty map (no coinbase change): genesis sets
+        // `terminalTotalDifficulty`, so Paris is active from block 0 and `calc::base_block_reward`
+        // returns `None` — no PoW reward is minted (the deflationary model funds rewards from gas
+        // fees alone) — and Gravity blocks carry no withdrawals.
+        // INVARIANT: a Gravity genesis MUST set `terminalTotalDifficulty`; without it Paris is
+        // inactive, `base_block_reward` returns `Some(2 ETH)`, and this would inflate the coinbase
+        // every block (and fork against the serial path).
+        let mut balance_increments = post_block_balance_increments(&self.chain_spec, block);
         let state = self.state.as_mut().unwrap();
 
         // Irregular state change at Ethereum DAO hardfork
@@ -310,7 +315,10 @@ where
     }
 }
 
-#[allow(dead_code)]
+/// Standard Ethereum post-block balance increments: `PoW` block + ommer rewards (only pre-Paris,
+/// i.e. when `base_block_reward` is `Some`) plus Shanghai withdrawals. Intentionally carries **no**
+/// Gravity-specific gating: Gravity zeroes block rewards by having Paris active from genesis (see
+/// the call site in `apply_post_execution_changes`), so this naturally returns an empty map for it.
 #[inline]
 fn post_block_balance_increments<ChainSpec, Block>(
     chain_spec: &ChainSpec,
@@ -320,15 +328,6 @@ where
     ChainSpec: EthereumHardforks + EthChainSpec,
     Block: reth_primitives_traits::Block,
 {
-    // After Alpha hardfork, skip all post-block balance increments
-    // (disables PoW block rewards and DAO fork irregularities)
-    if chain_spec
-        .gravity_hardforks()
-        .is_fork_active_at_timestamp(GravityHardfork::Alpha, block.header().timestamp())
-    {
-        return HashMap::default();
-    }
-
     let mut balance_increments = HashMap::default();
 
     // Add block rewards if they are enabled.
@@ -359,7 +358,6 @@ where
     balance_increments
 }
 
-#[allow(dead_code)]
 #[inline]
 fn insert_post_block_withdrawals_balance_increments(
     spec: impl EthereumHardforks,

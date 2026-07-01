@@ -271,7 +271,6 @@ mod tests {
                     output: Output::Call(Bytes::from(vec![])),
                 },
                 Default::default(),
-                0,
             ))
         }
 

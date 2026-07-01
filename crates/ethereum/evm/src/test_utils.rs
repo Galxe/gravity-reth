@@ -103,7 +103,6 @@ impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExec
                 output: Output::Call(Bytes::from(vec![])),
             },
             Default::default(),
-            0,
         ))
     }
 
