@@ -107,20 +107,11 @@ use tokio::sync::{
 use tracing::*;
 
 mod block_buffer;
-<<<<<<< HEAD
-mod cached_state;
-pub mod error;
-mod instrumented_state;
-mod invalid_headers;
-mod metrics;
-mod payload_processor;
-=======
 pub mod error;
 pub mod instrumented_state;
 mod invalid_headers;
 mod metrics;
 pub mod payload_processor;
->>>>>>> v2.3.0
 pub mod payload_validator;
 mod persistence_state;
 pub mod precompile_cache;
