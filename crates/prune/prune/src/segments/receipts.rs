@@ -1,23 +1,19 @@
-//! Common receipts pruning logic.
+//! Common receipts pruning logic shared between user and static file pruning segments.
 //!
 //! - [`crate::segments::user::Receipts`] is responsible for pruning receipts according to the
 //!   user-configured settings (for example, on a full node or with a custom prune config)
+//! - [`crate::segments::static_file::Receipts`] is responsible for pruning receipts on an archive
+//!   node after static file producer has finished
 
-use crate::{
-    db_ext::DbTxPruneExt,
-    segments::{self, PruneInput},
-    PrunerError,
-};
+use crate::{db_ext::DbTxPruneExt, segments::PruneInput, PrunerError};
 use reth_db_api::{table::Value, tables, transaction::DbTxMut};
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
-    errors::provider::ProviderResult, BlockReader, DBProvider, EitherWriter,
-    NodePrimitivesProvider, PruneCheckpointWriter, StaticFileProviderFactory, StorageSettingsCache,
-    TransactionsProvider,
+    errors::provider::ProviderResult, BlockReader, DBProvider, NodePrimitivesProvider,
+    PruneCheckpointWriter, TransactionsProvider,
 };
 use reth_prune_types::{PruneCheckpoint, PruneSegment, SegmentOutput, SegmentOutputCheckpoint};
-use reth_static_file_types::StaticFileSegment;
-use tracing::{debug, trace};
+use tracing::trace;
 
 pub(crate) fn prune<Provider>(
     provider: &Provider,
@@ -27,17 +23,8 @@ where
     Provider: DBProvider<Tx: DbTxMut>
         + TransactionsProvider
         + BlockReader
-        + StorageSettingsCache
-        + StaticFileProviderFactory
         + NodePrimitivesProvider<Primitives: NodePrimitives<Receipt: Value>>,
 {
-    if EitherWriter::receipts_destination(provider).is_static_file() {
-        debug!(target: "pruner", "Pruning receipts from static files.");
-        return segments::prune_static_files(provider, input, StaticFileSegment::Receipts)
-    }
-    debug!(target: "pruner", "Pruning receipts from database.");
-
-    // Original database implementation for when receipts are not on static files (old nodes)
     let tx_range = match input.get_next_tx_num_range(provider)? {
         Some(range) => range,
         None => {
@@ -61,7 +48,7 @@ where
     trace!(target: "pruner", %pruned, %done, "Pruned receipts");
 
     let last_pruned_block = provider
-        .block_by_transaction_id(last_pruned_transaction)?
+        .transaction_block(last_pruned_transaction)?
         .ok_or(PrunerError::InconsistentData("Block for transaction is not found"))?
         // If there's more receipts to prune, set the checkpoint block number to previous,
         // so we could finish pruning its receipts on the next run.
@@ -102,7 +89,7 @@ mod tests {
         Itertools,
     };
     use reth_db_api::tables;
-    use reth_provider::{DBProvider, DatabaseProviderFactory, PruneCheckpointReader};
+    use reth_provider::{DatabaseProviderFactory, PruneCheckpointReader};
     use reth_prune_types::{
         PruneCheckpoint, PruneInterruptReason, PruneMode, PruneProgress, PruneSegment,
     };
@@ -113,14 +100,8 @@ mod tests {
     use std::ops::Sub;
 
     #[test]
-    fn prune_legacy() {
-        let mut db = TestStageDB::default();
-        // Configure the factory to use database for receipts by enabling receipt pruning.
-        // This ensures EitherWriter::receipts_destination returns Database instead of StaticFile.
-        db.factory = db.factory.with_prune_modes(reth_prune_types::PruneModes {
-            receipts: Some(PruneMode::Full),
-            ..Default::default()
-        });
+    fn prune() {
+        let db = TestStageDB::default();
         let mut rng = generators::rng();
 
         let blocks = random_block_range(

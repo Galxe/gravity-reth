@@ -1,10 +1,12 @@
 //! Implements [`Compress`] and [`Decompress`] for [`IntegerList`]
 
-use crate::table::{Compress, Decompress};
+use crate::{
+    table::{Compress, Decompress},
+    DatabaseError,
+};
 use bytes::BufMut;
 use core::fmt;
 use derive_more::Deref;
-use reth_codecs::DecompressError;
 use roaring::RoaringTreemap;
 
 /// A data structure that uses Roaring Bitmaps to efficiently store a list of integers.
@@ -17,7 +19,7 @@ use roaring::RoaringTreemap;
 /// - Direct access: elements can be accessed or queried without needing to decode the entire list.
 /// - [`RoaringTreemap`] backing: internally backed by [`RoaringTreemap`], which supports 64-bit
 ///   integers.
-#[derive(Clone, PartialEq, Eq, Default, Deref)]
+#[derive(Clone, PartialEq, Default, Deref)]
 pub struct IntegerList(pub RoaringTreemap);
 
 impl fmt::Debug for IntegerList {
@@ -60,7 +62,7 @@ impl IntegerList {
 
     /// Pushes a new integer to the list.
     pub fn push(&mut self, value: u64) -> Result<(), IntegerListError> {
-        self.0.try_push(value).map_err(|_| IntegerListError::UnsortedInput)
+        self.0.push(value).then_some(()).ok_or(IntegerListError::UnsortedInput)
     }
 
     /// Clears the list.
@@ -169,8 +171,8 @@ impl Compress for IntegerList {
 }
 
 impl Decompress for IntegerList {
-    fn decompress(value: &[u8]) -> Result<Self, DecompressError> {
-        Self::from_bytes(value).map_err(DecompressError::new)
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+        Self::from_bytes(value).map_err(|_| DatabaseError::Decode)
     }
 }
 

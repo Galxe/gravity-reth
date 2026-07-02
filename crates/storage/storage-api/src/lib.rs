@@ -6,20 +6,13 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-<<<<<<< HEAD
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-=======
-#![cfg_attr(docsrs, feature(doc_cfg))]
->>>>>>> v2.3.0
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
 // Re-export used error types.
 pub use reth_storage_errors as errors;
-mod bal;
-pub use bal::*;
-
 mod account;
 pub use account::*;
 
@@ -93,16 +86,11 @@ mod block_indices;
 pub use block_indices::*;
 
 #[cfg(feature = "std")]
-<<<<<<< HEAD
 mod cache;
 #[cfg(feature = "std")]
 pub use cache::*;
 
 mod block_writer;
-=======
-mod block_writer;
-#[cfg(feature = "std")]
->>>>>>> v2.3.0
 pub use block_writer::*;
 
 mod state_writer;
@@ -111,21 +99,5 @@ pub use state_writer::*;
 mod header_sync_gap;
 pub use header_sync_gap::HeaderSyncGapProvider;
 
-<<<<<<< HEAD
 mod full;
 pub use full::*;
-=======
-#[cfg(feature = "db-api")]
-pub mod metadata;
-#[cfg(all(feature = "db-api", feature = "std"))]
-pub use metadata::StoragePath;
-#[cfg(feature = "db-api")]
-pub use metadata::{MetadataProvider, MetadataWriter, StorageSettingsCache};
-#[cfg(feature = "db-api")]
-pub use reth_db_api::models::StorageSettings;
-
-mod full;
-pub use full::*;
-
-pub mod macros;
->>>>>>> v2.3.0

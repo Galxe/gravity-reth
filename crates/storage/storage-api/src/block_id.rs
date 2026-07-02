@@ -9,7 +9,7 @@ use reth_storage_errors::provider::{ProviderError, ProviderResult};
 ///
 /// This trait also supports fetching block hashes and block numbers from a [`BlockHashOrNumber`].
 #[auto_impl::auto_impl(&, Arc)]
-pub trait BlockNumReader: BlockHashReader + Send {
+pub trait BlockNumReader: BlockHashReader + Send + Sync {
     /// Returns the current info for the chain.
     fn chain_info(&self) -> ProviderResult<ChainInfo>;
 
@@ -24,7 +24,6 @@ pub trait BlockNumReader: BlockHashReader + Send {
         Ok(0)
     }
 
-<<<<<<< HEAD
     /// The last persisted block that has written execution result successfully.
     /// In other word, the last block that has updated `StageId::Execution` in
     /// `tables::StageCheckpoints`
@@ -32,8 +31,6 @@ pub trait BlockNumReader: BlockHashReader + Send {
         unimplemented!("Not support recover_block_number");
     }
 
-=======
->>>>>>> v2.3.0
     /// Gets the `BlockNumber` for the given hash. Returns `None` if no block with this hash exists.
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>>;
 

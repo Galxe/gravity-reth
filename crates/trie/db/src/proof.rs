@@ -1,4 +1,4 @@
-use crate::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory, TrieTableAdapter};
+use crate::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
 use alloy_primitives::{keccak256, map::HashMap, Address, B256};
 use reth_db_api::transaction::DbTx;
 use reth_execution_errors::StateProofError;
@@ -11,16 +11,13 @@ use reth_trie::{
 };
 
 /// Extends [`Proof`] with operations specific for working with a database transaction.
-pub trait DatabaseProof<'a> {
-    /// Associated type for the database transaction.
-    type Tx;
-
-    /// Create a new [`Proof`] instance from database transaction.
-    fn from_tx(tx: &'a Self::Tx) -> Self;
+pub trait DatabaseProof<'a, TX> {
+    /// Create a new [Proof] from database transaction.
+    fn from_tx(tx: &'a TX) -> Self;
 
     /// Generates the state proof for target account based on [`TrieInput`].
     fn overlay_account_proof(
-        &self,
+        tx: &'a TX,
         input: TrieInput,
         address: Address,
         slots: &[B256],
@@ -28,49 +25,59 @@ pub trait DatabaseProof<'a> {
 
     /// Generates the state [`MultiProof`] for target hashed account and storage keys.
     fn overlay_multiproof(
-        &self,
+        tx: &'a TX,
         input: TrieInput,
         targets: MultiProofTargets,
     ) -> Result<MultiProof, StateProofError>;
 }
 
-impl<'a, TX: DbTx, A: TrieTableAdapter> DatabaseProof<'a>
-    for Proof<DatabaseTrieCursorFactory<&'a TX, A>, DatabaseHashedCursorFactory<&'a TX>>
+impl<'a, TX: DbTx> DatabaseProof<'a, TX>
+    for Proof<DatabaseTrieCursorFactory<'a, TX>, DatabaseHashedCursorFactory<'a, TX>>
 {
-    type Tx = TX;
-
-    fn from_tx(tx: &'a Self::Tx) -> Self {
+    /// Create a new [Proof] instance from database transaction.
+    fn from_tx(tx: &'a TX) -> Self {
         Self::new(DatabaseTrieCursorFactory::new(tx), DatabaseHashedCursorFactory::new(tx))
     }
+
     fn overlay_account_proof(
-        &self,
+        tx: &'a TX,
         input: TrieInput,
         address: Address,
         slots: &[B256],
     ) -> Result<AccountProof, StateProofError> {
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
-        Proof::new(
-            InMemoryTrieCursorFactory::new(self.trie_cursor_factory().clone(), &nodes_sorted),
-            HashedPostStateCursorFactory::new(self.hashed_cursor_factory().clone(), &state_sorted),
-        )
-        .with_prefix_sets_mut(input.prefix_sets)
-        .account_proof(address, slots)
+        Self::from_tx(tx)
+            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(
+                DatabaseTrieCursorFactory::new(tx),
+                &nodes_sorted,
+            ))
+            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
+                DatabaseHashedCursorFactory::new(tx),
+                &state_sorted,
+            ))
+            .with_prefix_sets_mut(input.prefix_sets)
+            .account_proof(address, slots)
     }
 
     fn overlay_multiproof(
-        &self,
+        tx: &'a TX,
         input: TrieInput,
         targets: MultiProofTargets,
     ) -> Result<MultiProof, StateProofError> {
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
-        Proof::new(
-            InMemoryTrieCursorFactory::new(self.trie_cursor_factory().clone(), &nodes_sorted),
-            HashedPostStateCursorFactory::new(self.hashed_cursor_factory().clone(), &state_sorted),
-        )
-        .with_prefix_sets_mut(input.prefix_sets)
-        .multiproof(targets)
+        Self::from_tx(tx)
+            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(
+                DatabaseTrieCursorFactory::new(tx),
+                &nodes_sorted,
+            ))
+            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
+                DatabaseHashedCursorFactory::new(tx),
+                &state_sorted,
+            ))
+            .with_prefix_sets_mut(input.prefix_sets)
+            .multiproof(targets)
     }
 }
 
@@ -96,19 +103,11 @@ pub trait DatabaseStorageProof<'a, TX> {
     ) -> Result<StorageMultiProof, StateProofError>;
 }
 
-impl<'a, TX: DbTx, A: TrieTableAdapter> DatabaseStorageProof<'a, TX>
-    for StorageProof<
-        'static,
-        DatabaseTrieCursorFactory<&'a TX, A>,
-        DatabaseHashedCursorFactory<&'a TX>,
-    >
+impl<'a, TX: DbTx> DatabaseStorageProof<'a, TX>
+    for StorageProof<DatabaseTrieCursorFactory<'a, TX>, DatabaseHashedCursorFactory<'a, TX>>
 {
     fn from_tx(tx: &'a TX, address: Address) -> Self {
-        Self::new(
-            DatabaseTrieCursorFactory::<_, A>::new(tx),
-            DatabaseHashedCursorFactory::new(tx),
-            address,
-        )
+        Self::new(DatabaseTrieCursorFactory::new(tx), DatabaseHashedCursorFactory::new(tx), address)
     }
 
     fn overlay_storage_proof(
@@ -123,13 +122,13 @@ impl<'a, TX: DbTx, A: TrieTableAdapter> DatabaseStorageProof<'a, TX>
             Default::default(),
             HashMap::from_iter([(hashed_address, storage.into_sorted())]),
         );
-        StorageProof::new(
-            DatabaseTrieCursorFactory::<_, A>::new(tx),
-            HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(tx), &state_sorted),
-            address,
-        )
-        .with_prefix_set_mut(prefix_set)
-        .storage_proof(slot)
+        Self::from_tx(tx, address)
+            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
+                DatabaseHashedCursorFactory::new(tx),
+                &state_sorted,
+            ))
+            .with_prefix_set_mut(prefix_set)
+            .storage_proof(slot)
     }
 
     fn overlay_storage_multiproof(
@@ -145,12 +144,12 @@ impl<'a, TX: DbTx, A: TrieTableAdapter> DatabaseStorageProof<'a, TX>
             Default::default(),
             HashMap::from_iter([(hashed_address, storage.into_sorted())]),
         );
-        StorageProof::new(
-            DatabaseTrieCursorFactory::<_, A>::new(tx),
-            HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(tx), &state_sorted),
-            address,
-        )
-        .with_prefix_set_mut(prefix_set)
-        .storage_multiproof(targets)
+        Self::from_tx(tx, address)
+            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
+                DatabaseHashedCursorFactory::new(tx),
+                &state_sorted,
+            ))
+            .with_prefix_set_mut(prefix_set)
+            .storage_multiproof(targets)
     }
 }

@@ -10,9 +10,6 @@ use std::hash::Hash;
 /// Number of indices in one shard.
 pub const NUM_OF_INDICES_IN_SHARD: usize = 2_000;
 
-/// Size of `BlockNumber` in bytes (u64 = 8 bytes).
-const BLOCK_NUMBER_SIZE: usize = std::mem::size_of::<BlockNumber>();
-
 /// Sometimes data can be too big to be saved for a single key. This helps out by dividing the data
 /// into different shards. Example:
 ///
@@ -46,19 +43,19 @@ impl<T> ShardedKey<T> {
     }
 }
 
-/// Stack-allocated encoded key for `ShardedKey<Address>`.
-///
-/// This avoids heap allocation in hot database paths. The key layout is:
-/// - 20 bytes: `Address`
-/// - 8 bytes: `BlockNumber` (big-endian)
-pub type ShardedKeyAddressEncoded = [u8; 20 + BLOCK_NUMBER_SIZE];
+/// Number of bytes in an encoded [`ShardedKey<Address>`]: 20-byte address + 8-byte BE block.
+const SHARDED_KEY_ADDRESS_BYTES_SIZE: usize = 20 + std::mem::size_of::<BlockNumber>();
 
+// Stack-allocated codec specialized for the only encoded shape, `ShardedKey<Address>` (the
+// `AccountsHistory` table key), avoiding a per-key heap allocation on the RocksDB history-index
+// write path (#21200). Bytes are identical to the previous `Vec<u8>` encoding:
+// `[20-byte address][8-byte big-endian block]`. All other `ShardedKey<T>` uses are `AsRef`-only
+// (`ShardedKey<B256>` is never encoded directly — `StorageShardedKey` encodes its fields itself).
 impl Encode for ShardedKey<Address> {
-    type Encoded = ShardedKeyAddressEncoded;
+    type Encoded = [u8; SHARDED_KEY_ADDRESS_BYTES_SIZE];
 
-    #[inline]
     fn encode(self) -> Self::Encoded {
-        let mut buf = [0u8; 20 + BLOCK_NUMBER_SIZE];
+        let mut buf = [0u8; SHARDED_KEY_ADDRESS_BYTES_SIZE];
         buf[..20].copy_from_slice(self.key.as_slice());
         buf[20..].copy_from_slice(&self.highest_block_number.to_be_bytes());
         buf
@@ -67,47 +64,12 @@ impl Encode for ShardedKey<Address> {
 
 impl Decode for ShardedKey<Address> {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        if value.len() != 20 + BLOCK_NUMBER_SIZE {
-            return Err(DatabaseError::Decode);
+        if value.len() != SHARDED_KEY_ADDRESS_BYTES_SIZE {
+            return Err(DatabaseError::Decode)
         }
         let key = Address::from_slice(&value[..20]);
         let highest_block_number =
             u64::from_be_bytes(value[20..].try_into().map_err(|_| DatabaseError::Decode)?);
         Ok(Self::new(key, highest_block_number))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloy_primitives::address;
-
-    #[test]
-    fn sharded_key_address_encode_decode_roundtrip() {
-        let addr = address!("0102030405060708091011121314151617181920");
-        let block_num = 0x123456789ABCDEF0u64;
-        let key = ShardedKey::new(addr, block_num);
-
-        let encoded = key.encode();
-
-        // Verify it's stack-allocated (28 bytes)
-        assert_eq!(encoded.len(), 28);
-        assert_eq!(std::mem::size_of_val(&encoded), 28);
-
-        // Verify roundtrip (check against expected values since key was consumed)
-        let decoded = ShardedKey::<Address>::decode(&encoded).unwrap();
-        assert_eq!(decoded.key, address!("0102030405060708091011121314151617181920"));
-        assert_eq!(decoded.highest_block_number, 0x123456789ABCDEF0u64);
-    }
-
-    #[test]
-    fn sharded_key_last_works() {
-        let addr = address!("0102030405060708091011121314151617181920");
-        let key = ShardedKey::<Address>::last(addr);
-        assert_eq!(key.highest_block_number, u64::MAX);
-
-        let encoded = key.encode();
-        let decoded = ShardedKey::<Address>::decode(&encoded).unwrap();
-        assert_eq!(decoded.highest_block_number, u64::MAX);
     }
 }

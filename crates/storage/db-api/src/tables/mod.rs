@@ -33,8 +33,8 @@ use reth_primitives_traits::{Account, Bytecode, StorageEntry};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::StageCheckpoint;
 use reth_trie_common::{
-    BranchNodeCompact, PackedStorageTrieEntry, PackedStoredNibbles, PackedStoredNibblesSubKey,
-    StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
+    nested_trie::{StorageNodeEntry, StoredNode},
+    BranchNodeCompact, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -95,10 +95,7 @@ pub trait TableViewer<R> {
     /// Operate on the dupsort table in a generic way.
     ///
     /// By default, the `view` function is invoked unless overridden.
-    fn view_dupsort<T: DupSort>(&self) -> Result<R, Self::Error>
-    where
-        T::Value: reth_primitives_traits::ValueWithSubKey<SubKey = T::SubKey>,
-    {
+    fn view_dupsort<T: DupSort>(&self) -> Result<R, Self::Error> {
         self.view::<T>()
     }
 }
@@ -312,8 +309,7 @@ tables! {
         type Value = HeaderHash;
     }
 
-    /// Stores the total difficulty from block headers.
-    /// Note: Deprecated.
+    /// Stores the total difficulty from a block header.
     table HeaderTerminalDifficulties {
         type Key = BlockNumber;
         type Value = CompactU256;
@@ -480,10 +476,21 @@ tables! {
         type SubKey = B256;
     }
 
+    table AccountsTrieV2 {
+        type Key = StoredNibbles;
+        type Value = StoredNode;
+    }
+
     /// Stores the current state's Merkle Patricia Tree.
     table AccountsTrie {
         type Key = StoredNibbles;
         type Value = BranchNodeCompact;
+    }
+
+    table StoragesTrieV2 {
+        type Key = B256;
+        type Value = StorageNodeEntry;
+        type SubKey = StoredNibblesSubKey;
     }
 
     /// From `HashedAddress` => `NibblesSubKey` => Intermediate value
@@ -530,45 +537,6 @@ tables! {
         type Key = ChainStateKey;
         type Value = BlockNumber;
     }
-
-    /// Stores generic node metadata as key-value pairs.
-    /// Can store feature flags, configuration markers, and other node-specific data.
-    table Metadata {
-        type Key = String;
-        type Value = Vec<u8>;
-    }
-}
-
-/// Packed-encoding view of the [`AccountsTrie`] table.
-///
-/// Uses [`PackedStoredNibbles`] (33-byte) keys instead of [`StoredNibbles`] (65-byte).
-/// Shares the same underlying MDBX table — this is a type-level view for storage v2.
-#[derive(Debug)]
-pub struct PackedAccountsTrie;
-
-impl Table for PackedAccountsTrie {
-    const NAME: &'static str = <AccountsTrie as Table>::NAME;
-    const DUPSORT: bool = false;
-    type Key = PackedStoredNibbles;
-    type Value = BranchNodeCompact;
-}
-
-/// Packed-encoding view of the [`StoragesTrie`] table.
-///
-/// Uses [`PackedStoredNibblesSubKey`] (33-byte) subkeys instead of [`StoredNibblesSubKey`]
-/// (65-byte). Shares the same underlying MDBX table — this is a type-level view for storage v2.
-#[derive(Debug)]
-pub struct PackedStoragesTrie;
-
-impl Table for PackedStoragesTrie {
-    const NAME: &'static str = <StoragesTrie as Table>::NAME;
-    const DUPSORT: bool = true;
-    type Key = B256;
-    type Value = PackedStorageTrieEntry;
-}
-
-impl DupSort for PackedStoragesTrie {
-    type SubKey = PackedStoredNibblesSubKey;
 }
 
 /// Keys for the `ChainState` table.
@@ -577,7 +545,7 @@ pub enum ChainStateKey {
     /// Last finalized block key
     LastFinalizedBlock,
     /// Last safe block key
-    LastSafeBlock,
+    LastSafeBlockBlock,
 }
 
 impl Encode for ChainStateKey {
@@ -586,7 +554,7 @@ impl Encode for ChainStateKey {
     fn encode(self) -> Self::Encoded {
         match self {
             Self::LastFinalizedBlock => [0],
-            Self::LastSafeBlock => [1],
+            Self::LastSafeBlockBlock => [1],
         }
     }
 }
@@ -595,7 +563,7 @@ impl Decode for ChainStateKey {
     fn decode(value: &[u8]) -> Result<Self, crate::DatabaseError> {
         match value {
             [0] => Ok(Self::LastFinalizedBlock),
-            [1] => Ok(Self::LastSafeBlock),
+            [1] => Ok(Self::LastSafeBlockBlock),
             _ => Err(crate::DatabaseError::Decode),
         }
     }

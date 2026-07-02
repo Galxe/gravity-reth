@@ -1,4 +1,4 @@
-use crate::NodePrimitivesProvider;
+use crate::{NodePrimitivesProvider, StorageLocation};
 use alloc::vec::Vec;
 use alloy_primitives::BlockNumber;
 use reth_db_models::StoredBlockBodyIndices;
@@ -9,38 +9,54 @@ use reth_trie_common::HashedPostStateSorted;
 
 /// `BlockExecution` Writer
 pub trait BlockExecutionWriter:
-    NodePrimitivesProvider<Primitives: NodePrimitives<Block = Self::Block>> + BlockWriter
+    NodePrimitivesProvider<Primitives: NodePrimitives<Block = Self::Block>> + BlockWriter + Send + Sync
 {
     /// Take all of the blocks above the provided number and their execution result
     ///
     /// The passed block number will stay in the database.
+    ///
+    /// Accepts [`StorageLocation`] specifying from where should transactions and receipts be
+    /// removed.
     fn take_block_and_execution_above(
         &self,
         block: BlockNumber,
+        remove_from: StorageLocation,
     ) -> ProviderResult<Chain<Self::Primitives>>;
 
     /// Remove all of the blocks above the provided number and their execution result
     ///
     /// The passed block number will stay in the database.
-    fn remove_block_and_execution_above(&self, block: BlockNumber) -> ProviderResult<()>;
+    ///
+    /// Accepts [`StorageLocation`] specifying from where should transactions and receipts be
+    /// removed.
+    fn remove_block_and_execution_above(
+        &self,
+        block: BlockNumber,
+        remove_from: StorageLocation,
+    ) -> ProviderResult<()>;
 }
 
 impl<T: BlockExecutionWriter> BlockExecutionWriter for &T {
     fn take_block_and_execution_above(
         &self,
         block: BlockNumber,
+        remove_from: StorageLocation,
     ) -> ProviderResult<Chain<Self::Primitives>> {
-        (*self).take_block_and_execution_above(block)
+        (*self).take_block_and_execution_above(block, remove_from)
     }
 
-    fn remove_block_and_execution_above(&self, block: BlockNumber) -> ProviderResult<()> {
-        (*self).remove_block_and_execution_above(block)
+    fn remove_block_and_execution_above(
+        &self,
+        block: BlockNumber,
+        remove_from: StorageLocation,
+    ) -> ProviderResult<()> {
+        (*self).remove_block_and_execution_above(block, remove_from)
     }
 }
 
 /// Block Writer
 #[auto_impl::auto_impl(&, Arc, Box)]
-pub trait BlockWriter {
+pub trait BlockWriter: Send + Sync {
     /// The body this writer can write.
     type Block: Block;
     /// The receipt type for [`ExecutionOutcome`].
@@ -51,10 +67,32 @@ pub trait BlockWriter {
     ///
     /// Return [`StoredBlockBodyIndices`] that contains indices of the first and last transactions
     /// and transition in the block.
+    ///
+    /// Accepts [`StorageLocation`] value which specifies where transactions and headers should be
+    /// written.
     fn insert_block(
         &self,
-        block: &RecoveredBlock<Self::Block>,
+        block: RecoveredBlock<Self::Block>,
+        write_to: StorageLocation,
     ) -> ProviderResult<StoredBlockBodyIndices>;
+
+    /// Insert a batch of consecutive blocks in one transaction, returning the
+    /// [`StoredBlockBodyIndices`] of each block in order.
+    ///
+    /// Unlike calling [`insert_block`](Self::insert_block) in a loop, this threads the running
+    /// transaction number through the batch in memory rather than re-reading it from the database
+    /// between blocks. The numbering therefore stays correct even when the whole batch is committed
+    /// only once and the backend does not observe its own uncommitted writes within a transaction
+    /// (e.g. a `RocksDB` `WriteBatch`).
+    ///
+    /// The default implementation inserts each block in turn.
+    fn insert_blocks(
+        &self,
+        blocks: Vec<RecoveredBlock<Self::Block>>,
+        write_to: StorageLocation,
+    ) -> ProviderResult<Vec<StoredBlockBodyIndices>> {
+        blocks.into_iter().map(|block| self.insert_block(block, write_to)).collect()
+    }
 
     /// Appends a batch of block bodies extending the canonical chain. This is invoked during
     /// `Bodies` stage and does not write to `TransactionHashNumbers` and `TransactionSenders`
@@ -63,16 +101,25 @@ pub trait BlockWriter {
     /// Bodies are passed as [`Option`]s, if body is `None` the corresponding block is empty.
     fn append_block_bodies(
         &self,
-        bodies: Vec<(BlockNumber, Option<&<Self::Block as Block>::Body>)>,
+        bodies: Vec<(BlockNumber, Option<<Self::Block as Block>::Body>)>,
+        write_to: StorageLocation,
     ) -> ProviderResult<()>;
 
     /// Removes all blocks above the given block number from the database.
     ///
     /// Note: This does not remove state or execution data.
-    fn remove_blocks_above(&self, block: BlockNumber) -> ProviderResult<()>;
+    fn remove_blocks_above(
+        &self,
+        block: BlockNumber,
+        remove_from: StorageLocation,
+    ) -> ProviderResult<()>;
 
     /// Removes all block bodies above the given block number from the database.
-    fn remove_bodies_above(&self, block: BlockNumber) -> ProviderResult<()>;
+    fn remove_bodies_above(
+        &self,
+        block: BlockNumber,
+        remove_from: StorageLocation,
+    ) -> ProviderResult<()>;
 
     /// Appends a batch of sealed blocks to the blockchain, including sender information, and
     /// updates the post-state.

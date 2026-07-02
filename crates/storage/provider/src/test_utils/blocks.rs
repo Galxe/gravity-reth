@@ -26,11 +26,15 @@ pub fn assert_genesis_block<DB: Database, N: NodeTypes>(
     let h = B256::ZERO;
     let tx = provider;
 
-    // check if tables contain only the genesis block data
+    // check if all tables are empty
     assert_eq!(tx.table::<tables::Headers>().unwrap(), vec![(g.number, g.header().clone())]);
 
     assert_eq!(tx.table::<tables::HeaderNumbers>().unwrap(), vec![(h, n)]);
     assert_eq!(tx.table::<tables::CanonicalHeaders>().unwrap(), vec![(n, h)]);
+    assert_eq!(
+        tx.table::<tables::HeaderTerminalDifficulties>().unwrap(),
+        vec![(n, g.difficulty.into())]
+    );
     assert_eq!(
         tx.table::<tables::BlockBodyIndices>().unwrap(),
         vec![(0, StoredBlockBodyIndices::default())]
@@ -45,8 +49,8 @@ pub fn assert_genesis_block<DB: Database, N: NodeTypes>(
     assert_eq!(tx.table::<tables::PlainStorageState>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::AccountsHistory>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::StoragesHistory>().unwrap(), vec![]);
-    // Reorged bytecodes are not reverted per https://github.com/paradigmxyz/reth/issues/1588
-    // assert_eq!(tx.table::<tables::Bytecodes>().unwrap(), vec![]);
+    // TODO check after this gets done: https://github.com/paradigmxyz/reth/issues/1588
+    // Bytecodes are not reverted assert_eq!(tx.table::<tables::Bytecodes>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::AccountChangeSets>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::StorageChangeSets>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::HashedAccounts>().unwrap(), vec![]);
@@ -81,7 +85,7 @@ pub(crate) static TEST_BLOCK: LazyLock<SealedBlock<reth_ethereum_primitives::Blo
                     )
                     .into(),
                     difficulty: U256::from(131_072),
-                    number: 0,
+                    number: 1,
                     gas_limit: 1_000_000,
                     gas_used: 14_352,
                     timestamp: 1_000,

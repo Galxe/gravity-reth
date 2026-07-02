@@ -6,17 +6,10 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
-
-mod execution_witness;
-pub use execution_witness::ExecutionWitnessMode;
-
-/// Lazy initialization wrapper for trie data.
-mod lazy;
-pub use lazy::{LazyTrieData, SortedTrieData};
 
 /// In-memory hashed state.
 mod hashed_state;
@@ -24,7 +17,7 @@ pub use hashed_state::*;
 
 /// Input for trie computation.
 mod input;
-pub use input::{TrieInput, TrieInputSorted};
+pub use input::TrieInput;
 
 /// The implementation of hash builder.
 pub mod hash_builder;
@@ -36,30 +29,17 @@ pub use constants::*;
 mod account;
 pub use account::TrieAccount;
 
-/// V2 proof targets and chunking.
-pub mod target_v2;
-pub use target_v2::{ChunkedMultiProofTargetsV2, MultiProofTargetsV2, ProofV2Target};
-
 mod key;
 pub use key::{KeccakKeyHasher, KeyHasher};
 
 mod nibbles;
-pub use nibbles::{
-    depth_first_cmp, Nibbles, PackedStoredNibbles, PackedStoredNibblesSubKey, StoredNibbles,
-    StoredNibblesSubKey,
-};
+pub use nibbles::{Nibbles, StoredNibbles, StoredNibblesSubKey};
 
 mod storage;
-pub use storage::{PackedStorageTrieEntry, StorageTrieEntry};
+pub use storage::StorageTrieEntry;
 
 mod subnode;
 pub use subnode::StoredSubNode;
-
-mod trie;
-pub use trie::{BranchNodeMasks, BranchNodeMasksMap, ProofTrieNode};
-
-mod trie_node_v2;
-pub use trie_node_v2::*;
 
 /// The implementation of a container for storing intermediate changes to a trie.
 /// The container indicates when the trie has been modified.
@@ -72,16 +52,10 @@ pub use proofs::*;
 
 pub mod root;
 
-/// Incremental ordered trie root computation.
-pub mod ordered_root;
-
 /// Buffer for trie updates.
 pub mod updates;
 
 pub mod added_removed_keys;
-
-/// Utilities used by other modules in this crate.
-mod utils;
 
 /// Bincode-compatible serde implementations for trie types.
 ///
@@ -91,13 +65,12 @@ mod utils;
 /// Read more: <https://github.com/paradigmxyz/reth/issues/11370>
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub mod serde_bincode_compat {
-    pub use super::{
-        hashed_state::serde_bincode_compat as hashed_state,
-        updates::serde_bincode_compat as updates,
-    };
+    pub use super::updates::serde_bincode_compat as updates;
 }
 
 /// Re-export
-pub use alloy_trie::{
-    nodes::*, proof, BranchNodeCompact, HashBuilder, TrieMask, TrieMaskIter, EMPTY_ROOT_HASH,
-};
+pub use alloy_trie::{nodes::*, proof, BranchNodeCompact, HashBuilder, TrieMask, EMPTY_ROOT_HASH};
+pub use updates::{StorageTrieUpdatesV2, TrieUpdatesV2};
+
+/// Nested trie for merklization
+pub mod nested_trie;

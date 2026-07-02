@@ -4,10 +4,6 @@ use crate::{
     flags::EnvironmentFlags,
     transaction::{RO, RW},
     txn_manager::{TxnManager, TxnManagerMessage, TxnPtr},
-<<<<<<< HEAD
-=======
-    txn_pool::ReadTxnPool,
->>>>>>> v2.3.0
     Mode, SyncMode, Transaction, TransactionKind,
 };
 use byteorder::{ByteOrder, NativeEndian};
@@ -99,21 +95,9 @@ impl Environment {
     }
 
     /// Create a read-only transaction for use with the environment.
-    ///
-    /// Reuses a previously-reset transaction handle from the internal pool when available,
-    /// avoiding the `lck_rdt_lock` mutex in MDBX's `mvcc_bind_slot` on each new transaction.
     #[inline]
     pub fn begin_ro_txn(&self) -> Result<Transaction<RO>> {
-        if let Some(txn_ptr) = self.inner.ro_txn_pool.pop() {
-            return Ok(Transaction::new_from_ptr(self.clone(), txn_ptr));
-        }
         Transaction::new(self.clone())
-    }
-
-    /// Returns the read transaction pool.
-    #[inline]
-    pub(crate) fn ro_txn_pool(&self) -> &ReadTxnPool {
-        &self.inner.ro_txn_pool
     }
 
     /// Create a read-write transaction for use with the environment. This method will block while
@@ -177,7 +161,7 @@ impl Environment {
             mdbx_result(ffi::mdbx_env_stat_ex(
                 self.env_ptr(),
                 ptr::null(),
-                stat.mdbx_stat(),
+                stat.mdb_stat(),
                 size_of::<Stat>(),
             ))?;
             Ok(stat)
@@ -227,14 +211,15 @@ impl Environment {
         let mut freelist: usize = 0;
         let txn = self.begin_ro_txn()?;
         let db = Database::freelist_db();
-        let cursor = txn.cursor(db.dbi())?;
+        let cursor = txn.cursor(&db)?;
 
         for result in cursor.iter_slices() {
             let (_key, value) = result?;
-            if value.len() < size_of::<u32>() {
+            if value.len() < size_of::<usize>() {
                 return Err(Error::Corrupted)
             }
-            let s = &value[..size_of::<u32>()];
+
+            let s = &value[..size_of::<usize>()];
             freelist += NativeEndian::read_u32(s) as usize;
         }
 
@@ -255,15 +240,10 @@ struct EnvironmentInner {
     env_kind: EnvironmentKind,
     /// Transaction manager
     txn_manager: TxnManager,
-    /// Pool of reset read-only transaction handles for reuse.
-    ro_txn_pool: ReadTxnPool,
 }
 
 impl Drop for EnvironmentInner {
     fn drop(&mut self) {
-        // Abort all pooled read transactions before closing the environment.
-        self.ro_txn_pool.drain();
-
         // Close open mdbx environment on drop
         unsafe {
             ffi::mdbx_env_close_ex(self.env, false);
@@ -326,18 +306,13 @@ unsafe impl Sync for EnvPtr {}
 pub struct Stat(ffi::MDBX_stat);
 
 impl Stat {
-    /// Create a new Stat with zero'd inner struct `ffi::MDBX_stat`.
+    /// Create a new Stat with zero'd inner struct `ffi::MDB_stat`.
     pub(crate) const fn new() -> Self {
         unsafe { Self(mem::zeroed()) }
     }
 
-<<<<<<< HEAD
     /// Returns a mut pointer to `ffi::MDB_stat`.
     pub(crate) const fn mdb_stat(&mut self) -> *mut ffi::MDBX_stat {
-=======
-    /// Returns a mut pointer to `ffi::MDBX_stat`.
-    pub(crate) const fn mdbx_stat(&mut self) -> *mut ffi::MDBX_stat {
->>>>>>> v2.3.0
         &mut self.0
     }
 }
@@ -430,12 +405,6 @@ impl Info {
     #[inline]
     pub const fn num_readers(&self) -> usize {
         self.0.mi_numreaders as usize
-    }
-
-    /// Transaction ID of the oldest active reader.
-    #[inline]
-    pub const fn latter_reader_txnid(&self) -> u64 {
-        self.0.mi_latter_reader_txnid
     }
 
     /// Return the internal page ops metrics
@@ -782,12 +751,7 @@ impl EnvironmentBuilder {
             }
         };
 
-        let env = EnvironmentInner {
-            env,
-            txn_manager,
-            env_kind: self.kind,
-            ro_txn_pool: ReadTxnPool::new(),
-        };
+        let env = EnvironmentInner { env, txn_manager, env_kind: self.kind };
 
         Ok(Environment { inner: Arc::new(env) })
     }
@@ -1026,10 +990,7 @@ mod tests {
                     result @ Err(_) => result.unwrap(),
                 }
             }
-            // The transaction may be in an error state after hitting MapFull,
-            // so commit could fail. We don't care about the result here since
-            // the purpose of this test is to verify the HSR callback was called.
-            let _ = tx.commit();
+            tx.commit().unwrap();
         }
 
         // Expect the HSR to be called
