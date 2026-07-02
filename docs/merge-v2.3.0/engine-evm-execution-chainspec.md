@@ -140,6 +140,9 @@ threshold / sparse-trie / cross-block 常量整段引入。`DEFAULT_BLOCK_BUFFER
 当前使用 mini-moka 仅在 gravity 自有的少量 cache 文件 — 建议切到 `moka`（avoid
 keeping two LFU cache crates），同时审计 gravity 自有 cache 使用点是否 API
 兼容（`moka::sync::Cache` 大体兼容 `mini_moka::sync::Cache`）。
+→ **更正**（2026-07-02）: 核实后推翻——cached_state.rs 为 fork 遗留、上游
+execution cache 已迁 `reth-execution-cache`（fixed-cache），按选项 C 执行：
+删文件、冲突取 v2.3.0 侧，不存在"切 moka"工作量。
 
 **推理**: 这是合并冲突里风险最低的一类（Cargo.toml 取并集），但 moka/mini-moka
 取舍需在合并完后核对 cache 调用站点。
@@ -1127,23 +1130,47 @@ fields：
 
 ## 开放问题
 
-1. **moka vs mini-moka 全栈切换**：建议在该组合并阶段统一切到 `moka`（与上
+> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+
+- [x] 1. **moka vs mini-moka 全栈切换**：建议在该组合并阶段统一切到 `moka`（与上
    游一致），需要 audit gravity 自有 cache 使用点（`tree/cached_state.rs` 等
    非本组文件）的 API 兼容性。
-2. **`ExecutedBlock` vs `ExecutedBlockWithTrieUpdates` 长期策略**：上游已统
+   → **状态**（2026-07-02）: 核实完成，报告见 `moka-vs-mini-moka-verification.md`。
+   结论推翻原问题前提：gravity 的 `cached_state.rs` 与 upstream v1.8.3 同文件
+   byte-identical（纯 fork 遗留，零 gravity 定制）；上游 cached_state 从未用过
+   moka，v2.3.0 已迁到新 crate `reth-execution-cache`（fixed-cache），worktree
+   里该 crate 与全部 caller 已就位，旧 `cached_state.rs` 零调用方。**建议选项 C**：
+   删 `cached_state.rs`、engine/tree Cargo.toml 与 mod.rs 冲突取 v2.3.0 侧
+   （moka 留给 precompile_cache，mini-moka 彻底移除），零额外开发。待拍板勾选。
+   → **决策**（2026-07-02）: 选项 C — 删 cached_state.rs（fork 遗留、零调用方），
+   engine/tree Cargo.toml 与 mod.rs 相关冲突块取 v2.3.0 侧，mini-moka 全仓移除；
+   已执行，见 moka-vs-mini-moka-verification.md 执行记录。
+- [x] 2. **`ExecutedBlock` vs `ExecutedBlockWithTrieUpdates` 长期策略**：上游已统
    一为单一 `ExecutedBlock + ComputedTrieData`，gravity baseline 仍二分。本组
    决策是保留二分；下一次 merge（v2.4+）时如果上游进一步深化集中式 trie
    overlay，gravity 需要评估是否一次性 port `LazyTrieData` 体系还是继续维护
    二分 fork — 这是 long-running tech debt。
-3. **`NextBlockEnvAttributes::slot_number`**：gravity 不上 Amsterdam，长期填
+   → **决策**（2026-07-02）: 本轮保留二分；v2.4+ 长期策略作为 tech debt 单独
+   评估，不阻塞本次 merge。（注：`in_memory.rs` 冲突尚未解完，决策待执行。）
+- [x] 3. **`NextBlockEnvAttributes::slot_number`**：gravity 不上 Amsterdam，长期填
    `None`。如果未来要走 Amsterdam（EIP-7928 BAL），gravity 需要先决定 BAL
    是否纳入链上语义；目前所有 BAL 相关 trait 方法 gravity 实现都应返回 `None`
    / `Empty`。
-4. **上游 #21226 `move execution logic from metrics to payload_validator`
+   → **决策**（2026-07-02）: 字段引入、gravity 侧填 `None`；是否上
+   Amsterdam/BAL 属未来业务决策，不阻塞本次 merge。
+- [x] 4. **上游 #21226 `move execution logic from metrics to payload_validator`
    不跟进**：metrics.rs 保留 `execute_metered` helper。如果未来要重构
    `payload_validator`，需要确认 helper 与新 validator 接口不冲突。
-5. **`trie_input` 在 `memory_overlay.rs` 中 `extend_from_sorted` vs
+   → **决策**（2026-07-02）: 不跟进 #21226，保留 `execute_metered`（已在
+   worktree 落地，`tree/metrics.rs:83`）。
+- [ ] 5. **`trie_input` 在 `memory_overlay.rs` 中 `extend_from_sorted` vs
    `from_blocks` 的性能差**：上游 #19894 / #20333 引入 sorted 路径有明确
    perf gain；gravity baseline 仍走 `from_blocks`。本次合并保守保留 gravity
    实现，但建议作为独立 follow-up 评估是否能在不破坏 gravity 二分类型的
    前提下切到 sorted 路径。
+   → **状态**（2026-07-02）: 文档结论与当前 worktree **背离** —
+   `memory_overlay.rs` 现为上游版（`Cow<'a, [ExecutedBlock<N>]>` +
+   `extend_from_sorted`，第 27 / 56-57 行），`ExecutedBlockWithTrieUpdates` 与
+   `from_blocks` 已不在。因其类型上游 `in_memory.rs` 仍满是冲突标记，疑为
+   squash checkpoint 带入的上游侧、尚未按本决策改回。收尾时须复核后重新拍板：
+   改回 gravity 版，或确认二分类型下可直接走 sorted 路径。

@@ -206,8 +206,10 @@
 
 ## 开放问题
 
-1. **gravity-RocksDB 与 v2.3.0 upstream RocksDB 路径并存策略**：v2.3.0 通过 PR #20253 / #21191 / #22970 把 RocksDB 引入上游主线（`RocksDBProvider`、`RocksDBProviderFactory`、`with_rocksdb_provider`），同时 gravity 在 baseline 上有完全独立的 `gravity-storage` + `parallel-storage` RocksDB 实现（PR #212）。本组合并先按 keep-gravity 处理 `args/database.rs` / `launch/common.rs`，但跨 crate 的 storage 分组合并完成前，`reth-db` 的 `mdbx` feature 必须保留（gravity-RocksDB 不替换 `reth-db` crate 本身）。
-2. **`Head.total_difficulty` 在 gravity 内部是否仍被消费**：v2.3.0 把 `lookup_head` 的 td 写死 `U256::ZERO`。若 gravity-only `pipe-exec-layer-ext` 或 `consensus_layer_handle` 路径读 `Head.total_difficulty`，需要在 gravity 侧改为直接 query `header_td_by_number`。建议在 `pipe-exec-layer-ext` 分组合并时一并核查。
-3. **`expire_pre_merge_transactions()` 在 gravity 上是否仍有意义**：本身是上游以太坊主网 hook，gravity 链没有 merge 节点；建议在 `engine.rs` 合并时直接删除。
-4. **`--db.rocksdb-block-cache-size` 与 `--db.disable-metrics`**：v2.3.0 上游 RocksDB 引入的 flag，如果未来 gravity-RocksDB 与上游 RocksDB 合并，需要把这两个 flag 接到 `gravity-storage::RocksDBConfig` 上。当前合并保留 gravity 命名空间（`--db.block-cache-size`），但要在 storage 分组任务里留 issue。
-5. **`#337 chainspec floor` 对 `args/txpool.rs` / `ethereum/node/src/node.rs` 的实际改动**：本次只通过 commit log 推断；落地时需要 `git show 364b851665 -- crates/node/core/src/args/txpool.rs crates/ethereum/node/src/node.rs` 拿到精确 diff，确认仅是 import / minor adapter 改动，不漏 fee floor 关键 hook。
+> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+
+- [ ] 1. **gravity-RocksDB 与 v2.3.0 upstream RocksDB 路径并存策略**：v2.3.0 通过 PR #20253 / #21191 / #22970 把 RocksDB 引入上游主线（`RocksDBProvider`、`RocksDBProviderFactory`、`with_rocksdb_provider`），同时 gravity 在 baseline 上有完全独立的 `gravity-storage` + `parallel-storage` RocksDB 实现（PR #212）。本组合并先按 keep-gravity 处理 `args/database.rs` / `launch/common.rs`，但跨 crate 的 storage 分组合并完成前，`reth-db` 的 `mdbx` feature 必须保留（gravity-RocksDB 不替换 `reth-db` crate 本身）。
+- [ ] 2. **`Head.total_difficulty` 在 gravity 内部是否仍被消费**：v2.3.0 把 `lookup_head` 的 td 写死 `U256::ZERO`。若 gravity-only `pipe-exec-layer-ext` 或 `consensus_layer_handle` 路径读 `Head.total_difficulty`，需要在 gravity 侧改为直接 query `header_td_by_number`。建议在 `pipe-exec-layer-ext` 分组合并时一并核查。
+- [ ] 3. **`expire_pre_merge_transactions()` 在 gravity 上是否仍有意义**：本身是上游以太坊主网 hook，gravity 链没有 merge 节点；建议在 `engine.rs` 合并时直接删除。
+- [ ] 4. **`--db.rocksdb-block-cache-size` 与 `--db.disable-metrics`**：v2.3.0 上游 RocksDB 引入的 flag，如果未来 gravity-RocksDB 与上游 RocksDB 合并，需要把这两个 flag 接到 `gravity-storage::RocksDBConfig` 上。当前合并保留 gravity 命名空间（`--db.block-cache-size`），但要在 storage 分组任务里留 issue。
+- [ ] 5. **`#337 chainspec floor` 对 `args/txpool.rs` / `ethereum/node/src/node.rs` 的实际改动**：本次只通过 commit log 推断；落地时需要 `git show 364b851665 -- crates/node/core/src/args/txpool.rs crates/ethereum/node/src/node.rs` 拿到精确 diff，确认仅是 import / minor adapter 改动，不漏 fee floor 关键 hook。

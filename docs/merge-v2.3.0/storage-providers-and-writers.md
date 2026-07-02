@@ -395,16 +395,18 @@ cargo nextest run -p reth-provider --no-run
 
 ## 开放问题
 
-1. **上游 `RocksDBProvider` 是否提供与 gravity #212 RocksDB 集成相同的 write-batch-flush 语义?** gravity `commit_view()` 依赖 RocksDB 的 `commit_view` 方法 — 核实它在上游 `RocksDBProvider` 上存在,或者把它通过 gravity 包装层导通。若否,`database/provider.rs:292` `unwind_trie_state_range` 中 `NestedStateRoot` 的 flush 注释就被破坏。
+> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
 
-2. **要不要采纳上游 `ChangesetCache`?** 上游 unwind 路径用 `changeset_cache.get_or_compute_range`,gravity 走 `NestedStateRoot::read_hashed_state(Some(range))`。两者可共存(上游 cache 作为 gravity 算法之下的一层),但需要 `NestedStateRoot::calculate` 从已见 cache 写入的事务中读取。建议合并后用 #313 验收测试快速验证。
+- [ ] 1. **上游 `RocksDBProvider` 是否提供与 gravity #212 RocksDB 集成相同的 write-batch-flush 语义?** gravity `commit_view()` 依赖 RocksDB 的 `commit_view` 方法 — 核实它在上游 `RocksDBProvider` 上存在,或者把它通过 gravity 包装层导通。若否,`database/provider.rs:292` `unwind_trie_state_range` 中 `NestedStateRoot` 的 flush 注释就被破坏。
 
-3. **`commit_view` vs 上游 `unwind_provider_rw` 提交顺序纪律:** 上游引入 `unwind_provider_rw()` 构造器,带 `with_reader_txn_tracker(self.db.clone())` 与更严的 commit 顺序(MDBX → RocksDB → static files,见 `#21311`)。Gravity `commit_view()` 是另一做法。建议在 `new_unwind_rw` 内部**包装调用** gravity `commit_view()`,对崩溃后重启恢复(#253/#255 保护的场景)更安全。
+- [ ] 2. **要不要采纳上游 `ChangesetCache`?** 上游 unwind 路径用 `changeset_cache.get_or_compute_range`,gravity 走 `NestedStateRoot::read_hashed_state(Some(range))`。两者可共存(上游 cache 作为 gravity 算法之下的一层),但需要 `NestedStateRoot::calculate` 从已见 cache 写入的事务中读取。建议合并后用 #313 验收测试快速验证。
 
-4. **`StorageLocation` 枚举命运:** 若 storage-api 分组删除,`database/provider.rs` 约 30 处调用点与 `blockchain_provider.rs` 测试约 6 处需压平。超出本组范围,但影响以上每个文件方案。建议 storage-api worker **保留** — 为 gravity pipe-exec 契约。
+- [ ] 3. **`commit_view` vs 上游 `unwind_provider_rw` 提交顺序纪律:** 上游引入 `unwind_provider_rw()` 构造器,带 `with_reader_txn_tracker(self.db.clone())` 与更严的 commit 顺序(MDBX → RocksDB → static files,见 `#21311`)。Gravity `commit_view()` 是另一做法。建议在 `new_unwind_rw` 内部**包装调用** gravity `commit_view()`,对崩溃后重启恢复(#253/#255 保护的场景)更安全。
 
-5. **`Cargo.toml` 的 `pipe_test` feature:** 若下游消费方(pipe-exec 层测试)都用 `--features pipe_test` 跑,那 `writer/mod.rs:172` 中被门控的 `cfg(not(feature = "pipe_test"))` block 就是 "真正的" 生产路径。用 `grep -rn "features = \[.*pipe_test" Cargo.toml .github/` 核实。
+- [ ] 4. **`StorageLocation` 枚举命运:** 若 storage-api 分组删除,`database/provider.rs` 约 30 处调用点与 `blockchain_provider.rs` 测试约 6 处需压平。超出本组范围,但影响以上每个文件方案。建议 storage-api worker **保留** — 为 gravity pipe-exec 契约。
 
-6. **`gravity-primitives` 在 storage/provider 中的边界:** 上游不会接受这个依赖,但对 gravity fork 无所谓。在上游拉过来的代码里新增 `get_gravity_config()` 访问点之前(例如:是否也要在 `historical.rs` 检查 `validator_node_only`,还是只在 `blockchain_provider.rs`?),先和项目负责人确认。当前 baseline 仅 `blockchain_provider.rs` 与 `static_file/manager.rs` 命中。
+- [ ] 5. **`Cargo.toml` 的 `pipe_test` feature:** 若下游消费方(pipe-exec 层测试)都用 `--features pipe_test` 跑,那 `writer/mod.rs:172` 中被门控的 `cfg(not(feature = "pipe_test"))` block 就是 "真正的" 生产路径。用 `grep -rn "features = \[.*pipe_test" Cargo.toml .github/` 核实。
 
-7. **`reth-db` 的 `mdbx` feature:** gravity #212 从 `reth-provider` 的 `reth-db` 依赖里去掉了 `mdbx` feature(因 RocksDB 是另一 crate);上游 v2.3.0 把它加回来。核实:加回 `mdbx` feature 是否会重新引入 gravity 在 #212 中故意规避的 MDBX 直接依赖,或者只是开了 trait/类型导出。`cargo tree -p reth-provider --features=` 验证。
+- [ ] 6. **`gravity-primitives` 在 storage/provider 中的边界:** 上游不会接受这个依赖,但对 gravity fork 无所谓。在上游拉过来的代码里新增 `get_gravity_config()` 访问点之前(例如:是否也要在 `historical.rs` 检查 `validator_node_only`,还是只在 `blockchain_provider.rs`?),先和项目负责人确认。当前 baseline 仅 `blockchain_provider.rs` 与 `static_file/manager.rs` 命中。
+
+- [ ] 7. **`reth-db` 的 `mdbx` feature:** gravity #212 从 `reth-provider` 的 `reth-db` 依赖里去掉了 `mdbx` feature(因 RocksDB 是另一 crate);上游 v2.3.0 把它加回来。核实:加回 `mdbx` feature 是否会重新引入 gravity 在 #212 中故意规避的 MDBX 直接依赖,或者只是开了 trait/类型导出。`cargo tree -p reth-provider --features=` 验证。

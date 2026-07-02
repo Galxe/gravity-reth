@@ -366,7 +366,9 @@ Gravity 不需要保留任何 hunk —— 当前冲突端全部是 v1.8.3 旧文
 
 ## 开放问题
 
-1. **PR #343 port 锚点选择**：v2.3.0 中 `validate_one`（或拆分后的 `validate_stateless` / `validate_stateful`）插入 EIP-7702 intrinsic gas 检查的精确位置需要再核 reth 重构后的方法名（cite #22910 / #22008 改名）。port 时优先放进 `validate_stateless`（无 state 依赖），与 `ensure_intrinsic_gas` 同位置即可。
-2. **`maintain.rs` pipe-exec discard 订阅生命周期**：上游 #20781 改了 stale_eviction 处理，gravity discard_txs 订阅块独立于 stale_eviction，互不影响；但需确认 `tokio::spawn` 与 `task_spawner.spawn_blocking_task` 的运行时一致（v2.3.0 全局 Runtime 后建议改用 `task_spawner` 而非裸 `tokio::spawn` 以共享统一 runtime）。
-3. **`best.rs` MAX_NEW_TRANSACTIONS_PER_BATCH=1024 与上游 `size_hint`**：上游新引入 `size_hint` 返回 `(0, Some(self.all.len()))`（当 `new_transaction_receiver.is_none()` 时）。大批量值与 size_hint 无冲突，但需 bench 验证 imbl::OrdMap 在大批 add_new_transactions 下的实际表现是否仍优于 1024 阈值原始动机（gravity batch-insert 通常一次喂数百 tx）。
-4. **`config.rs` 上游 `LocalTransactionConfig::local_addresses: AddressSet`**：gravity 调用方（如 pipe-exec、CLI）若用 `HashSet<Address>` 字面量构造，迁到 `AddressSet` 需同步调整 import。
+> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+
+- [ ] 1. **PR #343 port 锚点选择**：v2.3.0 中 `validate_one`（或拆分后的 `validate_stateless` / `validate_stateful`）插入 EIP-7702 intrinsic gas 检查的精确位置需要再核 reth 重构后的方法名（cite #22910 / #22008 改名）。port 时优先放进 `validate_stateless`（无 state 依赖），与 `ensure_intrinsic_gas` 同位置即可。
+- [ ] 2. **`maintain.rs` pipe-exec discard 订阅生命周期**：上游 #20781 改了 stale_eviction 处理，gravity discard_txs 订阅块独立于 stale_eviction，互不影响；但需确认 `tokio::spawn` 与 `task_spawner.spawn_blocking_task` 的运行时一致（v2.3.0 全局 Runtime 后建议改用 `task_spawner` 而非裸 `tokio::spawn` 以共享统一 runtime）。
+- [ ] 3. **`best.rs` MAX_NEW_TRANSACTIONS_PER_BATCH=1024 与上游 `size_hint`**：上游新引入 `size_hint` 返回 `(0, Some(self.all.len()))`（当 `new_transaction_receiver.is_none()` 时）。大批量值与 size_hint 无冲突，但需 bench 验证 imbl::OrdMap 在大批 add_new_transactions 下的实际表现是否仍优于 1024 阈值原始动机（gravity batch-insert 通常一次喂数百 tx）。
+- [ ] 4. **`config.rs` 上游 `LocalTransactionConfig::local_addresses: AddressSet`**：gravity 调用方（如 pipe-exec、CLI）若用 `HashSet<Address>` 字面量构造，迁到 `AddressSet` 需同步调整 import。

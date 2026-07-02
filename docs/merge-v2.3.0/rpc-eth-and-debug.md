@@ -438,10 +438,12 @@ Upstream diff range: `v1.8.3..v2.3.0` (覆盖 v1.9/v1.10/v1.11/v1.12 直至 v2.3
 
 ## 开放问题
 
-1. **`DebugExecutionWitnessApi<Attributes>` trait** — gravity `rpc-api/src/debug.rs` 中存在，需 `grep -n DebugExecutionWitnessApi` 比对 `gravity-reth@0cb1687c1c` 与 `reth@v2.3.0` 确认其在上游侧的归属。
+> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
 
-2. **`SYSTEM_CALLER` 是否应当扩展到 `receipt.rs`** — 当前 `receipt.rs` 在 fallback 路径用 `Address::ZERO`（v1.8.3 上游既存），未引入 gravity SYSTEM_CALLER 谱系。是否在 merge-v2.3.0 中把 `Address::ZERO` 一并改成 `SYSTEM_CALLER` 以与 `transaction.rs` 对齐，需要业务决策（非合并语义问题）。
+- [ ] 1. **`DebugExecutionWitnessApi<Attributes>` trait** — gravity `rpc-api/src/debug.rs` 中存在，需 `grep -n DebugExecutionWitnessApi` 比对 `gravity-reth@0cb1687c1c` 与 `reth@v2.3.0` 确认其在上游侧的归属。
 
-3. **`Consensus::Error` 移除影响面** — 上游 PR #20843 把 `Consensus: FullConsensus<N, Error = ConsensusError>` 收紧为 `Consensus: FullConsensus<N>`；gravity ethapi/op-rpc 等下游 impl 不再需要透传 `ConsensusError`，但 gravity-only consensus impl（如有）需要 verify 是否仍兼容。
+- [ ] 2. **`SYSTEM_CALLER` 是否应当扩展到 `receipt.rs`** — 当前 `receipt.rs` 在 fallback 路径用 `Address::ZERO`（v1.8.3 上游既存），未引入 gravity SYSTEM_CALLER 谱系。是否在 merge-v2.3.0 中把 `Address::ZERO` 一并改成 `SYSTEM_CALLER` 以与 `transaction.rs` 对齐，需要业务决策（非合并语义问题）。
 
-4. **`failpoints` 在 dev/test 之外是否启用** — `#225` 的 `debug_setFailpoint` 仅在 `cargo build --features failpoints` 下生效；需要确认本次 merge 是否要在 production binary 中启用此 feature。
+- [ ] 3. **`Consensus::Error` 移除影响面** — 上游 PR #20843 把 `Consensus: FullConsensus<N, Error = ConsensusError>` 收紧为 `Consensus: FullConsensus<N>`；gravity ethapi/op-rpc 等下游 impl 不再需要透传 `ConsensusError`，但 gravity-only consensus impl（如有）需要 verify 是否仍兼容。
+
+- [ ] 4. **`failpoints` 在 dev/test 之外是否启用** — `#225` 的 `debug_setFailpoint` 仅在 `cargo build --features failpoints` 下生效；需要确认本次 merge 是否要在 production binary 中启用此 feature。

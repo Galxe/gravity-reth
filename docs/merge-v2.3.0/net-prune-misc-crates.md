@@ -304,12 +304,14 @@ Baseline 形态：
 
 ## 开放问题
 
-1. **`BlockWriter::insert_block(&RecoveredBlock)` 在 gravity-storage 上的接口形态** —— gravity rocksdb 的 `BlockchainProvider` 是否实现了 `insert_block(&RecoveredBlock)`，并且每个 block 后会自动 flush RocksDB WriteBatch（参见 `acc458846c` (#340)）？决定 `prune/segments/mod.rs` 测试体是否可以最终切到上游 `insert_block + commit`。
+> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
 
-2. **`ChainStateBlockWriter::save_safe_block_number`** —— gravity-storage `DatabaseProviderRW` 是否实现了它？以及 gravity 的 pipe-exec consensus 是否会推进 safe block？决定 `pipeline/mod.rs` 中 `last_safe_block_number` healing 是现在合还是延后。
+- [ ] 1. **`BlockWriter::insert_block(&RecoveredBlock)` 在 gravity-storage 上的接口形态** —— gravity rocksdb 的 `BlockchainProvider` 是否实现了 `insert_block(&RecoveredBlock)`，并且每个 block 后会自动 flush RocksDB WriteBatch（参见 `acc458846c` (#340)）？决定 `prune/segments/mod.rs` 测试体是否可以最终切到上游 `insert_block + commit`。
 
-3. **`reth-payload-util` workspace 归属** —— 上游新增 crate `crates/payload/util` 与 gravity 的 `crates/pipe-exec-layer-ext-v2/event-bus` 必须以不同名（`reth-payload-util` vs `reth-pipe-exec-layer-event-bus`）在同一 workspace 共存。需要核查解决后的根 `Cargo.toml` workspace members 两者都在列。
+- [ ] 2. **`ChainStateBlockWriter::save_safe_block_number`** —— gravity-storage `DatabaseProviderRW` 是否实现了它？以及 gravity 的 pipe-exec consensus 是否会推进 safe block？决定 `pipeline/mod.rs` 中 `last_safe_block_number` healing 是现在合还是延后。
 
-4. **`bin/reth/Cargo.toml` 默认 features** —— 开启 `otlp` / `js-tracer` / `keccak-cache-global` / `min-trace-logs` 会传递性要求 `reth-node-core/<feature>` 声明。需要等 `crates/node/core/Cargo.toml` worker 给出结论后再决定本次合并是否一并开启。
+- [ ] 3. **`reth-payload-util` workspace 归属** —— 上游新增 crate `crates/payload/util` 与 gravity 的 `crates/pipe-exec-layer-ext-v2/event-bus` 必须以不同名（`reth-payload-util` vs `reth-pipe-exec-layer-event-bus`）在同一 workspace 共存。需要核查解决后的根 `Cargo.toml` workspace members 两者都在列。
 
-5. **stages/api `Stage` test module 的 port 可行性** —— gravity-storage 是否暴露与上游 5 参数 `ProviderFactory::new(rw_db, chain_spec, static_file_provider, rocksdb_provider, runtime)` 兼容的构造器？决定 follow-up port PR 的工作量。
+- [ ] 4. **`bin/reth/Cargo.toml` 默认 features** —— 开启 `otlp` / `js-tracer` / `keccak-cache-global` / `min-trace-logs` 会传递性要求 `reth-node-core/<feature>` 声明。需要等 `crates/node/core/Cargo.toml` worker 给出结论后再决定本次合并是否一并开启。
+
+- [ ] 5. **stages/api `Stage` test module 的 port 可行性** —— gravity-storage 是否暴露与上游 5 参数 `ProviderFactory::new(rw_db, chain_spec, static_file_provider, rocksdb_provider, runtime)` 兼容的构造器？决定 follow-up port PR 的工作量。

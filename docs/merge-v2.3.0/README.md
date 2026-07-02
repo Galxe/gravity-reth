@@ -55,6 +55,17 @@
 4. **both-touched mechanical-merge**：双方都触及但语义独立（典型：Cargo.toml feature 矩阵、`use` import 列表、新 enum variant 追加、metrics 项追加），按机械合并执行；不引入新语义。
 5. **文件系统兼容优先**：涉及磁盘 on-disk 格式（trie key/value 编码、table schema）的分歧，gravity 网络已在线上跑的编码必须保留；上游新格式作为并存类型引入。
 
+## 开放问题决策追踪
+
+12 个分组文档末尾的「开放问题」章节均为 **决策追踪 checklist**(共 69 项):
+勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论与日期;未勾选 =
+待决策 / 待核实。全局统计进度:
+
+```bash
+grep -c '^- \[ \]' docs/merge-v2.3.0/*.md   # 各文档剩余待决数
+grep -c '^- \[x\]' docs/merge-v2.3.0/*.md   # 已决数
+```
+
 ## 分组（共 12 个）
 
 > 文件数列取自各子文档头部统计。复杂度按子文档自评结论汇总。

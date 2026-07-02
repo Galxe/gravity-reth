@@ -309,18 +309,20 @@
 
 ## 开放问题
 
-1. **`ValueWithSubKey` 与 `SubkeyContainedValue` 并存** — 双 trait 同 struct 实现在本组解决；db-api 组（同一批文件中另含 `crates/storage/db-api/src/tables/mod.rs` 等）是否计划长期保留二者，或迁 gravity rocksdb 到 `ValueWithSubKey` 并废 `SubkeyContainedValue`？**Owner：db-api 组解析者。**
+> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
 
-2. **rocksdb 后端的 `DatabaseArguments::test()` stub** — 上游 `create_test_rw_db_with_datadir` 依赖该 helper。是否在 `crates/storage/db/src/implementation/rocksdb/` 上添加 stub 让上游测试可跨编译？**Owner：rocksdb 维护者。**
+- [ ] 1. **`ValueWithSubKey` 与 `SubkeyContainedValue` 并存** — 双 trait 同 struct 实现在本组解决；db-api 组（同一批文件中另含 `crates/storage/db-api/src/tables/mod.rs` 等）是否计划长期保留二者，或迁 gravity rocksdb 到 `ValueWithSubKey` 并废 `SubkeyContainedValue`？**Owner：db-api 组解析者。**
 
-3. **测试 helper 返回类型** — 上游 `create_test_db(kind) -> (TempDir, DatabaseEnv)` 修了 tempdir 清理竞态；gravity 仍用 `Arc<DatabaseEnv>` + `keep()`（泄漏目录）。是否长期采纳上游形式？**推迟，超本次合并范围。**
+- [ ] 2. **rocksdb 后端的 `DatabaseArguments::test()` stub** — 上游 `create_test_rw_db_with_datadir` 依赖该 helper。是否在 `crates/storage/db/src/implementation/rocksdb/` 上添加 stub 让上游测试可跨编译？**Owner：rocksdb 维护者。**
 
-4. **`NestedStateRoot` 与上游 init-state 增量写** — 上游 `b9969c5b1` 重构 state-root 流程（按 `STATE_ROOT_COMMIT_THRESHOLD` 增量写 trie 进度）。是否与 gravity 的 `NestedStateRoot` 路径有耦合？**Owner：state-root team。**
+- [ ] 3. **测试 helper 返回类型** — 上游 `create_test_db(kind) -> (TempDir, DatabaseEnv)` 修了 tempdir 清理竞态；gravity 仍用 `Arc<DatabaseEnv>` + `keep()`（泄漏目录）。是否长期采纳上游形式？**推迟，超本次合并范围。**
 
-5. **Storage-v2 trait 基础设施** — `MetadataProvider`/`MetadataWriter`/`StorageSettings`/`StorageSettingsCache`/`RocksDBProviderFactory`/`NodePrimitivesProvider`/`StateWriteConfig` 在 gravity provider crate 中尚未实现。本次明确**不**port；是否计划长期跟进，或在 gravity 上"drop storage-v2 import pathway"？**Owner：存储架构师。**
+- [ ] 4. **`NestedStateRoot` 与上游 init-state 增量写** — 上游 `b9969c5b1` 重构 state-root 流程（按 `STATE_ROOT_COMMIT_THRESHOLD` 增量写 trie 进度）。是否与 gravity 的 `NestedStateRoot` 路径有耦合？**Owner：state-root team。**
 
-6. **Cursor `Debug` 与断言形式** — 上游测试已从 `assert_eq!(cursor.current(), Ok(Some(...)))` 切换为 `assert!(cursor.current().unwrap().is_some())`。gravity 手写 `Debug` 仍支持前者，本次解决在 mdbx/mod.rs 保留前者；合并后须 `rg 'unwrap\(\)\.is_some\(\)' crates/storage/db/src/implementation/mdbx/mod.rs` 验证无误吸入。
+- [ ] 5. **Storage-v2 trait 基础设施** — `MetadataProvider`/`MetadataWriter`/`StorageSettings`/`StorageSettingsCache`/`RocksDBProviderFactory`/`NodePrimitivesProvider`/`StateWriteConfig` 在 gravity provider crate 中尚未实现。本次明确**不**port；是否计划长期跟进，或在 gravity 上"drop storage-v2 import pathway"？**Owner：存储架构师。**
 
-7. **`crates/storage/db/src/utils.rs`** — 上游新增 `is_database_empty`；本组未列入冲突清单，但 `lib.rs` 引用它。若它在 worktree 已存在则附加 OK；若是新文件需 git status 交叉确认。**Owner：与处理 `utils.rs` 的 worker 对齐。**
+- [ ] 6. **Cursor `Debug` 与断言形式** — 上游测试已从 `assert_eq!(cursor.current(), Ok(Some(...)))` 切换为 `assert!(cursor.current().unwrap().is_some())`。gravity 手写 `Debug` 仍支持前者，本次解决在 mdbx/mod.rs 保留前者；合并后须 `rg 'unwrap\(\)\.is_some\(\)' crates/storage/db/src/implementation/mdbx/mod.rs` 验证无误吸入。
 
-8. **`op` feature 直接 trim 的级联** — `db/Cargo.toml` 丢弃 `op = ["reth-db-api/op", "reth-primitives-traits/op"]` 后，下游若有 `--features op` 编译路径需同步 trim（规则 1）。
+- [ ] 7. **`crates/storage/db/src/utils.rs`** — 上游新增 `is_database_empty`；本组未列入冲突清单，但 `lib.rs` 引用它。若它在 worktree 已存在则附加 OK；若是新文件需 git status 交叉确认。**Owner：与处理 `utils.rs` 的 worker 对齐。**
+
+- [ ] 8. **`op` feature 直接 trim 的级联** — `db/Cargo.toml` 丢弃 `op = ["reth-db-api/op", "reth-primitives-traits/op"]` 后，下游若有 `--features op` 编译路径需同步 trim（规则 1）。

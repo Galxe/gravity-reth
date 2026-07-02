@@ -243,12 +243,14 @@
 
 ## 开放问题
 
-1. **GAT-factory 的下游传播。** Phase 3 步骤 11/12 采纳 `type AccountCursor<'a>` GAT 形式，要求 `reth_trie::hashed_cursor::HashedCursorFactory` 与 `reth_trie::trie_cursor::TrieCursorFactory`（在 `crates/trie/trie/src/`）声明 GAT 关联类型。这些文件不在本组冲突列表内，但 verify.rs (AA) 已经按 GAT 形式编写，说明上游 v2.3.0 trie crate 的 trait 也已 GAT 化 — 需在 Phase 2 步骤 7 之后实际编译验证。
+> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
 
-2. **nested-hash 路径的 witness 兼容。** 上游 PR #22564 (`b2eb061fe`) 删除了 `DatabaseTrieWitness` 与 `crates/trie/db/src/witness.rs`。gravity #237 (`605c372de6`) 在 `parallel/src/lib.rs` 保留 `pub mod proof` 用于 nested-hash 的 `eth_getProof`。删除 witness.rs 后，需 grep `crates/rpc/` 是否还有调用方仍 `use reth_trie_db::DatabaseTrieWitness;`；若有，把 `witness.rs` 作为 gravity-only 文件留下（不在本组冲突列表 — 可能本就不在 worktree 中）。
+- [ ] 1. **GAT-factory 的下游传播。** Phase 3 步骤 11/12 采纳 `type AccountCursor<'a>` GAT 形式，要求 `reth_trie::hashed_cursor::HashedCursorFactory` 与 `reth_trie::trie_cursor::TrieCursorFactory`（在 `crates/trie/trie/src/`）声明 GAT 关联类型。这些文件不在本组冲突列表内，但 verify.rs (AA) 已经按 GAT 形式编写，说明上游 v2.3.0 trie crate 的 trait 也已 GAT 化 — 需在 Phase 2 步骤 7 之后实际编译验证。
 
-3. **`DatabaseHashedPostState::from_reverts` / `HashedPostState::from_reverts` 调用面。** `crates/storage/provider/src/providers/state/historical.rs:136` 调用 `HashedPostState::from_reverts::<KeccakKeyHasher>(self.tx(), self.block_number)`，这是 RPC 历史读路径（`StateProvider`）。上游签名是 `from_reverts(provider, range) -> HashedPostStateSorted`。决策点：(a) 在 state.rs 保留 gravity trait 方法作为兼容垫片；(b) 在 historical.rs 调用点迁移到 provider-argument 形式。后者更彻底，前者更小风险 — 建议先 (a) 解锁编译，再单独 PR 做 (b) 迁移。
+- [ ] 2. **nested-hash 路径的 witness 兼容。** 上游 PR #22564 (`b2eb061fe`) 删除了 `DatabaseTrieWitness` 与 `crates/trie/db/src/witness.rs`。gravity #237 (`605c372de6`) 在 `parallel/src/lib.rs` 保留 `pub mod proof` 用于 nested-hash 的 `eth_getProof`。删除 witness.rs 后，需 grep `crates/rpc/` 是否还有调用方仍 `use reth_trie_db::DatabaseTrieWitness;`；若有，把 `witness.rs` 作为 gravity-only 文件留下（不在本组冲突列表 — 可能本就不在 worktree 中）。
 
-4. **`StoragesTrie` MDBX on-disk 格式锁定。** gravity #149 (`671680af37`) 改变了 `StoredNibblesSubKey` 的磁盘编码（变长 `[len][packed]` vs 上游 65B 右填充）。任何在当前 gravity main 上跑过 Galxe 网络的节点无法滚动升级到使用上游 65B 编码的二进制。本次合并保留 gravity 编码（nibbles.rs 决策为 keep-gravity）。需在 `MIGRATION.md` 或类似处记录这一锁定，并明确：上游新增的 `PackedAccountsTrie`/`PackedStoragesTrie` 表是 v2 路径，gravity 不消费这两张表（直到有迁移工具）。
+- [ ] 3. **`DatabaseHashedPostState::from_reverts` / `HashedPostState::from_reverts` 调用面。** `crates/storage/provider/src/providers/state/historical.rs:136` 调用 `HashedPostState::from_reverts::<KeccakKeyHasher>(self.tx(), self.block_number)`，这是 RPC 历史读路径（`StateProvider`）。上游签名是 `from_reverts(provider, range) -> HashedPostStateSorted`。决策点：(a) 在 state.rs 保留 gravity trait 方法作为兼容垫片；(b) 在 historical.rs 调用点迁移到 provider-argument 形式。后者更彻底，前者更小风险 — 建议先 (a) 解锁编译，再单独 PR 做 (b) 迁移。
 
-5. **`trie-common` 中 `gravity-primitives.workspace = true` 依赖。** 需在 workspace `Cargo.toml` 中验证 `gravity-primitives` 提供 `nested_trie::Node` 所需的类型（B256/Bytes 风格的 leaf payload）。Cargo.lock 已按 CLAUDE.md 备注解决，但 dependency tree（trie-common → gravity-primitives）应在 Phase 1 步骤 1 之后用 `cargo check -p reth-trie-common` 编译验证。
+- [ ] 4. **`StoragesTrie` MDBX on-disk 格式锁定。** gravity #149 (`671680af37`) 改变了 `StoredNibblesSubKey` 的磁盘编码（变长 `[len][packed]` vs 上游 65B 右填充）。任何在当前 gravity main 上跑过 Galxe 网络的节点无法滚动升级到使用上游 65B 编码的二进制。本次合并保留 gravity 编码（nibbles.rs 决策为 keep-gravity）。需在 `MIGRATION.md` 或类似处记录这一锁定，并明确：上游新增的 `PackedAccountsTrie`/`PackedStoragesTrie` 表是 v2 路径，gravity 不消费这两张表（直到有迁移工具）。
+
+- [ ] 5. **`trie-common` 中 `gravity-primitives.workspace = true` 依赖。** 需在 workspace `Cargo.toml` 中验证 `gravity-primitives` 提供 `nested_trie::Node` 所需的类型（B256/Bytes 风格的 leaf payload）。Cargo.lock 已按 CLAUDE.md 备注解决，但 dependency tree（trie-common → gravity-primitives）应在 Phase 1 步骤 1 之后用 `cargo check -p reth-trie-common` 编译验证。
