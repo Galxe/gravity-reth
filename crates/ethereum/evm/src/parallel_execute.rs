@@ -457,7 +457,9 @@ mod tests {
         eip7685::EMPTY_REQUESTS_HASH,
     };
     use alloy_primitives::{keccak256, Bytes, B256, U256};
-    use reth_chainspec::{ChainHardforks, ChainSpec, ChainSpecBuilder, ForkCondition, MAINNET};
+    use reth_chainspec::{
+        ChainHardforks, ChainSpec, ChainSpecBuilder, ForkCondition, GravityHardfork, MAINNET,
+    };
     use reth_ethereum_primitives::Block;
     use reth_evm::{execute::BasicBlockExecutor, parallel_execute::WrapExecutor};
     use reth_primitives_traits::RecoveredBlock;
