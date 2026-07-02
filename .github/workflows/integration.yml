@@ -93,18 +93,17 @@ jobs:
         with:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
-      - name: Run gravity pipe + EIP-7702 / EIP-2935 integration tests
+      - name: Run gravity pipe + hardfork / EIP-7702 / EIP-2935 integration tests
         # `--test <name>` is required (vs. just `-E 'binary(...)'`) because
         # nextest's filterset only filters at *run* time — without `--test`,
-        # `-p <crate>` still tries to compile every integration binary in the
-        # crate, including ones that don't compile in this workspace (e.g.
-        # gravity_hardfork_test.rs depends on reth-ethereum-forks which is not
-        # in dev-dependencies). `--test` restricts both compile and run.
+        # `-p <crate>` still tries to compile every integration binary in this
+        # crate. `--test` keeps this job focused on the intended binaries.
         run: |
           cargo nextest run \
             --locked \
             -p reth-pipe-exec-layer-ext-v2 \
             --test gravity_pipe_test \
+            --test gravity_hardfork_test \
             --test gravity_eip2935_test \
             --test gravity_eip7702_test
 
