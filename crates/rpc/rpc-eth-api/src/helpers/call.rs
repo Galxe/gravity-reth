@@ -18,6 +18,7 @@ use alloy_rpc_types_eth::{
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
+use reth_chainspec::{is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnv, EvmEnvFor, HaltReasonFor, InspectorFor,
@@ -743,18 +744,74 @@ pub trait Call:
         let block_number = evm_env.block_env.number;
         let block_timestamp = evm_env.block_env.timestamp;
         let current_randomness = evm_env.block_env.prevrandao;
-        let mut evm = self.evm_config().evm_with_env(db, evm_env);
+
+        // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring. When the
+        // sender of a pre-target replay tx is `SYSTEM_CALLER` and Alpha is
+        // active for the replayed block, we need cfg disables on the EVM that
+        // commits that tx. The fork gate keys off the replayed block's
+        // timestamp (matches the block-family path in `trace.rs`).
+        let exempt_fork_active = is_system_tx_gas_exempt(
+            self.provider().chain_spec().as_ref(),
+            block_timestamp.saturating_to::<u64>(),
+        );
+
+        // Peek the first replay tx so we can seed the initial EVM with the cfg
+        // kind it actually wants. In the common case the prelude leads with
+        // SYSTEM_CALLER metadata + validator txs, so starting with disables OFF
+        // would force an immediate `finish()` + rebuild on entry; pre-toggling
+        // the initial cfg avoids that wasted rebuild + `register_custom_precompiles`
+        // call. Matches the block-family path in `trace.rs` (`first_kind_system_exempt`).
+        let mut transactions = transactions.into_iter().peekable();
+        let first_kind_system_exempt = exempt_fork_active &&
+            transactions.peek().map(|tx| is_gravity_system_caller(tx.signer())).unwrap_or(false);
+
+        let mut current_kind_system_exempt = first_kind_system_exempt;
+        let mut initial_env = evm_env;
+        initial_env.cfg_env.disable_base_fee = first_kind_system_exempt;
+        initial_env.cfg_env.disable_balance_check = first_kind_system_exempt;
+        let mut evm = self.evm_config().evm_with_env(db, initial_env);
         self.register_custom_precompiles(
             &mut evm,
             block_number,
             block_timestamp,
             current_randomness,
         );
+
+        // Protocol invariant pin: same rationale as `trace.rs`'s block-family loop —
+        // pipe pins SYSTEM_CALLER-signed txs to a contiguous block-head prefix, the
+        // cfg-rebuild optimization below relies on monotonic system→user transition.
+        // Matching unit-tested predicate: `reth_chainspec::system_txs_form_head_prefix`.
+        let mut saw_non_system_caller_tx = false;
+
         let mut index = 0;
         for tx in transactions {
             if *tx.tx_hash() == target_tx_hash {
                 // reached the target transaction
                 break
+            }
+
+            let is_system_caller = is_gravity_system_caller(tx.signer());
+            debug_assert!(
+                !(is_system_caller && saw_non_system_caller_tx),
+                "RPC trace replay invariant violated: SYSTEM_CALLER-signed tx at index {index} appears after a non-system-caller tx in block #{block_number}",
+            );
+            if !is_system_caller {
+                saw_non_system_caller_tx = true;
+            }
+
+            let tx_is_system_exempt = exempt_fork_active && is_system_caller;
+            if tx_is_system_exempt != current_kind_system_exempt {
+                let (db_taken, mut env_taken) = evm.finish();
+                env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;
+                env_taken.cfg_env.disable_balance_check = tx_is_system_exempt;
+                evm = self.evm_config().evm_with_env(db_taken, env_taken);
+                self.register_custom_precompiles(
+                    &mut evm,
+                    block_number,
+                    block_timestamp,
+                    current_randomness,
+                );
+                current_kind_system_exempt = tx_is_system_exempt;
             }
 
             let tx_env = self.evm_config().tx_env(tx);

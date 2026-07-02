@@ -12,7 +12,7 @@ use revm::{
     context::TxEnv,
     context_interface::result::{ExecutionResult, HaltReason},
     database::BundleState,
-    state::EvmState,
+    state::{AccountInfo, EvmState},
 };
 
 /// The `ParallelExecutor` trait defines the interface for executing EVM blocks in parallel.
@@ -81,6 +81,13 @@ pub trait ParallelExecutor {
     /// [`take_bundle`]: Self::take_bundle
     fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error>;
 
+    /// Reads the current `AccountInfo` for `address` from the executor's in-memory state
+    /// without committing any change. Used by irregular-state-change hooks (e.g. the
+    /// Gravity Alpha `SYSTEM_CALLER` balance migration) that must inspect existing
+    /// nonce / code before constructing the diff submitted via
+    /// [`apply_state_change`](Self::apply_state_change).
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error>;
+
     /// Applies custom precompiled contracts to the executor.
     ///
     /// These precompiles will be available during transaction execution alongside
@@ -135,6 +142,11 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
     #[inline]
     fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), Self::Error> {
         self.0.apply_state_change(state_diff)
+    }
+
+    #[inline]
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        self.0.basic(address)
     }
 
     #[inline]

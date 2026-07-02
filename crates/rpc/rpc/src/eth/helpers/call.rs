@@ -8,7 +8,7 @@ use gravity_precompiles::randomness_by_height::{
     RandomnessByHeightGasPolicy, RandomnessByHeightLookup, RandomnessByHeightProvider,
     RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
 };
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork};
+use reth_chainspec::{is_system_tx_gas_exempt, ChainSpecProvider};
 use reth_errors::ProviderError;
 use reth_evm::{precompiles::PrecompilesMap, Evm, SpecFor, TxEnvFor};
 use reth_rpc_convert::RpcConvert;
@@ -114,10 +114,7 @@ where
         let Ok(block_number) = u64::try_from(block_number) else { return };
         let Ok(block_timestamp) = u64::try_from(block_timestamp) else { return };
         let chain_spec = self.provider().chain_spec();
-        if !chain_spec
-            .gravity_hardforks()
-            .is_fork_active_at_timestamp(GravityHardfork::Alpha, block_timestamp)
-        {
+        if !is_system_tx_gas_exempt(chain_spec.as_ref(), block_timestamp) {
             return
         }
 
