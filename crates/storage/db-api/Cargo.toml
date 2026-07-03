@@ -25,11 +25,14 @@ reth-trie-common.workspace = true
 # ethereum
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-genesis.workspace = true
 
 # codecs
 modular-bitfield.workspace = true
 roaring.workspace = true
 serde = { workspace = true, default-features = false }
+# gravity: `mod scale;` is unconditional (crates/storage/db-api/src/scale.rs)
+parity-scale-codec = { workspace = true, features = ["bytes"] }
 
 # metrics
 metrics.workspace = true

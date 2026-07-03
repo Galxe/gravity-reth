@@ -5,7 +5,7 @@ use reth_storage_errors::provider::ProviderResult;
 
 /// The trait for fetching stage checkpoint related data.
 #[auto_impl::auto_impl(&, Arc)]
-pub trait StageCheckpointReader: Send {
+pub trait StageCheckpointReader: Send + Sync {
     /// Fetch the checkpoint for the given stage.
     fn get_stage_checkpoint(&self, id: StageId) -> ProviderResult<Option<StageCheckpoint>>;
 
@@ -19,7 +19,7 @@ pub trait StageCheckpointReader: Send {
 
 /// The trait for updating stage checkpoint related data.
 #[auto_impl::auto_impl(&, Arc)]
-pub trait StageCheckpointWriter {
+pub trait StageCheckpointWriter: Send + Sync {
     /// Save stage checkpoint.
     fn save_stage_checkpoint(&self, id: StageId, checkpoint: StageCheckpoint)
         -> ProviderResult<()>;

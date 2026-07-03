@@ -1,12 +1,7 @@
 //! Database implementations for reth's database abstraction layer.
 //!
-<<<<<<< HEAD
 //! This crate provides implementations of `reth-db-api` for multiple database backends,
 //! including MDBX and `RocksDB`.
-=======
-//! This crate is an implementation of `reth-db-api` for MDBX, as well as a few other common
-//! database types.
->>>>>>> v2.3.0
 //!
 //! # Overview
 //!
@@ -18,17 +13,12 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 pub mod database;
 mod implementation;
 pub mod lockfile;
 pub mod static_file;
-<<<<<<< HEAD
-=======
-#[cfg(feature = "mdbx")]
-mod utils;
->>>>>>> v2.3.0
 pub mod version;
 
 // Backend-specific modules are now handled through the unified database module
@@ -36,11 +26,6 @@ pub mod version;
 pub mod generic;
 
 pub use reth_storage_errors::db::{DatabaseError, DatabaseWriteOperation};
-<<<<<<< HEAD
-=======
-#[cfg(feature = "mdbx")]
-pub use utils::is_database_empty;
->>>>>>> v2.3.0
 
 pub use generic::{create_db, init_db, open_db, open_db_read_only};
 
@@ -83,17 +68,11 @@ macro_rules! set_fail_point {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     use super::*;
-<<<<<<< HEAD
     use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
         database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
     };
-=======
-    use crate::mdbx::DatabaseArguments;
-    use parking_lot::RwLock;
-    use reth_db_api::{database::Database, database_metrics::DatabaseMetrics};
->>>>>>> v2.3.0
     use reth_fs_util;
     use std::{
         fmt::Formatter,
@@ -190,18 +169,6 @@ pub mod test_utils {
         fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
             self.db().tx_mut()
         }
-
-        fn path(&self) -> std::path::PathBuf {
-            self.db().path()
-        }
-
-        fn oldest_reader_txnid(&self) -> Option<u64> {
-            self.db().oldest_reader_txnid()
-        }
-
-        fn last_txnid(&self) -> Option<u64> {
-            self.db().last_txnid()
-        }
     }
 
     impl<DB: DatabaseMetrics> DatabaseMetrics for TempDatabase<DB> {
@@ -218,14 +185,6 @@ pub mod test_utils {
         (temp_dir, path)
     }
 
-    /// Create `rocksdb` path for testing
-    #[track_caller]
-    pub fn create_test_rocksdb_dir() -> (TempDir, PathBuf) {
-        let temp_dir = TempDir::with_prefix("reth-test-rocksdb-").expect(ERROR_TEMPDIR);
-        let path = temp_dir.path().to_path_buf();
-        (temp_dir, path)
-    }
-
     /// Get a temporary directory path to use for the database
     pub fn tempdir_path() -> PathBuf {
         let builder = tempfile::Builder::new().prefix("reth-test-").rand_bytes(8).tempdir();
@@ -238,11 +197,7 @@ pub mod test_utils {
         let path = tempdir_path();
         let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
 
-<<<<<<< HEAD
         let db = init_db(&path, DatabaseArguments::new(ClientVersion::default())).expect(&emsg);
-=======
-        let db = init_db(&path, DatabaseArguments::test()).expect(&emsg);
->>>>>>> v2.3.0
 
         Arc::new(TempDatabase::new(db, path))
     }
@@ -251,72 +206,22 @@ pub mod test_utils {
     #[track_caller]
     pub fn create_test_rw_db_with_path<P: AsRef<Path>>(path: P) -> Arc<TempDatabase<DatabaseEnv>> {
         let path = path.as_ref().to_path_buf();
-<<<<<<< HEAD
         let db = init_db(path.as_path(), DatabaseArguments::new(ClientVersion::default()))
             .expect(ERROR_DB_CREATION);
         Arc::new(TempDatabase::new(db, path))
-=======
-        let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
-        let db = init_db(path.as_path(), DatabaseArguments::test()).expect(&emsg);
-        Arc::new(TempDatabase::new(db, path))
-    }
-
-    /// Create read/write database for testing within a data directory.
-    ///
-    /// The database is created at `datadir/db`, and `TempDatabase` will clean up the entire
-    /// `datadir` on drop.
-    #[track_caller]
-    pub fn create_test_rw_db_with_datadir<P: AsRef<Path>>(
-        datadir: P,
-    ) -> Arc<TempDatabase<DatabaseEnv>> {
-        let datadir = datadir.as_ref().to_path_buf();
-        let db_path = datadir.join("db");
-        let emsg = format!("{ERROR_DB_CREATION}: {db_path:?}");
-        let db = init_db(&db_path, DatabaseArguments::test()).expect(&emsg);
-        Arc::new(TempDatabase::new(db, datadir))
->>>>>>> v2.3.0
     }
 
     /// Create read only database for testing
     #[track_caller]
     pub fn create_test_ro_db() -> Arc<TempDatabase<DatabaseEnv>> {
-<<<<<<< HEAD
         let args = DatabaseArguments::new(ClientVersion::default());
-=======
-        let args = DatabaseArguments::test();
->>>>>>> v2.3.0
 
         let path = tempdir_path();
-        let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
         {
-            init_db(path.as_path(), args.clone()).expect(&emsg);
+            init_db(path.as_path(), args.clone()).expect(ERROR_DB_CREATION);
         }
         let db = open_db_read_only(path.as_path(), args).expect(ERROR_DB_OPEN);
         Arc::new(TempDatabase::new(db, path))
-<<<<<<< HEAD
-=======
-    }
-
-    /// Enables MDBX legacy multi-open mode, allowing the same database to be opened
-    /// multiple times within a single process. This is needed for tests that simulate
-    /// concurrent primary + read-only secondary provider scenarios.
-    ///
-    /// Must be called before any MDBX environment is opened.
-    ///
-    /// # Safety
-    ///
-    /// This uses `MDBX_DBG_LEGACY_MULTIOPEN` which recovers POSIX file locks on close.
-    /// It may cause unexpected pauses and does not perfectly mirror multi-process behavior.
-    /// Use only in tests.
-    pub fn enable_legacy_multiopen() {
-        unsafe {
-            reth_libmdbx::ffi::mdbx_setup_debug(
-                reth_libmdbx::ffi::MDBX_LOG_DONTCHANGE,
-                reth_libmdbx::ffi::MDBX_DBG_LEGACY_MULTIOPEN as reth_libmdbx::ffi::MDBX_debug_flags,
-                None,
-            );
-        }
->>>>>>> v2.3.0
     }
 }
 
@@ -333,24 +238,6 @@ mod tests {
     };
     use std::time::Duration;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_temp_database_cleanup() {
-        // Test that TempDatabase properly cleans up its directory when dropped
-        let temp_path = {
-            let db = crate::test_utils::create_test_rw_db();
-            let path = db.path();
-            assert!(path.exists(), "Database directory should exist while TempDatabase is alive");
-            path
-            // TempDatabase dropped here
-        };
-
-        // Verify the directory was cleaned up
-        assert!(
-            !temp_path.exists(),
-            "Database directory should be cleaned up after TempDatabase is dropped"
-        );
-    }
 
     #[test]
     fn db_version() {

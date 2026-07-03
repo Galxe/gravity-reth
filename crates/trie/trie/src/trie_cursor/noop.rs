@@ -1,4 +1,4 @@
-use super::{TrieCursor, TrieCursorFactory, TrieStorageCursor};
+use super::{TrieCursor, TrieCursorFactory};
 use crate::{BranchNodeCompact, Nibbles};
 use alloy_primitives::B256;
 use reth_storage_errors::db::DatabaseError;
@@ -9,18 +9,11 @@ use reth_storage_errors::db::DatabaseError;
 pub struct NoopTrieCursorFactory;
 
 impl TrieCursorFactory for NoopTrieCursorFactory {
-    type AccountTrieCursor<'a>
-        = NoopAccountTrieCursor
-    where
-        Self: 'a;
-
-    type StorageTrieCursor<'a>
-        = NoopStorageTrieCursor
-    where
-        Self: 'a;
+    type AccountTrieCursor = NoopAccountTrieCursor;
+    type StorageTrieCursor = NoopStorageTrieCursor;
 
     /// Generates a noop account trie cursor.
-    fn account_trie_cursor(&self) -> Result<Self::AccountTrieCursor<'_>, DatabaseError> {
+    fn account_trie_cursor(&self) -> Result<Self::AccountTrieCursor, DatabaseError> {
         Ok(NoopAccountTrieCursor::default())
     }
 
@@ -28,7 +21,7 @@ impl TrieCursorFactory for NoopTrieCursorFactory {
     fn storage_trie_cursor(
         &self,
         _hashed_address: B256,
-    ) -> Result<Self::StorageTrieCursor<'_>, DatabaseError> {
+    ) -> Result<Self::StorageTrieCursor, DatabaseError> {
         Ok(NoopStorageTrieCursor::default())
     }
 }
@@ -60,10 +53,6 @@ impl TrieCursor for NoopAccountTrieCursor {
     fn current(&mut self) -> Result<Option<Nibbles>, DatabaseError> {
         Ok(None)
     }
-
-    fn reset(&mut self) {
-        // Noop
-    }
 }
 
 /// Noop storage trie cursor.
@@ -92,15 +81,5 @@ impl TrieCursor for NoopStorageTrieCursor {
 
     fn current(&mut self) -> Result<Option<Nibbles>, DatabaseError> {
         Ok(None)
-    }
-
-    fn reset(&mut self) {
-        // Noop
-    }
-}
-
-impl TrieStorageCursor for NoopStorageTrieCursor {
-    fn set_hashed_address(&mut self, _hashed_address: B256) {
-        // Noop
     }
 }

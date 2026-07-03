@@ -43,15 +43,10 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-<<<<<<< HEAD
 reth-db = { workspace = true }
 reth-provider = { workspace = true, features = ["test-utils"] }
 alloy-consensus.workspace = true
-=======
-reth-db = { workspace = true, features = ["mdbx"] }
-reth-provider = { workspace = true, features = ["test-utils"] }
 reth-tasks.workspace = true
->>>>>>> v2.3.0
 
 [lints]
 workspace = true

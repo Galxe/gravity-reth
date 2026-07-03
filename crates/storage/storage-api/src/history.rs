@@ -8,7 +8,7 @@ use reth_storage_errors::provider::ProviderResult;
 
 /// History Writer
 #[auto_impl(&, Arc, Box)]
-pub trait HistoryWriter: Send {
+pub trait HistoryWriter: Send + Sync {
     /// Unwind and clear account history indices.
     ///
     /// Returns number of changesets walked.
@@ -44,7 +44,7 @@ pub trait HistoryWriter: Send {
     /// Returns number of changesets walked.
     fn unwind_storage_history_indices_range(
         &self,
-        range: impl RangeBounds<BlockNumber>,
+        range: impl RangeBounds<BlockNumberAddress>,
     ) -> ProviderResult<usize>;
 
     /// Insert storage change index to database. Used inside `StorageHistoryIndex` stage

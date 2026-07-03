@@ -1,112 +1,23 @@
 mod receipts;
 mod set;
+mod static_file;
 mod user;
 
 use crate::{PruneLimiter, PrunerError};
 use alloy_primitives::{BlockNumber, TxNumber};
-<<<<<<< HEAD
 use reth_provider::{errors::provider::ProviderResult, BlockReader, PruneCheckpointWriter};
 use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, SegmentOutput};
-=======
-use reth_provider::{
-    errors::provider::ProviderResult, BlockReader, PruneCheckpointWriter, StaticFileProviderFactory,
-};
-use reth_prune_types::{
-    PruneCheckpoint, PruneMode, PruneProgress, PrunePurpose, PruneSegment, SegmentOutput,
-    SegmentOutputCheckpoint,
-};
-use reth_stages_types::StageId;
-use reth_static_file_types::StaticFileSegment;
->>>>>>> v2.3.0
 pub use set::SegmentSet;
+pub use static_file::{
+    Headers as StaticFileHeaders, Receipts as StaticFileReceipts,
+    Transactions as StaticFileTransactions,
+};
 use std::{fmt::Debug, ops::RangeInclusive};
 use tracing::error;
 pub use user::{
-    AccountHistory, Bodies, Receipts as UserReceipts, ReceiptsByLogs, SenderRecovery,
-    StorageHistory, TransactionLookup,
+    AccountHistory, Receipts as UserReceipts, ReceiptsByLogs, SenderRecovery, StorageHistory,
+    TransactionLookup,
 };
-
-/// Prunes data from static files for a given segment.
-///
-/// This is a generic helper function used by both receipts and bodies pruning
-/// when data is stored in static files.
-///
-/// The checkpoint block number is set to the highest block in the actually deleted files,
-/// not `input.to_block`, since `to_block` might refer to a block in the middle of an
-/// undeleted file.
-pub(crate) fn prune_static_files<Provider>(
-    provider: &Provider,
-    input: PruneInput,
-    segment: StaticFileSegment,
-) -> Result<SegmentOutput, PrunerError>
-where
-    Provider: StaticFileProviderFactory,
-{
-    let deleted_headers =
-        provider.static_file_provider().delete_segment_below_block(segment, input.to_block + 1)?;
-
-    if deleted_headers.is_empty() {
-        return Ok(SegmentOutput {
-            progress: PruneProgress::Finished,
-            pruned: 0,
-            checkpoint: input
-                .previous_checkpoint
-                .map(SegmentOutputCheckpoint::from_prune_checkpoint),
-        })
-    }
-
-    let tx_ranges = deleted_headers.iter().filter_map(|header| header.tx_range());
-
-    let pruned = tx_ranges.clone().map(|range| range.len()).sum::<u64>() as usize;
-
-    // The highest block number in the deleted files is the actual checkpoint.
-    let checkpoint_block = deleted_headers
-        .iter()
-        .filter_map(|header| header.block_range())
-        .map(|range| range.end())
-        .max();
-
-    Ok(SegmentOutput {
-        progress: PruneProgress::Finished,
-        pruned,
-        checkpoint: Some(SegmentOutputCheckpoint {
-            block_number: checkpoint_block,
-            tx_number: tx_ranges.map(|range| range.end()).max(),
-        }),
-    })
-}
-
-/// Deletes ALL static file jars for a given segment.
-///
-/// This is used for `PruneMode::Full` where all data should be removed, including the highest jar.
-/// Unlike [`prune_static_files`], this does not preserve the most recent jar.
-pub(crate) fn delete_static_files_segment<Provider>(
-    provider: &Provider,
-    input: PruneInput,
-    segment: StaticFileSegment,
-) -> Result<SegmentOutput, PrunerError>
-where
-    Provider: StaticFileProviderFactory,
-{
-    let deleted_headers = provider.static_file_provider().delete_segment(segment)?;
-
-    if deleted_headers.is_empty() {
-        return Ok(SegmentOutput::done())
-    }
-
-    let tx_ranges = deleted_headers.iter().filter_map(|header| header.tx_range());
-
-    let pruned = tx_ranges.clone().map(|range| range.len()).sum::<u64>() as usize;
-
-    Ok(SegmentOutput {
-        progress: PruneProgress::Finished,
-        pruned,
-        checkpoint: Some(SegmentOutputCheckpoint {
-            block_number: Some(input.to_block),
-            tx_number: tx_ranges.map(|range| range.end()).max(),
-        }),
-    })
-}
 
 /// A segment represents a pruning of some portion of the data.
 ///
@@ -138,14 +49,6 @@ pub trait Segment<Provider>: Debug + Send + Sync {
         Provider: PruneCheckpointWriter,
     {
         provider.save_prune_checkpoint(self.segment(), checkpoint)
-    }
-
-    /// Returns the stage this segment depends on, if any.
-    ///
-    /// If this returns `Some(stage_id)`, the pruner will skip this segment if the stage
-    /// has not yet caught up with the `Finish` stage checkpoint.
-    fn required_stage(&self) -> Option<StageId> {
-        None
     }
 }
 
@@ -246,10 +149,6 @@ mod tests {
     use reth_provider::{
         providers::BlockchainProvider,
         test_utils::{create_test_provider_factory, MockEthProvider},
-<<<<<<< HEAD
-=======
-        BlockWriter,
->>>>>>> v2.3.0
     };
     use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
 
@@ -291,21 +190,12 @@ mod tests {
         let provider_rw = factory.provider_rw().expect("failed to get provider_rw");
         for block in &blocks {
             provider_rw
-<<<<<<< HEAD
                 .insert_historical_block(
                     block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
             provider_rw.commit_view().unwrap();
         }
-=======
-                .insert_block(
-                    &block.clone().try_recover().expect("failed to seal block with senders"),
-                )
-                .expect("failed to insert block");
-        }
-        provider_rw.commit().expect("failed to commit");
->>>>>>> v2.3.0
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -338,21 +228,12 @@ mod tests {
         let provider_rw = factory.provider_rw().expect("failed to get provider_rw");
         for block in &blocks {
             provider_rw
-<<<<<<< HEAD
                 .insert_historical_block(
                     block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
             provider_rw.commit_view().unwrap();
         }
-=======
-                .insert_block(
-                    &block.clone().try_recover().expect("failed to seal block with senders"),
-                )
-                .expect("failed to insert block");
-        }
-        provider_rw.commit().expect("failed to commit");
->>>>>>> v2.3.0
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -393,21 +274,12 @@ mod tests {
         let provider_rw = factory.provider_rw().expect("failed to get provider_rw");
         for block in &blocks {
             provider_rw
-<<<<<<< HEAD
                 .insert_historical_block(
                     block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
             provider_rw.commit_view().unwrap();
         }
-=======
-                .insert_block(
-                    &block.clone().try_recover().expect("failed to seal block with senders"),
-                )
-                .expect("failed to insert block");
-        }
-        provider_rw.commit().expect("failed to commit");
->>>>>>> v2.3.0
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();
@@ -438,21 +310,12 @@ mod tests {
         let provider_rw = factory.provider_rw().expect("failed to get provider_rw");
         for block in &blocks {
             provider_rw
-<<<<<<< HEAD
                 .insert_historical_block(
                     block.clone().try_recover().expect("failed to seal block with senders"),
                 )
                 .expect("failed to insert block");
             provider_rw.commit_view().unwrap();
         }
-=======
-                .insert_block(
-                    &block.clone().try_recover().expect("failed to seal block with senders"),
-                )
-                .expect("failed to insert block");
-        }
-        provider_rw.commit().expect("failed to commit");
->>>>>>> v2.3.0
 
         // Create a new provider
         let provider = BlockchainProvider::new(factory).unwrap();

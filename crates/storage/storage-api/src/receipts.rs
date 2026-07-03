@@ -11,7 +11,7 @@ pub type ProviderReceipt<P> = <P as ReceiptProvider>::Receipt;
 
 /// Client trait for fetching receipt data.
 #[auto_impl::auto_impl(&, Arc)]
-pub trait ReceiptProvider {
+pub trait ReceiptProvider: Send + Sync {
     /// The receipt type.
     type Receipt: Receipt;
 

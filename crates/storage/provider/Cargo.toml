@@ -16,42 +16,26 @@ workspace = true
 reth-chainspec.workspace = true
 reth-execution-types.workspace = true
 reth-ethereum-primitives = { workspace = true, features = ["reth-codec"] }
-<<<<<<< HEAD
 reth-primitives-traits = { workspace = true, features = ["reth-codec", "secp256k1"] }
 reth-fs-util.workspace = true
 reth-errors.workspace = true
 reth-storage-errors.workspace = true
 reth-storage-api = { workspace = true, features = ["std", "db-api"] }
 reth-db = { workspace = true }
-=======
-reth-primitives-traits = { workspace = true, features = ["reth-codec", "secp256k1", "dashmap"] }
-reth-errors.workspace = true
-reth-storage-errors.workspace = true
-reth-storage-api = { workspace = true, features = ["std", "db-api"] }
-reth-db = { workspace = true, features = ["mdbx"] }
->>>>>>> v2.3.0
 reth-db-api.workspace = true
 reth-prune-types.workspace = true
 reth-stages-types.workspace = true
-reth-tasks = { workspace = true, features = ["rayon"] }
 reth-trie = { workspace = true, features = ["metrics"] }
 reth-trie-db = { workspace = true, features = ["metrics"] }
 reth-nippy-jar.workspace = true
 reth-codecs.workspace = true
+reth-evm.workspace = true
 reth-chain-state.workspace = true
 reth-node-types.workspace = true
-<<<<<<< HEAD
 reth-static-file-types.workspace = true
 gravity-primitives.workspace = true
-=======
-reth-static-file-types = { workspace = true, features = ["std"] }
-reth-fs-util.workspace = true
-
->>>>>>> v2.3.0
 # ethereum
-alloy-eip7928.workspace = true
 alloy-eips.workspace = true
-alloy-genesis.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-consensus.workspace = true
@@ -69,14 +53,9 @@ metrics.workspace = true
 itertools.workspace = true
 notify = { workspace = true, default-features = false, features = ["macos_fsevent"] }
 parking_lot.workspace = true
-smallvec.workspace = true
+dashmap = { workspace = true, features = ["inline"] }
 strum.workspace = true
 eyre.workspace = true
-<<<<<<< HEAD
-=======
-reth-tokio-util.workspace = true
-tokio = { workspace = true, features = ["sync"], optional = true }
->>>>>>> v2.3.0
 
 # test-utils
 reth-ethereum-engine-primitives = { workspace = true, optional = true }
@@ -84,8 +63,6 @@ tokio = { workspace = true, features = ["sync"], optional = true }
 
 # parallel utils
 rayon.workspace = true
-
-rocksdb.workspace = true
 
 [dev-dependencies]
 reth-db = { workspace = true, features = ["test-utils"] }
@@ -95,10 +72,6 @@ reth-trie = { workspace = true, features = ["test-utils"] }
 reth-testing-utils.workspace = true
 reth-ethereum-engine-primitives.workspace = true
 reth-ethereum-primitives.workspace = true
-<<<<<<< HEAD
-=======
-reth-tracing.workspace = true
->>>>>>> v2.3.0
 
 revm-database-interface.workspace = true
 revm-state.workspace = true
@@ -108,18 +81,11 @@ assert_matches.workspace = true
 rand.workspace = true
 
 tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
-<<<<<<< HEAD
 
 alloy-consensus.workspace = true
 
 [features]
 pipe_test = []
-=======
-tokio-stream = { workspace = true, features = ["sync"] }
-
-[features]
-jemalloc = ["rocksdb/jemalloc"]
->>>>>>> v2.3.0
 test-utils = [
     "reth-db/test-utils",
     "reth-nippy-jar/test-utils",
@@ -128,10 +94,7 @@ test-utils = [
     "reth-ethereum-engine-primitives",
     "reth-ethereum-primitives/test-utils",
     "reth-chainspec/test-utils",
-<<<<<<< HEAD
     "reth-evm/test-utils",
-=======
->>>>>>> v2.3.0
     "reth-primitives-traits/test-utils",
     "reth-codecs/test-utils",
     "reth-db-api/test-utils",
@@ -139,10 +102,5 @@ test-utils = [
     "reth-prune-types/test-utils",
     "reth-stages-types/test-utils",
     "revm-state",
-<<<<<<< HEAD
     "tokio",
-=======
-    "reth-tasks/test-utils",
-    "dep:tokio",
->>>>>>> v2.3.0
 ]

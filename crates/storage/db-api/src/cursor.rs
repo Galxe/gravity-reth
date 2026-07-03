@@ -67,14 +67,8 @@ pub trait DbCursorRO<T: Table> {
 
 /// A read-only cursor over the dup table `T`.
 pub trait DbDupCursorRO<T: DupSort> {
-    /// Positions the cursor at the prev KV pair of the table, returning it.
-    fn prev_dup(&mut self) -> PairResult<T>;
-
     /// Positions the cursor at the next KV pair of the table, returning it.
     fn next_dup(&mut self) -> PairResult<T>;
-
-    /// Positions the cursor at the last duplicate value of the current key.
-    fn last_dup(&mut self) -> ValueOnlyResult<T>;
 
     /// Positions the cursor at the next KV pair of the table, skipping duplicates.
     fn next_no_dup(&mut self) -> PairResult<T>;
@@ -103,7 +97,7 @@ pub trait DbDupCursorRO<T: DupSort> {
     /// | `key`  | `subkey` | **Equivalent starting position**        |
     /// |--------|----------|-----------------------------------------|
     /// | `None` | `None`   | [`DbCursorRO::first()`]                 |
-    /// | `Some` | `None`   | [`DbCursorRO::seek_exact()`]            |
+    /// | `Some` | `None`   | [`DbCursorRO::seek()`]               |
     /// | `None` | `Some`   | [`DbDupCursorRO::seek_by_key_subkey()`] |
     /// | `Some` | `Some`   | [`DbDupCursorRO::seek_by_key_subkey()`] |
     fn walk_dup(
@@ -140,7 +134,7 @@ pub trait DbCursorRW<T: Table> {
     }
 }
 
-/// Read Write Cursor over `DupSort` table.
+/// Read Write Cursor over `DupSorted` table.
 pub trait DbDupCursorRW<T: DupSort> {
     /// Delete all duplicate entries for current key.
     fn delete_current_duplicates(&mut self) -> Result<(), DatabaseError>;
@@ -345,14 +339,6 @@ impl<T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> RangeWalker<'_, T, CURSOR>
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
         self.start.take();
         self.cursor.delete_current()
-    }
-}
-
-impl<T: DupSort, CURSOR: DbDupCursorRW<T> + DbCursorRO<T>> RangeWalker<'_, T, CURSOR> {
-    /// Delete all duplicate entries for current key that walker points to.
-    pub fn delete_current_duplicates(&mut self) -> Result<(), DatabaseError> {
-        self.start.take();
-        self.cursor.delete_current_duplicates()
     }
 }
 

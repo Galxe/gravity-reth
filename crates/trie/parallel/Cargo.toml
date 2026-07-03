@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 # reth
-<<<<<<< HEAD
 reth-db-api.workspace = true
 reth-execution-errors.workspace = true
 reth-provider.workspace = true
@@ -21,73 +20,42 @@ reth-storage-errors.workspace = true
 reth-trie-common.workspace = true
 reth-trie-db.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std"] }
-=======
-reth-primitives-traits = { workspace = true, features = ["dashmap", "std"] }
-reth-execution-errors.workspace = true
-reth-provider.workspace = true
-reth-storage-errors.workspace = true
-reth-tasks = { workspace = true, features = ["rayon"] }
->>>>>>> v2.3.0
 reth-trie.workspace = true
 
 # alloy
-alloy-eip7928.workspace = true
-alloy-evm.workspace = true
-alloy-primitives.workspace = true
 alloy-rlp.workspace = true
+alloy-primitives.workspace = true
 
 # tracing
 tracing.workspace = true
-
-# revm
-revm-state.workspace = true
 
 # misc
 thiserror.workspace = true
 derive_more.workspace = true
 rayon.workspace = true
 itertools.workspace = true
-<<<<<<< HEAD
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
-=======
-crossbeam-channel.workspace = true
-crossbeam-utils.workspace = true
->>>>>>> v2.3.0
 
 # `metrics` feature
 reth-metrics = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 
-# `trie-debug` feature
-reth-trie-sparse = { workspace = true, optional = true, features = ["trie-debug"] }
-rand = { workspace = true, optional = true }
-
 [dev-dependencies]
 # reth
-<<<<<<< HEAD
-=======
-reth-chainspec.workspace = true
-reth-ethereum-primitives.workspace = true
->>>>>>> v2.3.0
 reth-primitives-traits.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
-reth-trie-db.workspace = true
 reth-trie = { workspace = true, features = ["test-utils"] }
 
 # misc
 rand.workspace = true
-<<<<<<< HEAD
 rayon.workspace = true
 criterion.workspace = true
-=======
->>>>>>> v2.3.0
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
 default = ["metrics"]
-<<<<<<< HEAD
 metrics = ["reth-metrics", "dep:metrics", "reth-trie/metrics", "reth-trie-sparse/metrics"]
 test-utils = [
     "reth-db-api/test-utils",
@@ -102,21 +70,3 @@ test-utils = [
 [[bench]]
 name = "root"
 harness = false
-=======
-metrics = ["reth-metrics", "dep:metrics", "reth-trie/metrics"]
-trie-debug = [
-    "dep:rand",
-    "dep:reth-trie-sparse",
-    "reth-trie-sparse?/trie-debug",
-]
-test-utils = [
-    "reth-primitives-traits/test-utils",
-    "reth-provider/test-utils",
-    "reth-trie-db/test-utils",
-    "reth-trie/test-utils",
-    "reth-tasks/test-utils",
-    "reth-chainspec/test-utils",
-    "reth-trie-sparse?/test-utils",
-    "reth-ethereum-primitives/test-utils",
-]
->>>>>>> v2.3.0

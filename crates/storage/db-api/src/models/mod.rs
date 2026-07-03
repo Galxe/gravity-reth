@@ -1,10 +1,9 @@
 //! Implements data structures specific to the database
 
 use crate::{
-    table::{Decode, Encode},
+    table::{Compress, Decode, Decompress, Encode},
     DatabaseError,
 };
-<<<<<<< HEAD
 use alloy_consensus::Header;
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
@@ -14,34 +13,20 @@ use reth_primitives_traits::{Account, Bytecode, StorageEntry, SubkeyContainedVal
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::StageCheckpoint;
 use reth_trie_common::{nested_trie::StorageNodeEntry, StoredNibbles, StoredNibblesSubKey, *};
-=======
-use alloy_primitives::{Address, B256, U256};
-use reth_codecs::{add_arbitrary_tests, impl_compression_for_compact, Compact};
-use reth_prune_types::PruneSegment;
-use reth_trie_common::{StoredNibbles, StoredNibblesSubKey, *};
->>>>>>> v2.3.0
 use serde::{Deserialize, Serialize};
 
 pub mod accounts;
 pub mod blocks;
 pub mod integer_list;
-pub mod metadata;
 pub mod sharded_key;
 pub mod storage_sharded_key;
 
 pub use accounts::*;
 pub use blocks::*;
 pub use integer_list::IntegerList;
-<<<<<<< HEAD
 pub use reth_db_models::{
     AccountBeforeTx, ClientVersion, StaticFileBlockWithdrawals, StoredBlockBodyIndices,
     StoredBlockWithdrawals,
-=======
-pub use metadata::*;
-pub use reth_db_models::{
-    AccountBeforeTx, ClientVersion, StaticFileBlockWithdrawals, StorageBeforeTx,
-    StoredBlockBodyIndices, StoredBlockWithdrawals,
->>>>>>> v2.3.0
 };
 pub use sharded_key::ShardedKey;
 
@@ -137,16 +122,13 @@ impl Decode for String {
 }
 
 impl Encode for StoredNibbles {
-    type Encoded = arrayvec::ArrayVec<u8, 64>;
+    type Encoded = Vec<u8>;
 
+    // Delegate to the Compact implementation
     fn encode(self) -> Self::Encoded {
-<<<<<<< HEAD
         // NOTE: This used to be `to_compact`, but all it does is append the bytes to the buffer,
         // so we can just use the implementation of `Into<Vec<u8>>` to reuse the buffer.
         self.0.to_vec()
-=======
-        self.0.iter().collect()
->>>>>>> v2.3.0
     }
 }
 
@@ -157,47 +139,19 @@ impl Decode for StoredNibbles {
 }
 
 impl Encode for StoredNibblesSubKey {
-    type Encoded = [u8; 65];
+    type Encoded = Vec<u8>;
 
+    // Delegate to the Compact implementation
     fn encode(self) -> Self::Encoded {
-        self.to_compact_array()
+        let mut buf = Vec::with_capacity(65);
+        self.to_compact(&mut buf);
+        buf
     }
 }
 
 impl Decode for StoredNibblesSubKey {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         Ok(Self::from_compact(value, value.len()).0)
-<<<<<<< HEAD
-=======
-    }
-}
-
-impl Encode for PackedStoredNibbles {
-    type Encoded = [u8; 33];
-
-    fn encode(self) -> Self::Encoded {
-        self.to_compact_array()
-    }
-}
-
-impl Decode for PackedStoredNibbles {
-    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        Ok(Self::from_compact(value, value.len()).0)
-    }
-}
-
-impl Encode for PackedStoredNibblesSubKey {
-    type Encoded = [u8; 33];
-
-    fn encode(self) -> Self::Encoded {
-        self.to_compact_array()
-    }
-}
-
-impl Decode for PackedStoredNibblesSubKey {
-    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        Ok(Self::from_compact(value, value.len()).0)
->>>>>>> v2.3.0
     }
 }
 
@@ -234,7 +188,6 @@ impl Decode for ClientVersion {
     }
 }
 
-<<<<<<< HEAD
 /// Implements compression for Compact type.
 macro_rules! impl_compression_for_compact {
     ($($name:ident$(<$($generic:ident),*>)?),+) => {
@@ -349,9 +302,6 @@ macro_rules! impl_compression_fixed_compact {
 }
 
 impl_compression_fixed_compact!(B256, Address);
-=======
-impl_compression_for_compact!(StoredBlockOmmers<H>, CompactU256);
->>>>>>> v2.3.0
 
 /// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
 /// used as pure table values.
@@ -423,10 +373,7 @@ mod tests {
         assert_eq!(PruneCheckpoint::bitflag_encoded_bytes(), 1);
         assert_eq!(PruneMode::bitflag_encoded_bytes(), 1);
         assert_eq!(PruneSegment::bitflag_encoded_bytes(), 1);
-<<<<<<< HEAD
         assert_eq!(Receipt::bitflag_encoded_bytes(), 1);
-=======
->>>>>>> v2.3.0
         assert_eq!(StageCheckpoint::bitflag_encoded_bytes(), 1);
         assert_eq!(StageUnitCheckpoint::bitflag_encoded_bytes(), 1);
         assert_eq!(StoredBlockBodyIndices::bitflag_encoded_bytes(), 1);
@@ -446,10 +393,7 @@ mod tests {
         validate_bitflag_backwards_compat!(PruneCheckpoint, UnusedBits::NotZero);
         validate_bitflag_backwards_compat!(PruneMode, UnusedBits::Zero);
         validate_bitflag_backwards_compat!(PruneSegment, UnusedBits::Zero);
-<<<<<<< HEAD
         validate_bitflag_backwards_compat!(Receipt, UnusedBits::Zero);
-=======
->>>>>>> v2.3.0
         validate_bitflag_backwards_compat!(StageCheckpoint, UnusedBits::NotZero);
         validate_bitflag_backwards_compat!(StageUnitCheckpoint, UnusedBits::Zero);
         validate_bitflag_backwards_compat!(StoredBlockBodyIndices, UnusedBits::Zero);

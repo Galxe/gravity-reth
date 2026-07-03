@@ -575,6 +575,7 @@ modular-bitfield = "0.13.1"
 notify = { version = "8.0.0", default-features = false, features = ["macos_fsevent"] }
 nybbles = { version = "0.4.8", default-features = false }
 once_cell = { version = "1.19", default-features = false, features = ["critical-section"] }
+parity-scale-codec = "3.2.1"
 parking_lot = "0.12"
 quanta = "0.12"
 paste = "1.0"

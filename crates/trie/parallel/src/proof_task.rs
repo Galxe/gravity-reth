@@ -1,1191 +1,608 @@
-//! Parallel proof computation using worker pools with dedicated database transactions.
+//! A Task that manages sending proof requests to a number of tasks that have longer-running
+//! database transactions.
 //!
+//! The [`ProofTaskManager`] ensures that there are a max number of currently executing proof tasks,
+//! and is responsible for managing the fixed number of database transactions created at the start
+//! of the task.
 //!
-//! # Architecture
-//!
-//! - **Worker Pools**: Pre-spawned workers with dedicated database transactions
-//!   - Storage pool: Handles storage proofs
-//!   - Account pool: Handles account multiproofs
-//! - **Direct Channel Access**: `ProofWorkerHandle` provides type-safe queue methods with direct
-//!   access to worker channels, eliminating routing overhead
-//! - **Automatic Shutdown**: Workers terminate gracefully when all handles are dropped
-//!
-//! # Message Flow
-//!
-//! 1. The `SparseTrieCacheTask` prepares a storage or account job and hands it to
-//!    `ProofWorkerHandle`. The job carries a `ProofResultContext` so the worker knows how to send
-//!    the result back.
-//! 2. A worker receives the job, runs the proof, and sends a `ProofResultMessage` through the
-//!    provided `ProofResultSender`.
-//! 3. The `SparseTrieCacheTask` receives the message and proceeds with its state-root logic.
-//!
-//! Each job gets its own direct channel so results go straight back to the `SparseTrieCacheTask`.
-//! That keeps ordering decisions in one place and lets workers run independently.
-//!
-//! ```text
-//! SparseTrieCacheTask -> ProofWorkerHandle -> Storage/Account Worker
-//!        ^                       |
-//!        |                       v
-//! ProofResultMessage <-- ProofResultSender
-//! ```
+//! Individual [`ProofTaskTx`] instances manage a dedicated [`InMemoryTrieCursorFactory`] and
+//! [`HashedPostStateCursorFactory`], which are each backed by a database transaction.
 
-use crate::{
-    root::ParallelStateRootError,
-    value_encoder::{AsyncAccountValueEncoder, ValueEncoderStats},
+use crate::root::ParallelStateRootError;
+use alloy_primitives::{map::B256Set, B256};
+use reth_db_api::transaction::DbTx;
+use reth_execution_errors::SparseTrieError;
+use reth_provider::{
+    providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, FactoryTx,
+    ProviderResult,
 };
-use alloy_primitives::{
-    map::{B256Map, B256Set},
-    B256, U256,
-};
-use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
-use reth_execution_errors::StateProofError;
-use reth_primitives_traits::{dashmap::DashMap, FastInstant as Instant};
-use reth_provider::{DatabaseProviderROFactory, ProviderError, ProviderResult};
-use reth_storage_errors::db::DatabaseError;
-use reth_tasks::Runtime;
 use reth_trie::{
-    hashed_cursor::{HashedCursorFactory, HashedStorageCursor, InstrumentedHashedCursor},
-    proof_v2,
-    trie_cursor::{InstrumentedTrieCursor, TrieCursorFactory, TrieStorageCursor},
-    DecodedMultiProofV2, HashedPostState, MultiProofTargetsV2, ProofTrieNodeV2, ProofV2Target,
+    hashed_cursor::HashedPostStateCursorFactory,
+    prefix_set::TriePrefixSetsMut,
+    proof::{ProofTrieNodeProviderFactory, StorageProof},
+    trie_cursor::InMemoryTrieCursorFactory,
+    updates::TrieUpdatesSorted,
+    DecodedStorageMultiProof, HashedPostStateSorted, Nibbles,
 };
+use reth_trie_common::{
+    added_removed_keys::MultiAddedRemovedKeys,
+    prefix_set::{PrefixSet, PrefixSetMut},
+};
+use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
+use reth_trie_sparse::provider::{RevealedNode, TrieNodeProvider, TrieNodeProviderFactory};
 use std::{
-    cell::RefCell,
-    rc::Rc,
+    collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{channel, Receiver, SendError, Sender},
         Arc,
     },
-    time::Duration,
+    time::Instant,
 };
-use tracing::{debug, debug_span, error, instrument, trace};
+use tokio::runtime::Handle;
+use tracing::debug;
 
 #[cfg(feature = "metrics")]
-use crate::proof_task_metrics::{
-    ProofTaskCursorMetrics, ProofTaskCursorMetricsCache, ProofTaskTrieMetrics,
-};
+use crate::proof_task_metrics::ProofTaskMetrics;
 
-/// Type alias for the V2 account proof calculator with instrumented cursors.
-type V2AccountProofCalculator<'a, Provider> = proof_v2::ProofCalculator<
-    InstrumentedTrieCursor<'a, <Provider as TrieCursorFactory>::AccountTrieCursor<'a>>,
-    InstrumentedHashedCursor<'a, <Provider as HashedCursorFactory>::AccountCursor<'a>>,
-    AsyncAccountValueEncoder<
-        InstrumentedTrieCursor<'a, <Provider as TrieCursorFactory>::StorageTrieCursor<'a>>,
-        InstrumentedHashedCursor<'a, <Provider as HashedCursorFactory>::StorageCursor<'a>>,
-    >,
->;
+type StorageProofResult = Result<DecodedStorageMultiProof, ParallelStateRootError>;
+type TrieNodeProviderResult = Result<Option<RevealedNode>, SparseTrieError>;
 
-/// Type alias for the V2 storage proof calculator with instrumented cursors.
-type V2StorageProofCalculator<'a, Provider> = proof_v2::StorageProofCalculator<
-    InstrumentedTrieCursor<'a, <Provider as TrieCursorFactory>::StorageTrieCursor<'a>>,
-    InstrumentedHashedCursor<'a, <Provider as HashedCursorFactory>::StorageCursor<'a>>,
->;
-
-/// Tracks worker availability counts.
-///
-/// It uses cacheline-aligned flags to avoid core-to-core chatter.
+/// A task that manages sending multiproof requests to a number of tasks that have longer-running
+/// database transactions
 #[derive(Debug)]
-struct AvailabilitySheet {
-    /// One flag per worker, each on its own cacheline. Workers store `true` when idle,
-    /// `false` when busy. Only the owning worker writes; the dispatcher only reads.
-    flags: Vec<crossbeam_utils::CachePadded<AtomicBool>>,
+pub struct ProofTaskManager<Factory: DatabaseProviderFactory> {
+    /// Max number of database transactions to create
+    max_concurrency: usize,
+    /// Number of database transactions created
+    total_transactions: usize,
+    /// Consistent view provider used for creating transactions on-demand
+    view: ConsistentDbView<Factory>,
+    /// Proof task context shared across all proof tasks
+    task_ctx: ProofTaskCtx,
+    /// Proof tasks pending execution
+    pending_tasks: VecDeque<ProofTaskKind>,
+    /// The underlying handle from which to spawn proof tasks
+    executor: Handle,
+    /// The proof task transactions, containing owned cursor factories that are reused for proof
+    /// calculation.
+    proof_task_txs: Vec<ProofTaskTx<FactoryTx<Factory>>>,
+    /// A receiver for new proof tasks.
+    proof_task_rx: Receiver<ProofTaskMessage<FactoryTx<Factory>>>,
+    /// A sender for sending back transactions.
+    tx_sender: Sender<ProofTaskMessage<FactoryTx<Factory>>>,
+    /// The number of active handles.
+    ///
+    /// Incremented in [`ProofTaskManagerHandle::new`] and decremented in
+    /// [`ProofTaskManagerHandle::drop`].
+    active_handles: Arc<AtomicUsize>,
+    /// Metrics tracking blinded node fetches.
+    #[cfg(feature = "metrics")]
+    metrics: ProofTaskMetrics,
 }
 
-impl AvailabilitySheet {
-    /// Creates a new sheet with `count` workers, all initially marked as busy.
-    fn new(count: usize) -> Self {
-        let flags =
-            (0..count).map(|_| crossbeam_utils::CachePadded::new(AtomicBool::new(false))).collect();
-        Self { flags }
+impl<Factory: DatabaseProviderFactory> ProofTaskManager<Factory> {
+    /// Creates a new [`ProofTaskManager`] with the given max concurrency, creating that number of
+    /// cursor factories.
+    ///
+    /// Returns an error if the consistent view provider fails to create a read-only transaction.
+    pub fn new(
+        executor: Handle,
+        view: ConsistentDbView<Factory>,
+        task_ctx: ProofTaskCtx,
+        max_concurrency: usize,
+    ) -> Self {
+        let (tx_sender, proof_task_rx) = channel();
+        Self {
+            max_concurrency,
+            total_transactions: 0,
+            view,
+            task_ctx,
+            pending_tasks: VecDeque::new(),
+            executor,
+            proof_task_txs: Vec::new(),
+            proof_task_rx,
+            tx_sender,
+            active_handles: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "metrics")]
+            metrics: ProofTaskMetrics::default(),
+        }
     }
 
-    /// Returns `true` if more than one worker is currently idle.
+    /// Returns a handle for sending new proof tasks to the [`ProofTaskManager`].
+    pub fn handle(&self) -> ProofTaskManagerHandle<FactoryTx<Factory>> {
+        ProofTaskManagerHandle::new(self.tx_sender.clone(), self.active_handles.clone())
+    }
+}
+
+impl<Factory> ProofTaskManager<Factory>
+where
+    Factory: DatabaseProviderFactory<Provider: BlockReader> + 'static,
+{
+    /// Inserts the task into the pending tasks queue.
+    pub fn queue_proof_task(&mut self, task: ProofTaskKind) {
+        self.pending_tasks.push_back(task);
+    }
+
+    /// Gets either the next available transaction, or creates a new one if all are in use and the
+    /// total number of transactions created is less than the max concurrency.
+    pub fn get_or_create_tx(&mut self) -> ProviderResult<Option<ProofTaskTx<FactoryTx<Factory>>>> {
+        if let Some(proof_task_tx) = self.proof_task_txs.pop() {
+            return Ok(Some(proof_task_tx));
+        }
+
+        // if we can create a new tx within our concurrency limits, create one on-demand
+        if self.total_transactions < self.max_concurrency {
+            let provider_ro = self.view.provider_ro()?;
+            let tx = provider_ro.into_tx();
+            self.total_transactions += 1;
+            return Ok(Some(ProofTaskTx::new(tx, self.task_ctx.clone(), self.total_transactions)));
+        }
+
+        Ok(None)
+    }
+
+    /// Spawns the next queued proof task on the executor with the given input, if there are any
+    /// transactions available.
     ///
-    /// Note, that this is somewhat racy since a flag that was just saying `idle` and we counted it
-    /// as such might turn into `busy` right away.
-    fn has_multiple_idle(&self) -> bool {
-        let mut idle = 0u32;
-        for flag in &self.flags {
-            if flag.load(Ordering::Relaxed) {
-                idle += 1;
-                if idle > 1 {
-                    return true;
-                }
+    /// This will return an error if a transaction must be created on-demand and the consistent view
+    /// provider fails.
+    pub fn try_spawn_next(&mut self) -> ProviderResult<()> {
+        let Some(task) = self.pending_tasks.pop_front() else { return Ok(()) };
+
+        let Some(proof_task_tx) = self.get_or_create_tx()? else {
+            // if there are no txs available, requeue the proof task
+            self.pending_tasks.push_front(task);
+            return Ok(())
+        };
+
+        let tx_sender = self.tx_sender.clone();
+        self.executor.spawn_blocking(move || match task {
+            ProofTaskKind::StorageProof(input, sender) => {
+                proof_task_tx.storage_proof(input, sender, tx_sender);
             }
-        }
-        false
-    }
-
-    /// Marks the given worker as idle.
-    fn mark_idle(&self, worker_id: usize) {
-        self.flags[worker_id].store(true, Ordering::Relaxed);
-    }
-
-    /// Marks the given worker as busy.
-    fn mark_busy(&self, worker_id: usize) {
-        self.flags[worker_id].store(false, Ordering::Relaxed);
-    }
-}
-
-/// A handle that provides type-safe access to proof worker pools.
-///
-/// The handle stores direct senders to both storage and account worker pools,
-/// eliminating the need for a routing thread. All handles share reference-counted
-/// channels, and workers shut down gracefully when all handles are dropped.
-#[derive(Debug, Clone)]
-pub struct ProofWorkerHandle {
-    /// Direct sender to storage worker pool
-    storage_work_tx: CrossbeamSender<StorageWorkerJob>,
-    /// Direct sender to account worker pool
-    account_work_tx: CrossbeamSender<AccountWorkerJob>,
-    /// Per-worker availability flags for storage workers. Used to determine whether to chunk
-    /// multiproofs.
-    storage_availability: Arc<AvailabilitySheet>,
-    /// Per-worker availability flags for account workers. Used to determine whether to chunk
-    /// multiproofs.
-    account_availability: Arc<AvailabilitySheet>,
-    /// Total number of storage workers spawned
-    storage_worker_count: usize,
-    /// Total number of account workers spawned
-    account_worker_count: usize,
-}
-
-impl ProofWorkerHandle {
-    /// Spawns storage and account worker pools with dedicated database transactions.
-    ///
-    /// Returns a handle for submitting proof tasks to the worker pools.
-    /// Workers run until the last handle is dropped.
-    ///
-    /// # Parameters
-    /// - `runtime`: The centralized runtime used to spawn blocking worker tasks
-    /// - `task_ctx`: Shared context with database view and prefix sets
-    /// - `halve_workers`: Whether to halve the worker pool size (for small blocks)
-    #[instrument(
-        name = "ProofWorkerHandle::new",
-        level = "debug",
-        target = "trie::proof_task",
-        skip_all
-    )]
-    pub fn new<Factory>(
-        runtime: &Runtime,
-        task_ctx: ProofTaskCtx<Factory>,
-        halve_workers: bool,
-    ) -> Self
-    where
-        Factory: DatabaseProviderROFactory<Provider: TrieCursorFactory + HashedCursorFactory>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-    {
-        let (storage_work_tx, storage_work_rx) = unbounded::<StorageWorkerJob>();
-        let (account_work_tx, account_work_rx) = unbounded::<AccountWorkerJob>();
-
-        let cached_storage_roots = Arc::<DashMap<_, _>>::default();
-
-        let divisor = if halve_workers { 2 } else { 1 };
-        let storage_worker_count =
-            runtime.proof_storage_worker_pool().current_num_threads() / divisor;
-        let account_worker_count =
-            runtime.proof_account_worker_pool().current_num_threads() / divisor;
-
-        let storage_availability = Arc::new(AvailabilitySheet::new(storage_worker_count));
-        let account_availability = Arc::new(AvailabilitySheet::new(account_worker_count));
-
-        debug!(
-            target: "trie::proof_task",
-            storage_worker_count,
-            account_worker_count,
-            halve_workers,
-            "Spawning proof worker pools"
-        );
-
-        // broadcast blocks until all workers exit (channel close), so run on
-        // tokio's blocking pool.
-        let storage_rt = runtime.clone();
-        let storage_task_ctx = task_ctx.clone();
-        let storage_avail = storage_availability.clone();
-        let storage_roots = cached_storage_roots.clone();
-        let storage_parent_span = tracing::Span::current();
-        runtime.spawn_blocking_named("storage-workers", move || {
-            let worker_id = AtomicUsize::new(0);
-            storage_rt.proof_storage_worker_pool().broadcast(storage_worker_count, |_| {
-                let worker_id = worker_id.fetch_add(1, Ordering::Relaxed);
-                let span = debug_span!(target: "trie::proof_task", parent: storage_parent_span.clone(), "storage_worker", ?worker_id);
-                let _guard = span.enter();
-
-                #[cfg(feature = "metrics")]
-                let metrics = ProofTaskTrieMetrics::default();
-                #[cfg(feature = "metrics")]
-                let cursor_metrics = ProofTaskCursorMetrics::new();
-
-                let worker = StorageProofWorker::new(
-                    storage_task_ctx.clone(),
-                    storage_work_rx.clone(),
-                    worker_id,
-                    storage_avail.clone(),
-                    storage_roots.clone(),
-                    #[cfg(feature = "metrics")]
-                    metrics,
-                    #[cfg(feature = "metrics")]
-                    cursor_metrics,
-                );
-                if let Err(error) = worker.run() {
-                    error!(
-                        target: "trie::proof_task",
-                        worker_id,
-                        ?error,
-                        "Storage worker failed"
-                    );
-                }
-            });
+            ProofTaskKind::BlindedAccountNode(path, sender) => {
+                proof_task_tx.blinded_account_node(path, sender, tx_sender);
+            }
+            ProofTaskKind::BlindedStorageNode(account, path, sender) => {
+                proof_task_tx.blinded_storage_node(account, path, sender, tx_sender);
+            }
         });
 
-        let account_rt = runtime.clone();
-        let account_tx = storage_work_tx.clone();
-        let account_avail = account_availability.clone();
-        let account_parent_span = tracing::Span::current();
-        runtime.spawn_blocking_named("account-workers", move || {
-            let worker_id = AtomicUsize::new(0);
-            account_rt.proof_account_worker_pool().broadcast(account_worker_count, |_| {
-                let worker_id = worker_id.fetch_add(1, Ordering::Relaxed);
-                let span = debug_span!(target: "trie::proof_task", parent: account_parent_span.clone(), "account_worker", ?worker_id);
-                let _guard = span.enter();
+        Ok(())
+    }
 
-                #[cfg(feature = "metrics")]
-                let metrics = ProofTaskTrieMetrics::default();
-                #[cfg(feature = "metrics")]
-                let cursor_metrics = ProofTaskCursorMetrics::new();
+    /// Loops, managing the proof tasks, and sending new tasks to the executor.
+    pub fn run(mut self) -> ProviderResult<()> {
+        loop {
+            match self.proof_task_rx.recv() {
+                Ok(message) => match message {
+                    ProofTaskMessage::QueueTask(task) => {
+                        // Track metrics for blinded node requests
+                        #[cfg(feature = "metrics")]
+                        match &task {
+                            ProofTaskKind::BlindedAccountNode(_, _) => {
+                                self.metrics.account_nodes += 1;
+                            }
+                            ProofTaskKind::BlindedStorageNode(_, _, _) => {
+                                self.metrics.storage_nodes += 1;
+                            }
+                            _ => {}
+                        }
+                        // queue the task
+                        self.queue_proof_task(task)
+                    }
+                    ProofTaskMessage::Transaction(tx) => {
+                        // return the transaction to the pool
+                        self.proof_task_txs.push(tx);
+                    }
+                    ProofTaskMessage::Terminate => {
+                        // Record metrics before terminating
+                        #[cfg(feature = "metrics")]
+                        self.metrics.record();
+                        return Ok(())
+                    }
+                },
+                // All senders are disconnected, so we can terminate
+                // However this should never happen, as this struct stores a sender
+                Err(_) => return Ok(()),
+            };
 
-                let worker = AccountProofWorker::new(
-                    task_ctx.clone(),
-                    account_work_rx.clone(),
-                    worker_id,
-                    account_tx.clone(),
-                    account_avail.clone(),
-                    cached_storage_roots.clone(),
-                    #[cfg(feature = "metrics")]
-                    metrics,
-                    #[cfg(feature = "metrics")]
-                    cursor_metrics,
-                );
-                if let Err(error) = worker.run() {
-                    error!(
-                        target: "trie::proof_task",
-                        worker_id,
-                        ?error,
-                        "Account worker failed"
-                    );
-                }
-            });
-        });
-
-        Self {
-            storage_work_tx,
-            account_work_tx,
-            storage_availability,
-            account_availability,
-            storage_worker_count,
-            account_worker_count,
+            // try spawning the next task
+            self.try_spawn_next()?;
         }
     }
-
-    /// Returns `true` if more than one storage worker is currently idle.
-    pub fn has_multiple_idle_storage_workers(&self) -> bool {
-        self.storage_availability.has_multiple_idle()
-    }
-
-    /// Returns `true` if more than one account worker is currently idle.
-    pub fn has_multiple_idle_account_workers(&self) -> bool {
-        self.account_availability.has_multiple_idle()
-    }
-
-    /// Returns the number of pending storage tasks in the queue.
-    pub fn pending_storage_tasks(&self) -> usize {
-        self.storage_work_tx.len()
-    }
-
-    /// Returns the number of pending account tasks in the queue.
-    pub fn pending_account_tasks(&self) -> usize {
-        self.account_work_tx.len()
-    }
-
-    /// Returns the total number of storage workers in the pool.
-    pub const fn total_storage_workers(&self) -> usize {
-        self.storage_worker_count
-    }
-
-    /// Returns the total number of account workers in the pool.
-    pub const fn total_account_workers(&self) -> usize {
-        self.account_worker_count
-    }
-
-    /// Dispatch a storage proof computation to storage worker pool
-    ///
-    /// The result will be sent via the `proof_result_sender` channel.
-    pub fn dispatch_storage_proof(
-        &self,
-        input: StorageProofInput,
-        proof_result_sender: CrossbeamSender<StorageProofResultMessage>,
-    ) -> Result<(), ProviderError> {
-        let hashed_address = input.hashed_address;
-        self.storage_work_tx
-            .send(StorageWorkerJob::StorageProof { input, proof_result_sender })
-            .map_err(|err| {
-                let StorageWorkerJob::StorageProof { proof_result_sender, .. } = err.0;
-                let _ = proof_result_sender.send(StorageProofResultMessage {
-                    hashed_address,
-                    result: Err(
-                        DatabaseError::Other("storage workers unavailable".to_string()).into()
-                    ),
-                });
-
-                ProviderError::other(std::io::Error::other("storage workers unavailable"))
-            })
-    }
-
-    /// Dispatch an account multiproof computation
-    ///
-    /// The result will be sent via the `result_sender` channel included in the input.
-    pub fn dispatch_account_multiproof(
-        &self,
-        input: AccountMultiproofInput,
-    ) -> Result<(), ProviderError> {
-        self.account_work_tx
-            .send(AccountWorkerJob::AccountMultiproof { input: Box::new(input) })
-            .map_err(|err| {
-                let error =
-                    ProviderError::other(std::io::Error::other("account workers unavailable"));
-
-                let AccountWorkerJob::AccountMultiproof { input } = err.0;
-                let ProofResultContext { sender: result_tx, state, start_time: start } =
-                    input.into_proof_result_sender();
-
-                let _ = result_tx.send(ProofResultMessage {
-                    result: Err(ParallelStateRootError::Provider(error.clone())),
-                    elapsed: start.elapsed(),
-                    state,
-                });
-
-                error
-            })
-    }
 }
 
-/// Data used for initializing cursor factories that is shared across all proof worker instances.
-#[derive(Clone, Debug)]
-pub struct ProofTaskCtx<Factory> {
-    /// The factory for creating state providers.
-    factory: Factory,
-    /// Maximum random jitter to apply before each proof computation (trie-debug only).
-    #[cfg(feature = "trie-debug")]
-    proof_jitter: Option<Duration>,
-}
-
-impl<Factory> ProofTaskCtx<Factory> {
-    /// Creates a new [`ProofTaskCtx`] with the given factory.
-    pub const fn new(factory: Factory) -> Self {
-        Self {
-            factory,
-            #[cfg(feature = "trie-debug")]
-            proof_jitter: None,
-        }
-    }
-
-    /// Sets the maximum proof jitter duration (trie-debug only).
-    #[cfg(feature = "trie-debug")]
-    pub const fn with_proof_jitter(mut self, jitter: Option<Duration>) -> Self {
-        self.proof_jitter = jitter;
-        self
-    }
-}
-
-/// This contains all information shared between account proof worker instances.
+/// This contains all information shared between all storage proof instances.
 #[derive(Debug)]
-pub struct ProofTaskTx<Provider> {
-    /// The provider that implements `TrieCursorFactory` and `HashedCursorFactory`.
-    provider: Provider,
+pub struct ProofTaskTx<Tx> {
+    /// The tx that is reused for proof calculations.
+    tx: Tx,
 
-    /// Identifier for the worker within the worker pool, used only for tracing.
+    /// Trie updates, prefix sets, and state updates
+    task_ctx: ProofTaskCtx,
+
+    /// Identifier for the tx within the context of a single [`ProofTaskManager`], used only for
+    /// tracing.
     id: usize,
 }
 
-impl<Provider> ProofTaskTx<Provider> {
-    /// Initializes a [`ProofTaskTx`] with the given provider and ID.
-    const fn new(provider: Provider, id: usize) -> Self {
-        Self { provider, id }
+impl<Tx> ProofTaskTx<Tx> {
+    /// Initializes a [`ProofTaskTx`] using the given transaction and a [`ProofTaskCtx`]. The id is
+    /// used only for tracing.
+    const fn new(tx: Tx, task_ctx: ProofTaskCtx, id: usize) -> Self {
+        Self { tx, task_ctx, id }
     }
 }
 
-impl<Provider> ProofTaskTx<Provider>
+impl<Tx> ProofTaskTx<Tx>
 where
-    Provider: TrieCursorFactory + HashedCursorFactory,
+    Tx: DbTx,
 {
-    fn compute_v2_storage_proof<TC, HC>(
+    fn create_factories(
         &self,
-        input: StorageProofInput,
-        calculator: &mut proof_v2::StorageProofCalculator<TC, HC>,
-    ) -> Result<StorageProofResult, StateProofError>
-    where
-        TC: TrieStorageCursor,
-        HC: HashedStorageCursor<Value = U256>,
-    {
-        let StorageProofInput { hashed_address, mut targets } = input;
-
-        let span = debug_span!(
-            target: "trie::proof_task",
-            "V2 Storage proof calculation",
-            n = %targets.len(),
+    ) -> (
+        InMemoryTrieCursorFactory<'_, DatabaseTrieCursorFactory<'_, Tx>>,
+        HashedPostStateCursorFactory<'_, DatabaseHashedCursorFactory<'_, Tx>>,
+    ) {
+        let trie_cursor_factory = InMemoryTrieCursorFactory::new(
+            DatabaseTrieCursorFactory::new(&self.tx),
+            &self.task_ctx.nodes_sorted,
         );
-        let _span_guard = span.enter();
 
+        let hashed_cursor_factory = HashedPostStateCursorFactory::new(
+            DatabaseHashedCursorFactory::new(&self.tx),
+            &self.task_ctx.state_sorted,
+        );
+
+        (trie_cursor_factory, hashed_cursor_factory)
+    }
+
+    /// Calculates a storage proof for the given hashed address, and desired prefix set.
+    fn storage_proof(
+        self,
+        input: StorageProofInput,
+        result_sender: Sender<StorageProofResult>,
+        tx_sender: Sender<ProofTaskMessage<Tx>>,
+    ) {
+        debug!(
+            target: "trie::proof_task",
+            hashed_address=?input.hashed_address,
+            "Starting storage proof task calculation"
+        );
+
+        let (trie_cursor_factory, hashed_cursor_factory) = self.create_factories();
+        let multi_added_removed_keys = input
+            .multi_added_removed_keys
+            .unwrap_or_else(|| Arc::new(MultiAddedRemovedKeys::new()));
+        let added_removed_keys = multi_added_removed_keys.get_storage(&input.hashed_address);
+
+        let span = tracing::trace_span!(
+            target: "trie::proof_task",
+            "Storage proof calculation",
+            hashed_address=?input.hashed_address,
+            // Add a unique id because we often have parallel storage proof calculations for the
+            // same hashed address, and we want to differentiate them during trace analysis.
+            span_id=self.id,
+        );
+        let span_guard = span.enter();
+
+        let target_slots_len = input.target_slots.len();
         let proof_start = Instant::now();
 
-        // If targets is empty it means the caller only wants the root node.
-        let proof = if targets.is_empty() {
-            let root_node = calculator.storage_root_node(hashed_address)?;
-            vec![root_node]
-        } else {
-            calculator.storage_proof(hashed_address, &mut targets)?
-        };
-
-        let root = calculator.compute_root_hash(&proof)?;
-
-        trace!(
-            target: "trie::proof_task",
-            hashed_address = ?hashed_address,
-            proof_time_us = proof_start.elapsed().as_micros(),
-            ?root,
-            worker_id = self.id,
-            "Completed V2 storage proof calculation"
-        );
-
-        Ok(StorageProofResult { proof, root })
-    }
-}
-
-/// Channel used by worker threads to deliver `ProofResultMessage` items back to
-/// `SparseTrieCacheTask`.
-///
-/// Workers use this sender to deliver proof results directly to `SparseTrieCacheTask`.
-pub type ProofResultSender = CrossbeamSender<ProofResultMessage>;
-
-/// Message containing a completed proof result with metadata for direct delivery to
-/// `SparseTrieCacheTask`.
-///
-/// This type enables workers to send proof results directly to the `SparseTrieCacheTask` event
-/// loop.
-#[derive(Debug)]
-pub struct ProofResultMessage {
-    /// The proof calculation result
-    pub result: Result<DecodedMultiProofV2, ParallelStateRootError>,
-    /// Time taken for the entire proof calculation (from dispatch to completion)
-    pub elapsed: Duration,
-    /// Original state update that triggered this proof
-    pub state: HashedPostState,
-}
-
-/// Context for sending proof calculation results back to `SparseTrieCacheTask`.
-///
-/// This struct contains all context needed to send and track proof calculation results.
-/// Workers use this to deliver completed proofs back to the main event loop.
-#[derive(Debug, Clone)]
-pub struct ProofResultContext {
-    /// Channel sender for result delivery
-    pub sender: ProofResultSender,
-    /// Original state update that triggered this proof
-    pub state: HashedPostState,
-    /// Calculation start time for measuring elapsed duration
-    pub start_time: Instant,
-}
-
-impl ProofResultContext {
-    /// Creates a new proof result context.
-    pub const fn new(
-        sender: ProofResultSender,
-        state: HashedPostState,
-        start_time: Instant,
-    ) -> Self {
-        Self { sender, state, start_time }
-    }
-}
-
-/// The results of a storage proof calculation.
-#[derive(Debug)]
-pub(crate) struct StorageProofResult {
-    /// The calculated V2 proof nodes
-    pub proof: Vec<ProofTrieNodeV2>,
-    /// The storage root calculated by the V2 proof
-    pub root: Option<B256>,
-}
-
-impl StorageProofResult {
-    /// Returns the calculated root of the trie, if one can be calculated from the proof.
-    const fn root(&self) -> Option<B256> {
-        self.root
-    }
-}
-
-/// Message containing a completed storage proof result with metadata.
-#[derive(Debug)]
-pub struct StorageProofResultMessage {
-    /// The hashed address this storage proof belongs to
-    #[allow(dead_code)]
-    pub(crate) hashed_address: B256,
-    /// The storage proof calculation result
-    pub(crate) result: Result<StorageProofResult, StateProofError>,
-}
-
-/// Internal message for storage workers.
-#[derive(Debug)]
-pub(crate) enum StorageWorkerJob {
-    /// Storage proof computation request
-    StorageProof {
-        /// Storage proof input parameters
-        input: StorageProofInput,
-        /// Context for sending the proof result.
-        proof_result_sender: CrossbeamSender<StorageProofResultMessage>,
-    },
-}
-
-/// Worker for storage trie operations.
-///
-/// Each worker maintains a dedicated database transaction and processes
-/// storage proof requests.
-struct StorageProofWorker<Factory> {
-    /// Shared task context with database factory and prefix sets
-    task_ctx: ProofTaskCtx<Factory>,
-    /// Channel for receiving work
-    work_rx: CrossbeamReceiver<StorageWorkerJob>,
-    /// Unique identifier for this worker (used for tracing)
-    worker_id: usize,
-    /// Per-worker availability flags
-    availability: Arc<AvailabilitySheet>,
-    /// Cached storage roots
-    cached_storage_roots: Arc<DashMap<B256, B256>>,
-    /// Metrics collector for this worker
-    #[cfg(feature = "metrics")]
-    metrics: ProofTaskTrieMetrics,
-    /// Cursor metrics for this worker
-    #[cfg(feature = "metrics")]
-    cursor_metrics: ProofTaskCursorMetrics,
-}
-
-impl<Factory> StorageProofWorker<Factory>
-where
-    Factory: DatabaseProviderROFactory<Provider: TrieCursorFactory + HashedCursorFactory>,
-{
-    /// Creates a new storage proof worker.
-    const fn new(
-        task_ctx: ProofTaskCtx<Factory>,
-        work_rx: CrossbeamReceiver<StorageWorkerJob>,
-        worker_id: usize,
-        availability: Arc<AvailabilitySheet>,
-        cached_storage_roots: Arc<DashMap<B256, B256>>,
-        #[cfg(feature = "metrics")] metrics: ProofTaskTrieMetrics,
-        #[cfg(feature = "metrics")] cursor_metrics: ProofTaskCursorMetrics,
-    ) -> Self {
-        Self {
-            task_ctx,
-            work_rx,
-            worker_id,
-            availability,
-            cached_storage_roots,
-            #[cfg(feature = "metrics")]
-            metrics,
-            #[cfg(feature = "metrics")]
-            cursor_metrics,
-        }
-    }
-
-    /// Runs the worker loop, processing jobs until the channel closes.
-    ///
-    /// # Lifecycle
-    ///
-    /// 1. Initializes database provider and transaction
-    /// 2. Advertises availability
-    /// 3. Processes jobs in a loop:
-    ///    - Receives job from channel
-    ///    - Marks worker as busy
-    ///    - Processes the job
-    ///    - Marks worker as available
-    /// 4. Shuts down when channel closes
-    ///
-    /// # Panic Safety
-    ///
-    /// If this function panics, the worker thread terminates but other workers
-    /// continue operating and the system degrades gracefully.
-    fn run(mut self) -> ProviderResult<()> {
-        // Create provider from factory
-        let provider = self.task_ctx.factory.database_provider_ro()?;
-        let proof_tx = ProofTaskTx::new(provider, self.worker_id);
-
-        trace!(
-            target: "trie::proof_task",
-            worker_id = self.worker_id,
-            "Storage worker started"
-        );
-
-        let mut storage_proofs_processed = 0u64;
-        let mut cursor_metrics_cache = ProofTaskCursorMetricsCache::default();
-        let trie_cursor = proof_tx.provider.storage_trie_cursor(B256::ZERO)?;
-        let hashed_cursor = proof_tx.provider.hashed_storage_cursor(B256::ZERO)?;
-        let instrumented_trie_cursor =
-            InstrumentedTrieCursor::new(trie_cursor, &mut cursor_metrics_cache.storage_trie_cursor);
-        let instrumented_hashed_cursor = InstrumentedHashedCursor::new(
-            hashed_cursor,
-            &mut cursor_metrics_cache.storage_hashed_cursor,
-        );
-        let mut v2_calculator = proof_v2::StorageProofCalculator::new_storage(
-            instrumented_trie_cursor,
-            instrumented_hashed_cursor,
-        );
-
-        // Initially mark this worker as available.
-        self.availability.mark_idle(self.worker_id);
-
-        let mut total_idle_time = Duration::ZERO;
-        let mut idle_start = Instant::now();
-
-        while let Ok(job) = self.work_rx.recv() {
-            total_idle_time += idle_start.elapsed();
-
-            // Mark worker as busy.
-            self.availability.mark_busy(self.worker_id);
-
-            #[cfg(feature = "trie-debug")]
-            if let Some(max_jitter) = self.task_ctx.proof_jitter {
-                let jitter =
-                    Duration::from_nanos(rand::random_range(0..=max_jitter.as_nanos() as u64));
-                trace!(
-                    target: "trie::proof_task",
-                    worker_id = self.worker_id,
-                    jitter_us = jitter.as_micros(),
-                    "Storage worker applying proof jitter"
-                );
-                std::thread::sleep(jitter);
-            }
-
-            match job {
-                StorageWorkerJob::StorageProof { input, proof_result_sender } => {
-                    self.process_storage_proof(
-                        &proof_tx,
-                        &mut v2_calculator,
-                        input,
-                        proof_result_sender,
-                        &mut storage_proofs_processed,
-                    );
-                }
-            }
-
-            // Mark worker as available again.
-            self.availability.mark_idle(self.worker_id);
-
-            idle_start = Instant::now();
-        }
-
-        // Drop calculator to release mutable borrows on cursor_metrics_cache.
-        drop(v2_calculator);
-
-        trace!(
-            target: "trie::proof_task",
-            worker_id = self.worker_id,
-            storage_proofs_processed,
-            total_idle_time_us = total_idle_time.as_micros(),
-            "Storage worker shutting down"
-        );
-
-        #[cfg(feature = "metrics")]
-        {
-            self.metrics.record_storage_worker_idle_time(total_idle_time);
-            self.cursor_metrics.record(&mut cursor_metrics_cache);
-        }
-
-        Ok(())
-    }
-
-    /// Processes a storage proof request.
-    fn process_storage_proof<Provider, TC, HC>(
-        &self,
-        proof_tx: &ProofTaskTx<Provider>,
-        v2_calculator: &mut proof_v2::StorageProofCalculator<TC, HC>,
-        input: StorageProofInput,
-        proof_result_sender: CrossbeamSender<StorageProofResultMessage>,
-        storage_proofs_processed: &mut u64,
-    ) where
-        Provider: TrieCursorFactory + HashedCursorFactory,
-        TC: TrieStorageCursor,
-        HC: HashedStorageCursor<Value = U256>,
-    {
-        let hashed_address = input.hashed_address;
-        let proof_start = Instant::now();
-
-        trace!(
-            target: "trie::proof_task",
-            worker_id = self.worker_id,
-            hashed_address = ?hashed_address,
-            targets_len = input.targets.len(),
-            "Processing V2 storage proof"
-        );
-
-        let result = proof_tx.compute_v2_storage_proof(input, v2_calculator);
-
-        let proof_elapsed = proof_start.elapsed();
-        *storage_proofs_processed += 1;
-
-        let root = result.as_ref().ok().and_then(|result| result.root());
-
-        if proof_result_sender.send(StorageProofResultMessage { hashed_address, result }).is_err() {
-            trace!(
-                target: "trie::proof_task",
-                worker_id = self.worker_id,
-                hashed_address = ?hashed_address,
-                storage_proofs_processed,
-                "Proof result receiver dropped, discarding result"
-            );
-        }
-
-        if let Some(root) = root {
-            self.cached_storage_roots.insert(hashed_address, root);
-        }
-
-        trace!(
-            target: "trie::proof_task",
-            worker_id = self.worker_id,
-            hashed_address = ?hashed_address,
-            proof_time_us = proof_elapsed.as_micros(),
-            total_processed = storage_proofs_processed,
-            ?root,
-            "Storage proof completed"
-        );
-    }
-}
-
-/// Worker for account trie operations.
-///
-/// Each worker maintains a dedicated database transaction and processes
-/// account multiproof requests.
-struct AccountProofWorker<Factory> {
-    /// Shared task context with database factory and prefix sets
-    task_ctx: ProofTaskCtx<Factory>,
-    /// Channel for receiving work
-    work_rx: CrossbeamReceiver<AccountWorkerJob>,
-    /// Unique identifier for this worker (used for tracing)
-    worker_id: usize,
-    /// Channel for dispatching storage proof work (for pre-dispatched target proofs)
-    storage_work_tx: CrossbeamSender<StorageWorkerJob>,
-    /// Per-worker availability flags
-    availability: Arc<AvailabilitySheet>,
-    /// Cached storage roots
-    cached_storage_roots: Arc<DashMap<B256, B256>>,
-    /// Metrics collector for this worker
-    #[cfg(feature = "metrics")]
-    metrics: ProofTaskTrieMetrics,
-    /// Cursor metrics for this worker
-    #[cfg(feature = "metrics")]
-    cursor_metrics: ProofTaskCursorMetrics,
-}
-
-impl<Factory> AccountProofWorker<Factory>
-where
-    Factory: DatabaseProviderROFactory<Provider: TrieCursorFactory + HashedCursorFactory>,
-{
-    /// Creates a new account proof worker.
-    #[expect(clippy::too_many_arguments)]
-    const fn new(
-        task_ctx: ProofTaskCtx<Factory>,
-        work_rx: CrossbeamReceiver<AccountWorkerJob>,
-        worker_id: usize,
-        storage_work_tx: CrossbeamSender<StorageWorkerJob>,
-        availability: Arc<AvailabilitySheet>,
-        cached_storage_roots: Arc<DashMap<B256, B256>>,
-        #[cfg(feature = "metrics")] metrics: ProofTaskTrieMetrics,
-        #[cfg(feature = "metrics")] cursor_metrics: ProofTaskCursorMetrics,
-    ) -> Self {
-        Self {
-            task_ctx,
-            work_rx,
-            worker_id,
-            storage_work_tx,
-            availability,
-            cached_storage_roots,
-            #[cfg(feature = "metrics")]
-            metrics,
-            #[cfg(feature = "metrics")]
-            cursor_metrics,
-        }
-    }
-
-    /// Runs the worker loop, processing jobs until the channel closes.
-    ///
-    /// # Lifecycle
-    ///
-    /// 1. Initializes database provider and transaction
-    /// 2. Advertises availability
-    /// 3. Processes jobs in a loop:
-    ///    - Receives job from channel
-    ///    - Marks worker as busy
-    ///    - Processes the job
-    ///    - Marks worker as available
-    /// 4. Shuts down when channel closes
-    ///
-    /// # Panic Safety
-    ///
-    /// If this function panics, the worker thread terminates but other workers
-    /// continue operating and the system degrades gracefully.
-    fn run(mut self) -> ProviderResult<()> {
-        let provider = self.task_ctx.factory.database_provider_ro()?;
-
-        trace!(
-            target: "trie::proof_task",
-            worker_id=self.worker_id,
-            "Account worker started"
-        );
-
-        let mut account_proofs_processed = 0u64;
-        let mut cursor_metrics_cache = ProofTaskCursorMetricsCache::default();
-
-        // Create both account and storage calculators for V2 proofs.
-        // The storage calculator is wrapped in Rc<RefCell<...>> for sharing with value encoders.
-        let account_trie_cursor = provider.account_trie_cursor()?;
-        let account_hashed_cursor = provider.hashed_account_cursor()?;
-
-        let storage_trie_cursor = provider.storage_trie_cursor(B256::ZERO)?;
-        let storage_hashed_cursor = provider.hashed_storage_cursor(B256::ZERO)?;
-
-        let instrumented_account_trie_cursor = InstrumentedTrieCursor::new(
-            account_trie_cursor,
-            &mut cursor_metrics_cache.account_trie_cursor,
-        );
-        let instrumented_account_hashed_cursor = InstrumentedHashedCursor::new(
-            account_hashed_cursor,
-            &mut cursor_metrics_cache.account_hashed_cursor,
-        );
-        let instrumented_storage_trie_cursor = InstrumentedTrieCursor::new(
-            storage_trie_cursor,
-            &mut cursor_metrics_cache.storage_trie_cursor,
-        );
-        let instrumented_storage_hashed_cursor = InstrumentedHashedCursor::new(
-            storage_hashed_cursor,
-            &mut cursor_metrics_cache.storage_hashed_cursor,
-        );
-
-        let mut v2_account_calculator =
-            proof_v2::ProofCalculator::<
-                _,
-                _,
-                AsyncAccountValueEncoder<
-                    InstrumentedTrieCursor<
-                        '_,
-                        <Factory::Provider as TrieCursorFactory>::StorageTrieCursor<'_>,
-                    >,
-                    InstrumentedHashedCursor<
-                        '_,
-                        <Factory::Provider as HashedCursorFactory>::StorageCursor<'_>,
-                    >,
-                >,
-            >::new(instrumented_account_trie_cursor, instrumented_account_hashed_cursor);
-        let v2_storage_calculator =
-            Rc::new(RefCell::new(proof_v2::StorageProofCalculator::new_storage(
-                instrumented_storage_trie_cursor,
-                instrumented_storage_hashed_cursor,
-            )));
-
-        // Count this worker as available only after successful initialization.
-        self.availability.mark_idle(self.worker_id);
-
-        let mut total_idle_time = Duration::ZERO;
-        let mut idle_start = Instant::now();
-        let mut value_encoder_stats_cache = ValueEncoderStats::default();
-
-        while let Ok(job) = self.work_rx.recv() {
-            total_idle_time += idle_start.elapsed();
-
-            // Mark worker as busy.
-            self.availability.mark_busy(self.worker_id);
-
-            #[cfg(feature = "trie-debug")]
-            if let Some(max_jitter) = self.task_ctx.proof_jitter {
-                let jitter =
-                    Duration::from_nanos(rand::random_range(0..=max_jitter.as_nanos() as u64));
-                trace!(
-                    target: "trie::proof_task",
-                    worker_id = self.worker_id,
-                    jitter_us = jitter.as_micros(),
-                    "Account worker applying proof jitter"
-                );
-                std::thread::sleep(jitter);
-            }
-
-            match job {
-                AccountWorkerJob::AccountMultiproof { input } => {
-                    let value_encoder_stats = self.process_account_multiproof::<Factory::Provider>(
-                        &mut v2_account_calculator,
-                        v2_storage_calculator.clone(),
-                        *input,
-                        &mut account_proofs_processed,
-                    );
-                    total_idle_time += value_encoder_stats.storage_wait_time;
-                    value_encoder_stats_cache.extend(&value_encoder_stats);
-                }
-            }
-
-            // Mark worker as available again.
-            self.availability.mark_idle(self.worker_id);
-
-            idle_start = Instant::now();
-        }
-
-        // Drop calculators to release mutable borrows on cursor_metrics_cache.
-        drop(v2_account_calculator);
-        drop(v2_storage_calculator);
-
-        trace!(
-            target: "trie::proof_task",
-            worker_id=self.worker_id,
-            account_proofs_processed,
-            total_idle_time_us = total_idle_time.as_micros(),
-            "Account worker shutting down"
-        );
-
-        #[cfg(feature = "metrics")]
-        {
-            self.metrics.record_account_worker_idle_time(total_idle_time);
-            self.cursor_metrics.record(&mut cursor_metrics_cache);
-            self.metrics.record_value_encoder_stats(&value_encoder_stats_cache);
-        }
-
-        Ok(())
-    }
-
-    fn compute_v2_account_multiproof<'a, Provider>(
-        &self,
-        v2_account_calculator: &mut V2AccountProofCalculator<'a, Provider>,
-        v2_storage_calculator: Rc<RefCell<V2StorageProofCalculator<'a, Provider>>>,
-        targets: MultiProofTargetsV2,
-    ) -> Result<(DecodedMultiProofV2, ValueEncoderStats), ParallelStateRootError>
-    where
-        Provider: TrieCursorFactory + HashedCursorFactory + 'a,
-    {
-        let MultiProofTargetsV2 { mut account_targets, storage_targets } = targets;
-
-        let span = debug_span!(
-            target: "trie::proof_task",
-            "Account V2 multiproof calculation",
-            account_targets = account_targets.len(),
-            storage_targets = storage_targets.values().map(|t| t.len()).sum::<usize>(),
-        );
-        let _span_guard = span.enter();
-
-        trace!(target: "trie::proof_task", "Processing V2 account multiproof");
-
-        let storage_proof_receivers =
-            dispatch_v2_storage_proofs(&self.storage_work_tx, &account_targets, storage_targets)?;
-
-        let mut value_encoder = AsyncAccountValueEncoder::new(
-            storage_proof_receivers,
-            self.cached_storage_roots.clone(),
-            v2_storage_calculator,
-        );
-
-        let account_proofs =
-            v2_account_calculator.proof(&mut value_encoder, &mut account_targets)?;
-
-        let (storage_proofs, value_encoder_stats) = value_encoder.finalize()?;
-
-        let proof = DecodedMultiProofV2 { account_proofs, storage_proofs };
-
-        Ok((proof, value_encoder_stats))
-    }
-
-    /// Processes an account multiproof request.
-    ///
-    /// Returns stats from the value encoder used during proof computation.
-    fn process_account_multiproof<'a, Provider>(
-        &self,
-        v2_account_calculator: &mut V2AccountProofCalculator<'a, Provider>,
-        v2_storage_calculator: Rc<RefCell<V2StorageProofCalculator<'a, Provider>>>,
-        input: AccountMultiproofInput,
-        account_proofs_processed: &mut u64,
-    ) -> ValueEncoderStats
-    where
-        Provider: TrieCursorFactory + HashedCursorFactory + 'a,
-    {
-        let proof_start = Instant::now();
-
-        let AccountMultiproofInput { targets, proof_result_sender } = input;
-        let (result, value_encoder_stats) = match self.compute_v2_account_multiproof::<Provider>(
-            v2_account_calculator,
-            v2_storage_calculator,
-            targets,
-        ) {
-            Ok((proof, stats)) => (Ok(proof), stats),
-            Err(e) => (Err(e), ValueEncoderStats::default()),
-        };
-
-        let ProofResultContext { sender: result_tx, state, start_time: start } =
-            proof_result_sender;
-
-        let proof_elapsed = proof_start.elapsed();
-        let total_elapsed = start.elapsed();
-        *account_proofs_processed += 1;
-
-        // Send result to SparseTrieCacheTask
-        if result_tx.send(ProofResultMessage { result, elapsed: total_elapsed, state }).is_err() {
-            trace!(
-                target: "trie::proof_task",
-                worker_id=self.worker_id,
-                account_proofs_processed,
-                "Account multiproof receiver dropped, discarding result"
-            );
-        }
-
-        trace!(
-            target: "trie::proof_task",
-            proof_time_us = proof_elapsed.as_micros(),
-            total_elapsed_us = total_elapsed.as_micros(),
-            total_processed = account_proofs_processed,
-            "Account multiproof completed"
-        );
-
-        value_encoder_stats
-    }
-}
-
-/// Queues V2 storage proofs for all accounts in the targets and returns receivers.
-///
-/// This function queues all storage proof tasks to the worker pool but returns immediately
-/// with receivers, allowing the account trie walk to proceed in parallel with storage proof
-/// computation. This enables interleaved parallelism for better performance.
-///
-/// Propagates errors up if queuing fails. Receivers must be consumed by the caller.
-fn dispatch_v2_storage_proofs(
-    storage_work_tx: &CrossbeamSender<StorageWorkerJob>,
-    account_targets: &[ProofV2Target],
-    mut storage_targets: B256Map<Vec<ProofV2Target>>,
-) -> Result<B256Map<CrossbeamReceiver<StorageProofResultMessage>>, ParallelStateRootError> {
-    if storage_targets.is_empty() {
-        return Ok(B256Map::default())
-    }
-
-    let mut storage_proof_receivers =
-        B256Map::with_capacity_and_hasher(storage_targets.len(), Default::default());
-
-    // Collect hashed addresses from account targets that need their storage roots computed
-    let account_target_addresses: B256Set = account_targets.iter().map(|t| t.key()).collect();
-
-    // For storage targets with associated account proofs, ensure the first target has
-    // min_len(0) so the root node is returned for storage root computation
-    for (hashed_address, targets) in &mut storage_targets {
-        if account_target_addresses.contains(hashed_address) &&
-            let Some(first) = targets.first_mut()
-        {
-            *first = first.with_min_len(0);
-        }
-    }
-
-    // Sort storage targets by address for optimal dispatch order.
-    // Since trie walk processes accounts in lexicographical order, dispatching in the same order
-    // reduces head-of-line blocking when consuming results.
-    let mut sorted_storage_targets: Vec<_> = storage_targets.into_iter().collect();
-    sorted_storage_targets.sort_unstable_by_key(|(addr, _)| *addr);
-
-    // Dispatch all proofs for targeted storage slots
-    for (hashed_address, targets) in sorted_storage_targets {
-        // Create channel for receiving StorageProofResultMessage
-        let (result_tx, result_rx) = crossbeam_channel::unbounded();
-        let input = StorageProofInput::new(hashed_address, targets);
-
-        storage_work_tx
-            .send(StorageWorkerJob::StorageProof { input, proof_result_sender: result_tx })
-            .map_err(|_| {
+        let raw_proof_result = StorageProof::new_hashed(
+            trie_cursor_factory,
+            hashed_cursor_factory,
+            input.hashed_address,
+        )
+        .with_prefix_set_mut(PrefixSetMut::from(input.prefix_set.iter().copied()))
+        .with_branch_node_masks(input.with_branch_node_masks)
+        .with_added_removed_keys(added_removed_keys)
+        .storage_multiproof(input.target_slots)
+        .map_err(|e| ParallelStateRootError::Other(e.to_string()));
+
+        drop(span_guard);
+
+        let decoded_result = raw_proof_result.and_then(|raw_proof| {
+            raw_proof.try_into().map_err(|e: alloy_rlp::Error| {
                 ParallelStateRootError::Other(format!(
-                    "Failed to queue storage proof for {hashed_address:?}: storage worker pool unavailable",
+                    "Failed to decode storage proof for {}: {}",
+                    input.hashed_address, e
                 ))
-            })?;
+            })
+        });
 
-        storage_proof_receivers.insert(hashed_address, result_rx);
+        debug!(
+            target: "trie::proof_task",
+            hashed_address=?input.hashed_address,
+            prefix_set = ?input.prefix_set.len(),
+            target_slots = ?target_slots_len,
+            proof_time = ?proof_start.elapsed(),
+            "Completed storage proof task calculation"
+        );
+
+        // send the result back
+        if let Err(error) = result_sender.send(decoded_result) {
+            debug!(
+                target: "trie::proof_task",
+                hashed_address = ?input.hashed_address,
+                ?error,
+                task_time = ?proof_start.elapsed(),
+                "Storage proof receiver is dropped, discarding the result"
+            );
+        }
+
+        // send the tx back
+        let _ = tx_sender.send(ProofTaskMessage::Transaction(self));
     }
 
-    Ok(storage_proof_receivers)
+    /// Retrieves blinded account node by path.
+    fn blinded_account_node(
+        self,
+        path: Nibbles,
+        result_sender: Sender<TrieNodeProviderResult>,
+        tx_sender: Sender<ProofTaskMessage<Tx>>,
+    ) {
+        debug!(
+            target: "trie::proof_task",
+            ?path,
+            "Starting blinded account node retrieval"
+        );
+
+        let (trie_cursor_factory, hashed_cursor_factory) = self.create_factories();
+
+        let blinded_provider_factory = ProofTrieNodeProviderFactory::new(
+            trie_cursor_factory,
+            hashed_cursor_factory,
+            self.task_ctx.prefix_sets.clone(),
+        );
+
+        let start = Instant::now();
+        let result = blinded_provider_factory.account_node_provider().trie_node(&path);
+        debug!(
+            target: "trie::proof_task",
+            ?path,
+            elapsed = ?start.elapsed(),
+            "Completed blinded account node retrieval"
+        );
+
+        if let Err(error) = result_sender.send(result) {
+            tracing::error!(
+                target: "trie::proof_task",
+                ?path,
+                ?error,
+                "Failed to send blinded account node result"
+            );
+        }
+
+        // send the tx back
+        let _ = tx_sender.send(ProofTaskMessage::Transaction(self));
+    }
+
+    /// Retrieves blinded storage node of the given account by path.
+    fn blinded_storage_node(
+        self,
+        account: B256,
+        path: Nibbles,
+        result_sender: Sender<TrieNodeProviderResult>,
+        tx_sender: Sender<ProofTaskMessage<Tx>>,
+    ) {
+        debug!(
+            target: "trie::proof_task",
+            ?account,
+            ?path,
+            "Starting blinded storage node retrieval"
+        );
+
+        let (trie_cursor_factory, hashed_cursor_factory) = self.create_factories();
+
+        let blinded_provider_factory = ProofTrieNodeProviderFactory::new(
+            trie_cursor_factory,
+            hashed_cursor_factory,
+            self.task_ctx.prefix_sets.clone(),
+        );
+
+        let start = Instant::now();
+        let result = blinded_provider_factory.storage_node_provider(account).trie_node(&path);
+        debug!(
+            target: "trie::proof_task",
+            ?account,
+            ?path,
+            elapsed = ?start.elapsed(),
+            "Completed blinded storage node retrieval"
+        );
+
+        if let Err(error) = result_sender.send(result) {
+            tracing::error!(
+                target: "trie::proof_task",
+                ?account,
+                ?path,
+                ?error,
+                "Failed to send blinded storage node result"
+            );
+        }
+
+        // send the tx back
+        let _ = tx_sender.send(ProofTaskMessage::Transaction(self));
+    }
 }
 
-/// Input parameters for storage proof computation.
+/// This represents an input for a storage proof.
 #[derive(Debug)]
 pub struct StorageProofInput {
     /// The hashed address for which the proof is calculated.
-    pub hashed_address: B256,
-    /// The set of proof targets
-    pub targets: Vec<ProofV2Target>,
+    hashed_address: B256,
+    /// The prefix set for the proof calculation.
+    prefix_set: PrefixSet,
+    /// The target slots for the proof calculation.
+    target_slots: B256Set,
+    /// Whether or not to collect branch node masks
+    with_branch_node_masks: bool,
+    /// Provided by the user to give the necessary context to retain extra proofs.
+    multi_added_removed_keys: Option<Arc<MultiAddedRemovedKeys>>,
 }
 
 impl StorageProofInput {
-    /// Creates a new [`StorageProofInput`] with the given hashed address and target slots.
-    pub const fn new(hashed_address: B256, targets: Vec<ProofV2Target>) -> Self {
-        Self { hashed_address, targets }
+    /// Creates a new [`StorageProofInput`] with the given hashed address, prefix set, and target
+    /// slots.
+    pub const fn new(
+        hashed_address: B256,
+        prefix_set: PrefixSet,
+        target_slots: B256Set,
+        with_branch_node_masks: bool,
+        multi_added_removed_keys: Option<Arc<MultiAddedRemovedKeys>>,
+    ) -> Self {
+        Self {
+            hashed_address,
+            prefix_set,
+            target_slots,
+            with_branch_node_masks,
+            multi_added_removed_keys,
+        }
     }
 }
 
-/// Input parameters for account multiproof computation.
-#[derive(Debug)]
-pub struct AccountMultiproofInput {
-    /// The targets for which to compute the multiproof.
-    pub targets: MultiProofTargetsV2,
-    /// Context for sending the proof result.
-    pub proof_result_sender: ProofResultContext,
+/// Data used for initializing cursor factories that is shared across all storage proof instances.
+#[derive(Debug, Clone)]
+pub struct ProofTaskCtx {
+    /// The sorted collection of cached in-memory intermediate trie nodes that can be reused for
+    /// computation.
+    nodes_sorted: Arc<TrieUpdatesSorted>,
+    /// The sorted in-memory overlay hashed state.
+    state_sorted: Arc<HashedPostStateSorted>,
+    /// The collection of prefix sets for the computation. Since the prefix sets _always_
+    /// invalidate the in-memory nodes, not all keys from `state_sorted` might be present here,
+    /// if we have cached nodes for them.
+    prefix_sets: Arc<TriePrefixSetsMut>,
 }
 
-impl AccountMultiproofInput {
-    /// Returns the [`ProofResultContext`] for this input, consuming the input.
-    fn into_proof_result_sender(self) -> ProofResultContext {
-        self.proof_result_sender
+impl ProofTaskCtx {
+    /// Creates a new [`ProofTaskCtx`] with the given sorted nodes and state.
+    pub const fn new(
+        nodes_sorted: Arc<TrieUpdatesSorted>,
+        state_sorted: Arc<HashedPostStateSorted>,
+        prefix_sets: Arc<TriePrefixSetsMut>,
+    ) -> Self {
+        Self { nodes_sorted, state_sorted, prefix_sets }
     }
 }
 
-/// Internal message for account workers.
+/// Message used to communicate with [`ProofTaskManager`].
 #[derive(Debug)]
-enum AccountWorkerJob {
-    /// Account multiproof computation request
-    AccountMultiproof {
-        /// Account multiproof input parameters
-        input: Box<AccountMultiproofInput>,
+pub enum ProofTaskMessage<Tx> {
+    /// A request to queue a proof task.
+    QueueTask(ProofTaskKind),
+    /// A returned database transaction.
+    Transaction(ProofTaskTx<Tx>),
+    /// A request to terminate the proof task manager.
+    Terminate,
+}
+
+/// Proof task kind.
+///
+/// When queueing a task using [`ProofTaskMessage::QueueTask`], this enum
+/// specifies the type of proof task to be executed.
+#[derive(Debug)]
+pub enum ProofTaskKind {
+    /// A storage proof request.
+    StorageProof(StorageProofInput, Sender<StorageProofResult>),
+    /// A blinded account node request.
+    BlindedAccountNode(Nibbles, Sender<TrieNodeProviderResult>),
+    /// A blinded storage node request.
+    BlindedStorageNode(B256, Nibbles, Sender<TrieNodeProviderResult>),
+}
+
+/// A handle that wraps a single proof task sender that sends a terminate message on `Drop` if the
+/// number of active handles went to zero.
+#[derive(Debug)]
+pub struct ProofTaskManagerHandle<Tx> {
+    /// The sender for the proof task manager.
+    sender: Sender<ProofTaskMessage<Tx>>,
+    /// The number of active handles.
+    active_handles: Arc<AtomicUsize>,
+}
+
+impl<Tx> ProofTaskManagerHandle<Tx> {
+    /// Creates a new [`ProofTaskManagerHandle`] with the given sender.
+    pub fn new(sender: Sender<ProofTaskMessage<Tx>>, active_handles: Arc<AtomicUsize>) -> Self {
+        active_handles.fetch_add(1, Ordering::SeqCst);
+        Self { sender, active_handles }
+    }
+
+    /// Queues a task to the proof task manager.
+    pub fn queue_task(&self, task: ProofTaskKind) -> Result<(), SendError<ProofTaskMessage<Tx>>> {
+        self.sender.send(ProofTaskMessage::QueueTask(task))
+    }
+
+    /// Terminates the proof task manager.
+    pub fn terminate(&self) {
+        let _ = self.sender.send(ProofTaskMessage::Terminate);
+    }
+}
+
+impl<Tx> Clone for ProofTaskManagerHandle<Tx> {
+    fn clone(&self) -> Self {
+        Self::new(self.sender.clone(), self.active_handles.clone())
+    }
+}
+
+impl<Tx> Drop for ProofTaskManagerHandle<Tx> {
+    fn drop(&mut self) {
+        // Decrement the number of active handles and terminate the manager if it was the last
+        // handle.
+        if self.active_handles.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.terminate();
+        }
+    }
+}
+
+impl<Tx: DbTx> TrieNodeProviderFactory for ProofTaskManagerHandle<Tx> {
+    type AccountNodeProvider = ProofTaskTrieNodeProvider<Tx>;
+    type StorageNodeProvider = ProofTaskTrieNodeProvider<Tx>;
+
+    fn account_node_provider(&self) -> Self::AccountNodeProvider {
+        ProofTaskTrieNodeProvider::AccountNode { sender: self.sender.clone() }
+    }
+
+    fn storage_node_provider(&self, account: B256) -> Self::StorageNodeProvider {
+        ProofTaskTrieNodeProvider::StorageNode { account, sender: self.sender.clone() }
+    }
+}
+
+/// Trie node provider for retrieving trie nodes by path.
+#[derive(Debug)]
+pub enum ProofTaskTrieNodeProvider<Tx> {
+    /// Blinded account trie node provider.
+    AccountNode {
+        /// Sender to the proof task.
+        sender: Sender<ProofTaskMessage<Tx>>,
+    },
+    /// Blinded storage trie node provider.
+    StorageNode {
+        /// Target account.
+        account: B256,
+        /// Sender to the proof task.
+        sender: Sender<ProofTaskMessage<Tx>>,
     },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use reth_chainspec::ChainSpec;
-    use reth_provider::test_utils::create_test_provider_factory_with_chain_spec;
-    use std::sync::Arc;
+impl<Tx: DbTx> TrieNodeProvider for ProofTaskTrieNodeProvider<Tx> {
+    fn trie_node(&self, path: &Nibbles) -> Result<Option<RevealedNode>, SparseTrieError> {
+        let (tx, rx) = channel();
+        match self {
+            Self::AccountNode { sender } => {
+                let _ = sender.send(ProofTaskMessage::QueueTask(
+                    ProofTaskKind::BlindedAccountNode(*path, tx),
+                ));
+            }
+            Self::StorageNode { sender, account } => {
+                let _ = sender.send(ProofTaskMessage::QueueTask(
+                    ProofTaskKind::BlindedStorageNode(*account, *path, tx),
+                ));
+            }
+        }
 
-    fn test_ctx<Factory>(factory: Factory) -> ProofTaskCtx<Factory> {
-        ProofTaskCtx::new(factory)
-    }
-
-    /// Ensures `ProofWorkerHandle::new` spawns workers correctly.
-    #[test]
-    fn spawn_proof_workers_creates_handle() {
-        let chain_spec = Arc::new(ChainSpec::default());
-        let anchor_hash = chain_spec.genesis_hash();
-        let provider_factory = create_test_provider_factory_with_chain_spec(chain_spec);
-        let changeset_cache = reth_trie_db::ChangesetCache::new();
-        let factory = reth_provider::providers::OverlayStateProviderFactory::new(
-            provider_factory,
-            reth_provider::providers::OverlayBuilder::<reth_ethereum_primitives::EthPrimitives>::new(
-                anchor_hash,
-                changeset_cache,
-            ),
-        );
-        let ctx = test_ctx(factory);
-
-        let runtime = reth_tasks::Runtime::test();
-        let proof_handle = ProofWorkerHandle::new(&runtime, ctx, false);
-
-        // Verify handle can be cloned
-        let _cloned_handle = proof_handle.clone();
-
-        // Workers shut down automatically when handle is dropped
-        drop(proof_handle);
+        rx.recv().unwrap()
     }
 }

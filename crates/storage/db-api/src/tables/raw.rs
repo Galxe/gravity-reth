@@ -1,8 +1,7 @@
 use crate::{
-    table::{Compress, Decode, Decompress, DupSort, Encode, IntoVec, Key, Table, Value},
+    table::{Compress, Decode, Decompress, DupSort, Encode, Key, Table, Value},
     DatabaseError,
 };
-use reth_codecs::DecompressError;
 use serde::{Deserialize, Serialize};
 
 /// Tuple with `RawKey<T::Key>` and `RawValue<T::Value>`.
@@ -53,7 +52,7 @@ pub struct RawKey<K: Key> {
 impl<K: Key> RawKey<K> {
     /// Create new raw key.
     pub fn new(key: K) -> Self {
-        Self { key: K::encode(key).into_vec(), _phantom: std::marker::PhantomData }
+        Self { key: K::encode(key).into(), _phantom: std::marker::PhantomData }
     }
 
     /// Creates a raw key from an existing `Vec`. Useful when we already have the encoded
@@ -133,7 +132,7 @@ impl<V: Value> RawValue<V> {
 
     /// Returns the decompressed value.
     pub fn value(&self) -> Result<V, DatabaseError> {
-        Ok(V::decompress(&self.value)?)
+        V::decompress(&self.value)
     }
 
     /// Returns the raw value as seen on the database.
@@ -177,11 +176,11 @@ impl<V: Value> Compress for RawValue<V> {
 }
 
 impl<V: Value> Decompress for RawValue<V> {
-    fn decompress(value: &[u8]) -> Result<Self, DecompressError> {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         Ok(Self { value: value.to_vec(), _phantom: std::marker::PhantomData })
     }
 
-    fn decompress_owned(value: Vec<u8>) -> Result<Self, DecompressError> {
+    fn decompress_owned(value: Vec<u8>) -> Result<Self, DatabaseError> {
         Ok(Self { value, _phantom: std::marker::PhantomData })
     }
 }

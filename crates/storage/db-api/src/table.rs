@@ -3,12 +3,22 @@ use crate::{
     transaction::{DbTx, DbTxMut},
     DatabaseError,
 };
+
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
-pub use reth_codecs::{Compress, Decompress};
+/// Trait that will transform the data to be saved in the DB in a (ideally) compressed format
+pub trait Compress: Send + Sync + Sized + Debug {
+    /// Compressed type.
+    type Compressed: bytes::BufMut
+        + AsRef<[u8]>
+        + AsMut<[u8]>
+        + Into<Vec<u8>>
+        + Default
+        + Send
+        + Sync
+        + Debug;
 
-<<<<<<< HEAD
     /// If the type cannot be compressed, return its inner reference as `Some(self.as_ref())`
     fn uncompressable_ref(&self) -> Option<&[u8]> {
         None
@@ -38,42 +48,13 @@ pub trait Decompress: Send + Sync + Sized + Debug {
     /// Decompresses owned data coming from the database.
     fn decompress_owned(value: Vec<u8>) -> Result<Self, DatabaseError> {
         Self::decompress(&value)
-=======
-/// Trait for converting encoded types to `Vec<u8>`.
-///
-/// This is implemented for all `AsRef<[u8]>` types. For `Vec<u8>` this is a no-op,
-/// for other types like `ArrayVec` or fixed arrays it performs a copy.
-pub trait IntoVec: AsRef<[u8]> {
-    /// Convert to a `Vec<u8>`.
-    fn into_vec(self) -> Vec<u8>;
-}
-
-impl IntoVec for Vec<u8> {
-    #[inline]
-    fn into_vec(self) -> Vec<u8> {
-        self
-    }
-}
-
-impl<const N: usize> IntoVec for [u8; N] {
-    #[inline]
-    fn into_vec(self) -> Vec<u8> {
-        self.to_vec()
-    }
-}
-
-impl<const N: usize> IntoVec for arrayvec::ArrayVec<u8, N> {
-    #[inline]
-    fn into_vec(self) -> Vec<u8> {
-        self.to_vec()
->>>>>>> v2.3.0
     }
 }
 
 /// Trait that will transform the data to be saved in the DB.
 pub trait Encode: Send + Sync + Sized + Debug {
     /// Encoded type.
-    type Encoded: AsRef<[u8]> + IntoVec + Send + Sync + Ord + Debug;
+    type Encoded: AsRef<[u8]> + Into<Vec<u8>> + Send + Sync + Ord + Debug;
 
     /// Encodes data going into the database.
     fn encode(self) -> Self::Encoded;
@@ -163,9 +144,6 @@ pub trait TableImporter: DbTxMut {
     }
 
     /// Imports table data from another transaction within a range.
-    ///
-    /// This method works correctly with both regular and `DupSort` tables. For `DupSort` tables,
-    /// all duplicate entries within the range are preserved during import.
     fn import_table_with_range<T: Table, R: DbTx>(
         &self,
         source_tx: &R,

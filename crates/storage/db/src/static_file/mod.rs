@@ -1,26 +1,28 @@
 //! reth's static file database table import and access
 
-use reth_nippy_jar::{NippyJar, NippyJarError};
-use reth_static_file_types::{
-    SegmentHeader, SegmentRangeInclusive, StaticFileMap, StaticFileSegment,
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    path::Path,
 };
-use std::path::Path;
 
 mod cursor;
 pub use cursor::StaticFileCursor;
 
 mod mask;
 pub use mask::*;
+use reth_nippy_jar::{NippyJar, NippyJarError};
 
 mod masks;
 pub use masks::*;
+use reth_static_file_types::{SegmentHeader, SegmentRangeInclusive, StaticFileSegment};
 
 /// Alias type for a map of [`StaticFileSegment`] and sorted lists of existing static file ranges.
-type SortedStaticFiles = StaticFileMap<Vec<(SegmentRangeInclusive, SegmentHeader)>>;
+type SortedStaticFiles =
+    HashMap<StaticFileSegment, Vec<(SegmentRangeInclusive, Option<SegmentRangeInclusive>)>>;
 
 /// Given the `static_files` directory path, it returns a list over the existing `static_files`
 /// organized by [`StaticFileSegment`]. Each segment has a sorted list of block ranges and
-/// segment headers as presented in the file configuration.
+/// transaction ranges as presented in the file configuration.
 pub fn iter_static_files(path: &Path) -> Result<SortedStaticFiles, NippyJarError> {
     if !path.exists() {
         reth_fs_util::create_dir_all(path).map_err(|err| NippyJarError::Custom(err.to_string()))?;
@@ -37,18 +39,25 @@ pub fn iter_static_files(path: &Path) -> Result<SortedStaticFiles, NippyJarError
         {
             let jar = NippyJar::<SegmentHeader>::load(&entry.path())?;
 
-            if let Some(block_range) = jar.user_header().block_range() {
-                static_files
-                    .entry(segment)
-                    .and_modify(|headers| headers.push((block_range, jar.user_header().clone())))
-                    .or_insert_with(|| vec![(block_range, jar.user_header().clone())]);
+            let (block_range, tx_range) =
+                (jar.user_header().block_range().copied(), jar.user_header().tx_range().copied());
+
+            if let Some(block_range) = block_range {
+                match static_files.entry(segment) {
+                    Entry::Occupied(mut entry) => {
+                        entry.get_mut().push((block_range, tx_range));
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(vec![(block_range, tx_range)]);
+                    }
+                }
             }
         }
     }
 
-    // Sort by block end range.
     for range_list in static_files.values_mut() {
-        range_list.sort_unstable_by_key(|(block_range, _)| block_range.end());
+        // Sort by block end range.
+        range_list.sort_by_key(|(r, _)| r.end());
     }
 
     Ok(static_files)
