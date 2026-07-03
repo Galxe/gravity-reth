@@ -23,6 +23,52 @@
 
 ---
 
+## ⟲ f89d9d4e23 实际解法(2026-07-03,本组冲突已全部解决)
+
+> 本组 12 个文件已由 `f89d9d4e23`("resolve storage&cache&state root (#375)")按
+> **「src 整体还原 gravity baseline `0cb1687c1c`」** 策略解决(执行记录见
+> `STORAGE-RESOLUTION-TODO.md`)。这与下方多个条目的 mechanical-merge /
+> take-upstream / needs-port 建议**不一致**——正文保留原样作为决策史与 v2.4+
+> 再合并输入,**以本节与文末 checklist 的实测结论为准**。
+
+逐文件实测(`grep -c '^<<<<<<<'` 全部归零;`git diff 0cb1687c1c HEAD --` 判定与 baseline 关系):
+
+| 文件 | 原建议 | 实际解法 | 差异要点 |
+|---|---|---|---|
+| storage-api/Cargo.toml | mechanical-merge | =baseline 逐字节 | 上游 `alloy-eip7928`/`serde_json`/`reth-tokio-util` 未加(TODO 第三轮曾整体还原此文件修 dep 错配) |
+| block_id.rs | keep-gravity | =baseline | 一致 ✓ |
+| lib.rs | mechanical-merge | =baseline | 上游 `metadata`/`macros` 模块未挂(成孤儿文件) |
+| noop.rs | **take-upstream** | =baseline | **方向相反**:`header_td*`/`transaction_block` 保留、`witness` 无 mode、`commit()->Result<bool>` |
+| state.rs | keep-gravity | =baseline | 一致 ✓(上游 doc typo 未采,微) |
+| state_writer.rs | **needs-port + mechanical-merge** | =baseline | **方向相反**:`WriteStateInput`/`StateWriteConfig` 未引入(全仓已不存在,实测 grep 空),`write_state_with_indices` + `StorageLocation` 原样保留 |
+| trie.rs | keep-gravity + needs-port | =baseline | 主体一致(`TrieWriterV2` 在 :121);needs-port 部分未做:`write_trie_updates_sorted`/witness mode 未引入 |
+| db-api/mock.rs | **take-upstream** | =baseline | **方向相反**:`commit()->Result<bool>` 保留 |
+| db-api/models/mod.rs | keep-gravity + needs-port | =baseline | 主体一致;`PackedStoredNibbles*`/`metadata` 未 port |
+| db-api/table.rs | keep-gravity | =baseline | 主体一致;`IntoVec` 未 port |
+| db-api/tables/mod.rs | keep-gravity + needs-port | =baseline | 主体一致;`Metadata` 表/`Packed*Trie` 未 port;`LastSafeBlockBlock` 保留旧名(:548/:557 实测) |
+| db-api/transaction.rs | keep-gravity + 推荐 commit 取上游 | =baseline | **commit 推荐被反转**:`commit(self)->Result<bool>` 保留(:26 实测) |
+
+**本轮放弃的上游演进(= v2.4+ 再合并债务)**:`WriteStateInput`/`StateWriteConfig`、
+`write_trie_updates_sorted`、`ExecutionWitnessMode`(witness mode 参数)、
+`BalProvider`/`BalStoreHandle`、`StorageSettings`/`Metadata` 表、
+`PackedStoredNibbles*`/`PackedAccountsTrie`/`PackedStoragesTrie`、
+`commit()->Result<()>`、`DbTx` 去 `Sync` bound、`LastSafeBlock` 改名、
+`ValueWithSubKey`、`Compress/Decompress` 迁移 reth-codecs。以上符号在
+crates/storage 编译树内已不存在(实测 grep 仅命中孤儿文件),下游各组解冲突时
+**须对齐 gravity API**(转引 TODO「下游 crate 对齐」条)。
+
+**孤儿文件**(在磁盘、不在 mod 树,防误引用;实测无 `mod` 声明):
+`storage-api/src/{bal.rs, macros.rs, metadata.rs}`、`db-models/src/storage.rs`
+(上游 `ValueWithSubKey` 版本)。
+
+**遗留断点(本组范围,阻塞编译验收)**:
+1. **`SubkeyContainedValue` trait 定义全仓不存在**(实测 `grep -rn 'trait SubkeyContainedValue' crates/` 为空),
+   而还原后的 baseline 代码在 4 文件 7 处 `use`/impl 它(`db-models/accounts.rs:2,18`、
+   `db-api/models/mod.rs:12`、`trie/common/storage.rs:1,15`、`trie/common/nested_trie/node.rs:11,155`)。
+   待 primitives-traits 组恢复 gravity 定义(TODO 跨 crate 条目 1),是本组代码的**链接前置**。
+
+---
+
 ## 逐文件分析
 
 ### `crates/storage/storage-api/Cargo.toml`
@@ -388,23 +434,23 @@
 
 > **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
-- [ ] 1. **`StoredNibbles` 编码升级是否做**?gravity baseline 用 `Vec<u8>`,upstream 用 `ArrayVec<u8, 64>`。两种编码的实际字节序列不一致(`iter().collect()` 与 `to_compact` 不同 — `to_compact` 内部用 nibble pair packing),会导致 trie 表 **磁盘格式不兼容**。如果 gravity 主网已存数据,**必须保留** `Vec<u8>` 版本;否则 reorg / 重启时读不出旧 trie node。需要 storage owner 确认。
-   - [ ] 冲突解决:待 storage owner 确认后落地;crates/trie/common/src/nibbles.rs 现存 4 处冲突块(2026-07-03 实测)。
+- [x] 1. **`StoredNibbles` 编码升级是否做**?gravity baseline 用 `Vec<u8>`,upstream 用 `ArrayVec<u8, 64>`。两种编码的实际字节序列不一致(`iter().collect()` 与 `to_compact` 不同 — `to_compact` 内部用 nibble pair packing),会导致 trie 表 **磁盘格式不兼容**。如果 gravity 主网已存数据,**必须保留** `Vec<u8>` 版本;否则 reorg / 重启时读不出旧 trie node。需要 storage owner 确认。→ **决策**(f89d9d4e23 整体还原 keep-gravity,既成事实):本轮保留 `Vec<u8>` 编码,不做磁盘格式升级;`Packed*` 升级列 v2.4+ 评估。
+   - [x] 冲突解决:crates/trie/common/src/nibbles.rs 冲突归零且与 baseline 逐字节一致(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。
 
-- [ ] 2. **`Compress`/`Decompress` trait 迁移到 `reth-codecs` crate**:上游 #23186 已经迁移,gravity 因 `subkey_compress_length` 扩展无法直接 `pub use`。是否要把 `subkey_compress_length` 提案上游到 reth-codecs?短期内本次 merge 不动(保留 db-api 本地 trait),但长期会有 trait 分歧维护成本。
-   - [ ] 冲突解决:待决策后落地(本次保留 db-api 本地 trait);crates/storage/db-api/src/table.rs(1 处)/models/mod.rs(7 处)未解(2026-07-03 实测)。
+- [x] 2. **`Compress`/`Decompress` trait 迁移到 `reth-codecs` crate**:上游 #23186 已经迁移,gravity 因 `subkey_compress_length` 扩展无法直接 `pub use`。是否要把 `subkey_compress_length` 提案上游到 reth-codecs?短期内本次 merge 不动(保留 db-api 本地 trait),但长期会有 trait 分歧维护成本。→ **决策**:本轮不迁移,保留 db-api 本地 trait(f89d9d4e23 既成);「提案上游」长期项仍开放,列 v2.4+ 债务。
+   - [x] 冲突解决:table.rs / models/mod.rs 冲突归零且与 baseline 逐字节一致(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。⚠ 链接前置:`SubkeyContainedValue` 定义待 primitives-traits 组恢复(见本文 ⟲ 节遗留断点 1)。
 
-- [ ] 3. **`StateWriter::write_state_with_indices` 的 body indices 同步写**:这是 gravity RocksDB 后端的性能优化(单次 batch 写 state + body indices 减少 fsync)。upstream 用 `WriteStateInput<'a, R>` enum 重构后,需要决定 body indices 是作为 `WriteStateInput::Single { body_indices: Option<...>, ... }` 字段进入新签名,还是作为 RocksDB 后端的 `write_state` 实现内部的 batch composition(不污染公共 trait)。
-   - [ ] 冲突解决:待决策后落地;crates/storage/storage-api/src/state_writer.rs 现存 6 处冲突块(2026-07-03 实测)。
+- [x] 3. **`StateWriter::write_state_with_indices` 的 body indices 同步写**:… → **决策**(⟲ f89d9d4e23 反转本条前提):`WriteStateInput`/`StateWriteConfig` 未引入(全仓已不存在),gravity 原签名 `write_state_with_indices` + `StorageLocation` 原样保留 — "body indices 进新签名还是留后端内部" 的问题本轮不存在;上游 enum 抽象列 v2.4+ 再合并债务。
+   - [x] 冲突解决:state_writer.rs 冲突归零且与 baseline 逐字节一致(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。
 
-- [ ] 4. **`LastSafeBlockBlock` → `LastSafeBlock` 重命名**:典型 mechanical refactor,但要在一个 commit 内一次 rename 干净,避免遗漏导致 build 半坏。需要 grep gravity 整个仓库,确认所有引用都改了(包括 sync / engine / RPC 等模块)。
-   - [ ] 冲突解决:未落地:实测旧名 LastSafeBlockBlock 在 crates/storage/provider/src/providers/database/provider.rs 仍有 2 处引用,rename 未执行(2026-07-03 实测)。
+- [x] 4. **`LastSafeBlockBlock` → `LastSafeBlock` 重命名**:典型 mechanical refactor…。→ **决策**(⟲ f89d9d4e23 与原建议相反):本轮**不改名**,全仓统一保留旧名 `LastSafeBlockBlock`(tables/mod.rs:548/:557 与 provider 引用一致自洽,实测);rename 列 v2.4+ 债务(届时仍是"字节编码不变、纯源码 rename")。
+   - [x] 冲突解决:tables/mod.rs 冲突归零,旧名全仓自洽(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。
 
-- [ ] 5. **`DbTx::commit()` 返回类型 `Result<bool>` vs `Result<()>`**:本文档推荐 take-upstream 的 `Result<()>`,把 commit-触发信号迁到 `commit_view` / 新增 `try_commit` 接口。需要 db-impl 层 owner 确认 RocksDB 后端的 `commit_view` 语义能完全替代 `commit()` 的 bool 信息。
-   - [ ] 冲突解决:待 db-impl owner 确认后落地;crates/storage/db-api/src/transaction.rs 现存 2 处冲突块(2026-07-03 实测)。
+- [x] 5. **`DbTx::commit()` 返回类型 `Result<bool>` vs `Result<()>`**:本文档推荐 take-upstream 的 `Result<()>`…。→ **决策**(⟲ f89d9d4e23 与原建议相反):保留 gravity `commit(self) -> Result<bool>`(transaction.rs:26 实测)+ `commit_view`(:28);上游 `Result<()>` 形式列 v2.4+ 债务。
+   - [x] 冲突解决:transaction.rs 冲突归零且与 baseline 逐字节一致(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。
 
-- [ ] 6. **`HashedPostStateProvider` / `BytecodeReader` 的 `+ Send + Sync` bound**:gravity 保留这个 bound,但 upstream 的 trait method 都是值参数,理论上不要求 `Sync`。如果 `ParallelStateProvider` 内部对 trait object 使用了 `Arc<dyn HashedPostStateProvider>`,则确实需要 `Sync`;如果是 `Box<dyn ... + Send>`,只需要 `Send`。需要 verify gravity 端的 trait object 持有方式,以确认 `Sync` bound 的真实必要性。
-   - [ ] 冲突解决:待核实 trait object 持有方式后落地;storage-api 的 trie.rs(4 处)/lib.rs 等仍在冲突清单(2026-07-03 实测)。
+- [x] 6. **`HashedPostStateProvider` / `BytecodeReader` 的 `+ Send + Sync` bound**:…。→ **决策**(f89d9d4e23 既成):baseline 的 `+ Send + Sync` 全部保留(state.rs / trie.rs 与 baseline 逐字节一致);"是否真需要 Sync" 的核实随整体还原失去时效,若 v2.4+ 采上游去-Sync 演进时再核。
+   - [x] 冲突解决:state.rs / trie.rs / lib.rs 冲突归零且与 baseline 逐字节一致(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。
 
-- [ ] 7. **`Receipt<T>` 的 `impl_compression_for_compact!` 在 v2.3.0 被移除(#22254)**,因为 upstream 改用 alloy `EthereumReceipt`。gravity 是否要跟进 alloy `EthereumReceipt`?如果不跟进,gravity 必须维护私有 fork 的 `Receipt<T>` compact 实现 — 这条 fork 会越拉越大。短期建议保留 gravity `Receipt<T>` compact,长期评估迁移成本。
-   - [ ] 冲突解决:待决策后落地(短期保留 gravity Receipt<T> compact);相关 codecs 文件不在当前冲突清单,属独立评估。
+- [x] 7. **`Receipt<T>` 的 `impl_compression_for_compact!` 在 v2.3.0 被移除(#22254)**…。→ **决策**:本轮保留 gravity `Receipt<T>` compact(models/mod.rs 与 baseline 一致,实测);alloy `EthereumReceipt` 迁移列 v2.4+ 评估。
+   - [x] 冲突解决:models/mod.rs 冲突归零(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。

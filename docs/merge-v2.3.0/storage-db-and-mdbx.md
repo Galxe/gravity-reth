@@ -35,6 +35,46 @@
 
 ---
 
+## ⟲ f89d9d4e23 实际解法(2026-07-03,本组冲突已全部解决)
+
+> 本组 10 个文件已由 `f89d9d4e23`("resolve storage&cache&state root (#375)")按
+> **「src 整体还原 gravity baseline `0cb1687c1c`」** 策略解决(执行记录见
+> `STORAGE-RESOLUTION-TODO.md`)。下方多个条目的 mechanical-merge / take-upstream
+> 建议被此策略取代——正文保留原样作为决策史与 v2.4+ 再合并输入,**以本节与
+> 文末 checklist 的实测结论为准**。
+
+逐文件实测(`grep -c '^<<<<<<<'` 全部归零;`git diff 0cb1687c1c HEAD --` 判定与 baseline 关系):
+
+| 文件 | 原建议 | 实际解法 | 差异要点 |
+|---|---|---|---|
+| db/Cargo.toml | mechanical-merge(gravity 主体) | baseline +4/-10 | 删 `hash_keys`/`criterion` 两个失效 `[[bench]]`(保 `get`,源文件在);+`quanta`(optional,**未接任何 feature,悬空**)+ unix `libc`;上游 `reth-metrics`/`strum`/`rustc-hash`/`tracing` 未加(metrics prebind 链未采,无需);**`op` feature 行保留未 trim(遗留断点,见下)** |
+| mdbx/cursor.rs | mechanical-merge | =baseline 逐字节 | **上游 metric prebind(`TableOperationMetrics`)未采**(全仓不存在,实测);gravity `drop_fn`/`Debug`/`Drop` 完整保留 ✓ |
+| mdbx/mod.rs | mechanical-merge | =baseline | 上游 `path`/`with_metrics_if`/`drop_orphan_table`/`DatabaseArguments::test()` 全部未采;gravity `ParallelTxRO`/`sync_mode: Option` 保留 ✓ |
+| db/lib.rs | keep-gravity | =baseline | 一致 ✓(`utils.rs` 成孤儿,见 checklist 7) |
+| db/metrics.rs | **take-upstream** | =baseline | **方向相反**:`quanta::Instant`/`TableOperationMetrics` 未引入,`std::time::Instant` + 元组 key 保留 |
+| libmdbx-rs/Cargo.toml | mechanical-merge | baseline +1/-14 | +`crossbeam-queue`(**悬空**:唯一消费方 `txn_pool.rs` 是孤儿);删 `cursor`/`transaction` `[[bench]]`(源文件已删,正确);**⚠ 连 gravity #180 的 `[[bench]] mdbx_bench_tool` + `criterion`/`rand` dev-deps 也删了,但 `benches/mdbx_bench_tool.rs` 仍在磁盘且 `use rand`(遗留断点,见下)** |
+| libmdbx-rs/environment.rs | **take-upstream** | =baseline 逐字节 | **方向相反**:`ReadTxnPool` 未引入(`txn_pool.rs` 孤儿)、`mdbx_stat` 重命名未采 |
+| db-common/Cargo.toml | mechanical-merge | baseline +1 | +`reth-tasks`(dev-dep,当前未用,无害);`reth-trie-parallel` 保留 ✓ |
+| db-common/init.rs | keep-gravity + cherry-pick | =baseline 逐字节 | 主体一致 ✓;**建议的 `StageCheckpoint::new(genesis_block_number)` cherry-pick 未做**(:158 仍 `Default::default()`,实测)— 非零 genesis 支持列 v2.4+ 评估(TODO 跨 crate 条目 5) |
+| db-models/accounts.rs | keep-gravity + 叠加 | =baseline 逐字节 | 主体一致 ✓;建议叠加的 `ValueWithSubKey` 并存与尾部 `impl_compression_for_compact!` 未做(上游版留在孤儿 `db-models/src/storage.rs`) |
+
+**孤儿文件**(在磁盘、不在 mod 树;实测无 `mod` 声明):`db/src/utils.rs`、
+`libmdbx-rs/src/txn_pool.rs`、`db-models/src/storage.rs`。
+
+**遗留断点(本组范围)**:
+1. **`op` feature 悬挂引用**:`db/Cargo.toml:105` 保留 `op = ["reth-db-api/op", "reth-primitives-traits/op"]`,
+   但 db-api 的 Cargo.toml(v2.3.0 侧 + surgical 修补)已无 `op` feature(实测)——cargo 在 feature
+   解析期即报错(不需要 `--features op`),当前被 workspace 根缺 ~20 个 dep 的更大错误掩盖。
+   修法 = 按本文原建议删除该行(规则 1)。
+2. **`mdbx_bench_tool` bench 失挂**:`benches/mdbx_bench_tool.rs`(gravity #180)仍在磁盘并
+   `use rand`,但 `[[bench]]` 声明与 `criterion`/`rand` dev-deps 已被删——cargo autobenches
+   会把它当默认 harness bench 目标自动发现,`cargo bench/-​-benches -p reth-libmdbx` 编译必挂。
+   修法:恢复 `[[bench]] mdbx_bench_tool` + `criterion`/`rand` dev-deps,或删文件(工具已弃则删)。
+3. **`SubkeyContainedValue` 链接前置**(与 api 组共享):定义全仓不存在,`db-models/accounts.rs:2,18` /
+   `db-api/models/mod.rs:12` 在用,待 primitives-traits 组恢复(TODO 跨 crate 条目 1)。
+
+---
+
 ## 逐文件分析
 
 ### `crates/storage/db/Cargo.toml`
@@ -311,26 +351,26 @@
 
 > **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
-- [ ] 1. **`ValueWithSubKey` 与 `SubkeyContainedValue` 并存** — 双 trait 同 struct 实现在本组解决；db-api 组（同一批文件中另含 `crates/storage/db-api/src/tables/mod.rs` 等）是否计划长期保留二者，或迁 gravity rocksdb 到 `ValueWithSubKey` 并废 `SubkeyContainedValue`？**Owner：db-api 组解析者。**
-   - [ ] 冲突解决:待 db-api 组拍板后落地;crates/storage/db-api/src/table.rs(1 处)/models/mod.rs(7 处)仍在冲突(2026-07-03 实测)。
+- [x] 1. **`ValueWithSubKey` 与 `SubkeyContainedValue` 并存** — 双 trait 同 struct 实现在本组解决；db-api 组（同一批文件中另含 `crates/storage/db-api/src/tables/mod.rs` 等）是否计划长期保留二者，或迁 gravity rocksdb 到 `ValueWithSubKey` 并废 `SubkeyContainedValue`？**Owner：db-api 组解析者。** → **决策**(⟲ f89d9d4e23 实际解法,与原建议不同):**不并存**,单轨 gravity `SubkeyContainedValue`;上游 `ValueWithSubKey` 留在孤儿 `db-models/src/storage.rs`,并存/迁移列 v2.4+ 债务。
+   - [x] 冲突解决:accounts.rs / table.rs / models/mod.rs 冲突归零且与 baseline 逐字节一致(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。⚠ 链接前置:`SubkeyContainedValue` 定义待 primitives-traits 组恢复(见 ⟲ 节遗留断点 3)。
 
-- [ ] 2. **rocksdb 后端的 `DatabaseArguments::test()` stub** — 上游 `create_test_rw_db_with_datadir` 依赖该 helper。是否在 `crates/storage/db/src/implementation/rocksdb/` 上添加 stub 让上游测试可跨编译？**Owner：rocksdb 维护者。**
-   - [ ] 冲突解决:待 rocksdb 维护者拍板后落地(新增 stub,非冲突块解决)。
+- [x] 2. **rocksdb 后端的 `DatabaseArguments::test()` stub** — 上游 `create_test_rw_db_with_datadir` 依赖该 helper。是否在 `crates/storage/db/src/implementation/rocksdb/` 上添加 stub 让上游测试可跨编译？**Owner：rocksdb 维护者。** → **决策**(f89d9d4e23 后前提消失即结):`create_test_rw_db_with_datadir` / `DatabaseArguments::test()` 均未引入(lib.rs/test_utils 还原 baseline),本轮无需 stub;v2.4+ 采上游测试基建时再议。
+   - [x] 冲突解决:无落地动作需要(前提已消失,f89d9d4e23 实测)。
 
-- [ ] 3. **测试 helper 返回类型** — 上游 `create_test_db(kind) -> (TempDir, DatabaseEnv)` 修了 tempdir 清理竞态；gravity 仍用 `Arc<DatabaseEnv>` + `keep()`（泄漏目录）。是否长期采纳上游形式？**推迟，超本次合并范围。**
-   - [ ] 冲突解决:已明确推迟,本次不落地;上游测试 helper 形式留长期评估。
+- [x] 3. **测试 helper 返回类型** — 上游 `create_test_db(kind) -> (TempDir, DatabaseEnv)` 修了 tempdir 清理竞态；gravity 仍用 `Arc<DatabaseEnv>` + `keep()`（泄漏目录）。是否长期采纳上游形式？**推迟，超本次合并范围。** → **决策**:维持推迟;f89d9d4e23 保留 gravity 形式(mdbx/mod.rs 与 baseline 逐字节一致,实测)。
+   - [x] 冲突解决:mdbx/mod.rs 冲突归零(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。
 
-- [ ] 4. **`NestedStateRoot` 与上游 init-state 增量写** — 上游 `b9969c5b1` 重构 state-root 流程（按 `STATE_ROOT_COMMIT_THRESHOLD` 增量写 trie 进度）。是否与 gravity 的 `NestedStateRoot` 路径有耦合？**Owner：state-root team。**
-   - [ ] 冲突解决:待 state-root team 核实后落地;crates/storage/db-common/src/init.rs 现存 23 处冲突块(2026-07-03 实测)。
+- [x] 4. **`NestedStateRoot` 与上游 init-state 增量写** — 上游 `b9969c5b1` 重构 state-root 流程（按 `STATE_ROOT_COMMIT_THRESHOLD` 增量写 trie 进度）。是否与 gravity 的 `NestedStateRoot` 路径有耦合？**Owner：state-root team。** → **决策**(f89d9d4e23 既成):init.rs 整体 keep-gravity,上游增量写/OOM 缓解未采;**本文原建议的 `StageCheckpoint::new(genesis_block_number)` cherry-pick 也未做**(:158 实测仍 `Default::default()`),非零 genesis 支持列 v2.4+ 评估(TODO 跨 crate 条目 5)。
+   - [x] 冲突解决:init.rs 23 处冲突归零且与 baseline 逐字节一致(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。
 
-- [ ] 5. **Storage-v2 trait 基础设施** — `MetadataProvider`/`MetadataWriter`/`StorageSettings`/`StorageSettingsCache`/`RocksDBProviderFactory`/`NodePrimitivesProvider`/`StateWriteConfig` 在 gravity provider crate 中尚未实现。本次明确**不**port；是否计划长期跟进，或在 gravity 上"drop storage-v2 import pathway"？**Owner：存储架构师。**
-   - [ ] 冲突解决:待存储架构师拍板;本次明确不 port,无冲突落地动作。
+- [x] 5. **Storage-v2 trait 基础设施** — `MetadataProvider`/`MetadataWriter`/`StorageSettings`/`StorageSettingsCache`/`RocksDBProviderFactory`/`NodePrimitivesProvider`/`StateWriteConfig` 在 gravity provider crate 中尚未实现。本次明确**不**port；是否计划长期跟进，或在 gravity 上"drop storage-v2 import pathway"？**Owner：存储架构师。** → **决策**(TODO 文档明示 + 实测确认):本轮不 port;这批符号在 storage 编译树内已不存在(实测 grep 仅命中孤儿文件),下游各组解冲突须对齐 gravity API;长期跟进列 v2.4+ 债务。
+   - [x] 冲突解决:无冲突落地动作(策略性不采纳);孤儿清单见 ⟲ 节(f89d9d4e23,实测)。
 
-- [ ] 6. **Cursor `Debug` 与断言形式** — 上游测试已从 `assert_eq!(cursor.current(), Ok(Some(...)))` 切换为 `assert!(cursor.current().unwrap().is_some())`。gravity 手写 `Debug` 仍支持前者，本次解决在 mdbx/mod.rs 保留前者；合并后须 `rg 'unwrap\(\)\.is_some\(\)' crates/storage/db/src/implementation/mdbx/mod.rs` 验证无误吸入。
-   - [ ] 冲突解决:待落地核验;crates/storage/db/src/implementation/mdbx/mod.rs 现存 28 处冲突块,rg 断言核验需解完后跑(2026-07-03 实测)。
+- [x] 6. **Cursor `Debug` 与断言形式** — 上游测试已从 `assert_eq!(cursor.current(), Ok(Some(...)))` 切换为 `assert!(cursor.current().unwrap().is_some())`。gravity 手写 `Debug` 仍支持前者，本次解决在 mdbx/mod.rs 保留前者；合并后须 `rg 'unwrap\(\)\.is_some\(\)' crates/storage/db/src/implementation/mdbx/mod.rs` 验证无误吸入。→ **决策**:保留 gravity `assert_eq!` 形式(mdbx/mod.rs = baseline)。
+   - [x] 冲突解决:28 处冲突归零;断言核验已跑,`unwrap().is_some()` 命中 0,无上游形式误吸入(f89d9d4e23,实测);编译证据待 cargo workspace 依赖修复后回填。
 
-- [ ] 7. **`crates/storage/db/src/utils.rs`** — 上游新增 `is_database_empty`；本组未列入冲突清单，但 `lib.rs` 引用它。若它在 worktree 已存在则附加 OK；若是新文件需 git status 交叉确认。**Owner：与处理 `utils.rs` 的 worker 对齐。**
-   - [ ] 冲突解决:核实通过、待拍板后勾选:实测 crates/storage/db/src/utils.rs 已在 worktree 且无冲突标记(2026-07-03 实测)。
+- [x] 7. **`crates/storage/db/src/utils.rs`** — 上游新增 `is_database_empty`；本组未列入冲突清单，但 `lib.rs` 引用它。若它在 worktree 已存在则附加 OK；若是新文件需 git status 交叉确认。**Owner：与处理 `utils.rs` 的 worker 对齐。** → **决策**(f89d9d4e23 既成):lib.rs 还原 baseline 后**不引用** `utils.rs`,该文件为孤儿(无 `mod` 声明,实测),无害保留、防误引用。
+   - [x] 冲突解决:无落地动作需要;孤儿状态实测确认(f89d9d4e23)。
 
-- [ ] 8. **`op` feature 直接 trim 的级联** — `db/Cargo.toml` 丢弃 `op = ["reth-db-api/op", "reth-primitives-traits/op"]` 后，下游若有 `--features op` 编译路径需同步 trim（规则 1）。
-   - [ ] 冲突解决:待核实后落地;下游 --features op 编译路径需全仓 grep 确认。
+- [ ] 8. **`op` feature 直接 trim 的级联** — `db/Cargo.toml` 丢弃 `op = ["reth-db-api/op", "reth-primitives-traits/op"]` 后，下游若有 `--features op` 编译路径需同步 trim（规则 1）。⟲ f89d9d4e23 **未执行本条**:db/Cargo.toml:105 该行保留(实测),而 db-api(v2.3.0 侧 + surgical 修补)已无 `op` feature → **cargo feature 解析期断点**(不需 `--features op` 即触发;当前被 workspace 根缺 ~20 个 dep 的更大错误掩盖,见 ⟲ 节遗留断点 1)。修法维持原建议:删除该行。
+   - [ ] 冲突解决:**未落地**;删行后以 `cargo metadata`(待 cargo 组修复 workspace 根)通过为证。
