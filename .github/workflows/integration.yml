@@ -121,6 +121,19 @@ jobs:
         # now pins the allowlist so any new file matching those globs must
         # either be wired here or be listed in the invariant's
         # `KNOWN_UNWIRED_TESTS` skip set with a reason.
+        #
+        # `-E 'not test(...)'` excludes `test_e2e_dual_backend_state_root_
+        # equivalence_across_alpha_boundary` in `gravity_system_tx_gas_exempt_test`:
+        # that test drives `run_pipe_e2e_test` twice inside one `#[test]` fn
+        # (grevm + serial), and each call routes through `NodeCommand::execute`
+        # → `init_gravity_config` (a process-global `OnceLock` with a hard
+        # `assert!`). Nextest gives each `#[test]` its own process, but two
+        # invocations *within* one test share it — the second panics with
+        # `"Global gravity config already initialized"`. The single-invocation
+        # `test_e2e_system_tx_alpha_activation_{grevm,disable_grevm}` in the
+        # same binary work fine and stay wired. Splitting the dual test into
+        # two `#[test]` fns + cross-process state persistence is #367
+        # follow-up; drop this filter when that lands.
         run: |
           cargo nextest run \
             --locked \
@@ -130,7 +143,8 @@ jobs:
             --test gravity_eip7702_test \
             --test gravity_system_tx_gas_exempt_test \
             --test gravity_system_tx_pre_alpha_replay_test \
-            --test gravity_system_tx_simulation_anti_spoof_test
+            --test gravity_system_tx_simulation_anti_spoof_test \
+            -E 'not test(=test_e2e_dual_backend_state_root_equivalence_across_alpha_boundary)'
 
   integration-success:
     name: integration success
