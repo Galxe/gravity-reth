@@ -427,10 +427,15 @@
 
 ## 开放问题
 
-> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+> **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
 - [ ] 1. **`common.rs` 中 `init_genesis_with_settings` 与 gravity stage-checkpoint guard 的叠加**：上游新签名 `init_genesis_with_settings(&provider_factory, self.storage_settings())` 是否会触发 gravity 在 pipe-execution 模式下原有的 "checkpoint 被重置为 0" 问题？需在 e2e 上验证 `should_init = ... is_none_or(|ck| ck.block_number == 0)` guard 是否仍能阻断 `init_genesis_with_settings` 内部的初始化。如果 `init_genesis_with_settings` 自身在 storage v2 路径下已自带 idempotency，则 guard 可以撤销；否则 guard 必保。
+   - [ ] 冲突解决:待 e2e 验证后落地;crates/cli/commands/src/common.rs 现存 9 处冲突块(2026-07-03 实测)。
 - [ ] 2. **`stage/drop.rs` 中 `cached_storage_settings().storage_v2` 分支判定**：gravity 部署是否始终以 `--storage.v2 false` 启动？若如此，新增的 `if settings.storage_v2 { rocksdb.clear(...) } else { tx.clear(...) }` 分支在 gravity 上永远走 `else` — 但 gravity 的 `AccountsHistory` / `StoragesHistory` / `TransactionHashNumbers` 是否已迁出 mdbx 到 RocksDB？需对照 `a1d7365bd6` 的 table routing 配置。
+   - [ ] 冲突解决:待核实部署配置后落地;crates/cli/commands/src/stage/drop.rs 现存 10 处冲突块(2026-07-03 实测)。
 - [ ] 3. **`db/list.rs` 对 storage v2 已迁出表的 entries 报告**：上游 `tx.inner().open_db().db_stat()` 只查 mdbx；若 gravity 把若干表迁到 RocksDB（参考 `a1d7365bd6` 的 `bc79cc44c` `--rocksdb.*` table routing），`reth db list <table>` 对这些表会返回 0 entries — 需在 `view` 内增加 `RocksDBProvider::table_entries` fallback。
+   - [ ] 冲突解决:待决策后落地;crates/cli/commands/src/db/list.rs 现存 3 处冲突块(2026-07-03 实测)。
 - [ ] 4. **`sigsegv_handler.rs` 上游回滚理由**：`9974ad0618` 把 cast 写法回退的真正原因需从 `fix CI test of unit.yml` 关联的 CI log 中追查 — 若是 nightly toolchain 兼容问题且 v2.3.0 默认 toolchain 已升级，可放心 take-upstream；若是 musl / cross-compile target 兼容问题，需保留 `cfg` 分支。
+   - [ ] 冲突解决:待追查 CI log 后落地;crates/cli/util/src/sigsegv_handler.rs 现存 1 处冲突块(2026-07-03 实测)。
 - [ ] 5. **`stage/run.rs` 中 `metrics_hooks(&provider_factory)` 的 metric 标签**：与 gravity baseline 手写 `db.report_metrics()` + `sfp.report_metrics()` 是否完全等价？若上游统一封装漏掉 RocksDB metrics，需在 gravity 侧 wrap 一层补齐（涉及 grafana dashboard 兼容）。
+   - [ ] 冲突解决:待核实 metric 等价性后落地;crates/cli/commands/src/stage/run.rs 现存 5 处冲突块(2026-07-03 实测)。

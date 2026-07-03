@@ -346,13 +346,21 @@
 
 ## 开放问题
 
-> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+> **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
 - [ ] 1. **stage.rs 上游 mod tests 是否值得 port** —— `test_exec_input_next_block_range_with_transaction_threshold` 依赖上游 `ProviderFactory::new` 5 参签名（含 `RocksDBProvider::builder`、`reth_tasks::Runtime::test()`）。storage-db-and-mdbx 落地后可廉价补 port 到 gravity 的 `ProviderFactory::new`。开 tracking issue，非合并阻塞。
+   - [ ] 冲突解决:非合并阻塞,tracking issue 待开;crates/stages/api/src/stage.rs 现存 1 处冲突块(2026-07-03 实测)。
 - [ ] 2. **prune.rs 上游 trait bound** `StorageSettingsCache + ChangeSetReader + StorageChangeSetReader` —— gravity `DBProvider` 是否实现？若否，丢掉能编译，但会损失上游 PrunerBuilder 中依赖它们的特性（grep `crates/prune/prune/src/` 中 `PrunerBuilder::run_with_provider` 函数体来确认）。
+   - [ ] 冲突解决:待核实 trait bound 后落地;crates/stages/stages/src/stages/prune.rs 现存 3 处冲突块(2026-07-03 实测)。
 - [ ] 3. **tx_lookup.rs 上游 `with_rocksdb_batch{,_auto_commit}` closure 签名** —— 必须与 gravity PR #212 在 `crates/storage/provider/src/providers/rocksdb/provider.rs:427+` 的实现兼容。若分歧，优先保留 baseline 手写 cursor 路径，留待 storage-db-and-mdbx 拍板。
+   - [ ] 冲突解决:待 storage-db-and-mdbx 拍板后落地;crates/stages/stages/src/stages/tx_lookup.rs 现存 9 处冲突块(2026-07-03 实测)。
 - [ ] 4. **headers.rs ETL collector 格式变化** —— `Bytes` collector value 从 bincode 改为 RLP（上游 PR #23156）。若 gravity 升级时磁盘上残留半成品 ETL 临时目录，新的 RLP 路径会误解析 bincode payload。需核对 gravity 是否在启动时清 `etl_path`（上游 PR #16770 已做）—— 若否，加启动清理。
+   - [ ] 冲突解决:待核实 etl_path 清理后落地;crates/stages/stages/src/stages/headers.rs 现存 12 处冲突块(2026-07-03 实测)。
 - [ ] 5. **merkle.rs vs trie-all-layers** —— 若 trie-all-layers 决定上游 `with_adapter!`/`DbStateRoot::<_, A>` 战胜 gravity `NestedStateRoot`，本文件需手写重写以保 V2 trie 兼容。这是 chain-halt 关键路径，必须等 trie-all-layers 给出明确结论后再动。
+   - [ ] 冲突解决:待 trie-all-layers 结论后落地(chain-halt 关键路径);crates/stages/stages/src/stages/merkle.rs 现存 13 处冲突块(2026-07-03 实测)。
 - [ ] 6. **pipeline/mod.rs `UnifiedStorageWriter` 符号是否仍存在** —— 上游 v2.3.0 已删除 writer 包装、直接用 `provider_rw.commit()`。但 `acc458846c` PR #340 要求 rocksdb batch 刷盘走 `UnifiedStorageWriter::commit` hook。**必须**核对 gravity 在 `crates/storage/provider/src/writer.rs` 中的 `UnifiedStorageWriter` 在 storage-db-and-mdbx 分组合并后是否仍存在；若被上游内联/删除，需要在 gravity 侧补回 wrapper 或把刷盘 hook 改打到 `provider_rw.commit()` 的实现内部 — 这是 chain-halt / data-loss 风险点。
+   - [ ] 冲突解决:核实部分通过、待落地:实测 UnifiedStorageWriter 符号仍存在(writer/mod.rs 11 处引用、pipeline/mod.rs 4 处引用),但两文件各存 15/10 处冲突块未解(2026-07-03 实测)。
 - [ ] 7. **prune.rs `commit_view()` 调用未在冲突 diff 中** —— 当前 worktree 的冲突 hunk 只覆盖 imports + trait bound，PR #246 在 execute body 中 `pruner.run_with_provider(...)?` 之后的 `provider.tx_ref().commit_view()?` 是否会被自动合并保留需要在 merge 产物中验证。该行如丢失，prune 写入将延迟一个 stage commit，rocksdb 后端有 OOM / 磁盘失序风险。
+   - [ ] 冲突解决:待 merge 产物验证;crates/stages/stages/src/stages/prune.rs 现存 3 处冲突块,commit_view 行保留情况需解完后核对(2026-07-03 实测)。
 - [ ] 8. **prune.rs trait bound 上游 `RocksDBProviderFactory`** —— 大概率丢；但要在丢之后确认 `PrunerBuilder::default().segments(...).build::<Provider>(...)` 不依赖该 bound（gravity 的 prune 路径走 mdbx + rocksdb 双后端，需 grep 确认）。
+   - [ ] 冲突解决:待核实后落地;crates/stages/stages/src/stages/prune.rs 现存 3 处冲突块(2026-07-03 实测)。

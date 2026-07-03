@@ -386,18 +386,25 @@
 
 ## 开放问题
 
-> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+> **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
 - [ ] 1. **`StoredNibbles` 编码升级是否做**?gravity baseline 用 `Vec<u8>`,upstream 用 `ArrayVec<u8, 64>`。两种编码的实际字节序列不一致(`iter().collect()` 与 `to_compact` 不同 — `to_compact` 内部用 nibble pair packing),会导致 trie 表 **磁盘格式不兼容**。如果 gravity 主网已存数据,**必须保留** `Vec<u8>` 版本;否则 reorg / 重启时读不出旧 trie node。需要 storage owner 确认。
+   - [ ] 冲突解决:待 storage owner 确认后落地;crates/trie/common/src/nibbles.rs 现存 4 处冲突块(2026-07-03 实测)。
 
 - [ ] 2. **`Compress`/`Decompress` trait 迁移到 `reth-codecs` crate**:上游 #23186 已经迁移,gravity 因 `subkey_compress_length` 扩展无法直接 `pub use`。是否要把 `subkey_compress_length` 提案上游到 reth-codecs?短期内本次 merge 不动(保留 db-api 本地 trait),但长期会有 trait 分歧维护成本。
+   - [ ] 冲突解决:待决策后落地(本次保留 db-api 本地 trait);crates/storage/db-api/src/table.rs(1 处)/models/mod.rs(7 处)未解(2026-07-03 实测)。
 
 - [ ] 3. **`StateWriter::write_state_with_indices` 的 body indices 同步写**:这是 gravity RocksDB 后端的性能优化(单次 batch 写 state + body indices 减少 fsync)。upstream 用 `WriteStateInput<'a, R>` enum 重构后,需要决定 body indices 是作为 `WriteStateInput::Single { body_indices: Option<...>, ... }` 字段进入新签名,还是作为 RocksDB 后端的 `write_state` 实现内部的 batch composition(不污染公共 trait)。
+   - [ ] 冲突解决:待决策后落地;crates/storage/storage-api/src/state_writer.rs 现存 6 处冲突块(2026-07-03 实测)。
 
 - [ ] 4. **`LastSafeBlockBlock` → `LastSafeBlock` 重命名**:典型 mechanical refactor,但要在一个 commit 内一次 rename 干净,避免遗漏导致 build 半坏。需要 grep gravity 整个仓库,确认所有引用都改了(包括 sync / engine / RPC 等模块)。
+   - [ ] 冲突解决:未落地:实测旧名 LastSafeBlockBlock 在 crates/storage/provider/src/providers/database/provider.rs 仍有 2 处引用,rename 未执行(2026-07-03 实测)。
 
 - [ ] 5. **`DbTx::commit()` 返回类型 `Result<bool>` vs `Result<()>`**:本文档推荐 take-upstream 的 `Result<()>`,把 commit-触发信号迁到 `commit_view` / 新增 `try_commit` 接口。需要 db-impl 层 owner 确认 RocksDB 后端的 `commit_view` 语义能完全替代 `commit()` 的 bool 信息。
+   - [ ] 冲突解决:待 db-impl owner 确认后落地;crates/storage/db-api/src/transaction.rs 现存 2 处冲突块(2026-07-03 实测)。
 
 - [ ] 6. **`HashedPostStateProvider` / `BytecodeReader` 的 `+ Send + Sync` bound**:gravity 保留这个 bound,但 upstream 的 trait method 都是值参数,理论上不要求 `Sync`。如果 `ParallelStateProvider` 内部对 trait object 使用了 `Arc<dyn HashedPostStateProvider>`,则确实需要 `Sync`;如果是 `Box<dyn ... + Send>`,只需要 `Send`。需要 verify gravity 端的 trait object 持有方式,以确认 `Sync` bound 的真实必要性。
+   - [ ] 冲突解决:待核实 trait object 持有方式后落地;storage-api 的 trie.rs(4 处)/lib.rs 等仍在冲突清单(2026-07-03 实测)。
 
 - [ ] 7. **`Receipt<T>` 的 `impl_compression_for_compact!` 在 v2.3.0 被移除(#22254)**,因为 upstream 改用 alloy `EthereumReceipt`。gravity 是否要跟进 alloy `EthereumReceipt`?如果不跟进,gravity 必须维护私有 fork 的 `Receipt<T>` compact 实现 — 这条 fork 会越拉越大。短期建议保留 gravity `Receipt<T>` compact,长期评估迁移成本。
+   - [ ] 冲突解决:待决策后落地(短期保留 gravity Receipt<T> compact);相关 codecs 文件不在当前冲突清单,属独立评估。

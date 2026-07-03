@@ -506,16 +506,22 @@ git add Cargo.lock
 
 ## 开放问题
 
-> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+> **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
 - [ ] 1. **AGENTS.md 工作树损坏** — `AGENTS.md` 工作树副本目前只有一行字面量 `"AGENTS.md"`（9 字节），index 也是这个 blob (`e4aa901d6f`)。这不是任何合并冲突解决的产物，必须用阶段 2 的 `git show v2.3.0:AGENTS.md > AGENTS.md` 修复后再 `git add`。Gravity baseline `CLAUDE.md` 内容是 v1.8.3 catch-up 时期的内容，没有 gravity 独立编辑过；直接取 v2.3.0 `AGENTS.md` 正本是合理结论。
+   - [ ] 冲突解决:未落地:实测 AGENTS.md 工作树副本仍为 9 字节损坏态,阶段 2 修复未执行(2026-07-03 实测)。
 
 - [ ] 2. **`crates/ethereum/reth/Cargo.toml` 跨组 feature 依赖** — 加 `keccak-cache-global`、`js-tracer`、`otlp`、`portable`、`jemalloc-symbols` 需要 `reth-node-ethereum`、`reth-cli-util`、`reth-rpc-eth-types`、`reth-revm`、`reth-node-core`、`reth-ethereum-cli` 上存在同名 feature。这些 crate 在其它冲突组。建议：等其他组的 Cargo.toml 解决后再把这些 feature 引入；若某个传播目标缺失，暂时从伞 crate 中去掉该 feature。
+   - [ ] 冲突解决:待其他组 Cargo.toml 解决后落地;crates/ethereum/reth/Cargo.toml 现存 5 处冲突块(2026-07-03 实测)。
 
 - [ ] 3. **`setup_import.rs` 中 `task_manager` 字段过渡** — `ChainImportResult { task_manager, … }` 解构调用点散落在 gravity 下游测试，移除字段后需要全部跟修。下游测试文件在其它冲突组（很可能是 `node/builder`、ethereum/node、e2e-test-utils 的下游使用方），标为跨组顺序依赖。可选过渡：把字段类型改成 `Option<TaskManager>` 并默认 `None`，让旧解构编译通过。
+   - [ ] 冲突解决:待跨组顺序依赖解决后落地;crates/e2e-test-utils/src/setup_import.rs 现存 21 处冲突块(2026-07-03 实测)。
 
 - [ ] 4. **`test_fee_history` 的 `#[ignore = "todo fix: HashBuilder failed"]`** — gravity 已知失败，理想是建一个跟踪 issue（baseline commit `9974ad0618` 没有附带 issue 链接），完成 HashBuilder 修复后能去掉。
+   - [ ] 冲突解决:待建 tracking issue;crates/ethereum/node/tests/e2e/rpc.rs 现存 11 处冲突块(2026-07-03 实测)。
 
 - [ ] 5. **`examples/bsc-p2p/tests/it/priority.rs` AU** — 两侧路径都不存在该文件，为 git rename-detection 幻影。`rg -F 'bsc-p2p/tests/it/priority' crates/ tests/` 应无结果 → 直接 `git rm`。
+   - [ ] 冲突解决:未落地:实测 examples/bsc-p2p/tests/it/priority.rs 仍存在于 worktree,git rm 未执行(2026-07-03 实测)。
 
 - [ ] 6. **`docs/vocs/docs/public/remote_exex.png` AU** — 两侧内容 hash 一致（`8606616e81…`）；丢弃 HEAD-side 路径副本，接受上游的 `docs/vocs/public/remote_exex.png`。用 `rg -F 'docs/public/remote_exex.png' docs/` 确认没有 MDX 页面引用该路径。
+   - [ ] 冲突解决:未落地:实测 docs/vocs/docs/public/remote_exex.png 与 docs/vocs/public/remote_exex.png 两路径均仍存在,HEAD 侧副本未丢弃(2026-07-03 实测)。

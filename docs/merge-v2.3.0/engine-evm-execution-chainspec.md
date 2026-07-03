@@ -325,6 +325,13 @@ gravity 流）。上游 #21226 把逻辑搬到 `payload_validator` 这件事，g
 **推理**: metric 字段并集风险低；helper 删了会断 gravity 的 chain；上游搬迁
 拒绝同步是为了避免连锁修改 `payload_validator.rs`。
 
+**勘误**（2026-07-02）: 本小节两处与实测不符：(1) `execute_metered` 并非
+gravity 侧新增 — 上游 v1.8.3 原生就有（metrics.rs:60），"Gravity 侧变更
+(baseline only)" 是对 v2.3.0 diff 的视角错觉（上游删了它，不是 gravity 加了
+它）；(2) 调用点在 v1.8.3 的 `payload_validator.rs:767`，而非 tree/mod.rs。
+据此决策已修订为跟进 #21226（删 helper，metrics.rs 取 v2.3.0 侧），见开放
+问题 #4。
+
 ---
 
 ### `crates/engine/tree/src/tree/mod.rs`
@@ -1130,7 +1137,11 @@ fields：
 
 ## 开放问题
 
-> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+> **决策追踪 checklist**:每条目两个勾选框 — 主框「决策」勾选 = 已拍板,
+> 条目末尾「→ **决策**: …」记录结论;嵌套框「冲突解决」勾选 = 该决策已在
+> worktree 落地(相关冲突块已按决策解掉,经实测核实,附证据)。未勾选 =
+> 待决策 / 待落地。勾选纪律:冲突解决框必须实测(`grep '^<<<<<<<'` 计数、
+> `git diff` 等),不得从决策存在与否推断。
 
 - [x] 1. **moka vs mini-moka 全栈切换**：建议在该组合并阶段统一切到 `moka`（与上
    游一致），需要 audit gravity 自有 cache 使用点（`tree/cached_state.rs` 等
@@ -1145,6 +1156,10 @@ fields：
    → **决策**（2026-07-02）: 选项 C — 删 cached_state.rs（fork 遗留、零调用方），
    engine/tree Cargo.toml 与 mod.rs 相关冲突块取 v2.3.0 侧，mini-moka 全仓移除；
    已执行，见 moka-vs-mini-moka-verification.md 执行记录。
+   - [x] 冲突解决:已落地(commit 7df23663c8)— 实测(2026-07-03)
+     `cached_state.rs` 已不存在、`mini-moka` 全仓 `*.toml` 零命中、
+     `tree/mod.rs` 无 `cached_state` 引用;`engine/tree/Cargo.toml` 尚余
+     8 处冲突块,但冲突块内容 grep moka 零命中,均与本决策无关。
 - [x] 2. **`ExecutedBlock` vs `ExecutedBlockWithTrieUpdates` 长期策略**：上游已统
    一为单一 `ExecutedBlock + ComputedTrieData`，gravity baseline 仍二分。本组
    决策是保留二分；下一次 merge（v2.4+）时如果上游进一步深化集中式 trie
@@ -1152,17 +1167,49 @@ fields：
    二分 fork — 这是 long-running tech debt。
    → **决策**（2026-07-02）: 本轮保留二分；v2.4+ 长期策略作为 tech debt 单独
    评估，不阻塞本次 merge。（注：`in_memory.rs` 冲突尚未解完，决策待执行。）
+   → **参见**（2026-07-02）: pipe-exec make-canonical 链路上该类型的全链路
+   分析与未闭环清单见 `executed-block-split-pipe-exec-make-canonical.md`。
+   - [ ] 冲突解决:未落地 — 实测(2026-07-03)`in_memory.rs` 仍有 39 处
+     冲突块,类型定义本身在冲突块 HEAD 侧;`memory_overlay.rs` 为上游版
+     (背离二分决策,归条目 5 复核)。
 - [x] 3. **`NextBlockEnvAttributes::slot_number`**：gravity 不上 Amsterdam，长期填
    `None`。如果未来要走 Amsterdam（EIP-7928 BAL），gravity 需要先决定 BAL
    是否纳入链上语义；目前所有 BAL 相关 trait 方法 gravity 实现都应返回 `None`
    / `Empty`。
    → **决策**（2026-07-02）: 字段引入、gravity 侧填 `None`；是否上
    Amsterdam/BAL 属未来业务决策，不阻塞本次 merge。
+   - [ ] 冲突解决:未落地 — 实测(2026-07-03)`crates/evm/evm/src/lib.rs`
+     仍有 18 处冲突块,`slot_number` 字段(第 713 行)在冲突块 v2.3.0 侧
+     尚未解出;gravity 构造点(pipe-exec execute/src/lib.rs:1180 的
+     `NextBlockEnvAttributes { … }`)尚未补 `slot_number: None`(连同
+     `extra_data` 字段),解冲突时需一并落地。
 - [x] 4. **上游 #21226 `move execution logic from metrics to payload_validator`
    不跟进**：metrics.rs 保留 `execute_metered` helper。如果未来要重构
    `payload_validator`，需要确认 helper 与新 validator 接口不冲突。
    → **决策**（2026-07-02）: 不跟进 #21226，保留 `execute_metered`（已在
    worktree 落地，`tree/metrics.rs:83`）。
+   → **决策修订**（2026-07-02）: 原决策前提（"删 helper 会断 gravity 调用点"）
+   经实测失效，修订为**跟进 #21226**：metrics.rs 剩余冲突取 v2.3.0 侧，删
+   `execute_metered` + `MeteredStateHook` 及其自测试（metrics.rs:885/945）。
+   依据三条实测：(a) `execute_metered` 并非 gravity 定制，是纯上游 v1.8.3
+   遗产（`gravity-base/v1.8.3-clean-ancestry` 的 metrics.rs:60 /
+   payload_validator.rs:767 逐行存在），对 v2.3.0 diff 时才显得像
+   baseline-only；(b) worktree `payload_validator.rs` 已与 v2.3.0 tag 零
+   diff，原调用点（v1.8.3 payload_validator.rs:767）已随之消失；(c) 全仓
+   现存调用方仅剩 metrics.rs:885/945 两个自测试，pipe-exec 路线有自有
+   执行 + metrics，从不引用该 helper。执行条件：`tree/mod.rs` 剩余冲突解完
+   后确认无 gravity 侧新调用点（main 分支实测 tree/mod.rs 零引用，风险
+   极低）。
+   → **已执行**（2026-07-03）: metrics.rs 整文件取 v2.3.0 侧（先核实
+   gravity 对该文件零定制 — 基线 diff 为零；现与 tag 零 diff、冲突全解），
+   `MeteredStateHook` 定义与 impl 已从 tree/mod.rs 移除，全仓
+   `execute_metered` / `MeteredStateHook` 零残留。遗留：tree/mod.rs 剩余冲突
+   解完后复核无新调用点，并清理失去使用点的 `OnStateHook` /
+   `StateChangeSource` / `EvmState` import。
+   - [x] 冲突解决:已落地 — 实测(2026-07-03)`metrics.rs` 与 v2.3.0 tag
+     零 diff(原 13 处冲突块全解),全仓 `execute_metered` /
+     `MeteredStateHook` grep 零命中;遗留仅 tree/mod.rs 收尾时的 import
+     清理与复核(见上「已执行」段),不影响本决策落地判定。
 - [ ] 5. **`trie_input` 在 `memory_overlay.rs` 中 `extend_from_sorted` vs
    `from_blocks` 的性能差**：上游 #19894 / #20333 引入 sorted 路径有明确
    perf gain；gravity baseline 仍走 `from_blocks`。本次合并保守保留 gravity
@@ -1174,3 +1221,7 @@ fields：
    `from_blocks` 已不在。因其类型上游 `in_memory.rs` 仍满是冲突标记，疑为
    squash checkpoint 带入的上游侧、尚未按本决策改回。收尾时须复核后重新拍板：
    改回 gravity 版，或确认二分类型下可直接走 sorted 路径。
+   - [ ] 冲突解决:未落地(决策本身待重新拍板)— 实测(2026-07-03)
+     `memory_overlay.rs` 冲突标记 0 处,但内容为上游版(`Cow<'a,
+     [ExecutedBlock<N>]>` + `extend_from_sorted`),与"保留 gravity 实现"
+     的原结论背离,须先复核拍板再落地。

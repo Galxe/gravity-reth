@@ -206,10 +206,15 @@
 
 ## 开放问题
 
-> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+> **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
 - [ ] 1. **gravity-RocksDB 与 v2.3.0 upstream RocksDB 路径并存策略**：v2.3.0 通过 PR #20253 / #21191 / #22970 把 RocksDB 引入上游主线（`RocksDBProvider`、`RocksDBProviderFactory`、`with_rocksdb_provider`），同时 gravity 在 baseline 上有完全独立的 `gravity-storage` + `parallel-storage` RocksDB 实现（PR #212）。本组合并先按 keep-gravity 处理 `args/database.rs` / `launch/common.rs`，但跨 crate 的 storage 分组合并完成前，`reth-db` 的 `mdbx` feature 必须保留（gravity-RocksDB 不替换 `reth-db` crate 本身）。
+   - [ ] 冲突解决:待 storage 分组完成后落地;crates/node/core/src/args/database.rs(8 处)与 crates/node/builder/src/launch/common.rs(30 处)仍在冲突(2026-07-03 实测)。
 - [ ] 2. **`Head.total_difficulty` 在 gravity 内部是否仍被消费**：v2.3.0 把 `lookup_head` 的 td 写死 `U256::ZERO`。若 gravity-only `pipe-exec-layer-ext` 或 `consensus_layer_handle` 路径读 `Head.total_difficulty`，需要在 gravity 侧改为直接 query `header_td_by_number`。建议在 `pipe-exec-layer-ext` 分组合并时一并核查。
+   - [ ] 冲突解决:核实部分通过、待拍板:实测 crates/pipe-exec-layer-ext-v2/ 内 total_difficulty 零引用;consensus_layer_handle 路径待补测(2026-07-03 实测)。
 - [ ] 3. **`expire_pre_merge_transactions()` 在 gravity 上是否仍有意义**：本身是上游以太坊主网 hook，gravity 链没有 merge 节点；建议在 `engine.rs` 合并时直接删除。
+   - [ ] 冲突解决:待 engine.rs 合并时落地;crates/node/builder/src/launch/engine.rs 现存 23 处冲突块(2026-07-03 实测)。
 - [ ] 4. **`--db.rocksdb-block-cache-size` 与 `--db.disable-metrics`**：v2.3.0 上游 RocksDB 引入的 flag，如果未来 gravity-RocksDB 与上游 RocksDB 合并，需要把这两个 flag 接到 `gravity-storage::RocksDBConfig` 上。当前合并保留 gravity 命名空间（`--db.block-cache-size`），但要在 storage 分组任务里留 issue。
+   - [ ] 冲突解决:待 storage 分组 issue 建立后落地;crates/node/core/src/args/database.rs 现存 8 处冲突块(2026-07-03 实测)。
 - [ ] 5. **`#337 chainspec floor` 对 `args/txpool.rs` / `ethereum/node/src/node.rs` 的实际改动**：本次只通过 commit log 推断；落地时需要 `git show 364b851665 -- crates/node/core/src/args/txpool.rs crates/ethereum/node/src/node.rs` 拿到精确 diff，确认仅是 import / minor adapter 改动，不漏 fee floor 关键 hook。
+   - [ ] 冲突解决:待落地时核对精确 diff;crates/node/core/src/args/txpool.rs(8 处)与 crates/ethereum/node/src/node.rs(26 处)仍在冲突(2026-07-03 实测)。

@@ -309,20 +309,28 @@
 
 ## 开放问题
 
-> **决策追踪 checklist**:勾选 = 已决策,并在条目末尾追加「→ **决策**: …」记录结论;未勾选 = 待决策 / 待核实。
+> **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
 - [ ] 1. **`ValueWithSubKey` 与 `SubkeyContainedValue` 并存** — 双 trait 同 struct 实现在本组解决；db-api 组（同一批文件中另含 `crates/storage/db-api/src/tables/mod.rs` 等）是否计划长期保留二者，或迁 gravity rocksdb 到 `ValueWithSubKey` 并废 `SubkeyContainedValue`？**Owner：db-api 组解析者。**
+   - [ ] 冲突解决:待 db-api 组拍板后落地;crates/storage/db-api/src/table.rs(1 处)/models/mod.rs(7 处)仍在冲突(2026-07-03 实测)。
 
 - [ ] 2. **rocksdb 后端的 `DatabaseArguments::test()` stub** — 上游 `create_test_rw_db_with_datadir` 依赖该 helper。是否在 `crates/storage/db/src/implementation/rocksdb/` 上添加 stub 让上游测试可跨编译？**Owner：rocksdb 维护者。**
+   - [ ] 冲突解决:待 rocksdb 维护者拍板后落地(新增 stub,非冲突块解决)。
 
 - [ ] 3. **测试 helper 返回类型** — 上游 `create_test_db(kind) -> (TempDir, DatabaseEnv)` 修了 tempdir 清理竞态；gravity 仍用 `Arc<DatabaseEnv>` + `keep()`（泄漏目录）。是否长期采纳上游形式？**推迟，超本次合并范围。**
+   - [ ] 冲突解决:已明确推迟,本次不落地;上游测试 helper 形式留长期评估。
 
 - [ ] 4. **`NestedStateRoot` 与上游 init-state 增量写** — 上游 `b9969c5b1` 重构 state-root 流程（按 `STATE_ROOT_COMMIT_THRESHOLD` 增量写 trie 进度）。是否与 gravity 的 `NestedStateRoot` 路径有耦合？**Owner：state-root team。**
+   - [ ] 冲突解决:待 state-root team 核实后落地;crates/storage/db-common/src/init.rs 现存 23 处冲突块(2026-07-03 实测)。
 
 - [ ] 5. **Storage-v2 trait 基础设施** — `MetadataProvider`/`MetadataWriter`/`StorageSettings`/`StorageSettingsCache`/`RocksDBProviderFactory`/`NodePrimitivesProvider`/`StateWriteConfig` 在 gravity provider crate 中尚未实现。本次明确**不**port；是否计划长期跟进，或在 gravity 上"drop storage-v2 import pathway"？**Owner：存储架构师。**
+   - [ ] 冲突解决:待存储架构师拍板;本次明确不 port,无冲突落地动作。
 
 - [ ] 6. **Cursor `Debug` 与断言形式** — 上游测试已从 `assert_eq!(cursor.current(), Ok(Some(...)))` 切换为 `assert!(cursor.current().unwrap().is_some())`。gravity 手写 `Debug` 仍支持前者，本次解决在 mdbx/mod.rs 保留前者；合并后须 `rg 'unwrap\(\)\.is_some\(\)' crates/storage/db/src/implementation/mdbx/mod.rs` 验证无误吸入。
+   - [ ] 冲突解决:待落地核验;crates/storage/db/src/implementation/mdbx/mod.rs 现存 28 处冲突块,rg 断言核验需解完后跑(2026-07-03 实测)。
 
 - [ ] 7. **`crates/storage/db/src/utils.rs`** — 上游新增 `is_database_empty`；本组未列入冲突清单，但 `lib.rs` 引用它。若它在 worktree 已存在则附加 OK；若是新文件需 git status 交叉确认。**Owner：与处理 `utils.rs` 的 worker 对齐。**
+   - [ ] 冲突解决:核实通过、待拍板后勾选:实测 crates/storage/db/src/utils.rs 已在 worktree 且无冲突标记(2026-07-03 实测)。
 
 - [ ] 8. **`op` feature 直接 trim 的级联** — `db/Cargo.toml` 丢弃 `op = ["reth-db-api/op", "reth-primitives-traits/op"]` 后，下游若有 `--features op` 编译路径需同步 trim（规则 1）。
+   - [ ] 冲突解决:待核实后落地;下游 --features op 编译路径需全仓 grep 确认。
