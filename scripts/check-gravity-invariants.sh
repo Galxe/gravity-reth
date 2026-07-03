@@ -34,6 +34,17 @@
 #      `trace_block_until_with_inspector`) per-tx sender-check by
 #      referencing `is_system_tx_gas_exempt` (or
 #      `is_gravity_system_caller`) in the same file.
+#   9. CI allowlist parity: every integration test binary matching
+#      `gravity_system_tx_*_test.rs` or `gravity_bls_*_test.rs` under
+#      `crates/pipe-exec-layer-ext-v2/execute/tests/` must EITHER appear
+#      in the `--test <name>` allowlist in `.github/workflows/integration.yml`
+#      OR be listed in the `KNOWN_UNWIRED_TESTS` skip set inside invariant 9
+#      with a documented reason. Rationale: `-p reth-pipe-exec-layer-ext-v2`
+#      alone would try to compile every binary in the dir, including ones
+#      with dev-dep gaps, so the workflow uses an explicit allowlist.
+#      Without invariant 9, a newly added test file is silently skipped by
+#      CI (as happened with the six #367 / #370 files) — assertions may
+#      pass locally but never gate a merge.
 #
 # Invocation:
 #   bash scripts/check-gravity-invariants.sh
@@ -229,6 +240,93 @@ ${unapproved}A new replay caller must per-tx check sender against SYSTEM_CALLER.
         "rg --type rust -n 'replay_transactions_until|trace_block_until_with_inspector' crates/rpc"
 fi
 ok 8 "RPC replay paths reference SYSTEM_CALLER exemption check"
+
+# ---------------------------------------------------------------------------
+# Invariant 9 — CI allowlist parity for post-#367 / post-#370 RPC replay tests.
+# Every file under `crates/pipe-exec-layer-ext-v2/execute/tests/` matching
+# `gravity_system_tx_*_test.rs` or `gravity_bls_*_test.rs` must EITHER appear
+# as a `--test <basename>` argument in `.github/workflows/integration.yml`
+# OR be listed in `KNOWN_UNWIRED_TESTS` below with a documented reason. The
+# workflow uses an explicit allowlist (not `-p reth-pipe-exec-layer-ext-v2`
+# alone) because the crate has integration binaries whose dev-deps are
+# missing in this workspace; that same allowlist silently skips new files
+# unless they are added by hand.
+#
+# Deferred entries force a future contributor to make an explicit
+# claim ("wire" or "defer, with reason"), preventing another silent-skip
+# incident like #367 / #370.
+# ---------------------------------------------------------------------------
+echo "Invariant 9: CI --test allowlist covers all gravity_system_tx_* / gravity_bls_* integration tests (or explicit KNOWN_UNWIRED_TESTS)"
+
+# Known-unwired: test file basename → one-line reason. Any entry here
+# should also have a follow-up issue / PR tracked. Removing an entry
+# means the corresponding `--test <name>` line must be added to the
+# workflow.
+declare -A KNOWN_UNWIRED_TESTS=(
+    # Requires #372 Track A (mint precompile RPC registration) + the RPC-side
+    # `apply_state_change` Alpha migration hook for `SYSTEM_CALLER.balance`
+    # zeroing to reproduce canonical byte-equal traces on the Alpha activation
+    # block. Locally the block-family assertion diverges by ~9.4k gas at
+    # block 1's metadata tx. Wire after those land.
+    [gravity_system_tx_post_alpha_trace_test]="blocked on #372 mint precompile RPC registration + RPC-side Alpha migration hook"
+    # Requires PR #370 (BLS pop-verify precompile RPC registration) to land.
+    # The file exists on upstream/main but the RPC-side helper it exercises
+    # is only registered by #370.
+    [gravity_bls_precompile_test]="blocked on #370 (BLS pop-verify RPC registration)"
+)
+
+workflow="$REPO_ROOT/.github/workflows/integration.yml"
+tests_dir="crates/pipe-exec-layer-ext-v2/execute/tests"
+if [ ! -f "$workflow" ]; then
+    fail 9 "expected workflow file at .github/workflows/integration.yml — invariant needs to know where to look for the allowlist" \
+        "ls .github/workflows/integration.yml"
+fi
+missing=""
+double_claimed=""
+for f in $(ls "$tests_dir"/gravity_system_tx_*_test.rs "$tests_dir"/gravity_bls_*_test.rs 2>/dev/null); do
+    binary=$(basename "$f" .rs)
+    in_workflow=false
+    if grep -qE "^[[:space:]]*--test[[:space:]]+${binary}([[:space:]]|\\\\|$)" "$workflow"; then
+        in_workflow=true
+    fi
+    in_unwired=false
+    if [ "${KNOWN_UNWIRED_TESTS[$binary]+set}" = "set" ]; then
+        in_unwired=true
+    fi
+    if [ "$in_workflow" = "false" ] && [ "$in_unwired" = "false" ]; then
+        missing="${missing}${binary}
+"
+    fi
+    if [ "$in_workflow" = "true" ] && [ "$in_unwired" = "true" ]; then
+        double_claimed="${double_claimed}${binary}
+"
+    fi
+done
+if [ -n "$missing" ]; then
+    fail 9 "integration test file(s) neither wired to CI nor in KNOWN_UNWIRED_TESTS. Add \`--test <name> \\\` line(s) to .github/workflows/integration.yml (gravity-pipe-test job) OR add an entry to KNOWN_UNWIRED_TESTS in this script with a documented reason. Missing:
+${missing}Rationale: silently-skipped tests can't gate merges (see integration.yml comment)." \
+        "grep -E '^[[:space:]]*--test' .github/workflows/integration.yml"
+fi
+if [ -n "$double_claimed" ]; then
+    fail 9 "integration test file(s) both in CI allowlist AND KNOWN_UNWIRED_TESTS — pick one. Double-claimed:
+${double_claimed}Remove the KNOWN_UNWIRED_TESTS entry if now wired, or drop the workflow line if you meant to defer." \
+        "grep -E '^[[:space:]]*--test' .github/workflows/integration.yml"
+fi
+# Also flag KNOWN_UNWIRED_TESTS references to files that no longer exist —
+# likely a rename / deletion missed the invariant update.
+stale=""
+for binary in "${!KNOWN_UNWIRED_TESTS[@]}"; do
+    if [ ! -f "$tests_dir/${binary}.rs" ]; then
+        stale="${stale}${binary}
+"
+    fi
+done
+if [ -n "$stale" ]; then
+    fail 9 "KNOWN_UNWIRED_TESTS references file(s) that no longer exist under $tests_dir/. Remove the stale entries or restore the files. Stale:
+${stale}" \
+        "ls $tests_dir/"
+fi
+ok 9 "CI --test allowlist + KNOWN_UNWIRED_TESTS jointly cover all gravity_system_tx_* / gravity_bls_* integration tests"
 
 echo
 echo "All Gravity invariants passed."
