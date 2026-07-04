@@ -32,7 +32,7 @@ use revm::{
     database::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
-    state::{Account, AccountStatus, EvmState},
+    state::{Account, AccountInfo, AccountStatus, EvmState},
     Database, DatabaseCommit,
 };
 
@@ -270,10 +270,22 @@ where
 
     fn transact_system_txn(
         &mut self,
-        evm_env: EvmEnv,
+        mut evm_env: EvmEnv,
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, Self::Error> {
+        // Gravity Alpha hardfork: gas-exempt the `SYSTEM_CALLER`-sourced system
+        // transactions on the L1 (cfg-side) lever. MUST stay byte-identical with
+        // the serial twin in `EthEvmConfig::transact_system_txn` — any drift
+        // between serial / grevm here forks state root on system-tx blocks.
+        let block_ts: u64 = evm_env.block_env.timestamp.saturating_to();
+        if crate::is_system_tx_gas_exempt(self.chain_spec.as_ref(), block_ts) {
+            evm_env.cfg_env.disable_base_fee = true;
+            evm_env.cfg_env.disable_balance_check = true;
+            // `disable_nonce_check` deliberately left `false` — SYSTEM_CALLER's
+            // nonce sequence is part of the protocol contract.
+        }
+
         let state = self.state.as_mut().unwrap();
         // Phase 1: execute with WrapDatabaseRef(state).
         let (execution_result, evm_state) = {
@@ -308,6 +320,14 @@ where
         }
         state.commit(state_diff);
         Ok(())
+    }
+
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        self.state
+            .as_mut()
+            .unwrap()
+            .basic(address)
+            .map_err(|e| BlockExecutionError::msg(alloc::format!("basic {address}: {e:?}")))
     }
 
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
@@ -429,21 +449,25 @@ mod tests {
     //!   replacing.
 
     use super::*;
-    use crate::EthEvmConfig;
+    use crate::{is_system_tx_gas_exempt, EthEvmConfig, SYSTEM_CALLER};
     use alloc::sync::Arc;
-    use alloy_consensus::Header;
+    use alloy_consensus::{constants::KECCAK_EMPTY, Header};
     use alloy_eips::{
         eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
         eip7685::EMPTY_REQUESTS_HASH,
     };
-    use alloy_primitives::{keccak256, B256, U256};
-    use reth_chainspec::{ChainSpec, ChainSpecBuilder, MAINNET};
+    use alloy_primitives::{keccak256, Bytes, B256, U256};
+    use reth_chainspec::{
+        ChainHardforks, ChainSpec, ChainSpecBuilder, ForkCondition, GravityHardfork, MAINNET,
+    };
     use reth_ethereum_primitives::Block;
     use reth_evm::{execute::BasicBlockExecutor, parallel_execute::WrapExecutor};
     use reth_primitives_traits::RecoveredBlock;
     use revm::{
         bytecode::Bytecode,
+        context::TxEnv,
         database::{CacheDB, EmptyDB},
+        primitives::TxKind,
         state::AccountInfo,
     };
 
@@ -455,6 +479,22 @@ mod tests {
                 .prague_activated()
                 .build(),
         )
+    }
+
+    /// Prague-activated chainspec with Gravity Alpha at the given timestamp.
+    ///
+    /// Used by U-6 to flip the `is_system_tx_gas_exempt` gate on/off via the same
+    /// `ChainHardforks` channel that production chainspecs use, so the test exercises
+    /// the actual predicate rather than monkey-patching `cfg_env` directly.
+    fn alpha_active_chainspec(alpha_time: u64) -> Arc<ChainSpec> {
+        let mut spec = ChainSpecBuilder::from(&*MAINNET)
+            .shanghai_activated()
+            .cancun_activated()
+            .prague_activated()
+            .build();
+        spec.gravity_hardforks =
+            ChainHardforks::from([(GravityHardfork::Alpha, ForkCondition::Timestamp(alpha_time))]);
+        Arc::new(spec)
     }
 
     /// Mirrors the alloc shape that `eip_2935::apply_state_changes_for_block`
@@ -656,6 +696,362 @@ mod tests {
         assert_eq!(
             info.code_hash, code_hash,
             "code_hash must still match HISTORY_STORAGE bytecode after second commit"
+        );
+    }
+
+    // ====================================================================
+    // Gravity Alpha system-tx gas-exempt unit tests (acceptance §1.1)
+    // ====================================================================
+    //
+    // These pin the "承重墙" (load-bearing wall) invariant from
+    // `_local/drafts/system-tx-gas-exempt/acceptance-tests-2026-06-26.md` §1.1:
+    // when the Alpha gate is active, the serial (`WrapExecutor` /
+    // `EthEvmConfig::transact_system_txn`) and grevm
+    // (`GrevmExecutor::transact_system_txn`) backends MUST produce
+    // byte-identical bundles for the same input system transactions. Any
+    // drift here forks state root on system-tx blocks.
+
+    /// Build a synthetic `EvmEnv` rooted at `timestamp` against a
+    /// Prague-active chainspec, with a non-zero `gas_limit` and a basefee
+    /// large enough that a system tx with `gas_price = 0` would normally be
+    /// rejected (i.e. enforces that the Alpha gate is doing its job).
+    fn alpha_block_header(timestamp: u64) -> Header {
+        Header {
+            parent_hash: B256::ZERO,
+            timestamp,
+            number: 1,
+            requests_hash: Some(EMPTY_REQUESTS_HASH),
+            excess_blob_gas: Some(0),
+            blob_gas_used: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..Header::default()
+        }
+    }
+
+    /// Build a metadata-shaped system tx (`gas_price = 0`, `value = 0`,
+    /// `SYSTEM_CALLER` sender, intrinsic-only payload).
+    fn system_tx_env(nonce: u64, chain_id: u64) -> TxEnv {
+        TxEnv {
+            caller: SYSTEM_CALLER,
+            gas_limit: 1_000_000,
+            gas_price: 0,
+            kind: TxKind::Call(SYSTEM_CALLER),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            nonce,
+            chain_id: Some(chain_id),
+            ..TxEnv::default()
+        }
+    }
+
+    /// Pre-seed a `CacheDB<EmptyDB>` with a `SYSTEM_CALLER` account, mirroring
+    /// the post-Alpha-migration state (balance=0, nonce=N, code=empty). Both
+    /// backends start from byte-identical DBs so any divergence in
+    /// `take_bundle()` comes from the `transact_system_txn` path itself,
+    /// which is what U-6 is designed to detect.
+    fn seeded_db(balance: U256, nonce: u64) -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            SYSTEM_CALLER,
+            AccountInfo { balance, nonce, code_hash: KECCAK_EMPTY, code: None },
+        );
+        db
+    }
+
+    // --- U-6: serial (`WrapExecutor`) == grevm (`GrevmExecutor`) bundle ---
+
+    /// Sketch §1.1 "承重墙": run the same metadata + validator system tx
+    /// sequence through both backends with the Alpha gate active. Assert the
+    /// resulting `BundleState` is byte-equal between serial and grevm. Any
+    /// drift = state-root fork on system-tx blocks (PR #363-class regression).
+    #[test]
+    fn u6_test_system_tx_gas_exempt_bundle_equivalence() {
+        let chain_spec = alpha_active_chainspec(1);
+        let chain_id = chain_spec.chain().id();
+        assert!(
+            is_system_tx_gas_exempt(chain_spec.as_ref(), 1),
+            "test fixture sanity: Alpha must be active at ts=1"
+        );
+
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let header = alpha_block_header(1);
+        let evm_env = evm_config.evm_env(&header).expect("evm_env must build");
+
+        // metadata + validator system txs, sender = SYSTEM_CALLER, gas_price=0
+        let tx_m = system_tx_env(0, chain_id);
+        let tx_v = system_tx_env(1, chain_id);
+
+        // Serial path — WrapExecutor wraps the same EthEvmConfig
+        // `transact_system_txn` impl that the pipe-exec-layer takes when
+        // `--gravity.disable-grevm` is set.
+        let mut serial = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config.clone(),
+            seeded_db(U256::ZERO, 0),
+        ));
+        serial
+            .transact_system_txn(evm_env.clone(), Vec::new(), tx_m.clone())
+            .expect("serial metadata tx must succeed under Alpha gate");
+        serial
+            .transact_system_txn(evm_env.clone(), Vec::new(), tx_v.clone())
+            .expect("serial validator tx must succeed under Alpha gate");
+        let bundle_serial = serial.take_bundle();
+
+        // Grevm path — `GrevmExecutor::transact_system_txn`, the twin impl
+        // that MUST stay byte-identical with the serial path.
+        let mut grevm =
+            GrevmExecutor::new(chain_spec.clone(), &evm_config, seeded_db(U256::ZERO, 0));
+        grevm
+            .transact_system_txn(evm_env.clone(), Vec::new(), tx_m)
+            .expect("grevm metadata tx must succeed under Alpha gate");
+        grevm
+            .transact_system_txn(evm_env, Vec::new(), tx_v)
+            .expect("grevm validator tx must succeed under Alpha gate");
+        let bundle_grevm = grevm.take_bundle();
+
+        // Assert load-bearing equality field by field. The matrix says "byte
+        // equal" — that's true for everything that affects state root:
+        //   - `state`: address → BundleAccount (info, original_info, storage, status)
+        //   - `contracts`: code_hash → Bytecode (changes to code map)
+        //   - `state_size`: memory size hint (matches between backends)
+        //   - `reverts`: revert content (block-level rollback ability)
+        //
+        // We deliberately skip `reverts_size` comparison: grevm's
+        // `parallel_apply_transitions_and_create_reverts` updates
+        // `state_size` but does NOT update `reverts_size` (see
+        // `grevm/src/storage.rs::parallel_apply_transitions_and_create_reverts`),
+        // while revm's serial `apply_transitions_and_create_reverts` does.
+        // The discrepancy is purely a memory-accounting field; the actual
+        // `reverts` content (the load-bearing data) is identical, so state
+        // root is unaffected. Flagged for follow-up grevm fix; not a
+        // consensus issue today.
+        assert_eq!(bundle_serial.state, bundle_grevm.state, "state map drift");
+        assert_eq!(bundle_serial.contracts, bundle_grevm.contracts, "contracts drift");
+        assert_eq!(bundle_serial.state_size, bundle_grevm.state_size, "state_size drift");
+        assert_eq!(bundle_serial.reverts, bundle_grevm.reverts, "reverts content drift");
+
+        // Sanity: the SYSTEM_CALLER account is in the bundle, balance still
+        // zero (no fee paid), and nonce bumped by 2 (one per system tx) on
+        // both backends.
+        let serial_acc = bundle_serial
+            .state
+            .get(&SYSTEM_CALLER)
+            .expect("SYSTEM_CALLER must be present after two system txs");
+        let info = serial_acc.info.as_ref().expect("SYSTEM_CALLER info present");
+        assert_eq!(info.balance, U256::ZERO, "SYSTEM_CALLER balance must stay zero (gas-exempt)");
+        assert_eq!(info.nonce, 2, "SYSTEM_CALLER nonce must reflect both system txs");
+    }
+
+    // --- U-7: fee归零 + 余额不动 + coinbase 不收 tip (matrix §1.2) ---
+
+    /// `u7`: under Alpha gate, SYSTEM_CALLER balance is preserved bit-for-bit
+    /// across a system tx (no fee debit) and coinbase does NOT receive any
+    /// tip (gas_price == 0). Both invariants together constitute the
+    /// "gas-exempt without breaking gas metering" property — gas_used is
+    /// still observable in the execution result.
+    ///
+    /// Picks an obviously non-zero sentinel for SYSTEM_CALLER's pre-state so
+    /// any silent debit would change the post-tx balance.
+    #[test]
+    fn u7_test_system_tx_fee_zero_balance_unchanged() {
+        let chain_spec = alpha_active_chainspec(1);
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let header = alpha_block_header(1);
+        let evm_env = evm_config.evm_env(&header).expect("evm_env must build");
+
+        // Sentinel pre-balance: 10^18 (1 G). Any silent fee debit would make
+        // the post-balance < 10^18; the gas-exempt design must keep it at
+        // exactly 10^18.
+        let sentinel = U256::from(1_000_000_000_000_000_000_u128);
+
+        let mut serial =
+            WrapExecutor::new(BasicBlockExecutor::new(evm_config.clone(), seeded_db(sentinel, 0)));
+        let result = serial
+            .transact_system_txn(evm_env.clone(), Vec::new(), system_tx_env(0, chain_id))
+            .expect("system tx must succeed under Alpha gate");
+
+        // Gas IS still metered — the gate only zeros fee accounting, not gas.
+        assert!(
+            result.is_success(),
+            "system tx execution must succeed (no insufficient-funds / GasPriceLessThanBasefee)"
+        );
+        assert!(
+            result.gas_used() > 0,
+            "gas_used must stay positive — gas metering is not bypassed"
+        );
+
+        let bundle = serial.take_bundle();
+        let acc = bundle
+            .state
+            .get(&SYSTEM_CALLER)
+            .expect("SYSTEM_CALLER must be in bundle after system tx");
+        let info = acc.info.as_ref().expect("info present");
+        assert_eq!(
+            info.balance, sentinel,
+            "SYSTEM_CALLER balance must stay at sentinel — no fee was debited"
+        );
+        assert_eq!(info.nonce, 1, "nonce must bump by 1 (protocol contract still enforced)");
+
+        // Coinbase tip: gas_price == 0  ⇒  no tip flows to beneficiary. The
+        // EvmEnv's beneficiary is `header.beneficiary()` which we left as
+        // Address::ZERO. Verify it's not in the bundle with a positive
+        // balance.
+        assert!(
+            bundle
+                .state
+                .get(&Address::ZERO)
+                .and_then(|a| a.info.as_ref())
+                .is_none_or(|i| i.balance == U256::ZERO),
+            "coinbase (Address::ZERO) must not receive tip when gas_price == 0"
+        );
+    }
+
+    /// `u7b`: gas_used is invariant across pre-Alpha (gate inactive,
+    /// gas_price = base_fee) and post-Alpha (gate active, gas_price = 0)
+    /// runs of the same system tx. The L1+L2 gas-exempt levers must change
+    /// **only** fee accounting, never gas metering — receipts, gas_used,
+    /// state writes, calldata effects must all remain identical.
+    #[test]
+    fn u7b_test_system_tx_gas_used_equivalent_to_pre_fork() {
+        // Pre-Alpha chainspec: Alpha = Timestamp(100), block_ts = 1  ⇒ gate inactive.
+        let chain_spec_pre = alpha_active_chainspec(100);
+        let evm_config_pre = EthEvmConfig::new(chain_spec_pre.clone());
+        let chain_id = chain_spec_pre.chain().id();
+        let header_pre = alpha_block_header(1);
+        let evm_env_pre = evm_config_pre.evm_env(&header_pre).expect("evm_env pre");
+        assert!(
+            !is_system_tx_gas_exempt(chain_spec_pre.as_ref(), 1),
+            "test fixture sanity: Alpha must NOT be active at ts=1 with Alpha=100"
+        );
+
+        // Pre-Alpha tx uses base_fee gas_price (production fallback path).
+        let basefee = evm_env_pre.block_env.basefee as u128;
+        let tx_pre = TxEnv {
+            caller: SYSTEM_CALLER,
+            gas_limit: 1_000_000,
+            gas_price: basefee,
+            kind: TxKind::Call(SYSTEM_CALLER),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            nonce: 0,
+            chain_id: Some(chain_id),
+            ..TxEnv::default()
+        };
+
+        // Need a large enough balance to cover base_fee × gas_limit for the
+        // pre-fork run; pick a generous one so the test isn't fragile.
+        let funded = U256::from(u128::MAX);
+        let mut pre_executor = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config_pre.clone(),
+            seeded_db(funded, 0),
+        ));
+        let result_pre = pre_executor
+            .transact_system_txn(evm_env_pre, Vec::new(), tx_pre)
+            .expect("pre-Alpha system tx must succeed (production fallback path)");
+        let gas_used_pre = result_pre.gas_used();
+        assert!(result_pre.is_success(), "pre-Alpha system tx must succeed");
+
+        // Post-Alpha chainspec: Alpha = Timestamp(1), block_ts = 1 ⇒ gate active.
+        let chain_spec_post = alpha_active_chainspec(1);
+        let evm_config_post = EthEvmConfig::new(chain_spec_post.clone());
+        let header_post = alpha_block_header(1);
+        let evm_env_post = evm_config_post.evm_env(&header_post).expect("evm_env post");
+        assert!(
+            is_system_tx_gas_exempt(chain_spec_post.as_ref(), 1),
+            "test fixture sanity: Alpha must be active at ts=1 with Alpha=1"
+        );
+
+        let tx_post = system_tx_env(0, chain_id);
+        let mut post_executor = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config_post.clone(),
+            seeded_db(U256::ZERO, 0),
+        ));
+        let result_post = post_executor
+            .transact_system_txn(evm_env_post, Vec::new(), tx_post)
+            .expect("post-Alpha system tx must succeed (gas-exempt path)");
+        let gas_used_post = result_post.gas_used();
+        assert!(result_post.is_success(), "post-Alpha system tx must succeed");
+
+        // The core invariant: gas metering doesn't change across the fork.
+        assert_eq!(
+            gas_used_pre, gas_used_post,
+            "system tx gas_used must be invariant across Alpha boundary (lever changes accounting, not metering)"
+        );
+    }
+
+    // --- U-8: `disable_balance_check` 防御性 verify (matrix §1.3) ---
+
+    /// `u8`: `disable_balance_check = true` must be a no-op (zero
+    /// collateral) when `gas_price = 0` and `disable_base_fee = true`.
+    /// Verifies the "second belt" — even without `disable_balance_check`,
+    /// the upfront cost is 0 × gas_limit = 0, so the balance check is
+    /// trivially satisfied. Test exercises both cfg variants and asserts
+    /// byte-equal bundles, pinning that the extra flag has no state-diff
+    /// side-effect today (R5 verify).
+    #[test]
+    fn u8_test_disable_balance_check_zero_collateral() {
+        let chain_spec = alpha_active_chainspec(1);
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let header = alpha_block_header(1);
+        let evm_env_base = evm_config.evm_env(&header).expect("evm_env must build");
+
+        // Variant A: both flags set (production default for system tx under
+        // Alpha gate). The serial `transact_system_txn` sets both.
+        let mut exec_a = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config.clone(),
+            seeded_db(U256::ZERO, 0),
+        ));
+        exec_a
+            .transact_system_txn(evm_env_base.clone(), Vec::new(), system_tx_env(0, chain_id))
+            .expect("variant A (both flags set) must succeed");
+        let bundle_a = exec_a.take_bundle();
+
+        // Variant B: disable_base_fee=true, disable_balance_check=false.
+        // Build a fresh evm_env, then bypass the gate (i.e. emulate "what
+        // happens if `disable_balance_check` ever gets reverted") by hand-
+        // crafting the cfg. We do this by simulating a pre-Alpha chainspec
+        // (gate inactive at this ts) and overriding the cfg fields ourselves
+        // after calling evm_env.
+        let chain_spec_b = alpha_active_chainspec(u64::MAX); // gate never fires
+        let evm_config_b = EthEvmConfig::new(chain_spec_b.clone());
+        let mut evm_env_b = evm_config_b.evm_env(&header).expect("evm_env B");
+        evm_env_b.cfg_env.disable_base_fee = true;
+        // explicitly DO NOT set disable_balance_check
+        assert!(
+            !evm_env_b.cfg_env.disable_balance_check,
+            "control case: leave disable_balance_check off"
+        );
+        assert!(
+            !is_system_tx_gas_exempt(chain_spec_b.as_ref(), 1),
+            "control case: gate must be inactive so `transact_system_txn` does not auto-flip the flags"
+        );
+
+        let mut exec_b = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config_b.clone(),
+            seeded_db(U256::ZERO, 0),
+        ));
+        exec_b
+            .transact_system_txn(evm_env_b, Vec::new(), system_tx_env(0, chain_id))
+            .expect("variant B (only disable_base_fee) must still succeed — upfront cost is 0×gas_limit = 0");
+        let bundle_b = exec_b.take_bundle();
+
+        // Bundles must match: `disable_balance_check` is a no-op when the
+        // upfront cost is already zero (R5 verify long-term defence —
+        // protects against a future revm prepay-path change).
+        assert_eq!(
+            bundle_a.state, bundle_b.state,
+            "state map drift between disable_balance_check on/off"
+        );
+        assert_eq!(
+            bundle_a.contracts, bundle_b.contracts,
+            "contracts drift between disable_balance_check on/off"
+        );
+        assert_eq!(
+            bundle_a.state_size, bundle_b.state_size,
+            "state_size drift between disable_balance_check on/off"
         );
     }
 }

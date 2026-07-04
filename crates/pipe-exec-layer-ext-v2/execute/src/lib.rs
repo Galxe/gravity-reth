@@ -1,12 +1,12 @@
 //! Pipeline execution layer extension
 #[macro_use]
 mod channel;
-pub mod bls_precompile;
 mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
 pub mod randomness_precompile;
+mod system_caller_migration;
 mod tx_filter;
 use alloy_sol_types::SolEvent;
 
@@ -24,7 +24,10 @@ use alloy_consensus::{
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
 use alloy_primitives::{Address, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
-use gravity_precompiles::randomness_by_height::randomness_by_height_gas_policy_at_block;
+use gravity_precompiles::{
+    bls_pop_verify::{create_bls_pop_verify_precompile, BLS_PRECOMPILE_ADDR},
+    randomness_by_height::randomness_by_height_gas_policy_at_block,
+};
 use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
@@ -68,15 +71,14 @@ use tokio::sync::{
 use tracing::*;
 
 use crate::{
-    bls_precompile::create_bls_pop_verify_precompile,
     mint_precompile::create_mint_token_precompile,
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         system_txns_into_executed_ordered_block_result,
         types::DataRecorded,
-        SystemTxnResult, BLS_PRECOMPILE_ADDR, DKG_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
-        NATIVE_ORACLE_ADDR, RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
+        SystemTxnResult, DKG_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, NATIVE_ORACLE_ADDR,
+        RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
     randomness_precompile::{
         create_randomness_by_height_precompile, ExecutionRandomnessProvider,
@@ -926,13 +928,28 @@ impl<Storage: GravityStorage> Core<Storage> {
             (BLS_PRECOMPILE_ADDR, bls_precompile),
         ];
 
+        // Gravity Alpha hardfork: gas-exempt system transactions (L2 — construction
+        // side). When the lever is on, every protocol-injected system tx is built
+        // with `gas_price = 0`; the L1 (cfg-side) `disable_base_fee` set in
+        // `transact_system_txn` then accepts `gas_price < basefee`. Result: fee
+        // == gas_used × 0 == 0, SYSTEM_CALLER balance is not touched, gas metering
+        // / calldata / state / receipts / gas_used otherwise unchanged.
+        // See system-tx gas-exempt design §3.2.
+        let block_ts = evm_env.block_env.timestamp.saturating_to::<u64>();
+        let system_tx_gas_price: u128 =
+            if reth_chainspec::is_system_tx_gas_exempt(chain_spec, block_ts) {
+                0
+            } else {
+                base_fee as u128
+            };
+
         let mut current_nonce = initial_nonce;
         // -----------------------------------------------------------------------
         // Metadata transaction (onBlockStart)
         // -----------------------------------------------------------------------
         let metadata_txn = construct_metadata_txn(
             current_nonce,
-            base_fee as u128,
+            system_tx_gas_price,
             ordered_block.timestamp_us,
             ordered_block.proposer_index,
             &ordered_block.failed_proposer_indices,
@@ -1023,7 +1040,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             let txn = match construct_validator_txn_from_extra_data(
                 extra_data,
                 current_nonce,
-                base_fee as u128,
+                system_tx_gas_price,
                 is_alpha_active,
             ) {
                 Ok(txn) => txn,
@@ -1193,8 +1210,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         let base_fee = evm_env.block_env.basefee;
 
-        // Read SYSTEM_CALLER nonce and gas price from state BEFORE moving state into executor.
+        // Read SYSTEM_CALLER nonce from state BEFORE moving state into executor.
         // ParallelDatabase (Storage::StateView) implements DatabaseRef, so we can read directly.
+        // The Alpha balance migration below reads SYSTEM_CALLER independently via the
+        // executor's own `basic` accessor (see `system_caller_migration`), so this read
+        // only serves `execute_system_transactions` nonce sequencing.
         let initial_nonce = state
             .basic_ref(SYSTEM_CALLER)
             .expect("failed to read SYSTEM_CALLER account from state")
@@ -1223,6 +1243,19 @@ impl<Storage: GravityStorage> Core<Storage> {
         let is_alpha_active = self.chain_spec.gravity_hardforks().is_fork_active_at_timestamp(
             GravityHardfork::Alpha,
             ordered_block.timestamp_us / 1_000_000,
+        );
+
+        // Gravity Alpha (system-tx gas-exempt) boundary state change: zero
+        // `SYSTEM_CALLER.balance` once, on the Alpha activation block. Runs
+        // BEFORE system transactions in the same block so the post-execution
+        // bundle reflects the zero balance — preserving nonce and code keeps
+        // the account non-empty under EIP-161 (design §3.3, R5).
+        system_caller_migration::apply_state_changes_for_block(
+            &mut *executor,
+            &self.chain_spec,
+            ordered_block.timestamp_us / 1_000_000,
+            parent_header.timestamp,
+            block_number,
         );
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.

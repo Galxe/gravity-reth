@@ -73,6 +73,25 @@ pub mod execute {
 pub mod hardfork;
 pub mod parallel_execute;
 
+// ============================================================================
+// Gravity system-tx gas-exempt gating
+// ============================================================================
+//
+// Both the canonical execution layer (this crate's serial `transact_system_txn`
+// + grevm `parallel_execute.rs::transact_system_txn`) and every RPC replay path
+// that re-executes a persisted system tx (sender == `SYSTEM_CALLER`) MUST gate
+// the cfg-side fee/balance disables on the SAME predicate, queried against the
+// timestamp of the block being executed/replayed. Any drift between callsites
+// forks state root on system-tx blocks.
+//
+// The predicate itself (`is_system_tx_gas_exempt`) is defined in `reth-chainspec`
+// alongside `SYSTEM_CALLER`/`is_gravity_system_caller`, so every callsite (this
+// crate's serial + grevm twins, the pipe layer's system-tx construction, and all
+// RPC replay paths in `reth-rpc-eth-api` / `reth-rpc`) reuses a single function
+// without crate-edge gymnastics.
+
+pub use reth_chainspec::{is_gravity_system_caller, is_system_tx_gas_exempt, SYSTEM_CALLER};
+
 mod build;
 pub use build::EthBlockAssembler;
 
@@ -306,7 +325,7 @@ where
     fn transact_system_txn<DB: Database>(
         &self,
         db: &mut State<DB>,
-        evm_env: EvmEnv,
+        mut evm_env: EvmEnv,
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
@@ -317,6 +336,23 @@ where
         // (e.g. the zero-reward coinbase) that grevm prunes, forking the state root on
         // system-tx blocks.
         db.set_state_clear_flag(evm_env.cfg_env.spec >= SpecId::SPURIOUS_DRAGON);
+
+        // Gravity Alpha hardfork: gas-exempt the `SYSTEM_CALLER`-sourced system
+        // transactions on the L1 (cfg-side) lever. Combined with the L2
+        // (construction-side) `gas_price = 0` at the pipe layer, this drops the
+        // SYSTEM_CALLER fee bill to zero while preserving gas metering, calldata,
+        // state writes, receipts and `gas_used`.
+        //
+        // MUST stay byte-identical with the grevm twin in
+        // `parallel_execute.rs::transact_system_txn`. Any drift forks state root.
+        let block_ts: u64 = evm_env.block_env.timestamp.saturating_to();
+        if is_system_tx_gas_exempt(self.chain_spec().as_ref(), block_ts) {
+            evm_env.cfg_env.disable_base_fee = true;
+            evm_env.cfg_env.disable_balance_check = true;
+            // `disable_nonce_check` deliberately left `false` — SYSTEM_CALLER's
+            // nonce sequence is part of the protocol contract.
+        }
+
         let (execution_result, evm_state) = {
             let mut evm = self.evm_with_env(&mut *db, evm_env);
             for (addr, precompile) in precompiles {
