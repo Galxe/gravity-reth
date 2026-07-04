@@ -1054,4 +1054,110 @@ mod tests {
             "state_size drift between disable_balance_check on/off"
         );
     }
+
+    // --- U-6d: pre-Alpha baseline symmetry (gate OFF) --------------------
+
+    /// `u6d`: even when the Alpha gate is inactive, serial (`WrapExecutor` →
+    /// `EthEvmConfig::transact_system_txn`) and grevm
+    /// (`GrevmExecutor::transact_system_txn`) must produce byte-identical
+    /// bundles for the same batch of pre-Alpha-shaped system txs (i.e.
+    /// `gas_price = basefee`, production fallback path). Pins that
+    /// backend byte-equivalence comes from shared underlying revm/grevm
+    /// semantics, not from the gate short-circuiting both backends onto the
+    /// same fast path.
+    ///
+    /// Dual to U-6 (gate ON) and complementary to U-7b: U-7b compares
+    /// `gas_used` across the fork on a single backend; U-6d compares
+    /// bundles across backends on the pre-Alpha side of the fork.
+    #[test]
+    fn u6d_test_pre_alpha_baseline_symmetry() {
+        // Alpha never fires: pushed out to u64::MAX so `is_system_tx_gas_exempt`
+        // is guaranteed off at the block ts we synthesize below.
+        let chain_spec = alpha_active_chainspec(u64::MAX);
+        let chain_id = chain_spec.chain().id();
+        assert!(
+            !is_system_tx_gas_exempt(chain_spec.as_ref(), 1),
+            "test fixture sanity: Alpha must be inactive at ts=1 with Alpha=u64::MAX"
+        );
+
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let header = alpha_block_header(1);
+        let evm_env = evm_config.evm_env(&header).expect("evm_env must build");
+
+        // With the gate off, `gas_price = 0` would trip `GasPriceLessThanBasefee`.
+        // Use the block's basefee (production fallback path — matches U-7b's
+        // `tx_pre`) so the tx clears revm's fee-check without further cfg
+        // manipulation, keeping the comparison isolated to backend semantics.
+        let basefee = evm_env.block_env.basefee as u128;
+        let build_tx = |nonce: u64| TxEnv {
+            caller: SYSTEM_CALLER,
+            gas_limit: 1_000_000,
+            gas_price: basefee,
+            kind: TxKind::Call(SYSTEM_CALLER),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            nonce,
+            chain_id: Some(chain_id),
+            ..TxEnv::default()
+        };
+        let tx0 = build_tx(0);
+        let tx1 = build_tx(1);
+
+        // Fund SYSTEM_CALLER generously so `basefee × gas_limit × 2` clears
+        // the balance check trivially — the test isn't measuring balance
+        // arithmetic, only backend equivalence.
+        let funded = U256::from(u128::MAX);
+
+        let mut serial =
+            WrapExecutor::new(BasicBlockExecutor::new(evm_config.clone(), seeded_db(funded, 0)));
+        serial
+            .transact_system_txn(evm_env.clone(), Vec::new(), tx0.clone())
+            .expect("serial pre-Alpha tx0 must succeed (production fallback path)");
+        serial
+            .transact_system_txn(evm_env.clone(), Vec::new(), tx1.clone())
+            .expect("serial pre-Alpha tx1 must succeed (production fallback path)");
+        let bundle_serial = serial.take_bundle();
+
+        let mut grevm = GrevmExecutor::new(chain_spec.clone(), &evm_config, seeded_db(funded, 0));
+        grevm
+            .transact_system_txn(evm_env.clone(), Vec::new(), tx0)
+            .expect("grevm pre-Alpha tx0 must succeed (production fallback path)");
+        grevm
+            .transact_system_txn(evm_env, Vec::new(), tx1)
+            .expect("grevm pre-Alpha tx1 must succeed (production fallback path)");
+        let bundle_grevm = grevm.take_bundle();
+
+        // Load-bearing byte-equivalence (same fields as U-6; see U-6 comment
+        // for the `reverts_size` skip rationale).
+        assert_eq!(bundle_serial.state, bundle_grevm.state, "pre-Alpha: state map drift");
+        assert_eq!(bundle_serial.contracts, bundle_grevm.contracts, "pre-Alpha: contracts drift");
+        assert_eq!(
+            bundle_serial.state_size, bundle_grevm.state_size,
+            "pre-Alpha: state_size drift"
+        );
+        assert_eq!(bundle_serial.reverts, bundle_grevm.reverts, "pre-Alpha: reverts content drift");
+
+        // Sanity: SYSTEM_CALLER balance strictly decreased (fee was actually
+        // debited) — proves the gate stayed off and we didn't accidentally
+        // exercise the gas-exempt path.
+        let serial_info = bundle_serial
+            .state
+            .get(&SYSTEM_CALLER)
+            .and_then(|a| a.info.as_ref())
+            .expect("SYSTEM_CALLER must be in serial bundle after two pre-Alpha txs");
+        assert!(
+            serial_info.balance < funded,
+            "SYSTEM_CALLER balance must be debited under the pre-Alpha (gate-off) path"
+        );
+        assert_eq!(serial_info.nonce, 2, "nonce must bump by 2 (one per system tx)");
+
+        // NB: we deliberately do NOT assert coinbase received a positive
+        // balance. With `gas_price = basefee` (production fallback shape),
+        // the EIP-1559 split is `priority_fee = gas_price - basefee = 0`
+        // — the entire fee is burned and coinbase receives nothing. The
+        // `SYSTEM_CALLER.balance < funded` check above is sufficient to
+        // prove the pre-Alpha fee path was exercised (fee was debited);
+        // asserting coinbase balance would only re-derive EIP-1559 math
+        // and is not the invariant U-6d cares about.
+    }
 }
