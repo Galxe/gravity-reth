@@ -267,9 +267,27 @@ where
 
                 let tx_env = this.eth_api().evm_config().tx_env(&tx);
 
+                // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring
+                // for the *target* tx. `replay_transactions_until` above toggles
+                // the cfg for pre-target replay txs internally, but the target
+                // tx trace uses `evm_env` unmodified — so a post-Alpha system tx
+                // (`gas_price = 0` vs `basefee > 0`) would fail with
+                // `GasPriceLessThanBasefee`. Mirrors the parity-namespace path
+                // in `spawn_trace_transaction_in_block_with_inspector`
+                // (`crates/rpc/rpc-eth-api/src/helpers/trace.rs`).
+                let mut target_evm_env = evm_env;
+                if is_system_tx_gas_exempt(
+                    this.eth_api().provider().chain_spec().as_ref(),
+                    target_evm_env.block_env.timestamp.saturating_to::<u64>(),
+                ) && is_gravity_system_caller(tx.signer())
+                {
+                    target_evm_env.cfg_env.disable_base_fee = true;
+                    target_evm_env.cfg_env.disable_balance_check = true;
+                }
+
                 this.trace_transaction(
                     &opts,
-                    evm_env,
+                    target_evm_env,
                     tx_env,
                     &mut db,
                     Some(TransactionContext {

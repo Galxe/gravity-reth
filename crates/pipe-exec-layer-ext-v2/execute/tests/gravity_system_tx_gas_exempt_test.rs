@@ -14,11 +14,7 @@
 //!   activation block T zeroes it via `system_caller_migration::apply_state_changes_for_block`;
 //!   subsequent blocks keep executing 1 metadata system tx each while balance stays 0.
 //!
-//! - §2.2: dual-backend parity — running the same Alpha-crossing block sequence under both grevm
-//!   (parallel) and `--gravity.disable-grevm` (serial `WrapExecutor`) yields **identical** state
-//!   roots at every block, including T-1 (pre-fork), T (activation), and T+i (post-fork). Pinned by
-//!   the shared `apply_state_change` channel + serial/grevm-symmetric `transact_system_txn`
-//!   exemption.
+//! §2.2 coverage moved to U-6b/U-6c/U-6d unit tests (see PR #377).
 //!
 //! Naming and scaffolding mirror `gravity_eip2935_test.rs` /
 //! `gravity_bls_precompile_test.rs` so the matrix row maps 1:1 to a `cargo
@@ -407,62 +403,6 @@ fn test_e2e_system_tx_alpha_activation_disable_grevm() {
         |b| run_alpha_e2e(b, "disable_grevm"),
     );
     assert!(!state_roots.is_empty(), "runner must return non-empty state-root map");
-}
-
-// ---------------------------------------------------------------------------
-// §2.2 dual-backend state-root equivalence across the Alpha boundary.
-//
-// Drives the same activation runner once under grevm and once under
-// `--gravity.disable-grevm`, then asserts the per-block state-root maps match
-// byte-for-byte at every block in {T-1, T, T+1..T+5}. The pre-Alpha entry
-// (T-1) guards against baseline drift (anything that diverges before the fork
-// must be a pre-existing serial/grevm bug, not the Alpha bundle). T and T+i
-// pin both lever paths plus the migration hook.
-//
-// Two CLI invocations live inside one #[test] function — each `run_pipe_e2e_test`
-// drives its own CliRunner against an isolated datadir, so the second
-// invocation re-uses the same harness without inheriting state.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_e2e_dual_backend_state_root_equivalence_across_alpha_boundary() {
-    let chain_spec = gravity_alpha_chainspec(ALPHA_TIME);
-
-    let grevm_roots = run_pipe_e2e_test(
-        &chain_spec,
-        "data/gravity_system_tx_gas_exempt_dual_grevm",
-        false,
-        |b| run_alpha_e2e(b, "dual/grevm"),
-    );
-    let serial_roots = run_pipe_e2e_test(
-        &chain_spec,
-        "data/gravity_system_tx_gas_exempt_dual_serial",
-        true,
-        |b| run_alpha_e2e(b, "dual/serial"),
-    );
-
-    assert_eq!(
-        grevm_roots.len(),
-        serial_roots.len(),
-        "dual-backend runs must produce state-root maps of equal cardinality (grevm={}, serial={})",
-        grevm_roots.len(),
-        serial_roots.len()
-    );
-
-    for (block, grevm_root) in &grevm_roots {
-        let serial_root = serial_roots
-            .get(block)
-            .unwrap_or_else(|| panic!("serial run is missing state_root for block {block}"));
-        assert_eq!(
-            grevm_root, serial_root,
-            "block {block} state_root divergence: grevm={grevm_root:?} serial={serial_root:?} — Alpha bundle (L1 cfg + L2 gas_price + migration hook) must be serial==grevm symmetric"
-        );
-    }
-
-    println!(
-        "[alpha_e2e dual] all {} block state-roots match across grevm + serial backends",
-        grevm_roots.len()
-    );
 }
 
 // ---------------------------------------------------------------------------

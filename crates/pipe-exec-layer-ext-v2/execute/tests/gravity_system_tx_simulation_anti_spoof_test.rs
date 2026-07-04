@@ -65,11 +65,22 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 // Parameters
 // ---------------------------------------------------------------------------
 
-/// `alphaTime = 1` so every block in the test (numbers 1..=) is strictly
-/// post-Alpha (block 1's timestamp = `ALPHA_TS_BASE + 1` >> 1). The migration
-/// hook fires at block 1 and SYSTEM_CALLER.balance is zeroed thereafter.
+/// Block N timestamp (seconds) = `ALPHA_TS_BASE + N`. Set Alpha activation
+/// to block 1's timestamp so:
+///   - parent (genesis) ts = `gravity_hardfork.json` 0x6490fdd2 = 1687223762 is strictly less than
+///     `ALPHA_TIME_ALWAYS`
+///   - block 1's ts == `ALPHA_TIME_ALWAYS` — Alpha activates exactly at block 1, the migration hook
+///     fires once (zeroing SYSTEM_CALLER.balance), and every block in `1..=TIP_BLOCK` is post-Alpha
+///
+/// (The previously committed `ALPHA_TIME_ALWAYS = 1` was a fixture bug:
+/// `transitions_at_timestamp(parent=1687223762, current=block_n_ts, activation=1)`
+/// returns false for every n because parent already crossed activation,
+/// so the migration never fired and SYSTEM_CALLER.balance stayed at the
+/// sentinel value — making the "post-Alpha balance must be 0" sanity check
+/// panic before any endpoint invocation ran. Same pattern already documented
+/// and fixed in `gravity_system_tx_post_alpha_trace_test.rs`.)
 const ALPHA_TS_BASE: u64 = 2_000_000_000;
-const ALPHA_TIME_ALWAYS: u64 = 1;
+const ALPHA_TIME_ALWAYS: u64 = ALPHA_TS_BASE + 1;
 const TIP_BLOCK: u64 = 10;
 
 /// `SYSTEM_CALLER = 0x…625f0000` — same literal as
@@ -90,6 +101,19 @@ fn gravity_alpha_chainspec(alpha_time: u64) -> String {
         serde_json::from_str(include_str!("../gravity_hardfork.json"))
             .expect("gravity_hardfork.json must parse as JSON");
     json["config"]["alphaTime"] = serde_json::json!(alpha_time);
+    // Pre-seed SYSTEM_CALLER with nonce=1 so the Alpha migration's
+    // balance-zeroing transition produces (balance=0, nonce=1, code=empty)
+    // which stays non-empty under EIP-161. Without this, the migration
+    // would zero balance on a fresh nonce=0 account, transitioning
+    // SYSTEM_CALLER to (balance=0, nonce=0, code=empty) — an "empty"
+    // touched state that revm's AccountStatus state machine rejects
+    // (`Wrong state transition, touch empty is not possible from Loaded`).
+    // In production this never happens because pre-Alpha system txs
+    // already bumped SYSTEM_CALLER nonce by the time Alpha activates;
+    // this fixture mirrors that precondition without paying the cost of
+    // running a real pre-Alpha block series first. Same rationale
+    // documented in `gravity_system_tx_post_alpha_trace_test.rs`.
+    json["alloc"]["0x00000000000000000000000000000001625f0000"]["nonce"] = serde_json::json!(1);
     json.to_string()
 }
 
@@ -278,8 +302,9 @@ async fn run_simulation_anti_spoof(
 
     // Push enough blocks past Alpha so SYSTEM_CALLER.balance is zero and a
     // post-Alpha state snapshot is queryable. Block 1 already activates Alpha
-    // (alphaTime=1, block 1 ts >> 1), but pushing to TIP_BLOCK keeps the test
-    // robust against post-fork blocks accidentally regressing.
+    // (alphaTime=ALPHA_TS_BASE+1, block 1 ts == alphaTime), but pushing to
+    // TIP_BLOCK keeps the test robust against post-fork blocks accidentally
+    // regressing.
     let consensus = MockConsensus::new(pipeline_api, Box::new(alpha_ts_us));
     consensus.push_empty_range(&mut epoch, 1, TIP_BLOCK).await;
     let pipeline_api = consensus.into_inner();

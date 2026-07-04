@@ -112,13 +112,27 @@ jobs:
         # crate, including ones that don't compile in this workspace (e.g.
         # gravity_hardfork_test.rs depends on reth-ethereum-forks which is not
         # in dev-dependencies). `--test` restricts both compile and run.
+        #
+        # The `gravity_system_tx_*` + `gravity_bls_*` binaries were added by
+        # #367 and #370 but originally never wired here — they compiled in
+        # local dev but CI silently skipped them, so latent regressions
+        # (e.g. `debug_traceTransaction` target-tx gas-exempt cfg gap) went
+        # unnoticed. Invariant 9 in `scripts/check-gravity-invariants.sh`
+        # now pins the allowlist so any new file matching those globs must
+        # either be wired here or be listed in the invariant's
+        # `KNOWN_UNWIRED_TESTS` skip set with a reason.
         run: |
           cargo nextest run \
             --locked \
             -p reth-pipe-exec-layer-ext-v2 \
             --test gravity_pipe_test \
             --test gravity_eip2935_test \
-            --test gravity_eip7702_test
+            --test gravity_eip7702_test \
+            --test gravity_system_tx_gas_exempt_test \
+            --test gravity_system_tx_pre_alpha_replay_test \
+            --test gravity_system_tx_simulation_anti_spoof_test \
+            --test gravity_bls_precompile_test \
+            --test gravity_system_tx_bls_replay_test
 
   integration-success:
     name: integration success

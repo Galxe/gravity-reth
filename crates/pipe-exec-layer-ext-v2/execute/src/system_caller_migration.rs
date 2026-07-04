@@ -427,4 +427,336 @@ mod tests {
         // §6.1 #2 should also fail. The unit test is a fast-feedback canary.
         assert_eq!(SYSTEM_CALLER, address!("0x00000000000000000000000000000001625f0000"));
     }
+
+    // ================================================================
+    // U-6b / U-6c — extensions to the U-6 dual-backend equivalence tests
+    // (defined in `crates/ethereum/evm/src/parallel_execute.rs`).
+    //
+    // These tests live here rather than beside U-6 because
+    // `apply_state_changes_for_block` is `pub(crate)` to this crate and
+    // pipe-exec-layer is downstream of `reth-evm-ethereum`. Colocating the
+    // tests with the hook they exercise avoids either promoting the hook
+    // to `pub` (widens the API surface for a test-only concern) or
+    // reaching into pipe-layer runtime from the U-6 module.
+    // U-6d does not need the hook and lives with U-6.
+    // ================================================================
+
+    /// Build a grevm-backed executor seeded with a `SYSTEM_CALLER` account.
+    ///
+    /// Mirrors [`fresh_executor`] but constructs
+    /// [`reth_evm_ethereum::parallel_execute::GrevmExecutor`] so U-6b/U-6c can
+    /// compare the migration hook / cross-block bundle against the serial
+    /// (`WrapExecutor`) path. Uses `CacheDB<EmptyDB>` on both sides so the
+    /// pre-hook state is byte-identical between backends.
+    fn fresh_grevm_executor(
+        chain_spec: Arc<reth_chainspec::ChainSpec>,
+        seed: AccountInfo,
+    ) -> reth_evm_ethereum::parallel_execute::GrevmExecutor<
+        CacheDB<EmptyDB>,
+        EthEvmConfig,
+        reth_chainspec::ChainSpec,
+    > {
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(SYSTEM_CALLER, seed);
+        reth_evm_ethereum::parallel_execute::GrevmExecutor::new(chain_spec, &evm_config, db)
+    }
+
+    // --- U-6b: migration hook symmetry across serial vs grevm backends ---
+
+    /// `u6b`: the Alpha `SYSTEM_CALLER` migration hook must produce
+    /// byte-identical `BundleState` on both backends. Serial routes through
+    /// `WrapExecutor::apply_state_change`; grevm routes through
+    /// `GrevmExecutor::apply_state_change`. Both consume the same diff shape
+    /// emitted by [`apply_state_changes_for_block`], so any drift is a
+    /// backend-side commit-semantics bug and would fork state root on the
+    /// activation block.
+    ///
+    /// Complements the existing U-6 (`transact_system_txn` equivalence) —
+    /// U-6 never triggers migration (its seed is already balance=0) and U-6b
+    /// never runs a system tx, so together they cover the two orthogonal
+    /// diff sources that land in an Alpha activation block.
+    #[test]
+    fn u6b_test_migration_hook_symmetry() {
+        let chain_spec = alpha_chainspec();
+        let code = nonempty_code();
+        let code_hash = code.hash_slow();
+        let seed = AccountInfo {
+            balance: sentinel_balance(),
+            nonce: 5,
+            code_hash,
+            code: Some(code.clone()),
+        };
+
+        // Serial: WrapExecutor over CacheDB<EmptyDB>, seeded identically.
+        let mut serial = fresh_executor(chain_spec.clone(), seed.clone());
+        apply_state_changes_for_block(
+            &mut serial
+                as &mut dyn ParallelExecutor<
+                    Primitives = EthPrimitives,
+                    Error = BlockExecutionError,
+                >,
+            chain_spec.as_ref(),
+            ALPHA_TS,
+            ALPHA_TS - 1,
+            42,
+        );
+        let bundle_serial = serial.take_bundle();
+
+        // Grevm: GrevmExecutor over CacheDB<EmptyDB>, seeded identically.
+        let mut grevm = fresh_grevm_executor(chain_spec.clone(), seed);
+        apply_state_changes_for_block(
+            &mut grevm
+                as &mut dyn ParallelExecutor<
+                    Primitives = EthPrimitives,
+                    Error = BlockExecutionError,
+                >,
+            chain_spec.as_ref(),
+            ALPHA_TS,
+            ALPHA_TS - 1,
+            42,
+        );
+        let bundle_grevm = grevm.take_bundle();
+
+        // Load-bearing byte-equivalence. Same field selection as U-6 —
+        // `reverts_size` skipped for the same reason (grevm's
+        // `parallel_apply_transitions_and_create_reverts` does not update
+        // `reverts_size`; not consensus-affecting).
+        assert_eq!(
+            bundle_serial.state, bundle_grevm.state,
+            "migration hook state map drift between serial and grevm"
+        );
+        assert_eq!(
+            bundle_serial.contracts, bundle_grevm.contracts,
+            "migration hook contracts drift between serial and grevm"
+        );
+        assert_eq!(
+            bundle_serial.state_size, bundle_grevm.state_size,
+            "migration hook state_size drift between serial and grevm"
+        );
+        assert_eq!(
+            bundle_serial.reverts, bundle_grevm.reverts,
+            "migration hook reverts drift between serial and grevm"
+        );
+
+        // Sanity: the migration actually did its job on the serial side
+        // (mirrored on grevm via the byte-equality above).
+        let acc = bundle_serial
+            .state
+            .get(&SYSTEM_CALLER)
+            .expect("SYSTEM_CALLER must be present after migration");
+        let info = acc.info.as_ref().expect("info present");
+        assert_eq!(info.balance, U256::ZERO, "balance must be zeroed by migration");
+        assert_eq!(info.nonce, 5, "nonce must be preserved by migration");
+        assert_eq!(info.code_hash, code_hash, "code_hash must be preserved by migration");
+        assert!(!info.is_empty(), "post-migration SYSTEM_CALLER must survive EIP-161 (nonce > 0)");
+    }
+
+    // --- U-6c: cross-block bundle carryover (activation + 5 post-Alpha) ---
+
+    /// `u6c`: run a sequence of 6 blocks through both backends
+    /// (activation block T + five post-Alpha blocks T+1..T+5), asserting
+    /// per-block `BundleState` byte-equivalence at every step. Pins that
+    /// backend state carryover across blocks does not drift — a bug that
+    /// only surfaces cumulatively (e.g. grevm forgetting a nonce bump
+    /// between blocks) would show up here as a drift in block N ≥ 2, but
+    /// not in the single-block U-6 or the single-hook U-6b.
+    ///
+    /// Uses "方案 A" from the design doc: the executor is reused across
+    /// blocks, `take_bundle` drains the bundle_state but preserves the
+    /// underlying cache, so block N+1 runs against the accumulated state
+    /// from blocks 1..N without any explicit re-seeding.
+    ///
+    /// The activation block also exercises the load-bearing "migration hook
+    /// diff + system-tx diff on the same block" combination — a serial /
+    /// grevm ordering mismatch there (migration written after tx instead of
+    /// before, or interleaved with the wrong state view) would fail at
+    /// block 1 of the sequence.
+    #[test]
+    fn u6c_test_cross_block_bundle_carryover() {
+        // Alpha = 1000. First block ts = 1000 → migration hook fires.
+        // Subsequent 5 blocks (ts 1001..=1005) → hook is a no-op, only
+        // system txs execute.
+        const ALPHA_C: u64 = 1000;
+        let mut spec = ChainSpecBuilder::from(&*MAINNET)
+            .shanghai_activated()
+            .cancun_activated()
+            .prague_activated()
+            .build();
+        spec.gravity_hardforks =
+            ChainHardforks::from([(GravityHardfork::Alpha, ForkCondition::Timestamp(ALPHA_C))]);
+        let chain_spec = Arc::new(spec);
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+
+        // Both backends: seed SYSTEM_CALLER with the sentinel balance (mirror
+        // production genesis pre-Alpha) and a non-zero nonce. Nonce is set
+        // to 1 rather than 0 so the post-migration `AccountInfo` is
+        // non-empty even before any tx has bumped the nonce — the migration
+        // hook's `apply_state_change` runs with `state_clear_flag = false`
+        // (only `transact_system_txn` flips that flag on the underlying
+        // `State`), and revm's pre-EIP-161 path (`touch_create_pre_eip161`
+        // → `on_touched_created_pre_eip161`) panics with "Wrong state
+        // transition, touch crate is not possible from Loaded" when the
+        // touched account is empty. Nonce ≥ 1 avoids that trap and matches
+        // production reality (SYSTEM_CALLER always has non-zero nonce by
+        // the time Alpha activates — it has been executing per-block system
+        // txs since block 1).
+        let seed = AccountInfo {
+            balance: sentinel_balance(),
+            nonce: 1,
+            code_hash: KECCAK_EMPTY,
+            code: None,
+        };
+        let mut serial = fresh_executor(chain_spec.clone(), seed.clone());
+        let mut grevm = fresh_grevm_executor(chain_spec.clone(), seed);
+
+        // Blocks: (block_number, timestamp, parent_ts)
+        //   block 1 = activation (ts 1000, parent 999) — migration fires
+        //   blocks 2..=6 = post-Alpha (ts 1001..=1005) — migration no-op
+        let sequence: [(u64, u64, u64); 6] = [
+            (1, 1000, 999),
+            (2, 1001, 1000),
+            (3, 1002, 1001),
+            (4, 1003, 1002),
+            (5, 1004, 1003),
+            (6, 1005, 1004),
+        ];
+
+        // Build a Prague-shaped header for each block. Only `timestamp` and
+        // `number` matter for the `EthEvmConfig::evm_env` shape used by
+        // `transact_system_txn`; `parent_hash` / `parent_beacon_block_root`
+        // stay defaulted since we do not chain them through consensus here.
+        let build_header = |number: u64, timestamp: u64| alloy_consensus::Header {
+            parent_hash: alloy_primitives::B256::ZERO,
+            timestamp,
+            number,
+            requests_hash: Some(alloy_eips::eip7685::EMPTY_REQUESTS_HASH),
+            excess_blob_gas: Some(0),
+            blob_gas_used: Some(0),
+            parent_beacon_block_root: Some(alloy_primitives::B256::ZERO),
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..alloy_consensus::Header::default()
+        };
+
+        // Metadata-shaped system tx (gas_price=0, gas-exempt under Alpha).
+        let build_tx = |nonce: u64| revm::context::TxEnv {
+            caller: SYSTEM_CALLER,
+            gas_limit: 1_000_000,
+            gas_price: 0,
+            kind: revm::primitives::TxKind::Call(SYSTEM_CALLER),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            nonce,
+            chain_id: Some(chain_id),
+            ..revm::context::TxEnv::default()
+        };
+
+        // Sanity: gate is ON at ts 1000 (activation), post-Alpha blocks too.
+        assert!(
+            reth_chainspec::is_system_tx_gas_exempt(chain_spec.as_ref(), 1000),
+            "U-6c fixture: gate must be ON at activation ts"
+        );
+        assert!(
+            reth_chainspec::is_system_tx_gas_exempt(chain_spec.as_ref(), 1005),
+            "U-6c fixture: gate must remain ON post-Alpha"
+        );
+
+        for (block_num, ts, prev_ts) in sequence {
+            let header = build_header(block_num, ts);
+            let evm_env = <EthEvmConfig as reth_evm::ConfigureEvm>::evm_env(&evm_config, &header)
+                .expect("evm_env must build");
+
+            // 1) migration hook (fires exactly on block 1, no-op on 2..=6)
+            apply_state_changes_for_block(
+                &mut serial
+                    as &mut dyn ParallelExecutor<
+                        Primitives = EthPrimitives,
+                        Error = BlockExecutionError,
+                    >,
+                chain_spec.as_ref(),
+                ts,
+                prev_ts,
+                block_num,
+            );
+            apply_state_changes_for_block(
+                &mut grevm
+                    as &mut dyn ParallelExecutor<
+                        Primitives = EthPrimitives,
+                        Error = BlockExecutionError,
+                    >,
+                chain_spec.as_ref(),
+                ts,
+                prev_ts,
+                block_num,
+            );
+
+            // 2) two system txs per block. Seed nonce = 1, so tx nonces
+            // start at 1 and grow monotonically: block 1 uses (1, 2),
+            // block 2 uses (3, 4), ..., block N uses (2*(N-1)+1, 2*(N-1)+2).
+            let n_meta = 2 * (block_num - 1) + 1;
+            let n_val = 2 * (block_num - 1) + 2;
+            serial
+                .transact_system_txn(evm_env.clone(), Vec::new(), build_tx(n_meta))
+                .unwrap_or_else(|e| panic!("serial block {block_num} metadata tx failed: {e:?}"));
+            serial
+                .transact_system_txn(evm_env.clone(), Vec::new(), build_tx(n_val))
+                .unwrap_or_else(|e| panic!("serial block {block_num} validator tx failed: {e:?}"));
+            grevm
+                .transact_system_txn(evm_env.clone(), Vec::new(), build_tx(n_meta))
+                .unwrap_or_else(|e| panic!("grevm block {block_num} metadata tx failed: {e:?}"));
+            grevm
+                .transact_system_txn(evm_env, Vec::new(), build_tx(n_val))
+                .unwrap_or_else(|e| panic!("grevm block {block_num} validator tx failed: {e:?}"));
+
+            // 3) drain bundle at end-of-block and assert byte equivalence.
+            // Draining resets bundle_state on both backends but preserves
+            // the underlying cache, so the next iteration continues from
+            // the accumulated state (方案 A from the design doc).
+            let bs = serial.take_bundle();
+            let bg = grevm.take_bundle();
+            assert_eq!(
+                bs.state, bg.state,
+                "block {block_num}: state map drift between serial and grevm"
+            );
+            assert_eq!(
+                bs.contracts, bg.contracts,
+                "block {block_num}: contracts drift between serial and grevm"
+            );
+            assert_eq!(
+                bs.state_size, bg.state_size,
+                "block {block_num}: state_size drift between serial and grevm"
+            );
+            assert_eq!(
+                bs.reverts, bg.reverts,
+                "block {block_num}: reverts drift between serial and grevm"
+            );
+
+            // Sanity per block: after end-of-block drain, SYSTEM_CALLER's
+            // nonce in the just-drained serial bundle equals the highest
+            // tx nonce we issued this block + 1 (revm bumps nonce on each
+            // successful tx).
+            if let Some(info) = bs.state.get(&SYSTEM_CALLER).and_then(|a| a.info.as_ref()) {
+                assert_eq!(
+                    info.nonce,
+                    n_val + 1,
+                    "block {block_num}: SYSTEM_CALLER nonce must reflect all txs so far"
+                );
+                // At and after activation, migration + subsequent txs keep
+                // balance at zero (gas-exempt under Alpha ⇒ no fee debit).
+                assert_eq!(
+                    info.balance,
+                    U256::ZERO,
+                    "block {block_num}: SYSTEM_CALLER balance must be zero post-migration"
+                );
+            }
+        }
+
+        // Final: after 6 blocks × 2 txs = 12 txs, SYSTEM_CALLER nonce
+        // observable via the last block's bundle equals 12. Already checked
+        // per-iteration above; this is a summary anchor for the sequence.
+        // No additional read here — the per-block assertions already pin
+        // the cumulative invariant.
+    }
 }
