@@ -269,10 +269,6 @@ declare -A KNOWN_UNWIRED_TESTS=(
     # block. Locally the block-family assertion diverges by ~9.4k gas at
     # block 1's metadata tx. Wire after those land.
     [gravity_system_tx_post_alpha_trace_test]="blocked on #372 mint precompile RPC registration + RPC-side Alpha migration hook"
-    # Requires PR #370 (BLS pop-verify precompile RPC registration) to land.
-    # The file exists on upstream/main but the RPC-side helper it exercises
-    # is only registered by #370.
-    [gravity_bls_precompile_test]="blocked on #370 (BLS pop-verify RPC registration)"
 )
 
 workflow="$REPO_ROOT/.github/workflows/integration.yml"
