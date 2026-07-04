@@ -263,12 +263,18 @@ echo "Invariant 9: CI --test allowlist covers all gravity_system_tx_* / gravity_
 # means the corresponding `--test <name>` line must be added to the
 # workflow.
 declare -A KNOWN_UNWIRED_TESTS=(
-    # Requires #372 Track A (mint precompile RPC registration) + the RPC-side
-    # `apply_state_change` Alpha migration hook for `SYSTEM_CALLER.balance`
-    # zeroing to reproduce canonical byte-equal traces on the Alpha activation
-    # block. Locally the block-family assertion diverges by ~9.4k gas at
-    # block 1's metadata tx. Wire after those land.
-    [gravity_system_tx_post_alpha_trace_test]="blocked on #372 mint precompile RPC registration + RPC-side Alpha migration hook"
+    # Blocked on #372 Track A (mint precompile RPC registration). Fixture is
+    # now correct (ALPHA_TIME_ALWAYS = ALPHA_TS_BASE + 1 and SYSTEM_CALLER
+    # pre-seeded with nonce=1 — see gravity_system_tx_post_alpha_trace_test.rs
+    # lines 82-113), so both `#[test]` fns reach the trace assertions instead
+    # of panicking on the pre-flight balance sanity check. What they now fail
+    # on is the block-family trace-vs-canonical byte-equal invariant:
+    # `trace_block(1)[0]` (block 1's metadata system tx) reports
+    # `gas_used = 292093` while canonical execution reports `gas_used = 282665`
+    # — a 9428-gas divergence caused by the RPC-side execution path missing
+    # the mint precompile registration that the pipe-layer canonical path has.
+    # Wire after #372 Track A lands.
+    [gravity_system_tx_post_alpha_trace_test]="blocked on #372 Track A (mint precompile RPC registration) — trace_block(1)[0] gas diverges 292093 vs canonical 282665 (delta 9428)"
 )
 
 workflow="$REPO_ROOT/.github/workflows/integration.yml"
