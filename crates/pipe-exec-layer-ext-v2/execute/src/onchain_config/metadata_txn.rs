@@ -69,74 +69,6 @@ impl SystemTxnResult {
         None
     }
 
-    /// Convert the system transaction result into a full executed block result
-    /// Used when new epoch is triggered and the block needs to be discarded.
-    pub(crate) fn into_executed_ordered_block_result(
-        self,
-        chain_spec: &ChainSpec,
-        ordered_block: &OrderedBlock,
-        base_fee: u64,
-        state: BundleState,
-        validators: Bytes,
-    ) -> ExecuteOrderedBlockResult {
-        let tx_type = self.txn.tx_type();
-        let gas_used = self.result.gas_used();
-        let mut block = Block {
-            header: Header {
-                beneficiary: ordered_block.coinbase,
-                timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
-                mix_hash: ordered_block.prev_randao,
-                base_fee_per_gas: Some(base_fee),
-                number: ordered_block.number,
-                gas_limit: PIPE_BLOCK_GAS_LIMIT,
-                ommers_hash: EMPTY_OMMER_ROOT_HASH,
-                nonce: BEACON_NONCE.into(),
-                gas_used,
-                ..Default::default()
-            },
-            body: BlockBody { transactions: vec![self.txn], ..Default::default() },
-        };
-
-        // Shanghai fork fields
-        if chain_spec.is_shanghai_active_at_timestamp(block.timestamp) {
-            block.header.withdrawals_root = Some(EMPTY_WITHDRAWALS);
-            block.body.withdrawals = Some(Withdrawals::default());
-        }
-
-        // Cancun fork fields
-        if chain_spec.is_cancun_active_at_timestamp(block.timestamp) {
-            // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
-            // execution?
-            block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
-
-            // TODO(nekomoto): fill `excess_blob_gas` and `blob_gas_used` fields
-            block.header.excess_blob_gas = Some(0);
-            block.header.blob_gas_used = Some(0);
-        }
-
-        let new_epoch = ordered_block.epoch + 1;
-        ExecuteOrderedBlockResult {
-            block,
-            senders: vec![SYSTEM_CALLER],
-            execution_output: BlockExecutionOutput {
-                state,
-                result: BlockExecutionResult {
-                    receipts: vec![Receipt {
-                        tx_type,
-                        success: self.result.is_success(),
-                        cumulative_gas_used: gas_used,
-                        logs: self.result.into_logs(),
-                    }],
-                    requests: Default::default(),
-                    gas_used,
-                },
-            },
-            txs_info: vec![],
-            gravity_events: vec![GravityEvent::NewEpoch(new_epoch, validators.into())],
-            epoch: new_epoch,
-        }
-    }
-
     /// Insert this system transaction into an existing executed block result at the specified
     /// position Position 0 is reserved for metadata tx, positions 1+ are for validator
     /// transactions
@@ -183,6 +115,92 @@ impl SystemTxnResult {
         );
         result.block.body.transactions.insert(insert_position, self.txn);
         result.senders.insert(insert_position, SYSTEM_CALLER);
+    }
+}
+
+/// Convert a completed system-transaction prefix into a full executed block result.
+/// Used when a system transaction triggers a new epoch and user transactions are discarded.
+pub(crate) fn system_txns_into_executed_ordered_block_result(
+    system_txn_results: Vec<SystemTxnResult>,
+    chain_spec: &ChainSpec,
+    ordered_block: &OrderedBlock,
+    base_fee: u64,
+    state: BundleState,
+    validators: Bytes,
+) -> ExecuteOrderedBlockResult {
+    debug_assert!(
+        !system_txn_results.is_empty(),
+        "epoch change requires at least the triggering system transaction"
+    );
+
+    let total_gas_used = system_txn_results.iter().map(|result| result.result.gas_used()).sum();
+    let mut block = Block {
+        header: Header {
+            beneficiary: ordered_block.coinbase,
+            timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
+            mix_hash: ordered_block.prev_randao,
+            base_fee_per_gas: Some(base_fee),
+            number: ordered_block.number,
+            gas_limit: PIPE_BLOCK_GAS_LIMIT,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            nonce: BEACON_NONCE.into(),
+            gas_used: total_gas_used,
+            ..Default::default()
+        },
+        body: BlockBody {
+            transactions: Vec::with_capacity(system_txn_results.len()),
+            ..Default::default()
+        },
+    };
+
+    // Shanghai fork fields
+    if chain_spec.is_shanghai_active_at_timestamp(block.timestamp) {
+        block.header.withdrawals_root = Some(EMPTY_WITHDRAWALS);
+        block.body.withdrawals = Some(Withdrawals::default());
+    }
+
+    // Cancun fork fields
+    if chain_spec.is_cancun_active_at_timestamp(block.timestamp) {
+        // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
+        // execution?
+        block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
+
+        // TODO(nekomoto): fill `excess_blob_gas` and `blob_gas_used` fields
+        block.header.excess_blob_gas = Some(0);
+        block.header.blob_gas_used = Some(0);
+    }
+
+    let mut receipts = Vec::with_capacity(system_txn_results.len());
+    let mut senders = Vec::with_capacity(system_txn_results.len());
+    let mut cumulative_gas_used = 0;
+    for SystemTxnResult { result, txn } in system_txn_results {
+        let gas_used = result.gas_used();
+        cumulative_gas_used += gas_used;
+        receipts.push(Receipt {
+            tx_type: txn.tx_type(),
+            success: result.is_success(),
+            cumulative_gas_used,
+            logs: result.into_logs(),
+        });
+        block.body.transactions.push(txn);
+        senders.push(SYSTEM_CALLER);
+    }
+
+    let new_epoch = ordered_block.epoch + 1;
+    ExecuteOrderedBlockResult {
+        block,
+        senders,
+        execution_output: BlockExecutionOutput {
+            state,
+            result: BlockExecutionResult {
+                receipts,
+                requests: Default::default(),
+                gas_used: total_gas_used,
+            },
+        },
+        txs_info: vec![],
+        gravity_events: vec![GravityEvent::NewEpoch(new_epoch, validators.into())],
+        epoch: new_epoch,
     }
 }
 
@@ -239,4 +257,68 @@ pub fn construct_metadata_txn(
     let input: Bytes = call.abi_encode().into();
 
     new_system_call_txn(BLOCK_ADDR, nonce, gas_price, input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Address, B256, U256};
+    use revm::context_interface::result::{Output, SuccessReason};
+
+    fn system_txn_result(nonce: u64, gas_used: u64) -> SystemTxnResult {
+        SystemTxnResult {
+            result: ExecutionResult::Success {
+                reason: SuccessReason::Return,
+                gas_used,
+                gas_refunded: 0,
+                logs: vec![],
+                output: Output::Call(Bytes::new()),
+            },
+            txn: construct_metadata_txn(nonce, 1, 1_000_000, Some(0), &[]),
+        }
+    }
+
+    fn ordered_block() -> OrderedBlock {
+        OrderedBlock {
+            epoch: 3,
+            parent_id: B256::with_last_byte(1),
+            id: B256::with_last_byte(2),
+            number: 11,
+            timestamp_us: 1_000_000,
+            coinbase: Address::ZERO,
+            prev_randao: B256::ZERO,
+            withdrawals: Withdrawals::default(),
+            transactions: vec![],
+            senders: vec![],
+            proposer_index: Some(0),
+            failed_proposer_indices: vec![],
+            extra_data: vec![],
+            randomness: U256::ZERO,
+        }
+    }
+
+    #[test]
+    fn system_txns_into_epoch_change_result_preserves_completed_prefix() {
+        let results =
+            vec![system_txn_result(10, 3), system_txn_result(11, 5), system_txn_result(12, 7)];
+        let result = system_txns_into_executed_ordered_block_result(
+            results,
+            &ChainSpec::default(),
+            &ordered_block(),
+            1,
+            BundleState::default(),
+            Bytes::from_static(b"validators"),
+        );
+
+        assert_eq!(result.block.body.transactions.len(), 3);
+        assert_eq!(result.execution_output.result.receipts.len(), 3);
+        assert_eq!(result.senders, vec![SYSTEM_CALLER; 3]);
+        assert_eq!(result.block.header.gas_used, 15);
+        assert_eq!(result.execution_output.result.gas_used, 15);
+        assert_eq!(result.execution_output.result.receipts[0].cumulative_gas_used, 3);
+        assert_eq!(result.execution_output.result.receipts[1].cumulative_gas_used, 8);
+        assert_eq!(result.execution_output.result.receipts[2].cumulative_gas_used, 15);
+        assert_eq!(result.epoch, 4);
+        assert!(matches!(result.gravity_events.as_slice(), [GravityEvent::NewEpoch(4, _)]));
+    }
 }

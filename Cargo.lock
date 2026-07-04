@@ -273,30 +273,8 @@ dependencies = [
  "derive_more",
  "op-alloy-consensus",
  "op-alloy-rpc-types-engine",
- "op-revm 10.1.1",
- "revm 29.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "thiserror 2.0.17",
-]
-
-[[package]]
-name = "alloy-evm"
-version = "0.21.3"
-source = "git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity#b1e00249990b054c90681931f03db9edccda7e89"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-hardforks",
- "alloy-op-hardforks",
- "alloy-primitives",
- "alloy-rpc-types-engine",
- "alloy-rpc-types-eth",
- "alloy-sol-types",
- "auto_impl",
- "derive_more",
- "op-alloy-consensus",
- "op-alloy-rpc-types-engine",
- "op-revm 10.1.0",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "op-revm",
+ "revm",
  "thiserror 2.0.17",
 ]
 
@@ -403,13 +381,13 @@ checksum = "d0b6679dc8854285d6c34ef6a9f9ade06dec1f5db8aab96e941d99b8abcefb72"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "alloy-evm",
  "alloy-op-hardforks",
  "alloy-primitives",
  "auto_impl",
  "op-alloy-consensus",
- "op-revm 10.1.1",
- "revm 29.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "op-revm",
+ "revm",
 ]
 
 [[package]]
@@ -1032,7 +1010,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=e9544c8cb3d8a5757d4c7f1b4807b312c03ba060#e9544c8cb3d8a5757d4c7f1b4807b312c03ba060"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=b1f68dc85781ef0d28a568d9d64604b153be9d9e#b1f68dc85781ef0d28a568d9d64604b153be9d9e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3271,7 +3249,7 @@ dependencies = [
  "reth-tracing",
  "reth-trie",
  "reth-trie-db",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -3517,7 +3495,7 @@ name = "example-custom-beacon-withdrawals"
 version = "0.0.0"
 dependencies = [
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-sol-macro",
  "alloy-sol-types",
  "eyre",
@@ -3561,7 +3539,7 @@ dependencies = [
 name = "example-custom-evm"
 version = "0.0.0"
 dependencies = [
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-primitives",
  "eyre",
@@ -3575,7 +3553,7 @@ name = "example-custom-inspector"
 version = "0.0.0"
 dependencies = [
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "clap",
@@ -3589,7 +3567,7 @@ version = "0.0.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-network",
  "alloy-op-evm",
@@ -3606,7 +3584,7 @@ dependencies = [
  "op-alloy-consensus",
  "op-alloy-rpc-types",
  "op-alloy-rpc-types-engine",
- "op-revm 10.1.0",
+ "op-revm",
  "reth-chain-state",
  "reth-codecs",
  "reth-db-api",
@@ -3620,8 +3598,8 @@ dependencies = [
  "reth-payload-builder",
  "reth-rpc-api",
  "reth-rpc-engine-api",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
+ "revm-primitives",
  "serde",
  "test-fuzz",
  "thiserror 2.0.17",
@@ -3812,7 +3790,7 @@ dependencies = [
 name = "example-precompile-cache"
 version = "0.0.0"
 dependencies = [
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-primitives",
  "eyre",
@@ -4303,8 +4281,9 @@ name = "gravity-precompiles"
 version = "1.8.3"
 dependencies = [
  "alloy-primitives",
+ "blst",
  "reth-evm",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "tracing",
 ]
 
@@ -4333,7 +4312,7 @@ dependencies = [
  "reth-storage-api",
  "reth-trie",
  "reth-trie-parallel",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -4382,10 +4361,10 @@ dependencies = [
 [[package]]
 name = "grevm"
 version = "2.2.2"
-source = "git+https://github.com/Galxe/grevm?rev=a368f423a967678f556c8b07cbf0c6e6d1a31335#a368f423a967678f556c8b07cbf0c6e6d1a31335"
+source = "git+https://github.com/Galxe/grevm?rev=2a42859a56f03197fce5be4ceb475d9f1a7d7c3d#2a42859a56f03197fce5be4ceb475d9f1a7d7c3d"
 dependencies = [
  "ahash",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "atomic",
  "auto_impl",
  "dashmap 6.1.0",
@@ -4396,12 +4375,12 @@ dependencies = [
  "parking_lot",
  "rand 0.9.2",
  "rayon",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-context 9.1.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-inspector 10.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
+ "revm-context",
+ "revm-database",
+ "revm-inspector",
+ "revm-primitives",
+ "revm-state",
  "tracing",
 ]
 
@@ -6461,22 +6440,12 @@ dependencies = [
 
 [[package]]
 name = "op-revm"
-version = "10.1.0"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "auto_impl",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "serde",
-]
-
-[[package]]
-name = "op-revm"
 version = "10.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "826f43a5b1613c224f561847c152bfbaefcb593a9ae2c612ff4dc4661c6e625f"
 dependencies = [
  "auto_impl",
- "revm 29.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "revm",
  "serde",
 ]
 
@@ -7670,8 +7639,8 @@ dependencies = [
  "reth-storage-api",
  "reth-testing-utils",
  "reth-trie",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-database",
+ "revm-state",
  "serde",
  "tokio",
  "tokio-stream",
@@ -7685,7 +7654,7 @@ dependencies = [
  "alloy-chains",
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
@@ -8203,7 +8172,7 @@ dependencies = [
  "reth-tasks",
  "reth-tokio-util",
  "reth-tracing",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "serde_json",
  "tempfile",
  "tokio",
@@ -8325,7 +8294,7 @@ version = "1.8.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-primitives",
  "alloy-rlp",
  "alloy-rpc-types-engine",
@@ -8383,9 +8352,9 @@ dependencies = [
  "reth-trie-parallel",
  "reth-trie-sparse",
  "reth-trie-sparse-parallel",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
+ "revm-primitives",
+ "revm-state",
  "schnellru",
  "serde_json",
  "smallvec",
@@ -8692,7 +8661,7 @@ dependencies = [
  "reth-revm",
  "reth-storage-api",
  "reth-transaction-pool",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "tracing",
 ]
 
@@ -8739,7 +8708,7 @@ version = "1.8.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-primitives",
  "auto_impl",
  "derive_more",
@@ -8754,7 +8723,7 @@ dependencies = [
  "reth-storage-api",
  "reth-storage-errors",
  "reth-trie-common",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
 ]
 
 [[package]]
@@ -8763,7 +8732,7 @@ version = "1.8.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
@@ -8779,7 +8748,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-storage-errors",
  "reth-testing-utils",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "secp256k1 0.30.0",
 ]
 
@@ -8787,7 +8756,7 @@ dependencies = [
 name = "reth-execution-errors"
 version = "1.8.3"
 dependencies = [
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-primitives",
  "alloy-rlp",
  "nybbles",
@@ -8801,7 +8770,7 @@ version = "1.8.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-primitives",
  "arbitrary",
  "bincode 1.3.3",
@@ -8810,7 +8779,7 @@ dependencies = [
  "reth-ethereum-primitives",
  "reth-primitives-traits",
  "reth-trie-common",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "serde",
  "serde_with",
 ]
@@ -8936,8 +8905,8 @@ dependencies = [
  "reth-rpc-api",
  "reth-tracing",
  "reth-trie",
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-database",
  "serde",
  "serde_json",
 ]
@@ -9373,7 +9342,7 @@ dependencies = [
  "reth-tasks",
  "reth-tracing",
  "reth-transaction-pool",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "serde_json",
  "tokio",
 ]
@@ -9599,7 +9568,7 @@ dependencies = [
  "reth-storage-errors",
  "reth-trie",
  "reth-trie-common",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "thiserror 2.0.17",
  "tracing",
 ]
@@ -9610,13 +9579,13 @@ version = "1.8.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-op-evm",
  "alloy-primitives",
  "op-alloy-consensus",
  "op-alloy-rpc-types-engine",
- "op-revm 10.1.0",
+ "op-revm",
  "reth-chainspec",
  "reth-evm",
  "reth-execution-errors",
@@ -9629,7 +9598,7 @@ dependencies = [
  "reth-revm",
  "reth-rpc-eth-api",
  "reth-storage-errors",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "thiserror 2.0.17",
 ]
 
@@ -9694,7 +9663,7 @@ dependencies = [
  "op-alloy-consensus",
  "op-alloy-network",
  "op-alloy-rpc-types-engine",
- "op-revm 10.1.0",
+ "op-revm",
  "reth-chainspec",
  "reth-consensus",
  "reth-db",
@@ -9729,7 +9698,7 @@ dependencies = [
  "reth-tracing",
  "reth-transaction-pool",
  "reth-trie-common",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "serde",
  "serde_json",
  "tokio",
@@ -9767,7 +9736,7 @@ dependencies = [
  "reth-revm",
  "reth-storage-api",
  "reth-transaction-pool",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.17",
@@ -9828,7 +9797,7 @@ dependencies = [
  "op-alloy-rpc-jsonrpsee",
  "op-alloy-rpc-types",
  "op-alloy-rpc-types-engine",
- "op-revm 10.1.0",
+ "op-revm",
  "reqwest",
  "reth-chain-state",
  "reth-chainspec",
@@ -9854,7 +9823,7 @@ dependencies = [
  "reth-storage-api",
  "reth-tasks",
  "reth-transaction-pool",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
@@ -9893,7 +9862,7 @@ dependencies = [
  "op-alloy-consensus",
  "op-alloy-flz",
  "op-alloy-rpc-types",
- "op-revm 10.1.0",
+ "op-revm",
  "parking_lot",
  "reth-chain-state",
  "reth-chainspec",
@@ -10003,13 +9972,13 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-rpc-types-eth",
+ "alloy-rpc-types-trace",
  "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-macro",
  "alloy-sol-types",
  "api-types",
  "bcs 0.1.6",
- "blst",
  "codspeed-criterion-compat",
  "eyre",
  "gravity-precompiles",
@@ -10049,9 +10018,9 @@ dependencies = [
  "reth-tracing",
  "reth-trie",
  "reth-trie-parallel",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-interpreter 25.0.3 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
+ "revm-interpreter",
+ "revm-primitives",
  "serde",
  "serde_json",
  "tiny-keccak",
@@ -10134,9 +10103,9 @@ dependencies = [
  "rayon",
  "reth-chainspec",
  "reth-codecs",
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-primitives",
+ "revm-state",
  "secp256k1 0.30.0",
  "serde",
  "serde_json",
@@ -10186,9 +10155,9 @@ dependencies = [
  "reth-testing-utils",
  "reth-trie",
  "reth-trie-db",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-database",
+ "revm-database-interface",
+ "revm-state",
  "strum 0.27.2",
  "tempfile",
  "tokio",
@@ -10309,7 +10278,7 @@ dependencies = [
  "reth-storage-api",
  "reth-storage-errors",
  "reth-trie",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
 ]
 
 [[package]]
@@ -10319,7 +10288,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
@@ -10384,9 +10353,9 @@ dependencies = [
  "reth-testing-utils",
  "reth-transaction-pool",
  "reth-trie-common",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "revm-inspectors",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-primitives",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -10515,13 +10484,13 @@ dependencies = [
  "op-alloy-consensus",
  "op-alloy-network",
  "op-alloy-rpc-types",
- "op-revm 10.1.0",
+ "op-revm",
  "reth-ethereum-primitives",
  "reth-evm",
  "reth-optimism-primitives",
  "reth-primitives-traits",
  "reth-storage-api",
- "revm-context 9.1.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-context",
  "serde_json",
  "thiserror 2.0.17",
 ]
@@ -10589,7 +10558,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-json-rpc",
  "alloy-network",
  "alloy-primitives",
@@ -10619,7 +10588,7 @@ dependencies = [
  "reth-tasks",
  "reth-transaction-pool",
  "reth-trie-common",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "revm-inspectors",
  "tokio",
  "tracing",
@@ -10631,7 +10600,7 @@ version = "1.8.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-evm 0.21.3 (git+https://github.com/Galxe/alloy-evm?branch=v0.21.3-gravity)",
+ "alloy-evm",
  "alloy-network",
  "alloy-primitives",
  "alloy-rpc-client",
@@ -10661,7 +10630,7 @@ dependencies = [
  "reth-tasks",
  "reth-transaction-pool",
  "reth-trie",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "revm-inspectors",
  "schnellru",
  "serde",
@@ -10894,8 +10863,8 @@ dependencies = [
  "reth-stages-types",
  "reth-storage-errors",
  "reth-trie-common",
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-database",
 ]
 
 [[package]]
@@ -10909,7 +10878,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-prune-types",
  "reth-static-file-types",
- "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-database-interface",
  "thiserror 2.0.17",
 ]
 
@@ -10937,7 +10906,7 @@ dependencies = [
  "reth-stages-types",
  "reth-storage-api",
  "reth-trie",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "tokio",
  "tracing",
 ]
@@ -11046,8 +11015,8 @@ dependencies = [
  "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
- "revm-interpreter 25.0.3 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-interpreter",
+ "revm-primitives",
  "rustc-hash",
  "schnellru",
  "serde",
@@ -11087,8 +11056,8 @@ dependencies = [
  "reth-tracing",
  "reth-trie-common",
  "reth-trie-sparse",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-database",
+ "revm-state",
  "tracing",
  "triehash",
 ]
@@ -11122,8 +11091,8 @@ dependencies = [
  "reth-codecs",
  "reth-primitives-traits",
  "reth-storage-errors",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-database",
+ "revm-state",
  "serde",
  "serde_json",
  "serde_with",
@@ -11152,8 +11121,8 @@ dependencies = [
  "reth-storage-errors",
  "reth-trie",
  "reth-trie-common",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
+ "revm-database",
  "serde_json",
  "similar-asserts",
  "tracing",
@@ -11264,35 +11233,17 @@ version = "29.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "718d90dce5f07e115d0e66450b1b8aa29694c1cf3f89ebddaddccc2ccbd2f13e"
 dependencies = [
- "revm-bytecode 6.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-context 9.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-context-interface 10.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-database 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-database-interface 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-handler 10.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-inspector 10.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-interpreter 25.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-precompile 27.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-state 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "revm"
-version = "29.0.1"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-context 9.1.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-context-interface 10.2.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-handler 10.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-inspector 10.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-interpreter 25.0.3 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-precompile 27.0.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-context",
+ "revm-context-interface",
+ "revm-database",
+ "revm-database-interface",
+ "revm-handler",
+ "revm-inspector",
+ "revm-interpreter",
+ "revm-precompile",
+ "revm-primitives",
+ "revm-state",
 ]
 
 [[package]]
@@ -11303,18 +11254,7 @@ checksum = "66c52031b73cae95d84cd1b07725808b5fd1500da3e5e24574a3b2dc13d9f16d"
 dependencies = [
  "bitvec",
  "phf",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
-name = "revm-bytecode"
-version = "6.2.2"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "bitvec",
- "phf",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-primitives",
  "serde",
 ]
 
@@ -11327,27 +11267,11 @@ dependencies = [
  "bitvec",
  "cfg-if",
  "derive-where",
- "revm-bytecode 6.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-context-interface 10.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-database-interface 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-state 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
-name = "revm-context"
-version = "9.1.0"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "bitvec",
- "cfg-if",
- "derive-where",
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-context-interface 10.2.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-context-interface",
+ "revm-database-interface",
+ "revm-primitives",
+ "revm-state",
  "serde",
 ]
 
@@ -11361,24 +11285,9 @@ dependencies = [
  "alloy-eip7702",
  "auto_impl",
  "either",
- "revm-database-interface 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-state 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
-name = "revm-context-interface"
-version = "10.2.0"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "alloy-eip2930",
- "alloy-eip7702",
- "auto_impl",
- "either",
- "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-database-interface",
+ "revm-primitives",
+ "revm-state",
  "serde",
 ]
 
@@ -11389,23 +11298,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39a276ed142b4718dcf64bc9624f474373ed82ef20611025045c3fb23edbef9c"
 dependencies = [
  "alloy-eips",
- "revm-bytecode 6.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-database-interface 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-state 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
-name = "revm-database"
-version = "7.0.5"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "alloy-eips",
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-database-interface",
+ "revm-primitives",
+ "revm-state",
  "serde",
 ]
 
@@ -11417,20 +11313,8 @@ checksum = "8c523c77e74eeedbac5d6f7c092e3851dbe9c7fec6f418b85992bd79229db361"
 dependencies = [
  "auto_impl",
  "either",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-state 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
-name = "revm-database-interface"
-version = "7.0.5"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "auto_impl",
- "either",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-primitives",
+ "revm-state",
  "serde",
 ]
 
@@ -11442,32 +11326,14 @@ checksum = "550331ea85c1d257686e672081576172fe3d5a10526248b663bbf54f1bef226a"
 dependencies = [
  "auto_impl",
  "derive-where",
- "revm-bytecode 6.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-context 9.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-context-interface 10.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-database-interface 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-interpreter 25.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-precompile 27.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-state 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
-name = "revm-handler"
-version = "10.0.1"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "auto_impl",
- "derive-where",
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-context 9.1.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-context-interface 10.2.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-interpreter 25.0.3 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-precompile 27.0.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-context",
+ "revm-context-interface",
+ "revm-database-interface",
+ "revm-interpreter",
+ "revm-precompile",
+ "revm-primitives",
+ "revm-state",
  "serde",
 ]
 
@@ -11479,37 +11345,21 @@ checksum = "7c0a6e9ccc2ae006f5bed8bd80cd6f8d3832cd55c5e861b9402fdd556098512f"
 dependencies = [
  "auto_impl",
  "either",
- "revm-context 9.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-database-interface 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-handler 10.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-interpreter 25.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-state 7.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "revm-inspector"
-version = "10.0.1"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "auto_impl",
- "either",
- "revm-context 9.1.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-database-interface 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-handler 10.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-interpreter 25.0.3 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-state 7.0.5 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-context",
+ "revm-database-interface",
+ "revm-handler",
+ "revm-interpreter",
+ "revm-primitives",
+ "revm-state",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "revm-inspectors"
-version = "0.30.0"
-source = "git+https://github.com/Galxe/revm-inspectors?branch=v0.30.0-gravity#aa13a14da925d754efb4889ad2d54beba981aa9f"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de23199c4b6181a6539e4131cf7e31cde4df05e1192bcdce491c34a511241588"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
@@ -11519,7 +11369,7 @@ dependencies = [
  "boa_engine",
  "boa_gc",
  "colorchoice",
- "revm 29.0.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -11531,20 +11381,9 @@ version = "25.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06575dc51b1d8f5091daa12a435733a90b4a132dca7ccee0666c7db3851bc30c"
 dependencies = [
- "revm-bytecode 6.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-context-interface 10.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
-name = "revm-interpreter"
-version = "25.0.3"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-context-interface 10.2.0 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-context-interface",
+ "revm-primitives",
  "serde",
 ]
 
@@ -11561,37 +11400,13 @@ dependencies = [
  "ark-serialize 0.5.0",
  "arrayref",
  "aurora-engine-modexp",
- "c-kzg",
- "cfg-if",
- "k256",
- "libsecp256k1",
- "p256",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "ripemd",
- "rug",
- "secp256k1 0.31.1",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "revm-precompile"
-version = "27.0.0"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "ark-bls12-381",
- "ark-bn254",
- "ark-ec",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "arrayref",
- "aurora-engine-modexp",
  "blst",
  "c-kzg",
  "cfg-if",
  "k256",
  "libsecp256k1",
  "p256",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-primitives",
  "ripemd",
  "rug",
  "secp256k1 0.31.1",
@@ -11611,36 +11426,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "revm-primitives"
-version = "20.2.1"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "alloy-primitives",
- "num_enum",
- "once_cell",
- "serde",
-]
-
-[[package]]
 name = "revm-state"
 version = "7.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f64fbacb86008394aaebd3454f9643b7d5a782bd251135e17c5b33da592d84d"
 dependencies = [
  "bitflags 2.10.0",
- "revm-bytecode 6.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "revm-primitives 20.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
-name = "revm-state"
-version = "7.0.5"
-source = "git+https://github.com/Galxe/revm?branch=v29.0.1-gravity#bfa048c6339ccac692370ef9a779a13d64be399a"
-dependencies = [
- "bitflags 2.10.0",
- "revm-bytecode 6.2.2 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
- "revm-primitives 20.2.1 (git+https://github.com/Galxe/revm?branch=v29.0.1-gravity)",
+ "revm-bytecode",
+ "revm-primitives",
  "serde",
 ]
 

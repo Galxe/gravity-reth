@@ -93,6 +93,9 @@ sol! {
     );
 }
 
+const PRE_ALPHA_MAX_DKG_TRANSCRIPT_BYTES: usize = 100 * 1024 * 1024; // 100 MiB
+const ALPHA_MAX_DKG_TRANSCRIPT_BYTES: usize = 1024 * 1024; // 1 MiB
+
 // ============================================================================
 // DKG State Fetcher
 // ============================================================================
@@ -374,34 +377,44 @@ pub(crate) fn construct_dkg_transaction(
     dkg_transcript: gravity_api_types::on_chain_config::dkg::DKGTranscript,
     nonce: u64,
     gas_price: u128,
+    is_alpha_active: bool,
 ) -> Result<reth_ethereum_primitives::TransactionSigned, String> {
     use super::RECONFIGURATION_WITH_DKG_ADDR;
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
 
-    // Validate transcript size before constructing system transaction
+    // Validate transcript size before constructing system transaction.
     //
-    // IMPORTANT: MAX_DKG_TRANSCRIPT_BYTES is a consensus-critical parameter.
+    // IMPORTANT: the DKG transcript cap is a consensus-critical parameter.
     // Changing this value affects which transcripts are accepted by the execution layer.
     // - Increasing this limit requires a coordinated hardfork: all nodes must upgrade before a
     //   larger transcript is submitted, otherwise non-upgraded nodes will reject the transcript and
     //   fork.
     // - Decreasing this limit is NOT safe: it could cause previously valid on-chain transcripts to
     //   be rejected during re-execution / sync, breaking consensus.
-    // - The current value (100 MB) is generous. The weighted transcript size is approximately 336 *
-    //   W bytes (3×G1 + 2×G2 per weight unit = 3×48 + 2×96 = 336 bytes/weight). With equal weights
-    //   (W=n), 100 MB supports ~312K validators; with average weight ~20 per validator (as in
-    //   mainnet benchmarks), it supports ~15K validators. See gravity-aptos
-    //   pvss::das::WeightedTranscript for size analysis.
-    const MAX_DKG_TRANSCRIPT_BYTES: usize = 100 * 1024 * 1024; // 100 MB
+    //
+    // The system call gas limit is 30,000,000. The absolute calldata-only ceiling, assuming every
+    // calldata byte is non-zero, is:
+    //
+    //   floor((30,000,000 - 21,000) / 16) - 68 ABI overhead = 1,873,600 bytes
+    //
+    // That leaves almost no gas for ABI decoding and contract logic, so Alpha uses a conservative
+    // 1 MiB cap. A 1 MiB transcript consumes at most 16,799,304 intrinsic gas, leaving roughly
+    // 13.2M gas for execution under the fixed system transaction gas limit. Pre-Alpha keeps the
+    // old 100 MiB cap for replay compatibility.
     if dkg_transcript.transcript_bytes.is_empty() {
         return Err("DKG transcript is empty".into());
     }
-    if dkg_transcript.transcript_bytes.len() > MAX_DKG_TRANSCRIPT_BYTES {
+    let max_dkg_transcript_bytes = if is_alpha_active {
+        ALPHA_MAX_DKG_TRANSCRIPT_BYTES
+    } else {
+        PRE_ALPHA_MAX_DKG_TRANSCRIPT_BYTES
+    };
+    if dkg_transcript.transcript_bytes.len() > max_dkg_transcript_bytes {
         return Err(format!(
             "DKG transcript too large: {} bytes (max {})",
             dkg_transcript.transcript_bytes.len(),
-            MAX_DKG_TRANSCRIPT_BYTES
+            max_dkg_transcript_bytes
         ));
     }
 
@@ -413,9 +426,68 @@ pub(crate) fn construct_dkg_transaction(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use alloy_consensus::Transaction;
+    use gravity_api_types::{
+        account::ExternalAccountAddress,
+        on_chain_config::dkg::{DKGTranscript, DKGTranscriptMetadata},
+    };
+
+    fn transcript_with_len(len: usize) -> DKGTranscript {
+        DKGTranscript {
+            metadata: DKGTranscriptMetadata {
+                epoch: 1,
+                author: ExternalAccountAddress::new([0; 32]),
+            },
+            transcript_bytes: vec![1; len],
+        }
+    }
+
     #[test]
     fn test_dkg_conversion() {
         // Basic test to ensure conversion functions compile
         // TODO: Add comprehensive tests
+    }
+
+    #[test]
+    fn construct_dkg_transaction_rejects_empty_transcript() {
+        let err = construct_dkg_transaction(transcript_with_len(0), 0, 0, true).unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn construct_dkg_transaction_accepts_one_mib_transcript_after_alpha() {
+        let txn = construct_dkg_transaction(
+            transcript_with_len(ALPHA_MAX_DKG_TRANSCRIPT_BYTES),
+            7,
+            1,
+            true,
+        )
+        .expect("1 MiB DKG transcript should fit the system tx gas budget");
+        assert_eq!(txn.nonce(), 7);
+    }
+
+    #[test]
+    fn construct_dkg_transaction_rejects_transcript_above_one_mib_after_alpha() {
+        let err = construct_dkg_transaction(
+            transcript_with_len(ALPHA_MAX_DKG_TRANSCRIPT_BYTES + 1),
+            0,
+            0,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("too large"));
+        assert!(err.contains(&ALPHA_MAX_DKG_TRANSCRIPT_BYTES.to_string()));
+    }
+
+    #[test]
+    fn construct_dkg_transaction_keeps_legacy_cap_before_alpha() {
+        construct_dkg_transaction(
+            transcript_with_len(ALPHA_MAX_DKG_TRANSCRIPT_BYTES + 1),
+            7,
+            1,
+            false,
+        )
+        .expect("pre-Alpha replay keeps the legacy 100 MiB cap");
     }
 }

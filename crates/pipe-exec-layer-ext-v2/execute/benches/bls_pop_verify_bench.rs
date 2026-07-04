@@ -4,7 +4,7 @@
 //! to inform the `POP_VERIFY_GAS` constant.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use reth_pipe_exec_layer_ext_v2::bls_precompile;
+use gravity_precompiles::bls_pop_verify as bls_precompile;
 
 /// Hardcoded valid BLS12-381 keypair for deterministic benchmarking.
 ///

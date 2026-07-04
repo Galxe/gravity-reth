@@ -21,6 +21,7 @@ pub mod validator_set;
 pub use base::{ConfigFetcher, OnchainConfigFetcher};
 pub use consensus_config::ConsensusConfigFetcher;
 pub use epoch::EpochFetcher;
+pub(crate) use metadata_txn::system_txns_into_executed_ordered_block_result;
 pub use metadata_txn::{construct_metadata_txn, transact_system_txn, SystemTxnResult};
 pub use types::{
     convert_active_validators_to_bcs, convert_validator_consensus_info, ValidatorConsensusInfo,
@@ -53,7 +54,11 @@ pub const DEAD_ADDRESS: Address = address!("000000000000000000000000000000000000
 // ============================================================================
 
 // Consensus Engine (0x1625F0xxx)
-pub const SYSTEM_CALLER: Address = address!("00000000000000000000000000000001625f0000");
+//
+// `SYSTEM_CALLER` is re-exported from `reth_chainspec` so the literal lives in a
+// single source of truth (see `crates/chainspec/src/gravity.rs`). Downstream
+// modules continue to import it from this module path for backwards compatibility.
+pub use reth_chainspec::SYSTEM_CALLER;
 pub const GENESIS_ADDR: Address = address!("00000000000000000000000000000001625f0001");
 
 // Runtime Configurations (0x1625F1xxx)
@@ -89,7 +94,6 @@ pub const ORACLE_REQUEST_QUEUE_ADDR: Address = address!("00000000000000000000000
 // Precompiles (0x1625F5xxx)
 pub const NATIVE_MINT_PRECOMPILE_ADDR: Address =
     address!("00000000000000000000000000000001625f5000");
-pub const BLS_PRECOMPILE_ADDR: Address = address!("00000000000000000000000000000001625f5001");
 pub use gravity_precompiles::randomness_by_height::RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR;
 
 // Legacy aliases (for backward compatibility)
@@ -116,6 +120,7 @@ pub fn construct_validator_txns_envelope(
     extra_data: &Vec<gravity_api_types::ExtraDataType>,
     system_caller_nonce: u64,
     gas_price: u128,
+    is_alpha_active: bool,
 ) -> Result<Vec<EthereumTxEnvelope<TxEip4844>>, String> {
     let system_caller_nonce = system_caller_nonce + 1;
     let mut txns = Vec::new();
@@ -124,7 +129,12 @@ pub fn construct_validator_txns_envelope(
         let current_nonce = system_caller_nonce + index as u64;
 
         // Process data based on ExtraDataType variant
-        match construct_validator_txn_from_extra_data(data, current_nonce, gas_price) {
+        match construct_validator_txn_from_extra_data(
+            data,
+            current_nonce,
+            gas_price,
+            is_alpha_active,
+        ) {
             Ok(transaction) => txns.push(transaction),
             Err(e) => {
                 return Err(format!("Failed to process extra data at index {}: {}", index, e));
@@ -144,6 +154,7 @@ pub fn construct_validator_txn_from_extra_data(
     data: &gravity_api_types::ExtraDataType,
     nonce: u64,
     gas_price: u128,
+    is_alpha_active: bool,
 ) -> Result<TransactionSigned, String> {
     match data {
         gravity_api_types::ExtraDataType::JWK(data_bytes) => {
@@ -167,7 +178,7 @@ pub fn construct_validator_txn_from_extra_data(
             >(data_bytes)
             .map_err(|e| format!("Failed to deserialize DKG data: {}", e))?;
             debug!("Processing DKG transcript for epoch: {:?}", dkg_transcript);
-            dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price)
+            dkg::construct_dkg_transaction(dkg_transcript, nonce, gas_price, is_alpha_active)
         }
     }
 }
