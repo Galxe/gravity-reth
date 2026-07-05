@@ -6,6 +6,7 @@
 - Baseline 已合并的 reth upstream tag：v1.8.3（`d620fd0eeb` #205, 2025-11-10）
 - 目标 upstream：reth v2.3.0
 - 当前分支: `merge-v2.3.0`，HEAD `e6b7e5ba32`
+- ⟲ 现状核实:2026-07-05,HEAD `a5e0201bd3`(f89d9d4e23 已整体解决本组,见下方「实际解法」节)
 - 上游变更范围一律按 `v1.8.3..v2.3.0` 取
 - gravity 侧变更一律按 `git log 0cb1687c1c -- <path>` 在 baseline 历史内取（v1.8.3 合并 `d620fd0eeb` 之后的 commits 视为 gravity-only 演进）
 
@@ -39,6 +40,62 @@
   5. `trie/trie/src/lib.rs` 然后 `trie/trie/src/verify.rs`
   6. `parallel/Cargo.toml` + `parallel/src/lib.rs`
   7. `db/tests/*` 机械跟随
+
+## ⟲ f89d9d4e23 实际解法(2026-07-05 现状核实,HEAD `a5e0201bd3`)
+
+> 本组冲突已由 f89d9d4e23("resolve storage&cache&state root (#375)")以**整体
+> 还原 gravity baseline `0cb1687c1c`** 的方式解决——与下文逐文件分析给出的
+> mechanical-merge / take-upstream 建议**方向不同**:原建议拟采纳的上游演进
+> (GAT factory、TrieKeyAdapter/`Packed*`、`TrieInputSorted`、sorted 扩展 API、
+> `proof_v2`、changesets、`state_root_task`/`value_encoder`、`lazy` 等)本轮
+> 整体放弃,以磁盘孤儿或删除形态留存,成为 **v2.4+ 再合并债务**。下文原分析
+> 保留作决策史。决策依据:2026-07-05 用户拍板总原则(storage 决策最高优先)。
+> 勾选证据统一:「冲突标记归零(f89d9d4e23,实测);编译证据待 cargo
+> workspace 修复后回填」。
+
+### 18 文件实测表(2026-07-05,全部冲突归零)
+
+| 文件 | 与 baseline | 原建议 → 实际 |
+|---|---|---|
+| common/Cargo.toml | 逐字节一致 | mechanical-merge → 纯 baseline(⚠ 遗留 L1) |
+| common/src/input.rs | 逐字节一致 | take-upstream → 纯 baseline(`from_blocks` 的 `Option<&TrieUpdates>` 签名回归) |
+| common/src/lib.rs | 逐字节一致 | mechanical-merge → 纯 baseline(`pub mod nested_trie` 在位;上游 7 个新模块未挂载→孤儿) |
+| common/src/nibbles.rs | 逐字节一致 | keep-gravity+新增 Packed* → **纯 keep-gravity**(#149 磁盘格式保住;`Packed*` 未进入类型宇宙) |
+| common/src/storage.rs | 逐字节一致 | keep-gravity+ValueWithSubKey → 纯 keep-gravity(`SubkeyContainedValue` 沿用,trait 改名未采纳) |
+| common/src/updates.rs | 逐字节一致 | mechanical-merge → 纯 baseline(V2 类型在;上游 sorted API 未采纳) |
+| db/Cargo.toml + db/src/{lib,hashed_cursor,trie_cursor,state}.rs | 逐字节一致 | 各建议 → 纯 baseline(GAT/adapter/changesets 全未采纳;**witness.rs 回归**,见 OQ2) |
+| db/tests/{fuzz_in_memory_nodes,trie,walker}.rs | 逐字节一致 | mechanical-merge → 纯 baseline(`commit_view()` 模式天然保留) |
+| parallel/Cargo.toml + parallel/src/lib.rs | 逐字节一致 | mechanical-merge → 纯 baseline(`pub mod proof`(:21)+ `pub use reth_trie_db::nested_hash;`(:30)在位;⚠ 遗留 L2) |
+| trie/src/lib.rs、trie/src/verify.rs | 逐字节一致 | mechanical-merge / take-upstream → 纯 baseline(GAT 出局,trait 面为无 `<'a>` 的 baseline 关联类型,hashed_cursor/mod.rs:19 实测) |
+| **trie/Cargo.toml** | **落 v2.3.0 侧**(±20 行) | ⚠ manifest 与 baseline src 不一致,遗留 L3 |
+| **sparse/Cargo.toml**(组外,连带发现) | **落 v2.3.0 侧**(±25 行) | ⚠ 遗留 L4 |
+
+### 磁盘孤儿清单(在盘、git 跟踪、未挂载——防误引用,均实测无 mod 声明)
+
+- common:`lazy.rs`、`execution_witness.rs`、`ordered_root.rs`、`target_v2.rs`、
+  `trie.rs`、`trie_node_v2.rs`、`utils.rs`(7 个)
+- db:`changesets.rs`;parallel:`state_root_task.rs`、`value_encoder.rs`
+- trie:`changesets.rs`、`proof_v2/`(4 文件)、`hashed_cursor/metrics.rs`、
+  `trie_cursor/metrics.rs`
+- sparse:`arena/`(4 文件)、`parallel.rs`、`lfu.rs`、`lower.rs`、
+  `debug_recorder.rs`(src 本体 = baseline,孤儿无害;tests 例外见 L4)
+
+### 遗留断点(4 条,manifest/bench/tests 三方不一致,归 trie/storage 组)
+
+| # | 断点 | 实测依据 | 修法建议 |
+|---|---|---|---|
+| L1 | common/Cargo.toml 声明 `[[bench]] prefix_set`,但 `benches/` 目录整个被删 | grep `[[bench]]` 命中 + `ls` 目录不存在 | 显式 target 缺文件对该 crate **任何 cargo 构建都是硬错误**:删 `[[bench]]` 段(顺带 criterion dev-dep)或恢复 baseline 的 `benches/prefix_set.rs` |
+| L2 | parallel/Cargo.toml 声明 `[[bench]] root`,`benches/root.rs` 被删 | 同上 | 同 L1 |
+| L3 | trie/Cargo.toml 落 v2.3.0:声明 `[[bench]] proof_v2`(required-features=test-utils)且 `benches/proof_v2.rs` 在盘,但 `proof_v2` 模块未挂载(lib.rs=baseline,`mod proof_v2` 0 命中) | 实测 | test-utils/bench 构建必断。建议 manifest 回 baseline 形态(连带恢复或放弃 `hash_post_state`/`trie_root` 两个被删 bench);被删的 `reth-ethereum-primitives` dep 实测 src 零使用,无碍 |
+| L4 | sparse/Cargo.toml 落 v2.3.0:删了 `[[bench]]` 声明与 criterion dev-dep,但 baseline `benches/{root,rlp_node,update}.rs` 在盘(无显式 bench target → cargo 自动发现 → 缺 criterion 必断);v2.3.0 新增 `tests/{memory_size.rs,suite/}` 是**自动发现的集成测试**,引用未挂载的 arena/parallel 孤儿 | `ls` + Cargo.toml 无 autotests/autobenches 设置(0 命中) | `cargo check --benches/--tests -p reth-trie-sparse` 必断:删 tests/ 两项孤儿测试 + 处置 benches 三文件(删或补 criterion+`[[bench]]`) |
+
+### 下游锚点核查(原 playbook「合并后跨组编译检查」5 项,2026-07-05 实测)
+
+全部消解或通过:`NestedStateRoot` 三个 import(gravity-storage/stages-merkle/
+db-common-init)可解析;gravity-storage lib.rs:9 的 `TrieUpdatesV2` 路径在;
+historical.rs:135 ↔ state.rs:129/:223 调用面吻合(OQ3);provider.rs 无
+`incremental_root_calculator` 调用(grep 仅 state.rs 内部,:33 保持 baseline
+tx-参数形式)——第 4 项检查随双侧还原消解。
 
 ## 逐文件分析
 
@@ -245,17 +302,18 @@
 
 > **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
-- [ ] 1. **GAT-factory 的下游传播。** Phase 3 步骤 11/12 采纳 `type AccountCursor<'a>` GAT 形式，要求 `reth_trie::hashed_cursor::HashedCursorFactory` 与 `reth_trie::trie_cursor::TrieCursorFactory`（在 `crates/trie/trie/src/`）声明 GAT 关联类型。这些文件不在本组冲突列表内，但 verify.rs (AA) 已经按 GAT 形式编写，说明上游 v2.3.0 trie crate 的 trait 也已 GAT 化 — 需在 Phase 2 步骤 7 之后实际编译验证。
-   - [ ] 冲突解决:待编译验证后落地;crates/trie/trie/src/verify.rs 现存 10 处冲突块,GAT 传播需 Phase 2 步骤 7 后 cargo check(2026-07-03 实测)。
+- [x] 1. **GAT-factory 的下游传播。** Phase 3 步骤 11/12 采纳 `type AccountCursor<'a>` GAT 形式，要求 `reth_trie::hashed_cursor::HashedCursorFactory` 与 `reth_trie::trie_cursor::TrieCursorFactory`（在 `crates/trie/trie/src/`）声明 GAT 关联类型。这些文件不在本组冲突列表内，但 verify.rs (AA) 已经按 GAT 形式编写，说明上游 v2.3.0 trie crate 的 trait 也已 GAT 化 — 需在 Phase 2 步骤 7 之后实际编译验证。→ **决策**: ⟲ 问题随 f89d9d4e23 整体还原**消解**——GAT factory 未采纳(v2.4+ 债务),Phase 3 建议未执行。
+   - [x] 冲突解决:verify.rs 冲突归零、与 baseline diff=0;trait 面为无 `<'a>` 的 baseline 关联类型(hashed_cursor/mod.rs:19 实测);GAT 符号仅存于孤儿文件(2026-07-05 实测)。编译证据待 cargo workspace 修复后回填。
 
-- [ ] 2. **nested-hash 路径的 witness 兼容。** 上游 PR #22564 (`b2eb061fe`) 删除了 `DatabaseTrieWitness` 与 `crates/trie/db/src/witness.rs`。gravity #237 (`605c372de6`) 在 `parallel/src/lib.rs` 保留 `pub mod proof` 用于 nested-hash 的 `eth_getProof`。删除 witness.rs 后，需 grep `crates/rpc/` 是否还有调用方仍 `use reth_trie_db::DatabaseTrieWitness;`；若有，把 `witness.rs` 作为 gravity-only 文件留下（不在本组冲突列表 — 可能本就不在 worktree 中）。
-   - [ ] 冲突解决:核实部分通过、待拍板:实测 crates/trie/db/src/witness.rs 已不存在、crates/rpc/ 无 DatabaseTrieWitness 调用方;但 crates/trie/db/src/commitment.rs 仍有 2 处引用待处置(2026-07-03 实测)。
+- [x] 2. **nested-hash 路径的 witness 兼容。** 上游 PR #22564 (`b2eb061fe`) 删除了 `DatabaseTrieWitness` 与 `crates/trie/db/src/witness.rs`。gravity #237 (`605c372de6`) 在 `parallel/src/lib.rs` 保留 `pub mod proof` 用于 nested-hash 的 `eth_getProof`。删除 witness.rs 后，需 grep `crates/rpc/` 是否还有调用方仍 `use reth_trie_db::DatabaseTrieWitness;`；若有，把 `witness.rs` 作为 gravity-only 文件留下（不在本组冲突列表 — 可能本就不在 worktree 中）。
+   → **决策**: ⟲ 被 f89d9d4e23 **反转消解**——`witness.rs` 随 baseline 还原**回归**(2026-07-03 的"已不存在"实测已失效):lib.rs:15 `mod witness;` + :28 re-export 在位,commitment.rs:3/:19 两处引用自然 resolve;crates/rpc/ 仍无外部调用方。无需任何处置。
+   - [x] 冲突解决:witness.rs / lib.rs / commitment.rs 冲突归零、与 baseline diff=0(2026-07-05 实测)。编译证据待 cargo workspace 修复后回填。
 
-- [ ] 3. **`DatabaseHashedPostState::from_reverts` / `HashedPostState::from_reverts` 调用面。** `crates/storage/provider/src/providers/state/historical.rs:136` 调用 `HashedPostState::from_reverts::<KeccakKeyHasher>(self.tx(), self.block_number)`，这是 RPC 历史读路径（`StateProvider`）。上游签名是 `from_reverts(provider, range) -> HashedPostStateSorted`。决策点：(a) 在 state.rs 保留 gravity trait 方法作为兼容垫片；(b) 在 historical.rs 调用点迁移到 provider-argument 形式。后者更彻底，前者更小风险 — 建议先 (a) 解锁编译，再单独 PR 做 (b) 迁移。
-   - [ ] 冲突解决:待决策后落地;crates/storage/provider/src/providers/state/historical.rs 现存 20 处冲突块(2026-07-03 实测)。
+- [x] 3. **`DatabaseHashedPostState::from_reverts` / `HashedPostState::from_reverts` 调用面。** `crates/storage/provider/src/providers/state/historical.rs:136` 调用 `HashedPostState::from_reverts::<KeccakKeyHasher>(self.tx(), self.block_number)`，这是 RPC 历史读路径（`StateProvider`）。上游签名是 `from_reverts(provider, range) -> HashedPostStateSorted`。决策点：(a) 在 state.rs 保留 gravity trait 方法作为兼容垫片；(b) 在 historical.rs 调用点迁移到 provider-argument 形式。后者更彻底，前者更小风险 — 建议先 (a) 解锁编译，再单独 PR 做 (b) 迁移。→ **决策**: ⟲ 方案 (a)/(b) 均 **moot**——f89d9d4e23 把 state.rs 与 historical.rs 两侧同时还原 baseline,调用面天然吻合,无需垫片、无需迁移。
+   - [x] 冲突解决:historical.rs 冲突归零(原 20 块随 storage 还原消解),:135 调用 ↔ state.rs:129/:223 `from_reverts<KH: KeyHasher>(tx, from)` 逐参吻合(2026-07-05 实测)。编译证据待 cargo workspace 修复后回填。
 
-- [ ] 4. **`StoragesTrie` MDBX on-disk 格式锁定。** gravity #149 (`671680af37`) 改变了 `StoredNibblesSubKey` 的磁盘编码（变长 `[len][packed]` vs 上游 65B 右填充）。任何在当前 gravity main 上跑过 Galxe 网络的节点无法滚动升级到使用上游 65B 编码的二进制。本次合并保留 gravity 编码（nibbles.rs 决策为 keep-gravity）。需在 `MIGRATION.md` 或类似处记录这一锁定，并明确：上游新增的 `PackedAccountsTrie`/`PackedStoragesTrie` 表是 v2 路径，gravity 不消费这两张表（直到有迁移工具）。
-   - [ ] 冲突解决:未落地:nibbles.rs 现存 4 处冲突块;实测仓库尚无 MIGRATION.md,编码锁定记录未创建(2026-07-03 实测)。
+- [x] 4. **`StoragesTrie` MDBX on-disk 格式锁定。** gravity #149 (`671680af37`) 改变了 `StoredNibblesSubKey` 的磁盘编码（变长 `[len][packed]` vs 上游 65B 右填充）。任何在当前 gravity main 上跑过 Galxe 网络的节点无法滚动升级到使用上游 65B 编码的二进制。本次合并保留 gravity 编码（nibbles.rs 决策为 keep-gravity）。需在 `MIGRATION.md` 或类似处记录这一锁定，并明确：上游新增的 `PackedAccountsTrie`/`PackedStoragesTrie` 表是 v2 路径，gravity 不消费这两张表（直到有迁移工具）。→ **决策**: ⟲ keep-gravity 编码已由 f89d9d4e23 落定;`Packed*` 类型未进入类型宇宙(v2.3.0 侧 nibbles.rs 被整体替换,无孤儿残留)。
+   - [ ] 冲突解决:nibbles.rs / storage.rs 冲突归零、与 baseline diff=0(2026-07-05 实测);**但 MIGRATION.md 编码锁定记录仍未创建**(实测根目录与 docs/ 均无该文件)——记录动作完成前本框不勾,归 trie/storage 组。
 
-- [ ] 5. **`trie-common` 中 `gravity-primitives.workspace = true` 依赖。** 需在 workspace `Cargo.toml` 中验证 `gravity-primitives` 提供 `nested_trie::Node` 所需的类型（B256/Bytes 风格的 leaf payload）。Cargo.lock 已按 CLAUDE.md 备注解决，但 dependency tree（trie-common → gravity-primitives）应在 Phase 1 步骤 1 之后用 `cargo check -p reth-trie-common` 编译验证。
-   - [ ] 冲突解决:待编译验证后落地;crates/trie/common/Cargo.toml 现存 13 处冲突块,cargo check -p reth-trie-common 需解完后跑(2026-07-03 实测)。
+- [x] 5. **`trie-common` 中 `gravity-primitives.workspace = true` 依赖。** 需在 workspace `Cargo.toml` 中验证 `gravity-primitives` 提供 `nested_trie::Node` 所需的类型（B256/Bytes 风格的 leaf payload）。Cargo.lock 已按 CLAUDE.md 备注解决，但 dependency tree（trie-common → gravity-primitives）应在 Phase 1 步骤 1 之后用 `cargo check -p reth-trie-common` 编译验证。→ **决策**: ⟲ 依赖链随 baseline 还原成立——root Cargo.toml:44/:488 定义 `gravity-primitives`,common/Cargo.toml:34 引用,`pub mod nested_trie` 挂载在位(均 2026-07-05 实测)。
+   - [x] 冲突解决:common/Cargo.toml 冲突归零(原 13 块消解)、与 baseline diff=0(2026-07-05 实测)。`cargo check -p reth-trie-common` 仍被 workspace dep 缺口整体阻塞(cargo 组),编译证据待回填;另注意本 crate 的 L1 bench 断点会在 cargo 修复后立刻暴露。
