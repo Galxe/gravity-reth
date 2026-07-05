@@ -1169,9 +1169,18 @@ fields：
    评估，不阻塞本次 merge。（注：`in_memory.rs` 冲突尚未解完，决策待执行。）
    → **参见**（2026-07-02）: pipe-exec make-canonical 链路上该类型的全链路
    分析与未闭环清单见 `executed-block-split-pipe-exec-make-canonical.md`。
-   - [ ] 冲突解决:未落地 — 实测(2026-07-03)`in_memory.rs` 仍有 39 处
-     冲突块,类型定义本身在冲突块 HEAD 侧;`memory_overlay.rs` 为上游版
-     (背离二分决策,归条目 5 复核)。
+   → **进展**（2026-07-03, f89d9d4e23）: storage 组以「整体还原 gravity
+   baseline」落地了本决策的 storage/trie 侧 — `trie/common/updates.rs`
+   (17→0)、storage-api 四文件(4/3/1/6→0)、`database/provider.rs`
+   (101→0)、`blockchain_provider.rs`(46→0,与 baseline 零 diff)等冲突
+   全归零(实测);engine/chain-state 侧(`in_memory.rs`/`tree/mod.rs`/
+   `persistence.rs`/`tests.rs`)未动。engine 侧实施路线随之反转(原"保
+   v2.3.0 validator 骨架"改为"整体复原 baseline"),见
+   `executed-block-split-pipe-exec-make-canonical.md` §6.5.1(⟲ 标记)。
+   - [ ] 冲突解决:未落地(storage/trie 侧已由 f89d9d4e23 解决,
+     engine/chain-state 侧未动)— 实测(2026-07-03)`in_memory.rs` 仍有
+     39 处冲突块,类型定义本身在冲突块 HEAD 侧;`memory_overlay.rs` 为
+     上游版(归条目 5,决策已拍板待落地)。
 - [x] 3. **`NextBlockEnvAttributes::slot_number`**：gravity 不上 Amsterdam，长期填
    `None`。如果未来要走 Amsterdam（EIP-7928 BAL），gravity 需要先决定 BAL
    是否纳入链上语义；目前所有 BAL 相关 trait 方法 gravity 实现都应返回 `None`
@@ -1210,7 +1219,7 @@ fields：
      零 diff(原 13 处冲突块全解),全仓 `execute_metered` /
      `MeteredStateHook` grep 零命中;遗留仅 tree/mod.rs 收尾时的 import
      清理与复核(见上「已执行」段),不影响本决策落地判定。
-- [ ] 5. **`trie_input` 在 `memory_overlay.rs` 中 `extend_from_sorted` vs
+- [x] 5. **`trie_input` 在 `memory_overlay.rs` 中 `extend_from_sorted` vs
    `from_blocks` 的性能差**：上游 #19894 / #20333 引入 sorted 路径有明确
    perf gain；gravity baseline 仍走 `from_blocks`。本次合并保守保留 gravity
    实现，但建议作为独立 follow-up 评估是否能在不破坏 gravity 二分类型的
@@ -1221,7 +1230,14 @@ fields：
    `from_blocks` 已不在。因其类型上游 `in_memory.rs` 仍满是冲突标记，疑为
    squash checkpoint 带入的上游侧、尚未按本决策改回。收尾时须复核后重新拍板：
    改回 gravity 版，或确认二分类型下可直接走 sorted 路径。
-   - [ ] 冲突解决:未落地(决策本身待重新拍板)— 实测(2026-07-03)
-     `memory_overlay.rs` 冲突标记 0 处,但内容为上游版(`Cow<'a,
-     [ExecutedBlock<N>]>` + `extend_from_sorted`),与"保留 gravity 实现"
-     的原结论背离,须先复核拍板再落地。
+   → **决策**（2026-07-03, f89d9d4e23 后拍板）: **整文件复原 baseline**
+   (`git checkout 0cb1687c1c -- crates/chain-state/src/memory_overlay.rs`,
+   零补丁)。依据:sorted 路径的三个前提已随 storage 组整体还原消失(实测:
+   `extend_from_sorted` 全仓不存在;storage-api `witness` 回无 mode 签名
+   trie.rs:93;`TrieInput::from_blocks` 的 Option 签名回归 input.rs:36-38),
+   当前上游版文件在还原后的 workspace 里必编译失败,baseline 版零补丁可用。
+   sorted 路径 perf follow-up 顺延至 v2.4+ 与二分长期策略(条目 2)一并评估。
+   详见 `executed-block-split-pipe-exec-make-canonical.md` §6.2.2(⟲)。
+   - [ ] 冲突解决:未落地(决策已定,checkout 待执行;落地证据 = 文件与
+     baseline 零 diff + `cargo check -p reth-chain-state`,编译证据待
+     cargo workspace 依赖修复后回填)。
