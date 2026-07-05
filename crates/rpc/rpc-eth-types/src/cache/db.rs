@@ -101,9 +101,8 @@ impl reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper {
         &self,
         input: reth_trie::TrieInput,
         target: reth_trie::HashedPostState,
-        mode: reth_trie::ExecutionWitnessMode,
     ) -> reth_errors::ProviderResult<Vec<alloy_primitives::Bytes>> {
-        self.0.witness(input, target, mode)
+        self.0.witness(input, target)
     }
 }
 

@@ -1,7 +1,6 @@
 //! Contains RPC handler implementations specific to endpoints that call/execute within evm.
 
 use crate::EthApi;
-<<<<<<< HEAD
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, U256};
 use gravity_precompiles::randomness_by_height::{
@@ -11,16 +10,13 @@ use gravity_precompiles::randomness_by_height::{
 };
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, GravityHardfork};
 use reth_errors::ProviderError;
-use reth_evm::{precompiles::PrecompilesMap, Evm, SpecFor, TxEnvFor};
-=======
->>>>>>> v2.3.0
+use reth_evm::{precompiles::PrecompilesMap, Evm};
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_api::{
     helpers::{estimate::EstimateCall, Call, EthCall},
     FromEvmError, RpcNodeCore,
 };
 use reth_rpc_eth_types::EthApiError;
-<<<<<<< HEAD
 use reth_storage_api::HeaderProvider;
 use std::sync::Arc;
 
@@ -72,23 +68,11 @@ where
     }
 }
 
-=======
-
->>>>>>> v2.3.0
 impl<N, Rpc> EthCall for EthApi<N, Rpc>
 where
     N: RpcNodeCore,
     EthApiError: FromEvmError<N::Evm>,
-<<<<<<< HEAD
-    Rpc: RpcConvert<
-        Primitives = N::Primitives,
-        Error = EthApiError,
-        TxEnv = TxEnvFor<N::Evm>,
-        Spec = SpecFor<N::Evm>,
-    >,
-=======
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
->>>>>>> v2.3.0
 {
 }
 
@@ -96,16 +80,7 @@ impl<N, Rpc> Call for EthApi<N, Rpc>
 where
     N: RpcNodeCore,
     EthApiError: FromEvmError<N::Evm>,
-<<<<<<< HEAD
-    Rpc: RpcConvert<
-        Primitives = N::Primitives,
-        Error = EthApiError,
-        TxEnv = TxEnvFor<N::Evm>,
-        Spec = SpecFor<N::Evm>,
-    >,
-=======
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
->>>>>>> v2.3.0
 {
     #[inline]
     fn call_gas_limit(&self) -> u64 {
@@ -117,7 +92,16 @@ where
         self.inner.max_simulate_blocks()
     }
 
-<<<<<<< HEAD
+    #[inline]
+    fn compute_state_root_for_eth_simulate(&self) -> bool {
+        self.inner.compute_state_root_for_eth_simulate()
+    }
+
+    #[inline]
+    fn evm_memory_limit(&self) -> u64 {
+        self.inner.evm_memory_limit()
+    }
+
     fn register_custom_precompiles<EV>(
         &self,
         evm: &mut EV,
@@ -149,19 +133,6 @@ where
         evm.precompiles_mut()
             .apply_precompile(&RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, move |_| Some(precompile));
     }
-}
-
-impl<N, Rpc> EstimateCall for EthApi<N, Rpc>
-where
-    N: RpcNodeCore,
-    EthApiError: FromEvmError<N::Evm>,
-    Rpc: RpcConvert<
-        Primitives = N::Primitives,
-        Error = EthApiError,
-        TxEnv = TxEnvFor<N::Evm>,
-        Spec = SpecFor<N::Evm>,
-    >,
-{
 }
 
 #[cfg(test)]
@@ -304,16 +275,6 @@ mod tests {
             provider.randomness_by_height(99).unwrap(),
             RandomnessByHeightLookup { value: None, gas_used: 20 }
         );
-=======
-    #[inline]
-    fn compute_state_root_for_eth_simulate(&self) -> bool {
-        self.inner.compute_state_root_for_eth_simulate()
-    }
-
-    #[inline]
-    fn evm_memory_limit(&self) -> u64 {
-        self.inner.evm_memory_limit()
->>>>>>> v2.3.0
     }
 }
 

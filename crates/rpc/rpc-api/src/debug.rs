@@ -1,24 +1,14 @@
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_genesis::ChainConfig;
 use alloy_json_rpc::RpcObject;
-<<<<<<< HEAD
-use alloy_primitives::{Address, Bytes, B256};
-use alloy_rpc_types_debug::ExecutionWitness;
-use alloy_rpc_types_eth::{Block, Bundle, StateContext};
-=======
 use alloy_primitives::{Address, Bytes, B256, U64};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{Account, AccountInfo, Bundle, Index, StateContext};
->>>>>>> v2.3.0
 use alloy_rpc_types_trace::geth::{
     BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
-<<<<<<< HEAD
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
-=======
-use reth_trie_common::{updates::TrieUpdates, ExecutionWitnessMode, HashedPostState};
->>>>>>> v2.3.0
 
 /// Debug rpc interface.
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "debug"))]
@@ -149,12 +139,7 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// to their preimages that were required during the execution of the block, including during
     /// state root recomputation.
     ///
-<<<<<<< HEAD
     /// The first argument is the block number or tag.
-=======
-    /// The first argument is the block number or tag. The optional second argument selects the
-    /// witness generation mode and defaults to `legacy`.
->>>>>>> v2.3.0
     #[method(name = "executionWitness")]
     async fn debug_execution_witness(&self, block: BlockNumberOrTag)
         -> RpcResult<ExecutionWitness>;
@@ -168,26 +153,7 @@ pub trait DebugApi<TxReq: RpcObject> {
     #[method(name = "executionWitnessByBlockHash")]
     async fn debug_execution_witness_by_block_hash(
         &self,
-<<<<<<< HEAD
         hash: B256,
-=======
-        block: BlockNumberOrTag,
-        mode: Option<ExecutionWitnessMode>,
->>>>>>> v2.3.0
-    ) -> RpcResult<ExecutionWitness>;
-
-    /// The `debug_executionWitnessByBlockHash` method allows for re-execution of a block with the
-    /// purpose of generating an execution witness. The witness comprises of a map of all hashed
-    /// trie nodes to their preimages that were required during the execution of the block,
-    /// including during state root recomputation.
-    ///
-    /// The first argument is the block hash. The optional second argument selects the witness
-    /// generation mode and defaults to `legacy`.
-    #[method(name = "executionWitnessByBlockHash")]
-    async fn debug_execution_witness_by_block_hash(
-        &self,
-        hash: B256,
-        mode: Option<ExecutionWitnessMode>,
     ) -> RpcResult<ExecutionWitness>;
 
     /// Returns account information, including the storage root, at the state after executing the
@@ -247,13 +213,6 @@ pub trait DebugApi<TxReq: RpcObject> {
         hash: B256,
         block_id: Option<BlockId>,
     ) -> RpcResult<Option<Bytes>>;
-<<<<<<< HEAD
-
-    /// Turns on CPU profiling for the given duration and writes profile data to disk.
-    #[method(name = "cpuProfile")]
-    async fn debug_cpu_profile(&self, file: String, seconds: u64) -> RpcResult<()>;
-=======
->>>>>>> v2.3.0
 
     /// Retrieves an ancient binary blob from the freezer. The freezer is a collection of
     /// append-only immutable files. The first argument `kind` specifies which table to look up data
@@ -370,17 +329,6 @@ pub trait DebugApi<TxReq: RpcObject> {
         opts: Option<GethDebugTracingCallOptions>,
     ) -> RpcResult<()>;
 
-<<<<<<< HEAD
-    /// Turns on CPU profiling indefinitely, writing to the given file.
-    #[method(name = "startCPUProfile")]
-    async fn debug_start_cpu_profile(&self, file: String) -> RpcResult<()>;
-
-    /// Starts writing a Go runtime trace to the given file.
-    #[method(name = "startGoTrace")]
-    async fn debug_start_go_trace(&self, file: String) -> RpcResult<()>;
-
-=======
->>>>>>> v2.3.0
     /// Returns the state root of the `HashedPostState` on top of the state for the given block with
     /// trie updates.
     #[method(name = "stateRootWithUpdates")]
@@ -389,17 +337,6 @@ pub trait DebugApi<TxReq: RpcObject> {
         hashed_state: HashedPostState,
         block_id: Option<BlockId>,
     ) -> RpcResult<(B256, TrieUpdates)>;
-<<<<<<< HEAD
-
-    /// Stops an ongoing CPU profile.
-    #[method(name = "stopCPUProfile")]
-    async fn debug_stop_cpu_profile(&self) -> RpcResult<()>;
-
-    /// Stops writing the Go runtime trace.
-    #[method(name = "stopGoTrace")]
-    async fn debug_stop_go_trace(&self) -> RpcResult<()>;
-=======
->>>>>>> v2.3.0
 
     /// Returns the storage at the given block height and transaction index. The result can be
     /// paged by providing a `maxResult` to cap the number of storage slots returned as well as
@@ -422,29 +359,7 @@ pub trait DebugApi<TxReq: RpcObject> {
         &self,
         block_hash: B256,
         opts: Option<GethDebugTracingCallOptions>,
-<<<<<<< HEAD
-    ) -> RpcResult<()>;
-
-    /// Sets the logging verbosity ceiling. Log messages with level up to and including the given
-    /// level will be printed.
-    #[method(name = "verbosity")]
-    async fn debug_verbosity(&self, level: usize) -> RpcResult<()>;
-
-    /// Sets the logging verbosity pattern.
-    #[method(name = "vmodule")]
-    async fn debug_vmodule(&self, pattern: String) -> RpcResult<()>;
-
-    /// Writes a goroutine blocking profile to the given file.
-    #[method(name = "writeBlockProfile")]
-    async fn debug_write_block_profile(&self, file: String) -> RpcResult<()>;
-
-    /// Writes an allocation profile to the given file.
-    #[method(name = "writeMemProfile")]
-    async fn debug_write_mem_profile(&self, file: String) -> RpcResult<()>;
-
-    /// Writes a goroutine blocking profile to the given file.
-    #[method(name = "writeMutexProfile")]
-    async fn debug_write_mutex_profile(&self, file: String) -> RpcResult<()>;
+    ) -> RpcResult<Vec<TraceResult>>;
 
     /// Sets a failpoint with the given name and action.
     ///
@@ -455,30 +370,4 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Note: Only available when built with the `failpoints` feature.
     #[method(name = "setFailpoint")]
     async fn debug_set_failpoint(&self, name: String, actions: String) -> RpcResult<()>;
-}
-
-/// An extension to the `debug_` namespace that provides additional methods for retrieving
-/// witnesses.
-///
-/// This is separate from the regular `debug_` api, because this depends on the network specific
-/// params. For optimism this will expect the optimism specific payload attributes
-#[cfg_attr(not(feature = "client"), rpc(server, namespace = "debug"))]
-#[cfg_attr(feature = "client", rpc(server, client, namespace = "debug"))]
-pub trait DebugExecutionWitnessApi<Attributes> {
-    /// The `debug_executePayload` method allows for re-execution of a group of transactions with
-    /// the purpose of generating an execution witness. The witness comprises of a map of all
-    /// hashed trie nodes to their preimages that were required during the execution of the block,
-    /// including during state root recomputation.
-    ///
-    /// The first argument is the parent block hash. The second argument is the payload
-    /// attributes for the new block.
-    #[method(name = "executePayload")]
-    async fn execute_payload(
-        &self,
-        parent_block_hash: B256,
-        attributes: Attributes,
-    ) -> RpcResult<ExecutionWitness>;
-=======
-    ) -> RpcResult<Vec<TraceResult>>;
->>>>>>> v2.3.0
 }

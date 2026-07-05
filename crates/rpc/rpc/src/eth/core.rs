@@ -589,7 +589,7 @@ mod tests {
         PruneCheckpointReader, StageCheckpointReader,
     };
     use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer};
-    use reth_storage_api::{BalProvider, BlockReader, BlockReaderIdExt, StateProviderFactory};
+    use reth_storage_api::{BlockReader, BlockReaderIdExt, StateProviderFactory};
     use reth_testing_utils::generators;
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
 
@@ -610,7 +610,6 @@ mod tests {
             + CanonStateSubscriptions<Primitives = reth_ethereum_primitives::EthPrimitives>
             + StageCheckpointReader
             + PruneCheckpointReader
-            + BalProvider
             + Unpin
             + Clone
             + 'static,
