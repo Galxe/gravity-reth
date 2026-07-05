@@ -3,6 +3,11 @@
 > **Baseline anchor**: `0cb1687c1c`（Galxe/gravity-reth `upstream/main` tip，已含 #373）。
 > **Target**: reth `v2.3.0`。
 > **分支**: `merge-v2.3.0`。HEAD: `e6b7e5ba32`。
+> **⟲ 簿记更新(2026-07-05,HEAD `a5e0201bd3` + 落地 commit `e9965cd3bf`)**:
+> 本文档 engine/chain-state 侧条目已全部落地,剩余待解范围收敛为
+> chainspec / evm / validation / engine-tree Cargo 共 13 文件 ~161 块,
+> 逐文件裁决见下方「落地簿记与剩余范围核实」节;开放问题 #2/#5 落地框
+> 已勾,**#4 被路线甲反向失效、已重开,2026-07-06 补修完成重新勾选**(见条目内 ⟲)。
 
 ## 分组概要
 
@@ -40,6 +45,95 @@ trait、`ConfigureEvm`）→ 以太坊 EVM 实现（`EthEvmConfig` + 测试 mock
    在 `chain-state` 里区分二者（trie cache 路径），上游 v2.3.0 用统一的
    `ExecutedBlock` + `LazyTrieData`/`ComputedTrieData`/`StateTrieOverlayManager`
    重写。
+
+## ⟲ 落地簿记与剩余范围核实(2026-07-05)
+
+> 背景:f89d9d4e23 整体还原 storage/trie/prune 后,`e9965cd3bf` 按
+> `executed-block-split-pipe-exec-make-canonical.md`(路线甲)落地了本文档的
+> engine/chain-state 侧。决策总原则(2026-07-05 用户拍板):①storage 决策
+> 最高;②冲突迎合 storage;③不冲突的在不破坏 gravity 功能前提下保留
+> v2.3.0 设计。以下状态均为实测(`grep -c '^<<<<<<<'` / `git diff` /
+> 符号扫描);**编译证据整体待 cargo workspace 依赖修复后回填**。
+
+### 已落地条目(冲突归零,实际解法与本文建议的出入见备注)
+
+| 逐文件条目 | 冲突 | 实际解法(e9965cd3bf 等)与本文建议的关系 |
+|---|---|---|
+| engine/primitives/config.rs | 0 | 已解(先期) |
+| engine/tree/src/metrics.rs | 0 | 按建议并集落地 |
+| persistence.rs | 0 | **偏离本文建议**:本文"禁止 crossbeam 替换 mpsc"已被推翻——实际=载荷 keep-gravity + 通道/服务形态 follow v2.3.0(crossbeam + PersistenceResult),triev2 写路径经 gravity 共同区函数保留;详见 executed-block-split §6.5.3 |
+| block_buffer.rs | 0 | 按建议:RecoveredBlock 主轴 + IndexSet/Entry 短路等上游改进吸收 |
+| tree/metrics.rs | 0 | 见开放问题 #4 ⟲(**再反转**:execute_metered 已于 2026-07-06 嫁接恢复) |
+| tree/mod.rs | 0 | keep-gravity 骨架,84 块(36H/30U/18 融合),与本文方向一致;上游 backpressure/overlay/BAL 未接入 |
+| tree/tests.rs | 0 | HEAD 主轴,gravity 专属测试保留 |
+| chain-state in_memory.rs | 0 | 按建议:二分类型保留,B256Map 等机械吸收(39 块,与 baseline 仅差 101 行) |
+| memory_overlay.rs | 0 | **整文件复原 baseline**(与 baseline 零 diff);本文"吸收 merged_hashed_storage"未采纳——sorted 路径前提已随 storage 还原消失(开放问题 #5) |
+| chain-state test_utils.rs | 0 | **整文件复原 baseline**;本文"吸收 post_block_state/with_state"未采纳(其消费方均为已出局的上游侧测试) |
+| payload_validator.rs / payload_processor | 0 | 路线甲整目录复原 baseline(validator 仅 +4/−3 行 FullConsensus 适配);本文对 tree 系的 keep-gravity 判断由此以更彻底的形式实现 |
+
+### 剩余待解范围:13 文件 ~161 块,逐文件裁决
+
+按决策总原则逐文件核实并裁决(决策 ☑ = 本节裁决;落地 ☐ 待 evm/chainspec
+方向执行,证据要求 = 冲突归零 + parse + 死符号扫描):
+
+- [ ] **`crates/evm/evm/src/execute.rs`(42 块)**——决策 ☑:**v2.3.0 为底 +
+  嫁接 gravity 4 方法**(`take_bundle`/`transact_system_txn`/
+  `apply_state_change`/`parallel_executor` 系)。证据:gravity 方法被
+  pipe-exec 5 个零冲突文件锁定(execute/src/{lib,eip_2935,onchain_config/*}.rs,
+  实测);v2.3.0-only API(`take_bal`/`GasOutput`/
+  `execute_with_state_closure_always`)全仓零外部消费方(仅本文件与
+  either.rs 自引,实测)、自包含且 deps 在位(`alloy-eip7928` 已在
+  evm/evm/Cargo.toml:27,该 manifest 与 baseline 仅差 +4/−3)——按原则③保留;
+  **`execute_with_state_closure` 在 v2.3.0 侧存活**(tag :99 实测),
+  execute_metered 恢复(开放问题 #4 ⟲)的前提成立。
+- [ ] **`crates/evm/evm/src/either.rs`(3 块)**——决策 ☑:同 execute.rs
+  方向(v2.3.0 为底 + gravity 三方法派发 + `take_bal` 派发到 inner)。
+- [ ] **`crates/evm/evm/src/lib.rs`(18 块)**——决策 ☑:v2.3.0 为底 +
+  保留 `parallel_execute` 模块/`ParallelDatabase`/`state_change` alias;
+  `NextBlockEnvAttributes` 含 `slot_number`(开放问题 #3)。**落地联动**:
+  pipe-exec 构造点(execute/src/lib.rs:1180,实测尚无该字段)须补
+  `slot_number: None`(连同 `extra_data`)。
+- [ ] **`crates/ethereum/evm/src/lib.rs`(11 块)**——决策 ☑:维持本文
+  keep-gravity + needs-port 建议。新增证据:`hardfork/`、`parallel_execute.rs`
+  在盘,`grevm`/`gravity-primitives` dep 在位(Cargo.toml:26-27),grevm 已
+  revm-40 对齐(`25fd1ecb41` bump)——吸收上游 revm40/alloy-evm 升级与
+  gravity 骨架不冲突。
+- [ ] **`crates/ethereum/evm/src/test_utils.rs`(2 块)**——决策 ☑:维持
+  keep-gravity(MockExecutor 全套);trait 若随 execute.rs 增 `take_bal`,
+  Mock 补 `None` impl。
+- [ ] **`crates/ethereum/evm/tests/execute.rs`(9 块)**——决策 ☑:跟随
+  lib.rs/test_utils.rs,编译驱动收敛。
+- [ ] **`crates/ethereum/evm/Cargo.toml`(4 块)**——决策 ☑:按本文建议
+  并集(grevm/gravity-primitives/parking_lot/derive_more + 上游
+  `reth-storage-errors/std` 等)。
+- [ ] **`crates/chainspec/src/spec.rs`(49 块)**——决策 ☑:维持本文建议
+  (gravity 三字段 + `amsterdam_time` 并集、`ChainSpec<H>` 泛化、OP 节点
+  清理)。新增证据:`amsterdam_time`/`create_chain_config`/
+  `blob_params_to_schedule` 全仓零外部消费方(仅 chainspec 自引,实测)——
+  吸收为自包含演进,符合原则③。
+- [ ] **`crates/chainspec/src/api.rs`(3 块)**——决策 ☑:维持本文建议。
+  gravity trait 方法为硬锁定:`gravity_hardforks` 被 pipe-exec 零冲突文件
+  消费(execute/src/lib.rs 的 GravityHardfork::Alpha 检查 +
+  tests/gravity_hardfork_test.rs,实测);`gravity_min_base_fee` 被
+  ethereum/node/node.rs(26 块,node-builder 文档范围)与 rpc call.rs(5 块)
+  引用,各文件解块时须同向保留。
+- [ ] **`crates/chainspec/src/lib.rs`(3 块)**——决策 ☑:维持本文建议
+  (并集 re-export;`once_cell_set` 保留——全仓消费方仅 chainspec 自身,
+  实测)。
+- [ ] **`crates/chainspec/src/constants.rs`(1 块)**——决策 ☑:
+  keep-gravity(上游对此文件 v1.8.3..v2.3.0 零变更,本文已核)。
+- [ ] **`crates/consensus/common/src/validation.rs`(8 块)**——决策 ☑:
+  维持本文建议,且实测**上游结构已在共同区**(`_with_tx_root` 拆分
+  :176/:188、`MINIMUM_GAS_LIMIT` 下界 :511 均无冲突标记),8 块仅剩
+  imports 与 50 Gwei floor 区局部(块@433 两侧均含 `INITIAL_BASE_FEE`)——
+  保 gravity floor,其余取 v2.3.0。
+- [ ] **`crates/engine/tree/Cargo.toml`(8 块)**——决策 ☑:**⟲ 修正本文
+  「机械并集」建议为「取 HEAD 侧」**。证据:v2.3.0-only 三 dep
+  (`reth-execution-cache`/`alloy-eip7928`/`reth-trie-common`)在已解
+  engine-tree 源码中零引用(仅 payload_processor/bal/*、receipt_root_task.rs
+  等**磁盘孤儿**引用,实测);v2.3.0 侧 feature 增强(`reth-chain-state
+  features=["rayon"]` 等)依赖已还原 chain-state 不存在的 feature,接入即
+  cargo 解析错误。`mini-moka`/`smallvec` 已由 e9965cd3bf 补回。
 
 ## 逐文件分析
 
@@ -331,6 +425,11 @@ gravity 侧新增 — 上游 v1.8.3 原生就有（metrics.rs:60），"Gravity �
 它）；(2) 调用点在 v1.8.3 的 `payload_validator.rs:767`，而非 tree/mod.rs。
 据此决策已修订为跟进 #21226（删 helper，metrics.rs 取 v2.3.0 侧），见开放
 问题 #4。
+
+**⟲ 再反转**(2026-07-05): 路线甲复原 baseline payload_validator 后,
+`execute_metered` 调用点回归(:768 实测),上述"跟进 #21226"决策被反向
+失效、已重开为「helper 嫁接回 v2.3.0 版 metrics.rs」——见开放问题 #4 的
+决策再修订(2026-07-06 已补修完成)。
 
 ---
 
@@ -1160,6 +1259,15 @@ fields：
      `cached_state.rs` 已不存在、`mini-moka` 全仓 `*.toml` 零命中、
      `tree/mod.rs` 无 `cached_state` 引用;`engine/tree/Cargo.toml` 尚余
      8 处冲突块,但冲突块内容 grep moka 零命中,均与本决策无关。
+   → **⟲ 部分回滚(2026-07-05)**:路线甲(baseline validator/processor
+   整目录复原)使「零调用方」前提失效(baseline 文件引用
+   `tree/cached_state` 18 处),已按 executed-block-split §9.1 裁决并由
+   `e9965cd3bf` 执行部分回滚:`cached_state.rs` 从 baseline 恢复(与
+   baseline 零 diff)、root Cargo.toml 补回 `mini-moka`、engine/tree
+   Cargo.toml 补回 mini-moka/smallvec、`mod cached_state;` 声明恢复;
+   `reth-engine-execution-cache` crate 留作 workspace 孤儿(v2.4+ 再启用)。
+   选项 C 的其余部分(precompile cache 用 moka 0.12)不变。上一条勾选的
+   证据描述由此**历史化**(当时为真,现状已反转)。
 - [x] 2. **`ExecutedBlock` vs `ExecutedBlockWithTrieUpdates` 长期策略**：上游已统
    一为单一 `ExecutedBlock + ComputedTrieData`，gravity baseline 仍二分。本组
    决策是保留二分；下一次 merge（v2.4+）时如果上游进一步深化集中式 trie
@@ -1177,10 +1285,13 @@ fields：
    `persistence.rs`/`tests.rs`)未动。engine 侧实施路线随之反转(原"保
    v2.3.0 validator 骨架"改为"整体复原 baseline"),见
    `executed-block-split-pipe-exec-make-canonical.md` §6.5.1(⟲ 标记)。
-   - [ ] 冲突解决:未落地(storage/trie 侧已由 f89d9d4e23 解决,
-     engine/chain-state 侧未动)— 实测(2026-07-03)`in_memory.rs` 仍有
-     39 处冲突块,类型定义本身在冲突块 HEAD 侧;`memory_overlay.rs` 为
-     上游版(归条目 5,决策已拍板待落地)。
+   - [x] 冲突解决:已落地 — storage/trie 侧 f89d9d4e23,engine/chain-state
+     侧 `e9965cd3bf`(路线甲)。实测(2026-07-05):`in_memory.rs` /
+     `tree/mod.rs` / `persistence.rs` / `tests.rs` / `memory_overlay.rs`
+     冲突标记全部归零,二分类型定义在位,pipe-exec 构造点(execute
+     lib.rs:753)五参签名与定义逐参吻合;逐块解法与偏差实录见
+     `executed-block-split-pipe-exec-make-canonical.md` §八/落地实录。
+     编译证据待 cargo workspace 依赖修复后回填。
 - [x] 3. **`NextBlockEnvAttributes::slot_number`**：gravity 不上 Amsterdam，长期填
    `None`。如果未来要走 Amsterdam（EIP-7928 BAL），gravity 需要先决定 BAL
    是否纳入链上语义；目前所有 BAL 相关 trait 方法 gravity 实现都应返回 `None`
@@ -1192,6 +1303,9 @@ fields：
      尚未解出;gravity 构造点(pipe-exec execute/src/lib.rs:1180 的
      `NextBlockEnvAttributes { … }`)尚未补 `slot_number: None`(连同
      `extra_data` 字段),解冲突时需一并落地。
+     复核(2026-07-05):状态不变(lib.rs 仍 18 块、构造点 :1180 仍无该
+     字段);解块方向已在上方「剩余范围核实」节裁决(v2.3.0 为底),
+     落地时联动补字段。
 - [x] 4. **上游 #21226 `move execution logic from metrics to payload_validator`
    不跟进**：metrics.rs 保留 `execute_metered` helper。如果未来要重构
    `payload_validator`，需要确认 helper 与新 validator 接口不冲突。
@@ -1215,10 +1329,38 @@ fields：
    `execute_metered` / `MeteredStateHook` 零残留。遗留：tree/mod.rs 剩余冲突
    解完后复核无新调用点，并清理失去使用点的 `OnStateHook` /
    `StateChangeSource` / `EvmState` import。
-   - [x] 冲突解决:已落地 — 实测(2026-07-03)`metrics.rs` 与 v2.3.0 tag
+   ~~- [x] 冲突解决:已落地 — 实测(2026-07-03)`metrics.rs` 与 v2.3.0 tag
      零 diff(原 13 处冲突块全解),全仓 `execute_metered` /
      `MeteredStateHook` grep 零命中;遗留仅 tree/mod.rs 收尾时的 import
-     清理与复核(见上「已执行」段),不影响本决策落地判定。
+     清理与复核(见上「已执行」段),不影响本决策落地判定。~~
+   → **⟲ 决策再修订(2026-07-05,路线甲反向失效,重开)**:「跟进 #21226」
+   的实测依据 (b)("worktree payload_validator.rs 已与 v2.3.0 零 diff、
+   调用点已消失")被 `e9965cd3bf` 击穿——路线甲把 payload_validator.rs
+   **复原到了 baseline**,`self.metrics.execute_metered(..)` 调用点回归
+   (payload_validator.rs:768,实测),而现 metrics.rs(v2.3.0 版)已无该
+   helper → 编译必断。按决策总原则②(与 storage 驱动的路线甲冲突 →
+   迎合 baseline 方向)修订为:**部分回滚 #21226 跟进——把 baseline 的
+   `execute_metered` + `MeteredStateHook` 嫁接回现 v2.3.0 版 metrics.rs**
+   (hybrid:v2.3.0 新 metric 字段保留 + baseline helper 回归;与 §9.1
+   option C 部分回滚同构)。可行性已核:helper 依赖的
+   `Executor::execute_with_state_closure` 在 v2.3.0 evm 侧存活(tag
+   execute.rs:99,实测)。不选"改造 validator :768"——违背路线甲
+   「整目录复原零改造」。
+   - [x] 冲突解决(重开后已补修,2026-07-06):`execute_metered`(含
+     `metered` 私有 helper)与 `MeteredStateHook` 已嫁接回
+     tree/metrics.rs(定义 :151/:207,调用 payload_validator.rs:768,
+     grep 双向闭合);连带嫁接 baseline 的三个 `*_loaded_histogram` 字段回
+     `crates/evm/evm/src/metrics.rs` 的 `ExecutorMetrics`(v2.3.0 版删了
+     它们而 `MeteredStateHook::on_state` 需要),并顺手修复该文件的
+     `FastInstant` 死符号 import(→ `std::time::Instant`)。取舍:baseline
+     metrics.rs 的 execute_metered 单测未随迁(其 MockExecutor 绑老版
+     alloy-evm `BlockExecutor` trait 面,cargo 不可用无法验证,留待编译
+     恢复后按需补)。同类扩面自查:全仓 `FastInstant` 扫描又修复两个
+     零冲突挂载文件(`payload/builder/src/service.rs:18`、
+     `static-file/.../static_file_producer.rs:9`);复原文件的 metrics
+     接收者(Prewarm/MultiProofTask/CachedState/StateProvider/BlockBuffer)
+     全部自包含或现存,无其它同类断点。证据 = rustfmt parse 通过 +
+     冲突标记 0;编译证据待 cargo 修复后回填。
 - [x] 5. **`trie_input` 在 `memory_overlay.rs` 中 `extend_from_sorted` vs
    `from_blocks` 的性能差**：上游 #19894 / #20333 引入 sorted 路径有明确
    perf gain；gravity baseline 仍走 `from_blocks`。本次合并保守保留 gravity
@@ -1238,6 +1380,7 @@ fields：
    当前上游版文件在还原后的 workspace 里必编译失败,baseline 版零补丁可用。
    sorted 路径 perf follow-up 顺延至 v2.4+ 与二分长期策略(条目 2)一并评估。
    详见 `executed-block-split-pipe-exec-make-canonical.md` §6.2.2(⟲)。
-   - [ ] 冲突解决:未落地(决策已定,checkout 待执行;落地证据 = 文件与
-     baseline 零 diff + `cargo check -p reth-chain-state`,编译证据待
-     cargo workspace 依赖修复后回填)。
+   - [x] 冲突解决:已落地(`e9965cd3bf`)— 实测(2026-07-05)
+     `memory_overlay.rs` 与 baseline `0cb1687c1c` **零 diff**(整文件复原,
+     零补丁),冲突标记 0;`cargo check -p reth-chain-state` 编译证据待
+     cargo workspace 依赖修复后回填。
