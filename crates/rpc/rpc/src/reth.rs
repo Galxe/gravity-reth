@@ -6,10 +6,7 @@ use alloy_primitives::{map::AddressMap, U256, U64};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use jsonrpsee::{core::RpcResult, PendingSubscriptionSink, SubscriptionMessage, SubscriptionSink};
-use reth_chain_state::{
-    CanonStateNotification, CanonStateSubscriptions, ForkChoiceSubscriptions,
-    PersistedBlockSubscriptions,
-};
+use reth_chain_state::{CanonStateNotification, CanonStateSubscriptions, ForkChoiceSubscriptions};
 use reth_errors::RethResult;
 use reth_evm::{execute::Executor, ConfigureEvm};
 use reth_execution_types::ExecutionOutcome;
@@ -194,7 +191,6 @@ where
         + BlockReader<Block = <Provider::Primitives as NodePrimitives>::Block>
         + CanonStateSubscriptions
         + ForkChoiceSubscriptions<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>
-        + PersistedBlockSubscriptions
         + 'static,
     EvmConfig: ConfigureEvm<Primitives = Provider::Primitives> + 'static,
 {
@@ -231,18 +227,6 @@ where
     ) -> jsonrpsee::core::SubscriptionResult {
         let sink = pending.accept().await?;
         let stream = self.provider().canonical_state_stream();
-        self.inner.task_spawner.spawn_task(pipe_from_stream(sink, stream));
-
-        Ok(())
-    }
-
-    /// Handler for `reth_subscribePersistedBlock`
-    async fn reth_subscribe_persisted_block(
-        &self,
-        pending: PendingSubscriptionSink,
-    ) -> jsonrpsee::core::SubscriptionResult {
-        let sink = pending.accept().await?;
-        let stream = self.provider().persisted_block_stream();
         self.inner.task_spawner.spawn_task(pipe_from_stream(sink, stream));
 
         Ok(())

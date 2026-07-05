@@ -257,7 +257,6 @@ mod tests {
     use reth_ethereum_primitives::{Receipt, TransactionSigned, TxType};
     use reth_execution_types::ExecutionOutcome;
     use reth_primitives_traits::SealedBlock;
-    use std::collections::BTreeMap;
 
     #[test]
     fn test_commit_notification() {
@@ -276,7 +275,7 @@ mod tests {
         let chain: Arc<Chain> = Arc::new(Chain::new(
             vec![block1.clone(), block2.clone()],
             ExecutionOutcome::default(),
-            BTreeMap::new(),
+            None,
         ));
 
         // Create a commit notification
@@ -311,15 +310,12 @@ mod tests {
         block3.set_block_number(3);
         block3.set_hash(block3_hash);
 
-        let old_chain: Arc<Chain> = Arc::new(Chain::new(
-            vec![block1.clone()],
-            ExecutionOutcome::default(),
-            BTreeMap::new(),
-        ));
+        let old_chain: Arc<Chain> =
+            Arc::new(Chain::new(vec![block1.clone()], ExecutionOutcome::default(), None));
         let new_chain = Arc::new(Chain::new(
             vec![block2.clone(), block3.clone()],
             ExecutionOutcome::default(),
-            BTreeMap::new(),
+            None,
         ));
 
         // Create a reorg notification
@@ -381,11 +377,8 @@ mod tests {
         let execution_outcome = ExecutionOutcome { receipts, ..Default::default() };
 
         // Create a new chain segment with `block1` and `block2` and the execution outcome.
-        let new_chain: Arc<Chain> = Arc::new(Chain::new(
-            vec![block1.clone(), block2.clone()],
-            execution_outcome,
-            BTreeMap::new(),
-        ));
+        let new_chain: Arc<Chain> =
+            Arc::new(Chain::new(vec![block1.clone(), block2.clone()], execution_outcome, None));
 
         // Create a commit notification containing the new chain segment.
         let notification = CanonStateNotification::Commit { new: new_chain };
@@ -443,7 +436,7 @@ mod tests {
 
         // Create an old chain segment to be reverted, containing `old_block1`.
         let old_chain: Arc<Chain> =
-            Arc::new(Chain::new(vec![old_block1.clone()], old_execution_outcome, BTreeMap::new()));
+            Arc::new(Chain::new(vec![old_block1.clone()], old_execution_outcome, None));
 
         // Define block2 for the new chain segment, which will be committed.
         let mut body = BlockBody::<TransactionSigned>::default();
@@ -471,8 +464,7 @@ mod tests {
             ExecutionOutcome { receipts: new_receipts, ..Default::default() };
 
         // Create a new chain segment to be committed, containing `new_block1`.
-        let new_chain =
-            Arc::new(Chain::new(vec![new_block1.clone()], new_execution_outcome, BTreeMap::new()));
+        let new_chain = Arc::new(Chain::new(vec![new_block1.clone()], new_execution_outcome, None));
 
         // Create a reorg notification with both reverted (old) and committed (new) chain segments.
         let notification = CanonStateNotification::Reorg { old: old_chain, new: new_chain };

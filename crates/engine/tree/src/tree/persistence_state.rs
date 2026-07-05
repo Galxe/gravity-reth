@@ -24,7 +24,7 @@ use crate::persistence::PersistenceResult;
 use alloy_eips::BlockNumHash;
 use alloy_primitives::B256;
 use crossbeam_channel::Receiver as CrossbeamReceiver;
-use reth_primitives_traits::FastInstant as Instant;
+use std::time::Instant;
 use tracing::trace;
 
 /// The state of the persistence task.

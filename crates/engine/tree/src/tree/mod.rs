@@ -2,25 +2,8 @@ use crate::{
     backfill::{BackfillAction, BackfillSyncState},
     chain::FromOrchestrator,
     engine::{DownloadRequest, EngineApiEvent, EngineApiKind, EngineApiRequest, FromEngine},
-    persistence::PersistenceHandle,
-<<<<<<< HEAD
+    persistence::{PersistenceHandle, PersistenceResult},
     tree::{error::InsertPayloadError, metrics::EngineApiMetrics, payload_validator::TreeCtx},
-};
-use alloy_consensus::BlockHeader;
-use alloy_eips::{eip1898::BlockWithParent, merge::EPOCH_SLOTS, BlockNumHash, NumHash};
-use alloy_evm::block::StateChangeSource;
-use alloy_primitives::B256;
-use alloy_rpc_types_engine::{
-    ForkchoiceState, PayloadStatus, PayloadStatusEnum, PayloadValidationError,
-};
-use error::{InsertBlockError, InsertBlockFatalError};
-use gravity_primitives::get_gravity_config;
-use persistence_state::CurrentPersistenceAction;
-use reth_chain_state::{
-    CanonicalInMemoryState, ExecutedBlock, ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates,
-    MemoryOverlayStateProvider, NewCanonicalChain,
-=======
-    tree::{error::InsertPayloadError, payload_validator::TreeCtx},
 };
 use alloy_consensus::BlockHeader;
 use alloy_eips::{eip1898::BlockWithParent, merge::EPOCH_SLOTS, BlockNumHash, NumHash};
@@ -28,85 +11,57 @@ use alloy_primitives::{map::B256Map, B256};
 use alloy_rpc_types_engine::{
     ForkchoiceState, PayloadStatus, PayloadStatusEnum, PayloadValidationError,
 };
-use error::{InsertBlockError, InsertBlockFatalError, InsertBlockValidationError};
+use crossbeam_channel::{Receiver, Sender};
+use error::{InsertBlockError, InsertBlockFatalError};
+use gravity_primitives::get_gravity_config;
+use persistence_state::CurrentPersistenceAction;
 use reth_chain_state::{
-    CanonicalInMemoryState, ComputedTrieData, ExecutedBlock, ExecutionTimingStats,
-    MemoryOverlayStateProvider, NewCanonicalChain, StateTrieOverlayManager,
->>>>>>> v2.3.0
+    CanonicalInMemoryState, ExecutedBlock, ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates,
+    ExecutionTimingStats, MemoryOverlayStateProvider, NewCanonicalChain,
 };
 use reth_consensus::{Consensus, FullConsensus};
 use reth_engine_primitives::{
     BeaconEngineMessage, BeaconOnNewPayloadError, ConsensusEngineEvent, ExecutionPayload,
-<<<<<<< HEAD
-    ForkchoiceStateTracker, ForkchoiceStatus, OnForkChoiceUpdated,
-};
-use reth_errors::{ConsensusError, ProviderResult};
-use reth_evm::{ConfigureEvm, OnStateHook};
-use reth_payload_builder::PayloadBuilderHandle;
-use reth_payload_primitives::{
-    BuiltPayload, EngineApiMessageVersion, NewPayloadError, PayloadBuilderAttributes, PayloadTypes,
-=======
-    ForkchoiceStateTracker, NewPayloadTimings, OnForkChoiceUpdated, SlowBlockInfo,
+    ForkchoiceStateTracker, ForkchoiceStatus, NewPayloadTimings, OnForkChoiceUpdated,
 };
 use reth_errors::{ConsensusError, ProviderResult};
 use reth_evm::ConfigureEvm;
 use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 use reth_payload_primitives::{BuiltPayload, NewPayloadError, PayloadTypes};
-use reth_primitives_traits::{
-    FastInstant as Instant, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
->>>>>>> v2.3.0
-};
 use reth_pipe_exec_layer_event_bus::{
     get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, WaitForPersistenceEvent,
 };
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader};
 use reth_provider::{
-<<<<<<< HEAD
-    providers::ConsistentDbView, BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory,
-    HashedPostStateProvider, ProviderError, StateProviderBox, StateProviderFactory, StateReader,
-    StateRootProvider, TransactionVariant,
+    BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HashedPostStateProvider,
+    ProviderError, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
+    TransactionVariant,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::ControlFlow;
+use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
 use reth_trie::{HashedPostState, TrieInput};
 use reth_trie_db::DatabaseHashedPostState;
-use revm::state::EvmState;
+use revm::interpreter::debug_unreachable;
 use state::TreeState;
 use std::{
     collections::BTreeMap,
     fmt::Debug,
+    ops,
     sync::{
-        mpsc::{Receiver, RecvError, RecvTimeoutError, Sender},
+        mpsc::{RecvError, RecvTimeoutError},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
-use tokio::sync::{
-    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    oneshot::{self, error::TryRecvError},
-=======
-    BlockExecutionOutput, BlockExecutionResult, BlockReader, ChangeSetReader,
-    DatabaseProviderFactory, HashedPostStateProvider, ProviderError, StageCheckpointReader,
-    StateProviderBox, StateProviderFactory, StateReader, StorageChangeSetReader,
-    StorageSettingsCache, TransactionVariant,
-};
-use reth_revm::database::StateProviderDatabase;
-use reth_stages_api::ControlFlow;
-use reth_tasks::{spawn_os_thread, utils::increase_thread_priority, WorkerPool};
-use reth_trie_db::ChangesetCache;
-use revm::interpreter::debug_unreachable;
-use state::TreeState;
-use std::{fmt::Debug, ops, sync::Arc, time::Duration};
-
-use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     oneshot,
->>>>>>> v2.3.0
 };
 use tracing::*;
 
 mod block_buffer;
+mod cached_state;
 pub mod error;
 pub mod instrumented_state;
 mod invalid_headers;
@@ -117,7 +72,6 @@ mod persistence_state;
 pub mod precompile_cache;
 #[cfg(test)]
 mod tests;
-<<<<<<< HEAD
 // TODO(alexey): compare trie updates in `insert_block_inner`
 #[expect(unused)]
 mod trie_updates;
@@ -125,28 +79,11 @@ mod trie_updates;
 use crate::tree::error::AdvancePersistenceError;
 pub use block_buffer::BlockBuffer;
 pub use invalid_headers::InvalidHeaderCache;
-=======
-mod trie_updates;
-pub mod types;
-
-use crate::{persistence::PersistenceResult, tree::error::AdvancePersistenceError};
-pub use block_buffer::BlockBuffer;
-pub use invalid_headers::InvalidHeaderCache;
-pub use metrics::EngineApiMetrics;
->>>>>>> v2.3.0
 pub use payload_processor::*;
 pub use payload_validator::{BasicEngineValidator, EngineValidator};
 pub use persistence_state::PersistenceState;
 pub use reth_engine_primitives::TreeConfig;
-<<<<<<< HEAD
 use reth_trie::KeccakKeyHasher;
-=======
-pub use reth_execution_cache::{
-    CachedStateCacheMetrics, CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider,
-    ExecutionCache, PayloadExecutionCache, SavedCache,
-};
-pub use types::{ValidationOutcome, ValidationOutput};
->>>>>>> v2.3.0
 
 pub mod state;
 
@@ -161,18 +98,10 @@ pub mod state;
 /// backfill this gap.
 pub(crate) const MIN_BLOCKS_FOR_PIPELINE_RUN: u64 = EPOCH_SLOTS;
 
-<<<<<<< HEAD
 /// The max number of blocks to persist in batch.
 /// Memory is released after blocks are persisted in a batch, so limiting the batch size
 /// prevents memory accumulation and ensures timely cleanup in high-throughput scenarios.
 const MAX_BLOCKS_TO_PERSIST: u64 = 8;
-=======
-/// The minimum number of blocks to retain in the changeset cache after eviction.
-///
-/// This ensures that recent trie changesets are kept in memory for potential reorgs,
-/// even when the finalized block is not set (e.g., on L2s like Optimism).
-const CHANGESET_CACHE_RETENTION_BLOCKS: u64 = 64;
->>>>>>> v2.3.0
 
 /// A builder for creating state providers that can be used across threads.
 #[derive(Clone, Debug)]
@@ -182,11 +111,7 @@ pub struct StateProviderBuilder<N: NodePrimitives, P> {
     /// The historical block hash to fetch state from.
     historical: B256,
     /// The blocks that form the chain from historical to target and are in memory.
-<<<<<<< HEAD
     overlay: Option<Vec<ExecutedBlockWithTrieUpdates<N>>>,
-=======
-    overlay: Option<Vec<ExecutedBlock<N>>>,
->>>>>>> v2.3.0
 }
 
 impl<N: NodePrimitives, P> StateProviderBuilder<N, P> {
@@ -195,11 +120,7 @@ impl<N: NodePrimitives, P> StateProviderBuilder<N, P> {
     pub const fn new(
         provider_factory: P,
         historical: B256,
-<<<<<<< HEAD
         overlay: Option<Vec<ExecutedBlockWithTrieUpdates<N>>>,
-=======
-        overlay: Option<Vec<ExecutedBlock<N>>>,
->>>>>>> v2.3.0
     ) -> Self {
         Self { provider_factory, historical, overlay }
     }
@@ -242,10 +163,6 @@ impl<N: NodePrimitives> EngineApiTreeState<N> {
         invalid_header_hit_eviction_threshold: u8,
         canonical_block: BlockNumHash,
         engine_kind: EngineApiKind,
-<<<<<<< HEAD
-=======
-        state_trie_overlay_worker_pool: Arc<WorkerPool>,
->>>>>>> v2.3.0
     ) -> Self {
         Self {
             invalid_headers: InvalidHeaderCache::new(
@@ -253,15 +170,7 @@ impl<N: NodePrimitives> EngineApiTreeState<N> {
                 invalid_header_hit_eviction_threshold,
             ),
             buffer: BlockBuffer::new(block_buffer_limit),
-<<<<<<< HEAD
             tree_state: TreeState::new(canonical_block, engine_kind),
-=======
-            tree_state: TreeState::new(
-                canonical_block,
-                engine_kind,
-                StateTrieOverlayManager::new(state_trie_overlay_worker_pool),
-            ),
->>>>>>> v2.3.0
             forkchoice_state_tracker: ForkchoiceStateTracker::default(),
         }
     }
@@ -401,11 +310,7 @@ where
     C: ConfigureEvm<Primitives = N> + 'static,
 {
     provider: P,
-<<<<<<< HEAD
-    consensus: Arc<dyn FullConsensus<N, Error = ConsensusError>>,
-=======
     consensus: Arc<dyn FullConsensus<N>>,
->>>>>>> v2.3.0
     payload_validator: V,
     /// Keeps track of internals such as executed and buffered blocks.
     state: EngineApiTreeState<N>,
@@ -442,12 +347,8 @@ where
     engine_kind: EngineApiKind,
     /// The EVM configuration.
     evm_config: C,
-<<<<<<< HEAD
     /// Persistence waiters that are waiting for the block to be persisted.
     persistence_waiters: PersistenceWaiters,
-=======
-    /// Changeset cache for in-memory trie changesets
-    changeset_cache: ChangesetCache,
     /// Timing statistics for executed blocks, keyed by block hash.
     /// Stored here (not in `ExecutedBlock`) to avoid leaking observability concerns into the block
     /// type. Entries are removed when blocks are persisted or invalidated.
@@ -455,9 +356,6 @@ where
     /// Set when an FCU with payload attributes is received, cleared on the next FCU without.
     /// Suppresses persistence cycles during payload building.
     building_payload: bool,
-    /// Task runtime for spawning blocking work on named, reusable threads.
-    runtime: reth_tasks::Runtime,
->>>>>>> v2.3.0
 }
 
 impl<N, P: Debug, T: PayloadTypes + Debug, V: Debug, C> std::fmt::Debug
@@ -482,12 +380,7 @@ where
             .field("metrics", &self.metrics)
             .field("engine_kind", &self.engine_kind)
             .field("evm_config", &self.evm_config)
-<<<<<<< HEAD
-=======
-            .field("changeset_cache", &self.changeset_cache)
             .field("execution_timing_stats", &self.execution_timing_stats.len())
-            .field("runtime", &self.runtime)
->>>>>>> v2.3.0
             .finish()
     }
 }
@@ -502,32 +395,17 @@ where
         + HashedPostStateProvider
         + Clone
         + 'static,
-<<<<<<< HEAD
     <P as DatabaseProviderFactory>::Provider:
         BlockReader<Block = N::Block, Header = N::BlockHeader>,
     C: ConfigureEvm<Primitives = N> + 'static,
     T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
     V: EngineValidator<T>,
-=======
-    P::Provider: BlockReader<Block = N::Block, Header = N::BlockHeader>
-        + StageCheckpointReader
-        + ChangeSetReader
-        + StorageChangeSetReader
-        + StorageSettingsCache,
-    C: ConfigureEvm<Primitives = N> + 'static,
-    T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
-    V: EngineValidator<T> + WaitForCaches,
->>>>>>> v2.3.0
 {
     /// Creates a new [`EngineApiTreeHandler`].
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         provider: P,
-<<<<<<< HEAD
-        consensus: Arc<dyn FullConsensus<N, Error = ConsensusError>>,
-=======
         consensus: Arc<dyn FullConsensus<N>>,
->>>>>>> v2.3.0
         payload_validator: V,
         outgoing: UnboundedSender<EngineApiEvent<N>>,
         state: EngineApiTreeState<N>,
@@ -538,15 +416,8 @@ where
         config: TreeConfig,
         engine_kind: EngineApiKind,
         evm_config: C,
-<<<<<<< HEAD
-    ) -> Self {
-        let (incoming_tx, incoming) = std::sync::mpsc::channel();
-=======
-        changeset_cache: ChangesetCache,
-        runtime: reth_tasks::Runtime,
     ) -> Self {
         let (incoming_tx, incoming) = crossbeam_channel::unbounded();
->>>>>>> v2.3.0
 
         Self {
             provider,
@@ -565,14 +436,9 @@ where
             incoming_tx,
             engine_kind,
             evm_config,
-<<<<<<< HEAD
             persistence_waiters: PersistenceWaiters::new(),
-=======
-            changeset_cache,
             execution_timing_stats: B256Map::default(),
             building_payload: false,
-            runtime,
->>>>>>> v2.3.0
         }
     }
 
@@ -584,11 +450,7 @@ where
     #[expect(clippy::complexity)]
     pub fn spawn_new(
         provider: P,
-<<<<<<< HEAD
-        consensus: Arc<dyn FullConsensus<N, Error = ConsensusError>>,
-=======
         consensus: Arc<dyn FullConsensus<N>>,
->>>>>>> v2.3.0
         payload_validator: V,
         persistence: PersistenceHandle<N>,
         payload_builder: PayloadBuilderHandle<T>,
@@ -596,11 +458,6 @@ where
         config: TreeConfig,
         kind: EngineApiKind,
         evm_config: C,
-<<<<<<< HEAD
-=======
-        changeset_cache: ChangesetCache,
-        runtime: reth_tasks::Runtime,
->>>>>>> v2.3.0
     ) -> (Sender<FromEngine<EngineApiRequest<T, N>, N::Block>>, UnboundedReceiver<EngineApiEvent<N>>)
     {
         let best_block_number = provider.best_block_number().unwrap_or(0);
@@ -618,10 +475,6 @@ where
             config.invalid_header_hit_eviction_threshold(),
             header.num_hash(),
             kind,
-<<<<<<< HEAD
-=======
-            runtime.state_trie_overlay_worker_pool(),
->>>>>>> v2.3.0
         );
 
         let task = Self::new(
@@ -637,11 +490,21 @@ where
             config,
             kind,
             evm_config,
-<<<<<<< HEAD
         );
         let incoming = task.incoming_tx.clone();
-        std::thread::Builder::new().name("Engine Task".to_string()).spawn(|| task.run()).unwrap();
+        spawn_os_thread("engine", || {
+            increase_thread_priority();
+            task.run()
+        });
         (incoming, outgoing)
+    }
+
+    /// Returns a [`TreeOutcome`] indicating the forkchoice head is valid and canonical.
+    fn valid_outcome(state: ForkchoiceState) -> TreeOutcome<OnForkChoiceUpdated> {
+        TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::new(
+            PayloadStatusEnum::Valid,
+            Some(state.head_block_hash),
+        )))
     }
 
     fn try_recv_pipe_exec_event(
@@ -730,25 +593,6 @@ where
         // deterministic consensus means canonical block is immediately safe and finalized
         self.canonical_in_memory_state.set_safe(sealed_header.clone());
         self.canonical_in_memory_state.set_finalized(sealed_header);
-=======
-            changeset_cache,
-            runtime,
-        );
-        let incoming = task.incoming_tx.clone();
-        spawn_os_thread("engine", || {
-            increase_thread_priority();
-            task.run()
-        });
-        (incoming, outgoing)
-    }
-
-    /// Returns a [`TreeOutcome`] indicating the forkchoice head is valid and canonical.
-    fn valid_outcome(state: ForkchoiceState) -> TreeOutcome<OnForkChoiceUpdated> {
-        TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::new(
-            PayloadStatusEnum::Valid,
-            Some(state.head_block_hash),
-        )))
->>>>>>> v2.3.0
     }
 
     /// Returns a new [`Sender`] to send messages to this type.
@@ -977,11 +821,7 @@ where
     /// block request processing isn't blocked for a long time.
     fn on_downloaded(
         &mut self,
-<<<<<<< HEAD
         mut blocks: Vec<RecoveredBlock<N::Block>>,
-=======
-        mut blocks: Vec<SealedBlock<N::Block>>,
->>>>>>> v2.3.0
     ) -> Result<Option<TreeEvent>, InsertBlockFatalError> {
         if blocks.is_empty() {
             // nothing to execute
@@ -1066,17 +906,13 @@ where
         //      null}` if the expected and the actual arrays don't match.
         //
         // This validation **MUST** be instantly run in all cases even during active sync process.
-<<<<<<< HEAD
         let parent_hash = payload.parent_hash();
-=======
->>>>>>> v2.3.0
 
         let num_hash = payload.num_hash();
         let engine_event = ConsensusEngineEvent::BlockReceived(num_hash);
         self.emit_event(EngineApiEvent::BeaconConsensus(engine_event));
 
         let block_hash = num_hash.hash;
-<<<<<<< HEAD
         let mut lowest_buffered_ancestor = self.lowest_buffered_ancestor_or(block_hash);
         if lowest_buffered_ancestor == block_hash {
             lowest_buffered_ancestor = parent_hash;
@@ -1151,27 +987,6 @@ where
         // if the block is valid and it is the current sync target head, make it canonical
         if outcome.outcome.is_valid() && self.is_sync_target_head(block_hash) {
             // but only if it isn't already the canonical head
-=======
-
-        // Check for invalid ancestors
-        if let Some(invalid) = self.find_invalid_ancestor(&payload) {
-            let status = self.handle_invalid_ancestor_payload(payload, invalid)?;
-            return Ok(TreeOutcome::new(status));
-        }
-
-        // record pre-execution phase duration
-        self.metrics.block_validation.record_payload_validation(start.elapsed().as_secs_f64());
-
-        let mut outcome = if self.backfill_sync_state.is_idle() {
-            self.try_insert_payload(payload)?.into_outcome()
-        } else {
-            TreeOutcome::new(self.try_buffer_payload(payload)?)
-        };
-
-        // if the block is valid and it is the current sync target head, make it canonical
-        if outcome.outcome.is_valid() && self.is_sync_target_head(block_hash) {
-            // Only create the canonical event if this block isn't already the canonical head
->>>>>>> v2.3.0
             if self.state.tree_state.canonical_block_hash() != block_hash {
                 outcome = outcome.with_event(TreeEvent::TreeAction(TreeAction::MakeCanonical {
                     sync_target_head: block_hash,
@@ -1183,84 +998,6 @@ where
         self.metrics.block_validation.total_duration.record(start.elapsed().as_secs_f64());
 
         Ok(outcome)
-    }
-
-    /// Processes a payload during normal sync operation.
-    #[instrument(level = "debug", target = "engine::tree", skip_all)]
-    fn try_insert_payload(
-        &mut self,
-        payload: T::ExecutionData,
-    ) -> Result<TryInsertPayloadResult, InsertBlockFatalError> {
-        let block_hash = payload.block_hash();
-        let num_hash = payload.num_hash();
-        let parent_hash = payload.parent_hash();
-        let mut latest_valid_hash = None;
-
-        match self.insert_payload(payload) {
-            Ok(status) => {
-                let (status, already_seen) = match status {
-                    InsertPayloadOk::Inserted(BlockStatus::Valid) => {
-                        latest_valid_hash = Some(block_hash);
-                        self.try_connect_buffered_blocks(num_hash)?;
-                        (PayloadStatusEnum::Valid, false)
-                    }
-                    InsertPayloadOk::AlreadySeen(BlockStatus::Valid) => {
-                        latest_valid_hash = Some(block_hash);
-                        (PayloadStatusEnum::Valid, true)
-                    }
-                    InsertPayloadOk::Inserted(BlockStatus::Disconnected { .. }) => {
-                        (PayloadStatusEnum::Syncing, false)
-                    }
-                    InsertPayloadOk::AlreadySeen(BlockStatus::Disconnected { .. }) => {
-                        // not known to be invalid, but we don't know anything else
-                        (PayloadStatusEnum::Syncing, true)
-                    }
-                };
-
-                Ok(TryInsertPayloadResult {
-                    status: PayloadStatus::new(status, latest_valid_hash),
-                    already_seen,
-                })
-            }
-            Err(error) => {
-                let status = match error {
-                    InsertPayloadError::Block(error) => self.on_insert_block_error(error)?,
-                    InsertPayloadError::Payload(error) => {
-                        self.on_new_payload_error(error, num_hash, parent_hash)?
-                    }
-                };
-
-                Ok(TryInsertPayloadResult { status, already_seen: false })
-            }
-        }
-    }
-
-    /// Stores a payload for later processing during backfill sync.
-    ///
-    /// During backfill, the node lacks the state needed to validate payloads,
-    /// so they are buffered (stored in memory) until their parent blocks are synced.
-    ///
-    /// Returns:
-    /// - `Syncing`: Payload successfully buffered
-    /// - Error status: Payload is malformed or invalid
-    fn try_buffer_payload(
-        &mut self,
-        payload: T::ExecutionData,
-    ) -> Result<PayloadStatus, InsertBlockFatalError> {
-        let parent_hash = payload.parent_hash();
-        let num_hash = payload.num_hash();
-
-        match self.payload_validator.convert_payload_to_block(payload) {
-            // if the block is well-formed, buffer it for later
-            Ok(block) => {
-                if let Err(error) = self.buffer_block(block) {
-                    Ok(self.on_insert_block_error(error)?)
-                } else {
-                    Ok(PayloadStatus::from_status(PayloadStatusEnum::Syncing))
-                }
-            }
-            Err(error) => Ok(self.on_new_payload_error(error, num_hash, parent_hash)?),
-        }
     }
 
     /// Returns the new chain for the given head.
@@ -1318,7 +1055,6 @@ where
         // If the canonical chain is ahead of the new chain,
         // gather all blocks until new head number.
         while current_canonical_number > current_number {
-<<<<<<< HEAD
             if let Some(block) = self.canonical_block_by_hash(old_hash)? {
                 old_chain.push(block.clone());
                 old_hash = block.recovered_block().parent_hash();
@@ -1328,12 +1064,6 @@ where
                 warn!(target: "engine::tree", current_hash=?old_hash, "Canonical block not found in TreeState");
                 return Ok(None)
             }
-=======
-            let block = self.canonical_block_by_hash(old_hash)?;
-            old_hash = block.recovered_block().parent_hash();
-            old_chain.push(block);
-            current_canonical_number -= 1;
->>>>>>> v2.3.0
         }
 
         // Both new and old chain pointers are now at the same height.
@@ -1342,7 +1072,6 @@ where
         // Walk both chains from specified hashes at same height until
         // a common ancestor (fork block) is reached.
         while old_hash != current_hash {
-<<<<<<< HEAD
             if let Some(block) = self.canonical_block_by_hash(old_hash)? {
                 old_hash = block.recovered_block().parent_hash();
                 old_chain.push(block);
@@ -1351,11 +1080,6 @@ where
                 warn!(target: "engine::tree", current_hash=?old_hash, "Canonical block not found in TreeState");
                 return Ok(None)
             }
-=======
-            let block = self.canonical_block_by_hash(old_hash)?;
-            old_hash = block.recovered_block().parent_hash();
-            old_chain.push(block);
->>>>>>> v2.3.0
 
             if let Some(block) = self.state.tree_state.executed_block_by_hash(current_hash).cloned()
             {
@@ -1448,27 +1172,17 @@ where
         new_head_number: u64,
         current_head_number: u64,
     ) -> Vec<ExecutedBlock<N>> {
-<<<<<<< HEAD
         let mut old_blocks = Vec::new();
 
         for block_num in (new_head_number + 1)..=current_head_number {
             if let Some(block_state) = self.canonical_in_memory_state.state_by_number(block_num) {
                 let executed_block = block_state.block_ref().block.clone();
-=======
-        let mut old_blocks =
-            Vec::with_capacity((current_head_number.saturating_sub(new_head_number)) as usize);
-
-        for block_num in (new_head_number + 1)..=current_head_number {
-            if let Some(block_state) = self.canonical_in_memory_state.state_by_number(block_num) {
-                let executed_block = block_state.block_ref().clone();
->>>>>>> v2.3.0
                 old_blocks.push(executed_block);
                 debug!(
                     target: "engine::tree",
                     block_number = block_num,
                     "Collected block for removal from in-memory state"
                 );
-<<<<<<< HEAD
             }
         }
 
@@ -1615,84 +1329,6 @@ where
         }
 
         Ok(true)
-=======
-            }
-        }
-
-        if old_blocks.is_empty() {
-            debug!(
-                target: "engine::tree",
-                "No blocks found in memory to remove, will clear and reset state"
-            );
-        }
-
-        old_blocks
-    }
-
-    /// Applies the canonical ancestor block via a reorg operation.
-    fn apply_canonical_ancestor_via_reorg(
-        &self,
-        canonical_header: &SealedHeader<N::BlockHeader>,
-        old_blocks: Vec<ExecutedBlock<N>>,
-    ) -> ProviderResult<()> {
-        let new_head_hash = canonical_header.hash();
-        let new_head_number = canonical_header.number();
-
-        // Load the canonical ancestor's block
-        let executed_block = self.canonical_block_by_hash(new_head_hash)?;
-        // Perform the reorg to properly handle the unwind
-        self.canonical_in_memory_state
-            .update_chain(NewCanonicalChain::Reorg { new: vec![executed_block], old: old_blocks });
-
-        // CRITICAL: Update the canonical head after the reorg
-        // This ensures get_canonical_head() returns the correct block
-        self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
-
-        debug!(
-            target: "engine::tree",
-            block_number = new_head_number,
-            block_hash = ?new_head_hash,
-            "Successfully loaded canonical ancestor into memory via reorg"
-        );
-
-        Ok(())
-    }
-
-    /// Handles chain advance or same height scenarios.
-    fn handle_chain_advance_or_same_height(
-        &self,
-        canonical_header: &SealedHeader<N::BlockHeader>,
-    ) -> ProviderResult<()> {
-        // Load the block into memory if it's not already present
-        self.ensure_block_in_memory(canonical_header.number(), canonical_header.hash())?;
-
-        // Update the canonical head header
-        self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
-
-        Ok(())
-    }
-
-    /// Ensures a block is loaded into memory if not already present.
-    fn ensure_block_in_memory(&self, block_number: u64, block_hash: B256) -> ProviderResult<()> {
-        // Check if block is already in memory
-        if self.canonical_in_memory_state.state_by_number(block_number).is_some() {
-            return Ok(());
-        }
-
-        // Load the block from storage
-        let executed_block = self.canonical_block_by_hash(block_hash)?;
-        self.canonical_in_memory_state
-            .update_chain(NewCanonicalChain::Commit { new: vec![executed_block] });
-
-        debug!(
-            target: "engine::tree",
-            block_number,
-            block_hash = ?block_hash,
-            "Added canonical block to in-memory state"
-        );
-
-        Ok(())
->>>>>>> v2.3.0
     }
 
     /// Returns the persisting kind for the input block.
@@ -1731,17 +1367,8 @@ where
         &mut self,
         state: ForkchoiceState,
         attrs: Option<T::PayloadAttributes>,
-        version: EngineApiMessageVersion,
     ) -> ProviderResult<TreeOutcome<OnForkChoiceUpdated>> {
         trace!(target: "engine::tree", ?attrs, "invoked forkchoice update");
-<<<<<<< HEAD
-        self.metrics.engine.forkchoice_updated_messages.increment(1);
-        if attrs.is_some() {
-            self.metrics.engine.forkchoice_with_attributes_updated_messages.increment(1);
-        }
-        self.canonical_in_memory_state.on_forkchoice_update_received();
-=======
->>>>>>> v2.3.0
 
         self.building_payload = attrs.is_some() && self.config.suppress_persistence_during_build();
 
@@ -1826,95 +1453,6 @@ where
         // - emitting a canonicalization event for the new chain (including reorg)
         // - if we have payload attributes, delegate them to the payload service
 
-<<<<<<< HEAD
-        // 1. ensure we have a new head block
-        if self.state.tree_state.canonical_block_hash() == state.head_block_hash {
-            trace!(target: "engine::tree", "fcu head hash is already canonical");
-
-            // update the safe and finalized blocks and ensure their values are valid
-            if let Err(outcome) = self.ensure_consistent_forkchoice_state(state) {
-                // safe or finalized hashes are invalid
-                return Ok(TreeOutcome::new(outcome))
-            }
-
-            // we still need to process payload attributes if the head is already canonical
-            if let Some(attr) = attrs {
-                let tip = self
-                    .sealed_header_by_hash(self.state.tree_state.canonical_block_hash())?
-                    .ok_or_else(|| {
-                        // If we can't find the canonical block, then something is wrong and we need
-                        // to return an error
-                        ProviderError::HeaderNotFound(state.head_block_hash.into())
-                    })?;
-                let updated = self.process_payload_attributes(attr, &tip, state, version);
-                return Ok(TreeOutcome::new(updated))
-            }
-
-            // the head block is already canonical
-            return Ok(valid_outcome(state.head_block_hash))
-        }
-
-        // 2. check if the head is already part of the canonical chain
-        if let Ok(Some(canonical_header)) = self.find_canonical_header(state.head_block_hash) {
-            debug!(target: "engine::tree", head = canonical_header.number(), "fcu head block is already canonical");
-
-            // For OpStack, or if explicitly configured, the proposers are allowed to reorg their
-            // own chain at will, so we need to always trigger a new payload job if requested.
-            if self.engine_kind.is_opstack() ||
-                self.config.always_process_payload_attributes_on_canonical_head()
-            {
-                if let Some(attr) = attrs {
-                    debug!(target: "engine::tree", head = canonical_header.number(), "handling payload attributes for canonical head");
-                    let updated =
-                        self.process_payload_attributes(attr, &canonical_header, state, version);
-                    return Ok(TreeOutcome::new(updated))
-                }
-
-                // At this point, no alternative block has been triggered, so we need effectively
-                // unwind the _canonical_ chain to the FCU's head, which is part of the canonical
-                // chain. We need to update the latest block state to reflect the
-                // canonical ancestor. This ensures that state providers and the
-                // transaction pool operate with the correct chain state after
-                // forkchoice update processing.
-                if self.config.unwind_canonical_header() {
-                    self.update_latest_block_to_canonical_ancestor(&canonical_header)?;
-                }
-            }
-
-            // 2. Client software MAY skip an update of the forkchoice state and MUST NOT begin a
-            //    payload build process if `forkchoiceState.headBlockHash` references a `VALID`
-            //    ancestor of the head of canonical chain, i.e. the ancestor passed payload
-            //    validation process and deemed `VALID`. In the case of such an event, client
-            //    software MUST return `{payloadStatus: {status: VALID, latestValidHash:
-            //    forkchoiceState.headBlockHash, validationError: null}, payloadId: null}`
-
-            // the head block is already canonical, so we're not triggering a payload job and can
-            // return right away
-            return Ok(valid_outcome(state.head_block_hash))
-        }
-
-        // 3. ensure we can apply a new chain update for the head block
-        if let Some(chain_update) = self.on_new_head(state.head_block_hash)? {
-            let tip = chain_update.tip().clone_sealed_header();
-            self.on_canonical_chain_update(chain_update);
-
-            // update the safe and finalized blocks and ensure their values are valid
-            if let Err(outcome) = self.ensure_consistent_forkchoice_state(state) {
-                // safe or finalized hashes are invalid
-                return Ok(TreeOutcome::new(outcome))
-            }
-
-            if let Some(attr) = attrs {
-                let updated = self.process_payload_attributes(attr, &tip, state, version);
-                return Ok(TreeOutcome::new(updated))
-            }
-
-            return Ok(valid_outcome(state.head_block_hash))
-        }
-
-        // 4. we don't have the block to perform the update
-        // we assume the FCU is valid and at least the head is missing,
-=======
         if self.state.tree_state.canonical_block_hash() != state.head_block_hash {
             return Ok(None);
         }
@@ -2034,7 +1572,6 @@ where
     ) -> ProviderResult<TreeOutcome<OnForkChoiceUpdated>> {
         // We don't have the block to perform the forkchoice update
         // We assume the FCU is valid and at least the head is missing,
->>>>>>> v2.3.0
         // so we need to start syncing to it
         //
         // find the appropriate target to sync to, if we don't have the safe block hash then we
@@ -2059,49 +1596,6 @@ where
         .with_event(TreeEvent::Download(DownloadRequest::single_block(target))))
     }
 
-<<<<<<< HEAD
-    /// Attempts to receive the next engine request.
-    ///
-    /// If there's currently no persistence action in progress, this will block until a new request
-    /// is received. If there's a persistence action in progress, this will try to receive the
-    /// next request with a timeout to not block indefinitely and return `Ok(None)` if no request is
-    /// received in time.
-    ///
-    /// Returns an error if the engine channel is disconnected.
-    #[expect(clippy::type_complexity)]
-    fn try_recv_engine_message(
-        &self,
-    ) -> Result<Option<FromEngine<EngineApiRequest<T, N>, N::Block>>, RecvError> {
-        if self.persistence_state.in_progress() {
-            // try to receive the next request with a timeout to not block indefinitely
-            match self.incoming.recv_timeout(std::time::Duration::from_millis(500)) {
-                Ok(msg) => Ok(Some(msg)),
-                Err(err) => match err {
-                    RecvTimeoutError::Timeout => Ok(None),
-                    RecvTimeoutError::Disconnected => Err(RecvError),
-                },
-            }
-        } else {
-            self.incoming.recv().map(Some)
-        }
-    }
-
-    /// Helper method to remove blocks and set the persistence state. This ensures we keep track of
-    /// the current persistence action while we're removing blocks.
-    fn remove_blocks(&mut self, new_tip_num: u64) {
-        debug!(target: "engine::tree", ?new_tip_num, last_persisted_block_number=?self.persistence_state.last_persisted_block.number, "Removing blocks using persistence task");
-        if new_tip_num < self.persistence_state.last_persisted_block.number {
-            debug!(target: "engine::tree", ?new_tip_num, "Starting remove blocks job");
-            let (tx, rx) = oneshot::channel();
-            let _ = self.persistence.remove_blocks_above(new_tip_num, tx);
-            self.persistence_state.start_remove(new_tip_num, rx);
-        }
-    }
-
-    /// Helper method to save blocks and set the persistence state. This ensures we keep track of
-    /// the current persistence action while we're saving blocks.
-    fn persist_blocks(&mut self, blocks_to_persist: Vec<ExecutedBlockWithTrieUpdates<N>>) {
-=======
     /// Helper method to remove blocks and set the persistence state. This ensures we keep track of
     /// the current persistence action while we're removing blocks.
     fn remove_blocks(&mut self, new_tip_num: u64) {
@@ -2116,8 +1610,7 @@ where
 
     /// Helper method to save blocks and set the persistence state. This ensures we keep track of
     /// the current persistence action while we're saving blocks.
-    fn persist_blocks(&mut self, blocks_to_persist: Vec<ExecutedBlock<N>>) {
->>>>>>> v2.3.0
+    fn persist_blocks(&mut self, blocks_to_persist: Vec<ExecutedBlockWithTrieUpdates<N>>) {
         if blocks_to_persist.is_empty() {
             debug!(target: "engine::tree", "Returned empty set of blocks to persist");
             return
@@ -2130,73 +1623,18 @@ where
             .map(|b| b.recovered_block().num_hash())
             .expect("Checked non-empty persisting blocks");
 
-<<<<<<< HEAD
-        info!(target: "engine::tree", blocks = ?blocks_to_persist.iter().map(|block| block.recovered_block().num_hash()).collect::<Vec<_>>(), "Persisting blocks");
-        let (tx, rx) = oneshot::channel();
-=======
         debug!(target: "engine::tree", count=blocks_to_persist.len(), blocks = ?blocks_to_persist.iter().map(|block| block.recovered_block().num_hash()).collect::<Vec<_>>(), "Persisting blocks");
         let (tx, rx) = crossbeam_channel::bounded(1);
->>>>>>> v2.3.0
         let _ = self.persistence.save_blocks(blocks_to_persist, tx);
 
         self.persistence_state.start_save(highest_num_hash, rx);
     }
 
-<<<<<<< HEAD
-    /// Attempts to advance the persistence state.
-=======
     /// Triggers new persistence actions if no persistence task is currently in progress.
->>>>>>> v2.3.0
     ///
     /// This checks if we need to remove blocks (disk reorg) or save new blocks to disk.
     /// Persistence completion is handled separately via the `wait_for_event` method.
     fn advance_persistence(&mut self) -> Result<(), AdvancePersistenceError> {
-<<<<<<< HEAD
-        if self.persistence_state.in_progress() {
-            let (mut rx, start_time, current_action) = self
-                .persistence_state
-                .rx
-                .take()
-                .expect("if a persistence task is in progress Receiver must be Some");
-            // Check if persistence has complete
-            match rx.try_recv() {
-                Ok(last_persisted_hash_num) => {
-                    self.metrics.engine.persistence_duration.record(start_time.elapsed());
-                    let Some(BlockNumHash {
-                        hash: last_persisted_block_hash,
-                        number: last_persisted_block_number,
-                    }) = last_persisted_hash_num
-                    else {
-                        // if this happened, then we persisted no blocks because we sent an
-                        // empty vec of blocks
-                        warn!(target: "engine::tree", "Persistence task completed but did not persist any blocks");
-                        return Ok(())
-                    };
-
-                    self.persistence_waiters.notify_waiters(last_persisted_block_number);
-                    info!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, "Finished persisting, calling finish");
-                    self.persistence_state
-                        .finish(last_persisted_block_hash, last_persisted_block_number);
-                    self.on_new_persisted_block()?;
-                }
-                Err(TryRecvError::Closed) => return Err(TryRecvError::Closed.into()),
-                Err(TryRecvError::Empty) => {
-                    self.persistence_state.rx = Some((rx, start_time, current_action))
-                }
-            }
-        }
-
-        if !self.persistence_state.in_progress() {
-            if let Some(new_tip_num) = self.find_disk_reorg()? {
-                self.remove_blocks(new_tip_num)
-            }
-
-            if self.should_persist() {
-                let blocks_to_persist = self.get_canonical_blocks_to_persist()?;
-                self.persist_blocks(blocks_to_persist);
-            }
-        }
-=======
         if !self.persistence_state.in_progress() {
             if let Some(new_tip_num) = self.find_disk_reorg()? {
                 self.remove_blocks(new_tip_num)
@@ -2291,33 +1729,11 @@ where
 
         debug!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, elapsed=?start_time.elapsed(), "Finished persisting, calling finish");
         self.persistence_state.finish(last_persisted_block_hash, last_persisted_block_number);
-
-        // Evict trie changesets for blocks below the eviction threshold.
-        // Keep at least CHANGESET_CACHE_RETENTION_BLOCKS from the persisted tip, and also respect
-        // the finalized block if set.
-        let min_threshold =
-            last_persisted_block_number.saturating_sub(CHANGESET_CACHE_RETENTION_BLOCKS);
-        let eviction_threshold =
-            if let Some(finalized) = self.canonical_in_memory_state.get_finalized_num_hash() {
-                // Use the minimum of finalized block and retention threshold to be conservative
-                finalized.number.min(min_threshold)
-            } else {
-                // When finalized is not set (e.g., on L2s), use the retention threshold
-                min_threshold
-            };
-        debug!(
-            target: "engine::tree",
-            last_persisted = last_persisted_block_number,
-            finalized_number = ?self.canonical_in_memory_state.get_finalized_num_hash().map(|f| f.number),
-            eviction_threshold,
-            "Evicting changesets below threshold"
-        );
-        self.changeset_cache.evict(eviction_threshold);
+        self.persistence_waiters.notify_waiters(last_persisted_block_number);
 
         self.on_new_persisted_block()?;
 
         self.purge_timing_stats(last_persisted_block_number, commit_duration);
->>>>>>> v2.3.0
 
         Ok(())
     }
@@ -2328,11 +1744,7 @@ where
     fn on_engine_message(
         &mut self,
         msg: FromEngine<EngineApiRequest<T, N>, N::Block>,
-<<<<<<< HEAD
-    ) -> Result<(), InsertBlockFatalError> {
-=======
     ) -> Result<ops::ControlFlow<()>, InsertBlockFatalError> {
->>>>>>> v2.3.0
         match msg {
             FromEngine::Event(event) => match event {
                 FromOrchestrator::BackfillSyncStarted => {
@@ -2352,43 +1764,21 @@ where
             },
             FromEngine::Request(request) => {
                 match request {
-<<<<<<< HEAD
                     EngineApiRequest::InsertExecutedBlock(block) => {
                         let block_num_hash = block.recovered_block().num_hash();
-                        if block_num_hash.number <= self.state.tree_state.canonical_block_number() {
-                            // outdated block that can be skipped
-                            return Ok(())
-=======
-                    EngineApiRequest::InsertExecutedBlock(payload) => {
-                        let block_num_hash = payload.recovered_block.num_hash();
                         if block_num_hash.number <= self.state.tree_state.canonical_block_number() {
                             // outdated block that can be skipped
                             return Ok(ops::ControlFlow::Continue(()))
                         }
 
-                        if self.state.tree_state.contains_hash(&block_num_hash.hash) {
+                        if self.state.tree_state.blocks_by_hash.contains_key(&block_num_hash.hash) {
                             // block already known to the tree (e.g. delivered via newPayload first)
                             return Ok(ops::ControlFlow::Continue(()))
->>>>>>> v2.3.0
                         }
 
                         debug!(target: "engine::tree", block=?block_num_hash, "inserting already executed block");
                         let now = Instant::now();
 
-<<<<<<< HEAD
-=======
-                        let block = match self
-                            .payload_validator
-                            .on_inserted_executed_block(payload, &self.state)
-                        {
-                            Ok(block) => block,
-                            Err(err) => {
-                                warn!(target: "engine::tree", %err, block=?block_num_hash, "Failed to insert already executed block");
-                                return Ok(ops::ControlFlow::Continue(()))
-                            }
-                        };
-
->>>>>>> v2.3.0
                         // if the parent is the canonical head, we can insert the block as the
                         // pending block
                         if self.state.tree_state.canonical_block_hash() ==
@@ -2406,22 +1796,11 @@ where
                     }
                     EngineApiRequest::Beacon(request) => {
                         match request {
-<<<<<<< HEAD
-                            BeaconEngineMessage::ForkchoiceUpdated {
-                                state,
-                                payload_attrs,
-                                tx,
-                                version,
-                            } => {
-                                let mut output =
-                                    self.on_forkchoice_updated(state, payload_attrs, version);
-=======
                             BeaconEngineMessage::ForkchoiceUpdated { state, payload_attrs, tx } => {
                                 let has_attrs = payload_attrs.is_some();
 
                                 let start = Instant::now();
                                 let mut output = self.on_forkchoice_updated(state, payload_attrs);
->>>>>>> v2.3.0
 
                                 if let Ok(res) = &mut output {
                                     // track last received forkchoice state
@@ -2457,13 +1836,6 @@ where
                                         .engine
                                         .failed_forkchoice_updated_response_deliveries
                                         .increment(1);
-<<<<<<< HEAD
-                                    error!(target: "engine::tree", "Failed to send event: {err:?}");
-                                }
-                            }
-                            BeaconEngineMessage::NewPayload { payload, tx } => {
-                                let mut output = self.on_new_payload(payload);
-=======
                                     warn!(target: "engine::tree", ?state, elapsed=?start.elapsed(), "Failed to deliver forkchoiceUpdated response, receiver dropped (request cancelled): {err:?}");
                                 }
                             }
@@ -2478,7 +1850,6 @@ where
                                     &output,
                                     gas_used,
                                 );
->>>>>>> v2.3.0
 
                                 let maybe_event =
                                     output.as_mut().ok().and_then(|out| out.event.take());
@@ -2489,11 +1860,7 @@ where
                                         BeaconOnNewPayloadError::Internal(Box::new(e))
                                     }))
                                 {
-<<<<<<< HEAD
-                                    error!(target: "engine::tree", "Failed to send event: {err:?}");
-=======
                                     warn!(target: "engine::tree", payload=?num_hash, elapsed=?start.elapsed(), "Failed to deliver newPayload response, receiver dropped (request cancelled): {err:?}");
->>>>>>> v2.3.0
                                     self.metrics
                                         .engine
                                         .failed_new_payload_response_deliveries
@@ -2502,58 +1869,43 @@ where
 
                                 // handle the event if any
                                 self.on_maybe_tree_event(maybe_event)?;
-<<<<<<< HEAD
-=======
                             }
                             BeaconEngineMessage::RethNewPayload {
                                 payload,
                                 wait_for_persistence,
-                                wait_for_caches,
+                                wait_for_caches: _,
                                 tx,
                                 enqueued_at,
                             } => {
                                 debug!(
                                     target: "engine::tree",
                                     wait_for_persistence,
-                                    wait_for_caches,
                                     "Processing reth_newPayload"
                                 );
 
                                 let backpressure_wait = enqueued_at.elapsed();
 
                                 let explicit_persistence_wait = if wait_for_persistence {
-                                    let pending_persistence = self.persistence_state.rx.take();
-                                    if let Some((rx, start_time, _action)) = pending_persistence {
-                                        let (persistence_tx, persistence_rx) =
-                                            std::sync::mpsc::channel();
-                                        self.runtime.spawn_blocking_named(
-                                            "wait-persist",
-                                            move || {
-                                                let start = Instant::now();
-                                                let result = rx
-                                                    .recv()
-                                                    .expect("persistence state channel closed");
-                                                let _ = persistence_tx.send((
-                                                    result,
-                                                    start_time,
-                                                    start.elapsed(),
-                                                ));
-                                            },
-                                        );
-                                        let (result, start_time, wait_duration) = persistence_rx
-                                            .recv()
-                                            .expect("persistence result channel closed");
-                                        let _ = self.on_persistence_complete(result, start_time);
-                                        wait_duration
+                                    if let Some((rx, start_time, _action)) =
+                                        self.persistence_state.rx.take()
+                                    {
+                                        let wait_start = Instant::now();
+                                        match rx.recv() {
+                                            Ok(result) => {
+                                                let _ = self
+                                                    .on_persistence_complete(result, start_time);
+                                            }
+                                            Err(_) => {
+                                                warn!(target: "engine::tree", "persistence channel closed while waiting");
+                                            }
+                                        }
+                                        wait_start.elapsed()
                                     } else {
                                         Duration::ZERO
                                     }
                                 } else {
                                     Duration::ZERO
                                 };
-
-                                let cache_wait = wait_for_caches
-                                    .then(|| self.payload_validator.wait_for_caches());
 
                                 let start = Instant::now();
                                 let gas_used = payload.gas_used();
@@ -2573,9 +1925,8 @@ where
                                 let timings = NewPayloadTimings {
                                     latency,
                                     persistence_wait: backpressure_wait + explicit_persistence_wait,
-                                    execution_cache_wait: cache_wait
-                                        .map(|wait| wait.execution_cache),
-                                    sparse_trie_wait: cache_wait.map(|wait| wait.sparse_trie),
+                                    execution_cache_wait: None,
+                                    sparse_trie_wait: None,
                                 };
                                 if let Err(err) =
                                     tx.send(output.map(|o| (o.outcome, timings)).map_err(|e| {
@@ -2590,7 +1941,6 @@ where
                                 }
 
                                 self.on_maybe_tree_event(maybe_event)?;
->>>>>>> v2.3.0
                             }
                         }
                     }
@@ -2697,21 +2047,12 @@ where
             // no finalized block, can't check distance on non-OP Stack chains
             return Ok(())
         }
-<<<<<<< HEAD
-        // get the block number of the finalized block, if we have it
-        let newest_finalized = self
-            .state
-            .buffer
-            .block(&sync_target_state.finalized_block_hash)
-            .map(|block| block.number());
-=======
         let target_hash = self.backfill_target_hash(sync_target_state);
         if target_hash.is_zero() {
             return Ok(())
         }
         // get the block number of the backfill target block, if we have it buffered
         let newest_target = self.state.buffer.block(&target_hash).map(|block| block.number());
->>>>>>> v2.3.0
 
         // The block number that the backfill finished at - if the progress or newest target is
         // None then we can't check the distance anyways.
@@ -2846,38 +2187,10 @@ where
     /// Removes timing stats for blocks at or below `below_number`.
     ///
     /// No-op when detailed block logging is disabled (no stats are recorded in that case).
-    /// When `commit_duration` is provided and a slow block threshold is configured, checks
-    /// each removed block against the threshold and emits a [`ConsensusEngineEvent::SlowBlock`]
-    /// event for blocks that exceed it.
-    fn purge_timing_stats(&mut self, below_number: u64, commit_duration: Option<Duration>) {
-        let threshold = self.config.slow_block_threshold();
-        let check_slow = commit_duration.is_some() && threshold.is_some();
-
-        // Two-pass: collect keys first because emit_event borrows &mut self.
-        let keys_to_remove: Vec<B256> = self
-            .execution_timing_stats
-            .iter()
-            .filter(|(_, stats)| stats.block_number <= below_number)
-            .map(|(k, _)| *k)
-            .collect();
-
-        for key in keys_to_remove {
-            let stats = self.execution_timing_stats.remove(&key).expect("key just found");
-            if check_slow {
-                let commit_dur = commit_duration.expect("checked above");
-                // state_read_duration is already included in execution_duration
-                let total_duration =
-                    stats.execution_duration + stats.state_hash_duration + commit_dur;
-
-                if total_duration > threshold.expect("checked above") {
-                    self.emit_event(ConsensusEngineEvent::SlowBlock(SlowBlockInfo {
-                        stats,
-                        commit_duration: Some(commit_dur),
-                        total_duration,
-                    }));
-                }
-            }
-        }
+    // gravity(route-A): baseline event.rs has no `SlowBlock` variant, so the slow-block
+    // emission that upstream v2.3.0 performed here is removed; only the purge remains.
+    fn purge_timing_stats(&mut self, below_number: u64, _commit_duration: Option<Duration>) {
+        self.execution_timing_stats.retain(|_, stats| stats.block_number > below_number);
     }
 
     /// Emits an outgoing event to the engine.
@@ -2909,43 +2222,32 @@ where
     }
 
     /// Returns true if the canonical chain length minus the last persisted
-<<<<<<< HEAD
-    /// block is greater than or equal to the persistence threshold and
-    /// backfill is not running.
-    pub fn should_persist(&self) -> bool {
-=======
     /// block is greater than or equal to the persistence threshold,
     /// backfill is not running, and no payload is currently being built.
-    pub const fn should_persist(&self) -> bool {
+    pub fn should_persist(&self) -> bool {
         if self.building_payload {
             return false
         }
 
->>>>>>> v2.3.0
         if !self.backfill_sync_state.is_idle() {
             // can't persist if backfill is running
             return false
         }
 
-<<<<<<< HEAD
         if !self.persistence_waiters.is_empty() {
             // if there are waiters, we should persist immediately
             return true
         }
 
-=======
->>>>>>> v2.3.0
         let min_block = self.persistence_state.last_persisted_block.number;
         self.state.tree_state.canonical_block_number().saturating_sub(min_block) >
             self.config.persistence_threshold()
     }
 
     /// Returns a batch of consecutive canonical blocks to persist in the range
-<<<<<<< HEAD
-    /// `(last_persisted_number .. canonical_head - threshold]`. The expected
-    /// order is oldest -> newest.
+    /// `(last_persisted_number .. target]`. The expected order is oldest -> newest.
     ///
-    /// If any blocks are missing trie updates, all blocks are persisted, not taking `threshold`
+    /// If any blocks are missing trie updates, all blocks are persisted, not taking the threshold
     /// into account.
     ///
     /// For those blocks that didn't have the trie updates calculated, runs the state root
@@ -2954,14 +2256,8 @@ where
     /// Returns an error if the state root calculation fails.
     fn get_canonical_blocks_to_persist(
         &mut self,
-    ) -> Result<Vec<ExecutedBlockWithTrieUpdates<N>>, AdvancePersistenceError> {
-=======
-    /// `(last_persisted_number .. target]`. The expected order is oldest -> newest.
-    fn get_canonical_blocks_to_persist(
-        &self,
         target: PersistTarget,
-    ) -> Result<Vec<ExecutedBlock<N>>, AdvancePersistenceError> {
->>>>>>> v2.3.0
+    ) -> Result<Vec<ExecutedBlockWithTrieUpdates<N>>, AdvancePersistenceError> {
         // We will calculate the state root using the database, so we need to be sure there are no
         // changes
         debug_assert!(!self.persistence_state.in_progress());
@@ -2977,30 +2273,28 @@ where
             .values()
             .all(|block| block.trie_updates().is_some());
 
-<<<<<<< HEAD
-        let target_number = if all_blocks_have_trie_updates {
-            // Persist only up to block buffer target if all blocks have trie updates.
-            // With merged-block persistence, drain more blocks per cycle (bounded by
-            // `cache_max_persist_gap`) so each merged group is large enough to amortize its commit.
-            let cfg = get_gravity_config();
-            let max_blocks_to_persist = if cfg.persist_merge_blocks {
-                cfg.cache_max_persist_gap.max(MAX_BLOCKS_TO_PERSIST)
-            } else {
-                MAX_BLOCKS_TO_PERSIST
-            };
-            canonical_head_number
-                .saturating_sub(self.config.memory_block_buffer_target())
-                .min(last_persisted_number + max_blocks_to_persist)
-        } else {
-            // Persist all blocks if any block is missing trie updates
-            canonical_head_number
-=======
         let target_number = match target {
             PersistTarget::Head => canonical_head_number,
             PersistTarget::Threshold => {
-                canonical_head_number.saturating_sub(self.config.memory_block_buffer_target())
+                if all_blocks_have_trie_updates {
+                    // Persist only up to block buffer target if all blocks have trie updates.
+                    // With merged-block persistence, drain more blocks per cycle (bounded by
+                    // `cache_max_persist_gap`) so each merged group is large enough to amortize
+                    // its commit.
+                    let cfg = get_gravity_config();
+                    let max_blocks_to_persist = if cfg.persist_merge_blocks {
+                        cfg.cache_max_persist_gap.max(MAX_BLOCKS_TO_PERSIST)
+                    } else {
+                        MAX_BLOCKS_TO_PERSIST
+                    };
+                    canonical_head_number
+                        .saturating_sub(self.config.memory_block_buffer_target())
+                        .min(last_persisted_number + max_blocks_to_persist)
+                } else {
+                    // Persist all blocks if any block is missing trie updates
+                    canonical_head_number
+                }
             }
->>>>>>> v2.3.0
         };
 
         debug!(
@@ -3008,10 +2302,7 @@ where
             ?current_hash,
             ?last_persisted_number,
             ?canonical_head_number,
-<<<<<<< HEAD
             ?all_blocks_have_trie_updates,
-=======
->>>>>>> v2.3.0
             ?target_number,
             "Returning canonical blocks to persist"
         );
@@ -3030,7 +2321,6 @@ where
         // Reverse the order so that the oldest block comes first
         blocks_to_persist.reverse();
 
-<<<<<<< HEAD
         // Calculate missing trie updates
         for block in &mut blocks_to_persist {
             if block.trie.is_present() {
@@ -3073,8 +2363,6 @@ where
             block.trie.set_present(trie_updates);
         }
 
-=======
->>>>>>> v2.3.0
         Ok(blocks_to_persist)
     }
 
@@ -3104,7 +2392,6 @@ where
 
     /// Return an [`ExecutedBlock`] from database or in-memory state by hash.
     ///
-<<<<<<< HEAD
     /// NOTE: This cannot fetch [`ExecutedBlock`]s for _finalized_ blocks, instead it can only
     /// fetch [`ExecutedBlock`]s for _canonical_ blocks, or blocks from sidechains that the node
     /// has in memory.
@@ -3115,18 +2402,6 @@ where
         // check memory first
         if let Some(block) = self.state.tree_state.executed_block_by_hash(hash) {
             return Ok(Some(block.block.clone()))
-=======
-    /// Note: This function attempts to fetch the `ExecutedBlock` from either in-memory state
-    /// or the database. If the required historical data (such as trie change sets) has been
-    /// pruned for a given block, this operation will return an error. On archive nodes, it
-    /// can retrieve any block.
-    #[instrument(level = "debug", target = "engine::tree", skip(self))]
-    fn canonical_block_by_hash(&self, hash: B256) -> ProviderResult<ExecutedBlock<N>> {
-        trace!(target: "engine::tree", ?hash, "Fetching executed block by hash");
-        // check memory first
-        if let Some(block) = self.state.tree_state.executed_block_by_hash(hash) {
-            return Ok(block.clone())
->>>>>>> v2.3.0
         }
 
         let (block, senders) = self
@@ -3134,17 +2409,12 @@ where
             .sealed_block_with_senders(hash.into(), TransactionVariant::WithHash)?
             .ok_or_else(|| ProviderError::HeaderNotFound(hash.into()))?
             .split_sealed();
-<<<<<<< HEAD
         let execution_output = self
-=======
-        let mut execution_output = self
->>>>>>> v2.3.0
             .provider
             .get_state(block.header().number())?
             .ok_or_else(|| ProviderError::StateForNumberNotFound(block.header().number()))?;
         let hashed_state = self.provider.hashed_post_state(execution_output.state());
 
-<<<<<<< HEAD
         Ok(Some(ExecutedBlock {
             recovered_block: Arc::new(RecoveredBlock::new_sealed(block, senders)),
             execution_output: Arc::new(execution_output),
@@ -3152,64 +2422,14 @@ where
         }))
     }
 
-    /// Return sealed block header from in-memory state or database by hash.
-    fn sealed_header_by_hash(
-        &self,
-        hash: B256,
-    ) -> ProviderResult<Option<SealedHeader<N::BlockHeader>>> {
-        // check memory first
-        let header = self.state.tree_state.sealed_header_by_hash(&hash);
-
-        if header.is_some() {
-            Ok(header)
-        } else {
-            self.provider.sealed_header_by_hash(hash)
-        }
-    }
-
-=======
-        debug!(
-            target: "engine::tree",
-            number = ?block.number(),
-            "computing block trie updates",
-        );
-        let db_provider = self.provider.database_provider_ro()?;
-        let trie_updates = reth_trie_db::compute_block_trie_updates(
-            &self.changeset_cache,
-            &db_provider,
-            block.number(),
-        )?;
-
-        let sorted_hashed_state = Arc::new(hashed_state.into_sorted());
-        let sorted_trie_updates = Arc::new(trie_updates);
-        let trie_data = ComputedTrieData::new(sorted_hashed_state, sorted_trie_updates);
-
-        let execution_output = Arc::new(BlockExecutionOutput {
-            state: execution_output.bundle,
-            result: BlockExecutionResult {
-                receipts: execution_output.receipts.pop().unwrap_or_default(),
-                requests: execution_output.requests.pop().unwrap_or_default(),
-                gas_used: block.gas_used(),
-                blob_gas_used: block.blob_gas_used().unwrap_or_default(),
-            },
-        });
-
-        Ok(ExecutedBlock::new(
-            Arc::new(RecoveredBlock::new_sealed(block, senders)),
-            execution_output,
-            trie_data,
-        ))
-    }
-
     /// Returns `true` if a block with the given hash is known, either in memory or in the
     /// database. This is a lightweight existence check that avoids constructing a full
     /// [`SealedHeader`].
     fn has_block_by_hash(&self, hash: B256) -> ProviderResult<bool> {
-        if self.state.tree_state.contains_hash(&hash) {
-            Ok(true)
-        } else {
-            self.provider.is_known(hash)
+        if self.state.tree_state.blocks_by_hash.contains_key(&hash) {
+            return Ok(true)
         }
+        Ok(self.provider.block_number(hash)?.is_some())
     }
 
     /// Return sealed block header from in-memory state or database by hash.
@@ -3227,7 +2447,6 @@ where
         }
     }
 
->>>>>>> v2.3.0
     /// Return the parent hash of the lowest buffered ancestor for the requested block, if there
     /// are any buffered ancestors. If there are no buffered ancestors, and the block itself does
     /// not exist in the buffer, this returns the hash that is passed in.
@@ -3257,11 +2476,7 @@ where
         parent_hash: B256,
     ) -> ProviderResult<Option<B256>> {
         // Check if parent exists in side chain or in canonical chain.
-<<<<<<< HEAD
-        if self.sealed_header_by_hash(parent_hash)?.is_some() {
-=======
         if self.has_block_by_hash(parent_hash)? {
->>>>>>> v2.3.0
             return Ok(Some(parent_hash))
         }
 
@@ -3275,11 +2490,7 @@ where
 
             // If current_header is None, then the current_hash does not have an invalid
             // ancestor in the cache, check its presence in blockchain tree
-<<<<<<< HEAD
-            if current_block.is_none() && self.sealed_header_by_hash(current_hash)?.is_some() {
-=======
             if current_block.is_none() && self.has_block_by_hash(current_hash)? {
->>>>>>> v2.3.0
                 return Ok(Some(current_hash))
             }
         }
@@ -3289,16 +2500,6 @@ where
     /// Prepares the invalid payload response for the given hash, checking the
     /// database for the parent hash and populating the payload status with the latest valid hash
     /// according to the engine api spec.
-<<<<<<< HEAD
-    fn prepare_invalid_response(&mut self, mut parent_hash: B256) -> ProviderResult<PayloadStatus> {
-        // Edge case: the `latestValid` field is the zero hash if the parent block is the terminal
-        // PoW block, which we need to identify by looking at the parent's block difficulty
-        if let Some(parent) = self.sealed_header_by_hash(parent_hash)? &&
-            !parent.difficulty().is_zero()
-        {
-            parent_hash = B256::ZERO;
-        }
-=======
     fn prepare_invalid_response(&mut self, parent_hash: B256) -> ProviderResult<PayloadStatus> {
         let valid_parent_hash = match self.sealed_header_by_hash(parent_hash)? {
             // Edge case: the `latestValid` field is the zero hash if the parent block is the
@@ -3308,7 +2509,6 @@ where
             Some(_) => Some(parent_hash),
             None => self.latest_valid_hash_for_invalid_payload(parent_hash)?,
         };
->>>>>>> v2.3.0
 
         Ok(PayloadStatus::from_status(PayloadStatusEnum::Invalid {
             validation_error: PayloadValidationError::LinksToRejectedPayload.to_string(),
@@ -3363,78 +2563,9 @@ where
 
         // insert the head block into the invalid header cache
         self.state.invalid_headers.insert_with_invalid_ancestor(head.hash(), invalid);
-<<<<<<< HEAD
         self.emit_event(ConsensusEngineEvent::InvalidBlock(Box::new(head)));
 
         Ok(status)
-=======
-        self.emit_event(ConsensusEngineEvent::InvalidBlock {
-            block: Box::new(head),
-            error: PayloadValidationError::LinksToRejectedPayload.to_string(),
-        });
-
-        Ok(status)
-    }
-
-    /// Finds any invalid ancestor for the given payload.
-    ///
-    /// This function first checks if the block itself is in the invalid headers cache (to
-    /// avoid re-executing a known-invalid block). Then it walks up the chain of buffered
-    /// ancestors and checks if any ancestor is marked as invalid.
-    ///
-    /// The check works by:
-    /// 1. Checking if the block hash itself is in the `invalid_headers` map
-    /// 2. Finding the lowest buffered ancestor for the given block hash
-    /// 3. If the ancestor is the same as the block hash itself, using the parent hash instead
-    /// 4. Checking if this ancestor is in the `invalid_headers` map
-    ///
-    /// Returns the invalid ancestor block info if found, or None if no invalid ancestor exists.
-    fn find_invalid_ancestor(&mut self, payload: &T::ExecutionData) -> Option<BlockWithParent> {
-        let parent_hash = payload.parent_hash();
-        let block_hash = payload.block_hash();
-
-        // Check if the block itself is already known to be invalid, avoiding re-execution
-        if let Some(entry) = self.state.invalid_headers.get(&block_hash) {
-            return Some(entry);
-        }
-
-        let mut lowest_buffered_ancestor = self.lowest_buffered_ancestor_or(block_hash);
-        if lowest_buffered_ancestor == block_hash {
-            lowest_buffered_ancestor = parent_hash;
-        }
-
-        // Check if the block has an invalid ancestor
-        self.state.invalid_headers.get(&lowest_buffered_ancestor)
-    }
-
-    /// Handles a payload that has an invalid ancestor.
-    ///
-    /// This function validates the payload and processes it according to whether it's
-    /// well-formed or malformed:
-    /// 1. **Well-formed payload**: The payload is marked as invalid since it descends from a
-    ///    known-bad block, which violates consensus rules
-    /// 2. **Malformed payload**: Returns an appropriate error status since the payload cannot be
-    ///    validated due to its own structural issues
-    fn handle_invalid_ancestor_payload(
-        &mut self,
-        payload: T::ExecutionData,
-        invalid: BlockWithParent,
-    ) -> Result<PayloadStatus, InsertBlockFatalError> {
-        let parent_hash = payload.parent_hash();
-        let num_hash = payload.num_hash();
-
-        // Here we might have 2 cases
-        // 1. the block is well formed and indeed links to an invalid header, meaning we should
-        //    remember it as invalid
-        // 2. the block is not well formed (i.e block hash is incorrect), and we should just return
-        //    an error and forget it
-        let block = match self.payload_validator.convert_payload_to_block(payload) {
-            Ok(block) => block,
-            Err(error) => return Ok(self.on_new_payload_error(error, num_hash, parent_hash)?),
-        };
-
-        Ok(self.on_invalid_new_payload(block, invalid)?)
->>>>>>> v2.3.0
     }
 
     /// Checks if the given `head` points to an invalid header, which requires a specific response
@@ -3442,10 +2573,6 @@ where
     fn check_invalid_ancestor(&mut self, head: B256) -> ProviderResult<Option<PayloadStatus>> {
         // check if the head was previously marked as invalid
         let Some(header) = self.state.invalid_headers.get(&head) else { return Ok(None) };
-<<<<<<< HEAD
-        // populate the latest valid hash field
-        Ok(Some(self.prepare_invalid_response(header.parent)?))
-=======
 
         // Try to prepare invalid response, but handle errors gracefully
         match self.prepare_invalid_response(header.parent) {
@@ -3458,26 +2585,17 @@ where
                 })))
             }
         }
->>>>>>> v2.3.0
     }
 
     /// Validate if block is correct and satisfies all the consensus rules that concern the header
     /// and block body itself.
-<<<<<<< HEAD
     fn validate_block(&self, block: &RecoveredBlock<N::Block>) -> Result<(), ConsensusError> {
-=======
-    fn validate_block(&self, block: &SealedBlock<N::Block>) -> Result<(), ConsensusError> {
->>>>>>> v2.3.0
         if let Err(e) = self.consensus.validate_header(block.sealed_header()) {
             error!(target: "engine::tree", ?block, "Failed to validate header {}: {e}", block.hash());
             return Err(e)
         }
 
-<<<<<<< HEAD
         if let Err(e) = self.consensus.validate_block_pre_execution(block.sealed_block()) {
-=======
-        if let Err(e) = self.consensus.validate_block_pre_execution(block) {
->>>>>>> v2.3.0
             error!(target: "engine::tree", ?block, "Failed to validate block {}: {e}", block.hash());
             return Err(e)
         }
@@ -3505,18 +2623,12 @@ where
             match self.insert_block(child) {
                 Ok(res) => {
                     debug!(target: "engine::tree", child =?child_num_hash, ?res, "connected buffered block");
-<<<<<<< HEAD
-                    if self.is_sync_target_head(child_num_hash.hash) &&
-                        matches!(res, InsertPayloadOk::Inserted(BlockStatus::Valid))
-                    {
-=======
                     if self.is_any_sync_target(child_num_hash.hash) &&
                         matches!(res, InsertPayloadOk::Inserted(BlockStatus::Valid))
                     {
                         debug!(target: "engine::tree", child =?child_num_hash, "connected sync target block");
                         // we just inserted a block that we know is part of the canonical chain, so
                         // we can make it canonical
->>>>>>> v2.3.0
                         self.make_canonical(child_num_hash.hash)?;
                     }
                 }
@@ -3539,17 +2651,10 @@ where
     /// Pre-validates the block and inserts it into the buffer.
     fn buffer_block(
         &mut self,
-<<<<<<< HEAD
         block: RecoveredBlock<N::Block>,
     ) -> Result<(), InsertBlockError<N::Block>> {
         if let Err(err) = self.validate_block(&block) {
             return Err(InsertBlockError::consensus_error(err, block.into_sealed_block()))
-=======
-        block: SealedBlock<N::Block>,
-    ) -> Result<(), InsertBlockError<N::Block>> {
-        if let Err(err) = self.validate_block(&block) {
-            return Err(InsertBlockError::consensus_error(err, block))
->>>>>>> v2.3.0
         }
         self.state.buffer.insert_block(block);
         Ok(())
@@ -3605,68 +2710,6 @@ where
         let state = self.state.forkchoice_state_tracker.sync_target_state()?;
         let target_hash = self.backfill_target_hash(state);
 
-<<<<<<< HEAD
-        // check if the downloaded block is the tracked finalized block
-        let exceeds_backfill_threshold =
-            match (downloaded_block.as_ref(), sync_target_state.as_ref()) {
-                // if we downloaded the finalized block we can now check how far we're off
-                (Some(downloaded_block), Some(state))
-                    if downloaded_block.hash == state.finalized_block_hash =>
-                {
-                    self.exceeds_backfill_run_threshold(canonical_tip_num, downloaded_block.number)
-                }
-                _ => match sync_target_state
-                    .as_ref()
-                    .and_then(|state| self.state.buffer.block(&state.finalized_block_hash))
-                {
-                    Some(buffered_finalized) => {
-                        // if we have buffered the finalized block, we should check how far we're
-                        // off
-                        self.exceeds_backfill_run_threshold(
-                            canonical_tip_num,
-                            buffered_finalized.number(),
-                        )
-                    }
-                    None => {
-                        // check if the distance exceeds the threshold for backfill sync
-                        self.exceeds_backfill_run_threshold(canonical_tip_num, target_block_number)
-                    }
-                },
-            };
-
-        // if the number of missing blocks is greater than the max, trigger backfill
-        if exceeds_backfill_threshold && let Some(state) = sync_target_state {
-            // if we have already canonicalized the finalized block, we should skip backfill
-            match self.provider.header_by_hash_or_number(state.finalized_block_hash.into()) {
-                Err(err) => {
-                    warn!(target: "engine::tree", %err, "Failed to get finalized block header");
-                }
-                Ok(None) => {
-                    // ensure the finalized block is known (not the zero hash)
-                    if !state.finalized_block_hash.is_zero() {
-                        // we don't have the block yet and the distance exceeds the allowed
-                        // threshold
-                        return Some(state.finalized_block_hash)
-                    }
-
-                    // OPTIMISTIC SYNCING
-                    //
-                    // It can happen when the node is doing an
-                    // optimistic sync, where the CL has no knowledge of the finalized hash,
-                    // but is expecting the EL to sync as high
-                    // as possible before finalizing.
-                    //
-                    // This usually doesn't happen on ETH mainnet since CLs use the more
-                    // secure checkpoint syncing.
-                    //
-                    // However, optimism chains will do this. The risk of a reorg is however
-                    // low.
-                    debug!(target: "engine::tree", hash=?state.head_block_hash, "Setting head hash as an optimistic backfill target.");
-                    return Some(state.head_block_hash)
-                }
-                Ok(Some(_)) => {
-                    // we're fully synced to the finalized block
-=======
         // check if the downloaded block is the tracked backfill target
         let exceeds_backfill_threshold = match downloaded_block.as_ref() {
             // if we downloaded the target block we can now check how far we're off
@@ -3677,7 +2720,6 @@ where
                 // if we have buffered the target block, we should check how far we're off
                 Some(buffered_target) => {
                     self.exceeds_backfill_run_threshold(canonical_tip_num, buffered_target.number())
->>>>>>> v2.3.0
                 }
                 // check if the distance exceeds the threshold for backfill sync
                 None => self.exceeds_backfill_run_threshold(canonical_tip_num, target_block_number),
@@ -3688,28 +2730,6 @@ where
             return None
         }
 
-<<<<<<< HEAD
-        None
-    }
-
-    /// This method tries to detect whether on-disk and in-memory states have diverged. It might
-    /// happen if a reorg is happening while we are persisting a block.
-    fn find_disk_reorg(&self) -> ProviderResult<Option<u64>> {
-        let mut canonical = self.state.tree_state.current_canonical_head;
-        let mut persisted = self.persistence_state.last_persisted_block;
-
-        let parent_num_hash = |num_hash: NumHash| -> ProviderResult<NumHash> {
-            Ok(self
-                .sealed_header_by_hash(num_hash.hash)?
-                .ok_or(ProviderError::BlockHashNotFound(num_hash.hash))?
-                .parent_num_hash())
-        };
-
-        // Happy path, canonical chain is ahead or equal to persisted chain.
-        // Walk canonical chain back to make sure that it connects to persisted chain.
-        while canonical.number > persisted.number {
-            canonical = parent_num_hash(canonical)?;
-=======
         // if we have already canonicalized the target block, we should skip backfill
         match self.provider.header_by_hash_or_number(target_hash.into()) {
             Err(err) => {
@@ -3736,34 +2756,7 @@ where
             }
             // we're fully synced to the target block
             Ok(Some(_)) => None,
->>>>>>> v2.3.0
         }
-
-        // If we've reached persisted tip by walking the canonical chain back, everything is fine.
-        if canonical == persisted {
-            return Ok(None);
-        }
-
-        // At this point, we know that `persisted` block can't be reached by walking the canonical
-        // chain back. In this case we need to truncate it to the first canonical block it connects
-        // to.
-
-        // Firstly, walk back until we reach the same height as `canonical`.
-        while persisted.number > canonical.number {
-            persisted = parent_num_hash(persisted)?;
-        }
-
-        debug_assert_eq!(persisted.number, canonical.number);
-
-        // Now walk both chains back until we find a common ancestor.
-        while persisted.hash != canonical.hash {
-            canonical = parent_num_hash(canonical)?;
-            persisted = parent_num_hash(persisted)?;
-        }
-
-        debug!(target: "engine::tree", remove_above=persisted.number, "on-disk reorg detected");
-
-        Ok(Some(persisted.number))
     }
 
     /// This method tries to detect whether on-disk and in-memory states have diverged. It might
@@ -3831,11 +2824,7 @@ where
             let old_first = old.first().map(|first| first.recovered_block().num_hash());
             trace!(target: "engine::tree", ?new_first, ?old_first, "Reorg detected, new and old first blocks");
 
-<<<<<<< HEAD
-            self.update_reorg_metrics(old.len());
-=======
             self.update_reorg_metrics(old.len(), old_first);
->>>>>>> v2.3.0
             self.reinsert_reorged_blocks(new.clone());
             // Try reinserting the reorged canonical chain. This is only possible if we have
             // `persisted_trie_updates` for those blocks.
@@ -3876,11 +2865,6 @@ where
         ));
     }
 
-<<<<<<< HEAD
-    /// This updates metrics based on the given reorg length.
-    fn update_reorg_metrics(&self, old_chain_length: usize) {
-        self.metrics.tree.reorgs.increment(1);
-=======
     /// This updates metrics based on the given reorg length and first reorged block number.
     fn update_reorg_metrics(&self, old_chain_length: usize, first_reorged_block: Option<NumHash>) {
         if let Some(first_reorged_block) = first_reorged_block.map(|block| block.number) {
@@ -3898,16 +2882,11 @@ where
         } else {
             debug_unreachable!("Reorged chain doesn't have any blocks");
         }
->>>>>>> v2.3.0
         self.metrics.tree.latest_reorg_depth.set(old_chain_length as f64);
     }
 
     /// This reinserts any blocks in the new chain that do not already exist in the tree
-<<<<<<< HEAD
     fn reinsert_reorged_blocks(&mut self, new_chain: Vec<ExecutedBlockWithTrieUpdates<N>>) {
-=======
-    fn reinsert_reorged_blocks(&mut self, new_chain: Vec<ExecutedBlock<N>>) {
->>>>>>> v2.3.0
         for block in new_chain {
             if self
                 .state
@@ -4013,7 +2992,6 @@ where
     /// Returns an event with the appropriate action to take, such as:
     ///  - download more missing blocks
     ///  - try to canonicalize the target if the `block` is the tracked target (head) block.
-<<<<<<< HEAD
     #[instrument(level = "trace", skip_all, fields(block_hash = %block.hash(), block_num = %block.number(),), target = "engine::tree")]
     fn on_downloaded_block(
         &mut self,
@@ -4025,16 +3003,6 @@ where
             .check_invalid_ancestor_with_head(lowest_buffered_ancestor, block.sealed_block())?
             .is_some()
         {
-=======
-    #[instrument(level = "debug", target = "engine::tree", skip_all, fields(block_hash = %block.hash(), block_num = %block.number()))]
-    fn on_downloaded_block(
-        &mut self,
-        block: SealedBlock<N::Block>,
-    ) -> Result<Option<TreeEvent>, InsertBlockFatalError> {
-        let block_num_hash = block.num_hash();
-        let lowest_buffered_ancestor = self.lowest_buffered_ancestor_or(block_num_hash.hash);
-        if self.check_invalid_ancestor_with_head(lowest_buffered_ancestor, &block)?.is_some() {
->>>>>>> v2.3.0
             return Ok(None)
         }
 
@@ -4045,21 +3013,7 @@ where
         // try to append the block
         match self.insert_block(block) {
             Ok(InsertPayloadOk::Inserted(BlockStatus::Valid)) => {
-<<<<<<< HEAD
-                if self.is_sync_target_head(block_num_hash.hash) {
-                    trace!(target: "engine::tree", "appended downloaded sync target block");
-
-                    // we just inserted the current sync target block, we can try to make it
-                    // canonical
-                    return Ok(Some(TreeEvent::TreeAction(TreeAction::MakeCanonical {
-                        sync_target_head: block_num_hash.hash,
-                    })))
-                }
-                trace!(target: "engine::tree", "appended downloaded block");
-                self.try_connect_buffered_blocks(block_num_hash)?;
-=======
                 return self.on_valid_downloaded_block(block_num_hash);
->>>>>>> v2.3.0
             }
             Ok(InsertPayloadOk::Inserted(BlockStatus::Disconnected { head, missing_ancestor })) => {
                 // block is not connected to the canonical head, we need to download
@@ -4086,8 +3040,6 @@ where
         Ok(None)
     }
 
-<<<<<<< HEAD
-=======
     /// Inserts a payload into the tree and executes it.
     ///
     /// This function validates the payload's basic structure, then executes it using the
@@ -4096,7 +3048,6 @@ where
     ///
     /// Returns `InsertPayloadOk` if the payload was successfully inserted and executed,
     /// or `InsertPayloadError` if validation or execution failed.
->>>>>>> v2.3.0
     fn insert_payload(
         &mut self,
         payload: T::ExecutionData,
@@ -4105,21 +3056,13 @@ where
             payload.block_with_parent(),
             payload,
             |validator, payload, ctx| validator.validate_payload(payload, ctx),
-<<<<<<< HEAD
             |this, payload| Ok(this.payload_validator.ensure_well_formed_payload(payload)?),
-=======
-            |this, payload| Ok(this.payload_validator.convert_payload_to_block(payload)?),
->>>>>>> v2.3.0
         )
     }
 
     fn insert_block(
         &mut self,
-<<<<<<< HEAD
         block: RecoveredBlock<N::Block>,
-=======
-        block: SealedBlock<N::Block>,
->>>>>>> v2.3.0
     ) -> Result<InsertPayloadOk, InsertPayloadError<N::Block>> {
         self.insert_block_or_payload(
             block.block_with_parent(),
@@ -4129,8 +3072,6 @@ where
         )
     }
 
-<<<<<<< HEAD
-=======
     /// Inserts a block or payload into the blockchain tree with full execution.
     ///
     /// This is a generic function that handles both blocks and payloads by accepting
@@ -4148,22 +3089,16 @@ where
     /// `InsertPayloadOk::AlreadySeen` if the block already exists, or
     /// `InsertPayloadOk::Inserted(BlockStatus::Disconnected)` if parent state is missing.
     #[instrument(level = "debug", target = "engine::tree", skip_all, fields(?block_id))]
->>>>>>> v2.3.0
     fn insert_block_or_payload<Input, Err>(
         &mut self,
         block_id: BlockWithParent,
         input: Input,
-<<<<<<< HEAD
         execute: impl FnOnce(
             &mut V,
             Input,
             TreeCtx<'_, N>,
         ) -> Result<ExecutedBlockWithTrieUpdates<N>, Err>,
         convert_to_block: impl FnOnce(&mut Self, Input) -> Result<RecoveredBlock<N::Block>, Err>,
-=======
-        execute: impl FnOnce(&mut V, Input, TreeCtx<'_, N>) -> Result<ValidationOutput<N>, Err>,
-        convert_to_block: impl FnOnce(&mut Self, Input) -> Result<SealedBlock<N::Block>, Err>,
->>>>>>> v2.3.0
     ) -> Result<InsertPayloadOk, Err>
     where
         Err: From<InsertBlockError<N::Block>>,
@@ -4172,7 +3107,6 @@ where
         let block_num_hash = block_id.block;
         debug!(target: "engine::tree", block=?block_num_hash, parent = ?block_id.parent, "Inserting new block into tree");
 
-<<<<<<< HEAD
         match self.sealed_header_by_hash(block_num_hash.hash) {
             Err(err) => {
                 let block = convert_to_block(self, input)?;
@@ -4231,87 +3165,6 @@ where
 
         let executed = execute(&mut self.payload_validator, input, ctx)?;
 
-=======
-        // Check if block already exists - first in memory, then DB only if it could be persisted
-        if self.state.tree_state.contains_hash(&block_num_hash.hash) {
-            convert_to_block(self, input)?;
-            return Ok(InsertPayloadOk::AlreadySeen(BlockStatus::Valid));
-        }
-
-        // Only query DB if block could be persisted (number <= last persisted block).
-        // New blocks from CL always have number > last persisted, so skip DB lookup for them.
-        if block_num_hash.number <= self.persistence_state.last_persisted_block.number {
-            match self.provider.sealed_header_by_hash(block_num_hash.hash) {
-                Err(err) => {
-                    let block = convert_to_block(self, input)?;
-                    return Err(InsertBlockError::new(block, err.into()).into());
-                }
-                Ok(Some(_)) => {
-                    convert_to_block(self, input)?;
-                    return Ok(InsertPayloadOk::AlreadySeen(BlockStatus::Valid));
-                }
-                Ok(None) => {}
-            }
-        }
-
-        // Ensure that the parent state is available.
-        match self.state_provider_builder(block_id.parent) {
-            Err(err) => {
-                let block = convert_to_block(self, input)?;
-                return Err(InsertBlockError::new(block, err.into()).into());
-            }
-            Ok(None) => {
-                let block = convert_to_block(self, input)?;
-
-                // we don't have the state required to execute this block, buffering it and find the
-                // missing parent block
-                let missing_ancestor = self
-                    .state
-                    .buffer
-                    .lowest_ancestor(&block.parent_hash())
-                    .map(|block| block.parent_num_hash())
-                    .unwrap_or_else(|| block.parent_num_hash());
-
-                self.state.buffer.insert_block(block);
-
-                return Ok(InsertPayloadOk::Inserted(BlockStatus::Disconnected {
-                    head: self.state.tree_state.current_canonical_head,
-                    missing_ancestor,
-                }))
-            }
-            Ok(Some(_)) => {}
-        }
-
-        // determine whether we are on a fork chain by comparing the block number with the
-        // canonical head. This is a simple check that is sufficient for the event emission below.
-        // A block is considered a fork if its number is less than or equal to the canonical head,
-        // as this indicates there's already a canonical block at that height.
-        let is_fork = block_id.block.number <= self.state.tree_state.current_canonical_head.number;
-
-        let ctx = TreeCtx::new(&mut self.state, &self.canonical_in_memory_state);
-
-        let start = Instant::now();
-
-        let ValidationOutput { executed_block: executed, execution_timing_stats: timing_stats } =
-            execute(&mut self.payload_validator, input, ctx)?;
-
-        // Emit slow block event immediately after execution so it appears even when
-        // persistence hasn't completed yet (e.g. blocks arriving faster than persistence).
-        if let Some(stats) = timing_stats {
-            if let Some(threshold) = self.config.slow_block_threshold() {
-                let total_duration = stats.execution_duration + stats.state_hash_duration;
-                if total_duration > threshold {
-                    self.emit_event(ConsensusEngineEvent::SlowBlock(SlowBlockInfo {
-                        stats: stats.clone(),
-                        commit_duration: None,
-                        total_duration,
-                    }));
-                }
-            }
-            self.execution_timing_stats.insert(executed.recovered_block().hash(), stats);
-        }
-
->>>>>>> v2.3.0
         // if the parent is the canonical head, we can insert the block as the pending block
         if self.state.tree_state.canonical_block_hash() == executed.recovered_block().parent_hash()
         {
@@ -4337,7 +3190,6 @@ where
             .record(block_insert_start.elapsed().as_secs_f64());
         debug!(target: "engine::tree", block=?block_num_hash, "Finished inserting block");
         Ok(InsertPayloadOk::Inserted(BlockStatus::Valid))
-<<<<<<< HEAD
     }
 
     /// Computes the trie input at the provided parent hash.
@@ -4441,8 +3293,6 @@ where
         );
 
         Ok(input)
-=======
->>>>>>> v2.3.0
     }
 
     /// Handles an error that occurred while inserting a block.
@@ -4471,7 +3321,6 @@ where
             "Invalid block error on new payload",
         );
         let latest_valid_hash = self.latest_valid_hash_for_invalid_payload(block.parent_hash())?;
-<<<<<<< HEAD
 
         // keep track of the invalid header
         self.state.invalid_headers.insert(block.block_with_parent());
@@ -4479,30 +3328,6 @@ where
             Box::new(block),
         )));
 
-=======
-
-        // keep track of the invalid header unless the consensus impl considers it transient
-        let is_transient = match &validation_err {
-            InsertBlockValidationError::Consensus(err) => self.consensus.is_transient_error(err),
-            _ => false,
-        };
-        if is_transient {
-            warn!(
-                target: "engine::tree",
-                invalid_hash=%block.hash(),
-                invalid_number=block.number(),
-                %validation_err,
-                "Skipping invalid header cache insert for transient validation error",
-            );
-        } else {
-            self.state.invalid_headers.insert(block.block_with_parent());
-        }
-        self.emit_event(EngineApiEvent::BeaconConsensus(ConsensusEngineEvent::InvalidBlock {
-            block: Box::new(block),
-            error: validation_err.to_string(),
-        }));
-
->>>>>>> v2.3.0
         Ok(PayloadStatus::new(
             PayloadStatusEnum::Invalid { validation_error: validation_err.to_string() },
             latest_valid_hash,
@@ -4513,16 +3338,9 @@ where
     fn on_new_payload_error(
         &mut self,
         error: NewPayloadError,
-<<<<<<< HEAD
         parent_hash: B256,
     ) -> ProviderResult<PayloadStatus> {
         error!(target: "engine::tree", %error, "Invalid payload");
-=======
-        payload_num_hash: NumHash,
-        parent_hash: B256,
-    ) -> ProviderResult<PayloadStatus> {
-        error!(target: "engine::tree", payload=?payload_num_hash, %error, "Invalid payload");
->>>>>>> v2.3.0
         // we need to convert the error to a payload status (response to the CL)
 
         let latest_valid_hash =
@@ -4547,11 +3365,7 @@ where
         let mut canonical = self.canonical_in_memory_state.header_by_hash(hash);
 
         if canonical.is_none() {
-<<<<<<< HEAD
             canonical = self.provider.header(&hash)?.map(|header| SealedHeader::new(header, hash));
-=======
-            canonical = self.provider.header(hash)?.map(|header| SealedHeader::new(header, hash));
->>>>>>> v2.3.0
         }
 
         Ok(canonical)
@@ -4579,13 +3393,9 @@ where
                     // we're also persisting the finalized block on disk so we can reload it on
                     // restart this is required by optimism which queries the finalized block: <https://github.com/ethereum-optimism/optimism/blob/c383eb880f307caa3ca41010ec10f30f08396b2e/op-node/rollup/sync/start.go#L65-L65>
                     let _ = self.persistence.save_finalized_block_number(finalized.number());
-<<<<<<< HEAD
-                    self.canonical_in_memory_state.set_finalized(finalized);
-=======
                     self.canonical_in_memory_state.set_finalized(finalized.clone());
                     // Update finalized block height metric
                     self.metrics.tree.finalized_block_height.set(finalized.number() as f64);
->>>>>>> v2.3.0
                 }
             }
             Err(err) => {
@@ -4613,13 +3423,9 @@ where
                     // we're also persisting the safe block on disk so we can reload it on
                     // restart this is required by optimism which queries the safe block: <https://github.com/ethereum-optimism/optimism/blob/c383eb880f307caa3ca41010ec10f30f08396b2e/op-node/rollup/sync/start.go#L65-L65>
                     let _ = self.persistence.save_safe_block_number(safe.number());
-<<<<<<< HEAD
-                    self.canonical_in_memory_state.set_safe(safe);
-=======
                     self.canonical_in_memory_state.set_safe(safe.clone());
                     // Update safe block height metric
                     self.metrics.tree.safe_block_height.set(safe.number() as f64);
->>>>>>> v2.3.0
                 }
             }
             Err(err) => {
@@ -4673,21 +3479,12 @@ where
     /// return an error if the payload attributes are invalid.
     fn process_payload_attributes(
         &self,
-<<<<<<< HEAD
-        attrs: T::PayloadAttributes,
-=======
         attributes: T::PayloadAttributes,
->>>>>>> v2.3.0
         head: &N::BlockHeader,
         state: ForkchoiceState,
-        version: EngineApiMessageVersion,
     ) -> OnForkChoiceUpdated {
         if let Err(err) =
-<<<<<<< HEAD
-            self.payload_validator.validate_payload_attributes_against_header(&attrs, head)
-=======
             self.payload_validator.validate_payload_attributes_against_header(&attributes, head)
->>>>>>> v2.3.0
         {
             warn!(target: "engine::tree", %err, ?head, "Invalid payload attributes");
             return OnForkChoiceUpdated::invalid_payload_attributes()
@@ -4697,34 +3494,12 @@ where
         //    forkchoiceState.headBlockHash and identified via buildProcessId value if
         //    payloadAttributes is not null and the forkchoice state has been updated successfully.
         //    The build process is specified in the Payload building section.
-<<<<<<< HEAD
-        match <T::PayloadBuilderAttributes as PayloadBuilderAttributes>::try_new(
-            state.head_block_hash,
-            attrs,
-            version as u8,
-        ) {
-            Ok(attributes) => {
-                // send the payload to the builder and return the receiver for the pending payload
-                // id, initiating payload job is handled asynchronously
-                let pending_payload_id = self.payload_builder.send_new_payload(attributes);
-=======
->>>>>>> v2.3.0
 
-        let cache = if self.config.share_execution_cache_with_payload_builder() {
-            self.payload_validator.cache_for(state.head_block_hash)
-        } else {
-            None
-        };
-
-        let trie_handle = if self.config.share_sparse_trie_with_payload_builder() {
-            self.payload_validator.sparse_trie_handle_for(
-                state.head_block_hash,
-                head.state_root(),
-                &self.state,
-            )
-        } else {
-            None
-        };
+        // gravity(route-A): the baseline validator exposes no cache/sparse-trie sharing
+        // APIs (`cache_for`/`sparse_trie_handle_for` are v2.3.0-only), so the payload
+        // builder handoff always starts without shared caches.
+        let cache = None;
+        let trie_handle = None;
 
         // send the payload to the builder and return the receiver for the pending payload
         // id, initiating payload job is handled asynchronously
@@ -4801,11 +3576,7 @@ where
         }
 
         // Check if the block is persisted
-<<<<<<< HEAD
         if let Some(header) = self.provider.header(&hash)? {
-=======
-        if let Some(header) = self.provider.header(hash)? {
->>>>>>> v2.3.0
             debug!(target: "engine::tree", %hash, number = %header.number(), "found canonical state for block in database, creating provider builder");
             // For persisted blocks, we create a builder that will fetch state directly from the
             // database
@@ -4814,66 +3585,6 @@ where
 
         debug!(target: "engine::tree", %hash, "no canonical state found for block");
         Ok(None)
-<<<<<<< HEAD
-    }
-}
-
-/// Block inclusion can be valid, accepted, or invalid. Invalid blocks are returned as an error
-/// variant.
-///
-/// If we don't know the block's parent, we return `Disconnected`, as we can't claim that the block
-/// is valid or not.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BlockStatus {
-    /// The block is valid and block extends canonical chain.
-    Valid,
-    /// The block may be valid and has an unknown missing ancestor.
-    Disconnected {
-        /// Current canonical head.
-        head: BlockNumHash,
-        /// The lowest ancestor block that is not connected to the canonical chain.
-        missing_ancestor: BlockNumHash,
-    },
-}
-
-/// How a payload was inserted if it was valid.
-///
-/// If the payload was valid, but has already been seen, [`InsertPayloadOk::AlreadySeen`] is
-/// returned, otherwise [`InsertPayloadOk::Inserted`] is returned.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InsertPayloadOk {
-    /// The payload was valid, but we have already seen it.
-    AlreadySeen(BlockStatus),
-    /// The payload was valid and inserted into the tree.
-    Inserted(BlockStatus),
-}
-
-/// Whether or not the blocks are currently persisting and the input block is a descendant.
-#[derive(Debug, Clone, Copy)]
-pub enum PersistingKind {
-    /// The blocks are not currently persisting.
-    NotPersisting,
-    /// The blocks are currently persisting but the input block is not a descendant.
-    PersistingNotDescendant,
-    /// The blocks are currently persisting and the input block is a descendant.
-    PersistingDescendant,
-}
-
-impl PersistingKind {
-    /// Returns true if the parallel state root can be run.
-    ///
-    /// We only run the parallel state root if we are not currently persisting any blocks or
-    /// persisting blocks that are all ancestors of the one we are calculating the state root for.
-    pub const fn can_run_parallel_state_root(&self) -> bool {
-        matches!(self, Self::NotPersisting | Self::PersistingDescendant)
-    }
-
-    /// Returns true if the blocks are currently being persisted and the input block is a
-    /// descendant.
-    pub const fn is_descendant(&self) -> bool {
-        matches!(self, Self::PersistingDescendant)
-=======
->>>>>>> v2.3.0
     }
 }
 
@@ -4934,6 +3645,33 @@ enum PersistTarget {
     Threshold,
     /// Persist all blocks up to and including the canonical head.
     Head,
+}
+
+/// Whether or not the blocks are currently persisting and the input block is a descendant.
+#[derive(Debug, Clone, Copy)]
+pub enum PersistingKind {
+    /// The blocks are not currently persisting.
+    NotPersisting,
+    /// The blocks are currently persisting but the input block is not a descendant.
+    PersistingNotDescendant,
+    /// The blocks are currently persisting and the input block is a descendant.
+    PersistingDescendant,
+}
+
+impl PersistingKind {
+    /// Returns true if the parallel state root can be run.
+    ///
+    /// We only run the parallel state root if we are not currently persisting any blocks or
+    /// persisting blocks that are all ancestors of the one we are calculating the state root for.
+    pub const fn can_run_parallel_state_root(&self) -> bool {
+        matches!(self, Self::NotPersisting | Self::PersistingDescendant)
+    }
+
+    /// Returns true if the blocks are currently being persisted and the input block is a
+    /// descendant.
+    pub const fn is_descendant(&self) -> bool {
+        matches!(self, Self::PersistingDescendant)
+    }
 }
 
 /// Result of waiting for caches to become available.

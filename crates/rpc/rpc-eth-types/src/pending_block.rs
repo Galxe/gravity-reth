@@ -9,7 +9,9 @@ use alloy_consensus::BlockHeader;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{BlockHash, TxHash, B256};
 use derive_more::Constructor;
-use reth_chain_state::{BlockState, ExecutedBlock};
+use reth_chain_state::{
+    BlockState, ExecutedBlock, ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates,
+};
 use reth_ethereum_primitives::Receipt;
 use reth_evm::{ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::{
@@ -99,7 +101,9 @@ impl<N: NodePrimitives> PendingBlock<N> {
     pub fn with_executed_block(expires_at: Instant, executed_block: ExecutedBlock<N>) -> Self {
         Self {
             expires_at,
-            receipts: Arc::new(executed_block.execution_output.receipts.clone()),
+            receipts: Arc::new(
+                executed_block.execution_output.receipts.iter().flatten().cloned().collect(),
+            ),
             executed_block,
         }
     }
@@ -159,6 +163,12 @@ impl<N: NodePrimitives> PendingBlock<N> {
 
 impl<N: NodePrimitives> From<PendingBlock<N>> for BlockState<N> {
     fn from(pending_block: PendingBlock<N>) -> Self {
-        Self::new(pending_block.executed_block)
+        Self::new(ExecutedBlockWithTrieUpdates::<N>::new(
+            pending_block.executed_block.recovered_block,
+            pending_block.executed_block.execution_output,
+            pending_block.executed_block.hashed_state,
+            ExecutedTrieUpdates::Missing,
+            Default::default(),
+        ))
     }
 }

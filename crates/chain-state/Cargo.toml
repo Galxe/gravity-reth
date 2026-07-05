@@ -87,3 +87,8 @@ test-utils = [
     "reth-tasks?/test-utils",
 ]
 rayon = ["dep:rayon", "dep:reth-tasks"]
+
+[[bench]]
+name = "canonical_hashes_range"
+harness = false
+required-features = ["test-utils"]

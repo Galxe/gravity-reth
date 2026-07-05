@@ -8,12 +8,12 @@ use alloy_eips::eip7840::BlobParams;
 use alloy_primitives::{B256, U256};
 use alloy_rpc_types_eth::{BlockNumberOrTag, BlockOverrides};
 use futures::Future;
-use reth_chain_state::{BlockState, ComputedTrieData, ExecutedBlock};
+use reth_chain_state::{BlockState, ExecutedBlock};
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::{BlockExecutionError, BlockValidationError, ProviderError, RethError};
 use reth_evm::{
     block::TxResult,
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
+    execute::{BlockBuilder, BlockBuilderOutcome, ExecutionOutcome},
     ConfigureEvm, Evm, EvmEnvFor, NextBlockEnvAttributes,
 };
 use reth_primitives_traits::{transaction::error::InvalidTransactionError, HeaderTy, SealedHeader};
@@ -426,20 +426,21 @@ pub trait LoadPendingBlock:
             }
         }
 
-        let BlockBuilderOutcome { execution_result, block, hashed_state, trie_updates, .. } =
+        let BlockBuilderOutcome { execution_result, block, hashed_state, .. } =
             builder.finish(NoopProvider::default(), None).map_err(Self::Error::from_eth_err)?;
 
-        let execution_outcome =
-            BlockExecutionOutput { state: db.take_bundle(), result: execution_result };
+        let execution_outcome = ExecutionOutcome::new(
+            db.take_bundle(),
+            vec![execution_result.receipts],
+            block.number(),
+            vec![execution_result.requests],
+        );
 
-        Ok(ExecutedBlock::new(
-            block.into(),
-            Arc::new(execution_outcome),
-            ComputedTrieData::new(
-                Arc::new(hashed_state.into_sorted()),
-                Arc::new(trie_updates.into_sorted()),
-            ),
-        ))
+        Ok(ExecutedBlock {
+            recovered_block: block.into(),
+            execution_output: Arc::new(execution_outcome),
+            hashed_state: Arc::new(hashed_state),
+        })
     }
 }
 

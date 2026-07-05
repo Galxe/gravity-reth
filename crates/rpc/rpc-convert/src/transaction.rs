@@ -4,7 +4,7 @@ use crate::{
 };
 use alloy_consensus::{error::ValueError, transaction::Recovered};
 use alloy_primitives::Address;
-use alloy_rpc_types_eth::TransactionInfo;
+use alloy_rpc_types_eth::{Transaction, TransactionInfo};
 use core::error;
 use dyn_clone::DynClone;
 use reth_evm::{BlockEnvFor, ConfigureEvm, EvmEnvFor, SpecFor, TxEnvFor};
@@ -754,5 +754,32 @@ where
         block_size: usize,
     ) -> Result<RpcHeader<Self::Network>, Self::Error> {
         Ok(self.header_converter.convert_header(header, block_size)?)
+    }
+}
+
+/// Trait for converting network transaction responses to primitive transaction types.
+pub trait TryFromTransactionResponse<N: alloy_network::Network> {
+    /// The error type returned if the conversion fails.
+    type Error: core::error::Error + Send + Sync + Unpin;
+
+    /// Converts a network transaction response to a primitive transaction type.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(Self)` on successful conversion, or `Err(Self::Error)` if the conversion fails.
+    fn from_transaction_response(
+        transaction_response: N::TransactionResponse,
+    ) -> Result<Self, Self::Error>
+    where
+        Self: Sized;
+}
+
+impl TryFromTransactionResponse<alloy_network::Ethereum>
+    for reth_ethereum_primitives::TransactionSigned
+{
+    type Error = std::convert::Infallible;
+
+    fn from_transaction_response(transaction_response: Transaction) -> Result<Self, Self::Error> {
+        Ok(transaction_response.into_inner().into())
     }
 }
