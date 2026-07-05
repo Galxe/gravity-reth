@@ -5,18 +5,19 @@ use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_runner::CliContext;
 use reth_cli_util::cancellation::CancellationToken;
-use reth_node_builder::common::metrics_hooks;
+use reth_db_api::database_metrics::DatabaseMetrics;
 use reth_node_core::{args::MetricArgs, version::version_metadata};
 use reth_node_metrics::{
     chain::ChainSpecInfo,
+    hooks::Hooks,
     server::{MetricServer, MetricServerConfig},
     version::VersionInfo,
 };
-use reth_provider::RocksDBProviderFactory;
+use reth_provider::StaticFileProviderFactory;
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 /// Prunes according to the configuration
 #[derive(Debug, Parser)]
@@ -53,7 +54,20 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> PruneComma
                 },
                 ChainSpecInfo { name: provider_factory.chain_spec().chain().to_string() },
                 ctx.task_executor.clone(),
-                metrics_hooks(&provider_factory),
+                Hooks::builder()
+                    .with_hook({
+                        let db = provider_factory.db_ref().clone();
+                        move || db.report_metrics()
+                    })
+                    .with_hook({
+                        let sfp = provider_factory.static_file_provider();
+                        move || {
+                            if let Err(error) = sfp.report_metrics() {
+                                error!(%error, "Failed to report metrics from static file provider");
+                            }
+                        }
+                    })
+                    .build(),
                 data_dir.pprof_dumps(),
             );
 
@@ -118,13 +132,6 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> PruneComma
                     "Pruning batch complete, continuing..."
                 );
             }
-        }
-
-        // Flush and compact RocksDB to reclaim disk space after pruning
-        {
-            info!(target: "reth::cli", "Flushing and compacting RocksDB...");
-            provider_factory.rocksdb_provider().flush_and_compact()?;
-            info!(target: "reth::cli", "RocksDB compaction complete");
         }
 
         Ok(())

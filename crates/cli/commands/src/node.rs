@@ -2,38 +2,22 @@
 
 use crate::launcher::Launcher;
 use clap::{value_parser, Args, Parser};
-<<<<<<< HEAD
 use gravity_primitives::init_gravity_config;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_runner::CliContext;
-use reth_cli_util::parse_socket_address;
-=======
-use reth_chainspec::{EthChainSpec, EthereumHardforks};
-use reth_cli::chainspec::ChainSpecParser;
-use reth_cli_runner::CliContext;
->>>>>>> v2.3.0
 use reth_db::init_db;
 use reth_node_builder::NodeBuilder;
 use reth_node_core::{
     args::{
-<<<<<<< HEAD
         DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, EraArgs, GravityArgs,
-        NetworkArgs, PayloadBuilderArgs, PruningArgs, RpcServerArgs, TxPoolArgs,
-=======
-        DatabaseArgs, DatadirArgs, DebugArgs, DevArgs, EngineArgs, EraArgs, MetricArgs,
-        NetworkArgs, PayloadBuilderArgs, PruningArgs, RpcServerArgs, StaticFilesArgs, StorageArgs,
-        TxPoolArgs,
->>>>>>> v2.3.0
+        MetricArgs, NetworkArgs, PayloadBuilderArgs, PruningArgs, RpcServerArgs, StaticFilesArgs,
+        StorageArgs, TxPoolArgs,
     },
     node_config::NodeConfig,
     version,
 };
-<<<<<<< HEAD
-use std::{ffi::OsString, fmt, net::SocketAddr, path::PathBuf, sync::Arc};
-=======
 use std::{ffi::OsString, fmt, path::PathBuf, sync::Arc};
->>>>>>> v2.3.0
 
 /// Start the node
 #[derive(Debug, Parser)]
@@ -120,13 +104,10 @@ pub struct NodeCommand<C: ChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs
     #[command(flatten)]
     pub pruning: PruningArgs,
 
-<<<<<<< HEAD
     /// All gravity related arguments
     #[command(flatten)]
     pub gravity: GravityArgs,
 
-=======
->>>>>>> v2.3.0
     /// Engine cli arguments
     #[command(flatten, next_help_heading = "Engine")]
     pub engine: EngineArgs,
@@ -135,8 +116,6 @@ pub struct NodeCommand<C: ChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs
     #[command(flatten, next_help_heading = "ERA")]
     pub era: EraArgs,
 
-<<<<<<< HEAD
-=======
     /// All static files related arguments
     #[command(flatten, next_help_heading = "Static Files")]
     pub static_files: StaticFilesArgs,
@@ -145,18 +124,13 @@ pub struct NodeCommand<C: ChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs
     #[command(flatten, next_help_heading = "Storage")]
     pub storage: StorageArgs,
 
->>>>>>> v2.3.0
     /// Additional cli arguments
     #[command(flatten, next_help_heading = "Extension")]
     pub ext: Ext,
 }
 
 impl<C: ChainSpecParser> NodeCommand<C> {
-<<<<<<< HEAD
-    /// Parsers only the default CLI arguments
-=======
     /// Parses only the default CLI arguments
->>>>>>> v2.3.0
     pub fn parse_args() -> Self {
         Self::parse()
     }
@@ -185,11 +159,7 @@ where
     where
         L: Launcher<C, Ext>,
     {
-<<<<<<< HEAD
-        tracing::info!(target: "reth::cli", version = ?version::version_metadata().short_version, "Starting reth");
-=======
         tracing::info!(target: "reth::cli", version = ?version::version_metadata().short_version, "Starting {}",  version::version_metadata().name_client);
->>>>>>> v2.3.0
 
         let Self {
             datadir,
@@ -210,20 +180,16 @@ where
             era,
             static_files,
             storage,
-            ext,
-            engine,
-            era,
             gravity,
+            ext,
         } = self;
 
-<<<<<<< HEAD
+        engine.validate()?;
+
         // Initialize global gravity config
         let gravity_config = gravity.to_config();
         tracing::info!(target: "reth::cli", gravity_config = ?gravity_config, "Initializing global gravity config");
         init_gravity_config(gravity_config);
-=======
-        engine.validate()?;
->>>>>>> v2.3.0
 
         // set up node config
         let mut node_config = NodeConfig {
@@ -242,24 +208,15 @@ where
             pruning,
             engine,
             era,
-<<<<<<< HEAD
-            gravity,
-=======
             static_files,
             storage,
->>>>>>> v2.3.0
         };
 
         let data_dir = node_config.datadir();
         let db_path = data_dir.db();
 
         tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
-<<<<<<< HEAD
         let database = Arc::new(init_db(db_path.clone(), self.db.database_args())?);
-=======
-        let database = init_db(db_path.clone(), self.db.database_args())?
-            .with_metrics_if(self.db.metrics_enabled());
->>>>>>> v2.3.0
 
         if with_unused_ports {
             node_config = node_config.with_unused_ports();
@@ -270,16 +227,6 @@ where
             .with_launch_context(ctx.task_executor);
 
         launcher.entrypoint(builder, ext).await
-<<<<<<< HEAD
-=======
-    }
-}
-
-impl<C: ChainSpecParser, Ext: clap::Args + fmt::Debug> NodeCommand<C, Ext> {
-    /// Returns the underlying chain being used to run this command
-    pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
-        Some(&self.chain)
->>>>>>> v2.3.0
     }
 }
 

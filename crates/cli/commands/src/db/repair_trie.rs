@@ -23,7 +23,6 @@ use reth_provider::{
     providers::ProviderNodeTypes, ChainSpecProvider, HeaderProvider, StageCheckpointReader,
 };
 use reth_stages::StageId;
-use reth_storage_api::StorageSettingsCache;
 use reth_tasks::TaskExecutor;
 use reth_trie::{
     verify::{Output, Verifier},
