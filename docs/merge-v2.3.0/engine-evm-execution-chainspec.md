@@ -76,7 +76,7 @@ trait、`ConfigureEvm`）→ 以太坊 EVM 实现（`EthEvmConfig` + 测试 mock
 按决策总原则逐文件核实并裁决(决策 ☑ = 本节裁决;落地 ☐ 待 evm/chainspec
 方向执行,证据要求 = 冲突归零 + parse + 死符号扫描):
 
-- [ ] **`crates/evm/evm/src/execute.rs`(42 块)**——决策 ☑:**v2.3.0 为底 +
+- [x] **`crates/evm/evm/src/execute.rs`(42 块)**——决策 ☑:**v2.3.0 为底 +
   嫁接 gravity 4 方法**(`take_bundle`/`transact_system_txn`/
   `apply_state_change`/`parallel_executor` 系)。证据:gravity 方法被
   pipe-exec 5 个零冲突文件锁定(execute/src/{lib,eip_2935,onchain_config/*}.rs,
@@ -86,43 +86,43 @@ trait、`ConfigureEvm`）→ 以太坊 EVM 实现（`EthEvmConfig` + 测试 mock
   evm/evm/Cargo.toml:27,该 manifest 与 baseline 仅差 +4/−3)——按原则③保留;
   **`execute_with_state_closure` 在 v2.3.0 侧存活**(tag :99 实测),
   execute_metered 恢复(开放问题 #4 ⟲)的前提成立。
-- [ ] **`crates/evm/evm/src/either.rs`(3 块)**——决策 ☑:同 execute.rs
+- [x] **`crates/evm/evm/src/either.rs`(3 块)**——决策 ☑:同 execute.rs
   方向(v2.3.0 为底 + gravity 三方法派发 + `take_bal` 派发到 inner)。
-- [ ] **`crates/evm/evm/src/lib.rs`(18 块)**——决策 ☑:v2.3.0 为底 +
+- [x] **`crates/evm/evm/src/lib.rs`(18 块)**——决策 ☑:v2.3.0 为底 +
   保留 `parallel_execute` 模块/`ParallelDatabase`/`state_change` alias;
   `NextBlockEnvAttributes` 含 `slot_number`(开放问题 #3)。**落地联动**:
   pipe-exec 构造点(execute/src/lib.rs:1180,实测尚无该字段)须补
   `slot_number: None`(连同 `extra_data`)。
-- [ ] **`crates/ethereum/evm/src/lib.rs`(11 块)**——决策 ☑:维持本文
+- [x] **`crates/ethereum/evm/src/lib.rs`(11 块)**——决策 ☑:维持本文
   keep-gravity + needs-port 建议。新增证据:`hardfork/`、`parallel_execute.rs`
   在盘,`grevm`/`gravity-primitives` dep 在位(Cargo.toml:26-27),grevm 已
   revm-40 对齐(`25fd1ecb41` bump)——吸收上游 revm40/alloy-evm 升级与
   gravity 骨架不冲突。
-- [ ] **`crates/ethereum/evm/src/test_utils.rs`(2 块)**——决策 ☑:维持
+- [x] **`crates/ethereum/evm/src/test_utils.rs`(2 块)**——决策 ☑:维持
   keep-gravity(MockExecutor 全套);trait 若随 execute.rs 增 `take_bal`,
   Mock 补 `None` impl。
-- [ ] **`crates/ethereum/evm/tests/execute.rs`(9 块)**——决策 ☑:跟随
+- [x] **`crates/ethereum/evm/tests/execute.rs`(9 块)**——决策 ☑:跟随
   lib.rs/test_utils.rs,编译驱动收敛。
-- [ ] **`crates/ethereum/evm/Cargo.toml`(4 块)**——决策 ☑:按本文建议
+- [x] **`crates/ethereum/evm/Cargo.toml`(4 块)**——决策 ☑:按本文建议
   并集(grevm/gravity-primitives/parking_lot/derive_more + 上游
   `reth-storage-errors/std` 等)。
-- [ ] **`crates/chainspec/src/spec.rs`(49 块)**——决策 ☑:维持本文建议
+- [x] **`crates/chainspec/src/spec.rs`(49 块)**——决策 ☑:维持本文建议
   (gravity 三字段 + `amsterdam_time` 并集、`ChainSpec<H>` 泛化、OP 节点
   清理)。新增证据:`amsterdam_time`/`create_chain_config`/
   `blob_params_to_schedule` 全仓零外部消费方(仅 chainspec 自引,实测)——
   吸收为自包含演进,符合原则③。
-- [ ] **`crates/chainspec/src/api.rs`(3 块)**——决策 ☑:维持本文建议。
+- [x] **`crates/chainspec/src/api.rs`(3 块)**——决策 ☑:维持本文建议。
   gravity trait 方法为硬锁定:`gravity_hardforks` 被 pipe-exec 零冲突文件
   消费(execute/src/lib.rs 的 GravityHardfork::Alpha 检查 +
   tests/gravity_hardfork_test.rs,实测);`gravity_min_base_fee` 被
   ethereum/node/node.rs(26 块,node-builder 文档范围)与 rpc call.rs(5 块)
   引用,各文件解块时须同向保留。
-- [ ] **`crates/chainspec/src/lib.rs`(3 块)**——决策 ☑:维持本文建议
+- [x] **`crates/chainspec/src/lib.rs`(3 块)**——决策 ☑:维持本文建议
   (并集 re-export;`once_cell_set` 保留——全仓消费方仅 chainspec 自身,
   实测)。
-- [ ] **`crates/chainspec/src/constants.rs`(1 块)**——决策 ☑:
+- [x] **`crates/chainspec/src/constants.rs`(1 块)**——决策 ☑:
   keep-gravity(上游对此文件 v1.8.3..v2.3.0 零变更,本文已核)。
-- [ ] **`crates/consensus/common/src/validation.rs`(8 块)**——决策 ☑:
+- [x] **`crates/consensus/common/src/validation.rs`(8 块)**——决策 ☑:
   维持本文建议,且实测**上游结构已在共同区**(`_with_tx_root` 拆分
   :176/:188、`MINIMUM_GAS_LIMIT` 下界 :511 均无冲突标记),8 块仅剩
   imports 与 50 Gwei floor 区局部(块@433 两侧均含 `INITIAL_BASE_FEE`)——
@@ -1384,3 +1384,41 @@ fields：
      `memory_overlay.rs` 与 baseline `0cb1687c1c` **零 diff**(整文件复原,
      零补丁),冲突标记 0;`cargo check -p reth-chain-state` 编译证据待
      cargo workspace 依赖修复后回填。
+
+## ⟲ 落地实录(2026-07-06,剩余范围 12 文件 + 联动项 + 收口二次对齐)
+
+evm/chainspec 组 12 个冲突文件(~153 块)已全部落地归零(证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填)。
+
+**落地偏差(均按决策总原则,证据在案)**:
+
+1. **`ConfigureEvm`/`ConfigureEngineEvm` impl 不随上游 `EvmF` 泛化**(原则②:
+   实测 `GrevmExecutor` 约束要求默认 EvmFactory,与上游泛化不可共存);
+2. `BasicBlockExecutor` 的 execute_one 系保 HEAD(custom_precompiles 注入 +
+   `without_state_clear` 是 disable-grevm 生产语义),上游 BAL 执行机器不接入
+   (gravity 无 Amsterdam);`take_bal` 上 trait 给**默认 None** 实现,
+   MockExecutor/TestExecutor/WrapExecutor 零改动闭合;
+3. 撤销 `EthEvmConfig::with_extra_data`(v2.3.0 `EthBlockAssembler` 已无
+   extra_data 字段,实测);`evm/evm/noop.rs` 零冲突侧翻断点连带修复
+   (补 `parallel_executor` 派发);validation.rs 修复公共区 interleave 残局
+   (import 双重导入 + `MAX_RLP_BLOCK_SIZE` 重复定义);
+4. 联动项:pipe-exec 构造点补 `extra_data: Default::default()` +
+   `slot_number: None`(`next_evm_env` 实测不消费 extra_data,gravity 流水线
+   自组 header;pipe 两 crate parse 金丝雀通过)。
+
+**收口二次对齐(2026-07-06,state-hook 断链类,evm 定版引出)**:
+
+- `tree/metrics.rs` 嫁接段:`OnStateHook` 已上移至 revm
+  (revm-database-interface 12.x,`on_state(&mut self, &EvmState)` 一参)且
+  executor 级 `with_state_hook` 不存在——`MeteredStateHook` 改一参、hook 改挂
+  `executor.evm_mut().db_mut().borrow_mut().set_state_hook(...)`(v2.3.0
+  同款机制,revm-database 15.0.2 `State::set_state_hook` :242 实测),finish
+  后 `set_state_hook(None)` 复位;
+- `evm/evm/execute.rs` 的 `execute_one_with_state_hook`:baseline 链式
+  `.with_state_hook(..)` 改 v2.3.0 db 级机制 + 保 gravity precompile 注入,
+  补 `merge_transitions`(对齐 v2.3.0 tag :628 语义);
+- `payload_processor`:`alloy_evm::block::StateChangeSource` 已随 0.36 删除
+  ——枚举家族 vendored 进 multiproof.rs(仅 tracing 标注用),边界闭包改一参
+  并合成 Transaction 序号;`WithTxEnv` 字面量补 `Arc::new(tx)`(evm 定版
+  `tx: Arc<T>`)。
+- 上述 5 文件 parse 全过、`.with_state_hook(`/`alloy_evm::block::StateChangeSource`
+  全仓活代码零残留(实测)。
