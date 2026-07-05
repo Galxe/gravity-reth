@@ -1184,6 +1184,11 @@ impl<Storage: GravityStorage> Core<Storage> {
                     gas_limit: PIPE_BLOCK_GAS_LIMIT,
                     parent_beacon_block_root: Some(ordered_block.parent_id),
                     withdrawals: Some(ordered_block.withdrawals.clone()),
+                    // `next_evm_env` only reads env-relevant fields; gravity assembles its own
+                    // headers in the pipeline, so extra_data here is inert. slot_number is
+                    // post-Amsterdam (gravity does not activate Amsterdam).
+                    extra_data: Default::default(),
+                    slot_number: None,
                 },
             )
             .unwrap();

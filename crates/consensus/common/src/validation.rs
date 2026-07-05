@@ -1,20 +1,8 @@
 //! Collection of methods for block validation.
 
-<<<<<<< HEAD
-use alloy_consensus::{
-    constants::MAXIMUM_EXTRA_DATA_SIZE, BlockHeader as _, Transaction, EMPTY_OMMER_ROOT_HASH,
-=======
-use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH};
-use alloy_eips::{eip4844::DATA_GAS_PER_BLOB, eip7840::BlobParams};
-use alloy_primitives::B256;
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks};
-use reth_consensus::ConsensusError;
-use reth_primitives_traits::{
-    constants::{GAS_LIMIT_BOUND_DIVISOR, MAXIMUM_GAS_LIMIT_BLOCK, MINIMUM_GAS_LIMIT},
-    Block, BlockBody, BlockHeader, GotExpected, SealedBlock, SealedHeader,
->>>>>>> v2.3.0
-};
+use alloy_consensus::{BlockHeader as _, Transaction, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip4844::DATA_GAS_PER_BLOB, eip7840::BlobParams};
+use alloy_primitives::B256;
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks};
 use reth_consensus::{ConsensusError, TxGasLimitTooHighErr};
 use reth_primitives_traits::{
@@ -24,13 +12,6 @@ use reth_primitives_traits::{
     transaction::TxHashRef,
     Block, BlockBody, BlockHeader, GotExpected, SealedBlock, SealedHeader,
 };
-
-/// The maximum RLP length of a block, defined in [EIP-7934](https://eips.ethereum.org/EIPS/eip-7934).
-///
-/// Calculated as `MAX_BLOCK_SIZE` - `SAFETY_MARGIN` where
-/// `MAX_BLOCK_SIZE` = `10_485_760`
-/// `SAFETY_MARGIN` = `2_097_152`
-pub const MAX_RLP_BLOCK_SIZE: usize = 8_388_608;
 
 /// The maximum RLP length of a block, defined in [EIP-7934](https://eips.ethereum.org/EIPS/eip-7934).
 ///
@@ -166,11 +147,6 @@ pub fn validate_block_pre_execution<B, ChainSpec>(
 ) -> Result<(), ConsensusError>
 where
     B: Block,
-<<<<<<< HEAD
-    ChainSpec: EthereumHardforks,
-{
-    post_merge_hardfork_fields(block, chain_spec)?;
-=======
     ChainSpec: EthChainSpec + EthereumHardforks,
 {
     validate_block_pre_execution_with_tx_root(block, chain_spec, None)
@@ -206,7 +182,6 @@ where
                 .into(),
         ))
     }
->>>>>>> v2.3.0
 
     Ok(())
 }
@@ -309,14 +284,7 @@ where
 ///  * `blob_gas_used` exists as a header field
 ///  * `parent_beacon_block_root` exists as a header field
 ///  * `blob_gas_used` is a multiple of `DATA_GAS_PER_BLOB`
-<<<<<<< HEAD
-///  * `excess_blob_gas` is a multiple of `DATA_GAS_PER_BLOB`
 ///  * `blob_gas_used` doesn't exceed the max allowed blob gas based on the given params
-///
-/// Note: This does not enforce any restrictions on `blob_gas_used`
-=======
-///  * `blob_gas_used` doesn't exceed the max allowed blob gas based on the given params
->>>>>>> v2.3.0
 pub fn validate_4844_header_standalone<H: BlockHeader>(
     header: &H,
     blob_params: BlobParams,
@@ -349,18 +317,12 @@ pub fn validate_4844_header_standalone<H: BlockHeader>(
 /// From yellow paper: extraData: An arbitrary byte array containing data relevant to this block.
 /// This must be 32 bytes or fewer; formally Hx.
 #[inline]
-<<<<<<< HEAD
-pub fn validate_header_extra_data<H: BlockHeader>(header: &H) -> Result<(), ConsensusError> {
-    let extra_data_len = header.extra_data().len();
-    if extra_data_len > MAXIMUM_EXTRA_DATA_SIZE {
-=======
 pub fn validate_header_extra_data<H: BlockHeader>(
     header: &H,
     max_size: usize,
 ) -> Result<(), ConsensusError> {
     let extra_data_len = header.extra_data().len();
     if extra_data_len > max_size {
->>>>>>> v2.3.0
         Err(ConsensusError::ExtraDataExceedsMax { len: extra_data_len })
     } else {
         Ok(())
@@ -376,20 +338,6 @@ pub fn validate_against_parent_hash_number<H: BlockHeader>(
     header: &H,
     parent: &SealedHeader<H>,
 ) -> Result<(), ConsensusError> {
-<<<<<<< HEAD
-    // Parent number is consistent.
-    if parent.number() + 1 != header.number() {
-        return Err(ConsensusError::ParentBlockNumberMismatch {
-            parent_block_number: parent.number(),
-            block_number: header.number(),
-        })
-    }
-
-    if parent.hash() != header.parent_hash() {
-        return Err(ConsensusError::ParentHashMismatch(
-            GotExpected { got: header.parent_hash(), expected: parent.hash() }.into(),
-        ))
-=======
     if parent.hash() != header.parent_hash() {
         return Err(ConsensusError::ParentHashMismatch(
             GotExpected { got: header.parent_hash(), expected: parent.hash() }.into(),
@@ -410,7 +358,6 @@ pub fn validate_against_parent_hash_number<H: BlockHeader>(
             parent_block_number: parent.number(),
             block_number: header.number(),
         })
->>>>>>> v2.3.0
     }
 
     Ok(())
@@ -430,11 +377,7 @@ pub fn validate_against_parent_eip1559_base_fee<ChainSpec: EthChainSpec + Ethere
             .ethereum_fork_activation(EthereumHardfork::London)
             .transitions_at_block(header.number())
         {
-<<<<<<< HEAD
             INITIAL_BASE_FEE
-=======
-            alloy_eips::eip1559::INITIAL_BASE_FEE
->>>>>>> v2.3.0
         } else {
             chain_spec
                 .next_block_base_fee(parent, header.timestamp())
@@ -507,11 +450,7 @@ pub fn validate_against_parent_gas_limit<
         })
     }
     // Check if the self gas limit is below the minimum required limit.
-<<<<<<< HEAD
-    else if header.gas_limit() < MINIMUM_GAS_LIMIT {
-=======
     if header.gas_limit() < MINIMUM_GAS_LIMIT {
->>>>>>> v2.3.0
         return Err(ConsensusError::GasLimitInvalidMinimum { child_gas_limit: header.gas_limit() })
     }
 
@@ -562,11 +501,7 @@ pub fn validate_against_parent_4844<H: BlockHeader>(
 mod tests {
     use super::*;
     use alloy_consensus::{BlockBody, Header, TxEip4844};
-<<<<<<< HEAD
-    use alloy_eips::eip4895::Withdrawals;
-=======
     use alloy_eips::{eip4844::DATA_GAS_PER_BLOB, eip4895::Withdrawals};
->>>>>>> v2.3.0
     use alloy_primitives::{Address, Bytes, Signature, U256};
     use rand::Rng;
     use reth_chainspec::ChainSpecBuilder;

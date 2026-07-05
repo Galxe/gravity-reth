@@ -2,7 +2,6 @@
 
 use crate::{execute::Executor, Database, OnStateHook};
 
-<<<<<<< HEAD
 use alloc::sync::Arc;
 use alloy_evm::{precompiles::DynPrecompile, EvmEnv};
 use alloy_primitives::Address;
@@ -17,12 +16,6 @@ use revm::{
     database::BundleState,
     state::EvmState,
 };
-=======
-// re-export Either
-pub use futures_util::future::Either;
-use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
-use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
->>>>>>> v2.3.0
 
 impl<A, B, DB> Executor<DB> for Either<A, B>
 where
@@ -90,7 +83,6 @@ where
         }
     }
 
-<<<<<<< HEAD
     fn take_bundle(&mut self) -> BundleState {
         match self {
             Self::Left(a) => a.take_bundle(),
@@ -98,8 +90,6 @@ where
         }
     }
 
-=======
->>>>>>> v2.3.0
     fn size_hint(&self) -> usize {
         match self {
             Self::Left(a) => a.size_hint(),
@@ -107,7 +97,6 @@ where
         }
     }
 
-<<<<<<< HEAD
     fn transact_system_txn(
         &mut self,
         evm_env: EvmEnv,
@@ -131,12 +120,13 @@ where
         match self {
             Self::Left(a) => a.apply_custom_precompiles(custom_precompiles),
             Self::Right(b) => b.apply_custom_precompiles(custom_precompiles),
-=======
+        }
+    }
+
     fn take_bal(&mut self) -> Option<alloy_eip7928::BlockAccessList> {
         match self {
             Self::Left(a) => a.take_bal(),
             Self::Right(b) => b.take_bal(),
->>>>>>> v2.3.0
         }
     }
 }

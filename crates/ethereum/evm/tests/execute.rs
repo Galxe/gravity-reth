@@ -8,21 +8,13 @@ use alloy_eips::{
     eip7002::{WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE},
     eip7685::EMPTY_REQUESTS_HASH,
 };
-<<<<<<< HEAD
 use alloy_evm::block::{BlockValidationError, NoopHook};
-use alloy_primitives::{b256, fixed_bytes, keccak256, Address, Bytes, TxKind, B256, U256};
-=======
-use alloy_evm::block::BlockValidationError;
-use alloy_primitives::{b256, fixed_bytes, keccak256, Bytes, TxKind, B256, U256};
->>>>>>> v2.3.0
+use alloy_primitives::{address, b256, fixed_bytes, keccak256, Address, Bytes, TxKind, B256, U256};
 use reth_chainspec::{ChainSpecBuilder, EthereumHardfork, ForkCondition, MAINNET};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction};
 use reth_evm::{
     execute::{BasicBlockExecutor, Executor},
-<<<<<<< HEAD
     precompiles::{DynPrecompile, PrecompileInput},
-=======
->>>>>>> v2.3.0
     ConfigureEvm,
 };
 use reth_evm_ethereum::EthEvmConfig;
@@ -33,23 +25,17 @@ use reth_primitives_traits::{
 use reth_testing_utils::generators::{self, sign_tx_with_key_pair};
 use revm::{
     database::{CacheDB, EmptyDB, TransitionState},
-<<<<<<< HEAD
     precompile::{PrecompileId, PrecompileOutput, PrecompileResult},
-=======
->>>>>>> v2.3.0
     primitives::address,
     state::{AccountInfo, Bytecode, EvmState},
     Database,
 };
 use std::sync::{mpsc, Arc};
 
-<<<<<<< HEAD
 const CUSTOM_PRECOMPILE_ADDR: Address = address!("0000000000000000000000000000000000000999");
 const CUSTOM_PRECOMPILE_GAS: u64 = 777;
 const CUSTOM_PRECOMPILE_TX_GAS_USED: u64 = 21_000 + CUSTOM_PRECOMPILE_GAS;
 
-=======
->>>>>>> v2.3.0
 fn create_database_with_beacon_root_contract() -> CacheDB<EmptyDB> {
     let mut db = CacheDB::new(Default::default());
 
@@ -58,10 +44,7 @@ fn create_database_with_beacon_root_contract() -> CacheDB<EmptyDB> {
         code_hash: keccak256(BEACON_ROOTS_CODE.clone()),
         nonce: 1,
         code: Some(Bytecode::new_raw(BEACON_ROOTS_CODE.clone())),
-<<<<<<< HEAD
-=======
         account_id: None,
->>>>>>> v2.3.0
     };
 
     db.insert_account_info(BEACON_ROOTS_ADDRESS, beacon_root_contract_account);
@@ -77,10 +60,7 @@ fn create_database_with_withdrawal_requests_contract() -> CacheDB<EmptyDB> {
         balance: U256::ZERO,
         code_hash: keccak256(WITHDRAWAL_REQUEST_PREDEPLOY_CODE.clone()),
         code: Some(Bytecode::new_raw(WITHDRAWAL_REQUEST_PREDEPLOY_CODE.clone())),
-<<<<<<< HEAD
-=======
         account_id: None,
->>>>>>> v2.3.0
     };
 
     db.insert_account_info(
@@ -91,7 +71,6 @@ fn create_database_with_withdrawal_requests_contract() -> CacheDB<EmptyDB> {
     db
 }
 
-<<<<<<< HEAD
 fn create_custom_precompile() -> DynPrecompile {
     (
         PrecompileId::custom("test_custom_precompile"),
@@ -180,8 +159,6 @@ fn basic_block_executor_execute_one_with_state_hook_applies_custom_precompiles()
     assert_eq!(receipt.cumulative_gas_used, CUSTOM_PRECOMPILE_TX_GAS_USED);
 }
 
-=======
->>>>>>> v2.3.0
 #[test]
 fn eip_4788_non_genesis_call() {
     let mut header =
@@ -458,10 +435,7 @@ fn create_database_with_block_hashes(latest_block: u64) -> CacheDB<EmptyDB> {
         code_hash: keccak256(HISTORY_STORAGE_CODE.clone()),
         code: Some(Bytecode::new_raw(HISTORY_STORAGE_CODE.clone())),
         nonce: 1,
-<<<<<<< HEAD
-=======
         account_id: None,
->>>>>>> v2.3.0
     };
 
     db.insert_account_info(HISTORY_STORAGE_ADDRESS, blockhashes_contract_account);
@@ -931,11 +905,7 @@ fn test_balance_increment_not_duplicated() {
     let tx_clone = tx.clone();
 
     let _output = executor
-<<<<<<< HEAD
-        .execute_with_state_hook(block, move |_, state: &EvmState| {
-=======
         .execute_with_state_hook(block, move |state: &EvmState| {
->>>>>>> v2.3.0
             if let Some(account) = state.get(&withdrawal_recipient) {
                 let _ = tx_clone.send(account.info.balance);
             }

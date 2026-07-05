@@ -1,5 +1,4 @@
 use crate::EthEvmConfig;
-<<<<<<< HEAD
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use alloy_consensus::Header;
 use alloy_eips::eip7685::Requests;
@@ -24,14 +23,10 @@ use revm::{
     database::State,
     Inspector,
 };
-=======
-use reth_evm::noop::NoopEvmConfig;
->>>>>>> v2.3.0
 
 /// A helper type alias for mocked block executor provider.
 pub type MockExecutorProvider = MockEvmConfig;
 
-<<<<<<< HEAD
 /// A block executor provider that returns mocked execution results.
 #[derive(Clone, Debug)]
 pub struct MockEvmConfig {
@@ -203,19 +198,21 @@ impl ConfigureEvm for MockEvmConfig {
 }
 
 impl ConfigureEngineEvm<ExecutionData> for MockEvmConfig {
-    fn evm_env_for_payload(&self, payload: &ExecutionData) -> EvmEnvFor<Self> {
+    fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
         self.inner.evm_env_for_payload(payload)
     }
 
-    fn context_for_payload<'a>(&self, payload: &'a ExecutionData) -> ExecutionCtxFor<'a, Self> {
+    fn context_for_payload<'a>(
+        &self,
+        payload: &'a ExecutionData,
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
         self.inner.context_for_payload(payload)
     }
 
-    fn tx_iterator_for_payload(&self, payload: &ExecutionData) -> impl ExecutableTxIterator<Self> {
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         self.inner.tx_iterator_for_payload(payload)
     }
 }
-=======
-/// Mock for EVM config.
-pub type MockEvmConfig = NoopEvmConfig<EthEvmConfig>;
->>>>>>> v2.3.0
