@@ -105,13 +105,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ripgrep
           bash scripts/check-gravity-invariants.sh
-      - name: Run gravity pipe + EIP-7702 / EIP-2935 integration tests
+      - name: Run gravity pipe + hardfork / EIP-7702 / EIP-2935 integration tests
         # `--test <name>` is required (vs. just `-E 'binary(...)'`) because
         # nextest's filterset only filters at *run* time — without `--test`,
-        # `-p <crate>` still tries to compile every integration binary in the
-        # crate, including ones that don't compile in this workspace (e.g.
-        # gravity_hardfork_test.rs depends on reth-ethereum-forks which is not
-        # in dev-dependencies). `--test` restricts both compile and run.
+        # `-p <crate>` still tries to compile every integration binary in this
+        # crate. `--test` keeps this job focused on the intended binaries.
         #
         # The `gravity_system_tx_*` + `gravity_bls_*` binaries were added by
         # #367 and #370 but originally never wired here — they compiled in
@@ -126,6 +124,7 @@ jobs:
             --locked \
             -p reth-pipe-exec-layer-ext-v2 \
             --test gravity_pipe_test \
+            --test gravity_hardfork_test \
             --test gravity_eip2935_test \
             --test gravity_eip7702_test \
             --test gravity_system_tx_gas_exempt_test \

@@ -10000,6 +10000,7 @@ dependencies = [
  "reth-db",
  "reth-engine-primitives",
  "reth-ethereum-cli",
+ "reth-ethereum-forks",
  "reth-ethereum-primitives",
  "reth-evm",
  "reth-evm-ethereum",
