@@ -497,26 +497,46 @@ import_era.rs、init_state、prune.rs、stage/unwind.rs、re_execute.rs 等,均�
 
 - [x] 1. **`common.rs` 中 `init_genesis_with_settings` 与 gravity stage-checkpoint guard 的叠加**：~~上游新签名是否会触发 checkpoint 重置问题,需 e2e 验证~~
    → **决策(2026-07-06,⟲ 前提消亡)**:`init_genesis_with_settings` 全仓零定义,db-common/init.rs 已随 f89d9d4e23 回归 baseline `init_genesis(factory)`(:87,零冲突)——上游 API 不存在,e2e 验证无对象。**guard 必保**,common.rs 按「HEAD 体 + v2.3.0 二参签名」解(见 ⟲ 裁决表)。依据:决策总原则 ②。
-   - [ ] 冲突解决:common.rs 现存 9 处冲突块。
+   - [x] 冲突解决:已落地(2026-07-06)——baseline 重建 + 三项存活增量(二参 `init(access, _runtime)`、`RoInconsistent` 门控、`default_value()`);证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 - [x] 2. **`stage/drop.rs` 中 `cached_storage_settings().storage_v2` 分支判定**:~~gravity 部署配置核实~~
    → **决策(2026-07-06,⟲ 前提消亡)**:`cached_storage_settings` 是孤儿(metadata.rs 不在 mod 树)、`unwind_provider_rw`/`prune_to_unwind_target` 零定义;而 `HeaderTerminalDifficulties` 表与 `PruneSegment::Transactions` 已随 db-api/prune 还原回归——**上游 schema 演进整体出局,drop.rs 取 HEAD 体**(合并分支/保 TD clear/保 reset_prune_checkpoint),仅 `execute(executor)` 签名保 v2.3.0。部署配置核实无对象。依据:原则 ②。
-   - [ ] 冲突解决:stage/drop.rs 现存 10 处冲突块。
+   - [x] 冲突解决:已落地(2026-07-06)——⟲ 偏差:公共区挂死 API 致逐块不可行,整文件 baseline + 二参签名;证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 - [x] 3. **`db/list.rs` 对 storage v2 已迁出表的 entries 报告**:~~需增加 RocksDBProvider::table_entries fallback~~
    → **决策(2026-07-06,⟲ 问题消解)**:上游 `open_db/db_stat` 路径已死;gravity 的 `tx.table_entries(name)` 本就是双后端统一抽象(mdbx parallel_tx.rs:156 + rocksdb tx.rs:123 实测存活)——取 HEAD 即天然覆盖两侧,无需 fallback。依据:原则 ②。
-   - [ ] 冲突解决:db/list.rs 现存 3 处冲突块。
+   - [x] 冲突解决:已落地(2026-07-06)——HEAD `table_entries` + 保 v2.3.0 `disable_long_read_transaction_safety`,公共区 :66 非 Arc 形态修回;证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 - [x] 4. **`sigsegv_handler.rs` 上游回滚理由**:~~需追查 CI log~~
    → **决策(2026-07-06,实测)**:rustc 1.94.1 下两种 cast 写法**均编译通过**(最小 repro 实测,upstream `as unsafe extern "C" fn(...)` 与 gravity `as *const ()` 双绿)——`9974ad0618` 的回退在当前工具链已无必要性,**take-upstream**(上游写法更防未来 fn-item-cast lint,且带 `2cae43864` 页对齐修复)。CI pin nightly-2026-02-01 晚于两写法要求;若未来 musl 目标出问题再加 `cfg` 分支。依据:原则 ③。
-   - [ ] 冲突解决:sigsegv_handler.rs 现存 1 处冲突块。
+   - [x] 冲突解决:已落地(2026-07-06)——take-upstream;证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 - [x] 5. **`stage/run.rs` 中 `metrics_hooks` 的 metric 标签等价性**:~~需核实等价性~~
    → **决策(2026-07-06,⟲ 前提坍塌)**:`metrics_hooks` 定义存活(node/builder/launch/common.rs:1625)但**体内调 `rocksdb_provider()`(死)**且宿主文件尚有 30 个冲突块——对 cli 组等同于死。stage/run.rs 取 HEAD 手写 `Hooks::builder()`,等价性问题无对象;`UnifiedStorageWriter::commit/commit_unwind` 保 HEAD(已复活)。跨组注:node-builder 组解 launch/common.rs 时须同向处理 metrics_hooks。依据:原则 ②。
-   - [ ] 冲突解决:stage/run.rs 现存 5 处冲突块。
+   - [x] 冲突解决:已落地(2026-07-06)——HEAD Hooks/UnifiedStorageWriter + v2.3.0 `requires_commit`/pprof_dumps,公共区 FastInstant→std、补回被吞 import ×2;证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 - [x] 6. **`download` 模块二义**(正文「关键决策」条目,此处补勾选框):
    → **决策(2026-07-06,实测)**:**方案 2 —— 删除 `download.rs`,采纳上游 `download/` 目录**。三条证据:① gravity 对 download.rs **零修改**(`git diff v1.8.3 0cb1687c1c` 为空,纯 v1.8.3 遗产,无 gravity 功能损失);② v2.3.0 已用模块化 `download/` 目录取代它(v2.3.0 无 download.rs);③ 活消费方 `ethereum/cli/src/interface.rs`(零冲突)已按目录版接线(`download::manifest_cmd` :10、`DownloadCommand` :286),方案 1/3 都要反向改零冲突上游文件。download/ 目录死符号扫描零命中(config_gen.rs:233 的 `.static_files` 是 reth_config::Config 字段,非 EnvironmentArgs)。依据:原则 ③。
-   - [ ] 冲突解决:`git rm crates/cli/commands/src/download.rs` 一步,尚未执行。
+   - [x] 冲突解决:已落地(2026-07-06)——已 `git rm`,`pub mod download;` 唯一指向目录版。
 - [x] 7. **零冲突侧翻断点 10 文件**(2026-07-06 新增,正文未覆盖):
    → **决策**:按 ⟲ 横幅「零冲突侧翻断点」表处置——baseline 无的 5 个上游 storage-v2 工具 trim(摘 db/mod.rs 5 个子命令挂载 + checksum/mod.rs 3 处);baseline 有的 5 个局部摘死符号段或回 baseline 段。依据:原则 ②。
-   - [ ] 冲突解决:10 文件 + db/mod.rs + checksum/mod.rs 待执行。
+   - [x] 冲突解决:已落地(2026-07-06)——4 孤儿卸载 + 5 文件局部摘死符号;⟲ 偏差:checksum 整目录回 baseline 单文件(非"3 处摘除");证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 
 ## 落地待办(依赖序,2026-07-06)
 
 1. `Cargo.toml`(7 块,存活依赖并集)→ 2. `common.rs`(9 块,HEAD 体 + 二参签名)→ 3. OQ6(`git rm download.rs`)→ 4. OQ7 侧翻 10 文件 + db/mod.rs + checksum/mod.rs 摘挂载 → 5. `db/list.rs`(3)、`db/stats.rs`(7)、`node.rs`(11)、`stage/drop.rs`(10)、`stage/dump/*`(21)、`stage/run.rs`(5)→ 6. `sigsegv_handler.rs`(1)→ 7. 验收:本组冲突标记归零 + rustfmt parse + 死符号扫描;编译证据待 cargo 组修复 workspace 依赖后回填。
+
+## ⟲ 落地实录(2026-07-06)
+
+13 个冲突文件 + OQ6/OQ7 全部落地,`crates/cli/` 全域冲突标记归零(改动 24
+文件);收口 agent 全局验证通过。偏差实录(均按决策总原则,证据在案):
+
+1. **4 处「逐块不可行、整文件 baseline 重建」**:common.rs、stage/drop.rs、
+   db/stats.rs(+ 嫁接 `skip_consistency_checks` 字段)、db/checksum 整目录
+   ——公共区挂死 API(`prune_account_changesets`/`use_hashed_state` 等),
+   逐块取边必拼残局(与 blockchain_provider interleave 同类)。
+2. Cargo.toml 存活依赖并集,`parking_lot` 不纳入(唯一消费方是已卸载孤儿);
+   node.rs 的 gravity 配置不进 `NodeConfig`(零冲突 node/core 无该字段、全仓
+   无读取方,`init_gravity_config` 全局单例保全功能);dump 系公共区 v2.3.0
+   工厂尾巴手工剥除 ×4;prune.rs 保 v2.3.0 `MetricServer` 新功能(原则③);
+   download/manifest_cmd.rs 的 FastInstant→std(文档未列的第 9 处偏差)。
+3. 跨组遗留(已入 executed-block-split §九台账):static-file/types 缝隙经
+   收口实测定性为 **storage 组有意桥接**(writer.rs 通配臂 + gravity 注释、
+   `tables::TransactionSenders` 存活、零冲突消费方按 v2.3.0 types 编译),
+   cli 的 changeset 分支 bail 是正确配合,types **保持 v2.3.0 不回退**;
+   changeset 段运行时能力记 v2.4+ 债务。
