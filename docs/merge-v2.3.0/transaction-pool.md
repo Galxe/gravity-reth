@@ -415,7 +415,7 @@ Gravity 不需要保留任何 hunk —— 当前冲突端全部是 v1.8.3 旧文
    同函数既有测试可作邻位),U-5 依赖的 `.no_prague()` builder v2.3.0 存在。
    audit#668 防线由上游生产代码天然保持,无回归窗口。原文「重新 port 117 行
    检查」的表述据此 ⟲ 收窄。
-   - [ ] 冲突解决:待落地(仅 port 两测试 + 常规解块);crates/transaction-pool/src/validate/eth.rs 现存 47 处冲突块(2026-07-05 复测持平)。
+   - [x] 冲突解决:已落地(2026-07-06)——47 块归零(v2.3.0 底 + 测试 helper),U-4/U-5 已从 baseline mod tests 移植(适配 `ForkTracker` 新三字段、builder 二参、`initial_total_gas()`);证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 - [x] 2. **`maintain.rs` pipe-exec discard 订阅生命周期**：上游 #20781 改了 stale_eviction 处理，gravity discard_txs 订阅块独立于 stale_eviction，互不影响；但需确认 `tokio::spawn` 与 `task_spawner.spawn_blocking_task` 的运行时一致（v2.3.0 全局 Runtime 后建议改用 `task_spawner` 而非裸 `tokio::spawn` 以共享统一 runtime）。
    → **决策**(2026-07-05,依据:原则 2 保 discard 块 + 原则 3 随 Runtime):
    discard 订阅块保留(baseline :182-187 形态),spawn 由裸 `tokio::spawn`
@@ -429,7 +429,7 @@ Gravity 不需要保留任何 hunk —— 当前冲突端全部是 v1.8.3 旧文
    `MockEthProvider::with_genesis_block`(tag 侧 1 处),该方法在 f89d9d4e23
    还原后的 provider 中不存在(实测 grep 空)——跨组反向失效,落地时改写
    测试侧(用 baseline MockEthProvider 现有 API),不动 storage 还原文件。
-   - [ ] 冲突解决:待落地;crates/transaction-pool/src/maintain.rs 现存 16 处冲突块(2026-07-05 复测持平)。
+   - [x] 冲突解决:已落地(2026-07-06)——16 块归零,discard 订阅块以 `task_spawner.spawn_task` 形态织回(与 baseline :179-190 语义逐行一致);Cargo.toml 已补回 gravity 3 行(与 baseline diff 逐字一致);`with_genesis_block` 测试点已改写(实测处置面 = eth.rs 11 处 + maintain.rs 1 处,原预报 1 处,⟲ 系统性外延);证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 - [x] 3. **`best.rs` MAX_NEW_TRANSACTIONS_PER_BATCH=1024 与上游 `size_hint`**：上游新引入 `size_hint` 返回 `(0, Some(self.all.len()))`（当 `new_transaction_receiver.is_none()` 时）。大批量值与 size_hint 无冲突，但需 bench 验证 imbl::OrdMap 在大批 add_new_transactions 下的实际表现是否仍优于 1024 阈值原始动机（gravity batch-insert 通常一次喂数百 tx）。
    → **决策**(2026-07-05,依据:原则 3,gravity perf 常量与 storage 决策
    无冲突):整体取 v2.3.0(含 `size_hint` / `imbl::OrdMap`),仅一行常量
@@ -439,7 +439,7 @@ Gravity 不需要保留任何 hunk —— 当前冲突端全部是 v1.8.3 旧文
    bench 文件是 v1.8.3 上游遗产而非 gravity 引入(原文归因有误,⟲ 见
    Cargo.toml 节与文末现状核实),上游 v2.3.0 已整体删除 bench 体系。改为
    落地后以 pipe 压测 / 生产 metrics 验证 1024 阈值,不阻塞本决策。
-   - [ ] 冲突解决:待落地;crates/transaction-pool/src/pool/best.rs 现存 13 处冲突块(2026-07-05 复测持平)。另:`benches/` 残留 `canonical_state_change.rs` / `insertion.rs` 两个孤儿文件(无 `[[bench]]` 挂载),落地时随上游删除。
+   - [x] 冲突解决:已落地(2026-07-06)——13 块归零(v2.3.0 + 常量一行覆盖 1024,带注释;baseline 的 `IncomingTransaction` 机制实测已被 v2.3.0 同形吸收);两个孤儿 bench 已 `git rm`;证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 - [x] 4. **`config.rs` 上游 `LocalTransactionConfig::local_addresses: AddressSet`**：gravity 调用方（如 pipe-exec、CLI）若用 `HashSet<Address>` 字面量构造，迁到 `AddressSet` 需同步调整 import。
    → **决策**(2026-07-05,依据:原则 3 + 调用方实测):take-upstream 成立,
    **无需任何调用方调整**——全仓无 `HashSet<Address>` 字面量构造
@@ -448,7 +448,7 @@ Gravity 不需要保留任何 hunk —— 当前冲突端全部是 v1.8.3 旧文
    `crates/node/core/src/args/txpool.rs`(8 处冲突,node 组范围)现文本
    `self.locals.iter().copied().collect()`(:658)对 `AddressSet` 类型推断
    天然兼容。
-   - [ ] 冲突解决:待落地;crates/transaction-pool/src/config.rs 现存 5 处冲突块(2026-07-05 复测持平)。
+   - [x] 冲突解决:已落地(2026-07-06)——5 块归零(纯 v2.3.0,baseline delta 实测为 0);证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 
 ## ⟲ 现状核实(2026-07-05,f89d9d4e23 之后)
 
@@ -490,3 +490,23 @@ error.rs 6、maintain.rs 16、best.rs 13、txpool.rs 24、validate/eth.rs 47,
 源码对 `LazyTrieData` / `trie_data` 零引用(`git grep` tag 实测)——
 executed-block-split §9.2 的裁决不级联到本组。Cargo.toml 节「LazyTrieData →
 新增 revm dep」的表述不影响结论(revm dep 实际服务于 serde feature)。
+
+## ⟲ 落地实录(2026-07-06)
+
+六文件 111 块 + Cargo.toml 全部归零(收口 agent 全局验证通过)。与裁决的偏差
+两条,均按决策总原则落地并经收口复核:
+
+1. **error.rs / pool/txpool.rs 的「take-upstream 全文、gravity 无自定义」被
+   实测推翻**:gravity 把 `FeeCapBelowMinimumProtocolFeeCap` 改为带链上最小值
+   的 struct 变体(服务 gravity 自定义 min base fee),且零冲突的
+   rpc-eth-types error/mod.rs 匹配臂反向锁定。已嫁接保留(error.rs 变体 +
+   match 臂、txpool.rs 构造点带 `minimum: minimal_protocol_basefee`)。
+   收口注:rpc 组解块曾把 error/mod.rs :1027 覆盖回元组形态,收口时已修正为
+   struct 匹配(`{ .. }`),全仓元组形态残留归零(实测)。
+2. `with_genesis_block` 改写规模 = 12 处(eth.rs 本地 helper
+   `provider_with_genesis_block()` + maintain.rs 单点内联),超出核实时预报的
+   1 处;未动 storage 还原文件(遵 OQ2 决策)。
+
+附:`reth-primitives-traits` 已是 crates.io 注册表依赖(root Cargo.toml),
+baseline path crate 仅剩残片目录——这是 `SubkeyContainedValue` 全仓零定义的
+根因,归 primitives-traits/cargo 组(总台账见 executed-block-split §九)。
