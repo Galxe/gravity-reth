@@ -52,6 +52,12 @@ Baseline 锚点：`0cb1687c1c`（gravity main，已合 reth v1.8.3 via #205）�
 
 **推理**：双方变更落在不相交的字段上，无语义冲突。`reth-tasks/test-utils` 上游新增可直接采用。`criterion` 删除属 upstream 内部 bench 清理，但 gravity 自身 bench 仍在使用，需保留。
 
+> ⟲ 2026-07-05 实测修正:①本文件已**零冲突侧翻为纯 v2.3.0**(与 tag 零
+> diff);②gravity 真实增量实测仅 3 行(两依赖 + `config-from-env` 转发),
+> 开放问题 2 落地时补回;③「五条 `[[bench]]` 段全部 gravity 引入」归因
+> **有误**——bench 文件与段均为 v1.8.3 上游遗产(diff 实测为空),按决策
+> 原则第 3 条随上游删除,本节 bench 保留建议作废。详见文末「⟲ 现状核实」。
+
 ### `crates/transaction-pool/src/config.rs`
 
 **模块**：`PoolConfig` / `SubPoolLimit` / `LocalTransactionConfig`
@@ -129,6 +135,13 @@ Baseline 锚点：`0cb1687c1c`（gravity main，已合 reth v1.8.3 via #205）�
 
 **推理**：cite `3eec9c4976` baseline 内 `Pool::new` 已扩字段、`validate_all` 已基于 `validate_transactions` 批接口（PR #92 同时改 `PoolInner::validate_all`）。`Runtime` 切换是 upstream 系列 PR 强制，无 keep-gravity 余地。
 
+> ⟲ 2026-07-05 实测修正:本节对 #92 的归因**有误**——
+> `git diff v1.8.3 0cb1687c1c -- src/lib.rs` 为空,`validate_all_with_origins`
+> 等 API 是 v1.8.3 上游文本(#92 已被 #205 catch-up 收编),且 tx-pool 之外
+> 零调用方。本文件已零冲突侧翻为纯 v2.3.0,**侧翻无损失、无需返工**;
+> mechanical-merge 建议降级为 take-upstream(已成事实)。`pool/mod.rs`
+> 同理(diff 亦为空)。
+
 ### `crates/transaction-pool/src/maintain.rs`
 
 **模块**：pool 与 canonical chain 同步循环
@@ -163,6 +176,12 @@ Baseline 锚点：`0cb1687c1c`（gravity main，已合 reth v1.8.3 via #205）�
 **推理**：`get_pipe_exec_layer_event_bus().discard_txs.lock().await.take().unwrap()` 在 gravity 启动期是单一消费者，必须在 loop 内启动；其余 hunk 都是上游优化/重构，没有 gravity-specific 语义。
 
 **关键发现**：pipe-exec discard 订阅块缺失 → mempool 与 execution layer 严重失同步（chain 不会 halt，但 pool 内将堆积大量已被网络拒收的 txs，最终 OOM 或 best-tx iterator 反复吐出无效 tx）。
+
+> ⟲ 2026-07-05:本节方案维持有效,决策已定(开放问题 2 已勾):spawn 形态
+> 定为 `task_spawner.spawn_task`;新增两个落地前置——Cargo.toml 补回 3 行
+> gravity 依赖(已侧翻丢失)、v2.3.0 测试的
+> `MockEthProvider::with_genesis_block` 在还原后 provider 中不存在须改写
+> 测试侧。详见开放问题 2 与文末「⟲ 现状核实」。
 
 ### `crates/transaction-pool/src/metrics.rs`
 
@@ -208,6 +227,10 @@ Baseline 锚点：`0cb1687c1c`（gravity main，已合 reth v1.8.3 via #205）�
 **解决方案建议**：take-upstream — 整体采纳 v2.3.0（含 `imbl::OrdMap`、`FxHashSet`、`AddressSet`、`next_tx_and_priority`、`size_hint`），但**保留 `const MAX_NEW_TRANSACTIONS_PER_BATCH: usize = 1024`**（一行常量覆盖）。
 
 **推理**：除常量外 gravity 没有自定义逻辑；其它分歧都是底座版本差异。`MAX_NEW_TRANSACTIONS_PER_BATCH = 1024` 是性能调优，保留 gravity 数值无副作用（上限受 channel size 实际约束）。
+
+> ⟲ 2026-07-05:本节方案维持有效,决策已定(开放问题 3 已勾,1024 保留);
+> bench 前置验证改为落地后压测(bench 体系实为上游遗产且 v2.3.0 已删,
+> 见开放问题 3)。
 
 ### `crates/transaction-pool/src/pool/mod.rs`
 
@@ -341,6 +364,13 @@ Gravity 不需要保留任何 hunk —— 当前冲突端全部是 v1.8.3 旧文
 
 **关键发现**：丢失 #343 在 validate/eth.rs 的 117 行 intrinsic gas 校验 → gravity-audit#668 回归，EIP-7702 低 gas tx 可经 RPC 进入 mempool → 推入 pipe-exec → revm-handler panic → 节点 halt（与 PR description 一致）。
 
+> ⟲ 2026-07-05 实测收窄:#343 的 117 行**全部是 `mod tests` 增量**
+> (U-4/U-5 两个单测 + 两处 typo),生产侧 `ensure_intrinsic_gas` 调用本就是
+> v1.8.3 上游文本且 v2.3.0 等价保留(`validate_stateless` tag :550 调用、
+> 函数体 tag :1404)——**不存在生产逻辑回归窗口**,上段"117 行校验丢失 →
+> 节点 halt"的风险描述据此失效;真实 port 范围 = 两个测试。详见开放问题 1
+> 决策。
+
 ### `crates/transaction-pool/src/validate/task.rs`
 
 **模块**：`TransactionValidationTaskExecutor`
@@ -367,12 +397,96 @@ Gravity 不需要保留任何 hunk —— 当前冲突端全部是 v1.8.3 旧文
 ## 开放问题
 
 > **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
+>
+> ⟲ 2026-07-05 核实:四条均按决策总原则(见
+> `executed-block-split-pipe-exec-make-canonical.md` §九:storage 决策最高;
+> 冲突迎合 storage;不冲突留 v2.3.0;裁决前先做符号存活实测)裁决完毕,
+> 证据均为当日实测;冲突计数复测与 07-03 持平。全组现状总扫见文末
+> 「⟲ 现状核实」节。
 
-- [ ] 1. **PR #343 port 锚点选择**：v2.3.0 中 `validate_one`（或拆分后的 `validate_stateless` / `validate_stateful`）插入 EIP-7702 intrinsic gas 检查的精确位置需要再核 reth 重构后的方法名（cite #22910 / #22008 改名）。port 时优先放进 `validate_stateless`（无 state 依赖），与 `ensure_intrinsic_gas` 同位置即可。
-   - [ ] 冲突解决:待核实 port 锚点后落地;crates/transaction-pool/src/validate/eth.rs 现存 47 处冲突块(2026-07-03 实测)。
-- [ ] 2. **`maintain.rs` pipe-exec discard 订阅生命周期**：上游 #20781 改了 stale_eviction 处理，gravity discard_txs 订阅块独立于 stale_eviction，互不影响；但需确认 `tokio::spawn` 与 `task_spawner.spawn_blocking_task` 的运行时一致（v2.3.0 全局 Runtime 后建议改用 `task_spawner` 而非裸 `tokio::spawn` 以共享统一 runtime）。
-   - [ ] 冲突解决:待决策后落地;crates/transaction-pool/src/maintain.rs 现存 16 处冲突块(2026-07-03 实测)。
-- [ ] 3. **`best.rs` MAX_NEW_TRANSACTIONS_PER_BATCH=1024 与上游 `size_hint`**：上游新引入 `size_hint` 返回 `(0, Some(self.all.len()))`（当 `new_transaction_receiver.is_none()` 时）。大批量值与 size_hint 无冲突，但需 bench 验证 imbl::OrdMap 在大批 add_new_transactions 下的实际表现是否仍优于 1024 阈值原始动机（gravity batch-insert 通常一次喂数百 tx）。
-   - [ ] 冲突解决:待 bench 验证后落地;crates/transaction-pool/src/pool/best.rs 现存 13 处冲突块(2026-07-03 实测)。
-- [ ] 4. **`config.rs` 上游 `LocalTransactionConfig::local_addresses: AddressSet`**：gravity 调用方（如 pipe-exec、CLI）若用 `HashSet<Address>` 字面量构造，迁到 `AddressSet` 需同步调整 import。
-   - [ ] 冲突解决:待核实调用方后落地;crates/transaction-pool/src/config.rs 现存 5 处冲突块(2026-07-03 实测)。
+- [x] 1. **PR #343 port 锚点选择**：v2.3.0 中 `validate_one`（或拆分后的 `validate_stateless` / `validate_stateful`）插入 EIP-7702 intrinsic gas 检查的精确位置需要再核 reth 重构后的方法名（cite #22910 / #22008 改名）。port 时优先放进 `validate_stateless`（无 state 依赖），与 `ensure_intrinsic_gas` 同位置即可。
+   → **决策**(2026-07-05,依据:原则 3 + 实测):**生产逻辑无需 port**——
+   `git diff v1.8.3 0cb1687c1c -- validate/eth.rs` 实测 #343 的 117 行增量
+   **全部在 `mod tests`**(U-4/U-5 两个单测 + 两处 typo 修复),生产侧的
+   `ensure_intrinsic_gas` 调用本就是 v1.8.3 上游文本;v2.3.0 等价覆盖:
+   `validate_stateless` 内调用(tag :550),函数体(tag :1404)与 baseline
+   仅差 revm-40 改名(`gas.initial_gas` → `gas.initial_total_gas()`)。
+   **port 范围收敛为 U-4/U-5 两个测试**,落到上游 tests 区(tag :1481 起有
+   同函数既有测试可作邻位),U-5 依赖的 `.no_prague()` builder v2.3.0 存在。
+   audit#668 防线由上游生产代码天然保持,无回归窗口。原文「重新 port 117 行
+   检查」的表述据此 ⟲ 收窄。
+   - [ ] 冲突解决:待落地(仅 port 两测试 + 常规解块);crates/transaction-pool/src/validate/eth.rs 现存 47 处冲突块(2026-07-05 复测持平)。
+- [x] 2. **`maintain.rs` pipe-exec discard 订阅生命周期**：上游 #20781 改了 stale_eviction 处理，gravity discard_txs 订阅块独立于 stale_eviction，互不影响；但需确认 `tokio::spawn` 与 `task_spawner.spawn_blocking_task` 的运行时一致（v2.3.0 全局 Runtime 后建议改用 `task_spawner` 而非裸 `tokio::spawn` 以共享统一 runtime）。
+   → **决策**(2026-07-05,依据:原则 2 保 discard 块 + 原则 3 随 Runtime):
+   discard 订阅块保留(baseline :182-187 形态),spawn 由裸 `tokio::spawn`
+   改为 `task_spawner.spawn_task(async move { ... })`(v2.3.0 maintain.rs
+   tag :518 同形用法;`Runtime` 存活实测 `crates/tasks/src/runtime.rs:316`,
+   tasks crate 未被 storage 还原波及)。**落地前置(2026-07-05 新发现,详见
+   文末「⟲ 现状核实」)**:①本 crate `Cargo.toml` 已零冲突侧翻为纯 v2.3.0,
+   须补回 gravity 真实增量 3 行(`gravity-primitives` /
+   `reth-pipe-exec-layer-event-bus` 两依赖 + `config-from-env` feature 转发),
+   否则 discard 块编译断;②v2.3.0 maintain.rs 测试用
+   `MockEthProvider::with_genesis_block`(tag 侧 1 处),该方法在 f89d9d4e23
+   还原后的 provider 中不存在(实测 grep 空)——跨组反向失效,落地时改写
+   测试侧(用 baseline MockEthProvider 现有 API),不动 storage 还原文件。
+   - [ ] 冲突解决:待落地;crates/transaction-pool/src/maintain.rs 现存 16 处冲突块(2026-07-05 复测持平)。
+- [x] 3. **`best.rs` MAX_NEW_TRANSACTIONS_PER_BATCH=1024 与上游 `size_hint`**：上游新引入 `size_hint` 返回 `(0, Some(self.all.len()))`（当 `new_transaction_receiver.is_none()` 时）。大批量值与 size_hint 无冲突，但需 bench 验证 imbl::OrdMap 在大批 add_new_transactions 下的实际表现是否仍优于 1024 阈值原始动机（gravity batch-insert 通常一次喂数百 tx）。
+   → **决策**(2026-07-05,依据:原则 3,gravity perf 常量与 storage 决策
+   无冲突):整体取 v2.3.0(含 `size_hint` / `imbl::OrdMap`),仅一行常量
+   覆盖 `MAX_NEW_TRANSACTIONS_PER_BATCH = 1024`(v2.3.0 值 16,tag :20,
+   消费点 tag :176)。**bench 前置验证改为后置**:①cargo workspace 当前
+   不可解析;②实测 `git diff v1.8.3 0cb1687c1c -- benches/` 为空——五个
+   bench 文件是 v1.8.3 上游遗产而非 gravity 引入(原文归因有误,⟲ 见
+   Cargo.toml 节与文末现状核实),上游 v2.3.0 已整体删除 bench 体系。改为
+   落地后以 pipe 压测 / 生产 metrics 验证 1024 阈值,不阻塞本决策。
+   - [ ] 冲突解决:待落地;crates/transaction-pool/src/pool/best.rs 现存 13 处冲突块(2026-07-05 复测持平)。另:`benches/` 残留 `canonical_state_change.rs` / `insertion.rs` 两个孤儿文件(无 `[[bench]]` 挂载),落地时随上游删除。
+- [x] 4. **`config.rs` 上游 `LocalTransactionConfig::local_addresses: AddressSet`**：gravity 调用方（如 pipe-exec、CLI）若用 `HashSet<Address>` 字面量构造，迁到 `AddressSet` 需同步调整 import。
+   → **决策**(2026-07-05,依据:原则 3 + 调用方实测):take-upstream 成立,
+   **无需任何调用方调整**——全仓无 `HashSet<Address>` 字面量构造
+   `LocalTransactionConfig`;`crates/node/builder/src/components/pool.rs`
+   (零冲突)已是 `local_addresses: AddressSet`(:66);
+   `crates/node/core/src/args/txpool.rs`(8 处冲突,node 组范围)现文本
+   `self.locals.iter().copied().collect()`(:658)对 `AddressSet` 类型推断
+   天然兼容。
+   - [ ] 冲突解决:待落地;crates/transaction-pool/src/config.rs 现存 5 处冲突块(2026-07-05 复测持平)。
+
+## ⟲ 现状核实(2026-07-05,f89d9d4e23 之后)
+
+按「零冲突侧翻」与「跨组反向失效」两类盲区模式对全组 12 文件复扫:
+
+**冲突数现状**(`grep -c '^<<<<<<<'`,较 07-03 无漂移):config.rs 5、
+error.rs 6、maintain.rs 16、best.rs 13、txpool.rs 24、validate/eth.rs 47,
+合计 111;其余 6 文件已零冲突。
+
+**零冲突侧翻 ×6,全部落为纯 v2.3.0**(`git diff v2.3.0 HEAD --` 均为 0 行):
+`Cargo.toml`、`lib.rs`、`metrics.rs`、`pool/mod.rs`、`pool/pending.rs`、
+`validate/task.rs`。与 baseline / v1.8.3 三方核对判定:
+
+- **5 个源文件侧翻无损失**:`git diff v1.8.3 0cb1687c1c` 对 lib.rs /
+  metrics.rs / pool/mod.rs / pending.rs / task.rs **全部为空**——本文档
+  「逐文件分析」把 `validate_all_with_origins` / batch-insert API 归因给
+  gravity #92 有误,它们是 v1.8.3 上游文本(#92 已被 #205 catch-up 收编),
+  且 tx-pool 之外全仓零调用方(grep 实测)。lib.rs / pool/mod.rs 两节的
+  mechanical-merge 建议就此 ⟲ 降级为 take-upstream(已成事实,无需返工)。
+- **唯一真实损失在 `Cargo.toml`**:gravity 增量实测仅 3 行
+  (`gravity-primitives.workspace = true`、
+  `reth-pipe-exec-layer-event-bus.workspace = true`、
+  `config-from-env = ["gravity-primitives/config-from-env"]`),已随侧翻
+  丢失——开放问题 2 落地时必须补回,否则 maintain.rs discard 订阅块编译断。
+  注:全仓无人启用 `reth-transaction-pool/config-from-env`(grep 实测),
+  feature 转发行按同类 gravity crate 惯例(pipe-exec / storage-api /
+  engine-tree / ethereum-evm 均保留)一并补回。
+- **bench 归因修正**:五个 bench 文件与 `[[bench]]` 段均为 v1.8.3 上游遗产
+  (`git diff v1.8.3 0cb1687c1c -- benches/` 为空),非 gravity 引入;
+  Cargo.toml 节「五条 [[bench]] 段全部 gravity 引入、必须保留」的建议 ⟲
+  作废,按原则 3 随上游删除(残留两个孤儿文件见开放问题 3)。
+
+**跨组反向失效 ×1**:v2.3.0 maintain.rs 测试引用
+`MockEthProvider::with_genesis_block`(tag 侧 1 处),f89d9d4e23 还原后的
+`crates/storage/provider/src/test_utils/mock.rs` 无此方法(实测 grep 空)。
+处置见开放问题 2 决策(改写测试侧,不动 storage 还原文件)。
+
+**9.2 级联排查(chain.rs 回 baseline 对本组的影响)**:v2.3.0 侧 tx-pool
+源码对 `LazyTrieData` / `trie_data` 零引用(`git grep` tag 实测)——
+executed-block-split §9.2 的裁决不级联到本组。Cargo.toml 节「LazyTrieData →
+新增 revm dep」的表述不影响结论(revm dep 实际服务于 serde feature)。
