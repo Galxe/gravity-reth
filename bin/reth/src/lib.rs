@@ -209,6 +209,9 @@ pub mod rpc {
     }
 }
 
+/// Ress subprotocol installation.
+pub mod ress;
+
 // re-export for convenience
 #[doc(inline)]
 pub use reth_cli_runner::{CliContext, CliRunner};

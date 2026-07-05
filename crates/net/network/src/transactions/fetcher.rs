@@ -36,11 +36,7 @@ use crate::{
     metrics::TransactionFetcherMetrics,
 };
 use alloy_consensus::transaction::PooledTransaction;
-<<<<<<< HEAD
-use alloy_primitives::TxHash;
-=======
 use alloy_primitives::{map::FbBuildHasher, TxHash};
->>>>>>> v2.3.0
 use derive_more::{Constructor, Deref};
 use futures::{stream::FuturesUnordered, Future, FutureExt, Stream, StreamExt};
 use pin_project::pin_project;
@@ -85,12 +81,8 @@ pub struct TransactionFetcher<N: NetworkPrimitives = EthNetworkPrimitives> {
     /// which a [`GetPooledTransactions`] request is inflight.
     pub hashes_pending_fetch: LruCache<TxHash, FbBuildHasher<32>>,
     /// Tracks all hashes in the transaction fetcher.
-<<<<<<< HEAD
-    pub hashes_fetch_inflight_and_pending_fetch: LruMap<TxHash, TxFetchMetadata, ByLength>,
-=======
     pub hashes_fetch_inflight_and_pending_fetch:
         LruMap<TxHash, TxFetchMetadata, ByLength, FbBuildHasher<32>>,
->>>>>>> v2.3.0
     /// Info on capacity of the transaction fetcher.
     pub info: TransactionFetcherInfo,
     #[doc(hidden)]
@@ -142,12 +134,6 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
         metrics.capacity_inflight_requests.increment(max_inflight_requests as u64);
 
         Self {
-<<<<<<< HEAD
-            active_peers: LruMap::new(max_inflight_requests),
-            hashes_pending_fetch: LruCache::new(max_capacity_cache_txns_pending_fetch),
-            hashes_fetch_inflight_and_pending_fetch: LruMap::new(
-                max_inflight_requests + max_capacity_cache_txns_pending_fetch,
-=======
             active_peers: LruMap::with_hasher(max_inflight_requests, Default::default()),
             hashes_pending_fetch: LruCache::with_hasher(
                 max_capacity_cache_txns_pending_fetch,
@@ -156,7 +142,6 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
             hashes_fetch_inflight_and_pending_fetch: LruMap::with_hasher(
                 max_inflight_requests + max_capacity_cache_txns_pending_fetch,
                 Default::default(),
->>>>>>> v2.3.0
             ),
             info,
             metrics,
@@ -208,17 +193,7 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
         let TxFetchMetadata { fallback_peers, .. } =
             self.hashes_fetch_inflight_and_pending_fetch.peek(&hash)?;
 
-<<<<<<< HEAD
-        for peer_id in fallback_peers.iter() {
-            if self.is_idle(peer_id) {
-                return Some(peer_id)
-            }
-        }
-
-        None
-=======
         fallback_peers.iter().find(|peer_id| self.is_idle(peer_id))
->>>>>>> v2.3.0
     }
 
     /// Returns any idle peer for any hash pending fetch. If one is found, the corresponding
@@ -436,10 +411,6 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
             if let (_, Some(evicted_hash)) = self.hashes_pending_fetch.insert_and_get_evicted(hash)
             {
                 self.hashes_fetch_inflight_and_pending_fetch.remove(&evicted_hash);
-<<<<<<< HEAD
-                self.hashes_pending_fetch.remove(&evicted_hash);
-=======
->>>>>>> v2.3.0
             }
         }
     }
@@ -452,11 +423,7 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
         &mut self,
         peers: &HashMap<PeerId, PeerMetadata<N>>,
         has_capacity_wrt_pending_pool_imports: impl Fn(usize) -> bool,
-<<<<<<< HEAD
-    ) {
-=======
     ) -> bool {
->>>>>>> v2.3.0
         let mut hashes_to_request = RequestTxHashes::with_capacity(
             DEFAULT_MARGINAL_COUNT_HASHES_GET_POOLED_TRANSACTIONS_REQUEST,
         );
@@ -588,13 +555,6 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
             }
 
             previously_unseen_hashes_count += 1;
-<<<<<<< HEAD
-
-            if self.hashes_fetch_inflight_and_pending_fetch.get_or_insert(*hash, ||
-                TxFetchMetadata{retries: 0, fallback_peers: LruCache::new(DEFAULT_MAX_COUNT_FALLBACK_PEERS as u32), tx_encoded_length: None}
-            ).is_none() {
-
-=======
 
             if self
                 .hashes_fetch_inflight_and_pending_fetch
@@ -609,7 +569,6 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
                 .is_none()
             {
 
->>>>>>> v2.3.0
                 trace!(target: "net::tx",
                     peer_id=format!("{peer_id:#}"),
                     %hash,
@@ -1082,11 +1041,7 @@ pub struct TxFetchMetadata {
 
 impl TxFetchMetadata {
     /// Returns a mutable reference to the fallback peers cache for this transaction hash.
-<<<<<<< HEAD
-    pub const fn fallback_peers_mut(&mut self) -> &mut LruCache<PeerId> {
-=======
     pub const fn fallback_peers_mut(&mut self) -> &mut LruCache<PeerId, FbBuildHasher<64>> {
->>>>>>> v2.3.0
         &mut self.fallback_peers
     }
 
@@ -1354,24 +1309,16 @@ struct TxFetcherSearchDurations {
 mod test {
     use super::*;
     use crate::test_utils::transactions::{buffer_hash_to_tx_fetcher, new_mock_session};
-<<<<<<< HEAD
-    use alloy_primitives::{hex, B256};
-=======
     use alloy_primitives::{
         hex,
         map::{B256Map, B256Set, HashMap},
         B256,
     };
->>>>>>> v2.3.0
     use alloy_rlp::Decodable;
     use derive_more::IntoIterator;
     use reth_eth_wire_types::EthVersion;
     use reth_ethereum_primitives::TransactionSigned;
-<<<<<<< HEAD
-    use std::{collections::HashSet, str::FromStr};
-=======
     use std::str::FromStr;
->>>>>>> v2.3.0
 
     #[derive(IntoIterator)]
     struct TestValidAnnouncementData(Vec<(TxHash, Option<(u8, usize)>)>);

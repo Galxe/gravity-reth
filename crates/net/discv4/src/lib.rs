@@ -211,10 +211,6 @@ impl Discv4 {
     /// Binds a new `UdpSocket` and creates the service
     ///
     /// ```
-<<<<<<< HEAD
-    /// # use std::io;
-=======
->>>>>>> v2.3.0
     /// use reth_discv4::{Discv4, Discv4Config};
     /// use reth_network_peers::{pk2id, NodeRecord, PeerId};
     /// use secp256k1::SECP256K1;
@@ -286,10 +282,6 @@ impl Discv4 {
         let local_addr = socket.local_addr()?;
         local_node_record.udp_port = local_addr.port();
 
-<<<<<<< HEAD
-        let mut service =
-            Discv4Service::new(socket, local_addr, local_node_record, secret_key, config);
-=======
         let mut service = Discv4Service::new(
             socket,
             ingress_tx,
@@ -299,7 +291,6 @@ impl Discv4 {
             secret_key,
             config,
         );
->>>>>>> v2.3.0
 
         // resolve the external address immediately
         service.resolve_external_ip();
@@ -691,12 +682,6 @@ impl Discv4Service {
         self.lookup_interval = tokio::time::interval(duration);
     }
 
-<<<<<<< HEAD
-    /// Sets the external Ip to the configured external IP if [`NatResolver::ExternalIp`].
-    fn resolve_external_ip(&mut self) {
-        if let Some(r) = &self.resolve_external_ip_interval &&
-            let Some(external_ip) = r.resolver().as_external_ip()
-=======
     /// Sets the external Ip to the configured external IP if [`NatResolver::ExternalIp`] or
     /// [`NatResolver::ExternalAddr`]. In the case of [`NatResolver::ExternalAddr`], it will return
     /// the first IP address found for the domain associated with the discv4 UDP port.
@@ -704,7 +689,6 @@ impl Discv4Service {
         if let Some(r) = &self.resolve_external_ip_interval &&
             let Some(external_ip) =
                 r.resolver().clone().as_external_ip(self.local_node_record.udp_port)
->>>>>>> v2.3.0
         {
             self.set_external_ip_addr(external_ip);
         }
@@ -1005,11 +989,7 @@ impl Discv4Service {
         let key = kad_key(peer_id);
         match self.kbuckets.entry(&key) {
             BucketEntry::Present(entry, _) => Some(f(entry.value())),
-<<<<<<< HEAD
-            BucketEntry::Pending(mut entry, _) => Some(f(entry.value())),
-=======
             BucketEntry::Pending(entry, _) => Some(f(entry.value())),
->>>>>>> v2.3.0
             _ => None,
         }
     }
@@ -1089,13 +1069,8 @@ impl Discv4Service {
             }
             kbucket::Entry::Pending(mut entry, mut status) => {
                 // endpoint is now proven
-<<<<<<< HEAD
-                entry.value().establish_proof();
-                entry.value().update_with_enr(last_enr_seq);
-=======
                 entry.value_mut().establish_proof();
                 entry.value_mut().update_with_enr(last_enr_seq);
->>>>>>> v2.3.0
 
                 if !status.is_connected() {
                     status.state = ConnectionState::Connected;
@@ -1227,11 +1202,7 @@ impl Discv4Service {
                 } else {
                     is_proven = entry.value().has_endpoint_proof;
                 }
-<<<<<<< HEAD
-                entry.value().update_with_enr(ping.enr_sq)
-=======
                 entry.value_mut().update_with_enr(ping.enr_sq)
->>>>>>> v2.3.0
             }
             kbucket::Entry::Absent(entry) => {
                 let mut node = NodeEntry::new(record);
@@ -1409,11 +1380,7 @@ impl Discv4Service {
                 }
             }
             PingReason::EstablishBond => {
-<<<<<<< HEAD
-                // same as `InitialInsert` which renews the bond if the peer is in the table
-=======
                 // no initial lookup needed here since the node was already in the table.
->>>>>>> v2.3.0
                 self.update_on_pong(node, pong.enr_sq);
             }
             PingReason::RePing => {
@@ -1759,11 +1726,7 @@ impl Discv4Service {
             .filter(|entry| entry.node.value.is_expired())
             .map(|n| n.node.value)
             .collect::<Vec<_>>();
-<<<<<<< HEAD
-        nodes.sort_by_key(|a| a.last_seen);
-=======
         nodes.sort_unstable_by_key(|a| a.last_seen);
->>>>>>> v2.3.0
         let to_ping = nodes.into_iter().map(|n| n.record).take(MAX_NODES_PING).collect::<Vec<_>>();
         for node in to_ping {
             self.try_ping(node, PingReason::RePing)
@@ -3230,11 +3193,7 @@ mod tests {
 
         // Poll for events for a reasonable time
         let mut bootnode_appeared = false;
-<<<<<<< HEAD
-        let timeout = tokio::time::sleep(Duration::from_secs(3));
-=======
         let timeout = tokio::time::sleep(Duration::from_secs(1));
->>>>>>> v2.3.0
         tokio::pin!(timeout);
 
         loop {
@@ -3253,8 +3212,6 @@ mod tests {
         // Assert bootnode did not appear in update stream
         assert!(bootnode_appeared, "Bootnode should appear in update stream");
     }
-<<<<<<< HEAD
-=======
 
     fn insert_proven_node(service: &mut Discv4Service, record: NodeRecord) {
         let key = kad_key(record.id);
@@ -3360,5 +3317,4 @@ mod tests {
         // flag should be false when lookups are disabled
         assert!(!service.pending_lookup_reset);
     }
->>>>>>> v2.3.0
 }

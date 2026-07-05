@@ -9,20 +9,6 @@ repository.workspace = true
 description = "Reth node implementation"
 default-run = "reth"
 
-[package.metadata.deb]
-maintainer = "reth team"
-depends = "$auto"
-section = "network"
-priority = "optional"
-maintainer-scripts = "../../pkg/reth/debian/"
-assets = [
-    "$auto",
-    ["../../README.md", "usr/share/doc/reth/", "644"],
-    ["../../LICENSE-APACHE", "usr/share/doc/reth/", "644"],
-    ["../../LICENSE-MIT", "usr/share/doc/reth/", "644"],
-]
-systemd-units = { enable = false, start = false, unit-name = "reth", unit-scripts = "../../pkg/reth/debian" }
-
 [lints]
 workspace = true
 
@@ -30,15 +16,10 @@ workspace = true
 # reth
 reth-ethereum-cli.workspace = true
 reth-chainspec.workspace = true
-<<<<<<< HEAD
 reth-primitives.workspace = true
-reth-db = { workspace = true }
-=======
-reth-primitives-traits.workspace = true
-reth-ethereum-primitives.workspace = true
 reth-db = { workspace = true, features = ["mdbx"] }
->>>>>>> v2.3.0
 reth-provider.workspace = true
+reth-evm.workspace = true
 reth-revm.workspace = true
 reth-transaction-pool.workspace = true
 reth-cli-runner.workspace = true
@@ -63,23 +44,17 @@ reth-node-ethereum = { workspace = true, features = ["js-tracer"] }
 reth-node-builder.workspace = true
 reth-node-metrics.workspace = true
 reth-consensus.workspace = true
-<<<<<<< HEAD
 reth-tokio-util.workspace = true
 reth-ress-protocol.workspace = true
 reth-ress-provider.workspace = true
 
 # alloy
-=======
-
-# alloy
 alloy-primitives.workspace = true
->>>>>>> v2.3.0
 alloy-rpc-types = { workspace = true, features = ["engine"] }
 
 # tracing
 tracing.workspace = true
 
-<<<<<<< HEAD
 # async
 tokio = { workspace = true, features = ["sync", "macros", "time", "rt-multi-thread"] }
 
@@ -89,27 +64,17 @@ clap = { workspace = true, features = ["derive", "env"] }
 eyre.workspace = true
 
 [dev-dependencies]
-backon.workspace = true
-=======
-# misc
-aquamarine.workspace = true
-clap = { workspace = true, features = ["derive", "env"] }
-
-[dev-dependencies]
 alloy-node-bindings = "2.0.5"
 alloy-provider = { workspace = true, features = ["reqwest"] }
 alloy-rpc-types-eth.workspace = true
 backon.workspace = true
 serde_json.workspace = true
 tar.workspace = true
->>>>>>> v2.3.0
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml.workspace = true
 zstd.workspace = true
 
 [features]
-<<<<<<< HEAD
 default = ["jemalloc", "reth-revm/portable"]
 
 dev = ["reth-ethereum-cli/dev"]
@@ -120,83 +85,21 @@ asm-keccak = [
     "reth-ethereum-cli/asm-keccak",
     "reth-node-ethereum/asm-keccak",
 ]
-=======
-default = [
-    "jemalloc",
-    "otlp",
-    "otlp-logs",
-    "reth-revm/portable",
-    "js-tracer",
-    "keccak-cache-global",
-    "asm-keccak",
-    "min-trace-logs",
-]
 
-otlp = [
-    "reth-ethereum-cli/otlp",
-    "reth-node-core/otlp",
-]
-otlp-logs = [
-    "reth-ethereum-cli/otlp-logs",
-    "reth-node-core/otlp-logs",
-]
-js-tracer = [
-    "reth-node-builder/js-tracer",
-    "reth-node-ethereum/js-tracer",
-    "reth-rpc/js-tracer",
-    "reth-rpc-eth-types/js-tracer",
-]
-
-dev = ["reth-ethereum-cli/dev"]
->>>>>>> v2.3.0
-
-asm-keccak = [
-    "reth-node-core/asm-keccak",
-    "reth-ethereum-cli/asm-keccak",
-    "reth-node-ethereum/asm-keccak",
-    "alloy-primitives/asm-keccak",
-]
-keccak-cache-global = [
-    "reth-node-core/keccak-cache-global",
-    "reth-node-ethereum/keccak-cache-global",
-    "alloy-primitives/keccak-cache-global",
-]
 jemalloc = [
     "reth-cli-util/jemalloc",
     "reth-node-core/jemalloc",
     "reth-node-metrics/jemalloc",
     "reth-ethereum-cli/jemalloc",
-<<<<<<< HEAD
 ]
 jemalloc-prof = [
     "reth-cli-util/jemalloc",
     "reth-cli-util/jemalloc-prof",
     "reth-ethereum-cli/jemalloc-prof",
-=======
-    "reth-provider/jemalloc",
-]
-jemalloc-prof = [
-    "jemalloc",
-    "reth-cli-util/jemalloc-prof",
-    "reth-ethereum-cli/jemalloc-prof",
-    "reth-node-metrics/jemalloc-prof",
-]
-jemalloc-symbols = [
-    "jemalloc-prof",
-    "reth-ethereum-cli/jemalloc-symbols",
->>>>>>> v2.3.0
 ]
 tracy-allocator = [
     "reth-cli-util/tracy-allocator",
     "reth-ethereum-cli/tracy-allocator",
-<<<<<<< HEAD
-=======
-    "tracy",
-]
-tracy = [
-    "reth-ethereum-cli/tracy",
-    "reth-node-core/tracy",
->>>>>>> v2.3.0
 ]
 
 # Because jemalloc is default and preferred over snmalloc when both features are
@@ -210,37 +113,6 @@ snmalloc-native = [
     "reth-cli-util/snmalloc-native",
     "reth-ethereum-cli/snmalloc-native",
 ]
-<<<<<<< HEAD
-=======
-
-min-error-logs = [
-    "tracing/release_max_level_error",
-    "reth-ethereum-cli/min-error-logs",
-    "reth-node-core/min-error-logs",
-]
-min-warn-logs = [
-    "tracing/release_max_level_warn",
-    "reth-ethereum-cli/min-warn-logs",
-    "reth-node-core/min-warn-logs",
-]
-min-info-logs = [
-    "tracing/release_max_level_info",
-    "reth-ethereum-cli/min-info-logs",
-    "reth-node-core/min-info-logs",
-]
-min-debug-logs = [
-    "tracing/release_max_level_debug",
-    "reth-ethereum-cli/min-debug-logs",
-    "reth-node-core/min-debug-logs",
-]
-min-trace-logs = [
-    "tracing/release_max_level_trace",
-    "reth-ethereum-cli/min-trace-logs",
-    "reth-node-core/min-trace-logs",
-]
-
-trie-debug = ["reth-node-builder/trie-debug", "reth-node-core/trie-debug"]
->>>>>>> v2.3.0
 
 min-error-logs = [
     "tracing/release_max_level_error",

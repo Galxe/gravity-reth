@@ -662,7 +662,7 @@ async fn new_random_peer(
 async fn test_connect_many() {
     reth_tracing::init_test_tracing();
 
-    let provider = MockEthProvider::default().with_genesis_block();
+    let provider = MockEthProvider::default();
     let net = Testnet::create_with(5, provider).await;
 
     // install request handlers

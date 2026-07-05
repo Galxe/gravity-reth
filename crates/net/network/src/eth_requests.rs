@@ -17,7 +17,7 @@ use reth_network_api::test_utils::PeersHandle;
 use reth_network_p2p::error::RequestResult;
 use reth_network_peers::PeerId;
 use reth_primitives_traits::Block;
-use reth_storage_api::{BalProvider, BlockReader, GetBlockAccessListLimit, HeaderProvider};
+use reth_storage_api::{BlockReader, HeaderProvider};
 use reth_transaction_pool::{blobstore::NoopBlobStore, BlobStore};
 use std::{
     future::Future,
@@ -356,39 +356,13 @@ where
     }
 }
 
-impl<C, N> EthRequestHandler<C, N>
-where
-    N: NetworkPrimitives,
-    C: BalProvider,
-{
-    /// Handles [`GetBlockAccessLists`] queries.
-    ///
-    /// EIP-8159 defines the final `BlockAccessLists` response semantics:
-    /// <https://eips.ethereum.org/EIPS/eip-8159>
-    fn on_block_access_lists_request(
-        &self,
-        _peer_id: PeerId,
-        mut request: GetBlockAccessLists,
-        response: oneshot::Sender<RequestResult<BlockAccessLists>>,
-    ) {
-        self.metrics.eth_block_access_lists_requests_received_total.increment(1);
-        request.0.truncate(MAX_BLOCK_ACCESS_LISTS_SERVE);
-
-        let limit = GetBlockAccessListLimit::ResponseSizeSoftLimit(SOFT_RESPONSE_LIMIT);
-        let access_lists =
-            self.client.bal_store().get_by_hashes_with_limit(&request.0, limit).unwrap_or_default();
-        let _ = response.send(Ok(BlockAccessLists(access_lists)));
-    }
-}
-
 /// An endless future.
 ///
 /// This should be spawned or used as part of `tokio::select!`.
 impl<C, N> Future for EthRequestHandler<C, N>
 where
     N: NetworkPrimitives,
-    C: BalProvider
-        + BlockReader<Block = N::Block, Receipt = N::Receipt>
+    C: BlockReader<Block = N::Block, Receipt = N::Receipt>
         + HeaderProvider<Header = N::BlockHeader>
         + Unpin,
 {
@@ -424,8 +398,9 @@ where
                     IncomingEthRequest::GetReceipts70 { peer_id, request, response } => {
                         this.on_receipts70_request(peer_id, request, response)
                     }
-                    IncomingEthRequest::GetBlockAccessLists { peer_id, request, response } => {
-                        this.on_block_access_lists_request(peer_id, request, response)
+                    IncomingEthRequest::GetBlockAccessLists { response, .. } => {
+                        // gravity does not maintain a BAL store; answer with an empty list
+                        let _ = response.send(Ok(BlockAccessLists(Vec::new())));
                     }
                     IncomingEthRequest::GetCells { peer_id, request, response } => {
                         this.on_cells_request(peer_id, request, response)
