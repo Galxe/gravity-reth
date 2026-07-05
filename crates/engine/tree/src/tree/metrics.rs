@@ -1,7 +1,7 @@
 use crate::tree::{error::InsertBlockFatalError, TreeOutcome};
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
-    block::{BlockExecutor, ExecutableTx, StateChangeSource},
+    block::{BlockExecutor, ExecutableTx},
     Evm,
 };
 use alloy_rpc_types_engine::{PayloadStatus, PayloadStatusEnum};
@@ -163,7 +163,9 @@ impl EngineApiMetrics {
         // be accessible.
         let wrapper = MeteredStateHook { metrics: self.executor.clone(), inner_hook: state_hook };
 
-        let mut executor = executor.with_state_hook(Some(Box::new(wrapper)));
+        // The state hook now lives on the revm `State` database rather than the executor.
+        let mut executor = executor;
+        executor.evm_mut().db_mut().borrow_mut().set_state_hook(Some(Box::new(wrapper)));
 
         let f = || {
             executor.apply_pre_execution_changes()?;
@@ -186,6 +188,7 @@ impl EngineApiMetrics {
         })?;
 
         // merge transitions into bundle state
+        db.borrow_mut().set_state_hook(None);
         db.borrow_mut().merge_transitions(BundleRetention::Reverts);
         let output = BlockExecutionOutput { result, state: db.borrow_mut().take_bundle() };
 
@@ -210,7 +213,7 @@ struct MeteredStateHook {
 }
 
 impl OnStateHook for MeteredStateHook {
-    fn on_state(&mut self, source: StateChangeSource, state: &EvmState) {
+    fn on_state(&mut self, state: &EvmState) {
         // Update the metrics for the number of accounts, storage slots and bytecodes loaded
         let accounts = state.keys().len();
         let storage_slots = state.values().map(|account| account.storage.len()).sum::<usize>();
@@ -221,7 +224,7 @@ impl OnStateHook for MeteredStateHook {
         self.metrics.bytecodes_loaded_histogram.record(bytecodes as f64);
 
         // Call the original state hook
-        self.inner_hook.on_state(source, state);
+        self.inner_hook.on_state(state);
     }
 }
 

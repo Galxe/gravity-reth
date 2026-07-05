@@ -13,7 +13,7 @@ use crate::tree::{
     sparse_trie::SparseTrieTask,
     StateProviderBuilder, TreeConfig,
 };
-use alloy_evm::{block::StateChangeSource, ToTxEnv};
+use alloy_evm::ToTxEnv;
 use alloy_primitives::B256;
 use executor::WorkloadExecutor;
 use multiproof::{SparseTrieUpdate, *};
@@ -285,7 +285,7 @@ where
         let (execute_tx, execute_rx) = mpsc::channel();
         self.executor.spawn_blocking(move || {
             for tx in transactions {
-                let tx = tx.map(|tx| WithTxEnv { tx_env: tx.to_tx_env(), tx });
+                let tx = tx.map(|tx| WithTxEnv { tx_env: tx.to_tx_env(), tx: Arc::new(tx) });
                 // only send Ok(_) variants to prewarming task
                 if let Ok(tx) = &tx {
                     let _ = prewarm_tx.send(tx.clone());
@@ -453,8 +453,13 @@ impl<Tx, Err> PayloadHandle<Tx, Err> {
         // convert the channel into a `StateHookSender` that emits an event on drop
         let to_multi_proof = self.to_multi_proof.clone().map(StateHookSender::new);
 
-        move |source: StateChangeSource, state: &EvmState| {
+        // The revm-level `OnStateHook` no longer carries a change source; synthesize
+        // per-invocation `Transaction` indices for the multiproof tracing labels.
+        let mut next_source_idx = 0usize;
+        move |state: &EvmState| {
             if let Some(sender) = &to_multi_proof {
+                let source = StateChangeSource::Transaction(next_source_idx);
+                next_source_idx += 1;
                 let _ = sender.send(MultiProofMessage::StateUpdate(source, state.clone()));
             }
         }
@@ -629,7 +634,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ExecutionCache;
+    use super::{multiproof::StateChangeSource, ExecutionCache};
     use crate::tree::{
         cached_state::{CachedStateMetrics, ExecutionCacheBuilder, SavedCache},
         payload_processor::{
@@ -638,7 +643,6 @@ mod tests {
         precompile_cache::PrecompileCacheMap,
         StateProviderBuilder, TreeConfig,
     };
-    use alloy_evm::block::StateChangeSource;
     use rand::Rng;
     use reth_chainspec::ChainSpec;
     use reth_db_common::init::init_genesis;
