@@ -496,7 +496,7 @@ rpc-convert 删除,而 9.4 复原后的 baseline rpc-provider 需要它(4 处使
    ("若被删除则取上游")。⚠ 落地注意:同文件 8 块**不能全取 v2.3.0**——
    `executionWitnessByBlockHash(hash, mode)` 新签名因 `ExecutionWitnessMode`
    孤儿化不可采纳(见上方 ⟲ 修正节第 2 条),witness 端点保 baseline 签名。
-   - [ ] 冲突解决:待落地;crates/rpc/rpc-api/src/debug.rs 现存 8 处冲突块(2026-07-05 复测未变)。
+   - [x] 冲突解决:已落地(2026-07-06)——8 块归零:trait 随上游删除,witness 双端点回 baseline 无 mode 签名,`debug_setFailpoint` 声明加回;证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 
 - [x] 2. **`SYSTEM_CALLER` 是否应当扩展到 `receipt.rs`** — 当前 `receipt.rs` 在 fallback 路径用 `Address::ZERO`（v1.8.3 上游既存），未引入 gravity SYSTEM_CALLER 谱系。是否在 merge-v2.3.0 中把 `Address::ZERO` 一并改成 `SYSTEM_CALLER` 以与 `transaction.rs` 对齐，需要业务决策（非合并语义问题）。
    → **决策**: **不需要扩展**(用户拍板,2026-07-05)。
@@ -515,8 +515,7 @@ rpc-convert 删除,而 9.4 复原后的 baseline rpc-provider 需要它(4 处使
    **gravity 无自有 FullConsensus impl**(gravity 共识走 pipe-exec 的
    Coordinator/event-bus 注入,不经 FullConsensus trait),兼容性问题不存在。
    → **决策**: 采纳上游收紧后的 bound(决策总原则第 3 条;无 gravity 功能受损)。
-   - [ ] 冲突解决:无独立代码动作,随 `rpc/src/debug.rs` 等相关文件解块自动
-     落地(该文件现存 41 块未解,故暂不勾;解完后凭编译/grep 证据勾)。
+   - [x] 冲突解决:已落地(2026-07-06)——rpc/debug.rs 41 块归零(v2.3.0 底 + witness 三函数回 baseline 语义),rpc-builder 49 块归零(`FullConsensus` 无 Error bound 随 v2.3.0);grep 实证无 `Error = ConsensusError` 残留;证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
 
 - [x] 4. **`failpoints` 在 dev/test 之外是否启用** — `#225` 的 `debug_setFailpoint` 仅在 `cargo build --features failpoints` 下生效；需要确认本次 merge 是否要在 production binary 中启用此 feature。
    ⟲ baseline 实测(`git show 0cb1687c1c:bin/reth/Cargo.toml`):
@@ -527,5 +526,32 @@ rpc-convert 删除,而 9.4 复原后的 baseline rpc-provider 需要它(4 处使
    → **决策**: 维持 baseline 行为——`failpoints` 保留为 opt-in feature、
    **不进 default**。依据:决策总原则精神(merge 只对齐两侧,不改变 gravity
    既有行为);是否在某次生产构建中显式启用属运维构建选择,不在 merge 范围。
-   - [ ] 冲突解决:待落地;bin/reth/Cargo.toml 现存 7 处冲突块(2026-07-05
-     复测未变),解块时保住 `failpoints` feature 定义且不加入 default。
+   - [x] 冲突解决:已落地(2026-07-06,net/era 组双规则执行)——7 块归零:`default = ["jemalloc", "reth-revm/portable"]` 维持 baseline,`failpoints` 独立 feature 不进 default;证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-06 落地);编译证据待 cargo workspace 修复后回填。
+
+## ⟲ 落地实录(2026-07-06)
+
+rpc 五 crate 13 个冲突文件(253 块)+ 9 个零冲突侧翻断点全部落地归零;收口
+agent 全局验证通过。与核实版裁决的偏差与外延(均按决策总原则):
+
+1. **BAL 剔除面比核实版宽约一倍**:除预告的 core.rs/error 外,实测
+   `rpc-eth-types/cache/mod.rs` 是生产级活断点(整套 BAL-ectomy,1487→908 行)、
+   `rpc-eth-api/node.rs`、`rpc-api/engine.rs` + `rpc/engine.rs`(EngineEthApi
+   四方法)、`eth/core.rs` 测试、`helpers/mod.rs` bounds 同向剔除;
+   `helpers/bal.rs` 卸载留盘孤儿。**收口延伸**:`rpc-engine-api/engine_api.rs`
+   (零冲突)同向剔除(import/bounds ×3/`get_block_access_lists_by_hashes`
+   方法/两个 BAL 测试,`getPayloadBodies*V2` 的 `block_access_list` 字段恒
+   `None`);`consensus/debug-client` 的 `get_block_access_list_raw` 经实测为
+   **alloy-provider 2.0.x trait 方法(外部 crate,存活)**,原「越界断点」系
+   误报,零动作。
+2. **「trace/estimate/call 无 gravity-only 改动」被实测推翻**:gravity #372
+   的 `register_custom_precompiles` 精编注册簇横跨 helpers/call(trait 默认
+   方法 + 5 调用点)/trace(2)/estimate(1)/bundle+sim_bundle(各 1)/
+   eth-helpers-call(完整 impl + randomness 精编 4 单测),已全部织回保留。
+3. **#259 SYSTEM_CALLER 保住**:transaction.rs `const :41` + fallback `:694`
+   (`recover_signer_unchecked().unwrap_or(SYSTEM_CALLER)`),grep 实证。
+4. **必要范围外延**:`crates/revm/src/witness.rs` 复原 baseline(零冲突侧翻
+   为 mode 版、依赖孤儿 `ExecutionWitnessMode`,是 debug witness 路径直接
+   前置;复原后与 baseline 逐字节一致)。
+5. 收口修正一处组间缝隙:error/mod.rs 的
+   `FeeCapBelowMinimumProtocolFeeCap` 匹配臂已对齐 tx-pool 定版的 struct
+   变体形态(收口实测 + 修复,全仓元组残留归零)。
