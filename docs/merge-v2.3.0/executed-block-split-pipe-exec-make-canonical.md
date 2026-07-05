@@ -31,6 +31,12 @@
 > baseline 二参)、9.3 = 分拆(`PersistedBlockSubscriptions` 整链 trim /
 > `ExecutionTimingStats` 保留)、9.4 = 选项 a(rpc-provider 整 crate 回
 > baseline,「仅一处断点」被实测推翻)。engine / chain-state 组动工前置解除。
+>
+> **⟲ 2026-07-05 四次修订(落地轮)**:§六/§九方案已由六路并行落地 + 收口
+> 执行完毕——本文档范围内全部文件冲突标记归零(全仓带冲突文件 117→77,
+> 余者均在范围外);§八/§九落地框已按实测证据勾选,偏差以「落地实录」
+> 标注;收口死符号总扫另抓 4 个断点已修(§五 25a-25c);跨组遗留见
+> §九末「跨组断点台账」。编译级验收统一待 cargo 组修复 workspace 依赖后回补。
 
 - 核实日期:2026-07-02(初版链路分析)/ 2026-07-03(代码级实施方案,六路并行
   逐冲突块核查 + 交叉裁决;同日按 `f89d9d4e23` 二次修订)/ 2026-07-05
@@ -179,7 +185,10 @@ pipe-exec 路线(gravity 不走 CL 的 newPayload/FCU,由 pipe-exec event bus �
 | 22 | `crates/engine/tree/src/tree/payload_validator.rs` + `payload_processor/` | 0* | **整体复原 baseline(路线甲)**(§6.5.1 ⟲) |
 | 23 | `crates/engine/primitives/src/event.rs` | 0* | 回退 baseline(EBWT 载荷)(§6.5.1) |
 | 24 | `crates/engine/tree/src/engine.rs`、`tree/persistence_state.rs` | 0* | engine.rs 回 baseline(`InsertExecutedBlock(EBWT)`);persistence_state.rs 保上游版(§6.5.1 ⟲) |
-| 25 | `crates/engine/tree/src/tree/mod.rs` | 84 | PIPE/OTHER 逐块 + 3 处标记外编辑;**:96 `use reth_trie_db::ChangesetCache` 已断,changeset/runtime/overlay 相关取向需重估**(§6.5.2 ⟲) |
+| 25 | `crates/engine/tree/src/tree/mod.rs` | 84→**0** ✅ | 已落地(§6.5.2 ⟲ 落地实录;标记外编辑实为 5 处) |
+| 25a | `crates/engine/tree/src/tree/block_buffer.rs` | 13→**0** ✅ | **⟲ 清单漏项,收口时补解**:HEAD 类型主轴(`RecoveredBlock`)+ v2.3.0 独立改进(IndexSet——公共区已定、Entry 去重插入、简化淘汰、`swap_remove`) |
+| 25b | `tree/{instrumented_state,persistence_state,metrics}.rs`、`engine/tree/src/launch.rs` | 0* | **⟲ 收口死符号总扫新抓的 4 断点**:instrumented_state 侧翻双死符号→整文件复原(diff=0);persistence_state/metrics 的 `FastInstant`→std;launch.rs(v2.3.0 新文件引 ChangesetCache)摘 `pub mod launch;` 留孤儿——其唯一消费方 node/builder launch/engine.rs 按 node-builder 文档裁决解向 baseline 后本就不调用 |
+| 25c | `crates/rpc/rpc-convert/{lib,transaction,block,receipt}.rs` | 0* | **⟲ 收口新发现**:三个 TryFrom* trait 失挂/被删,已重挂+加回(见 9.4 落地补记) |
 | 26 | `crates/engine/tree/src/persistence.rs` | 18 | 融合版 `on_save_blocks`;**已解决区反向失效:`SaveBlocksMode`(:32/:313)、`bal_store()`(:329/:353/:884+)引用已消失符号,须一并清掉**(§6.5.3 ⟲) |
 | 27 | `crates/engine/tree/src/tree/tests.rs` | 44 | **HEAD 为主轴**(随路线甲反转)(§6.5.5 ⟲) |
 | 28 | `crates/ress/provider/*`、`crates/chain-state/benches/canonical_hashes_range.rs` | 0 | 已是 gravity 形态,不动(是「必须收 EBWT」的反向锁定) |
@@ -786,15 +795,18 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
 - [x] §6.1 storage-api——⟲ 整体还原 baseline,`TrieWriterV2` 在 :121,
       witness 回无 mode 签名。证据:冲突标记归零(4/3/1/6→0,实测);
       编译证据待回填
-- [ ] §6.3 前置断点:chain.rs + exex/wal 回 baseline(⟲ 新增项;
-      §9.2=路线 A 已裁决,chain-state 组执行)
-- [ ] §6.2.1 in_memory.rs 39 块(⟲ to_chain_notification 直接取 HEAD,
-      无新增访问器)
-- [ ] §6.2.2 memory_overlay.rs 整文件复原 baseline(⟲ 方案 B,零补丁;
-      = 开放问题 #5,决策已定,落地待做)
-- [ ] §6.2.3 test_utils.rs 复原 + Cargo.toml `[[bench]]`
-- [ ] §6.2.4 state_trie_overlay.rs + deferred_trie.rs trim + lib.rs 清挂载(⟲)
-- [ ] §6.3 rpc pending_block ×2 就地适配
+- [x] §6.3 前置断点:chain.rs + exex/wal 回 baseline(⟲ 新增项;
+      §9.2=路线 A)——与 baseline diff=0;notifications.rs 6 处
+      `Chain::new` 调用点级联适配。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §6.2.1 in_memory.rs 39 块(⟲ to_chain_notification 直接取 HEAD,
+      无新增访问器)——22 HEAD + 14 v2.3.0 + 3 融合;另修复 3 处公共区
+      interleave 残局(Reorg 臂拼残、getters impl 提前闭合、测试脚手架
+      夹带,文档原仅预警 1 处)与 test_state_receipts 公共区断言。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §6.2.2 memory_overlay.rs 整文件复原 baseline(⟲ 方案 B,零补丁;
+      = 开放问题 #5)——与 baseline diff=0。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §6.2.3 test_utils.rs 复原(diff=0)+ Cargo.toml `[[bench]]` 补回。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §6.2.4 state_trie_overlay.rs + deferred_trie.rs trim(git rm)+ lib.rs 清挂载(⟲;execution_stats/notifications 按 9.3 保留)。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §6.3 rpc pending_block ×2 就地适配(rpc-eth-api 保 v2.3.0 双参 `finish`;rpc-eth-types 3 处按方案)。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
 - [x] §6.4.1 database/provider.rs——⟲ 整体还原 baseline(原 8 块手术/
       save_blocks 适配/unwind 双路径均不再需要)。证据:冲突标记归零
       (101→0)+ 与 baseline 仅 ~101 行 diff(实测);编译证据待回填
@@ -806,19 +818,36 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
 - [x] §6.5.4 writer/mod.rs——⟲ 反向解决:`UnifiedStorageWriter` 复活
       (:21/:136/:172/:192 实测),原「删除 + cfg 迁移」作废。证据:
       冲突标记归零(15→0);编译证据待回填
-- [ ] §6.5.1 newPayload 集群(⟲ 路线甲:payload_processor 目录 +
-      payload_validator + state.rs 纯复原、cached_state.rs 恢复
-      (§9.1=a,决策已闭环)、types.rs 删除、event.rs/engine.rs 回
-      baseline、mod.rs:96 断点)
-- [ ] §6.5.2 tree/mod.rs(84 块 + 3 处标记外编辑,含
-      `notify_waiters` 插入——漏插 = 持久化屏障死锁;⟲ 行按新注记)
-- [ ] §6.5.3 persistence.rs(18 块,融合版 on_save_blocks + ⟲ 反向失效
-      清理:`SaveBlocksMode`/`bal_store()`)
-- [ ] §6.5.5 tree/tests.rs(44 块,⟲ HEAD 为主轴)
-- [ ] §9.3 落地:`PersistedBlockSubscriptions` 整链 trim(rpc/reth.rs 端点
-      + rpc-builder bound 随其 49 块按 baseline 侧解;chain-state 侧无动作,
-      `ExecutionTimingStats` 保留)
-- [ ] §9.4 落地:rpc-provider 整 crate 回 baseline(~205 行回退,4 文件)
+- [x] §6.5.1 newPayload 集群(⟲ 路线甲)——validator/processor/state.rs/
+      cached_state.rs 复原与 baseline diff=0(v2.3.0 独有 4 文件留孤儿)、
+      types.rs 已删、event.rs/engine.rs 回 baseline;Cargo:root
+      +`mini-moka`、engine/tree +`mini-moka`/`smallvec`。
+      **落地实录偏差**:validator 两处 `Arc<dyn FullConsensus<N, Error =
+      ConsensusError>>` 适配为无 Error 形态 + `validate_block_post_execution`
+      调用扩为 4 参(consensus crate 未被 storage 还原,trait 已 v2.3.0 化)。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §6.5.2 tree/mod.rs(84 块:36 HEAD + 30 v2.3.0 + 18 融合;
+      4958→3696 行)——`notify_waiters` 已插(on_persistence_complete,
+      紧跟 `persistence_state.finish`);**标记外编辑实为 5 处**(version
+      参数 ×2、find_disk_reorg 实际是删 26 行孤儿尾巴而非接回函数头、
+      purge_timing_stats 剥离 SlowBlock 发射、删公共区死函数
+      try_insert_payload/try_buffer_payload 78 行);newPayload 重构组
+      12 块按⟲预期贴 HEAD;`mod cached_state;` 恢复、`pub mod types` 删。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §6.5.3 persistence.rs(18 块,1291→796 行,融合版 on_save_blocks +
+      反向失效清理)——**落地实录偏差**:P5 未按 ⟲ 注取 v2.3.0 二参,
+      改取 HEAD + 补回被公共区吞掉的 `let sf_provider = ...`(理由:还原后
+      writer 的 `remove_blocks_above` 内部含 static-file 截断,二参形态会把
+      static-file 数据留成孤儿;现与 baseline 逐行一致);测试区另删 2 个
+      死符号测试(RocksDBProviderFactory/SaveBlocksMode 全仓零命中)。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §6.5.5 tree/tests.rs(44 块:41 HEAD + 3 v2.3.0;3027→1344 行,gravity 专属测试保留)。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §9.3 落地(rpc 端):rpc/reth.rs 端点三件套(import/bound/handler)
+      + rpc-api/reth.rs subscription 声明已外科摘除(`persisted` grep 归零;
+      整文件回退会丢 429 行无关演进,按原则 3 只摘端点);chain-state 侧
+      trait+noop impl 按裁决保留(自包含可编译);rpc-builder 4 处引用全在
+      冲突块内(@135/@377/@850/@1071),留 rpc 组随 49 块解向 baseline。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+- [x] §9.4 落地:rpc-provider 整 crate 回 baseline——与 baseline diff=0
+      (含手动删 v2.3.0 独有 `rpc_response.rs`);死符号反扫全绿;连带断点
+      `TryFromTransactionResponse` 已按原则 2 裁决并落地 = 从 baseline 加回
+      rpc-convert(见 9.4 补记)。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
 - [ ] 终验:`cargo check --workspace --all-features`(当前被 workspace
       依赖缺失阻塞)+ `grep -rl '^<<<<<<<' crates/ | wc -l` 相对基线
       只减不增 + pipe 两 crate 编译 + **跨组反向失效重扫**(§七教训 4)
@@ -849,7 +878,7 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
   孤儿。这同时回答了本条末的总问题:早期 v2.3.0-为底 决议**冲突的重议**
   (option C→部分回滚),**不冲突的保留**(metrics.rs v2.3.0 版抽样兼容,
   按原则 3 不动、仅全字段复核)
-- 落地:☐(随 §6.5.1 路线甲落地清单第 3 项执行)
+- 落地:☑(2026-07-05)——cached_state.rs 与 baseline diff=0;root Cargo.toml +`mini-moka`、engine/tree Cargo.toml +`mini-moka`/`smallvec`;`mod cached_state;` 已在 mod.rs 恢复。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
 
 **Option C 是什么**(定义见
 `docs/merge-v2.3.0/moka-vs-mini-moka-verification.md` §四,2026-07-02 拍板
@@ -934,7 +963,7 @@ validator 引用的两个字段 `record_state_root`(现 metrics.rs:544)与
   实测)——即路线 B 技术上大概率只差一行挂载,但这不改变「须动 storage
   还原文件」的冲突定性,仍取 A。归属:**chain-state 组**(照原建议,
   in_memory.rs 解法直接依赖本条))
-- 落地:☐(§七第 3 步)
+- 落地:☑(2026-07-05)——chain.rs / exex wal 与 baseline diff=0;notifications.rs 6 处调用点级联适配。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
 
 `crates/evm/execution-types/src/chain.rs`(零冲突、落 v2.3.0 侧)**当前
 就是活断点**:`Chain::new`(:69)/`append_block`(:328)三参签名 + 全文件
@@ -965,7 +994,7 @@ validator 引用的两个字段 `record_state_root`(现 metrics.rs:544)与
     (实测独立),留作死代码不破坏 gravity 功能、下轮 merge 少 diff;若
     后续编译实测被牵连,降级为 trim 并回注此处)。
   本条已在 rpc-builder 解块前关闭,解块方向有据。
-- 落地:☐(rpc 组解 rpc-builder 49 块时执行 trim;chain-state 组无动作)
+- 落地:☑(rpc 端,2026-07-05)——rpc/reth.rs + rpc-api/reth.rs 端点已外科摘除,`persisted` grep 归零;chain-state 侧 trait+noop impl 按裁决保留;**尾款**:rpc-builder 4 处引用(冲突块 @135/@377/@850/@1071)随其 49 块解向 baseline,归 rpc 组。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
 
 两个上游 v2.3.0 特性在 storage 还原后处境不同,决策原则应统一:
 
@@ -992,8 +1021,9 @@ validator 引用的两个字段 `record_state_root`(现 metrics.rs:544)与
   与 baseline trait 面成片漂移,≥11 处、跨 ≥5 个 impl block,属「保 v2.3.0
   须适配 storage 已还原的 trait 面」的冲突)。归属:rpc 组执行,或 storage
   组补刀
-- 落地:☐(`git checkout 0cb1687c1c -- crates/storage/rpc-provider`,
-  ~205 行回退,4 文件)
+- 落地:☑(2026-07-05)——整 crate 与 baseline diff=0(含手动删 v2.3.0 独有 `rpc_response.rs`);死符号反扫全绿。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
+
+**⟲ 9.4 落地补记(连带断点,收口时裁决并落地)**:复原后 rpc-provider 从 `reth_rpc_convert` 导入的三个 trait 实测**全部失挂**——不止预报的 `TryFromTransactionResponse`(v2.3.0 删除),`TryFromBlockResponse`/`TryFromReceiptResponse` 所在的 block.rs/receipt.rs 也是磁盘孤儿(文件与 baseline 逐字节一致,但 v2.3.0 侧 lib.rs 无模块声明,nested_trie 同款静默失挂)。按原则 2 落地:rpc-convert lib.rs 补 `pub mod block; pub mod receipt;` 及导出、transaction.rs 尾部从 baseline 加回 `TryFromTransactionResponse` trait + Ethereum impl(OP impl 按「no OP」惯例不带)、Cargo.toml 补 `reth-ethereum-primitives`。选 rpc-convert 而非移进 rpc-provider:贴 baseline 布局,下轮 merge 呈现为 rpc-convert 的 gravity 增量。
 
 `crates/storage/rpc-provider` 是 workspace member(根 Cargo.toml:59、
 workspace dep :372),**baseline 与 v2.3.0 都有此 crate**(`git ls-tree`
@@ -1027,6 +1057,19 @@ workspace dep :372),**baseline 与 v2.3.0 都有此 crate**(`git ls-tree`
   不构成编译问题;`crates/ress/` 目录删不删是卫生问题。§五 #29 的
   「反向锁定」论据随之弱化,但 memory_overlay 方向已由开放问题 #5 的
   决策独立锁定,不受影响。
+### 跨组断点台账(2026-07-05 落地轮汇总;本文档范围外,逐条注明归属)
+
+| 断点 | 位置 | 归属 |
+|---|---|---|
+| `Chain::new` 三参调用点(9.2 回 baseline 后必断) | 生产 3 处:`stages/execution/mod.rs:430/:560`、`exex/backfill/job.rs:152`;测试 ~10 处(exex wal/notifications、exex/types、tx-pool blobstore tracker) | stages / exex 组 |
+| RocksDB 死符号面 | cli/commands ~12 文件、stages ~7 文件、e2e-test-utils、exex/test-utils | cli / stages 组(裁决=解向 HEAD,见 node-builder 文档开放问题 1) |
+| `PersistedBlockSubscriptions` 尾款 | rpc-builder 4 处引用,冲突块 @135/@377/@850/@1071,随 49 块解向 baseline | rpc 组 |
+| `MockEthProvider::with_genesis_block` 已消失 | tx-pool maintain.rs 测试(v2.3.0 侧) | tx-pool 组(见 transaction-pool 文档) |
+| `builder/states.rs`/`builder/mod.rs` 零冲突侧翻引死符号 | node/builder | node-builder 组(见 node-builder 文档开放问题 1 落地清单) |
+| `launch.rs` 孤儿与 `build_engine_orchestrator` | node/builder `launch/engine.rs:32` 调用点随 23 块解向 baseline 即自然断开 | node-builder 组 |
+| workspace ~20 缺 dep(阻塞一切编译证据) | root Cargo.toml | cargo 组 |
+| `SubkeyContainedValue` 定义缺失(4 文件 7 处) | primitives-traits | primitives-traits 组 |
+
 - 外部依赖(非本文档决策,但阻塞验收/动工):cargo 组补 workspace 约 20
   个 dep(阻塞一切编译证据);primitives-traits 组恢复
   `SubkeyContainedValue`——其还原范围顺带决定 `FastInstant` 一类符号的
