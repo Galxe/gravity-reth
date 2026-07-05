@@ -35,6 +35,72 @@
   4. `node.rs` — 依赖 `crate::launcher::Launcher`（gravity 在 baseline 已自定义的 `crates/cli/commands/src/launcher.rs`，**本组不涉及**），只需处理 `GravityArgs`/`StaticFilesArgs`/`StorageArgs` 字段共存与 `init_gravity_config` 调用位置。
   5. `db/list.rs`、`db/stats.rs`、`stage/drop.rs`、`stage/run.rs`、`stage/dump/{execution,hashing_account,hashing_storage,merkle}.rs`、`test_vectors/compact.rs`、`sigsegv_handler.rs` — 在上述基础上独立解决。
 
+## ⟲ 2026-07-06 现状核实与解块方向修正(f89d9d4e23 之后)
+
+> 本文档正文写于 f89d9d4e23(storage/trie/prune 整体还原 baseline)之前,
+> 其"偏向上游 / take-upstream"建议大面积建立在上游 storage-v2 机器之上,
+> **该机器已死**。以下裁决按 2026-07-05 决策总原则(①storage 决策最高;
+> ②冲突迎合 storage;③不冲突留 v2.3.0)+ 符号存活实测得出,**以本节为准,
+> 正文逐文件"解决方案建议"仅作决策史保留**。
+
+### 符号存活实测(2026-07-06)
+
+**已死**(keep-gravity 下引用即编译断):`RocksDBProvider`/`RocksDBProviderFactory`/
+`rocksdb_provider()`、`StaticFileProviderBuilder`、`init_genesis_with_settings`、
+`unwind_provider_rw`、`prune_to_unwind_target`、`HeaderMut`(全仓零定义);
+`BalStoreHandle`/`InMemoryBalStore`(storage-api/bal.rs、provider/bal.rs 在盘
+但 lib.rs 无挂载 = 磁盘孤儿)、`StorageSettings`/`cached_storage_settings`
+(metadata.rs 同为孤儿);`metrics_hooks`(定义在
+node/builder/src/launch/common.rs:1625,但体内调 `rocksdb_provider()` 且该
+文件尚有 30 个冲突块 —— 对 cli 组等同于死)。
+
+**存活**(可按原则 ③ 保留):`reth_tasks::Runtime`(runtime.rs:316)与
+`TaskExecutor` 接线、`HeaderTy`/`TxTy`(node/types)、`table_entries`
+(gravity 双后端统一抽象,mdbx parallel_tx.rs:156 + rocksdb tx.rs:123)、
+`UnifiedStorageWriter`(复活)、`HeaderTerminalDifficulties` 表(db-api
+baseline 回归)、`PruneSegment::Transactions`、`init_genesis(factory)`
+baseline 形态(db-common/init.rs:87,零冲突)、
+`disable_long_read_transaction_safety`(基线本有)。`ProviderFactory::new`
+已回 baseline 三参 `(db, chain_spec, static_file_provider)`;`DatabaseEnv`
+无 Clone derive(`Arc<DatabaseEnv>` 包装模式回归)。
+
+### 解块主轴(替代正文各"take-upstream"建议)
+
+**「HEAD 体 + v2.3.0 存活签名」**:函数体/工厂构造/schema 语义一律取 HEAD
+(baseline),但**对外签名保持 v2.3.0 形态**——因为 `init::<N>(access,
+runtime)` 的二参签名已被 **10 个零冲突文件**定型(db/mod.rs 宏、import.rs、
+import_era.rs、init_state、prune.rs、stage/unwind.rs、re_execute.rs 等,均传
+`ctx.task_executor.clone()` 或 `runtime`),`stage/mod.rs`(零冲突)同样已按
+`Drop.execute::<N>(executor)`/`Dump.execute(components, executor)` 定型。
+改签名的代价(动 10+ 个零冲突上游文件)远大于保签名(参数体内不用,`_` 前缀)。
+
+### 逐文件裁决表
+
+| 文件(冲突数) | 原建议 | ⟲ 现裁决 |
+|---|---|---|
+| Cargo.toml(7) | mechanical-merge 偏上游 | **HEAD 为底 + 存活依赖并集**:保 gravity-only(reth-engine-tree、gravity-primitives);保 `reth-tasks`(init 签名需要);download/ 目录保留所需(url/blake3/reqwest-blocking/rayon 等)按 OQ6 定;`metrics`/`parking_lot` 视 run.rs 取 HEAD 后按编译驱动裁剪 |
+| common.rs(9) | mechanical-merge 偏上游 | **HEAD 体 + v2.3.0 `init(access, runtime)` 签名**(runtime 体内可不用);两段 gravity 语义(checkpoint guard、StorageRecoveryHelper)必保(原建议已对);`EnvironmentArgs` 不带 static_files/storage 字段(喂死机器);`CliHeader` 保 HEAD(HeaderMut 死);`init_genesis` 用 baseline 形态;`StaticFileProvider::read_write/read_only` + `Arc<DatabaseEnv>` 保 HEAD |
+| node.rs(11) | mechanical-merge | **大体维持原建议**:gravity 字段 + `init_gravity_config` 必保;`engine.validate()`、`name_client` log、`MetricArgs`/`StaticFilesArgs`/`StorageArgs` 字段可留(args 结构体在 node/core 零冲突存活);`init_db` 是否去 Arc 跟 node-builder 组界面走(跨组注) |
+| db/list.rs(3) | take-upstream + fallback | **HEAD**:`table_entries` 本就是 gravity 双后端统一抽象,上游 `open_db/db_stat` 不可用;clap `RangedU64ValueParser` 等独立改进可留(OQ3 消解) |
+| db/stats.rs(7) | take-upstream | **反转 → HEAD 占位实现**:上游真实现依赖 `rocksdb_provider()`(死)+ mdbx `open_db/db_stat/freelist`(baseline 接口不配);占位丑但唯一可编译,RocksDB stats 记 v2.4+ 债 |
+| stage/drop.rs(10) | take-upstream | **反转 → HEAD 体**(合并分支、保 TD clear、保 `reset_prune_checkpoint(Transactions)`、`database_provider_rw` + `UnifiedStorageWriter`)+ v2.3.0 `execute(executor)` 签名(OQ2 消解) |
+| stage/dump/*.rs ×4(17) | take-upstream | **反转 → HEAD 体**(`Arc<DatabaseEnv>`、三参 factory、无 runtime 串接);**唯一保 v2.3.0**:`FullConsensus` 去 `Error` 关联类型(consensus crate 未被还原,HEAD 写法编译不过——与 engine-tree 落地同向)+ `HeaderTy`/`TxTy` import(活) |
+| stage/dump/mod.rs(4) | take-upstream | 签名保 v2.3.0(`execute(components, runtime)`,stage/mod.rs 已定型),宏内**不**把 runtime 串给 factory(HEAD 构造);`DatabaseArguments` 用 baseline 顶层路径 |
+| stage/run.rs(5) | take-upstream | **反转 → HEAD**:手写 `Hooks::builder()`(metrics_hooks 死)、`UnifiedStorageWriter::commit/commit_unwind` 保 HEAD(复活);`requires_commit()` 若自包含可留(编译驱动);`pprof_dumps` 参数视 MetricServerConfig 现行签名 |
+| test_vectors/compact.rs(0) | take-upstream | **已零冲突落 v2.3.0 侧**(`print!("{}", type_name)` 实测),无动作 |
+| sigsegv_handler.rs(1) | take-upstream + verify | **take-upstream(OQ4 已裁决)**:rustc 1.94.1 实测两种 cast 写法均编译通过,上游写法更防未来 lint;musl/交叉编译注意事项保留一句备查 |
+
+### 零冲突侧翻断点(正文完全未覆盖,10 文件)
+
+死符号扫描(2026-07-06)抓出 cli/commands 内 10 个零冲突文件落在 v2.3.0 侧
+引用死符号,**解块清单必须包含它们**:
+
+| 文件 | 血统 | 死符号 | 处置 |
+|---|---|---|---|
+| db/settings.rs、db/migrate_v2.rs、db/account_storage.rs、db/state.rs、db/checksum/rocksdb.rs | **baseline 无**(上游 storage-v2 工具) | StorageSettings 系 / RocksDBProvider 系 | **trim**:摘除 db/mod.rs 的 5 个子命令挂载(:48-:83、:136-:238 一带)与 checksum/mod.rs 3 处(:24/:78/:102),文件留盘作孤儿 |
+| db/get.rs、db/repair_trie.rs、import_core.rs、prune.rs | baseline 有(落上游侧) | rocksdb_provider()/StorageSettingsCache/metrics_hooks | **局部摘除死符号段**(优先)或整文件回 baseline,以最小 diff 为准 |
+| init_state/mod.rs | baseline 有 | HeaderMut | import/用法改回 baseline 的 `CliHeader` 形态 |
+
 ## 逐文件分析
 
 ### `crates/cli/commands/Cargo.toml`
@@ -429,13 +495,28 @@
 
 > **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
-- [ ] 1. **`common.rs` 中 `init_genesis_with_settings` 与 gravity stage-checkpoint guard 的叠加**：上游新签名 `init_genesis_with_settings(&provider_factory, self.storage_settings())` 是否会触发 gravity 在 pipe-execution 模式下原有的 "checkpoint 被重置为 0" 问题？需在 e2e 上验证 `should_init = ... is_none_or(|ck| ck.block_number == 0)` guard 是否仍能阻断 `init_genesis_with_settings` 内部的初始化。如果 `init_genesis_with_settings` 自身在 storage v2 路径下已自带 idempotency，则 guard 可以撤销；否则 guard 必保。
-   - [ ] 冲突解决:待 e2e 验证后落地;crates/cli/commands/src/common.rs 现存 9 处冲突块(2026-07-03 实测)。
-- [ ] 2. **`stage/drop.rs` 中 `cached_storage_settings().storage_v2` 分支判定**：gravity 部署是否始终以 `--storage.v2 false` 启动？若如此，新增的 `if settings.storage_v2 { rocksdb.clear(...) } else { tx.clear(...) }` 分支在 gravity 上永远走 `else` — 但 gravity 的 `AccountsHistory` / `StoragesHistory` / `TransactionHashNumbers` 是否已迁出 mdbx 到 RocksDB？需对照 `a1d7365bd6` 的 table routing 配置。
-   - [ ] 冲突解决:待核实部署配置后落地;crates/cli/commands/src/stage/drop.rs 现存 10 处冲突块(2026-07-03 实测)。
-- [ ] 3. **`db/list.rs` 对 storage v2 已迁出表的 entries 报告**：上游 `tx.inner().open_db().db_stat()` 只查 mdbx；若 gravity 把若干表迁到 RocksDB（参考 `a1d7365bd6` 的 `bc79cc44c` `--rocksdb.*` table routing），`reth db list <table>` 对这些表会返回 0 entries — 需在 `view` 内增加 `RocksDBProvider::table_entries` fallback。
-   - [ ] 冲突解决:待决策后落地;crates/cli/commands/src/db/list.rs 现存 3 处冲突块(2026-07-03 实测)。
-- [ ] 4. **`sigsegv_handler.rs` 上游回滚理由**：`9974ad0618` 把 cast 写法回退的真正原因需从 `fix CI test of unit.yml` 关联的 CI log 中追查 — 若是 nightly toolchain 兼容问题且 v2.3.0 默认 toolchain 已升级，可放心 take-upstream；若是 musl / cross-compile target 兼容问题，需保留 `cfg` 分支。
-   - [ ] 冲突解决:待追查 CI log 后落地;crates/cli/util/src/sigsegv_handler.rs 现存 1 处冲突块(2026-07-03 实测)。
-- [ ] 5. **`stage/run.rs` 中 `metrics_hooks(&provider_factory)` 的 metric 标签**：与 gravity baseline 手写 `db.report_metrics()` + `sfp.report_metrics()` 是否完全等价？若上游统一封装漏掉 RocksDB metrics，需在 gravity 侧 wrap 一层补齐（涉及 grafana dashboard 兼容）。
-   - [ ] 冲突解决:待核实 metric 等价性后落地;crates/cli/commands/src/stage/run.rs 现存 5 处冲突块(2026-07-03 实测)。
+- [x] 1. **`common.rs` 中 `init_genesis_with_settings` 与 gravity stage-checkpoint guard 的叠加**：~~上游新签名是否会触发 checkpoint 重置问题,需 e2e 验证~~
+   → **决策(2026-07-06,⟲ 前提消亡)**:`init_genesis_with_settings` 全仓零定义,db-common/init.rs 已随 f89d9d4e23 回归 baseline `init_genesis(factory)`(:87,零冲突)——上游 API 不存在,e2e 验证无对象。**guard 必保**,common.rs 按「HEAD 体 + v2.3.0 二参签名」解(见 ⟲ 裁决表)。依据:决策总原则 ②。
+   - [ ] 冲突解决:common.rs 现存 9 处冲突块。
+- [x] 2. **`stage/drop.rs` 中 `cached_storage_settings().storage_v2` 分支判定**:~~gravity 部署配置核实~~
+   → **决策(2026-07-06,⟲ 前提消亡)**:`cached_storage_settings` 是孤儿(metadata.rs 不在 mod 树)、`unwind_provider_rw`/`prune_to_unwind_target` 零定义;而 `HeaderTerminalDifficulties` 表与 `PruneSegment::Transactions` 已随 db-api/prune 还原回归——**上游 schema 演进整体出局,drop.rs 取 HEAD 体**(合并分支/保 TD clear/保 reset_prune_checkpoint),仅 `execute(executor)` 签名保 v2.3.0。部署配置核实无对象。依据:原则 ②。
+   - [ ] 冲突解决:stage/drop.rs 现存 10 处冲突块。
+- [x] 3. **`db/list.rs` 对 storage v2 已迁出表的 entries 报告**:~~需增加 RocksDBProvider::table_entries fallback~~
+   → **决策(2026-07-06,⟲ 问题消解)**:上游 `open_db/db_stat` 路径已死;gravity 的 `tx.table_entries(name)` 本就是双后端统一抽象(mdbx parallel_tx.rs:156 + rocksdb tx.rs:123 实测存活)——取 HEAD 即天然覆盖两侧,无需 fallback。依据:原则 ②。
+   - [ ] 冲突解决:db/list.rs 现存 3 处冲突块。
+- [x] 4. **`sigsegv_handler.rs` 上游回滚理由**:~~需追查 CI log~~
+   → **决策(2026-07-06,实测)**:rustc 1.94.1 下两种 cast 写法**均编译通过**(最小 repro 实测,upstream `as unsafe extern "C" fn(...)` 与 gravity `as *const ()` 双绿)——`9974ad0618` 的回退在当前工具链已无必要性,**take-upstream**(上游写法更防未来 fn-item-cast lint,且带 `2cae43864` 页对齐修复)。CI pin nightly-2026-02-01 晚于两写法要求;若未来 musl 目标出问题再加 `cfg` 分支。依据:原则 ③。
+   - [ ] 冲突解决:sigsegv_handler.rs 现存 1 处冲突块。
+- [x] 5. **`stage/run.rs` 中 `metrics_hooks` 的 metric 标签等价性**:~~需核实等价性~~
+   → **决策(2026-07-06,⟲ 前提坍塌)**:`metrics_hooks` 定义存活(node/builder/launch/common.rs:1625)但**体内调 `rocksdb_provider()`(死)**且宿主文件尚有 30 个冲突块——对 cli 组等同于死。stage/run.rs 取 HEAD 手写 `Hooks::builder()`,等价性问题无对象;`UnifiedStorageWriter::commit/commit_unwind` 保 HEAD(已复活)。跨组注:node-builder 组解 launch/common.rs 时须同向处理 metrics_hooks。依据:原则 ②。
+   - [ ] 冲突解决:stage/run.rs 现存 5 处冲突块。
+- [x] 6. **`download` 模块二义**(正文「关键决策」条目,此处补勾选框):
+   → **决策(2026-07-06,实测)**:**方案 2 —— 删除 `download.rs`,采纳上游 `download/` 目录**。三条证据:① gravity 对 download.rs **零修改**(`git diff v1.8.3 0cb1687c1c` 为空,纯 v1.8.3 遗产,无 gravity 功能损失);② v2.3.0 已用模块化 `download/` 目录取代它(v2.3.0 无 download.rs);③ 活消费方 `ethereum/cli/src/interface.rs`(零冲突)已按目录版接线(`download::manifest_cmd` :10、`DownloadCommand` :286),方案 1/3 都要反向改零冲突上游文件。download/ 目录死符号扫描零命中(config_gen.rs:233 的 `.static_files` 是 reth_config::Config 字段,非 EnvironmentArgs)。依据:原则 ③。
+   - [ ] 冲突解决:`git rm crates/cli/commands/src/download.rs` 一步,尚未执行。
+- [x] 7. **零冲突侧翻断点 10 文件**(2026-07-06 新增,正文未覆盖):
+   → **决策**:按 ⟲ 横幅「零冲突侧翻断点」表处置——baseline 无的 5 个上游 storage-v2 工具 trim(摘 db/mod.rs 5 个子命令挂载 + checksum/mod.rs 3 处);baseline 有的 5 个局部摘死符号段或回 baseline 段。依据:原则 ②。
+   - [ ] 冲突解决:10 文件 + db/mod.rs + checksum/mod.rs 待执行。
+
+## 落地待办(依赖序,2026-07-06)
+
+1. `Cargo.toml`(7 块,存活依赖并集)→ 2. `common.rs`(9 块,HEAD 体 + 二参签名)→ 3. OQ6(`git rm download.rs`)→ 4. OQ7 侧翻 10 文件 + db/mod.rs + checksum/mod.rs 摘挂载 → 5. `db/list.rs`(3)、`db/stats.rs`(7)、`node.rs`(11)、`stage/drop.rs`(10)、`stage/dump/*`(21)、`stage/run.rs`(5)→ 6. `sigsegv_handler.rs`(1)→ 7. 验收:本组冲突标记归零 + rustfmt parse + 死符号扫描;编译证据待 cargo 组修复 workspace 依赖后回填。
