@@ -436,18 +436,96 @@ Upstream diff range: `v1.8.3..v2.3.0` (覆盖 v1.9/v1.10/v1.11/v1.12 直至 v2.3
 
 ---
 
+## ⟲ 2026-07-05 现状核实与解块方向修正(f89d9d4e23 之后)
+
+> 本节为开放问题核实时的附带实测发现。背景:f89d9d4e23 已把 storage/trie/prune
+> 整体还原 gravity baseline;决策总原则(2026-07-05 用户拍板,记档于
+> `executed-block-split-pipe-exec-make-canonical.md` §九):①storage 决策最高
+> ②冲突迎合 storage ③不冲突的在不破坏 gravity 功能前提下保留 v2.3.0 设计。
+
+**1. 五个"零冲突侧翻"文件**:分组概要记录的 13 文件中,以下 5 个当前冲突标记
+为 0,且实测与 v2.3.0 **逐字节相同**(`git diff v2.3.0 HEAD -- <path>` = 0 行,
+自 squash checkpoint e6b7e5ba32 起即如此;概要中的 hunk 数对它们从未成立):
+`rpc-builder/src/config.rs`、`rpc-eth-api/src/helpers/receipt.rs`、
+`rpc-eth-api/src/helpers/state.rs`、`rpc-eth-types/src/cache/db.rs`、
+`rpc/src/eth/helpers/transaction.rs`。其中:
+
+- **`cache/db.rs` 是活断点**:`fn witness`(:100-104)带
+  `mode: reth_trie::ExecutionWitnessMode` —— 双重断:①该类型定义文件
+  `trie/common/src/execution_witness.rs` 在盘上但 baseline 版 lib.rs 无
+  `mod execution_witness;` 挂载(磁盘孤儿,路径编译不可达);
+  ②storage-api 的 `StateProofProvider::witness` 已随还原回二参无 mode
+  (trie.rs:93)。**须回 baseline 形态**,属本组新增落地项。
+- 其余 4 个做过死符号专项扫(ExecutionWitnessMode/BalProvider/bal_store/
+  ChangesetCache/StateTrieOverlayManager/trie_data/DatabaseProviderROFactory
+  各 0 命中),暂无已知断点,按原则 3 可留 v2.3.0 形态;落地组编译期复核。
+
+**2. 孤儿/死符号对解块方向的修正**(按原则 2,以下 v2.3.0 侧内容**不可采纳**,
+解向 baseline;这修正了下方多个逐文件「解决方案建议」):
+
+| 符号 | 现状(实测) | 受影响的解块 |
+|---|---|---|
+| `ExecutionWitnessMode` | 磁盘孤儿(见上) | `rpc-api/debug.rs` 8 块中 `executionWitnessByBlockHash(hash, mode)` 新签名**不可采纳**(保 baseline 无 mode 签名);`rpc/debug.rs` 41 块中 6 处 mode 引用同理 |
+| `BalProvider` | `storage-api/src/bal.rs:283` 在盘,lib.rs 无挂载 = 孤儿 | `core.rs` 8 块中 4 个 BAL 端点方法、BAL 相关 impl 不可采纳 |
+| `BalError` | 全仓无定义 | `error/mod.rs` 14 块中 BAL 相关变体不可采纳;非 BAL 的新变体(如 `CallManyError`)逐个验存活后可采纳 |
+| `BadBlockStore` | `rpc/debug.rs:2007` 文件内自包含定义 | 存活,`debug_traceBadBlock` 相关块可按原文档建议采纳(其 `&Runtime` 依赖 reth-tasks,存活) |
+
+**3. gravity 保留项风险**:`#259` 的 `SYSTEM_CALLER` fallback 两处
+(`rpc-eth-api/src/helpers/transaction.rs` :64 const 定义、:842 使用)**均位于
+冲突块内**(awk 分区实测),且对应 impl 文件 `rpc/src/eth/helpers/transaction.rs`
+已侧翻为纯 v2.3.0——trait default 方法是该 gravity 语义的唯一承载点,解
+21 块时必须保 HEAD 侧,漏保即静默丢失。
+
+**4. 跨组断点交叉引用**:`TryFromTransactionResponse` 已被 v2.3.0 侧
+rpc-convert 删除,而 9.4 复原后的 baseline rpc-provider 需要它(4 处使用)——
+待裁决(rpc-convert 加回 vs 移植进 rpc-provider),rpc 组认领;若本组解块
+涉及 rpc-convert 相关 import,先查该裁决进展。
+
 ## 开放问题
 
 > **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
-- [ ] 1. **`DebugExecutionWitnessApi<Attributes>` trait** — gravity `rpc-api/src/debug.rs` 中存在，需 `grep -n DebugExecutionWitnessApi` 比对 `gravity-reth@0cb1687c1c` 与 `reth@v2.3.0` 确认其在上游侧的归属。
-   - [ ] 冲突解决:待决策后落地;涉及 crates/rpc/rpc-api/src/debug.rs 现存 8 处冲突块(2026-07-03 实测)。
+- [x] 1. **`DebugExecutionWitnessApi<Attributes>` trait** — gravity `rpc-api/src/debug.rs` 中存在，需 `grep -n DebugExecutionWitnessApi` 比对 `gravity-reth@0cb1687c1c` 与 `reth@v2.3.0` 确认其在上游侧的归属。
+   ⟲ 归属已核实(2026-07-05,`git grep -l DebugExecutionWitnessApi <ref>`):
+   v1.8.3 与 baseline `0cb1687c1c` 均有(rpc-api/debug.rs + crates/optimism 两处),
+   **v2.3.0 已删除**;即 v1.8.3 上游遗留、gravity 零定制。当前 worktree 中该
+   trait 位于 rpc-api/debug.rs:467 的冲突块 **HEAD 侧**;workspace 内唯一其它
+   消费方是 crates/optimism(root Cargo.toml 无 optimism member,不参与编译)。
+   → **决策**: 随上游删除(解块取 v2.3.0 侧)。依据:决策总原则第 3 条(上游
+   删除不破坏 gravity 功能——gravity 无消费方)+ 本文件原「解决方案建议」
+   ("若被删除则取上游")。⚠ 落地注意:同文件 8 块**不能全取 v2.3.0**——
+   `executionWitnessByBlockHash(hash, mode)` 新签名因 `ExecutionWitnessMode`
+   孤儿化不可采纳(见上方 ⟲ 修正节第 2 条),witness 端点保 baseline 签名。
+   - [ ] 冲突解决:待落地;crates/rpc/rpc-api/src/debug.rs 现存 8 处冲突块(2026-07-05 复测未变)。
 
-- [ ] 2. **`SYSTEM_CALLER` 是否应当扩展到 `receipt.rs`** — 当前 `receipt.rs` 在 fallback 路径用 `Address::ZERO`（v1.8.3 上游既存），未引入 gravity SYSTEM_CALLER 谱系。是否在 merge-v2.3.0 中把 `Address::ZERO` 一并改成 `SYSTEM_CALLER` 以与 `transaction.rs` 对齐，需要业务决策（非合并语义问题）。
-   - [ ] 冲突解决:待决策后落地(业务决策);crates/rpc/rpc/src/eth/helpers/receipt.rs 无冲突标记,落地时为独立代码修改。
+- [x] 2. **`SYSTEM_CALLER` 是否应当扩展到 `receipt.rs`** — 当前 `receipt.rs` 在 fallback 路径用 `Address::ZERO`（v1.8.3 上游既存），未引入 gravity SYSTEM_CALLER 谱系。是否在 merge-v2.3.0 中把 `Address::ZERO` 一并改成 `SYSTEM_CALLER` 以与 `transaction.rs` 对齐，需要业务决策（非合并语义问题）。
+   → **决策**: **不需要扩展**(用户拍板,2026-07-05)。
+   ⟲ 现状补充:该问题的代码位点已被上游 #22795 重构消解——
+   `build_transaction_receipt` 改收 `Recovered<Tx>`(调用方先完成 recovery),
+   receipt 路径不再有 recovery fallback 位点。实测:
+   `rpc-eth-api/src/helpers/receipt.rs` 零冲突、与 v2.3.0 逐字节相同(新签名
+   :25-30);`rpc/rpc/src/eth/helpers/receipt.rs` 中 `SYSTEM_CALLER` /
+   `Address::ZERO` 均 0 命中。
+   - [x] 冲突解决:决策为"不扩展" = 零代码动作,现状即终态(证据:上述两文件
+     冲突标记为 0、无 fallback 位点残留,2026-07-05 实测)。
 
-- [ ] 3. **`Consensus::Error` 移除影响面** — 上游 PR #20843 把 `Consensus: FullConsensus<N, Error = ConsensusError>` 收紧为 `Consensus: FullConsensus<N>`；gravity ethapi/op-rpc 等下游 impl 不再需要透传 `ConsensusError`，但 gravity-only consensus impl（如有）需要 verify 是否仍兼容。
-   - [ ] 冲突解决:待核实后落地;gravity-only consensus impl 的兼容性尚未实测。
+- [x] 3. **`Consensus::Error` 移除影响面** — 上游 PR #20843 把 `Consensus: FullConsensus<N, Error = ConsensusError>` 收紧为 `Consensus: FullConsensus<N>`；gravity ethapi/op-rpc 等下游 impl 不再需要透传 `ConsensusError`，但 gravity-only consensus impl（如有）需要 verify 是否仍兼容。
+   ⟲ 已核实(2026-07-05):全 workspace `impl … FullConsensus` 仅一处——
+   上游自有的 `EthBeaconConsensus`(crates/ethereum/consensus/src/lib.rs:111);
+   **gravity 无自有 FullConsensus impl**(gravity 共识走 pipe-exec 的
+   Coordinator/event-bus 注入,不经 FullConsensus trait),兼容性问题不存在。
+   → **决策**: 采纳上游收紧后的 bound(决策总原则第 3 条;无 gravity 功能受损)。
+   - [ ] 冲突解决:无独立代码动作,随 `rpc/src/debug.rs` 等相关文件解块自动
+     落地(该文件现存 41 块未解,故暂不勾;解完后凭编译/grep 证据勾)。
 
-- [ ] 4. **`failpoints` 在 dev/test 之外是否启用** — `#225` 的 `debug_setFailpoint` 仅在 `cargo build --features failpoints` 下生效；需要确认本次 merge 是否要在 production binary 中启用此 feature。
-   - [ ] 冲突解决:待决策后落地;bin/reth/Cargo.toml 现存 7 处冲突块(2026-07-03 实测)。
+- [x] 4. **`failpoints` 在 dev/test 之外是否启用** — `#225` 的 `debug_setFailpoint` 仅在 `cargo build --features failpoints` 下生效；需要确认本次 merge 是否要在 production binary 中启用此 feature。
+   ⟲ baseline 实测(`git show 0cb1687c1c:bin/reth/Cargo.toml`):
+   `default = ["jemalloc", "reth-revm/portable"]`(:70),`failpoints` 为独立
+   feature(:130,`failpoints = ["reth-node-ethereum/failpoints"]`),**不在
+   default 中**——即 gravity 既有行为 = production binary 默认不启用,仅
+   `--features failpoints` 显式构建时生效。
+   → **决策**: 维持 baseline 行为——`failpoints` 保留为 opt-in feature、
+   **不进 default**。依据:决策总原则精神(merge 只对齐两侧,不改变 gravity
+   既有行为);是否在某次生产构建中显式启用属运维构建选择,不在 merge 范围。
+   - [ ] 冲突解决:待落地;bin/reth/Cargo.toml 现存 7 处冲突块(2026-07-05
+     复测未变),解块时保住 `failpoints` feature 定义且不加入 default。
