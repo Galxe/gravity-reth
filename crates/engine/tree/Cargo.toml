@@ -12,27 +12,17 @@ workspace = true
 
 [dependencies]
 # reth
-<<<<<<< HEAD
 reth-chain-state.workspace = true
 reth-chainspec = { workspace = true, optional = true }
 reth-consensus.workspace = true
 reth-db.workspace = true
 reth-engine-primitives.workspace = true
-=======
-reth-chain-state = { workspace = true, features = ["rayon"] }
-reth-chainspec = { workspace = true, optional = true }
-reth-consensus.workspace = true
-reth-db.workspace = true
-reth-engine-primitives = { workspace = true, features = ["std"] }
-reth-execution-cache.workspace = true
->>>>>>> v2.3.0
 reth-errors.workspace = true
 reth-execution-types.workspace = true
 reth-evm = { workspace = true, features = ["metrics"] }
 reth-network-p2p.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
-<<<<<<< HEAD
 reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-provider.workspace = true
@@ -48,39 +38,17 @@ reth-pipe-exec-layer-event-bus.workspace = true
 gravity-primitives.workspace = true
 reth-trie-sparse-parallel = { workspace = true, features = ["std"] }
 reth-trie.workspace = true
-=======
-reth-primitives-traits = { workspace = true, features = ["rayon", "dashmap"] }
-reth-ethereum-primitives.workspace = true
-reth-provider.workspace = true
-reth-prune.workspace = true
-reth-revm = { workspace = true, features = ["optional-balance-check"] }
-reth-stages-api.workspace = true
-reth-tasks = { workspace = true, features = ["rayon"] }
-reth-trie-parallel.workspace = true
-reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
-reth-trie.workspace = true
-reth-trie-common.workspace = true
-reth-trie-db.workspace = true
->>>>>>> v2.3.0
 
 # alloy
 alloy-evm.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
-<<<<<<< HEAD
-=======
-alloy-eip7928 = { workspace = true, features = ["rlp"] }
->>>>>>> v2.3.0
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-engine.workspace = true
 
 revm.workspace = true
 revm-primitives.workspace = true
-<<<<<<< HEAD
-=======
-revm-state.workspace = true
->>>>>>> v2.3.0
 
 # common
 futures.workspace = true
@@ -95,19 +63,13 @@ metrics.workspace = true
 reth-metrics = { workspace = true, features = ["common"] }
 
 # misc
-<<<<<<< HEAD
-=======
 indexmap.workspace = true
->>>>>>> v2.3.0
 schnellru.workspace = true
 rayon.workspace = true
 tracing.workspace = true
 derive_more.workspace = true
 parking_lot.workspace = true
-<<<<<<< HEAD
-=======
 crossbeam-channel.workspace = true
->>>>>>> v2.3.0
 
 # optional deps for test-utils
 reth-prune-types = { workspace = true, optional = true }
@@ -136,7 +98,6 @@ reth-tracing.workspace = true
 reth-node-ethereum.workspace = true
 reth-e2e-test-utils.workspace = true
 
-<<<<<<< HEAD
 # alloy
 revm-state.workspace = true
 
@@ -144,7 +105,6 @@ assert_matches.workspace = true
 criterion.workspace = true
 eyre.workspace = true
 serde_json.workspace = true
-crossbeam-channel.workspace = true
 proptest.workspace = true
 rand.workspace = true
 rand_08.workspace = true
@@ -156,16 +116,6 @@ harness = false
 [[bench]]
 name = "state_root_task"
 harness = false
-=======
-revm-database-interface.workspace = true
-
-assert_matches.workspace = true
-eyre.workspace = true
-serde_json.workspace = true
-proptest.workspace = true
-rand.workspace = true
-rand_08.workspace = true
->>>>>>> v2.3.0
 
 [features]
 config-from-env = ["gravity-primitives/config-from-env"]
@@ -187,7 +137,6 @@ test-utils = [
     "reth-static-file",
     "reth-tracing",
     "reth-trie/test-utils",
-<<<<<<< HEAD
     "reth-trie-sparse/test-utils",
     "reth-prune-types?/test-utils",
     "reth-trie-db/test-utils",
@@ -201,25 +150,6 @@ failpoints = ["fail/failpoints", "reth-db/failpoints"]
 [dependencies.fail]
 version = "0.5"
 optional = true
-=======
-    "reth-trie-common/test-utils",
-    "reth-trie-db/test-utils",
-    "reth-trie-sparse/test-utils",
-    "reth-prune-types?/test-utils",
-    "reth-trie-parallel/test-utils",
-    "reth-ethereum-primitives/test-utils",
-    "reth-node-ethereum/test-utils",
-    "reth-tasks/test-utils",
-    "reth-execution-cache/test-utils",
-    "reth-evm-ethereum/test-utils",
-]
-trie-debug = [
-    "reth-trie-sparse/trie-debug",
-    "reth-trie-parallel/trie-debug",
-    "reth-engine-primitives/trie-debug",
-    "dep:serde_json",
-]
->>>>>>> v2.3.0
 
 [[test]]
 name = "e2e_testsuite"
