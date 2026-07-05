@@ -37,6 +37,62 @@
 
 ---
 
+## ⟲ 2026-07-05 现状核实(f89d9d4e23 storage 还原 + e9965cd3bf engine/chain-state/rpc 落地之后)
+
+> 本节为开工前核实结论;逐文件分析中受影响条目已就地加「⟲」短注。裁决依据
+> = 决策总原则(2026-07-05 用户拍板,记档于
+> `executed-block-split-pipe-exec-make-canonical.md` §九):①storage 决策最高;
+> ②冲突迎合 storage;③不冲突留 v2.3.0(不破坏 gravity 功能)。
+
+### 三个重大新发现(文档原稿未覆盖)
+
+1. **README.md 零冲突侧翻,gravity 开场叙事已丢失(最高优先)**。实测:当前
+   README.md 与 v2.3.0 **逐字节相同**,且自 squash checkpoint(`e6b7e5ba32`)
+   起即无冲突标记(`git log` 显示此后无 commit 触碰)——文档所记「UU,8 个
+   冲突区域」在 worktree 从未成立,属 3-way 自动合并把整文件判给上游侧的
+   「零冲突侧翻」。gravity 开场(intro、ERC20 基准、docs.gravity.xyz、
+   `# Reth Original README` 分隔符)全部丢失;`assets/erc20-transfer-test.png`
+   仍在盘(只丢文本未丢资产)。修复动作 = 原 mechanical-merge 建议不变,但
+   实施方式从「解冲突」变为「从 `git show 0cb1687c1c:README.md` 摘取开场段
+   拼接回当前上游正文之上」。见开放问题 7。
+2. **`crates/e2e-test-utils/tests/rocksdb/main.rs` 是清单漏项 + 活断点**。
+   该文件 v2.3.0 独有(baseline 无,`git cat-file` 实测)、零冲突入库,全文
+   引用已死符号(`RocksDBProviderFactory` / `.rocksdb_provider()`,随
+   f89d9d4e23 删除,全仓零定义);且 `crates/e2e-test-utils/Cargo.toml`
+   (零冲突、侧翻 v2.3.0)挂着 `[[test]] name = "rocksdb"`(:75-77)——cargo
+   修复后 `--tests` 编译必炸。处置按 node-builder 文档开放问题 1 裁决
+   (RocksDB 不并存)+ 原则②:**摘除 `[[test]]` 挂载,测试文件留盘作孤儿**
+   (仓库惯例)。见开放问题 8。
+3. **`setup_import.rs` 的 take-upstream 建议需修正为混合解**。v2.3.0 侧含
+   4 处 `reth_provider::providers::RocksDBProvider::builder(..)`(:162/:401/
+   :487/:603,awk 实测**全部在冲突块内**、无公共区残留)——上游 RocksDB
+   装配段按原则②丢弃(取 HEAD 侧);`Runtime::test()` 迁移部分维持
+   take-upstream(`reth_tasks::Runtime::test` 实测存活,runtime.rs:403)。
+
+### 维持有效的原建议(符号存活实测,2026-07-05)
+
+- `Runtime::test()`(tasks/runtime.rs:403)、`TxHashRef`
+  (primitives-traits/transaction/mod.rs)、`TaskManager`(tasks/lib.rs:115,
+  开放问题 3 过渡方案前提)均存活;
+- `dev.rs` / `p2p.rs` / `rpc.rs` / `produce_blocks.rs` / `transaction.rs` /
+  `e2e-testsuite/main.rs` 死符号专项扫描(RocksDB 系 / SaveBlocksMode / BAL 系
+  / ExecutionWitnessMode / ComputedTrieData / FastInstant)**零命中**,各自的
+  take-upstream / mechanical-merge 建议维持;
+- `MockEthProvider::with_genesis_block`(tx-pool 组发现的跨组反向失效)本组
+  文件零引用,不波及;
+- `.gitignore` 已在 checkpoint 自动解到上游侧(`pages.gen.ts` 在 :64),与
+  建议一致,无需动作。
+
+### 实测冲突数(2026-07-05,与原稿出入处)
+
+`README.md` 0(侧翻,见上)、`.gitignore` 0(已解)、`Cargo.lock` 767(DEFER
+不变);其余文件与原稿所记一致(lint.yml 15、setup_import.rs 21、rpc.rs 11、
+produce_blocks.rs 10、unit.yml 9、dev.rs 8、p2p.rs 7、integration.yml 6、
+node_ops.rs 6、e2e-testsuite/main.rs 5、ethereum/reth Cargo.toml 5、e2e.yml 5、
+其余 ≤3)。
+
+---
+
 ## 逐文件分析
 
 ### `.config/nextest.toml`
@@ -169,6 +225,9 @@
 **解决方案建议：** take-upstream — 接受 `docs/vocs/docs/pages.gen.ts` 这行新增。
 **推理：** 纯叠加；Vocs v2 typegen 是上游文档系统的一部分。
 
+> **⟲ 2026-07-05 实测**:已在 checkpoint 自动解到上游侧(:64 该行在,零冲突),
+> 与建议一致,**无需动作**。
+
 ---
 
 ### `CLAUDE.md~HEAD`
@@ -200,6 +259,11 @@
 **影响范围：** 公开面着陆页。`assets/erc20-transfer-test.png` 必须继续存在；docs.gravity.xyz 链接是 gravity 品牌承诺。
 **解决方案建议：** mechanical-merge — 保留 gravity 开场（intro、ERC20 图、Grevm/Merklization/Cache/Pipeline 要点、docs.gravity.xyz 链接、`# Reth Original README` 分隔符）；分隔符之下采用上游 v2.3.0 改写后的正文（bullet 化 Goals、`assets/reth-2.png`、`reth.rs` 安装 URL、Reth 2.0 release 段、Storage V2 段）。
 **推理：** Gravity baseline `d620fd0eeb` 携带的开场叙事是这个 fork 的核心 identity；上游 body 重写是 gravity README 通过 "Reth Original README" 标题主动让位的内容，保持新鲜。
+
+> **⟲ 2026-07-05 实测**:「UU 8 冲突区」从未在 worktree 成立——README.md 自
+> squash checkpoint 起零冲突侧翻为纯 v2.3.0(逐字节相同),gravity 开场已
+> 静默丢失。建议内容不变,实施方式改为从 `0cb1687c1c:README.md` 摘取开场段
+> 拼回。见「⟲ 现状核实」节新发现 1 与开放问题 7。
 
 ---
 
@@ -294,6 +358,12 @@
   - 采纳上游 `revm` features `memory_limit` + `p256-aws-lc-rs`（性能/正确性增益，gravity 无冲突）
 **推理：** Gravity baseline `a1d7365bd6` in-baseline；`reth-stateless` 是否保留取决于其他组该 crate 是否仍存在（跨组依赖）。
 
+> **⟲ 2026-07-05 实测,跨组确认已闭环**:root Cargo.toml **无** `reth-stateless`
+> workspace 定义(`crates/stateless/` 在盘但已出 workspace,属磁盘孤儿)——
+> HEAD 侧 :38 的 `reth-stateless = { workspace = true }` 行**必须随上游删除**,
+> 「保留」选项不成立。`reth-revm` 的 `witness` feature 实测存在
+> (crates/revm/Cargo.toml),`["std", "witness"]` 保留可行。
+
 ---
 
 ### `crates/e2e-test-utils/src/setup_import.rs`
@@ -304,6 +374,12 @@
 **影响范围：** test-utils 公开 API：`ChainImportResult.task_manager` 字段被 gravity 多处测试解构引用。
 **解决方案建议：** take-upstream（内部 wire 走 `Runtime::test()`），同时**临时保留** `ChainImportResult.task_manager` 字段以兼容下游调用点（若必须的话用 wrapper 字段或在跨组修复完成前作为 `Option`/`TaskManager` field 暴露）。下游调用点的机械修复在各自组处理；这里标为顺序依赖。
 **推理：** 上游 `Runtime::test()` 是 v1.8.3 → v2.3.0 唯一向前兼容路线；保留字段是过渡兼容措施。
+
+> **⟲ 2026-07-05 实测**:take-upstream 需降级为**混合解**——v2.3.0 侧含 4 处
+> `RocksDBProvider::builder`(:162/:401/:487/:603,全在冲突块内),该符号已随
+> f89d9d4e23 死亡(全仓零定义),这些块按原则②取 HEAD 侧;`Runtime::test()`
+> 迁移部分维持 take-upstream(符号存活,runtime.rs:403)。`TaskManager` 存活
+> (tasks/lib.rs:115),字段过渡方案前提成立。
 
 ---
 
@@ -407,6 +483,14 @@
   - 每个传播 feature 在加入前必须确认下游 crate 同名 feature 存在；缺失时在 playbook 中标记，等其他组落地后再启用
 **推理：** Gravity baseline `a1d7365bd6` 保留 db 后端选择；伞 crate 用途是暴露下游可能需要的所有 feature，应采纳上游 v2.3.0 后扩展的 feature 图。
 
+> **⟲ 2026-07-05 传播目标实测**:`reth-provider?/jemalloc` 分支**不可加**——
+> provider 已还原 baseline,无 `jemalloc` feature(v2.3.0 有 / baseline 无,
+> 双基线 grep 实测),jemalloc 系 feature 须去掉该分支(原则②)。其余目标
+> 在位:revm `portable`✓、rpc-eth-types `js-tracer`✓、tasks `test-utils`✓、
+> cli/util `jemalloc`✓、ethereum/cli `otlp`✓、`reth-codecs` 为 crates.io
+> 0.4.1(std feature 随包);node-ethereum(8 块)/node-core(5 块)的
+> `keccak-cache-global`/`otlp` 行在位但文件尚有冲突,待 node 组解块后核对。
+
 ---
 
 ## 组级解决 playbook
@@ -479,6 +563,10 @@ git add AGENTS.md
 
 采纳上游 `Runtime::test()` 接线与 `PayloadAttributes` 闭包类型。**临时保留** `ChainImportResult.task_manager` 字段以兼容 gravity 下游调用点（在跨组修复完成前的过渡），或者把字段去掉同时把下游引用 `task_manager` 字段的代码点全部跟修（依赖跨组）。
 
+> **⟲ 2026-07-05**:追加两条——① 4 处 `RocksDBProvider::builder` 冲突块取
+> HEAD(死符号,见「⟲ 现状核实」新发现 3);② 过渡方案定为保留
+> `task_manager: TaskManager` 原型(开放问题 3 决策)。
+
 ### 阶段 7 — Cargo 清单
 
 - `testing/ef-tests/Cargo.toml`：`reth-db` 不带 `mdbx`（gravity 多后端，baseline `a1d7365bd6`）；保留 `reth-revm` 的 `["std", "witness"]`；`reth-stateless` 是否保留取决于上游 `c915841a4` 在 gravity 是否已落实（跨组确认）；采纳上游 `revm` 的 `memory_limit` + `p256-aws-lc-rs`。
@@ -502,26 +590,47 @@ git add Cargo.lock
 
 （如果 `cargo update` 太激进，手动清完冲突标记后用 `cargo metadata --locked`，只 commit 真正变更的 pin 行。）
 
+> **⟲ 2026-07-05**:cargo 当前不可用(workspace 缺约 20 个 dep 定义,cargo 组
+> 范围,见 STORAGE-RESOLUTION-TODO 第三轮)——阶段 9 与本组全部编译级验收
+> 都被它前置阻塞;阶段 7 的 `reth-stateless` 行须删(见 ef-tests 条目 ⟲)、
+> 伞 crate 的 `reth-provider?/jemalloc` 分支须剔(见开放问题 2 决策)。
+> 另:`crates/e2e-test-utils/Cargo.toml` 摘 `[[test]] rocksdb`(开放问题 8)
+> 不在原 playbook 任何阶段,落地时并入阶段 7。
+
 ---
 
 ## 开放问题
 
 > **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
-- [ ] 1. **AGENTS.md 工作树损坏** — `AGENTS.md` 工作树副本目前只有一行字面量 `"AGENTS.md"`（9 字节），index 也是这个 blob (`e4aa901d6f`)。这不是任何合并冲突解决的产物，必须用阶段 2 的 `git show v2.3.0:AGENTS.md > AGENTS.md` 修复后再 `git add`。Gravity baseline `CLAUDE.md` 内容是 v1.8.3 catch-up 时期的内容，没有 gravity 独立编辑过；直接取 v2.3.0 `AGENTS.md` 正本是合理结论。
-   - [ ] 冲突解决:未落地:实测 AGENTS.md 工作树副本仍为 9 字节损坏态,阶段 2 修复未执行(2026-07-03 实测)。
+- [x] 1. **AGENTS.md 工作树损坏** — `AGENTS.md` 工作树副本目前只有一行字面量 `"AGENTS.md"`（9 字节），index 也是这个 blob (`e4aa901d6f`)。这不是任何合并冲突解决的产物，必须用阶段 2 的 `git show v2.3.0:AGENTS.md > AGENTS.md` 修复后再 `git add`。Gravity baseline `CLAUDE.md` 内容是 v1.8.3 catch-up 时期的内容，没有 gravity 独立编辑过；直接取 v2.3.0 `AGENTS.md` 正本是合理结论。
+   → **决策**:取 v2.3.0 `AGENTS.md` 正本 + `git rm CLAUDE.md~HEAD`(原则③:上游 rename 与 gravity 零冲突,baseline 无独立编辑——2026-07-05 复核维持)。
+   - [ ] 冲突解决:未落地:实测 AGENTS.md 仍为 9 字节损坏态、CLAUDE.md~HEAD 仍在(2026-07-05 复测)。
 
-- [ ] 2. **`crates/ethereum/reth/Cargo.toml` 跨组 feature 依赖** — 加 `keccak-cache-global`、`js-tracer`、`otlp`、`portable`、`jemalloc-symbols` 需要 `reth-node-ethereum`、`reth-cli-util`、`reth-rpc-eth-types`、`reth-revm`、`reth-node-core`、`reth-ethereum-cli` 上存在同名 feature。这些 crate 在其它冲突组。建议：等其他组的 Cargo.toml 解决后再把这些 feature 引入；若某个传播目标缺失，暂时从伞 crate 中去掉该 feature。
-   - [ ] 冲突解决:待其他组 Cargo.toml 解决后落地;crates/ethereum/reth/Cargo.toml 现存 5 处冲突块(2026-07-03 实测)。
+- [x] 2. **`crates/ethereum/reth/Cargo.toml` 跨组 feature 依赖** — 加 `keccak-cache-global`、`js-tracer`、`otlp`、`portable`、`jemalloc-symbols` 需要 `reth-node-ethereum`、`reth-cli-util`、`reth-rpc-eth-types`、`reth-revm`、`reth-node-core`、`reth-ethereum-cli` 上存在同名 feature。这些 crate 在其它冲突组。建议：等其他组的 Cargo.toml 解决后再把这些 feature 引入；若某个传播目标缺失，暂时从伞 crate 中去掉该 feature。
+   → **决策**(2026-07-05,依据决策总原则 + 传播目标实测):采纳上游 feature 图,**唯一剔除 `reth-provider?/jemalloc` 传播分支**(provider 还原 baseline 后无此 feature,原则②);其余目标已实测在位(revm/rpc-eth-types/tasks/cli-util/ethereum-cli),node-ethereum(8 块)/node-core(5 块)行在位待解块确认。
+   - [ ] 冲突解决:待 node 组两个 Cargo.toml 解块后机械核对落地;本文件现存 5 处冲突块(2026-07-05 复测)。
 
-- [ ] 3. **`setup_import.rs` 中 `task_manager` 字段过渡** — `ChainImportResult { task_manager, … }` 解构调用点散落在 gravity 下游测试，移除字段后需要全部跟修。下游测试文件在其它冲突组（很可能是 `node/builder`、ethereum/node、e2e-test-utils 的下游使用方），标为跨组顺序依赖。可选过渡：把字段类型改成 `Option<TaskManager>` 并默认 `None`，让旧解构编译通过。
-   - [ ] 冲突解决:待跨组顺序依赖解决后落地;crates/e2e-test-utils/src/setup_import.rs 现存 21 处冲突块(2026-07-03 实测)。
+- [x] 3. **`setup_import.rs` 中 `task_manager` 字段过渡** — `ChainImportResult { task_manager, … }` 解构调用点散落在 gravity 下游测试，移除字段后需要全部跟修。下游测试文件在其它冲突组（很可能是 `node/builder`、ethereum/node、e2e-test-utils 的下游使用方），标为跨组顺序依赖。可选过渡：把字段类型改成 `Option<TaskManager>` 并默认 `None`，让旧解构编译通过。
+   → **决策**(2026-07-05):采纳过渡方案——take-upstream `Runtime::test()` 迁移 + 保留 `task_manager: TaskManager` 字段原型(前提实测成立:`TaskManager` 存活 tasks/lib.rs:115;`Option` 包装反而扩大下游解构改动面,不取)。**连带**:同文件 4 处 RocksDB 装配块取 HEAD(见「⟲ 现状核实」新发现 3)。
+   - [ ] 冲突解决:未落地;setup_import.rs 现存 21 处冲突块(2026-07-05 复测)。
 
-- [ ] 4. **`test_fee_history` 的 `#[ignore = "todo fix: HashBuilder failed"]`** — gravity 已知失败，理想是建一个跟踪 issue（baseline commit `9974ad0618` 没有附带 issue 链接），完成 HashBuilder 修复后能去掉。
-   - [ ] 冲突解决:待建 tracking issue;crates/ethereum/node/tests/e2e/rpc.rs 现存 11 处冲突块(2026-07-03 实测)。
+- [x] 4. **`test_fee_history` 的 `#[ignore = "todo fix: HashBuilder failed"]`** — gravity 已知失败，理想是建一个跟踪 issue（baseline commit `9974ad0618` 没有附带 issue 链接），完成 HashBuilder 修复后能去掉。
+   → **决策**(2026-07-05):保留 `#[ignore]`(gravity 已知失败标记,与 storage 决策无关,维持 baseline 语义);tracking issue 随落地一并建。
+   - [ ] 冲突解决:未落地;rpc.rs 现存 11 处冲突块(2026-07-05 复测)。
 
-- [ ] 5. **`examples/bsc-p2p/tests/it/priority.rs` AU** — 两侧路径都不存在该文件，为 git rename-detection 幻影。`rg -F 'bsc-p2p/tests/it/priority' crates/ tests/` 应无结果 → 直接 `git rm`。
-   - [ ] 冲突解决:未落地:实测 examples/bsc-p2p/tests/it/priority.rs 仍存在于 worktree,git rm 未执行(2026-07-03 实测)。
+- [x] 5. **`examples/bsc-p2p/tests/it/priority.rs` AU** — 两侧路径都不存在该文件，为 git rename-detection 幻影。`rg -F 'bsc-p2p/tests/it/priority' crates/ tests/` 应无结果 → 直接 `git rm`。
+   → **决策**(2026-07-05):`git rm`(幻影定性复核维持:双基线均无此路径)。
+   - [ ] 冲突解决:未落地:实测文件仍在 worktree(2026-07-05 复测)。
 
-- [ ] 6. **`docs/vocs/docs/public/remote_exex.png` AU** — 两侧内容 hash 一致（`8606616e81…`）；丢弃 HEAD-side 路径副本，接受上游的 `docs/vocs/public/remote_exex.png`。用 `rg -F 'docs/public/remote_exex.png' docs/` 确认没有 MDX 页面引用该路径。
-   - [ ] 冲突解决:未落地:实测 docs/vocs/docs/public/remote_exex.png 与 docs/vocs/public/remote_exex.png 两路径均仍存在,HEAD 侧副本未丢弃(2026-07-03 实测)。
+- [x] 6. **`docs/vocs/docs/public/remote_exex.png` AU** — 两侧内容 hash 一致（`8606616e81…`）；丢弃 HEAD-side 路径副本，接受上游的 `docs/vocs/public/remote_exex.png`。用 `rg -F 'docs/public/remote_exex.png' docs/` 确认没有 MDX 页面引用该路径。
+   → **决策**(2026-07-05):`git rm` 旧路径(blob 一致性复测:两路径 `git hash-object` 同为 `8606616e81…`)。同理 `docs/vocs/docs/pages/run/faq/pruning.mdx` 旧路径一并 rm(新路径 `run/storage/pruning.mdx` 已实测在盘)。
+   - [ ] 冲突解决:未落地:两组新旧路径均仍并存(2026-07-05 复测)。
+
+- [x] 7. **⟲ 新增:README.md gravity 开场找回** — 零冲突侧翻致 gravity 开场叙事(fork identity)自 checkpoint 起丢失(实测与 v2.3.0 逐字节相同);`assets/erc20-transfer-test.png` 仍在盘。
+   → **决策**(2026-07-05):按本组原 mechanical-merge 建议执行——从 `0cb1687c1c:README.md` 摘取开场段(intro 至 `# Reth Original README` 分隔符)拼接回当前上游正文之上,分隔符以下保持 v2.3.0 现状。
+   - [ ] 冲突解决:未落地(2026-07-05 实测仍纯上游)。
+
+- [x] 8. **⟲ 新增:`e2e-test-utils` 上游 RocksDB E2E 测试摘除** — `tests/rocksdb/main.rs`(v2.3.0 独有、零冲突入库、清单漏项)全文引用死符号 `RocksDBProviderFactory`/`.rocksdb_provider()`;`Cargo.toml`(零冲突侧翻)挂 `[[test]] name = "rocksdb"`(:75-77)。
+   → **决策**(2026-07-05,依据 node-builder 文档开放问题 1「RocksDB 不并存」裁决 + 原则②):摘除 `Cargo.toml` 的 `[[test]] rocksdb` 段,`tests/rocksdb/main.rs` 留盘作磁盘孤儿(仓库惯例),v2.4+ 上游 RocksDB 路径再议时一并回收。
+   - [ ] 冲突解决:未落地:实测挂载与文件均在(2026-07-05)。
