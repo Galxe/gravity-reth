@@ -391,16 +391,14 @@ Baseline 形态：
    `crates/pipe-exec-layer-ext-v2/event-bus`(:201),workspace deps 两条均在
    (:448/:485,实测)。event-bus Cargo.toml 的 AU 幻象已物化为 3 个冲突块
    (HEAD=event-bus vs v2.3.0=payload-util rename 串扰),解块=整块取 HEAD。
-   - [ ] 冲突解决:待落地;`pipe-exec-layer-ext-v2/event-bus/Cargo.toml` 现存
-     3 处冲突块(2026-07-05 实测)。
+   - [x] 冲突解决:已落地(2026-07-06)——3 块整块取 HEAD,与 baseline blob 逐字节相等(实测);双名共存确认。
 
 - [x] 4. **`bin/reth/Cargo.toml` 默认 features** —— 开启 `otlp` / `js-tracer` / `keccak-cache-global` / `min-trace-logs` 会传递性要求 `reth-node-core/<feature>` 声明。需要等 `crates/node/core/Cargo.toml` worker 给出结论后再决定本次合并是否一并开启。
    → **决策(2026-07-05,决策总原则 + 最小风险)**:本轮默认 features 维持
    baseline(`["jemalloc", "reth-revm/portable"]`),上游新默认 features 全部
    推迟 follow-up(与 rpc-eth-and-debug.md OQ4 failpoints 同模式)——
    node/core/Cargo.toml 未解、且传递接线属跨组;v2.4+ 或独立 PR 再评估开启。
-   - [ ] 冲突解决:待落地;bin/reth/Cargo.toml 现存 7 处冲突块(2026-07-05
-     实测);另有根依赖缺口前置,见问题 6。
+   - [x] 冲突解决:已落地(2026-07-06)——7 块归零:default 维持 baseline、failpoints 独立(双规则),上游新 feature 定义整体不引入(引用未解块 crate 的 feature,定义即解析错);⟲ 偏差:dev-deps 保留上游全套(零冲突落盘的上游集成测试 tests/it/main.rs 实测在用,核实时漏查该文件);根依赖缺口仍前置(问题 6,cargo 组)。
 
 - [x] 5. **stages/api `Stage` test module 的 port 可行性** —— gravity-storage 是否暴露与上游 5 参数 `ProviderFactory::new(rw_db, chain_spec, static_file_provider, rocksdb_provider, runtime)` 兼容的构造器？决定 follow-up port PR 的工作量。
    → **决策(2026-07-05,决策总原则②)**:port **不可行**——上游 test mod
@@ -426,3 +424,25 @@ Baseline 形态：
    - [ ] 冲突解决:待 cargo 组落地根 Cargo.toml(ress 2 members + 2 deps +
      reth-primitives 等 ~20 缺失 deps);随后 bin/reth/Cargo.toml 7 块按本文
      建议解块。
+
+## ⟲ 落地实录(2026-07-06)
+
+net ×4 + era ×2 + event-bus/bin-reth 两个 Cargo.toml 已落地(stages/api ×3
+按指令留给 stages 组);收口 agent 全局验证通过。要点与偏差:
+
+1. take-upstream 类(discv4/nat/fetcher/era ×2)与 v2.3.0 blob **hash 相等**;
+   txgossip 机械合并 + 剥离全部 5 处 `.with_genesis_block()`(死方法)。
+2. **bin/reth ress 接线修复(必要范围外延)**:lib.rs/main.rs 实测零冲突侧翻
+   至纯 v2.3.0,baseline 的 `pub mod ress;` 与 `install_ress_subprotocol`
+   调用链被静默丢弃——OQ6 前提"活接线"实际已断,已修(lib.rs 补挂载、
+   main.rs 复原 baseline,调用链逐环实测)。
+3. **收口补修(2026-07-06,net/network 零冲突侧翻 7 文件,原落地清单未覆盖)**:
+   BAL 请求链同向剔除——eth_requests.rs(删 `BalProvider` 处理 impl,
+   `GetBlockAccessLists` 派发臂改回空列表应答,eth-wire 消息层原样保留)、
+   builder.rs/config.rs/testnet.rs 的 import+bounds ×7、metrics.rs 宏内
+   FastInstant→std、tests/it/requests.rs 删 BAL 测试群(8 测试 + 基建,
+   772→531 行)、tests/it/connect.rs 剥 `.with_genesis_block()`。全部
+   parse 通过、死符号归零(实测)。
+4. 越界记录:`crates/primitives/` 整目录缺失(reth_primitives 消费方:
+   bin/reth、event-bus、ress ×2)与 ress 根依赖同批,归 cargo 组
+   (总台账见 executed-block-split §九)。
