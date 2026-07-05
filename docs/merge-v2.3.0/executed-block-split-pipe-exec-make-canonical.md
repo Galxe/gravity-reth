@@ -40,7 +40,7 @@
 
 - 核实日期:2026-07-02(初版链路分析)/ 2026-07-03(代码级实施方案,六路并行
   逐冲突块核查 + 交叉裁决;同日按 `f89d9d4e23` 二次修订)/ 2026-07-05
-  (§九裁决 + 9.2/9.4 补充实测)
+  (§九裁决 + 9.2/9.4 补充实测)/ 2026-07-06(五组落地 + 收口:台账 4 项关闭、2 项定性、根因升级)
 - 分支:`gravity-reth-merge-v2.3.0`(WIP checkpoint `f89d9d4e23`)
 - 基线引用:HEAD 侧(gravity baseline)= `0cb1687c1c`;上游侧 = tag `v2.3.0`。
   对照命令:`git show 0cb1687c1c:<path>` / `git show v2.3.0:<path>`
@@ -1059,16 +1059,20 @@ workspace dep :372),**baseline 与 v2.3.0 都有此 crate**(`git ls-tree`
   决策独立锁定,不受影响。
 ### 跨组断点台账(2026-07-05 落地轮汇总;本文档范围外,逐条注明归属)
 
-| 断点 | 位置 | 归属 |
+| 断点 | 位置 | 归属 / 状态 |
 |---|---|---|
-| `Chain::new` 三参调用点(9.2 回 baseline 后必断) | 生产 3 处:`stages/execution/mod.rs:430/:560`、`exex/backfill/job.rs:152`;测试 ~10 处(exex wal/notifications、exex/types、tx-pool blobstore tracker) | stages / exex 组 |
-| RocksDB 死符号面 | cli/commands ~12 文件、stages ~7 文件、e2e-test-utils、exex/test-utils | cli / stages 组(裁决=解向 HEAD,见 node-builder 文档开放问题 1) |
-| `PersistedBlockSubscriptions` 尾款 | rpc-builder 4 处引用,冲突块 @135/@377/@850/@1071,随 49 块解向 baseline | rpc 组 |
-| `MockEthProvider::with_genesis_block` 已消失 | tx-pool maintain.rs 测试(v2.3.0 侧) | tx-pool 组(见 transaction-pool 文档) |
+| `Chain::new` 三参调用点(9.2 回 baseline 后必断) | ~~生产 3 处~~ → **stages 侧 2 处随 stages-pipeline OQ10(execution/mod.rs 整文件复原)关闭**;`exex/backfill/job.rs:152` 与测试 ~10 处中 tx-pool 侧已随其落地关闭 | exex 组余量(backfill/job.rs + exex 测试);stages 组照 OQ10 执行 |
+| RocksDB 死符号面 | ~~cli ~12 文件~~ ✅ cli 组已落地(2026-07-06);stages ~7 文件、e2e-test-utils、exex/test-utils 仍在 | stages / tests-infra / exex 组 |
+| ~~`PersistedBlockSubscriptions` 尾款~~ | ✅ rpc-builder 49 块已解,4 处随之剥离(2026-07-06 落地,实测) | 已关闭 |
+| ~~`MockEthProvider::with_genesis_block`~~ | ✅ tx-pool 12 处改写完成;net/network txgossip ×5 + connect ×1 收口剥离(2026-07-06);e2e-test-utils 若有同类归 tests-infra 组 | 基本关闭 |
 | `builder/states.rs`/`builder/mod.rs` 零冲突侧翻引死符号 | node/builder | node-builder 组(见 node-builder 文档开放问题 1 落地清单) |
 | `launch.rs` 孤儿与 `build_engine_orchestrator` | node/builder `launch/engine.rs:32` 调用点随 23 块解向 baseline 即自然断开 | node-builder 组 |
-| workspace ~20 缺 dep(阻塞一切编译证据) | root Cargo.toml | cargo 组 |
-| `SubkeyContainedValue` 定义缺失(4 文件 7 处) | primitives-traits | primitives-traits 组 |
+| workspace ~20 缺 dep(阻塞一切编译证据) | root Cargo.toml;**根因升级(2026-07-06 实测)**:`crates/primitives/` 整目录缺失(bin/reth、pipe-exec event-bus、ress ×2 依赖 `reth_primitives`),`reth-primitives-traits` 已被替换为 crates.io 0.4.1 注册表依赖(baseline path crate 仅剩残片目录)——修复 = 恢复 path crate + members + workspace dep 切回 path,连带 ress 2 members + 2 deps(net-prune 文档 OQ6) | cargo 组 |
+| `SubkeyContainedValue` 定义缺失(4 文件 7 处) | primitives-traits;根因同上行(crates.io 版无 gravity 定制) | primitives-traits 组 |
+| static-file/types「缝隙」 | **收口实测定性:非断裂,系 storage 组有意桥接**——provider writer.rs 通配臂带 gravity 注释、`tables::TransactionSenders` 存活(db-api :506)、零冲突消费方(cli get.rs / without_evm.rs)按 v2.3.0 types 编译;`ChangesetOffset*` 家族零外部消费方自包含。**types 保持 v2.3.0 不回退**;changeset 段运行时能力记 v2.4+ 债务;stages 组解块时三个新 segment variant 可用 | 已定性关闭(stages 组照此解块) |
+| `NodeConfig.gravity` 字段随 node/core 侧翻丢失 | 当前全仓无读取方不阻塞(cli 落地经 `init_gravity_config` 全局单例保全);node-builder 复原 launch 代码若引用须同步补字段 | node-builder 组 |
+| 收口修复项(2026-07-06,已关闭) | ①metrics.rs 嫁接段 state-hook 机制二次对齐 + StateChangeSource vendored;②`WithTxEnv` 字面量 `Arc::new`;③evm execute.rs hook 机制修正;④rpc-engine-api BAL 剔除;⑤net/network 零冲突侧翻 7 文件(BAL 链 + FastInstant + with_genesis_block);⑥error/mod.rs `FeeCapBelowMinimumProtocolFeeCap` struct 形态对齐;⑦debug-client `get_block_access_list_raw` 实测为 alloy-provider 外部 trait 方法,原报断点系误报 | 已关闭(详见各组文档 ⟲ 落地实录) |
+| 新增磁盘孤儿 | `rpc-eth-api/helpers/bal.rs`、cli db/{settings,state,account_storage,migrate_v2}.rs、checksum/rocksdb.rs、tx-pool 2 bench(已删) | 防误引用清单,勿再挂载 |
 
 - 外部依赖(非本文档决策,但阻塞验收/动工):cargo 组补 workspace 约 20
   个 dep(阻塞一切编译证据);primitives-traits 组恢复
