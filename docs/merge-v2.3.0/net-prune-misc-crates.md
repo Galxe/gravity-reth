@@ -4,6 +4,31 @@
 > **Upstream target**：reth `v2.3.0`。
 > **分支**: `merge-v2.3.0`。HEAD: `e6b7e5ba32`。
 
+## ⟲ 2026-07-05 现状核实(HEAD `a5e0201bd3`,f89d9d4e23 之后)
+
+> 本文写于 f89d9d4e23(storage/trie/prune 整体还原 baseline)之前。按 2026-07-05
+> 决策总原则(①storage 决策最高;②冲突迎合 storage;③不冲突且不破坏 gravity
+> 功能则保留 v2.3.0 设计)对 14 个文件逐一实测复核,结论如下表;逐文件建议的
+> 修订以「⟲」标注在对应章节,开放问题裁决见文末。cargo workspace 仍不可解析
+> (缺根 deps,cargo 组),所有验证为冲突标记/diff/符号扫描级,无编译证据。
+
+| 文件 | 冲突(实测) | 状态与建议有效性 |
+|---|---|---|
+| `prune/segments/mod.rs` | **0**(diff-vs-baseline = 0) | ✅ 已由 f89d9d4e23 整体还原落地,本文建议被"纯 baseline"取代(§见下) |
+| `prune/segments/user/history.rs` | **0**(diff = 0) | ✅ 同上,`delete_by_key`+`seek` 保留即成事实 |
+| `exex/backfill/test_utils.rs` | **0**(diff 96 行) | ✅ 零冲突侧翻至上游形态 = take-upstream 建议**已自动落地**;依赖符号全存活(实测:`LatestStateProvider::new(db)` owned 构造器 latest.rs:185、`KeccakKeyHasher` trie/common/key.rs:11、`append_blocks_with_state` 第 3 参 `HashedPostStateSorted` block_writer.rs:138-143) |
+| `stages/api/pipeline/mod.rs` | 10 | 建议**被加固**:`UnifiedStorageWriter::commit/commit_unwind` 已随还原复活(writer/mod.rs:92/:110 实测);healing 建议修订(见 OQ2 裁决) |
+| `stages/api/pipeline/builder.rs` | 1 | 建议维持有效 |
+| `stages/api/stage.rs` | 1 | 建议维持,但理由升级:上游 test mod 绑定的 `RocksDBProvider` 全仓零定义(f89d9d4e23 删除)——port **不可行**而非"延后"(见 OQ5 裁决) |
+| `net/discv4/src/lib.rs` | 10 | take-upstream 维持有效(自包含,无死符号依赖) |
+| `net/nat/src/lib.rs` | 5 | take-upstream 维持有效 |
+| `net/network/transactions/fetcher.rs` | 10 | take-upstream 维持有效(`FbBuildHasher` 由 workspace alloy 2.x 供给,根 Cargo.toml 已 v2.3.0 基线) |
+| `net/network/tests/it/txgossip.rs` | 5 | **建议部分失效**:`MockEthProvider::with_genesis_block` 全仓零定义(storage 还原反向失效,与 transaction-pool.md 核实发现同源),v2.3.0 侧 5 处调用不可采纳,解块时剥离(⟲ 见该节) |
+| `era-downloader/src/fs.rs` | 3 | take-upstream 维持有效 |
+| `era-utils/tests/it/history.rs` | 3 | take-upstream 由"建议"升级为"**必须**":HEAD 侧旧路径 `reth_era::execution_types` 已是磁盘孤儿(execution_types.rs 在盘但 lib.rs 无挂载,实测;新路径 `era1/types/execution.rs:103` 在挂载树内) |
+| `pipe-exec-layer-ext-v2/event-bus/Cargo.toml` | 3 | keep-gravity 维持有效;原 AU 幻象已物化为 3 个冲突块(HEAD=event-bus vs v2.3.0=payload-util rename 串扰),解块=整块取 HEAD |
+| `bin/reth/Cargo.toml` | 7 | mechanical-merge 主体维持,但**新增根依赖缺口**:根 Cargo.toml 无 `reth-primitives` workspace dep(实测 0 定义,即 cargo 报错点)、无 `reth-ress-*` deps/members——而 baseline 本文件 :19/:48-49 需要它们且 `bin/reth/src/ress.rs`(零冲突,gravity 侧)是活接线 → 新增开放问题 6 |
+
 ## 分组概要
 
 - **文件数：** 14（11 UU，2 AA，1 AU）
@@ -56,6 +81,12 @@
 - 跳过 `[package.metadata.deb]` 段（gravity 没有 .deb 发布渠道）。
 - 跳过 `tar` / `zstd` / `alloy-node-bindings` 新增 dev-deps（仅供 CLI 集成测试，gravity 没有对应测试场景）。
 **理由：** baseline 在此文件上完全是 v1.8.3 + gravity 接线的稳定快照（零 gravity-only commit），dep 列表分歧（保留 `reth-primitives` / 引入 `reth-evm`、`reth-ress-*`）来自更深层 gravity 模块对它们的依赖。开启上游新默认 features 需要跨文件配套，应当延后到单独的 follow-up PR。
+
+> **⟲ 2026-07-05 补充**:本建议新增**根依赖前置**——根 Cargo.toml 当前无
+> `reth-primitives` workspace dep(实测零定义,正是 cargo metadata 报错点)、
+> 无 `reth-ress-{protocol,provider}` deps/members(`7490ae4ca6` 对齐时删除,
+> 当时未查 bin/reth 引用),而 `bin/reth/src/ress.rs`(零冲突)是活接线。
+> 裁决与回滚方案见开放问题 6;默认 features 裁决见开放问题 4。
 
 ### `crates/pipe-exec-layer-ext-v2/event-bus/Cargo.toml`
 **模块：** Gravity 专属 crate `reth-pipe-exec-layer-event-bus`（在 PipeExecLayer extension 与 consensus 之间广播 `BlockProduced` / `BlockProductionRequested` 事件）。
@@ -127,6 +158,15 @@
 - 原样采纳新的 `test_tx_ingress_policy_trusted_only` 测试，包括它内部的 `U256::from(100_000_000)`（该测试不依赖 gravity base fee 流转，只测 ingress accept/reject，余额不需要覆盖 upfront cost）。
 **理由：** baseline 验证 `7d0483e565` 在 baseline 内 → gravity-marker 保留；新 ingress 测试与 `.with_genesis_block()` 是干净上游增量。解决后跑 `cargo test -p reth-network --tests txgossip` 验证。
 
+> **⟲ 2026-07-05 修订(storage 还原反向失效)**:`MockEthProvider::with_genesis_block`
+> **全仓零定义**(f89d9d4e23 把 provider test_utils 还原 baseline;与
+> transaction-pool.md 核实中 maintain.rs 的发现同源)。本文件 v2.3.0 侧 5 处
+> `.with_genesis_block()` 调用**不可采纳**——解块时按原则②剥离该调用
+> (`MockEthProvider::default()` 原样),其余建议不变(gravity 3 个旧测试保
+> `10u128.pow(18)` 余额;新 ingress 测试正常采纳,仅去掉 with_genesis_block)。
+> 若剥离后新 ingress 测试因缺 chain tip 失败,测试侧改用 baseline
+> MockEthProvider 现有 API 补 tip(落地时实测),不得反向给 provider 加方法。
+
 ### `crates/prune/prune/src/segments/mod.rs`
 **模块：** Prune segment trait + static_file pruning re-export + 测试脚手架。
 **冲突类型：** UU
@@ -153,6 +193,13 @@
   1. 在 `mod.rs` 里删除 `mod static_file;` 声明（跟随上游）
   2. 决定要不要一并 `git rm` gravity 侧遗留的 `static_file/{headers,receipts,transactions,mod}.rs` 四个文件（推荐删除，若没有其他 crate 直接 `use reth_prune::segments::static_file::*` 的话）
 - 与上面 `pub use static_file::{Headers, Receipts, Transactions}` 的删除决策捆绑：如果 mod 声明与 re-export 都删掉，需要 grep 整仓库确认无残余依赖后再落地
+
+> **⟲ f89d9d4e23 后消解(2026-07-05 实测)**:本决策项与上文 mechanical-merge
+> 建议整体**已被"纯 baseline 还原"取代**——`segments/mod.rs` 与 baseline 零
+> diff、零冲突;`mod static_file;`(:3)、`pub use static_file::{..}`(:11)、
+> `segments/static_file/` 四文件三者一致共存,无悬空。上游 import 扩展
+> (`PruneProgress` 等)随还原一并放弃,归入 storage-v2 再合并债务
+> (v2.4+,见 STORAGE-RESOLUTION-TODO)。无需任何动作。
 
 ### `crates/prune/prune/src/segments/user/history.rs`
 **模块：** Per-shard 账户 / 存储 history pruning 逻辑。
@@ -255,6 +302,14 @@ Baseline 形态：
 
 **理由：** baseline 验证 `1224ae1846` / `9acbf22633` / `3cd18422c9` / `3ee6ac039e` 全部通过 → pipeline commit 路径上 4 个 gravity-marker。`UnifiedStorageWriter` 是 gravity-storage v1 的 atomic-commit 抽象，丢掉它等于丢掉 RocksDB 写路径。`saturating_sub` 是上游 clean 改动，可吸收。`last_safe_block_number` 需要配套 storage 接口，强行合入有 chain-halt 风险。
 
+> **⟲ 2026-07-05 修订**:两处更新——①keep-gravity 主体**被 f89d9d4e23 加固**:
+> `UnifiedStorageWriter::commit/commit_unwind` 已随 writer/mod.rs 整体还原复活
+> (writer/mod.rs:92/:110 实测),上游侧 `unwind_provider_rw()` /
+> `disable_long_read_transaction_safety` / `StorageSettingsCache` 反成死符号,
+> 冲突块凡引用它们的一律按原则②取 HEAD;②`last_saved_safe_block_number`
+> healing 的"推迟"建议**撤销**,改为解块时叠加采纳——前提已全部核实成立,
+> 见开放问题 2 的裁决。
+
 ### `crates/stages/api/src/stage.rs`
 **模块：** `Stage` 与 `StageExt` trait + `ExecInput::next_block_range_with_transaction_threshold`。
 **冲突类型：** UU
@@ -268,25 +323,31 @@ Baseline 形态：
 **解决方案建议：** keep-gravity（删除上游新增的 test mod），同时记录 follow-up：合并稳定后核实 gravity-storage 的 `ProviderFactory::new` 参数顺序/类型是否与上游 5 参数签名兼容，再 port 测试模块进来。
 **理由：** baseline 验证表明此处无 gravity 测试存在，trait 主体冲突也只是上下文行扰动。上游测试依赖 storage-v2 `RocksDBProvider::builder(...)` 形态，gravity-storage v1 RocksDB provider 不一定吻合 —— 与其在合并节点冒着改测试体的风险，不如延后到独立的 port-test PR。需要在 baseline 工作树确认 `crates/storage/provider/src/test_utils.rs` 是否暴露兼容的 `ProviderFactory::new` 入口。
 
+> **⟲ 2026-07-05 修订**:"延后 port"升级为"**port 不可行**"——上游 test mod
+> 绑定的 `RocksDBProvider` 已被 f89d9d4e23 连文件删除(全仓零定义,实测),
+> 5 参 `ProviderFactory::new` 形态亦不存在。keep-gravity(删上游 test mod)
+> 从"稳妥选择"变为唯一可编译选择;follow-up 改为 v2.4+ 随 storage-v2
+> 再合并时重估。见开放问题 5 裁决。
+
 ## 组级解决 playbook
 
-1. **解决顺序**（与依赖树一致）：
-   1. `crates/stages/api/src/stage.rs` —— keep-gravity（删上游 test mod，记 follow-up）。
+1. **解决顺序**（与依赖树一致;⟲ 2026-07-05 按现状核实修订）：
+   1. `crates/stages/api/src/stage.rs` —— keep-gravity（删上游 test mod;⟲ follow-up 撤销,port 不可行,见 OQ5）。
    2. `crates/stages/api/src/pipeline/builder.rs` —— 保留泛型名 `ProviderRW`，采纳 `extend(stages)` + `reserve` + doc 修正。
-   3. `crates/stages/api/src/pipeline/mod.rs` —— 主体 keep-gravity（`UnifiedStorageWriter::commit*` + MerkleExecute 全错误重置 + `execute_duration_ms` 日志），叠加 `saturating_sub(1)`。**不要**加 `last_saved_safe_block_number` healing。
-   4. `crates/prune/prune/src/segments/mod.rs` —— 采纳上游 import + 删 `pub use static_file::*`，**保留** gravity 测试体 `insert_historical_block` + `commit_view`。`cargo check -p reth-prune --tests` 验证。
-   5. `crates/prune/prune/src/segments/user/history.rs` —— 整体 keep-gravity（`delete_by_key` + `seek` 恢复），丢 `Itertools` import。
+   3. `crates/stages/api/src/pipeline/mod.rs` —— 主体 keep-gravity（`UnifiedStorageWriter::commit*` + MerkleExecute 全错误重置 + `execute_duration_ms` 日志），叠加 `saturating_sub(1)`。⟲ **改为叠加** `last_saved_safe_block_number` healing（前提已核实,见 OQ2）;凡引用 `unwind_provider_rw`/`StorageSettingsCache` 死符号的上游侧一律取 HEAD。
+   4. ~~`crates/prune/prune/src/segments/mod.rs`~~ —— ⟲ **✅ 已由 f89d9d4e23 落地**(与 baseline 零 diff),无需动作。
+   5. ~~`crates/prune/prune/src/segments/user/history.rs`~~ —— ⟲ **✅ 已由 f89d9d4e23 落地**,同上。
    6. `crates/net/discv4/src/lib.rs` —— take-upstream。
    7. `crates/net/nat/src/lib.rs` —— take-upstream。
    8. `crates/net/network/src/transactions/fetcher.rs` —— take-upstream；交叉核对兄弟文件 `transactions/mod.rs`（其他 worker）。
-   9. `crates/net/network/tests/it/txgossip.rs` —— gravity 3 个旧测试保留 `U256::from(10u128.pow(18))` + 注释，新 ingress 测试 + `.with_genesis_block()` 全盘 take-upstream。
-   10. `crates/exex/exex/src/backfill/test_utils.rs` —— take-upstream（`NodePrimitives` / `LatestStateProvider::new(provider)` / `hashed_state`）。
+   9. `crates/net/network/tests/it/txgossip.rs` —— gravity 3 个旧测试保留 `U256::from(10u128.pow(18))` + 注释，新 ingress 测试 take-upstream;⟲ **剥离全部 5 处 `.with_genesis_block()`**(方法已死,见该节修订注)。
+   10. ~~`crates/exex/exex/src/backfill/test_utils.rs`~~ —— ⟲ **✅ 已零冲突侧翻落地**(= take-upstream 结果,符号全存活),无需动作。
    11. `crates/era-downloader/src/fs.rs` —— take-upstream。
-   12. `crates/era-utils/tests/it/history.rs` —— take-upstream，保留 gravity proxy 注释一行。
-   13. `crates/pipe-exec-layer-ext-v2/event-bus/Cargo.toml` —— keep-gravity（写回 baseline 内容，消解 AU 幻象）。
-   14. `bin/reth/Cargo.toml` —— 按本文章节做机械合并。
+   12. `crates/era-utils/tests/it/history.rs` —— take-upstream，保留 gravity proxy 注释一行;⟲ HEAD 旧 import 路径已死(execution_types 孤儿),必须切新路径。
+   13. `crates/pipe-exec-layer-ext-v2/event-bus/Cargo.toml` —— keep-gravity（3 块整块取 HEAD，消解物化的 AU 幻象）。
+   14. `bin/reth/Cargo.toml` —— 按本文章节做机械合并;⟲ **前置**:根 Cargo.toml 补 ress deps/members + `reth-primitives` 等缺失 deps(OQ6,cargo 组)。
 
-2. **批量解决后的验证命令：**
+2. **批量解决后的验证命令（⟲ 当前 cargo workspace 不可解析——缺根 deps,cargo 组修复后方可执行;此前以「冲突标记归零 + rustfmt parse + 死符号扫描」为过渡验收）：**
    ```bash
    cargo check -p reth-discv4 -p reth-net-nat -p reth-network -p reth-prune -p reth-exex
    cargo check -p reth-stages-api -p reth-era-downloader -p reth-era-utils
@@ -306,17 +367,62 @@ Baseline 形态：
 
 > **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
 
-- [ ] 1. **`BlockWriter::insert_block(&RecoveredBlock)` 在 gravity-storage 上的接口形态** —— gravity rocksdb 的 `BlockchainProvider` 是否实现了 `insert_block(&RecoveredBlock)`，并且每个 block 后会自动 flush RocksDB WriteBatch（参见 `acc458846c` (#340)）？决定 `prune/segments/mod.rs` 测试体是否可以最终切到上游 `insert_block + commit`。
-   - [ ] 冲突解决:待决策后落地;crates/prune/prune/src/segments/mod.rs 现存 6 处冲突块(2026-07-03 实测)。
+- [x] 1. **`BlockWriter::insert_block(&RecoveredBlock)` 在 gravity-storage 上的接口形态** —— gravity rocksdb 的 `BlockchainProvider` 是否实现了 `insert_block(&RecoveredBlock)`，并且每个 block 后会自动 flush RocksDB WriteBatch（参见 `acc458846c` (#340)）？决定 `prune/segments/mod.rs` 测试体是否可以最终切到上游 `insert_block + commit`。
+   → **决策(2026-07-05,决策总原则②/问题消解)**:保留 gravity 测试体
+   (`insert_historical_block` + `commit_view`)——f89d9d4e23 整体还原已使其成为
+   既成事实,"是否切上游"不再是本轮问题;上游测试体归入 storage-v2 再合并
+   债务(v2.4+)。
+   - [x] 冲突解决:`prune/segments/mod.rs` 冲突 0、与 baseline diff = 0
+     (2026-07-05 实测;编译证据待 cargo workspace 修复后回填)。
 
-- [ ] 2. **`ChainStateBlockWriter::save_safe_block_number`** —— gravity-storage `DatabaseProviderRW` 是否实现了它？以及 gravity 的 pipe-exec consensus 是否会推进 safe block？决定 `pipeline/mod.rs` 中 `last_safe_block_number` healing 是现在合还是延后。
-   - [ ] 冲突解决:待决策后落地;crates/stages/api/src/pipeline/mod.rs 现存 10 处冲突块(2026-07-03 实测)。
+- [x] 2. **`ChainStateBlockWriter::save_safe_block_number`** —— gravity-storage `DatabaseProviderRW` 是否实现了它？以及 gravity 的 pipe-exec consensus 是否会推进 safe block？决定 `pipeline/mod.rs` 中 `last_safe_block_number` healing 是现在合还是延后。
+   → **决策(2026-07-05,决策总原则③)**:两个前提实测均成立——trait 定义
+   `storage-api/src/block.rs:393` + 还原后 provider impl
+   `database/provider.rs:3215`;gravity 生产路径确实推进 safe block
+   (engine `persistence.rs:236` 融合版 on_save_blocks 持久化
+   safe/finalized)。→ healing **现在合**:解 `pipeline/mod.rs` 10 块时在
+   keep-gravity 主体(UnifiedStorageWriter 路径)上叠加采纳,纯增量、无冲突。
+   - [ ] 冲突解决:待落地;`stages/api/src/pipeline/mod.rs` 现存 10 处冲突块
+     (2026-07-05 实测)。
 
-- [ ] 3. **`reth-payload-util` workspace 归属** —— 上游新增 crate `crates/payload/util` 与 gravity 的 `crates/pipe-exec-layer-ext-v2/event-bus` 必须以不同名（`reth-payload-util` vs `reth-pipe-exec-layer-event-bus`）在同一 workspace 共存。需要核查解决后的根 `Cargo.toml` workspace members 两者都在列。
-   - [ ] 冲突解决:核实通过、待拍板后勾选:实测根 Cargo.toml members 已同时含 crates/payload/util 与 crates/pipe-exec-layer-ext-v2/event-bus,且根 Cargo.toml 无冲突标记(2026-07-03 实测)。
+- [x] 3. **`reth-payload-util` workspace 归属** —— 上游新增 crate `crates/payload/util` 与 gravity 的 `crates/pipe-exec-layer-ext-v2/event-bus` 必须以不同名（`reth-payload-util` vs `reth-pipe-exec-layer-event-bus`）在同一 workspace 共存。需要核查解决后的根 `Cargo.toml` workspace members 两者都在列。
+   → **决策(2026-07-05,核实即裁决)**:双名共存成立——根 Cargo.toml members
+   同时含 `crates/payload/util/`(:127)与
+   `crates/pipe-exec-layer-ext-v2/event-bus`(:201),workspace deps 两条均在
+   (:448/:485,实测)。event-bus Cargo.toml 的 AU 幻象已物化为 3 个冲突块
+   (HEAD=event-bus vs v2.3.0=payload-util rename 串扰),解块=整块取 HEAD。
+   - [ ] 冲突解决:待落地;`pipe-exec-layer-ext-v2/event-bus/Cargo.toml` 现存
+     3 处冲突块(2026-07-05 实测)。
 
-- [ ] 4. **`bin/reth/Cargo.toml` 默认 features** —— 开启 `otlp` / `js-tracer` / `keccak-cache-global` / `min-trace-logs` 会传递性要求 `reth-node-core/<feature>` 声明。需要等 `crates/node/core/Cargo.toml` worker 给出结论后再决定本次合并是否一并开启。
-   - [ ] 冲突解决:待 crates/node/core/Cargo.toml 结论后落地;bin/reth/Cargo.toml 现存 7 处、node/core/Cargo.toml 仍在冲突清单(2026-07-03 实测)。
+- [x] 4. **`bin/reth/Cargo.toml` 默认 features** —— 开启 `otlp` / `js-tracer` / `keccak-cache-global` / `min-trace-logs` 会传递性要求 `reth-node-core/<feature>` 声明。需要等 `crates/node/core/Cargo.toml` worker 给出结论后再决定本次合并是否一并开启。
+   → **决策(2026-07-05,决策总原则 + 最小风险)**:本轮默认 features 维持
+   baseline(`["jemalloc", "reth-revm/portable"]`),上游新默认 features 全部
+   推迟 follow-up(与 rpc-eth-and-debug.md OQ4 failpoints 同模式)——
+   node/core/Cargo.toml 未解、且传递接线属跨组;v2.4+ 或独立 PR 再评估开启。
+   - [ ] 冲突解决:待落地;bin/reth/Cargo.toml 现存 7 处冲突块(2026-07-05
+     实测);另有根依赖缺口前置,见问题 6。
 
-- [ ] 5. **stages/api `Stage` test module 的 port 可行性** —— gravity-storage 是否暴露与上游 5 参数 `ProviderFactory::new(rw_db, chain_spec, static_file_provider, rocksdb_provider, runtime)` 兼容的构造器？决定 follow-up port PR 的工作量。
-   - [ ] 冲突解决:待核实后落地;crates/stages/api/src/stage.rs 现存 1 处冲突块(2026-07-03 实测)。
+- [x] 5. **stages/api `Stage` test module 的 port 可行性** —— gravity-storage 是否暴露与上游 5 参数 `ProviderFactory::new(rw_db, chain_spec, static_file_provider, rocksdb_provider, runtime)` 兼容的构造器？决定 follow-up port PR 的工作量。
+   → **决策(2026-07-05,决策总原则②)**:port **不可行**——上游 test mod
+   绑定的 `RocksDBProvider` 已被 f89d9d4e23 连文件删除(全仓零定义,实测),
+   5 参构造器形态不存在。keep-gravity(删上游 test mod);follow-up 撤销,
+   改为 v2.4+ 随 storage-v2 再合并时重估。
+   - [ ] 冲突解决:待落地;`stages/api/src/stage.rs` 现存 1 处冲突块
+     (2026-07-05 实测)。
+
+- [x] 6. **(新增)`bin/reth` 的 ress 接线 vs 根 Cargo.toml 对齐决议** ——
+   `7490ae4ca6` 按 v2.3.0 基线对齐根 Cargo.toml 时删除了 `crates/ress/*`
+   members 与 `reth-ress-{protocol,provider}` 两条 workspace deps(当时判定
+   依据是"上游已删",未查 bin/reth 引用);但实测 `bin/reth/src/ress.rs`
+   (零冲突、gravity 侧)是**活的生产接线**(`install_ress_subprotocol`),
+   baseline `bin/reth/Cargo.toml:48-49` 依赖这两条 deps,且 ress crates 文件
+   全在盘、已是 gravity EBWT 形态(executed-block-split 文档核实)。
+   → **决策(2026-07-05,决策总原则"不破坏 gravity 原有功能"硬条款)**:
+   恢复根 Cargo.toml 的 ress members + 2 条 workspace deps = **部分回滚
+   `7490ae4ca6` 的 ress 条目**(与 executed-block-split §9.1 回滚 option C
+   同模式:「上游已删且无引用」前提在 bin/reth 处不成立,属当时核查遗漏)。
+   连带:根 Cargo.toml 缺 `reth-primitives` workspace dep(实测零定义,即
+   当前 cargo metadata 报错点)同属 cargo 组的根依赖修复批次。
+   - [ ] 冲突解决:待 cargo 组落地根 Cargo.toml(ress 2 members + 2 deps +
+     reth-primitives 等 ~20 缺失 deps);随后 bin/reth/Cargo.toml 7 块按本文
+     建议解块。
