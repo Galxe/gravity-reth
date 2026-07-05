@@ -24,6 +24,11 @@ reth-execution-types.workspace = true
 reth-fs-util.workspace = true
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
+
+# gravity
+gravity-primitives.workspace = true
+reth-pipe-exec-layer-event-bus.workspace = true
+
 revm.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
@@ -78,6 +83,7 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 futures.workspace = true
 
 [features]
+config-from-env = ["gravity-primitives/config-from-env"]
 serde = [
     "reth-execution-types/serde",
     "reth-eth-wire-types/serde",

@@ -24,8 +24,6 @@ use crate::{
 use alloy_consensus::constants::{
     EIP1559_TX_TYPE_ID, EIP2930_TX_TYPE_ID, EIP4844_TX_TYPE_ID, EIP7702_TX_TYPE_ID, KECCAK_EMPTY,
     LEGACY_TX_TYPE_ID,
-<<<<<<< HEAD
-=======
 };
 use alloy_eips::{
     eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE},
@@ -37,14 +35,7 @@ use alloy_primitives::Address;
 use alloy_primitives::{
     map::{AddressSet, B256Map, B256Set},
     TxHash, B256,
->>>>>>> v2.3.0
 };
-use alloy_eips::{
-    eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE},
-    eip4844::BLOB_TX_MIN_BLOB_GASPRICE,
-    Typed2718,
-};
-use alloy_primitives::{Address, TxHash, B256};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 #[cfg(test)]
@@ -130,8 +121,6 @@ pub struct TxPool<T: TransactionOrdering> {
     all_transactions: AllTransactions<T::Transaction>,
     /// Transaction pool metrics
     metrics: TxPoolMetrics,
-    /// The last update kind that was applied to the pool.
-    latest_update_kind: Option<PoolUpdateKind>,
 }
 
 // === impl TxPool ===
@@ -140,10 +129,6 @@ impl<T: TransactionOrdering> TxPool<T> {
     /// Create a new graph pool instance.
     pub fn new(ordering: T, config: PoolConfig) -> Self {
         Self {
-<<<<<<< HEAD
-            sender_info: Default::default(),
-=======
->>>>>>> v2.3.0
             pending_pool: PendingPool::with_buffer(
                 ordering,
                 config.max_new_pending_txs_notifications,
@@ -154,7 +139,6 @@ impl<T: TransactionOrdering> TxPool<T> {
             all_transactions: AllTransactions::new(&config),
             config,
             metrics: Default::default(),
-            latest_update_kind: None,
         }
     }
 
@@ -185,11 +169,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         let mut last_consecutive_tx = None;
 
         // ensure this operates on the most recent
-<<<<<<< HEAD
-        if let Some(current) = self.sender_info.get(&on_chain.sender) {
-=======
         if let Some(current) = self.all_transactions.sender_info.get(&on_chain.sender) {
->>>>>>> v2.3.0
             on_chain.nonce = on_chain.nonce.max(current.state_nonce);
         }
 
@@ -376,17 +356,6 @@ impl<T: TransactionOrdering> TxPool<T> {
 
     /// Sets the current block info for the pool.
     ///
-<<<<<<< HEAD
-    /// This will also apply updates to the pool based on the new base fee and blob fee
-    pub fn set_block_info(&mut self, info: BlockInfo) {
-        // first update the subpools based on the new values
-        let basefee_ordering = self.update_basefee(info.pending_basefee, |_| {});
-        if let Some(blob_fee) = info.pending_blob_fee {
-            self.update_blob_fee(blob_fee, basefee_ordering, |_| {})
-        }
-        // then update tracked values
-        self.all_transactions.set_block_info(info);
-=======
     /// This will also apply updates to the pool based on the new base fee and blob fee.
     ///
     /// Returns the outcome containing any transactions that were promoted due to fee changes.
@@ -406,7 +375,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         self.all_transactions.set_block_info(info);
 
         outcome
->>>>>>> v2.3.0
     }
 
     /// Returns an iterator that yields transactions that are ready to be included in the block with
@@ -527,11 +495,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         &self,
         sender: SenderId,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
-<<<<<<< HEAD
-        self.pending_transactions_iter().filter(|tx| tx.sender_id() == sender).collect()
-=======
         self.pending_pool.txs_by_sender(sender)
->>>>>>> v2.3.0
     }
 
     /// Returns all transactions from parked pools
@@ -539,16 +503,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         self.basefee_pool.all().chain(self.queued_pool.all()).collect()
     }
 
-<<<<<<< HEAD
-    /// Returns an iterator over all transactions from parked pools
-    pub(crate) fn queued_transactions_iter(
-        &self,
-    ) -> impl Iterator<Item = Arc<ValidPoolTransaction<T::Transaction>>> + '_ {
-        self.basefee_pool.all().chain(self.queued_pool.all())
-    }
-
-=======
->>>>>>> v2.3.0
     /// Returns the number of transactions in parked pools
     pub(crate) fn queued_transactions_count(&self) -> usize {
         self.basefee_pool.len() + self.queued_pool.len()
@@ -567,13 +521,9 @@ impl<T: TransactionOrdering> TxPool<T> {
         &self,
         sender: SenderId,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
-<<<<<<< HEAD
-        self.queued_transactions_iter().filter(|tx| tx.sender_id() == sender).collect()
-=======
         let mut txs = self.basefee_pool.txs_by_sender(sender);
         txs.extend(self.queued_pool.txs_by_sender(sender));
         txs
->>>>>>> v2.3.0
     }
 
     /// Returns `true` if the transaction with the given hash is already included in this pool.
@@ -622,8 +572,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         self.all_transactions.txs_iter(sender).map(|(_, tx)| Arc::clone(&tx.transaction)).collect()
     }
 
-<<<<<<< HEAD
-=======
     /// Returns a pending transaction sent by the given sender with the given nonce.
     pub(crate) fn get_pending_transaction_by_sender_and_nonce(
         &self,
@@ -636,7 +584,6 @@ impl<T: TransactionOrdering> TxPool<T> {
             .map(|(_, tx)| Arc::clone(&tx.transaction))
     }
 
->>>>>>> v2.3.0
     /// Updates only the pending fees without triggering subpool updates.
     /// Returns the previous base fee and blob fee values.
     const fn update_pending_fees_only(
@@ -699,11 +646,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         let updates = self.all_transactions.update(&changed_senders);
 
         // track changed accounts
-<<<<<<< HEAD
-        self.sender_info.extend(changed_senders);
-=======
         self.all_transactions.sender_info.extend(changed_senders);
->>>>>>> v2.3.0
 
         // Process the sub-pool updates
         let update = self.process_updates(updates);
@@ -721,11 +664,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         block_info: BlockInfo,
         mined_transactions: Vec<TxHash>,
         changed_senders: FxHashMap<SenderId, SenderInfo>,
-<<<<<<< HEAD
-        update_kind: PoolUpdateKind,
-=======
         _update_kind: PoolUpdateKind,
->>>>>>> v2.3.0
     ) -> OnNewCanonicalStateOutcome<T::Transaction> {
         // update block info
         let block_hash = block_info.last_seen_block_hash;
@@ -761,12 +700,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         self.update_transaction_type_metrics();
         self.metrics.performed_state_updates.increment(1);
 
-<<<<<<< HEAD
-        // Update the latest update kind
-        self.latest_update_kind = Some(update_kind);
-
-=======
->>>>>>> v2.3.0
         OnNewCanonicalStateOutcome {
             block_hash,
             mined: mined_transactions,
@@ -796,10 +729,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         let mut eip1559_count = 0;
         let mut eip4844_count = 0;
         let mut eip7702_count = 0;
-<<<<<<< HEAD
-=======
         let mut other_count = 0;
->>>>>>> v2.3.0
 
         for tx in self.all_transactions.transactions_iter() {
             match tx.transaction.ty() {
@@ -808,11 +738,7 @@ impl<T: TransactionOrdering> TxPool<T> {
                 EIP1559_TX_TYPE_ID => eip1559_count += 1,
                 EIP4844_TX_TYPE_ID => eip4844_count += 1,
                 EIP7702_TX_TYPE_ID => eip7702_count += 1,
-<<<<<<< HEAD
-                _ => {} // Ignore other types
-=======
                 _ => other_count += 1,
->>>>>>> v2.3.0
             }
         }
 
@@ -821,10 +747,7 @@ impl<T: TransactionOrdering> TxPool<T> {
         self.metrics.total_eip1559_transactions.set(eip1559_count as f64);
         self.metrics.total_eip4844_transactions.set(eip4844_count as f64);
         self.metrics.total_eip7702_transactions.set(eip7702_count as f64);
-<<<<<<< HEAD
-=======
         self.metrics.total_other_transactions.set(other_count as f64);
->>>>>>> v2.3.0
     }
 
     pub(crate) fn add_transaction(
@@ -848,12 +771,6 @@ impl<T: TransactionOrdering> TxPool<T> {
             .update(on_chain_nonce, on_chain_balance);
 
         match self.all_transactions.insert_tx(tx, on_chain_balance, on_chain_nonce) {
-<<<<<<< HEAD
-            Ok(InsertOk { transaction, move_to, replaced_tx, updates, state }) => {
-                // replace the new tx and remove the replaced in the subpool(s)
-                self.add_new_transaction(transaction.clone(), replaced_tx.clone(), move_to);
-                // Update inserted transactions metric
-=======
             Ok(InsertOk { transaction, move_to, replaced_tx, mut updates, state }) => {
                 // Interleave update processing and new-tx insertion so that live
                 // `BestTransactions` iterators always receive transactions in nonce order.
@@ -888,7 +805,6 @@ impl<T: TransactionOrdering> TxPool<T> {
                         (outcome.promoted, outcome.discarded)
                     }
                 };
->>>>>>> v2.3.0
                 self.metrics.inserted_transactions.increment(1);
 
                 let replaced = replaced_tx.map(|(tx, _)| tx);
@@ -1043,13 +959,8 @@ impl<T: TransactionOrdering> TxPool<T> {
     ///    of the standard limit. This is due to the possibility of the account being sweeped by an
     ///    unrelated account.
     /// 2. In case the pool is tracking a pending / queued transaction from a specific account, at
-<<<<<<< HEAD
-    ///    most one in-flight transaction is allowed; any additional delegated transactions from
-    ///    that account will be rejected.
-=======
     ///    most the configured inflight delegation slot limit of in-flight transactions is allowed;
     ///    any additional delegated transactions from that account will be rejected.
->>>>>>> v2.3.0
     fn validate_auth(
         &self,
         transaction: &ValidPoolTransaction<T::Transaction>,
@@ -1061,10 +972,6 @@ impl<T: TransactionOrdering> TxPool<T> {
 
         if let Some(authority_list) = &transaction.authority_ids {
             for sender_id in authority_list {
-<<<<<<< HEAD
-                // Ensure authority has at most 1 inflight transaction.
-                if self.all_transactions.txs_iter(*sender_id).nth(1).is_some() {
-=======
                 // Ensure authority does not exceed the configured inflight delegation slot limit.
                 if self
                     .all_transactions
@@ -1072,7 +979,6 @@ impl<T: TransactionOrdering> TxPool<T> {
                     .nth(self.config.max_inflight_delegated_slot_limit)
                     .is_some()
                 {
->>>>>>> v2.3.0
                     return Err(PoolError::new(
                         *transaction.hash(),
                         PoolErrorKind::InvalidTransaction(InvalidPoolTransactionError::Eip7702(
@@ -1091,10 +997,7 @@ impl<T: TransactionOrdering> TxPool<T> {
     /// This will move/discard the given transaction according to the `PoolUpdate`
     fn process_updates(&mut self, updates: Vec<PoolUpdate>) -> UpdateOutcome<T::Transaction> {
         let mut outcome = UpdateOutcome::default();
-<<<<<<< HEAD
-=======
         let mut removed = 0;
->>>>>>> v2.3.0
         for PoolUpdate { id, current, destination } in updates {
             match destination {
                 Destination::Discard => {
@@ -1117,13 +1020,10 @@ impl<T: TransactionOrdering> TxPool<T> {
             }
         }
 
-<<<<<<< HEAD
-=======
         if removed > 0 {
             self.metrics.removed_transactions.increment(removed);
         }
 
->>>>>>> v2.3.0
         outcome
     }
 
@@ -1188,8 +1088,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         removed
     }
 
-<<<<<<< HEAD
-=======
     /// Prunes and returns all matching transactions from the pool.
     ///
     /// This uses [`Self::prune_transaction_by_hash`] which does **not** park descendant
@@ -1205,7 +1103,6 @@ impl<T: TransactionOrdering> TxPool<T> {
         txs
     }
 
->>>>>>> v2.3.0
     /// Remove the transaction from the __entire__ pool.
     ///
     /// This includes the total set of transaction and the subpool it currently resides in.
@@ -1521,11 +1418,7 @@ pub(crate) struct AllTransactions<T: PoolTransaction> {
     /// How to handle [`TransactionOrigin::Local`](crate::TransactionOrigin) transactions.
     local_transactions_config: LocalTransactionConfig,
     /// All accounts with a pooled authorization
-<<<<<<< HEAD
-    auths: FxHashMap<SenderId, HashSet<TxHash>>,
-=======
     auths: FxHashMap<SenderId, B256Set>,
->>>>>>> v2.3.0
     /// All Transactions metrics
     metrics: AllTransactionsMetrics,
 }
@@ -2295,11 +2188,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn assert_invariants(&self) {
         assert_eq!(self.by_hash.len(), self.txs.len(), "by_hash.len() != txs.len()");
-<<<<<<< HEAD
-        assert!(self.auths.len() <= self.txs.len(), "auths > txs.len()");
-=======
         assert!(self.auths.len() <= self.txs.len(), "auths.len() > txs.len()");
->>>>>>> v2.3.0
     }
 }
 
@@ -3837,11 +3726,7 @@ mod tests {
         // update the tracked nonce
         let mut info = SenderInfo::default();
         info.update(8, U256::ZERO);
-<<<<<<< HEAD
-        pool.sender_info.insert(sender_id, info);
-=======
         pool.all_transactions.sender_info.insert(sender_id, info);
->>>>>>> v2.3.0
         let next_tx =
             pool.get_highest_consecutive_transaction_by_sender(sender_id.into_transaction_id(5));
         assert_eq!(next_tx.map(|tx| tx.nonce()), Some(9), "Expected nonce 9 for on-chain nonce 8");
@@ -4752,8 +4637,6 @@ mod tests {
             "Non-4844 tx should gain ENOUGH_FEE_CAP_BLOCK bit after basefee decrease"
         );
     }
-<<<<<<< HEAD
-=======
 
     /// Test for <https://github.com/paradigmxyz/reth/issues/17701>
     ///
@@ -4910,5 +4793,4 @@ mod tests {
         assert_eq!(t2.id().nonce, 2, "expected nonce 2, got {}", t2.id().nonce);
         assert_eq!(t3.id().nonce, 3, "expected nonce 3, got {}", t3.id().nonce);
     }
->>>>>>> v2.3.0
 }

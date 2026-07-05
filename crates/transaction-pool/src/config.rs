@@ -5,13 +5,8 @@ use crate::{
 };
 use alloy_consensus::constants::EIP4844_TX_TYPE_ID;
 use alloy_eips::eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE};
-<<<<<<< HEAD
-use alloy_primitives::Address;
-use std::{collections::HashSet, ops::Mul, time::Duration};
-=======
 use alloy_primitives::{map::AddressSet, Address};
 use std::{ops::Mul, time::Duration};
->>>>>>> v2.3.0
 
 /// Guarantees max transactions for one sender, compatible with geth/erigon
 pub const TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER: usize = 16;
@@ -179,15 +174,6 @@ impl Mul<usize> for SubPoolLimit {
     }
 }
 
-impl Mul<usize> for SubPoolLimit {
-    type Output = Self;
-
-    fn mul(self, rhs: usize) -> Self::Output {
-        let Self { max_txs, max_size } = self;
-        Self { max_txs: max_txs * rhs, max_size: max_size * rhs }
-    }
-}
-
 impl Default for SubPoolLimit {
     fn default() -> Self {
         // either 10k transactions or 20MB
@@ -239,11 +225,7 @@ pub struct LocalTransactionConfig {
     ///   - no eviction exemptions
     pub no_exemptions: bool,
     /// Addresses that will be considered as local. Above exemptions apply.
-<<<<<<< HEAD
-    pub local_addresses: HashSet<Address>,
-=======
     pub local_addresses: AddressSet,
->>>>>>> v2.3.0
     /// Flag indicating whether local transactions should be propagated.
     pub propagate_local_transactions: bool,
 }
@@ -351,11 +333,7 @@ mod tests {
     #[test]
     fn test_contains_local_address() {
         let address = Address::new([1; 20]);
-<<<<<<< HEAD
-        let mut local_addresses = HashSet::default();
-=======
         let mut local_addresses = AddressSet::default();
->>>>>>> v2.3.0
         local_addresses.insert(address);
 
         let config = LocalTransactionConfig { local_addresses, ..Default::default() };
@@ -372,11 +350,7 @@ mod tests {
         let address = Address::new([1; 20]);
         let config = LocalTransactionConfig {
             no_exemptions: true,
-<<<<<<< HEAD
-            local_addresses: HashSet::default(),
-=======
             local_addresses: AddressSet::default(),
->>>>>>> v2.3.0
             ..Default::default()
         };
 
@@ -387,11 +361,7 @@ mod tests {
     #[test]
     fn test_is_local_without_no_exemptions() {
         let address = Address::new([1; 20]);
-<<<<<<< HEAD
-        let mut local_addresses = HashSet::default();
-=======
         let mut local_addresses = AddressSet::default();
->>>>>>> v2.3.0
         local_addresses.insert(address);
 
         let config =

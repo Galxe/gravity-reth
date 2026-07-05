@@ -5,14 +5,6 @@ use crate::{
     PoolTransaction, Priority, TransactionOrdering, ValidPoolTransaction,
 };
 use alloy_consensus::Transaction;
-<<<<<<< HEAD
-use alloy_eips::Typed2718;
-use alloy_primitives::Address;
-use core::fmt;
-use reth_primitives_traits::transaction::error::InvalidTransactionError;
-use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
-=======
 use alloy_primitives::map::AddressSet;
 use core::fmt;
 use imbl::OrdMap;
@@ -20,18 +12,15 @@ use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use rustc_hash::FxHashSet;
 use std::{
     collections::{BTreeSet, VecDeque},
->>>>>>> v2.3.0
     sync::Arc,
 };
 use tokio::sync::broadcast::{error::TryRecvError, Receiver};
 use tracing::debug;
 
-<<<<<<< HEAD
+// gravity: 1024 (upstream: 16) — sized for pipe-exec batch-insert which feeds
+// hundreds of txs per round; see merge-v2.3.0 transaction-pool.md open question 3.
 const MAX_NEW_TRANSACTIONS_PER_BATCH: usize = 1024;
-=======
-const MAX_NEW_TRANSACTIONS_PER_BATCH: usize = 16;
 
->>>>>>> v2.3.0
 /// An iterator that returns transactions that can be executed on the current state (*best*
 /// transactions).
 ///
@@ -111,11 +100,7 @@ pub struct BestTransactions<T: TransactionOrdering> {
     /// then can be moved from the `all` set to the `independent` set.
     pub(crate) independent: BTreeSet<PendingTransaction<T>>,
     /// There might be the case where a yielded transactions is invalid, this will track it.
-<<<<<<< HEAD
-    pub(crate) invalid: HashSet<SenderId>,
-=======
     pub(crate) invalid: FxHashSet<SenderId>,
->>>>>>> v2.3.0
     /// Used to receive any new pending transactions that have been added to the pool after this
     /// iterator was static filtered
     ///
@@ -124,22 +109,14 @@ pub struct BestTransactions<T: TransactionOrdering> {
     pub(crate) new_transaction_receiver: Option<Receiver<PendingTransaction<T>>>,
     /// The priority value of most recently yielded transaction.
     ///
-<<<<<<< HEAD
-    /// This is required if we new pending transactions are fed in while it yields new values.
-=======
     /// This is required if new pending transactions are fed in while it yields new values.
->>>>>>> v2.3.0
     pub(crate) last_priority: Option<Priority<T::PriorityValue>>,
     /// Flag to control whether to skip blob transactions (EIP4844).
     pub(crate) skip_blobs: bool,
 }
 
 impl<T: TransactionOrdering> BestTransactions<T> {
-<<<<<<< HEAD
-    /// Mark the transaction and it's descendants as invalid.
-=======
     /// Mark the transaction and its descendants as invalid.
->>>>>>> v2.3.0
     pub(crate) fn mark_invalid(
         &mut self,
         tx: &Arc<ValidPoolTransaction<T::Transaction>>,
@@ -217,8 +194,6 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                 }
             } else {
                 break;
-<<<<<<< HEAD
-=======
             }
         }
     }
@@ -263,7 +238,6 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                     self.last_priority = Some(best.priority.clone())
                 }
                 return Some((best.transaction, best.priority))
->>>>>>> v2.3.0
             }
         }
     }
@@ -319,51 +293,11 @@ impl<T: TransactionOrdering> Iterator for BestTransactions<T> {
     type Item = Arc<ValidPoolTransaction<T::Transaction>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-<<<<<<< HEAD
-        loop {
-            self.add_new_transactions();
-            // Remove the next independent tx with the highest priority
-            let best = self.pop_best()?;
-            let sender_id = best.transaction.sender_id();
-
-            // skip transactions for which sender was marked as invalid
-            if self.invalid.contains(&sender_id) {
-                debug!(
-                    target: "txpool",
-                    "[{:?}] skipping invalid transaction",
-                    best.transaction.hash()
-                );
-                continue
-            }
-
-            // Insert transactions that just got unlocked.
-            if let Some(unlocked) = self.all.get(&best.unlocks()) {
-                self.independent.insert(unlocked.clone());
-            }
-
-            if self.skip_blobs && best.transaction.transaction.is_eip4844() {
-                // blobs should be skipped, marking them as invalid will ensure that no dependent
-                // transactions are returned
-                self.mark_invalid(
-                    &best.transaction,
-                    InvalidPoolTransactionError::Eip4844(
-                        Eip4844PoolTransactionError::NoEip4844Blobs,
-                    ),
-                )
-            } else {
-                if self.new_transaction_receiver.is_some() {
-                    self.last_priority = Some(best.priority.clone())
-                }
-                return Some(best.transaction)
-            }
-        }
-=======
         self.next_tx_and_priority().map(|(tx, _)| tx)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, self.new_transaction_receiver.is_none().then_some(self.all.len()))
->>>>>>> v2.3.0
     }
 }
 
@@ -445,11 +379,7 @@ pub struct BestTransactionsWithPrioritizedSenders<I: Iterator> {
     /// Inner iterator
     inner: I,
     /// A set of senders which transactions should be prioritized
-<<<<<<< HEAD
-    prioritized_senders: HashSet<Address>,
-=======
     prioritized_senders: AddressSet,
->>>>>>> v2.3.0
     /// Maximum total gas limit of prioritized transactions
     max_prioritized_gas: u64,
     /// Buffer with transactions that are not being prioritized. Those will be the first to be
@@ -462,11 +392,7 @@ pub struct BestTransactionsWithPrioritizedSenders<I: Iterator> {
 
 impl<I: Iterator> BestTransactionsWithPrioritizedSenders<I> {
     /// Constructs a new [`BestTransactionsWithPrioritizedSenders`].
-<<<<<<< HEAD
-    pub fn new(prioritized_senders: HashSet<Address>, max_prioritized_gas: u64, inner: I) -> Self {
-=======
     pub fn new(prioritized_senders: AddressSet, max_prioritized_gas: u64, inner: I) -> Self {
->>>>>>> v2.3.0
         Self {
             inner,
             prioritized_senders,
@@ -505,8 +431,6 @@ where
             self.inner.next()
         }
     }
-<<<<<<< HEAD
-=======
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let buffered = self.buffer.len();
@@ -517,7 +441,6 @@ where
             inner_upper.and_then(|upper| upper.checked_add(buffered)),
         )
     }
->>>>>>> v2.3.0
 }
 
 impl<I, T> crate::traits::BestTransactions for BestTransactionsWithPrioritizedSenders<I>
@@ -1043,11 +966,7 @@ mod tests {
         pool.add_transaction(Arc::new(valid_prioritized_tx2), 0);
 
         let prioritized_senders =
-<<<<<<< HEAD
-            HashSet::from([prioritized_tx.sender(), prioritized_tx2.sender()]);
-=======
             AddressSet::from_iter([prioritized_tx.sender(), prioritized_tx2.sender()]);
->>>>>>> v2.3.0
         let best =
             BestTransactionsWithPrioritizedSenders::new(prioritized_senders, 200, pool.best());
 
@@ -1061,11 +980,7 @@ mod tests {
             assert_eq!(iter.next().unwrap().max_fee_per_gas(), (gas_price + 1) * 10);
         }
 
-<<<<<<< HEAD
-        // Due to the gas limit, the transaction from second prioritized sender was not
-=======
         // Due to the gas limit, the transaction from second-prioritized sender was not
->>>>>>> v2.3.0
         // prioritized.
         let top_of_block_tx2 = iter.next().unwrap();
         assert_eq!(top_of_block_tx2.max_fee_per_gas(), 3);
@@ -1237,8 +1152,6 @@ mod tests {
             assert_ne!(tx.sender_id(), valid_new_higher_fee_tx.sender_id());
         }
     }
-<<<<<<< HEAD
-=======
 
     /// Reproduces the "Blob Transaction Ordering, Multiple Clients" Hive scenario.
     ///
@@ -1311,5 +1224,4 @@ mod tests {
         );
         assert_eq!(included_txs, 2, "expected one 5-blob tx and one 1-blob tx in the block");
     }
->>>>>>> v2.3.0
 }
