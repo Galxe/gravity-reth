@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-use alloy_primitives::{bytes::BufMut, keccak256, B256};
-=======
 use alloy_primitives::{b256, bytes::BufMut, keccak256, Address, B256};
->>>>>>> v2.3.0
 use itertools::Itertools;
 use reth_config::config::{EtlConfig, HashingConfig};
 use reth_db_api::{
@@ -16,10 +12,9 @@ use reth_etl::Collector;
 use reth_primitives_traits::StorageEntry;
 use reth_provider::{DBProvider, HashingWriter, StatsReader, StorageReader};
 use reth_stages_api::{
-    BlockRangeOutput, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
-    StageError, StageId, StorageHashingCheckpoint, UnwindInput, UnwindOutput,
+    BlockRangeOutput, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError,
+    StageId, StorageHashingCheckpoint, UnwindInput, UnwindOutput,
 };
-use reth_storage_api::StorageSettingsCache;
 use reth_storage_errors::provider::ProviderResult;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -79,11 +74,7 @@ impl Default for StorageHashingStage {
 
 impl<Provider> Stage<Provider> for StorageHashingStage
 where
-    Provider: DBProvider<Tx: DbTxMut>
-        + StorageReader
-        + HashingWriter
-        + StatsReader
-        + StorageSettingsCache,
+    Provider: DBProvider<Tx: DbTxMut> + StorageReader + HashingWriter + StatsReader,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -95,12 +86,6 @@ where
         let tx = provider.tx_ref();
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
-        }
-
-        // If use_hashed_state is enabled, execution writes directly to `HashedStorages`,
-        // so this stage becomes a no-op.
-        if provider.cached_storage_settings().use_hashed_state() {
-            return Ok(ExecOutput::done(input.checkpoint().with_block_number(input.target())));
         }
 
         // Use the total remaining range to decide clean vs incremental.
@@ -232,19 +217,10 @@ where
         provider: &Provider,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
-        // NOTE: this runs in both v1 and v2 mode. In v2 mode, execution writes
-        // directly to `HashedStorages`, but the unwind must still revert those
-        // entries here because `MerkleUnwind` runs after this stage (in unwind
-        // order) and needs `HashedStorages` to reflect the target block state
-        // before it can verify the state root.
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
-<<<<<<< HEAD
         provider.unwind_storage_hashing_range(BlockNumberAddress::range(range))?;
-=======
-        provider.unwind_storage_hashing_range(range)?;
->>>>>>> v2.3.0
 
         let mut stage_checkpoint =
             input.checkpoint.storage_hashing_stage_checkpoint().unwrap_or_default();
@@ -341,7 +317,7 @@ mod tests {
                         },
                         ..
                     }) if processed == previous_checkpoint.progress.processed + 1 &&
-                        total == runner.db.count_entries::<tables::PlainStorageState>().unwrap() as u64);
+                        total == runner.db.table::<tables::PlainStorageState>().unwrap().len() as u64);
 
                     // Continue from checkpoint
                     input.checkpoint = Some(checkpoint);
@@ -356,14 +332,8 @@ mod tests {
                     Some(StorageHashingCheckpoint {
                         progress: EntitiesCheckpoint { processed: _, total: _ },
                         ..
-<<<<<<< HEAD
                     })
                 );
-=======
-                    }) if processed == total &&
-                        total == runner.db.count_entries::<tables::PlainStorageState>().unwrap() as u64);
-
->>>>>>> v2.3.0
                 // Validate the stage execution
                 assert!(
                     runner.validate_execution(input, Some(result)).is_ok(),
@@ -431,10 +401,7 @@ mod tests {
             );
 
             self.db.insert_headers(blocks.iter().map(|block| block.sealed_header()))?;
-<<<<<<< HEAD
-=======
             let mut tx_hash_numbers = Vec::new();
->>>>>>> v2.3.0
 
             let iter = blocks.iter();
             let mut next_tx_num = 0;
@@ -445,14 +412,7 @@ mod tests {
                 self.db.commit(|tx| {
                     progress.body().transactions.iter().try_for_each(
                         |transaction| -> Result<(), reth_db::DatabaseError> {
-<<<<<<< HEAD
-                            tx.put::<tables::TransactionHashNumbers>(
-                                *transaction.tx_hash(),
-                                next_tx_num,
-                            )?;
-=======
                             tx_hash_numbers.push((*transaction.tx_hash(), next_tx_num));
->>>>>>> v2.3.0
                             tx.put::<tables::Transactions>(next_tx_num, transaction.clone())?;
 
                             let (addr, _) = accounts

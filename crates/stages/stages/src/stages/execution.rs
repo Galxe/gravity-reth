@@ -2,19 +2,18 @@ use crate::stages::MERKLE_STAGE_DEFAULT_INCREMENTAL_THRESHOLD;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::BlockNumber;
 use num_traits::Zero;
-use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_config::config::ExecutionConfig;
 use reth_consensus::FullConsensus;
 use reth_db::{static_file::HeaderMask, tables};
-use reth_evm::{execute::Executor, metrics::ExecutorMetrics, ConfigureEvm};
+use reth_evm::{metrics::ExecutorMetrics, ConfigureEvm};
 use reth_execution_types::Chain;
 use reth_exex::{ExExManagerHandle, ExExNotification, ExExNotificationSource};
 use reth_primitives_traits::{format_gas_throughput, BlockBody, NodePrimitives};
 use reth_provider::{
     providers::{StaticFileProvider, StaticFileWriter},
-    BlockHashReader, BlockReader, DBProvider, EitherWriter, ExecutionOutcome, HeaderProvider,
-    LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateWriteConfig, StateWriter,
-    StaticFileProviderFactory, StatsReader, StoragePath, StorageSettingsCache, TransactionVariant,
+    BlockHashReader, BlockReader, DBProvider, ExecutionOutcome, HeaderProvider,
+    LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateWriter,
+    StaticFileProviderFactory, StatsReader, StorageLocation, TransactionVariant,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
@@ -23,10 +22,8 @@ use reth_stages_api::{
     UnwindInput, UnwindOutput,
 };
 use reth_static_file_types::StaticFileSegment;
-use reth_trie::KeccakKeyHasher;
 use std::{
-    cmp::{max, Ordering},
-    collections::BTreeMap,
+    cmp::Ordering,
     ops::RangeInclusive,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -36,14 +33,13 @@ use tracing::*;
 
 use super::missing_static_data_error;
 
-mod slot_preimages;
-
 /// The execution stage executes all transactions and
 /// update history indexes.
 ///
 /// Input tables:
 /// - [`tables::CanonicalHeaders`] get next block to execute.
 /// - [`tables::Headers`] get for revm environment variables.
+/// - [`tables::HeaderTerminalDifficulties`]
 /// - [`tables::BlockBodyIndices`] to get tx number
 /// - [`tables::Transactions`] to execute
 ///
@@ -172,7 +168,7 @@ where
         // We can only prune changesets if we're not executing MerkleStage from scratch (by
         // threshold or first-sync)
         Ok(max_block - start_block > self.external_clean_threshold ||
-            provider.count_entries::<tables::AccountsTrie>()?.is_zero())
+            provider.count_entries::<tables::AccountsTrieV2>()?.is_zero())
     }
 
     /// Performs consistency check on static files.
@@ -190,15 +186,11 @@ where
         unwind_to: Option<u64>,
     ) -> Result<(), StageError>
     where
-        Provider: StaticFileProviderFactory
-            + DBProvider
-            + BlockReader
-            + HeaderProvider
-            + StorageSettingsCache,
+        Provider: StaticFileProviderFactory + DBProvider + BlockReader + HeaderProvider,
     {
-        // On old nodes, if there's any receipts pruning configured, receipts are written directly
-        // to database and inconsistencies are expected.
-        if EitherWriter::receipts_destination(provider).is_database() {
+        // If there's any receipts pruning configured, receipts are written directly to database and
+        // inconsistencies are expected.
+        if provider.prune_modes_ref().has_receipts_pruning() {
             return Ok(())
         }
 
@@ -214,23 +206,16 @@ where
             .map(|num| num + 1)
             .unwrap_or(0);
 
-        // Get highest block number in static files for receipts
-        let static_file_block_num = static_file_provider
-            .get_highest_static_file_block(StaticFileSegment::Receipts)
-            .unwrap_or(0);
-
         // Check if we had any unexpected shutdown after committing to static files, but
         // NOT committing to database.
-        match static_file_block_num.cmp(&checkpoint) {
+        match next_static_file_receipt_num.cmp(&next_receipt_num) {
             // It can be equal when it's a chain of empty blocks, but we still need to update the
             // last block in the range.
             Ordering::Greater | Ordering::Equal => {
                 let mut static_file_producer =
                     static_file_provider.latest_writer(StaticFileSegment::Receipts)?;
-                static_file_producer.prune_receipts(
-                    next_static_file_receipt_num.saturating_sub(next_receipt_num),
-                    checkpoint,
-                )?;
+                static_file_producer
+                    .prune_receipts(next_static_file_receipt_num - next_receipt_num, checkpoint)?;
                 // Since this is a database <-> static file inconsistency, we commit the change
                 // straight away.
                 static_file_producer.commit()?;
@@ -238,14 +223,19 @@ where
             Ordering::Less => {
                 // If we are already in the process of unwind, this might be fine because we will
                 // fix the inconsistency right away.
-                if let Some(unwind_to) = unwind_to &&
-                    unwind_to <= static_file_block_num
-                {
-                    return Ok(())
+                if let Some(unwind_to) = unwind_to {
+                    let next_receipt_num_after_unwind = provider
+                        .block_body_indices(unwind_to)?
+                        .map(|b| b.next_tx_num())
+                        .ok_or(ProviderError::BlockBodyIndicesNotFound(unwind_to))?;
+
+                    if next_receipt_num_after_unwind > next_static_file_receipt_num {
+                        // This means we need a deeper unwind.
+                    } else {
+                        return Ok(())
+                    }
                 }
 
-                // Otherwise, this is a real inconsistency - database has more blocks than static
-                // files
                 return Err(missing_static_data_error(
                     next_static_file_receipt_num.saturating_sub(1),
                     &static_file_provider,
@@ -270,10 +260,7 @@ where
             Primitives: NodePrimitives<BlockHeader: reth_db_api::table::Value>,
         > + StatsReader
         + BlockHashReader
-        + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
-        + StorageSettingsCache
-        + StoragePath
-        + ChainSpecProvider<ChainSpec: EthereumHardforks>,
+        + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -303,7 +290,7 @@ where
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
         let db = StateProviderDatabase(LatestStateProviderRef::new(provider));
-        let mut executor = self.evm_config.batch_executor(db);
+        let mut executor = self.evm_config.parallel_executor(db);
 
         // Progress tracking
         let mut stage_progress = start_block;
@@ -406,11 +393,7 @@ where
 
         // prepare execution output for writing
         let time = Instant::now();
-        let mut state = ExecutionOutcome::from_blocks(
-            start_block,
-            executor.into_state().take_bundle(),
-            results,
-        );
+        let mut state = ExecutionOutcome::from_blocks(start_block, executor.take_bundle(), results);
         let write_preparation_duration = time.elapsed();
 
         // log the gas per second for the range we just executed
@@ -427,11 +410,8 @@ where
         // Note: Since we only write to `blocks` if there are any ExExes, we don't need to perform
         // the `has_exexs` check here as well
         if !blocks.is_empty() {
-            let previous_input = self.post_execute_commit_input.replace(Chain::new(
-                blocks,
-                state.clone(),
-                BTreeMap::new(),
-            ));
+            let previous_input =
+                self.post_execute_commit_input.replace(Chain::new(blocks, state.clone(), None));
 
             if previous_input.is_some() {
                 // Not processing the previous post execute commit input is a critical error, as it
@@ -469,35 +449,8 @@ where
             }
         }
 
-        // When using hashed state (storage.v2), inject plain storage-slot keys into wipe
-        // reverts for self-destructed accounts. Without this, the changeset writer would only
-        // see hashed slot keys (from `HashedStorages`) which pollutes the entire codebase.
-        //
-        // SELFDESTRUCT no longer destroys storage post-Cancun, so this is only needed for
-        // pre-Cancun blocks. Post-Cancun we can remove the preimage db entirely.
-        if provider.cached_storage_settings().use_hashed_state() {
-            let start_header = provider
-                .header_by_number(start_block)?
-                .ok_or_else(|| ProviderError::HeaderNotFound(start_block.into()))?;
-
-            let path = provider.storage_path().join("preimage");
-            if !provider.chain_spec().is_cancun_active_at_timestamp(start_header.timestamp()) {
-                slot_preimages::inject_plain_wipe_slots(&path, provider, &mut state)?;
-            } else if path.exists() {
-                // Post-Cancun: no more self-destructs, preimage db is no longer needed.
-                let _ = std::fs::remove_dir_all(&path);
-            }
-        }
-
-        // Write output. When `use_hashed_state` is enabled, `write_state` skips writing to
-        // plain account/storage tables and only writes bytecodes and changesets. The hashed
-        // state is then written separately below.
-        provider.write_state(&state, OriginalValuesKnown::Yes, StateWriteConfig::default())?;
-
-        if provider.cached_storage_settings().use_hashed_state() {
-            let hashed_state = state.hash_state_slow::<KeccakKeyHasher>();
-            provider.write_hashed_state(&hashed_state.into_sorted())?;
-        }
+        // write output
+        provider.write_state(&state, OriginalValuesKnown::Yes, StorageLocation::StaticFiles)?;
 
         let db_write_duration = time.elapsed();
         debug!(
@@ -544,14 +497,13 @@ where
             })
         }
 
-        reject_cancun_boundary_unwind(provider, input.checkpoint.block_number, unwind_to)?;
-
         self.ensure_consistency(provider, input.checkpoint.block_number, Some(unwind_to))?;
 
         // Unwind account and storage changesets, as well as receipts.
         //
         // This also updates `PlainStorageState` and `PlainAccountState`.
-        let bundle_state_with_receipts = provider.take_state_above(unwind_to)?;
+        let bundle_state_with_receipts =
+            provider.take_state_above(unwind_to, StorageLocation::Both)?;
 
         // Prepare the input for post unwind commit hook, where an `ExExNotification` will be sent.
         if self.exex_manager_handle.has_exexs() {
@@ -560,7 +512,7 @@ where
             let previous_input = self.post_unwind_commit_input.replace(Chain::new(
                 blocks,
                 bundle_state_with_receipts,
-                BTreeMap::new(),
+                None,
             ));
 
             debug_assert!(
@@ -603,40 +555,6 @@ where
 
         Ok(())
     }
-}
-
-fn reject_cancun_boundary_unwind<Provider>(
-    provider: &Provider,
-    checkpoint_block: u64,
-    unwind_to: u64,
-) -> Result<(), StageError>
-where
-    Provider: HeaderProvider + ChainSpecProvider<ChainSpec: EthereumHardforks>,
-{
-    let checkpoint_header = provider
-        .header_by_number(checkpoint_block)?
-        .ok_or_else(|| ProviderError::HeaderNotFound(checkpoint_block.into()))?;
-    let unwind_to_header = provider
-        .header_by_number(unwind_to)?
-        .ok_or_else(|| ProviderError::HeaderNotFound(unwind_to.into()))?;
-    let checkpoint_is_cancun =
-        provider.chain_spec().is_cancun_active_at_timestamp(checkpoint_header.timestamp());
-    let unwind_to_is_cancun =
-        provider.chain_spec().is_cancun_active_at_timestamp(unwind_to_header.timestamp());
-    if checkpoint_is_cancun && !unwind_to_is_cancun {
-        return Err(StageError::Fatal(
-            std::io::Error::other(format!(
-                "execution unwind across Cancun activation boundary is not allowed: checkpoint \
-                 block #{checkpoint_block} (ts={}) is Cancun-active but unwind target \
-                 #{unwind_to} (ts={}) is pre-Cancun",
-                checkpoint_header.timestamp(),
-                unwind_to_header.timestamp()
-            ))
-            .into(),
-        ))
-    }
-
-    Ok(())
 }
 
 fn execution_checkpoint<N>(
@@ -695,11 +613,7 @@ where
         // Otherwise, we recalculate the whole stage checkpoint including the amount of gas
         // already processed, if there's any.
         _ => {
-            let genesis_block_number = provider.genesis_block_number();
-            let processed = calculate_gas_used_from_headers(
-                provider,
-                genesis_block_number..=max(start_block - 1, genesis_block_number),
-            )?;
+            let processed = calculate_gas_used_from_headers(provider, 0..=start_block - 1)?;
 
             ExecutionCheckpoint {
                 block_range: CheckpointBlockRange { from: start_block, to: max_block },
@@ -732,9 +646,8 @@ where
         *range.start()..*range.end() + 1,
         |cursor, number| cursor.get_one::<HeaderMask<N::BlockHeader>>(number.into()),
     )? {
-        if let Some(entry) = entry? {
-            gas_total += entry.gas_used();
-        }
+        let entry = entry?;
+        gas_total += entry.gas_used();
     }
 
     let duration = start.elapsed();
@@ -750,24 +663,22 @@ mod tests {
     use alloy_primitives::{address, hex_literal::hex, keccak256, Address, B256, U256};
     use alloy_rlp::Decodable;
     use assert_matches::assert_matches;
-    use reth_chainspec::{ChainSpecBuilder, EthereumHardfork, ForkCondition};
+    use reth_chainspec::ChainSpecBuilder;
     use reth_db_api::{
-        models::{metadata::StorageSettings, AccountBeforeTx},
+        models::AccountBeforeTx,
         transaction::{DbTx, DbTxMut},
     };
     use reth_ethereum_consensus::EthBeaconConsensus;
     use reth_ethereum_primitives::Block;
     use reth_evm_ethereum::EthEvmConfig;
-    use reth_primitives_traits::{Account, Block as _, Bytecode, SealedBlock, StorageEntry};
+    use reth_primitives_traits::{Account, Bytecode, SealedBlock, StorageEntry};
     use reth_provider::{
-        test_utils::{create_test_provider_factory, create_test_provider_factory_with_chain_spec},
-        AccountReader, BlockWriter, DatabaseProviderFactory, ReceiptProvider,
-        StaticFileProviderFactory,
+        test_utils::create_test_provider_factory, AccountReader, DatabaseProviderFactory,
+        ReceiptProvider, StaticFileProviderFactory,
     };
     use reth_prune::PruneModes;
     use reth_prune_types::{PruneMode, ReceiptsLogPruneConfig};
     use reth_stages_api::StageUnitCheckpoint;
-    use reth_testing_utils::generators;
     use std::collections::BTreeMap;
 
     fn stage() -> ExecutionStage<EthEvmConfig> {
@@ -824,8 +735,8 @@ mod tests {
         let genesis = SealedBlock::<Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
         let block = SealedBlock::<Block>::decode(&mut block_rlp).unwrap();
-        provider.insert_block(&genesis.try_recover().unwrap()).unwrap();
-        provider.insert_block(&block.clone().try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -865,8 +776,8 @@ mod tests {
         let genesis = SealedBlock::<Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
         let block = SealedBlock::<Block>::decode(&mut block_rlp).unwrap();
-        provider.insert_block(&genesis.try_recover().unwrap()).unwrap();
-        provider.insert_block(&block.clone().try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -906,8 +817,8 @@ mod tests {
         let genesis = SealedBlock::<Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
         let block = SealedBlock::<Block>::decode(&mut block_rlp).unwrap();
-        provider.insert_block(&genesis.try_recover().unwrap()).unwrap();
-        provider.insert_block(&block.clone().try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -939,8 +850,8 @@ mod tests {
         let genesis = SealedBlock::<Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
         let block = SealedBlock::<Block>::decode(&mut block_rlp).unwrap();
-        provider.insert_block(&genesis.try_recover().unwrap()).unwrap();
-        provider.insert_block(&block.clone().try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -1022,46 +933,41 @@ mod tests {
                 done: true
             } if processed == total && total == block.gas_used);
 
-            {
-                let provider = factory.provider().unwrap();
+            let provider = factory.provider().unwrap();
 
-                // check post state
-                let account1 = address!("0x1000000000000000000000000000000000000000");
-                let account1_info =
-                    Account { balance: U256::ZERO, nonce: 0x00, bytecode_hash: Some(code_hash) };
-                let account2 = address!("0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba");
-                let account2_info = Account {
-                    balance: U256::from(0x1bc16d674ece94bau128),
-                    nonce: 0x00,
-                    bytecode_hash: None,
-                };
-                let account3 = address!("0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b");
-                let account3_info = Account {
-                    balance: U256::from(0x3635c9adc5de996b46u128),
-                    nonce: 0x01,
-                    bytecode_hash: None,
-                };
+            // check post state
+            let account1 = address!("0x1000000000000000000000000000000000000000");
+            let account1_info =
+                Account { balance: U256::ZERO, nonce: 0x00, bytecode_hash: Some(code_hash) };
+            let account2 = address!("0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba");
+            let account2_info = Account {
+                balance: U256::from(0x1bc16d674ece94bau128),
+                nonce: 0x00,
+                bytecode_hash: None,
+            };
+            let account3 = address!("0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b");
+            let account3_info = Account {
+                balance: U256::from(0x3635c9adc5de996b46u128),
+                nonce: 0x01,
+                bytecode_hash: None,
+            };
 
-                // assert accounts
-                assert!(matches!(
-                    provider.basic_account(&account1),
-                    Ok(Some(acc)) if acc == account1_info
-                ));
-                assert!(matches!(
-                    provider.basic_account(&account2),
-                    Ok(Some(acc)) if acc == account2_info
-                ));
-                assert!(matches!(
-                    provider.basic_account(&account3),
-                    Ok(Some(acc)) if acc == account3_info
-                ));
-                // assert storage
-                // Get on dupsort would return only first value. This is good enough for this test.
-                assert!(matches!(
-                    provider.tx_ref().get::<tables::PlainStorageState>(account1),
-                    Ok(Some(entry)) if entry.key == B256::with_last_byte(1) && entry.value == U256::from(2)
-                ));
-            }
+            // assert accounts
+            assert!(
+                matches!(provider.basic_account(&account1), Ok(Some(acc)) if acc == account1_info)
+            );
+            assert!(
+                matches!(provider.basic_account(&account2), Ok(Some(acc)) if acc == account2_info)
+            );
+            assert!(
+                matches!(provider.basic_account(&account3), Ok(Some(acc)) if acc == account3_info)
+            );
+            // assert storage
+            // Get on dupsort would return only first value. This is good enough for this test.
+            assert!(matches!(
+                provider.tx_ref().get::<tables::PlainStorageState>(account1),
+                Ok(Some(entry)) if entry.key == B256::with_last_byte(1) && entry.value == U256::from(2)
+            ));
 
             let mut provider = factory.database_provider_rw().unwrap();
             let mut stage = stage();
@@ -1086,8 +992,8 @@ mod tests {
         let genesis = SealedBlock::<Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f90262f901f9a075c371ba45999d87f4542326910a11af515897aebce5265d3f6acd1f1161f82fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa098f2dcd87c8ae4083e7017a05456c14eea4b1db2032126e27b3b1563d57d7cc0a08151d548273f6683169524b66ca9fe338b9ce42bc3540046c828fd939ae23bcba03f4e5c2ec5b2170b711d97ee755c160457bb58d8daa338e835ec02ae6860bbabb901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000083020000018502540be40082a8798203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f863f861800a8405f5e10094100000000000000000000000000000000000000080801ba07e09e26678ed4fac08a249ebe8ed680bf9051a5e14ad223e4b2b9d26e0208f37a05f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509bc0").as_slice();
         let block = SealedBlock::<Block>::decode(&mut block_rlp).unwrap();
-        provider.insert_block(&genesis.try_recover().unwrap()).unwrap();
-        provider.insert_block(&block.clone().try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -1122,7 +1028,6 @@ mod tests {
         provider.commit().unwrap();
 
         // execute
-        let mut provider = factory.database_provider_rw().unwrap();
 
         // If there is a pruning configuration, then it's forced to use the database.
         // This way we test both cases.
@@ -1141,6 +1046,7 @@ mod tests {
 
             // Test Execution
             let mut execution_stage = stage();
+            let mut provider = factory.database_provider_rw().unwrap();
             provider.set_prune_modes(mode.clone().unwrap_or_default());
 
             let result = execution_stage.execute(&provider, input).unwrap();
@@ -1157,8 +1063,7 @@ mod tests {
                     UnwindInput { checkpoint: result.checkpoint, unwind_to: 0, bad_block: None },
                 )
                 .unwrap();
-
-            provider.static_file_provider().commit().unwrap();
+            provider.commit_view().unwrap();
 
             assert_matches!(result, UnwindOutput {
                 checkpoint: StageCheckpoint {
@@ -1184,76 +1089,8 @@ mod tests {
             assert!(matches!(provider.basic_account(&miner_acc), Ok(None)));
 
             assert!(matches!(provider.receipt(0), Ok(None)));
+            provider.commit().unwrap();
         }
-    }
-
-    #[test]
-    fn unwind_from_cancun_to_pre_cancun_is_rejected() {
-        let chain_spec = Arc::new(
-            ChainSpecBuilder::mainnet()
-                .berlin_activated()
-                .with_fork(EthereumHardfork::Cancun, ForkCondition::Timestamp(15))
-                .build(),
-        );
-        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
-        let provider = factory.database_provider_rw().unwrap();
-
-        let mut rng = generators::rng();
-        let mut genesis = generators::random_block(
-            &mut rng,
-            0,
-            generators::BlockParams { tx_count: Some(0), ..Default::default() },
-        )
-        .unseal();
-        genesis.header.timestamp = 0;
-        let genesis = genesis.seal_slow();
-
-        let mut block_1 = generators::random_block(
-            &mut rng,
-            1,
-            generators::BlockParams {
-                parent: Some(genesis.hash()),
-                tx_count: Some(0),
-                ..Default::default()
-            },
-        )
-        .unseal();
-        block_1.header.timestamp = 10;
-        let block_1 = block_1.seal_slow();
-
-        let mut block_2 = generators::random_block(
-            &mut rng,
-            2,
-            generators::BlockParams {
-                parent: Some(block_1.hash()),
-                tx_count: Some(0),
-                ..Default::default()
-            },
-        )
-        .unseal();
-        block_2.header.timestamp = 20;
-        let block_2 = block_2.seal_slow();
-
-        provider.insert_block(&genesis.try_recover().unwrap()).unwrap();
-        provider.insert_block(&block_1.try_recover().unwrap()).unwrap();
-        provider.insert_block(&block_2.try_recover().unwrap()).unwrap();
-        provider
-            .static_file_provider()
-            .latest_writer(StaticFileSegment::Headers)
-            .unwrap()
-            .commit()
-            .unwrap();
-
-        let mut execution_stage = stage();
-        let err = execution_stage
-            .unwind(
-                &provider,
-                UnwindInput { checkpoint: StageCheckpoint::new(2), unwind_to: 1, bad_block: None },
-            )
-            .unwrap_err();
-
-        assert_matches!(err, StageError::Fatal(_));
-        assert!(err.to_string().contains("across Cancun activation boundary"));
     }
 
     #[tokio::test]
@@ -1265,8 +1102,8 @@ mod tests {
         let genesis = SealedBlock::<Block>::decode(&mut genesis_rlp).unwrap();
         let mut block_rlp = hex!("f9025ff901f7a0c86e8cc0310ae7c531c758678ddbfd16fc51c8cef8cec650b032de9869e8b94fa01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347942adc25665018aa1fe0e6bc666dac8fc2697ff9baa050554882fbbda2c2fd93fdc466db9946ea262a67f7a76cc169e714f105ab583da00967f09ef1dfed20c0eacfaa94d5cd4002eda3242ac47eae68972d07b106d192a0e3c8b47fbfc94667ef4cceb17e5cc21e3b1eebd442cebb27f07562b33836290db90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008302000001830f42408238108203e800a00000000000000000000000000000000000000000000000000000000000000000880000000000000000f862f860800a83061a8094095e7baea6a6c7c4c2dfeb977efac326af552d8780801ba072ed817487b84ba367d15d2f039b5fc5f087d0a8882fbdf73e8cb49357e1ce30a0403d800545b8fc544f92ce8124e2255f8c3c6af93f28243a120585d4c4c6a2a3c0").as_slice();
         let block = SealedBlock::<Block>::decode(&mut block_rlp).unwrap();
-        provider.insert_block(&genesis.try_recover().unwrap()).unwrap();
-        provider.insert_block(&block.clone().try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(genesis.try_recover().unwrap()).unwrap();
+        provider.insert_historical_block(block.clone().try_recover().unwrap()).unwrap();
         provider
             .static_file_provider()
             .latest_writer(StaticFileSegment::Headers)
@@ -1398,67 +1235,5 @@ mod tests {
                 )
             ]
         );
-    }
-
-    #[test]
-    fn test_ensure_consistency_with_skipped_receipts() {
-        // Test that ensure_consistency allows the case where receipts are intentionally
-        // skipped. When receipts are skipped, blocks are still incremented in static files
-        // but no receipt data is written.
-
-        let factory = create_test_provider_factory();
-        factory.set_storage_settings_cache(StorageSettings::v2());
-
-        // Setup with block 1
-        let provider_rw = factory.database_provider_rw().unwrap();
-        let mut rng = generators::rng();
-        let genesis = generators::random_block(&mut rng, 0, Default::default());
-        provider_rw
-            .insert_block(&genesis.try_recover().unwrap())
-            .expect("failed to insert genesis");
-        let block = generators::random_block(
-            &mut rng,
-            1,
-            generators::BlockParams { tx_count: Some(2), ..Default::default() },
-        );
-        provider_rw.insert_block(&block.try_recover().unwrap()).expect("failed to insert block");
-
-        let static_file_provider = provider_rw.static_file_provider();
-        static_file_provider.latest_writer(StaticFileSegment::Headers).unwrap().commit().unwrap();
-
-        // Simulate skipped receipts: increment block in receipts static file but don't write
-        // receipts
-        {
-            let mut receipts_writer =
-                static_file_provider.latest_writer(StaticFileSegment::Receipts).unwrap();
-            receipts_writer.increment_block(0).unwrap();
-            receipts_writer.increment_block(1).unwrap();
-            receipts_writer.commit().unwrap();
-        } // Explicitly drop receipts_writer here
-
-        provider_rw.commit().expect("failed to commit");
-
-        // Verify blocks are incremented but no receipts written
-        assert_eq!(
-            factory
-                .static_file_provider()
-                .get_highest_static_file_block(StaticFileSegment::Receipts),
-            Some(1)
-        );
-        assert_eq!(
-            factory.static_file_provider().get_highest_static_file_tx(StaticFileSegment::Receipts),
-            None
-        );
-
-        // Create execution stage
-        let stage = stage();
-
-        // Run ensure_consistency - should NOT error
-        // Block numbers match (both at 1), but tx numbers don't (database has txs, static files
-        // don't) This is fine - receipts are being skipped
-        let provider = factory.provider().unwrap();
-        stage
-            .ensure_consistency(&provider, 1, None)
-            .expect("ensure_consistency should succeed when receipts are intentionally skipped");
     }
 }
