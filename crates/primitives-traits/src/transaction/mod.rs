@@ -25,7 +25,7 @@ pub use alloy_consensus::transaction::{
 use crate::{InMemorySize, MaybeCompact, MaybeSerde};
 use core::{fmt, hash::Hash};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std", feature = "reth-codec"))]
 mod access_list;
 
 /// Helper trait that unifies all behaviour required by transaction to support full node operations.

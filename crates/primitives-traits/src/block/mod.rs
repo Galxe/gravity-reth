@@ -23,10 +23,18 @@
 //! ```
 
 pub(crate) mod sealed;
-pub use sealed::SealedBlock;
+pub use sealed::{SealedBlock, SealedBlockWith};
 
 pub(crate) mod recovered;
 pub use recovered::RecoveredBlock;
+
+/// Bincode-compatible block type serde implementations.
+#[cfg(feature = "serde-bincode-compat")]
+pub mod serde_bincode_compat {
+    pub use super::{
+        recovered::serde_bincode_compat::RecoveredBlock, sealed::serde_bincode_compat::SealedBlock,
+    };
+}
 
 pub mod body;
 pub mod error;
@@ -41,26 +49,10 @@ use crate::{
     FullBlockBody, FullBlockHeader, InMemorySize, MaybeSerde, SealedHeader, SignedTransaction,
 };
 
-/// Bincode-compatible header type serde implementations.
-#[cfg(feature = "serde-bincode-compat")]
-pub mod serde_bincode_compat {
-    pub use super::{
-        recovered::serde_bincode_compat::RecoveredBlock, sealed::serde_bincode_compat::SealedBlock,
-    };
-}
-
 /// Helper trait that unifies all behaviour required by block to support full node operations.
-pub trait FullBlock:
-    Block<Header: FullBlockHeader, Body: FullBlockBody> + alloy_rlp::Encodable + alloy_rlp::Decodable
-{
-}
+pub trait FullBlock: Block<Header: FullBlockHeader, Body: FullBlockBody> {}
 
-impl<T> FullBlock for T where
-    T: Block<Header: FullBlockHeader, Body: FullBlockBody>
-        + alloy_rlp::Encodable
-        + alloy_rlp::Decodable
-{
-}
+impl<T> FullBlock for T where T: Block<Header: FullBlockHeader, Body: FullBlockBody> {}
 
 /// Helper trait to access [`BlockBody::Transaction`] given a [`Block`].
 pub type BlockTx<B> = <<B as Block>::Body as BlockBody>::Transaction;
@@ -138,6 +130,16 @@ pub trait Block:
     /// Consumes the block and returns the body.
     fn into_body(self) -> Self::Body {
         self.split().1
+    }
+
+    /// Encodes the block with the given header and body.
+    fn rlp_encode(
+        header: &Self::Header,
+        body: &Self::Body,
+        out: &mut dyn alloy_rlp::bytes::BufMut,
+    ) {
+        // TODO: https://github.com/paradigmxyz/reth/issues/18002
+        Self::new(header.clone(), body.clone()).encode(out)
     }
 
     /// Returns the rlp length of the block with the given header and body.
@@ -247,6 +249,14 @@ where
         Self::rlp_length_for(header, body)
     }
 
+    fn rlp_encode(
+        header: &Self::Header,
+        body: &Self::Body,
+        out: &mut dyn alloy_rlp::bytes::BufMut,
+    ) {
+        Self::rlp_encode_from_parts(header, body, out)
+    }
+
     fn into_ethereum_block(self) -> Self {
         self
     }
@@ -274,6 +284,11 @@ pub trait TestBlock: Block<Header: crate::test_utils::TestHeader> {
     /// Updates the block number.
     fn set_block_number(&mut self, number: alloy_primitives::BlockNumber) {
         crate::header::test_utils::TestHeader::set_block_number(self.header_mut(), number);
+    }
+
+    /// Updates the block timestamp.
+    fn set_timestamp(&mut self, timestamp: u64) {
+        crate::header::test_utils::TestHeader::set_timestamp(self.header_mut(), timestamp);
     }
 
     /// Updates the block state root.

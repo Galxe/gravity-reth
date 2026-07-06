@@ -68,6 +68,7 @@ members = [
     "crates/consensus/consensus/",
     "crates/consensus/debug-client/",
     "crates/e2e-test-utils/",
+    "crates/engine/execution-cache/",
     "crates/engine/invalid-block-hooks/",
     "crates/engine/local",
     "crates/engine/primitives/",
@@ -124,9 +125,13 @@ members = [
     "crates/payload/primitives/",
     "crates/payload/validator/",
     "crates/payload/util/",
+    "crates/primitives/",
+    "crates/primitives-traits/",
     "crates/prune/db",
     "crates/prune/prune",
     "crates/prune/types",
+    "crates/ress/protocol",
+    "crates/ress/provider",
     "crates/revm/",
     "crates/rpc/ipc/",
     "crates/rpc/rpc-api/",
@@ -382,7 +387,7 @@ reth-config = { path = "crates/config", default-features = false }
 reth-consensus = { path = "crates/consensus/consensus", default-features = false }
 reth-consensus-common = { path = "crates/consensus/common", default-features = false }
 reth-consensus-debug-client = { path = "crates/consensus/debug-client" }
-reth-db = { path = "crates/storage/db", default-features = false }
+reth-db = { path = "crates/storage/db" }
 reth-db-api = { path = "crates/storage/db-api" }
 reth-db-common = { path = "crates/storage/db-common" }
 reth-db-models = { path = "crates/storage/db-models", default-features = false }
@@ -412,6 +417,7 @@ reth-ethereum = { path = "crates/ethereum/reth" }
 reth-etl = { path = "crates/etl" }
 reth-evm = { path = "crates/evm/evm", default-features = false }
 reth-evm-ethereum = { path = "crates/ethereum/evm", default-features = false }
+reth-execution-cache = { path = "crates/engine/execution-cache" }
 reth-execution-errors = { path = "crates/evm/execution-errors", default-features = false }
 reth-execution-types = { path = "crates/evm/execution-types", default-features = false }
 reth-exex = { path = "crates/exex/exex" }
@@ -444,7 +450,8 @@ reth-payload-builder-primitives = { path = "crates/payload/builder-primitives" }
 reth-payload-primitives = { path = "crates/payload/primitives" }
 reth-payload-validator = { path = "crates/payload/validator" }
 reth-payload-util = { path = "crates/payload/util" }
-reth-primitives-traits = { version = "0.4.1", default-features = false }
+reth-primitives = { path = "crates/primitives", default-features = false }
+reth-primitives-traits = { path = "crates/primitives-traits", default-features = false }
 reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types", default-features = false }
@@ -476,7 +483,7 @@ reth-tracing = { path = "crates/tracing" }
 reth-tracing-otlp = { path = "crates/tracing-otlp" }
 reth-transaction-pool = { path = "crates/transaction-pool" }
 reth-trie = { path = "crates/trie/trie" }
-reth-trie-common = { path = "crates/trie/common", default-features = false }
+reth-trie-common = { path = "crates/trie/common" }
 reth-trie-db = { path = "crates/trie/db" }
 reth-trie-parallel = { path = "crates/trie/parallel" }
 reth-pipe-exec-layer-ext-v2 = { path = "crates/pipe-exec-layer-ext-v2/execute" }
@@ -486,7 +493,10 @@ gravity-storage = { path = "crates/gravity-storage" }
 gravity-primitives = { path = "crates/gravity-primitives" }
 gravity-precompiles = { path = "crates/gravity-precompiles" }
 reth-trie-sparse = { path = "crates/trie/sparse", default-features = false }
+reth-trie-sparse-parallel = { path = "crates/trie/sparse-parallel" }
 reth-zstd-compressors = { version = "0.4.1", default-features = false }
+reth-ress-protocol = { path = "crates/ress/protocol" }
+reth-ress-provider = { path = "crates/ress/provider" }
 
 # revm
 revm = { version = "40.0.3", default-features = false }
@@ -501,6 +511,7 @@ revm-inspectors = "0.40.1"
 # eth
 alloy-dyn-abi = "1.6.0"
 alloy-primitives = { version = "1.6.0", default-features = false, features = ["map-foldhash"] }
+alloy-sol-macro = "1.3.1"
 alloy-sol-types = { version = "1.6.0", default-features = false }
 
 alloy-chains = { version = "0.2.33", default-features = false }
@@ -586,6 +597,7 @@ serde = { version = "1.0", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 serde_with = { version = "3", default-features = false, features = ["macros"] }
 sha2 = { version = "0.10", default-features = false }
+shellexpand = "3.0.0"
 shlex = "1.3"
 slotmap = "1"
 smallvec = "1"
@@ -759,3 +771,9 @@ vergen-git2 = "9.1.0"
 
 # networking
 ipnet = "2.11"
+
+# gravity: reth-primitives-traits restored as an in-tree path crate (crates.io 0.4.1
+# source + gravity `SubkeyContainedValue`). Patch unifies transitive registry deps
+# (e.g. reth-rpc-traits -> reth-primitives-traits) onto the same package.
+[patch.crates-io]
+reth-primitives-traits = { path = "crates/primitives-traits" }

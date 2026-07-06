@@ -94,7 +94,7 @@ test-utils = [
     "reth-primitives-traits/test-utils",
     "reth-prune-types/test-utils",
 ]
-bench = ["reth-db-api/bench"]
+bench = []
 arbitrary = [
     "reth-db-api/arbitrary",
     "alloy-primitives/arbitrary",
@@ -102,7 +102,6 @@ arbitrary = [
     "reth-primitives-traits/arbitrary",
     "reth-prune-types/arbitrary",
 ]
-op = ["reth-db-api/op", "reth-primitives-traits/op"]
 failpoints = ["fail/failpoints"]
 disable-lock = []
 

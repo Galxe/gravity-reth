@@ -31,4 +31,10 @@ return-borrowed = []
 read-tx-timeouts = ["dep:dashmap"]
 
 [dev-dependencies]
+criterion.workspace = true
+rand.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "mdbx_bench_tool"
+harness = false

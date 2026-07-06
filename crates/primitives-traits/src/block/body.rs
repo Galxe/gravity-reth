@@ -2,7 +2,7 @@
 
 use crate::{
     transaction::signed::RecoveryError, BlockHeader, FullSignedTx, InMemorySize, MaybeSerde,
-    MaybeSerdeBincodeCompat, SignedTransaction,
+    SignedTransaction,
 };
 use alloc::{fmt, vec::Vec};
 use alloy_consensus::{
@@ -13,9 +13,9 @@ use alloy_eips::{eip2718::Encodable2718, eip4895::Withdrawals};
 use alloy_primitives::{Address, Bytes, B256};
 
 /// Helper trait that unifies all behaviour required by transaction to support full node operations.
-pub trait FullBlockBody: BlockBody<Transaction: FullSignedTx> + MaybeSerdeBincodeCompat {}
+pub trait FullBlockBody: BlockBody<Transaction: FullSignedTx> {}
 
-impl<T> FullBlockBody for T where T: BlockBody<Transaction: FullSignedTx> + MaybeSerdeBincodeCompat {}
+impl<T> FullBlockBody for T where T: BlockBody<Transaction: FullSignedTx> {}
 
 /// Abstraction for block's body.
 ///
@@ -197,6 +197,47 @@ pub trait BlockBody:
                 .map(|(tx, signer)| tx.clone().with_signer(signer))
                 .collect()
         })
+    }
+
+    /// Returns an iterator over `Recovered<&Transaction>` for all transactions in the block body.
+    ///
+    /// This method recovers signers and returns an iterator without cloning transactions,
+    /// making it more efficient than [`BlockBody::recover_transactions`] when owned values are not
+    /// required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any transaction's signature is invalid.
+    fn recover_transactions_ref(
+        &self,
+    ) -> Result<impl Iterator<Item = Recovered<&Self::Transaction>> + '_, RecoveryError> {
+        let signers = self.recover_signers()?;
+        Ok(self
+            .transactions()
+            .iter()
+            .zip(signers)
+            .map(|(tx, signer)| Recovered::new_unchecked(tx, signer)))
+    }
+
+    /// Returns an iterator over `Recovered<&Transaction>` for all transactions in the block body
+    /// _without ensuring that the signature has a low `s` value_.
+    ///
+    /// This method recovers signers and returns an iterator without cloning transactions,
+    /// making it more efficient than recovering with owned transactions when owned values are not
+    /// required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any transaction's signature is invalid.
+    fn recover_transactions_unchecked_ref(
+        &self,
+    ) -> Result<impl Iterator<Item = Recovered<&Self::Transaction>> + '_, RecoveryError> {
+        let signers = self.recover_signers_unchecked()?;
+        Ok(self
+            .transactions()
+            .iter()
+            .zip(signers)
+            .map(|(tx, signer)| Recovered::new_unchecked(tx, signer)))
     }
 }
 
