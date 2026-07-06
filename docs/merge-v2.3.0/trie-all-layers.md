@@ -313,7 +313,7 @@ tx-参数形式)——第 4 项检查随双侧还原消解。
    - [x] 冲突解决:historical.rs 冲突归零(原 20 块随 storage 还原消解),:135 调用 ↔ state.rs:129/:223 `from_reverts<KH: KeyHasher>(tx, from)` 逐参吻合(2026-07-05 实测)。编译证据待 cargo workspace 修复后回填。
 
 - [x] 4. **`StoragesTrie` MDBX on-disk 格式锁定。** gravity #149 (`671680af37`) 改变了 `StoredNibblesSubKey` 的磁盘编码（变长 `[len][packed]` vs 上游 65B 右填充）。任何在当前 gravity main 上跑过 Galxe 网络的节点无法滚动升级到使用上游 65B 编码的二进制。本次合并保留 gravity 编码（nibbles.rs 决策为 keep-gravity）。需在 `MIGRATION.md` 或类似处记录这一锁定，并明确：上游新增的 `PackedAccountsTrie`/`PackedStoragesTrie` 表是 v2 路径，gravity 不消费这两张表（直到有迁移工具）。→ **决策**: ⟲ keep-gravity 编码已由 f89d9d4e23 落定;`Packed*` 类型未进入类型宇宙(v2.3.0 侧 nibbles.rs 被整体替换,无孤儿残留)。
-   - [ ] 冲突解决:nibbles.rs / storage.rs 冲突归零、与 baseline diff=0(2026-07-05 实测);**但 MIGRATION.md 编码锁定记录仍未创建**(实测根目录与 docs/ 均无该文件)——记录动作完成前本框不勾,归 trie/storage 组。
+   - [x] 冲突解决:nibbles.rs / storage.rs 冲突归零、与 baseline diff=0(2026-07-05 实测);MIGRATION.md 已创建(2026-07-06,仓库根,20 行):①`StoredNibblesSubKey` 变长 `[len][packed]` vs 上游 65B 编码锁定 + 不可滚动升级警示;②`PackedAccountsTrie`/`PackedStoragesTrie` gravity 不消费(直至迁移工具)。
 
 - [x] 5. **`trie-common` 中 `gravity-primitives.workspace = true` 依赖。** 需在 workspace `Cargo.toml` 中验证 `gravity-primitives` 提供 `nested_trie::Node` 所需的类型（B256/Bytes 风格的 leaf payload）。Cargo.lock 已按 CLAUDE.md 备注解决，但 dependency tree（trie-common → gravity-primitives）应在 Phase 1 步骤 1 之后用 `cargo check -p reth-trie-common` 编译验证。→ **决策**: ⟲ 依赖链随 baseline 还原成立——root Cargo.toml:44/:488 定义 `gravity-primitives`,common/Cargo.toml:34 引用,`pub mod nested_trie` 挂载在位(均 2026-07-05 实测)。
    - [x] 冲突解决:common/Cargo.toml 冲突归零(原 13 块消解)、与 baseline diff=0(2026-07-05 实测)。`cargo check -p reth-trie-common` 仍被 workspace dep 缺口整体阻塞(cargo 组),编译证据待回填;另注意本 crate 的 L1 bench 断点会在 cargo 修复后立刻暴露。

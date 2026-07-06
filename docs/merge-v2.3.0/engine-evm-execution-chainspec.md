@@ -127,13 +127,22 @@ trait、`ConfigureEvm`）→ 以太坊 EVM 实现（`EthEvmConfig` + 测试 mock
   :176/:188、`MINIMUM_GAS_LIMIT` 下界 :511 均无冲突标记),8 块仅剩
   imports 与 50 Gwei floor 区局部(块@433 两侧均含 `INITIAL_BASE_FEE`)——
   保 gravity floor,其余取 v2.3.0。
-- [ ] **`crates/engine/tree/Cargo.toml`(8 块)**——决策 ☑:**⟲ 修正本文
+- [x] **`crates/engine/tree/Cargo.toml`(8 块)**——决策 ☑:**⟲ 修正本文
   「机械并集」建议为「取 HEAD 侧」**。证据:v2.3.0-only 三 dep
   (`reth-execution-cache`/`alloy-eip7928`/`reth-trie-common`)在已解
   engine-tree 源码中零引用(仅 payload_processor/bal/*、receipt_root_task.rs
   等**磁盘孤儿**引用,实测);v2.3.0 侧 feature 增强(`reth-chain-state
   features=["rayon"]` 等)依赖已还原 chain-state 不存在的 feature,接入即
   cargo 解析错误。`mini-moka`/`smallvec` 已由 e9965cd3bf 补回。
+  ⟲ 落地复核(2026-07-06):8 块已由 `d67d4ac565` 解决归零,方向与本裁决
+  相符(三 dep 不在、chain-state 无 rayon、`[features]` 与 baseline diff=0);
+  相对 baseline 增补 `moka`/`indexmap`/`crossbeam-channel` 三项均有源码
+  消费方,合理保留。**偏差修复**:删除 v2.3.0 残留死 optional `serde_json`
+  (消费方 payload_validator.rs 已整目录复原 baseline,src/ 全树零引用,
+  feature 接线未带入;dev-dep serde_json 保留,tests/e2e-testsuite 在用)。
+  dep 反向核对:可达源码 28 文件、47 个外部 crate root 零缺失;新识别孤儿
+  `launch.rs`(v2.3.0-only,lib.rs 未声明,不编译,不处置)。编译证据待
+  cargo workspace 修复后回填。
 
 ## 逐文件分析
 
@@ -1298,14 +1307,19 @@ fields：
    / `Empty`。
    → **决策**（2026-07-02）: 字段引入、gravity 侧填 `None`；是否上
    Amsterdam/BAL 属未来业务决策，不阻塞本次 merge。
-   - [ ] 冲突解决:未落地 — 实测(2026-07-03)`crates/evm/evm/src/lib.rs`
-     仍有 18 处冲突块,`slot_number` 字段(第 713 行)在冲突块 v2.3.0 侧
-     尚未解出;gravity 构造点(pipe-exec execute/src/lib.rs:1180 的
-     `NextBlockEnvAttributes { … }`)尚未补 `slot_number: None`(连同
-     `extra_data` 字段),解冲突时需一并落地。
-     复核(2026-07-05):状态不变(lib.rs 仍 18 块、构造点 :1180 仍无该
-     字段);解块方向已在上方「剩余范围核实」节裁决(v2.3.0 为底),
-     落地时联动补字段。
+   - [x] 冲突解决:已落地(`0b943ddb25`,2026-07-06 复核):`crates/evm/evm/src/lib.rs`
+     18 块归零,与 v2.3.0 全文件 diff 的增量恰为 gravity 嫁接面
+     (`parallel_execute`/`ParallelDatabase`/`state_change` alias/
+     `transact_system_txn`/`parallel_executor`),无其他偏差;
+     `NextBlockEnvAttributes` 与上游 tag 定义逐字段一致(8 字段含
+     `extra_data: Bytes`/`slot_number: Option<u64>`)。gravity 构造点
+     (pipe-exec execute/src/lib.rs:1180)已补 `slot_number: None` +
+     `extra_data: Default::default()`,8/8 字段与定义吻合、无
+     `..Default::default()` 兜底;extra_data 取空 Bytes 依据:
+     `next_evm_env` 路径实测不读该字段(仅 BlockAssembler 路径消费,
+     gravity pipe-exec 自组 header 不走),等价上游 testing.rs 惯例。
+     rustfmt --edition 2024 --check exit 0。编译证据待 cargo workspace
+     修复后回填。
 - [x] 4. **上游 #21226 `move execution logic from metrics to payload_validator`
    不跟进**：metrics.rs 保留 `execute_metered` helper。如果未来要重构
    `payload_validator`，需要确认 helper 与新 validator 接口不冲突。

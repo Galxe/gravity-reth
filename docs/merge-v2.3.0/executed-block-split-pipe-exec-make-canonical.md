@@ -1061,12 +1061,12 @@ workspace dep :372),**baseline 与 v2.3.0 都有此 crate**(`git ls-tree`
 
 | 断点 | 位置 | 归属 / 状态 |
 |---|---|---|
-| `Chain::new` 三参调用点(9.2 回 baseline 后必断) | ~~生产 3 处~~ → **stages 侧 2 处随 stages-pipeline OQ10(execution/mod.rs 整文件复原)关闭**;`exex/backfill/job.rs:152` 与测试 ~10 处中 tx-pool 侧已随其落地关闭 | exex 组余量(backfill/job.rs + exex 测试);stages 组照 OQ10 执行 |
-| RocksDB 死符号面 | ~~cli ~12 文件~~ ✅ cli 组已落地(2026-07-06);stages ~7 文件、e2e-test-utils、exex/test-utils 仍在 | stages / tests-infra / exex 组 |
+| ~~`Chain::new` 三参调用点~~ | ✅ 全部关闭(2026-07-06 收尾轮):stages 侧 2 处随 OQ10;exex 侧 16 处(backfill/job.rs:151、wal/mod.rs ×5、notifications.rs ×8、types/notification.rs ×2)`BTreeMap::new()` → `None`(与 baseline 逐字一致;manager.rs 12 处 `Default::default()` 本就吻合);tx-pool 残留 blobstore/tracker.rs:177 由主会话同法修复 | 已关闭 |
+| ~~RocksDB 死符号面~~ | ✅ 全部关闭(2026-07-06):cli ~12 文件、stages ~7 文件、e2e-test-utils(setup_import + `[[test]] rocksdb` 摘除 + 7 测试文件簇)、exex/test-utils(装配段按 baseline 逐字还原,`ProviderFactory::new` 回三参)均落地,广谱 grep 归零 | 已关闭 |
 | ~~`PersistedBlockSubscriptions` 尾款~~ | ✅ rpc-builder 49 块已解,4 处随之剥离(2026-07-06 落地,实测) | 已关闭 |
 | ~~`MockEthProvider::with_genesis_block`~~ | ✅ tx-pool 12 处改写完成;net/network txgossip ×5 + connect ×1 收口剥离(2026-07-06);e2e-test-utils 若有同类归 tests-infra 组 | 基本关闭 |
-| `builder/states.rs`/`builder/mod.rs` 零冲突侧翻引死符号 | node/builder | node-builder 组(见 node-builder 文档开放问题 1 落地清单) |
-| `launch.rs` 孤儿与 `build_engine_orchestrator` | node/builder `launch/engine.rs:32` 调用点随 23 块解向 baseline 即自然断开 | node-builder 组 |
+| ~~`builder/states.rs`/`builder/mod.rs` 零冲突侧翻引死符号~~ | ✅ 已关闭(2026-07-06,node-builder 组局部摘除 15 点,死符号 crates/node/ 归零) | 已关闭 |
+| ~~`launch.rs` 与 `build_engine_orchestrator`~~ | ✅ 已关闭(2026-07-06 专项 + 主会话收口)。⟲ 前提反转实录:engine.rs 取 orchestrator 主体后 launch.rs 必须活。①挂载:lib.rs:104 补 `pub mod launch;`(merge 丢行,doc 注释孤悬为证);②咬合:launch.rs 仅一处适配——`spawn_new` 调用 11→9 实参(HEAD tree 按 baseline 形态);外部 12 crate 全在 Cargo.toml,**零增补**(v2.3.0-only 三 dep 确属 BAL 孤儿,engine-evm 原裁决无需推翻);③连带剪线(主会话):`ChangesetCache` 属 storage-v2 changeset 缓存家族——trie/db `changesets.rs` 内 7 处死符号、`BasicEngineValidator`(gravity 形态)不持有它、全仓消费方仅 engine.rs/rpc.rs/launch.rs 传递链 → 按原则②整线剪除(engine.rs 构造+3 处传参、rpc.rs re-export+trait/impl 参、launch.rs 参数,`BasicEngineValidator::new` 调用回 6 参实测吻合);`changesets.rs` 定性磁盘孤儿勿挂载;④`WaitForCaches` 补桩:v2.3.0 impl(payload_validator.rs :2235)被 merge 丢弃而 rpc.rs/launch.rs bound 存活、运行时零调用方 → 补 `CacheWaitDurations::default()` 桩 impl(gravity payload processor 无 cache 锁,零等待=baseline 行为)。4 文件 rustfmt parse 全绿,`ChangesetCache` 活代码 grep 归零 | 已关闭 |
 | workspace ~20 缺 dep(阻塞一切编译证据) | root Cargo.toml;**根因升级(2026-07-06 实测)**:`crates/primitives/` 整目录缺失(bin/reth、pipe-exec event-bus、ress ×2 依赖 `reth_primitives`),`reth-primitives-traits` 已被替换为 crates.io 0.4.1 注册表依赖(baseline path crate 仅剩残片目录)——修复 = 恢复 path crate + members + workspace dep 切回 path,连带 ress 2 members + 2 deps(net-prune 文档 OQ6) | cargo 组 |
 | `SubkeyContainedValue` 定义缺失(4 文件 7 处) | primitives-traits;根因同上行(crates.io 版无 gravity 定制) | primitives-traits 组 |
 | static-file/types「缝隙」 | **收口实测定性:非断裂,系 storage 组有意桥接**——provider writer.rs 通配臂带 gravity 注释、`tables::TransactionSenders` 存活(db-api :506)、零冲突消费方(cli get.rs / without_evm.rs)按 v2.3.0 types 编译;`ChangesetOffset*` 家族零外部消费方自包含。**types 保持 v2.3.0 不回退**;changeset 段运行时能力记 v2.4+ 债务;stages 组解块时三个新 segment variant 可用 | 已定性关闭(stages 组照此解块) |
