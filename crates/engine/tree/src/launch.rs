@@ -26,7 +26,6 @@ use reth_provider::{
 use reth_prune::PrunerWithFactory;
 use reth_stages_api::{MetricEventsSender, Pipeline};
 use reth_tasks::Runtime;
-use reth_trie_db::ChangesetCache;
 use std::sync::Arc;
 
 /// Builds the engine [`ChainOrchestrator`] that drives the chain forward.
@@ -63,8 +62,10 @@ pub fn build_engine_orchestrator<N, Client, S, V, C>(
     tree_config: TreeConfig,
     sync_metrics_tx: MetricEventsSender,
     evm_config: C,
-    changeset_cache: ChangesetCache,
-    runtime: Runtime,
+    // NOTE(gravity): accepted for call-site parity with upstream; the gravity-form
+    // NOTE(gravity): `EngineApiTreeHandler::spawn_new` does not take a runtime; the
+    // gravity-form tree spawns via the global runtime instead.
+    _runtime: Runtime,
 ) -> ChainOrchestrator<
     EngineHandler<
         EngineApiRequestHandler<EngineApiRequest<N::Payload, N::Primitives>, N::Primitives>,
@@ -97,8 +98,6 @@ where
         tree_config,
         engine_kind,
         evm_config,
-        changeset_cache,
-        runtime,
     );
 
     let engine_handler = EngineApiRequestHandler::new(to_tree_tx, from_tree);

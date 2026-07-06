@@ -18,35 +18,20 @@ asm-keccak = ["alloy-primitives/asm-keccak", "revm/asm-keccak"]
 [dependencies]
 reth-chainspec.workspace = true
 reth-ethereum-primitives.workspace = true
-<<<<<<< HEAD
-reth-primitives-traits.workspace = true
-reth-consensus.workspace = true
-reth-db = { workspace = true, features = ["test-utils", "disable-lock"] }
-=======
 reth-primitives-traits = { workspace = true, features = ["rayon"] }
 reth-consensus.workspace = true
-reth-db = { workspace = true, features = ["mdbx", "test-utils", "disable-lock"] }
->>>>>>> v2.3.0
+reth-db = { workspace = true, features = ["test-utils", "disable-lock"] }
 reth-db-api.workspace = true
 reth-db-common.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-evm.workspace = true
 reth-evm-ethereum.workspace = true
 reth-ethereum-consensus.workspace = true
-<<<<<<< HEAD
 reth-revm = { workspace = true, features = ["std", "witness"] }
-reth-stateless = { workspace = true }
-reth-tracing.workspace = true
-reth-trie.workspace = true
-reth-trie-db.workspace = true
-revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg"] }
-=======
-reth-revm.workspace = true
 reth-tracing.workspace = true
 reth-trie.workspace = true
 reth-trie-db.workspace = true
 revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg", "memory_limit", "p256-aws-lc-rs"] }
->>>>>>> v2.3.0
 
 alloy-rlp.workspace = true
 alloy-primitives.workspace = true

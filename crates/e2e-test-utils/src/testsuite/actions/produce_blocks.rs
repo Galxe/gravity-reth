@@ -11,10 +11,7 @@ use alloy_rpc_types_engine::{
 use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
 use eyre::Result;
 use futures_util::future::BoxFuture;
-<<<<<<< HEAD
-=======
 use reth_ethereum_primitives::TransactionSigned;
->>>>>>> v2.3.0
 use reth_node_api::{EngineTypes, PayloadTypes};
 use reth_rpc_api::clients::{EngineApiClient, EthApiClient};
 use std::{collections::HashSet, marker::PhantomData, time::Duration};
@@ -83,10 +80,7 @@ where
                 Block,
                 Receipt,
                 Header,
-<<<<<<< HEAD
-=======
                 TransactionSigned,
->>>>>>> v2.3.0
             >::block_by_number(
                 rpc_client, alloy_eips::BlockNumberOrTag::Latest, false
             )
@@ -104,38 +98,12 @@ where
                 finalized_block_hash: parent_hash,
             };
 
-<<<<<<< HEAD
-            let fcu_result = EngineApiClient::<Engine>::fork_choice_updated_v2(
-=======
             // Try v2 first for backwards compatibility, fall back to v3 on error.
             match EngineApiClient::<Engine>::fork_choice_updated_v2(
->>>>>>> v2.3.0
                 &engine_client,
                 fork_choice_state,
                 Some(self.payload_attributes.clone()),
             )
-<<<<<<< HEAD
-            .await?;
-
-            debug!("FCU result: {:?}", fcu_result);
-
-            // check if we got a valid payload ID
-            match fcu_result.payload_status.status {
-                PayloadStatusEnum::Valid => {
-                    if let Some(payload_id) = fcu_result.payload_id {
-                        debug!("Got payload ID: {payload_id}");
-
-                        // get the payload that was built
-                        let _engine_payload =
-                            EngineApiClient::<Engine>::get_payload_v2(&engine_client, payload_id)
-                                .await?;
-                        Ok(())
-                    } else {
-                        Err(eyre::eyre!("No payload ID returned from forkchoiceUpdated"))
-                    }
-                }
-                _ => Err(eyre::eyre!("Payload status not valid: {:?}", fcu_result.payload_status)),
-=======
             .await
             {
                 Ok(fcu_result) => {
@@ -190,7 +158,6 @@ where
                         )),
                     }
                 }
->>>>>>> v2.3.0
             }
         })
     }
@@ -260,10 +227,7 @@ where
                 suggested_fee_recipient: alloy_primitives::Address::random(),
                 withdrawals: Some(vec![]),
                 parent_beacon_block_root: Some(B256::ZERO),
-<<<<<<< HEAD
-=======
                 slot_number: None,
->>>>>>> v2.3.0
             };
 
             env.active_node_state_mut()?
@@ -336,10 +300,7 @@ where
                     suggested_fee_recipient: alloy_primitives::Address::random(),
                     withdrawals: Some(vec![]),
                     parent_beacon_block_root: Some(B256::ZERO),
-<<<<<<< HEAD
-=======
                     slot_number: None,
->>>>>>> v2.3.0
                 };
 
                 let fresh_fcu_result = EngineApiClient::<Engine>::fork_choice_updated_v3(
@@ -426,10 +387,7 @@ where
                     Block,
                     Receipt,
                     Header,
-<<<<<<< HEAD
-=======
                     TransactionSigned,
->>>>>>> v2.3.0
                 >::block_by_number(
                     rpc_client, alloy_eips::BlockNumberOrTag::Latest, false
                 )
@@ -503,10 +461,7 @@ where
                 Block,
                 Receipt,
                 Header,
-<<<<<<< HEAD
-=======
                 TransactionSigned,
->>>>>>> v2.3.0
             >::block_by_number(
                 rpc_client, alloy_eips::BlockNumberOrTag::Latest, false
             )
@@ -617,10 +572,7 @@ where
                     Block,
                     Receipt,
                     Header,
-<<<<<<< HEAD
-=======
                     TransactionSigned,
->>>>>>> v2.3.0
                 >::header_by_number(
                     rpc_client, alloy_eips::BlockNumberOrTag::Latest
                 )
@@ -693,13 +645,6 @@ where
                         rpc_latest_header.inner.timestamp;
                     env.active_node_state_mut()?.latest_fork_choice_state.head_block_hash =
                         rpc_latest_header.hash;
-<<<<<<< HEAD
-
-                    // update local copy for any further usage in this scope
-                    // latest_block.hash = rpc_latest_header.hash;
-                    // latest_block.number = rpc_latest_header.inner.number;
-=======
->>>>>>> v2.3.0
                 }
             }
 

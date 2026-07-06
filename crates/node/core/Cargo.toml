@@ -16,11 +16,7 @@ reth-chainspec.workspace = true
 reth-consensus.workspace = true
 reth-primitives-traits = { workspace = true, features = ["rayon"] }
 reth-cli-util.workspace = true
-<<<<<<< HEAD
-reth-db = { workspace = true }
-=======
 reth-db = { workspace = true, features = ["mdbx"] }
->>>>>>> v2.3.0
 reth-storage-errors.workspace = true
 reth-storage-api = { workspace = true, features = ["std", "db-api"] }
 reth-network = { workspace = true, features = ["serde"] }
@@ -29,12 +25,8 @@ reth-rpc-eth-types.workspace = true
 reth-rpc-server-types.workspace = true
 reth-rpc-convert.workspace = true
 reth-transaction-pool.workspace = true
-<<<<<<< HEAD
-reth-tracing.workspace = true
-=======
 reth-tasks.workspace = true
 reth-tracing = { workspace = true, features = ["std"] }
->>>>>>> v2.3.0
 reth-config = { workspace = true, features = ["serde"] }
 reth-discv4.workspace = true
 reth-discv5.workspace = true
@@ -46,18 +38,11 @@ reth-stages-types.workspace = true
 reth-ethereum-forks.workspace = true
 reth-engine-local.workspace = true
 reth-engine-primitives.workspace = true
-<<<<<<< HEAD
 gravity-primitives.workspace = true
 
 # ethereum
 alloy-primitives.workspace = true
-alloy-rpc-types-engine = { workspace = true, features = ["std", "jwt"] }
-=======
-
-# ethereum
-alloy-primitives.workspace = true
 alloy-rpc-types-engine = { workspace = true, features = ["std", "jwt-aws-lc-rs"] }
->>>>>>> v2.3.0
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 
@@ -72,16 +57,9 @@ serde.workspace = true
 strum = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 url.workspace = true
-<<<<<<< HEAD
-
-# io
-dirs-next.workspace = true
-shellexpand.workspace = true
-=======
 ipnet.workspace = true
 # io
 dirs-next.workspace = true
->>>>>>> v2.3.0
 
 # obs
 tracing.workspace = true
@@ -102,8 +80,6 @@ tokio.workspace = true
 # Features for vergen to generate correct env vars
 jemalloc = ["reth-cli-util/jemalloc"]
 asm-keccak = ["alloy-primitives/asm-keccak"]
-<<<<<<< HEAD
-=======
 keccak-cache-global = ["alloy-primitives/keccak-cache-global"]
 otlp = ["reth-tracing/otlp", "reth-tracing-otlp/otlp"]
 otlp-logs = ["reth-tracing/otlp-logs", "reth-tracing-otlp/otlp-logs"]
@@ -117,7 +93,6 @@ min-trace-logs = ["tracing/release_max_level_trace"]
 
 # Debug recording for sparse trie mutations
 trie-debug = ["reth-engine-primitives/trie-debug"]
->>>>>>> v2.3.0
 
 [build-dependencies]
 vergen = { workspace = true, features = ["build", "cargo", "emit_and_set"] }

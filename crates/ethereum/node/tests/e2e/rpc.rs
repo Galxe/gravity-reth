@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-use crate::utils::eth_payload_attributes;
-use alloy_eips::{eip2718::Encodable2718, eip7910::EthConfig};
-use alloy_primitives::{Address, B256, U256};
-use alloy_provider::{network::EthereumWallet, Provider, ProviderBuilder, SendableTx};
-use alloy_rpc_types_beacon::relay::{
-    BidTrace, BuilderBlockValidationRequestV3, BuilderBlockValidationRequestV4,
-    SignedBidSubmissionV3, SignedBidSubmissionV4,
-=======
 use crate::utils::{eth_payload_attributes, eth_payload_attributes_amsterdam};
 use alloy_eips::{eip2718::Encodable2718, eip7910::EthConfig};
 use alloy_genesis::Genesis;
@@ -16,18 +7,12 @@ use alloy_rpc_types_beacon::relay::{
     BidTrace, BuilderBlockValidationRequestV3, BuilderBlockValidationRequestV4,
     BuilderBlockValidationRequestV6, SignedBidSubmissionV3, SignedBidSubmissionV4,
     SignedBidSubmissionV6,
->>>>>>> v2.3.0
 };
 use alloy_rpc_types_engine::{BlobsBundleV1, ExecutionPayloadV3};
 use alloy_rpc_types_eth::TransactionRequest;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use reth_chainspec::{ChainSpecBuilder, EthChainSpec, MAINNET};
 use reth_e2e_test_utils::setup_engine;
-<<<<<<< HEAD
-use reth_node_ethereum::EthereumNode;
-use reth_payload_primitives::BuiltPayload;
-use std::{
-=======
 use reth_network::{types::NatResolver, PeersInfo};
 use reth_node_builder::{NodeBuilder, NodeHandle};
 use reth_node_core::{
@@ -40,7 +25,6 @@ use reth_rpc_api::servers::AdminApiServer;
 use reth_tasks::Runtime;
 use std::{
     net::{IpAddr, Ipv4Addr},
->>>>>>> v2.3.0
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -60,10 +44,7 @@ alloy_sol_types::sol! {
 }
 
 #[tokio::test]
-<<<<<<< HEAD
 #[ignore = "todo fix: HashBuilder failed"]
-=======
->>>>>>> v2.3.0
 async fn test_fee_history() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -79,11 +60,7 @@ async fn test_fee_history() -> eyre::Result<()> {
             .build(),
     );
 
-<<<<<<< HEAD
-    let (mut nodes, _tasks, wallet) = setup_engine::<EthereumNode>(
-=======
     let (mut nodes, wallet) = setup_engine::<EthereumNode>(
->>>>>>> v2.3.0
         1,
         chain_spec.clone(),
         false,
@@ -116,13 +93,8 @@ async fn test_fee_history() -> eyre::Result<()> {
     assert_eq!(block.header.gas_used, receipt.gas_used,);
     assert_eq!(block.header.base_fee_per_gas.unwrap(), expected_first_base_fee as u64);
 
-<<<<<<< HEAD
-    for _ in 0..100 {
-        let _ = GasWaster::deploy_builder(&provider, U256::from(rng.random_range(0..1000)))
-=======
     for _ in 0..20 {
         let _ = GasWaster::deploy_builder(&provider, U256::from(rng.random_range(0..100)))
->>>>>>> v2.3.0
             .send()
             .await?;
 
@@ -131,11 +103,7 @@ async fn test_fee_history() -> eyre::Result<()> {
 
     let latest_block = provider.get_block_number().await?;
 
-<<<<<<< HEAD
-    for _ in 0..100 {
-=======
     for _ in 0..20 {
->>>>>>> v2.3.0
         let latest_block = rng.random_range(0..=latest_block);
         let block_count = rng.random_range(1..=(latest_block + 1));
 
@@ -177,11 +145,7 @@ async fn test_flashbots_validate_v3() -> eyre::Result<()> {
             .build(),
     );
 
-<<<<<<< HEAD
-    let (mut nodes, _tasks, wallet) = setup_engine::<EthereumNode>(
-=======
     let (mut nodes, wallet) = setup_engine::<EthereumNode>(
->>>>>>> v2.3.0
         1,
         chain_spec.clone(),
         false,
@@ -263,11 +227,7 @@ async fn test_flashbots_validate_v4() -> eyre::Result<()> {
             .build(),
     );
 
-<<<<<<< HEAD
-    let (mut nodes, _tasks, wallet) = setup_engine::<EthereumNode>(
-=======
     let (mut nodes, wallet) = setup_engine::<EthereumNode>(
->>>>>>> v2.3.0
         1,
         chain_spec.clone(),
         false,
@@ -339,8 +299,6 @@ async fn test_flashbots_validate_v4() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-<<<<<<< HEAD
-=======
 async fn test_flashbots_validate_v6() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -427,7 +385,6 @@ async fn test_flashbots_validate_v6() -> eyre::Result<()> {
 }
 
 #[tokio::test]
->>>>>>> v2.3.0
 async fn test_eth_config() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -446,11 +403,7 @@ async fn test_eth_config() -> eyre::Result<()> {
             .build(),
     );
 
-<<<<<<< HEAD
-    let (mut nodes, _tasks, wallet) = setup_engine::<EthereumNode>(
-=======
     let (mut nodes, wallet) = setup_engine::<EthereumNode>(
->>>>>>> v2.3.0
         1,
         chain_spec.clone(),
         false,
@@ -474,8 +427,6 @@ async fn test_eth_config() -> eyre::Result<()> {
 
     Ok(())
 }
-<<<<<<< HEAD
-=======
 
 // <https://github.com/paradigmxyz/reth/issues/19765>
 #[tokio::test]
@@ -603,4 +554,3 @@ async fn test_admin_node_info_discv5_enr_uses_nat_extip_when_discv4_is_disabled(
 
     Ok(())
 }
->>>>>>> v2.3.0

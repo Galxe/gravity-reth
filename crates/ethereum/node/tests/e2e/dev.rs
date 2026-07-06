@@ -1,20 +1,7 @@
-<<<<<<< HEAD
-use alloy_eips::eip2718::Encodable2718;
-=======
->>>>>>> v2.3.0
 use alloy_genesis::Genesis;
 use alloy_primitives::{b256, hex, Address};
 use futures::StreamExt;
 use reth_chainspec::ChainSpec;
-<<<<<<< HEAD
-use reth_node_api::{BlockBody, FullNodeComponents, FullNodePrimitives, NodeTypes};
-use reth_node_builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle};
-use reth_node_core::args::DevArgs;
-use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
-use reth_provider::{providers::BlockchainProvider, CanonStateSubscriptions};
-use reth_rpc_eth_api::{helpers::EthTransactions, EthApiServer};
-use reth_tasks::TaskManager;
-=======
 use reth_node_api::{BlockBody, FullNodeComponents};
 use reth_node_builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle};
 use reth_node_core::args::DevArgs;
@@ -23,28 +10,18 @@ use reth_primitives_traits::transaction::TxHashRef;
 use reth_provider::{providers::BlockchainProvider, CanonStateSubscriptions};
 use reth_rpc_eth_api::{helpers::EthTransactions, EthApiServer};
 use reth_tasks::Runtime;
->>>>>>> v2.3.0
 use std::sync::Arc;
 
 #[tokio::test]
 async fn can_run_dev_node() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-<<<<<<< HEAD
-    let tasks = TaskManager::current();
-    let exec = tasks.executor();
-=======
     let runtime = Runtime::test();
->>>>>>> v2.3.0
 
     let node_config = NodeConfig::test()
         .with_chain(custom_chain())
         .with_dev(DevArgs { dev: true, ..Default::default() });
     let NodeHandle { node, .. } = NodeBuilder::new(node_config.clone())
-<<<<<<< HEAD
-        .testing_node(exec.clone())
-=======
         .testing_node(runtime.clone())
->>>>>>> v2.3.0
         .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
         .with_components(EthereumNode::components())
         .with_add_ons(EthereumAddOns::default())
@@ -59,23 +36,14 @@ async fn can_run_dev_node() -> eyre::Result<()> {
 #[tokio::test]
 async fn can_run_dev_node_custom_attributes() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-<<<<<<< HEAD
-    let tasks = TaskManager::current();
-    let exec = tasks.executor();
-=======
     let runtime = Runtime::test();
->>>>>>> v2.3.0
 
     let node_config = NodeConfig::test()
         .with_chain(custom_chain())
         .with_dev(DevArgs { dev: true, ..Default::default() });
     let fee_recipient = Address::random();
     let NodeHandle { node, .. } = NodeBuilder::new(node_config.clone())
-<<<<<<< HEAD
-        .testing_node(exec.clone())
-=======
         .testing_node(runtime.clone())
->>>>>>> v2.3.0
         .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
         .with_components(EthereumNode::components())
         .with_add_ons(EthereumAddOns::default())
@@ -111,10 +79,6 @@ async fn assert_chain_advances<N, AddOns>(node: &FullNode<N, AddOns>)
 where
     N: FullNodeComponents<Provider: CanonStateSubscriptions>,
     AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
-<<<<<<< HEAD
-    N::Types: NodeTypes<Primitives: FullNodePrimitives>,
-=======
->>>>>>> v2.3.0
 {
     let mut notifications = node.provider.canonical_state_stream();
 
@@ -135,11 +99,7 @@ where
     let head = notifications.next().await.unwrap();
 
     let tx = &head.tip().body().transactions()[0];
-<<<<<<< HEAD
-    assert_eq!(tx.trie_hash(), hash);
-=======
     assert_eq!(*tx.tx_hash(), hash);
->>>>>>> v2.3.0
     println!("mined transaction: {hash}");
 }
 

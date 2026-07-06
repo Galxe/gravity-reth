@@ -13,7 +13,7 @@ use reth_stages_api::{ExecInput, ExecOutput, Stage, StageError, UnwindInput, Unw
 use std::fmt::Debug;
 use tracing::info;
 
-/// Stage is indexing history the storage changesets generated in
+/// Stage is indexing history the account changesets generated in
 /// [`ExecutionStage`][crate::stages::ExecutionStage]. For more information
 /// on index sharding take a look at [`tables::StoragesHistory`].
 #[derive(Debug)]
@@ -34,7 +34,7 @@ impl IndexStorageHistoryStage {
         etl_config: EtlConfig,
         prune_mode: Option<PruneMode>,
     ) -> Self {
-        Self { commit_threshold: config.commit_threshold, etl_config, prune_mode }
+        Self { commit_threshold: config.commit_threshold, prune_mode, etl_config }
     }
 }
 
@@ -382,12 +382,12 @@ mod tests {
     async fn insert_index_second_half_shard() {
         // init
         let db = TestStageDB::default();
-        let mut almost_full_list = (1..=LAST_BLOCK_IN_FULL_SHARD - 1).collect::<Vec<_>>();
+        let mut close_full_list = (1..=LAST_BLOCK_IN_FULL_SHARD - 1).collect::<Vec<_>>();
 
         // setup
         partial_setup(&db);
         db.commit(|tx| {
-            tx.put::<tables::StoragesHistory>(shard(u64::MAX), list(&almost_full_list)).unwrap();
+            tx.put::<tables::StoragesHistory>(shard(u64::MAX), list(&close_full_list)).unwrap();
             Ok(())
         })
         .unwrap();
@@ -396,12 +396,12 @@ mod tests {
         run(&db, LAST_BLOCK_IN_FULL_SHARD + 1, Some(LAST_BLOCK_IN_FULL_SHARD - 1));
 
         // verify
-        almost_full_list.push(LAST_BLOCK_IN_FULL_SHARD);
+        close_full_list.push(LAST_BLOCK_IN_FULL_SHARD);
         let table = cast(db.table::<tables::StoragesHistory>().unwrap());
         assert_eq!(
             table,
             BTreeMap::from([
-                (shard(LAST_BLOCK_IN_FULL_SHARD), almost_full_list.clone()),
+                (shard(LAST_BLOCK_IN_FULL_SHARD), close_full_list.clone()),
                 (shard(u64::MAX), vec![LAST_BLOCK_IN_FULL_SHARD + 1])
             ])
         );
@@ -410,9 +410,9 @@ mod tests {
         unwind(&db, LAST_BLOCK_IN_FULL_SHARD, LAST_BLOCK_IN_FULL_SHARD - 1);
 
         // verify initial state
-        almost_full_list.pop();
+        close_full_list.pop();
         let table = cast(db.table::<tables::StoragesHistory>().unwrap());
-        assert_eq!(table, BTreeMap::from([(shard(u64::MAX), almost_full_list)]));
+        assert_eq!(table, BTreeMap::from([(shard(u64::MAX), close_full_list)]));
     }
 
     #[tokio::test]

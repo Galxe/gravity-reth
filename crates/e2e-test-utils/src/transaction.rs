@@ -1,12 +1,7 @@
-<<<<<<< HEAD
-use alloy_consensus::{EnvKzgSettings, SidecarBuilder, SimpleCoder, TxEip4844Variant, TxEnvelope};
-use alloy_eips::eip7702::SignedAuthorization;
-=======
 use alloy_consensus::{
     EnvKzgSettings, EthereumTxEnvelope, SidecarBuilder, SimpleCoder, TxEip4844Variant, TxEnvelope,
 };
 use alloy_eips::{eip7594::BlobTransactionSidecarVariant, eip7702::SignedAuthorization};
->>>>>>> v2.3.0
 use alloy_network::{
     eip2718::Encodable2718, Ethereum, EthereumWallet, NetworkTransactionBuilder,
     TransactionBuilder4844,
@@ -44,8 +39,6 @@ impl TransactionTestContext {
         signed.encoded_2718().into()
     }
 
-<<<<<<< HEAD
-=======
     /// Creates a transfer with a specific nonce and signs it, returning bytes.
     /// Uses high `max_fee_per_gas` (1000 gwei) to ensure tx acceptance regardless of basefee.
     pub async fn transfer_tx_bytes_with_nonce(
@@ -58,7 +51,6 @@ impl TransactionTestContext {
         signed.encoded_2718().into()
     }
 
->>>>>>> v2.3.0
     /// Creates a deployment transaction and signs it, returning an envelope.
     pub async fn deploy_tx(
         chain_id: u64,
@@ -172,13 +164,9 @@ impl TransactionTestContext {
 
     /// Validates the sidecar of a given tx envelope and returns the versioned hashes
     #[track_caller]
-<<<<<<< HEAD
-    pub fn validate_sidecar(tx: TxEnvelope) -> Vec<B256> {
-=======
     pub fn validate_sidecar(
         tx: EthereumTxEnvelope<TxEip4844Variant<BlobTransactionSidecarVariant>>,
     ) -> Vec<B256> {
->>>>>>> v2.3.0
         let proof_setting = EnvKzgSettings::Default;
 
         match tx {

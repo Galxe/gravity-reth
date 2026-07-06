@@ -7,7 +7,6 @@ use std::{
     ops::{Range, RangeInclusive},
     task::{Context, Poll},
 };
-use tracing::instrument;
 
 /// Stage execution input, see [`Stage::execute`].
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -16,26 +15,6 @@ pub struct ExecInput {
     pub target: Option<BlockNumber>,
     /// The checkpoint of this stage the last time it was executed.
     pub checkpoint: Option<StageCheckpoint>,
-}
-
-/// Return type for [`ExecInput::next_block_range_with_threshold`].
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct BlockRangeOutput {
-    /// The block range to execute.
-    pub block_range: RangeInclusive<BlockNumber>,
-    /// Whether this is the final range to execute.
-    pub is_final_range: bool,
-}
-
-/// Return type for [`ExecInput::next_block_range_with_transaction_threshold`].
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct TransactionRangeOutput {
-    /// The transaction range to execute.
-    pub tx_range: Range<TxNumber>,
-    /// The block range to execute.
-    pub block_range: RangeInclusive<BlockNumber>,
-    /// Whether this is the final range to execute.
-    pub is_final_range: bool,
 }
 
 impl ExecInput {
@@ -63,7 +42,8 @@ impl ExecInput {
 
     /// Return next block range that needs to be executed.
     pub fn next_block_range(&self) -> RangeInclusive<BlockNumber> {
-        self.next_block_range_with_threshold(u64::MAX).block_range
+        let (range, _) = self.next_block_range_with_threshold(u64::MAX);
+        range
     }
 
     /// Return true if this is the first block range to execute.
@@ -72,7 +52,11 @@ impl ExecInput {
     }
 
     /// Return the next block range to execute.
-    pub fn next_block_range_with_threshold(&self, threshold: u64) -> BlockRangeOutput {
+    /// Return pair of the block range and if this is final block range.
+    pub fn next_block_range_with_threshold(
+        &self,
+        threshold: u64,
+    ) -> (RangeInclusive<BlockNumber>, bool) {
         let current_block = self.checkpoint();
         let start = current_block.block_number + 1;
         let target = self.target();
@@ -80,32 +64,22 @@ impl ExecInput {
         let end = min(target, current_block.block_number.saturating_add(threshold));
 
         let is_final_range = end == target;
-        BlockRangeOutput { block_range: start..=end, is_final_range }
+        (start..=end, is_final_range)
     }
 
     /// Return the next block range determined the number of transactions within it.
     /// This function walks the block indices until either the end of the range is reached or
     /// the number of transactions exceeds the threshold.
-    ///
-    /// Returns [`None`] if no transactions are found for the current execution input.
-    #[instrument(level = "debug", target = "sync::stages", skip(provider), ret)]
     pub fn next_block_range_with_transaction_threshold<Provider>(
         &self,
         provider: &Provider,
         tx_threshold: u64,
-    ) -> Result<Option<TransactionRangeOutput>, StageError>
+    ) -> Result<(Range<TxNumber>, RangeInclusive<BlockNumber>, bool), StageError>
     where
         Provider: BlockReader,
     {
         let start_block = self.next_block();
         let target_block = self.target();
-
-        // If the start block is greater than the target, then there's no transactions to process
-        // and we return early. It's possible to trigger this scenario when running `reth
-        // stage run` manually for a range of transactions that doesn't exist.
-        if start_block > target_block {
-            return Ok(None)
-        }
 
         let start_block_body = provider
             .block_body_indices(start_block)?
@@ -121,7 +95,7 @@ impl ExecInput {
 
         if all_tx_cnt == 0 {
             // if there is no more transaction return back.
-            return Ok(None)
+            return Ok((first_tx_num..first_tx_num, start_block..=target_block, true))
         }
 
         // get block of this tx
@@ -142,11 +116,7 @@ impl ExecInput {
         };
 
         let tx_range = first_tx_num..next_tx_num;
-        Ok(Some(TransactionRangeOutput {
-            tx_range,
-            block_range: start_block..=end_block,
-            is_final_range,
-        }))
+        Ok((tx_range, start_block..=end_block, is_final_range))
     }
 }
 
@@ -225,7 +195,7 @@ pub struct UnwindOutput {
 ///
 /// Stages receive [`DBProvider`](reth_provider::DBProvider).
 #[auto_impl::auto_impl(Box)]
-pub trait Stage<Provider>: Send {
+pub trait Stage<Provider>: Send + Sync {
     /// Get the ID of the stage.
     ///
     /// Stage IDs must be unique.

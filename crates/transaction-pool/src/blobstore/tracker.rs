@@ -174,7 +174,7 @@ mod tests {
         );
 
         // Extract blocks from the chain
-        let chain: Chain = Chain::new(vec![block1, block2], Default::default(), BTreeMap::new());
+        let chain: Chain = Chain::new(vec![block1, block2], Default::default(), None);
         let blocks = chain.into_inner().0;
 
         // Add new chain blocks to the tracker

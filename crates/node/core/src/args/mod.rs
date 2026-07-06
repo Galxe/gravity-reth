@@ -64,6 +64,10 @@ pub use datadir_args::DatadirArgs;
 mod engine;
 pub use engine::{DefaultEngineValues, EngineArgs};
 
+/// GravityArgs for configuring gravity features
+mod gravity;
+pub use gravity::GravityArgs;
+
 /// `EraArgs` for configuring ERA files import.
 mod era;
 pub use era::{DefaultEraHost, EraArgs, EraSourceArgs};
