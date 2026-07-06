@@ -9,13 +9,7 @@ use reth_db_api::{
 };
 use reth_etl::Collector;
 use reth_primitives_traits::Account;
-<<<<<<< HEAD
 use reth_provider::{AccountExtReader, DBProvider, HashingWriter, StatsReader};
-=======
-use reth_provider::{
-    AccountExtReader, DBProvider, HashingWriter, StatsReader, StorageSettingsCache,
-};
->>>>>>> v2.3.0
 use reth_stages_api::{
     AccountHashingCheckpoint, BlockRangeOutput, EntitiesCheckpoint, ExecInput, ExecOutput, Stage,
     StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
@@ -75,22 +69,14 @@ impl AccountHashingStage {
         opts: SeedOpts,
     ) -> Result<Vec<(alloy_primitives::Address, Account)>, StageError>
     where
-<<<<<<< HEAD
-        N::Primitives: reth_primitives_traits::FullNodePrimitives<
-=======
         N::Primitives: reth_primitives_traits::NodePrimitives<
->>>>>>> v2.3.0
             Block = reth_ethereum_primitives::Block,
             BlockHeader = reth_primitives_traits::Header,
         >,
     {
         use alloy_primitives::U256;
         use reth_db_api::models::AccountBeforeTx;
-<<<<<<< HEAD
         use reth_provider::{StaticFileProviderFactory, StaticFileWriter};
-=======
-        use reth_provider::{BlockWriter, StaticFileProviderFactory, StaticFileWriter};
->>>>>>> v2.3.0
         use reth_testing_utils::{
             generators,
             generators::{random_block_range, random_eoa_accounts, BlockRangeParams},
@@ -105,11 +91,7 @@ impl AccountHashingStage {
         );
 
         for block in blocks {
-<<<<<<< HEAD
             provider.insert_historical_block(block.try_recover().unwrap()).unwrap();
-=======
-            provider.insert_block(&block.try_recover().unwrap()).unwrap();
->>>>>>> v2.3.0
         }
         provider
             .static_file_provider()
@@ -158,11 +140,7 @@ impl Default for AccountHashingStage {
 
 impl<Provider> Stage<Provider> for AccountHashingStage
 where
-    Provider: DBProvider<Tx: DbTxMut>
-        + HashingWriter
-        + AccountExtReader
-        + StatsReader
-        + StorageSettingsCache,
+    Provider: DBProvider<Tx: DbTxMut> + HashingWriter + AccountExtReader + StatsReader,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -170,19 +148,9 @@ where
     }
 
     /// Execute the stage.
-    ///
-    /// When `use_hashed_state` is enabled, this stage is a no-op because the execution stage
-    /// writes directly to `HashedAccounts`. Otherwise, it hashes plain state to populate hashed
-    /// tables.
     fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
-        }
-
-        // If using hashed state as canonical, execution already writes to `HashedAccounts`,
-        // so this stage becomes a no-op.
-        if provider.cached_storage_settings().use_hashed_state() {
-            return Ok(ExecOutput::done(input.checkpoint().with_block_number(input.target())));
         }
 
         // Use the total remaining range to decide clean vs incremental.
@@ -303,18 +271,9 @@ where
         provider: &Provider,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
-        // NOTE: this runs in both v1 and v2 mode. In v2 mode, execution writes
-        // directly to `HashedAccounts`, but the unwind must still revert those
-        // entries here because `MerkleUnwind` runs after this stage (in unwind
-        // order) and needs `HashedAccounts` to reflect the target block state
-        // before it can verify the state root.
         let (range, unwind_progress, _) =
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
-<<<<<<< HEAD
-        // Aggregate all transition changesets and make a list of accounts that have been changed.
-=======
->>>>>>> v2.3.0
         provider.unwind_account_hashing_range(range)?;
 
         let mut stage_checkpoint =
@@ -420,12 +379,7 @@ mod tests {
                 },
                 done: true,
             }) if block_number == previous_stage &&
-<<<<<<< HEAD
                 total == runner.db.table::<tables::PlainAccountState>().unwrap().len() as u64
-=======
-                processed == total &&
-                total == runner.db.count_entries::<tables::PlainAccountState>().unwrap() as u64
->>>>>>> v2.3.0
         );
 
         // Validate the stage execution

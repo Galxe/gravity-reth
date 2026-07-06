@@ -382,8 +382,10 @@ Baseline 形态：
    (engine `persistence.rs:236` 融合版 on_save_blocks 持久化
    safe/finalized)。→ healing **现在合**:解 `pipeline/mod.rs` 10 块时在
    keep-gravity 主体(UnifiedStorageWriter 路径)上叠加采纳,纯增量、无冲突。
-   - [ ] 冲突解决:待落地;`stages/api/src/pipeline/mod.rs` 现存 10 处冲突块
-     (2026-07-05 实测)。
+   - [x] 冲突解决:已落地(2026-07-06,由 stages 组随 pipeline/mod.rs 10 块一并解决)——
+     safe-block 保存路径按本决策叠加采纳,紧贴其后保 gravity `UnifiedStorageWriter::commit_unwind`;
+     另修复公共区 :425 死符号侧翻 `unwind_provider_rw()`→`database_provider_rw()`。
+     详见 stages-pipeline.md「落地实录」。
 
 - [x] 3. **`reth-payload-util` workspace 归属** —— 上游新增 crate `crates/payload/util` 与 gravity 的 `crates/pipe-exec-layer-ext-v2/event-bus` 必须以不同名（`reth-payload-util` vs `reth-pipe-exec-layer-event-bus`）在同一 workspace 共存。需要核查解决后的根 `Cargo.toml` workspace members 两者都在列。
    → **决策(2026-07-05,核实即裁决)**:双名共存成立——根 Cargo.toml members
@@ -405,8 +407,10 @@ Baseline 形态：
    绑定的 `RocksDBProvider` 已被 f89d9d4e23 连文件删除(全仓零定义,实测),
    5 参构造器形态不存在。keep-gravity(删上游 test mod);follow-up 撤销,
    改为 v2.4+ 随 storage-v2 再合并时重估。
-   - [ ] 冲突解决:待落地;`stages/api/src/stage.rs` 现存 1 处冲突块
-     (2026-07-05 实测)。
+   - [x] 冲突解决:已落地(2026-07-06,由 stages 组解决)——1 块解毕,上游 mod tests
+     整块丢弃。⟲ 勘误:该文件生产体(公共区)含上游带入的 `BlockRangeOutput`/
+     `TransactionRangeOutput` 定义,实为存活自包含符号(非死符号),已按原则③保留并
+     全组对齐 4 个调用点(见 stages-pipeline.md「落地实录」)。
 
 - [x] 6. **(新增)`bin/reth` 的 ress 接线 vs 根 Cargo.toml 对齐决议** ——
    `7490ae4ca6` 按 v2.3.0 基线对齐根 Cargo.toml 时删除了 `crates/ress/*`

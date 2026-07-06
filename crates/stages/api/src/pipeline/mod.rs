@@ -7,15 +7,9 @@ pub use event::*;
 use futures_util::Future;
 use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
-<<<<<<< HEAD
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockNumReader,
     ChainStateBlockReader, ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory,
     PruneCheckpointReader, StageCheckpointReader, StageCheckpointWriter,
-=======
-    providers::ProviderNodeTypes, BlockHashReader, BlockNumReader, ChainStateBlockReader,
-    ChainStateBlockWriter, DBProvider, DatabaseProviderFactory, ProviderFactory,
-    PruneCheckpointReader, StageCheckpointReader, StageCheckpointWriter, StorageSettingsCache,
->>>>>>> v2.3.0
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
@@ -128,14 +122,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     }
 
     /// Get a mutable reference to a stage by index.
-<<<<<<< HEAD
-    pub fn stage(&mut self, idx: usize) -> &mut dyn Stage<DatabaseProviderRW<N>> {
-=======
     pub fn stage(
         &mut self,
         idx: usize,
     ) -> &mut dyn Stage<<ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW> {
->>>>>>> v2.3.0
         &mut self.stages[idx]
     }
 }
@@ -280,16 +270,9 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// - [`StaticFileSegment::Transactions`](reth_static_file_types::StaticFileSegment::Transactions)
     ///   -> [`StageId::Bodies`]
     ///
-    /// This is a legacy storage.v1 backfill step. Storage.v2 writes directly to static files and
-    /// `RocksDB`, so there is no MDBX -> static-file migration to perform.
-    ///
     /// CAUTION: This method locks the static file producer Mutex, hence can block the thread if the
     /// lock is occupied.
     pub fn move_to_static_files(&self) -> RethResult<()> {
-        if self.provider_factory.cached_storage_settings().is_v2() {
-            return Ok(())
-        }
-
         // Copies data from database to static files
         let lowest_static_file_height =
             self.static_file_producer.lock().copy_to_static_files()?.min_block_num();
@@ -317,15 +300,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         bad_block: Option<BlockNumber>,
     ) -> Result<(), PipelineError> {
         // Add validation before starting unwind
-<<<<<<< HEAD
-        let provider = self.provider_factory.provider()?;
-        let latest_block = provider.last_block_number()?;
-
-        // Get the actual pruning configuration
-        let prune_modes = provider.prune_modes_ref();
-
-        let checkpoints = provider.get_prune_checkpoints()?;
-=======
         let (latest_block, prune_modes, checkpoints) = {
             let provider = self.provider_factory.provider()?;
             (
@@ -334,7 +308,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 provider.get_prune_checkpoints()?,
             )
         };
->>>>>>> v2.3.0
         prune_modes.ensure_unwind_target_unpruned(latest_block, to, &checkpoints)?;
 
         // Unwind stages in reverse order of execution
@@ -344,12 +317,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         // attempt to proceed with a finalized block which has been unwinded
         let _locked_sf_producer = self.static_file_producer.lock();
 
-<<<<<<< HEAD
         let mut provider_rw = self.provider_factory.database_provider_rw()?;
-=======
-        let mut provider_rw =
-            self.provider_factory.unwind_provider_rw()?.disable_long_read_transaction_safety();
->>>>>>> v2.3.0
 
         for stage in unwind_pipeline {
             let stage_id = stage.id();
@@ -411,11 +379,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                             });
                         }
 
-<<<<<<< HEAD
-                        // update finalized block if needed
-=======
                         // update finalized and safe block if needed
->>>>>>> v2.3.0
                         let last_saved_finalized_block_number =
                             provider_rw.last_finalized_block_number()?;
 
@@ -429,9 +393,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                             ))?;
                         }
 
-<<<<<<< HEAD
-                        UnifiedStorageWriter::commit_unwind(provider_rw)?;
-=======
                         let last_saved_safe_block_number = provider_rw.last_safe_block_number()?;
 
                         if last_saved_safe_block_number.is_none() ||
@@ -442,12 +403,11 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                             ))?;
                         }
 
-                        provider_rw.commit()?;
->>>>>>> v2.3.0
+                        UnifiedStorageWriter::commit_unwind(provider_rw)?;
 
                         stage.post_unwind_commit()?;
 
-                        provider_rw = self.provider_factory.unwind_provider_rw()?;
+                        provider_rw = self.provider_factory.database_provider_rw()?;
                     }
                     Err(err) => {
                         self.event_sender.notify(PipelineEvent::Error { stage_id });
@@ -527,17 +487,13 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 target,
             });
 
-<<<<<<< HEAD
             let start = Instant::now();
-=======
->>>>>>> v2.3.0
             match self.stage(stage_index).execute(&provider_rw, exec_input) {
                 Ok(out @ ExecOutput { checkpoint, done }) => {
                     // Update stage checkpoint.
                     provider_rw.save_stage_checkpoint(stage_id, checkpoint)?;
 
                     // Commit processed data to the database.
-<<<<<<< HEAD
                     UnifiedStorageWriter::commit(provider_rw)?;
                     info!(
                         target: "sync::pipeline",
@@ -547,9 +503,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                         execute_duration_ms = start.elapsed().as_millis(),
                         "Stage has executed, and reached the target block."
                     );
-=======
-                    provider_rw.commit()?;
->>>>>>> v2.3.0
 
                     // Invoke stage post commit hook.
                     self.stage(stage_index).post_execute_commit()?;
@@ -640,7 +593,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                     // FIXME: When handling errors, we do not commit the database transaction. This
                     // leads to the Merkle stage not clearing its checkpoint, and restarting from an
                     // invalid place.
-<<<<<<< HEAD
                     let provider_rw = self.provider_factory.database_provider_rw()?;
                     provider_rw.save_stage_checkpoint_progress(StageId::MerkleExecute, vec![])?;
                     provider_rw.save_stage_checkpoint(
@@ -649,20 +601,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                     )?;
 
                     UnifiedStorageWriter::commit(provider_rw)?;
-=======
-                    // Only reset MerkleExecute checkpoint if MerkleExecute itself failed
-                    if stage_id == StageId::MerkleExecute {
-                        let provider_rw = self.provider_factory.database_provider_rw()?;
-                        provider_rw
-                            .save_stage_checkpoint_progress(StageId::MerkleExecute, vec![])?;
-                        provider_rw.save_stage_checkpoint(
-                            StageId::MerkleExecute,
-                            prev_checkpoint.unwrap_or_default(),
-                        )?;
-
-                        provider_rw.commit()?;
-                    }
->>>>>>> v2.3.0
 
                     // We unwind because of a validation error. If the unwind itself
                     // fails, we bail entirely,
@@ -700,14 +638,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 "Stage is missing static file data."
             );
 
-<<<<<<< HEAD
-            Ok(Some(ControlFlow::Unwind { target: block.block.number - 1, bad_block: block }))
-=======
             Ok(Some(ControlFlow::Unwind {
                 target: block.block.number.saturating_sub(1),
                 bad_block: block,
             }))
->>>>>>> v2.3.0
         } else if err.is_fatal() {
             error!(target: "sync::pipeline", stage = %stage_id, "Stage encountered a fatal error: {err}");
             Err(err.into())

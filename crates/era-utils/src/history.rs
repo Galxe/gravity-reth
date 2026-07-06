@@ -25,8 +25,8 @@ use reth_stages_types::{
     CheckpointBlockRange, EntitiesCheckpoint, HeadersCheckpoint, StageCheckpoint, StageId,
 };
 use reth_storage_api::{
-    errors::ProviderResult, DBProvider, DatabaseProviderFactory, NodePrimitivesProvider,
-    StageCheckpointWriter,
+    errors::ProviderResult, DBProvider, DatabaseProviderFactory, HeaderProvider,
+    NodePrimitivesProvider, StageCheckpointWriter, StorageLocation,
 };
 use std::{collections::Bound, error::Error, ops::RangeBounds, sync::mpsc};
 use tracing::info;
@@ -109,6 +109,11 @@ where
         .get_highest_static_file_block(StaticFileSegment::Headers)
         .unwrap_or_default();
 
+    // Find the latest total difficulty
+    let mut td = static_file_provider
+        .header_td_by_number(height)?
+        .ok_or_else(|| eyre::eyre!("total difficulty not found for block {height}"))?;
+
     while let Some(meta) = rx.recv()? {
         let from = height;
         let provider = provider_factory.database_provider_rw()?;
@@ -118,6 +123,7 @@ where
             &mut static_file_provider.latest_writer(StaticFileSegment::Headers)?,
             &provider,
             hash_collector,
+            &mut td,
             height..,
         )?;
 
@@ -167,11 +173,14 @@ where
 
 /// Reads `meta` with the [`EraBlockReader`] `S`, appends its blocks within `block_numbers`, and
 /// marks `meta` processed if the file was fully consumed. Returns last block height.
+///
+/// Adds on to `total_difficulty` for each appended header.
 pub fn process<S, P, B, BB, BH>(
     meta: &(impl EraMeta + ?Sized),
     writer: &mut StaticFileProviderRWRefMut<'_, <P as NodePrimitivesProvider>::Primitives>,
     provider: &P,
     hash_collector: &mut Collector<BlockHash, BlockNumber>,
+    total_difficulty: &mut U256,
     block_numbers: impl RangeBounds<BlockNumber>,
 ) -> eyre::Result<BlockNumber>
 where
@@ -193,7 +202,7 @@ where
         }))
         .flatten();
 
-    process_iter(iter, writer, provider, hash_collector, block_numbers)
+    process_iter(iter, writer, provider, hash_collector, total_difficulty, block_numbers)
 }
 
 /// Extracts a pair of [`FullBlockHeader`] and [`FullBlockBody`] from [`BlockTuple`].
@@ -212,7 +221,7 @@ where
 
 /// Extracts block headers and bodies from `iter` and appends them using `writer` and `provider`.
 ///
-/// Collects hash to height using `hash_collector`.
+/// Adds on to `total_difficulty` and collects hash to height using `hash_collector`.
 ///
 /// Skips all blocks below the [`start_bound`] of `block_numbers` and stops when reaching past the
 /// [`end_bound`] or the end of the file.
@@ -226,6 +235,7 @@ pub fn process_iter<P, B, BB, BH>(
     writer: &mut StaticFileProviderRWRefMut<'_, <P as NodePrimitivesProvider>::Primitives>,
     provider: &P,
     hash_collector: &mut Collector<BlockHash, BlockNumber>,
+    total_difficulty: &mut U256,
     block_numbers: impl RangeBounds<BlockNumber>,
 ) -> eyre::Result<BlockNumber>
 where
@@ -265,11 +275,18 @@ where
         let hash = header.hash_slow();
         last_header_number = number;
 
+        // Increase total difficulty
+        *total_difficulty += header.difficulty();
+
         // Append to Headers segment
-        writer.append_header(&header, &hash)?;
+        writer.append_header(&header, *total_difficulty, &hash)?;
 
         // Write bodies to database.
-        provider.append_block_bodies(vec![(header.number(), Some(&body))])?;
+        provider.append_block_bodies(
+            vec![(header.number(), Some(body))],
+            // We are writing transactions directly to static files.
+            StorageLocation::StaticFiles,
+        )?;
 
         hash_collector.insert(hash, number)?;
     }
@@ -404,12 +421,14 @@ mod tests {
         let folder = tempdir().unwrap();
         let mut hash_collector = Collector::new(4096, Some(folder.path().to_owned()));
         let meta = TestMeta { marked: Cell::new(false) };
+        let mut total_difficulty = U256::ZERO;
 
         let height = process::<TestEra, _, Block, _, _>(
             &meta,
             &mut writer,
             &provider,
             &mut hash_collector,
+            &mut total_difficulty,
             0..=1,
         )
         .unwrap();

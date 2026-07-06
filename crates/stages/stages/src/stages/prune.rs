@@ -1,12 +1,9 @@
-<<<<<<< HEAD
 use reth_db::transaction::DbTx;
-=======
->>>>>>> v2.3.0
 use reth_db_api::{table::Value, transaction::DbTxMut};
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
-    BlockReader, ChainStateBlockReader, DBProvider, PruneCheckpointReader, PruneCheckpointWriter,
-    RocksDBProviderFactory, StageCheckpointReader, StaticFileProviderFactory,
+    BlockReader, DBProvider, PruneCheckpointReader, PruneCheckpointWriter,
+    StaticFileProviderFactory,
 };
 use reth_prune::{
     PruneMode, PruneModes, PruneSegment, PrunerBuilder, SegmentOutput, SegmentOutputCheckpoint,
@@ -14,7 +11,6 @@ use reth_prune::{
 use reth_stages_api::{
     ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
-use reth_storage_api::{ChangeSetReader, StorageChangeSetReader, StorageSettingsCache};
 use tracing::info;
 
 /// The prune stage that runs the pruner with the provided prune modes.
@@ -47,20 +43,9 @@ where
         + PruneCheckpointReader
         + PruneCheckpointWriter
         + BlockReader
-<<<<<<< HEAD
         + StaticFileProviderFactory<
             Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
         >,
-=======
-        + ChainStateBlockReader
-        + StageCheckpointReader
-        + StaticFileProviderFactory<
-            Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-        > + StorageSettingsCache
-        + ChangeSetReader
-        + StorageChangeSetReader
-        + RocksDBProviderFactory,
->>>>>>> v2.3.0
 {
     fn id(&self) -> StageId {
         StageId::Prune
@@ -162,20 +147,9 @@ where
         + PruneCheckpointReader
         + PruneCheckpointWriter
         + BlockReader
-<<<<<<< HEAD
         + StaticFileProviderFactory<
             Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
         >,
-=======
-        + ChainStateBlockReader
-        + StageCheckpointReader
-        + StaticFileProviderFactory<
-            Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-        > + StorageSettingsCache
-        + ChangeSetReader
-        + StorageChangeSetReader
-        + RocksDBProviderFactory,
->>>>>>> v2.3.0
 {
     fn id(&self) -> StageId {
         StageId::PruneSenderRecovery
