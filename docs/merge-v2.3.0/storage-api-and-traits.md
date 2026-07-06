@@ -62,10 +62,10 @@ crates/storage 编译树内已不存在(实测 grep 仅命中孤儿文件),下�
 (上游 `ValueWithSubKey` 版本)。
 
 **遗留断点(本组范围,阻塞编译验收)**:
-1. **`SubkeyContainedValue` trait 定义全仓不存在**(实测 `grep -rn 'trait SubkeyContainedValue' crates/` 为空),
-   而还原后的 baseline 代码在 4 文件 7 处 `use`/impl 它(`db-models/accounts.rs:2,18`、
-   `db-api/models/mod.rs:12`、`trie/common/storage.rs:1,15`、`trie/common/nested_trie/node.rs:11,155`)。
-   待 primitives-traits 组恢复 gravity 定义(TODO 跨 crate 条目 1),是本组代码的**链接前置**。
+1. ~~**`SubkeyContainedValue` trait 定义全仓不存在**~~ ✅ 已关闭(2026-07-06,cargo 组,6a54e53528):
+   primitives-traits 已恢复为 path crate(crates.io 0.4.1 vendor 为底 + gravity 增量补回,
+   定义在 lib.rs:248 + storage.rs:46 StorageEntry impl),4 消费文件 7 处 import 全部可解析(grep 实测);
+   `cargo check -p reth-primitives-traits` 通过。
 
 ---
 

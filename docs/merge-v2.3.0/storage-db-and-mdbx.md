@@ -372,5 +372,5 @@
 - [x] 7. **`crates/storage/db/src/utils.rs`** — 上游新增 `is_database_empty`；本组未列入冲突清单，但 `lib.rs` 引用它。若它在 worktree 已存在则附加 OK；若是新文件需 git status 交叉确认。**Owner：与处理 `utils.rs` 的 worker 对齐。** → **决策**(f89d9d4e23 既成):lib.rs 还原 baseline 后**不引用** `utils.rs`,该文件为孤儿(无 `mod` 声明,实测),无害保留、防误引用。
    - [x] 冲突解决:无落地动作需要;孤儿状态实测确认(f89d9d4e23)。
 
-- [ ] 8. **`op` feature 直接 trim 的级联** — `db/Cargo.toml` 丢弃 `op = ["reth-db-api/op", "reth-primitives-traits/op"]` 后，下游若有 `--features op` 编译路径需同步 trim（规则 1）。⟲ f89d9d4e23 **未执行本条**:db/Cargo.toml:105 该行保留(实测),而 db-api(v2.3.0 侧 + surgical 修补)已无 `op` feature → **cargo feature 解析期断点**(不需 `--features op` 即触发;当前被 workspace 根缺 ~20 个 dep 的更大错误掩盖,见 ⟲ 节遗留断点 1)。修法维持原建议:删除该行。
-   - [ ] 冲突解决:**未落地**;删行后以 `cargo metadata`(待 cargo 组修复 workspace 根)通过为证。
+- [x] 8. **`op` feature 直接 trim 的级联** — `db/Cargo.toml` 丢弃 `op = ["reth-db-api/op", "reth-primitives-traits/op"]` 后，下游若有 `--features op` 编译路径需同步 trim（规则 1）。⟲ f89d9d4e23 **未执行本条**:db/Cargo.toml:105 该行保留(实测),而 db-api(v2.3.0 侧 + surgical 修补)已无 `op` feature → **cargo feature 解析期断点**(不需 `--features op` 即触发;当前被 workspace 根缺 ~20 个 dep 的更大错误掩盖,见 ⟲ 节遗留断点 1)。修法维持原建议:删除该行。
+   - [x] 冲突解决:已落地(2026-07-06,cargo 组):该行已删,`cargo metadata` exit=0 + `cargo check -p reth-db` 通过为证(6a54e53528)。⟲ 遗留断点 1/2 同批关闭:libmdbx-rs 恢复 `[[bench]] mdbx_bench_tool` + criterion/rand dev-deps(baseline 形态);连带主会话修复 db static_file/mod.rs 两处 `.copied()`(v2.3.0 range 值语义)。
