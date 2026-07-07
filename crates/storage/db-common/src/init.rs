@@ -2,7 +2,11 @@
 
 use alloy_consensus::BlockHeader;
 use alloy_genesis::GenesisAccount;
-use alloy_primitives::{keccak256, map::HashMap, Address, B256, U256};
+use alloy_primitives::{
+    keccak256,
+    map::{B256Map, HashMap},
+    Address, B256, U256,
+};
 use reth_chainspec::EthChainSpec;
 use reth_codecs::Compact;
 use reth_config::config::EtlConfig;
@@ -235,7 +239,7 @@ where
                         let value = U256::from_be_bytes(value.0);
                         (*key, (U256::ZERO, value))
                     })
-                    .collect::<HashMap<_, _>>()
+                    .collect::<B256Map<_>>()
             })
             .unwrap_or_default();
 
