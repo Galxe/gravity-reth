@@ -919,6 +919,86 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
           - `FullNodePrimitives` 4 crate 连坐(hashing_account / provider
             chain.rs / providers/mod.rs / static_file/manager.rs)—— 全
             workspace check 未触及默认 features,登记继续
+    - ⟲ 2026-07-07 Task #5 下一轮尾款进度:
+        - **reth-evm 已落**:execute.rs:627 `State::builder().with_bundle_update()
+          .without_state_clear().build()` → 去掉 `without_state_clear()`。依据
+          revm-database 15.0.2 `StateBuilder` API 已彻底移除 `without_state_clear`
+          (原 EIP-158 pre-Byzantium 开关),upstream reth `crates/evm/evm/src/
+          execute.rs:577` 同步为无该 flag 形态。gravity 链后 Byzantium,语义等价;
+          `cargo check -p reth-evm --all-features` 绿
+        - **reth-revm 已落 3 处**:
+          - test_utils.rs:144-149 `witness` 4→3 参 —— 去掉 `_mode:
+            reth_trie::ExecutionWitnessMode`,匹配 storage-api trie.rs:93 canonical
+            trait 定义(3 参形态,已在 f89d9d4e23 baseline)
+          - witness.rs:74 `statedb.block_hashes.keys().next().copied()` →
+            `statedb.block_hashes.lowest().map(|(block_number, _)| block_number)`。
+            依据 revm-database 15.0.2 `BlockHashCache` 从 BTreeMap 换成固定大小
+            数组 + wrap-around 编码,新增 `iter()`/`lowest()` API;upstream reth
+            `crates/revm/src/witness.rs:86-87` 同样迁移
+          - E0412 `ExecutionWitnessMode not found` 随 :148 witness 参数缩减
+            自动消解(无第三 place)。`cargo check -p reth-revm --all-features` 绿
+        - **storage-provider FullNodePrimitives 连坐 3 处已落**:按 Task #4 B 项
+          同模式(upstream 936baf1232 `refactor: remove FullNodePrimitives`)
+          机械迁移:
+          - providers/database/chain.rs:3, 9, 27, 55(import + trait bound
+            + 2 impl bounds)
+          - providers/mod.rs:5, 38, 47(import + 2 trait/impl bounds
+            with `SignedTx: Value, Receipt: Value, BlockHeader: Value`)
+          - providers/static_file/manager.rs:39, 1654, 1854(import 简化 +
+            2 impl bounds)
+        - **顺带 2 处 static_file/manager.rs**(允许编辑范围内的机械迁移):
+          - :417 `MissingStaticFilePath(segment, path)` → `MissingStaticFilePath(path)`
+            (upstream 已删 segment 参数,单 PathBuf)
+          - :619 `.block_range().copied()` → `.block_range()`(`block_range()`
+            现返回 `Option<SegmentRangeInclusive>` 而非 `Option<&_>`,`.copied()`
+            不适用;`SegmentRangeInclusive: Copy` 直接可用)
+        - **crate-local 复测**:
+          - `cargo check -p reth-evm --all-features` 绿
+          - `cargo check -p reth-revm --all-features` 绿
+          - `cargo check -p reth-provider --all-features` 剩 14 error(见下)
+        - **workspace check 复测**:`cargo check --workspace --all-features`
+          仍 75 error,失败 3 crate(**均不在 Task #5 允许编辑范围**):
+          - `reth-evm-ethereum`(7 err)—— alloy-evm block executor trait
+            重构(StateChange{,PostBlock}Source 删除、BlockExecutor::set_state_hook
+            trait 项删除、BlockExecutorFor 从 trait 变 type alias、create_executor
+            lifetime 变更、commit_transaction 参数化、TxExecutionResult/Executor/
+            Result/receipts 缺失)
+          - `gravity-precompiles`(5 err)—— revm PrecompileError 枚举变体
+            重命名(Other → other() 构造器 / OutOfGas → OutOfGas 拆分)+
+            PrecompileOutput.reverted 字段删除
+          - `reth-exex-types`(88 err)—— serde_bincode_compat 泛型 chain
+            上 `N::BlockHeader: RlpBincode`、`N::BlockBody: RlpBincode`
+            trait bound 缺失(88 处 error 同构;需要在 `Chain<'a, N>` 等
+            wrapper 类型的 bound 里加 RlpBincode,或在 serde impl 加 where 子句)
+        - **latent(reth-provider 单 crate --all-features 剩 14 err,workspace
+          check 因上游先失败而未触达)**:
+          - **可 Task #5 允许范围内消化,但涉及语义决策**:
+            - static_file/manager.rs:1187 / 1189 `HighestStaticFiles.headers`
+              / `HighestStaticFiles.transactions` 字段访问 —— gravity 侧
+              e6b7e5ba32(v2.3.0 squash)已把 `HighestStaticFiles` 精简为仅
+              `receipts` 字段(见 crates/static-file/types/src/lib.rs:39-43),
+              但 manager.rs / writer.rs 未同步。writer.rs 注释仍称
+              "gravity static file writer only covers Headers/Transactions/
+              Receipts",与仅 receipts 的类型定义矛盾。设计决策:是恢复
+              headers/transactions 字段,还是同步删掉 manager.rs 的调用?
+              **本轮不自决,handoff 挂待办**
+          - **不在 Task #5 允许编辑范围**:
+            - providers/database/provider.rs:54 `reth_prune_types::
+              MINIMUM_PRUNING_DISTANCE` 未找到(E0432)——上游删除
+            - writer/mod.rs:13 `reth_storage_errors::writer` 模块未找到
+              (E0432)——上游拆分
+            - providers/state/historical.rs 4 处 + latest.rs 4 处 + test_utils/
+              mod.rs 2 处 `DatabaseError: From<StateRootError>` trait impl
+              缺失(E0277)—— reth_execution_errors::trie::StateRootError →
+              reth-db DatabaseError 的转换 impl 上游已改路径,gravity 侧仍
+              走老 map_err(reth_db::DatabaseError::from)
+        - **未 commit 变更**(共 6 文件):
+          - crates/evm/evm/src/execute.rs
+          - crates/revm/src/test_utils.rs
+          - crates/revm/src/witness.rs
+          - crates/storage/provider/src/providers/database/chain.rs
+          - crates/storage/provider/src/providers/mod.rs
+          - crates/storage/provider/src/providers/static_file/manager.rs
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
