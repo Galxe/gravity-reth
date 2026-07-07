@@ -50,9 +50,7 @@ use reth_primitives_traits::{
     Account, Block as _, BlockBody as _, Bytecode, GotExpected, NodePrimitives, RecoveredBlock,
     SealedHeader, StorageEntry,
 };
-use reth_prune_types::{
-    PruneCheckpoint, PruneMode, PruneModes, PruneSegment, MINIMUM_PRUNING_DISTANCE,
-};
+use reth_prune_types::{PruneCheckpoint, PruneMode, PruneModes, PruneSegment, MINIMUM_DISTANCE};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
@@ -1842,7 +1840,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         // All receipts from the last 128 blocks are required for blockchain tree, even with
         // [`PruneSegment::ContractLogs`].
         let prunable_receipts =
-            PruneMode::Distance(MINIMUM_PRUNING_DISTANCE).should_prune(first_block, tip);
+            PruneMode::Distance(MINIMUM_DISTANCE).should_prune(first_block, tip);
 
         // Prepare set of addresses which logs should not be pruned.
         let mut allowed_addresses: HashSet<Address, _> = HashSet::new();

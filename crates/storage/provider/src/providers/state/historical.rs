@@ -286,14 +286,12 @@ impl<Provider: DBProvider + BlockNumReader> StateRootProvider
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
         let mut revert_state = self.revert_state()?;
         revert_state.extend(hashed_state);
-        StateRoot::overlay_root(self.tx(), revert_state)
-            .map_err(|err| ProviderError::Database(err.into()))
+        StateRoot::overlay_root(self.tx(), revert_state).map_err(ProviderError::from)
     }
 
     fn state_root_from_nodes(&self, mut input: TrieInput) -> ProviderResult<B256> {
         input.prepend(self.revert_state()?);
-        StateRoot::overlay_root_from_nodes(self.tx(), input)
-            .map_err(|err| ProviderError::Database(err.into()))
+        StateRoot::overlay_root_from_nodes(self.tx(), input).map_err(ProviderError::from)
     }
 
     fn state_root_with_updates(
@@ -302,8 +300,7 @@ impl<Provider: DBProvider + BlockNumReader> StateRootProvider
     ) -> ProviderResult<(B256, TrieUpdates)> {
         let mut revert_state = self.revert_state()?;
         revert_state.extend(hashed_state);
-        StateRoot::overlay_root_with_updates(self.tx(), revert_state)
-            .map_err(|err| ProviderError::Database(err.into()))
+        StateRoot::overlay_root_with_updates(self.tx(), revert_state).map_err(ProviderError::from)
     }
 
     fn state_root_from_nodes_with_updates(
@@ -312,7 +309,7 @@ impl<Provider: DBProvider + BlockNumReader> StateRootProvider
     ) -> ProviderResult<(B256, TrieUpdates)> {
         input.prepend(self.revert_state()?);
         StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
-            .map_err(|err| ProviderError::Database(err.into()))
+            .map_err(ProviderError::from)
     }
 }
 

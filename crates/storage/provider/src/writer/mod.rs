@@ -10,7 +10,7 @@ use reth_errors::{ProviderError, ProviderResult};
 use reth_primitives_traits::{NodePrimitives, SignedTransaction};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{DBProvider, StageCheckpointWriter, TransactionsProviderExt};
-use reth_storage_errors::writer::UnifiedStorageWriterError;
+use reth_storage_errors::provider::StaticFileWriterError;
 use revm_database::OriginalValuesKnown;
 use std::sync::Arc;
 use tracing::debug;
@@ -70,11 +70,11 @@ impl<'a, ProviderDB, ProviderSF> UnifiedStorageWriter<'a, ProviderDB, ProviderSF
     ///
     /// # Returns
     /// - `Ok(())` if the static file instance is set.
-    /// - `Err(StorageWriterError::MissingStaticFileWriter)` if the static file instance is not set.
+    /// - `Err(StaticFileWriterError::Other)` if the static file instance is not set.
     #[expect(unused)]
-    const fn ensure_static_file(&self) -> Result<(), UnifiedStorageWriterError> {
+    fn ensure_static_file(&self) -> Result<(), StaticFileWriterError> {
         if self.static_file.is_none() {
-            return Err(UnifiedStorageWriterError::MissingStaticFileWriter)
+            return Err(StaticFileWriterError::new("static file writer not set"))
         }
         Ok(())
     }
