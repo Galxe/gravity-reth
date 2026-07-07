@@ -11085,9 +11085,12 @@ dependencies = [
 name = "reth-trie-parallel"
 version = "2.3.0"
 dependencies = [
+ "alloy-eip7928 0.4.1",
+ "alloy-evm",
  "alloy-primitives",
  "alloy-rlp",
  "codspeed-criterion-compat",
+ "crossbeam-channel",
  "derive_more",
  "itertools 0.14.0",
  "metrics",
@@ -11105,6 +11108,7 @@ dependencies = [
  "reth-trie-common",
  "reth-trie-db",
  "reth-trie-sparse",
+ "revm-state",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

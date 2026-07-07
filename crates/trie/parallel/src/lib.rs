@@ -22,6 +22,9 @@ pub mod proof;
 
 pub mod proof_task;
 
+/// Task-based state root computation with concurrent proof/hash pipelining.
+pub mod state_root_task;
+
 /// Parallel state root metrics.
 #[cfg(feature = "metrics")]
 pub mod metrics;

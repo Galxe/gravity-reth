@@ -25,6 +25,11 @@ reth-trie.workspace = true
 # alloy
 alloy-rlp.workspace = true
 alloy-primitives.workspace = true
+alloy-eip7928.workspace = true
+alloy-evm.workspace = true
+
+# revm
+revm-state.workspace = true
 
 # tracing
 tracing.workspace = true
@@ -35,6 +40,7 @@ derive_more.workspace = true
 rayon.workspace = true
 itertools.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+crossbeam-channel.workspace = true
 
 # `metrics` feature
 reth-metrics = { workspace = true, optional = true }
