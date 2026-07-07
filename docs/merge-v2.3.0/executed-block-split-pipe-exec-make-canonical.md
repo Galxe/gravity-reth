@@ -1250,6 +1250,30 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
       (commands/db/{settings,migrate_v2}.rs、node/builder/src/launch/
       {common,engine}.rs)属**设计决策项**(全剪 vs 补 shim),留下轮
       subagent 收
+    - ⟲ 2026-07-07 Task #11 StorageSettings 死符号 P1 全剪(裁决 storage
+      决策 f89d9d4e23 baseline 最高):
+        - node_config.rs:24 剔 `StorageSettings` from `use reth_storage_api::{...}`
+          + 剔 `pub const fn storage_settings()` 方法(374-385 整段)
+        - launch/common.rs:611 剔 `let storage_settings = ...` 与"Report the
+          configured storage settings"注释;`StorageSettingsInfo` 里
+          `storage_v2: storage_settings.storage_v2` 硬编码为 `false`
+          (gravity 用 RocksDB 自成一路,无 v1/v2 语义;label 保 false 保
+          dashboard 兼容),pruning_mode / prune_config metric 继续输出
+        - launch/engine.rs:118 startup log 剔 `let settings = ...` 与
+          `?settings`,`info!(?pruning_mode, "Loaded storage settings")` 保留
+        - 4 处 caller 处置:2 处 live 现场手术(launch/{common,engine}.rs),
+          2 处 arphaned(commands/db/{settings,migrate_v2}.rs 未在
+          commands/src/db/mod.rs 挂 mod,不参与编译,gravity storage-v2
+          相关死码,保持不动待独立清理任务)
+        - `--storage.v2` flag(node/core/src/args/storage.rs + NodeConfig
+          `storage: StorageArgs` 字段)保留:e2e-test-utils/setup_builder.rs
+          + cli/commands/node.rs 仍消费,越界不动;flag 现为无语义惰性载荷
+        - `cargo +nightly check -p reth-node-core --all-features` **exit=0
+          全绿**;task #11 StorageSettings 面**闭环**
+        - workspace check --all-features 仍有 3 crate 红(reth-rpc-eth-api
+          58 err / reth-exex 23 err / reth-ress-provider 1 err),均**独立于
+          storage 决策**、单独 `cargo check -p <crate>` 复现,不属 task #11
+          范畴,留下轮 rpc / exex / ress 组任务收
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
