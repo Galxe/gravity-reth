@@ -999,6 +999,62 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
           - crates/storage/provider/src/providers/database/chain.rs
           - crates/storage/provider/src/providers/mod.rs
           - crates/storage/provider/src/providers/static_file/manager.rs
+    - ⟲ 2026-07-07 Task #6 provider 补收 + HighestStaticFiles 决策面:
+        - **A1 已落(10 处)**: `StateRootError → DatabaseError` 转换在
+          upstream 已被替换为 `impl From<StateRootError> for ProviderError`
+          (因新增 `PrefixSetLoadError(ProviderError)` 变体,老 impl 不再可
+          自然构造)。callers 迁移到 canonical 形态 `.map_err(ProviderError::
+          from)`,与同文件相邻 storage_proof / account_proof 方法体的已有
+          写法一致:
+          - providers/state/historical.rs:289-316(4 处 state_root* 方法)
+          - providers/state/latest.rs:63-86(4 处 state_root* 方法)
+          - test_utils/mod.rs:93(`.map_err(reth_db::DatabaseError::from)` →
+            `.map_err(reth_errors::ProviderError::from)`,函数返回
+            `ProviderResult`,`?` 直通)
+        - **A2 已落(1 处)**: writer/mod.rs:13 `reth_storage_errors::writer::
+          UnifiedStorageWriterError` → `reth_storage_errors::provider::
+          StaticFileWriterError`(upstream 已删 `writer` mod,error 类型合并
+          进 provider 模块)。同步 `ensure_static_file` fn 内
+          `UnifiedStorageWriterError::MissingStaticFileWriter` →
+          `StaticFileWriterError::new("static file writer not set")`
+          (新枚举无 `MissingStaticFileWriter` 变体,`Other(String)` 语义
+          等价;该 fn `#[expect(unused)]` 无实际调用)
+        - **A3 已落(1 处)**: providers/database/provider.rs:54 `reth_prune_
+          types::MINIMUM_PRUNING_DISTANCE` → `MINIMUM_DISTANCE`(upstream
+          rename;新常量 `MINIMUM_DISTANCE: u64 = 64` 语义等价:64 个块的
+          reorg-safety 距离),同步 :1845 使用点
+        - **B 未落(留人拍板)**: static_file/manager.rs:1185/1187
+          `HighestStaticFiles.headers` / `.transactions` 字段访问。
+          调查结论:字段精简是 **upstream commit 3d3a05386a
+          (refactor(static-file): remove unused segments #19209,2025-10-23)**
+          的机械裁剪 —— upstream 认为 headers/transactions static-file
+          segment 未被使用,只保留 receipts。gravity 侧(storage baseline
+          restore f89d9d4e23)恢复了 manager.rs 的 pre-#19209 版本,与
+          static-file/types(已含 #19209 精简)脱节。
+          - **P1 精简 manager.rs 两行**(2 line delete,推荐):
+            与 upstream #19209 完全对齐;其他 8 处 HighestStaticFiles 调用
+            (`static-file/static-file/src/static_file_producer.rs:179,
+            298, 304, 308, 314, 318, 327, 351`)已全部 `{ receipts: ... }`
+            单字段形态;gravity 架构:pipe-exec-layer 直接写 kv,static-file
+            仅承担 Receipts segment,精简与之自洽
+          - **P2 恢复 struct 三字段**(否决):须回退 upstream #19209 =
+            `crates/static-file/types/src/lib.rs` + `static-file/static-file/
+            src/segments/` 下删除的 headers.rs/transactions.rs + 更新
+            static_file_producer.rs 8 处调用,共约 300 行连坐,且违反
+            gravity 只 receipts static-file 的架构语义
+          - **推荐 P1**(见 `_local/2026-07-07/task6-handoff.md` §B)
+        - **crate-local 复测**: `cargo check -p reth-provider --all-features`
+          → 2 err(仅剩 HighestStaticFiles 2 行,待 B 拍板)
+        - **workspace check 复测**: 90 → 78 error(delta 12,严格等于 A 类
+          修复数),失败 crate 3(reth-evm-ethereum 7 / gravity-precompiles 5
+          / reth-exex-types 88)+ reth-provider 2 待 B 决策
+        - **未 commit 变更**(共 5 文件):
+          - crates/storage/provider/src/providers/database/provider.rs
+          - crates/storage/provider/src/providers/state/historical.rs
+          - crates/storage/provider/src/providers/state/latest.rs
+          - crates/storage/provider/src/providers/mod.rs(前轮遗留)
+          - crates/storage/provider/src/test_utils/mod.rs
+          - crates/storage/provider/src/writer/mod.rs
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
