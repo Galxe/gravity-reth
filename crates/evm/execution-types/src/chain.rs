@@ -416,7 +416,7 @@ pub struct BlockReceipts<T = reth_ethereum_primitives::Receipt> {
 /// Bincode-compatible [`Chain`] serde implementation.
 #[cfg(feature = "serde-bincode-compat")]
 pub(super) mod serde_bincode_compat {
-    use crate::{serde_bincode_compat, ExecutionOutcome};
+    use crate::serde_bincode_compat;
     use alloc::{borrow::Cow, collections::BTreeMap};
     use alloy_primitives::BlockNumber;
     use reth_ethereum_primitives::EthPrimitives;
@@ -451,7 +451,7 @@ pub(super) mod serde_bincode_compat {
         >,
     {
         blocks: RecoveredBlocks<'a, N::Block>,
-        execution_outcome: serde_bincode_compat::ExecutionOutcome<'a, N::Receipt>,
+        execution_outcome: serde_bincode_compat::ExecutionOutcome<'a>,
         trie_updates: Option<TrieUpdates<'a>>,
     }
 
@@ -504,7 +504,7 @@ pub(super) mod serde_bincode_compat {
         fn from(value: &'a super::Chain<N>) -> Self {
             Self {
                 blocks: RecoveredBlocks(Cow::Borrowed(&value.blocks)),
-                execution_outcome: value.execution_outcome.as_repr(),
+                execution_outcome: (&value.execution_outcome).into(),
                 trie_updates: value.trie_updates.as_ref().map(Into::into),
             }
         }
@@ -519,7 +519,7 @@ pub(super) mod serde_bincode_compat {
         fn from(value: Chain<'a, N>) -> Self {
             Self {
                 blocks: value.blocks.0.into_owned(),
-                execution_outcome: ExecutionOutcome::from_repr(value.execution_outcome),
+                execution_outcome: value.execution_outcome.into(),
                 trie_updates: value.trie_updates.map(Into::into),
             }
         }

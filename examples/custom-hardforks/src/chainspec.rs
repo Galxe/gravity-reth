@@ -7,8 +7,8 @@ use alloy_eips::eip7840::BlobParams;
 use alloy_genesis::Genesis;
 use alloy_primitives::{B256, U256};
 use reth_chainspec::{
-    hardfork, BaseFeeParams, Chain, ChainSpec, DepositContract, EthChainSpec, EthereumHardfork,
-    EthereumHardforks, ForkCondition, Hardfork, Hardforks,
+    hardfork, BaseFeeParams, Chain, ChainHardforks, ChainSpec, DepositContract, EthChainSpec,
+    EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork, Hardforks,
 };
 use reth_network_peers::NodeRecord;
 use serde::{Deserialize, Serialize};
@@ -138,6 +138,10 @@ impl EthChainSpec for CustomChainSpec {
 
     fn final_paris_total_difficulty(&self) -> Option<U256> {
         self.inner.final_paris_total_difficulty()
+    }
+
+    fn gravity_hardforks(&self) -> &ChainHardforks {
+        self.inner.gravity_hardforks()
     }
 }
 
