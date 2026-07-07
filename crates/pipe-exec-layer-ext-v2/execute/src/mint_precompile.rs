@@ -6,7 +6,7 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use reth_evm::precompiles::{DynPrecompile, PrecompileInput};
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::{info, warn};
 
 /// Authorized caller address (JWK Manager at 0x2018)
@@ -73,7 +73,7 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
             authorized = ?AUTHORIZED_CALLER,
             "Unauthorized caller"
         );
-        return Err(PrecompileError::Other("Unauthorized caller".into()));
+        return Ok(PrecompileOutput::halt(PrecompileHalt::other_static("Unauthorized caller"), 0));
     }
 
     // 2. Parameter length check (1 + 20 + 32 = 53 bytes)
@@ -85,8 +85,13 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
             expected = EXPECTED_LEN,
             "Invalid input length"
         );
-        return Err(PrecompileError::Other(
-            format!("Invalid input length: {}, expected {}", input.data.len(), EXPECTED_LEN).into(),
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other(format!(
+                "Invalid input length: {}, expected {}",
+                input.data.len(),
+                EXPECTED_LEN
+            )),
+            0,
         ));
     }
 
@@ -98,8 +103,12 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
             expected = FUNC_MINT,
             "Invalid function ID"
         );
-        return Err(PrecompileError::Other(
-            format!("Invalid function ID: {:#x}, expected {:#x}", input.data[0], FUNC_MINT).into(),
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other(format!(
+                "Invalid function ID: {:#x}, expected {:#x}",
+                input.data[0], FUNC_MINT
+            )),
+            0,
         ));
     }
 
@@ -108,33 +117,49 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
 
     // 5. Parse amount (bytes 21-52)
     let amount_u256 = U256::from_be_slice(&input.data[21..53]);
-    let amount: u128 = amount_u256.try_into().map_err(|_| {
-        warn!(
-            target: "evm::precompile::mint_token",
-            ?recipient,
-            amount = ?amount_u256,
-            "Amount exceeds u128::MAX"
-        );
-        PrecompileError::Other("Amount exceeds u128::MAX".into())
-    })?;
+    let amount: u128 = match amount_u256.try_into() {
+        Ok(a) => a,
+        Err(_) => {
+            warn!(
+                target: "evm::precompile::mint_token",
+                ?recipient,
+                amount = ?amount_u256,
+                "Amount exceeds u128::MAX"
+            );
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::other_static("Amount exceeds u128::MAX"),
+                0,
+            ));
+        }
+    };
 
     if amount == 0 {
         warn!(target: "evm::precompile::mint_token", ?recipient, "Zero amount");
-        return Err(PrecompileError::Other("Zero amount not allowed".into()));
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other_static("Zero amount not allowed"),
+            0,
+        ));
     }
 
     // 6. Load recipient account from EVM journal and directly increment its balance. `load_account`
     //    either returns the cached journal entry or fetches from the underlying DB and inserts it
     //    into the journal cache, always returning a `&mut Account`.
-    let state_load = input.internals_mut().load_account(recipient).map_err(|e| {
-        PrecompileError::Other(format!("Failed to load account {recipient}: {e}").into())
-    })?;
+    let state_load = match input.internals_mut().load_account(recipient) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::other(format!("Failed to load account {recipient}: {e}")),
+                0,
+            ));
+        }
+    };
     let account = state_load.data;
-    let new_balance = account
-        .info
-        .balance
-        .checked_add(U256::from(amount))
-        .ok_or_else(|| PrecompileError::Other("Balance overflow".into()))?;
+    let new_balance = match account.info.balance.checked_add(U256::from(amount)) {
+        Some(b) => b,
+        None => {
+            return Ok(PrecompileOutput::halt(PrecompileHalt::other_static("Balance overflow"), 0));
+        }
+    };
     account.info.balance = new_balance;
     // Mark the account as touched so revm commits it to state on transaction end.
     account.mark_touch();
@@ -147,5 +172,5 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
         "Minted tokens directly into journal state"
     );
 
-    Ok(PrecompileOutput { gas_used: MINT_BASE_GAS, bytes: Bytes::new(), reverted: false })
+    Ok(PrecompileOutput::new(MINT_BASE_GAS, Bytes::new(), 0))
 }
