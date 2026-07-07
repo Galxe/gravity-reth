@@ -1114,6 +1114,63 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
           允许改动的 3 crate 范围,登记后续 subagent。
         - **未 commit 变更**(1 文件):
           - crates/exex/types/src/notification.rs
+    - ⟲ 2026-07-07 Task #8 workspace 收官落地(B/C 推荐 + reth-prune):
+        - **B 已落**(gravity-precompiles 5→0 err + 扩批
+          pipe-exec-layer-ext-v2 precompile 面同一 API 迁移):
+          按 Task #7 §决策 1 推荐路径 —— `PrecompileError::OutOfGas` /
+          `Other(msg)` 全部迁到 `Ok(PrecompileOutput::halt(PrecompileHalt::...,
+          0))`(非致命,tx 继续);`PrecompileOutput { reverted: false, .. }`
+          全部改用 `PrecompileOutput::new(gas_used, bytes, 0)`。`handler_raw`
+          签名不变(reservoir=0);unit test 断言从 `.is_err()` /
+          `.reverted` 改成 `.is_halt()` / `.is_success()`。落地文件:
+          crates/gravity-precompiles/src/randomness_by_height.rs、
+          crates/pipe-exec-layer-ext-v2/execute/src/bls_precompile.rs、
+          crates/pipe-exec-layer-ext-v2/execute/src/mint_precompile.rs
+          (precompile_cache.rs 已用新 API,无需改)。
+        - **C 已落**(reth-evm-ethereum state-hook 剥离 + test_utils P1
+          重写补齐):按 Task #7 §决策 2 推荐路径。
+          (i) parallel_execute.rs:剔除 `SystemCaller::try_on_state_with(...)`
+          调用 + 关联 `use ...StateChangeSource / StateChangePostBlockSource`
+          全删,`balance_increment_state` 变死代码整个移除;`BlockExecutionResult`
+          初始化补 `blob_gas_used: 0`(reth v2.3.0 新增字段,与 upstream
+          `EthBlockExecutor::finish` 对齐)。
+          (ii) test_utils.rs:MockEvmConfig `BlockExecutorFactory` 补
+          `type TxExecutionResult = EthTxResult<HaltReason, TxType>` +
+          `type Executor<'a, DB: StateDB, I> = MockExecutor<'a, DB, I>`(GAT);
+          `create_executor` 签名改成 trait canonical 形(`evm: EthEvm<DB, I,
+          PrecompilesMap>` 替代旧 `EthEvm<&'a mut State<DB>, I, PrecompilesMap>`,
+          DB 泛型直接是 `StateDB` 而非 `Database + State<>` 特化);MockExecutor
+          泛型改成 `DB: StateDB`,`'a` 通过 `PhantomData<&'a ()>` 承载;
+          `BlockExecutor` 关联类型补 `type Result = EthTxResult<HaltReason,
+          TxType>`,`commit_transaction` 签名去掉 `_tx: impl ExecutableTx<Self>`
+          参数改成返回 `GasOutput::new(0)`,加 `fn receipts() -> &[]`,
+          `set_state_hook` 剔除,`ExecutionResult::Success` 字段从 `gas_used
+          + gas_refunded` 改成 `gas: ResultGas::default()`,`finish` 里
+          `bundle_state = bundle` 赋值删除(mock DB 泛化后无 bundle_state
+          字段可寻;下游只观察 ExecutionOutcome 形态,不看 mock DB)。
+        - **reth-prune 已落**(2→0 err):机械修 `MINIMUM_PRUNING_DISTANCE`
+          → `MINIMUM_DISTANCE` caller 侧 use path 更名 —— Task #6 rename
+          遗漏 `segments/static_file/headers.rs` + `segments/user/
+          receipts_by_logs.rs` 两处 caller,补上即绿。
+        - **workspace check --all-features 终态**: 16 err / 5 crate
+          (较 Task #7 baseline 20 err/6 crate 净下降 4)。新曝光/剩余:
+          reth-evm-ethereum 9 err(revm 40.0 API 破 —— `Account` struct
+          literal 需走 `Default::default()` 后 setter、`transaction_id: 0`
+          期待 `TransactionId` 而非 int、`EvmStorageSlot::new_changed` 第 3
+          参从 `u64` 变 `TransactionId`、`&mut State<DB>::set_state_clear_flag`
+          方法已删 —— 均在 `hardfork/common.rs` + `lib.rs:244`,与 state-hook
+          剥离独立,决策上升);reth-execution-cache 3 / reth-static-file 1 /
+          reth-downloaders 2(承 Task #7);reth-db-common 1(NEW 曝光 —
+          `init.rs:256` HashMap 期待 `FbBuildHasher<32>` 但传 `DefaultHashBuilder`,
+          原被 evm-ethereum 阻塞未见)。
+        - **未 commit 变更**(6 文件):
+          - crates/gravity-precompiles/src/randomness_by_height.rs
+          - crates/pipe-exec-layer-ext-v2/execute/src/bls_precompile.rs
+          - crates/pipe-exec-layer-ext-v2/execute/src/mint_precompile.rs
+          - crates/ethereum/evm/src/parallel_execute.rs
+          - crates/ethereum/evm/src/test_utils.rs
+          - crates/prune/prune/src/segments/static_file/headers.rs
+          - crates/prune/prune/src/segments/user/receipts_by_logs.rs
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
