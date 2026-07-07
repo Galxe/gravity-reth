@@ -876,6 +876,49 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
           associated type 缺失(E0220);属 upstream 上游 refactor 面
     - B 阶段三 crate 复测(`cargo check -p reth-node-core -p reth-node-ethereum`)
       被 storage-api / consensus-common 传导阻塞,B 三文件本身未新增红
+    - ⟲ 2026-07-07 Task #4 尾款进度:
+        - **B 项 storage-api 已落**:`crates/storage/storage-api/src/chain.rs`
+          按 upstream #19176(`936baf1232 refactor: remove FullNodePrimitives`)
+          机械迁移 —— 五处 `FullNodePrimitives` → `NodePrimitives`(:17 import
+          + :45 / :49 ChainStorageWriter bound / impl + :78 / :82
+          ChainStorageReader bound / impl);`cargo check -p reth-storage-api
+          --all-features` 绿。E0220 associated type `Primitives::Block`
+          连坐随迁移自动消解(`NodePrimitives` trait 定义包含 `type Block`)
+        - **A 项 consensus-common 待人拍板**:validation.rs 双份 impl 决策
+          方案已梳理(P1 采 EIP-7825 版 / P2 采 4895+4844+7934 版 /
+          P3 合并),推荐 P3(两版语义正交、upstream v1.8.3 canonical
+          结构提示 EIP-7825 原应在 `validate_block_pre_execution` 而非
+          `post_merge_hardfork_fields`,但当前 tree 已把它移进本函数,合并
+          可回收两版全部 fork 校验)。决策落地前 workspace check 保留
+          E0428 单一阻塞
+        - **workspace 复扫新面**:除 A 项外浮出 1 个新错误 —
+          `reth-evm` execute.rs:627 `StateBuilder::without_state_clear`
+          方法未找到(E0599)。属 revm/alloy-evm 上游 API 面变化,不在
+          Task #4 尾款范围,登记待后续轮次消化
+    - ⟲ 2026-07-07 Task #4 A 项 P3 合并落地:
+        - **P3 合并已落**:validation.rs 双份 `post_merge_hardfork_fields`
+          合并为单一 impl —— 五校验全覆盖(ommers hash + EIP-4895 shanghai
+          withdrawals + EIP-4844 cancun blob gas + EIP-7825 osaka per-tx
+          gas + EIP-7934 osaka block-size limit);单一 caller(validation.rs
+          `validate_block_pre_execution_with_tx_root`)语义等价,doc 同步
+          扩一行 `EIP-7825 per-tx gas limit validation`;`grep -c '^pub fn
+          post_merge_hardfork_fields'` = 1,`cargo check -p reth-consensus-common
+          --all-features` 绿(3.79s),`cargo +nightly fmt` 无遗留 diff
+        - **workspace 剩余尾款登记**(不属 Task #4 A/B 范围,登记待后续
+          轮次消化):
+          - `reth-evm` execute.rs:627 `StateBuilder::without_state_clear`
+            (E0599)—— revm/alloy-evm 上游 API 面变化
+          - `reth-revm` test_utils.rs:145-148 —— `reth_trie::ExecutionWitnessMode`
+            未找到(E0412)+ trait `witness` 参数数 3→4 不匹配(E0050);
+            trie API 面变化
+          - `reth-revm` witness.rs:74 —— `BlockHashCache::keys()` 方法缺失
+            (E0599),alloy-evm cache 结构变化
+          - `reth-downloaders` bodies/request.rs:248 —— 使用 unstable
+            `vec_deque_pop_if` feature,与当前 toolchain(nightly-2025-10-28)
+            不匹配
+          - `FullNodePrimitives` 4 crate 连坐(hashing_account / provider
+            chain.rs / providers/mod.rs / static_file/manager.rs)—— 全
+            workspace check 未触及默认 features,登记继续
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
