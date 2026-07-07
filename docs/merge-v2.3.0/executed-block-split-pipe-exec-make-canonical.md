@@ -1215,6 +1215,41 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
           - crates/net/downloaders/src/bodies/request.rs
           - crates/net/downloaders/src/bodies/test_utils.rs
           - crates/storage/db-common/src/init.rs
+    - ⟲ 2026-07-07 Task #10 前台一波收 5 crate + 死码/双份消解:
+        - trie 模块挂载修复:reth-trie-parallel/src/state_root_task.rs
+          文件存在但 lib.rs 未挂载 + 缺 5 类 dep(crossbeam-channel/
+          alloy-eip7928/alloy-evm/revm-state + MultiProofTargetsV2 use);
+          ethereum/payload/src/lib.rs:461 实际调 handle.state_root() 消费
+          StateRootHandle,证明非死码是 3-way 双漏;同源修 reth-trie-common
+          lib.rs 挂 pub mod target_v2 + re-export MultiProofTargetsV2
+        - reth-evm-ethereum Task #8 决策 1 A/B/C/D 全 P1 落地:revm 40.0
+          Account 私字段 (`original_info`) → 用 Account::default() + acc.info/
+          acc.status setter(struct update ..Default 因 private field 触
+          E0451 不可用);TransactionId new-type 3 处 + EvmStorageSlot
+          第 3 参 2 处补 TransactionId::default();lib.rs:244 + parallel_execute
+          .rs:84 两处 set_state_clear_flag 死码删,注释登记 revm v40+ 剥离
+          + PR #363 invariant 默认成立(Task #9A grevm 端 rev eecc6fc
+          ParallelState::set_state_clear_flag 已 no-op stub 核查通过)
+        - reth-transaction-pool NewTransactionEvent 双份定义消解:
+          pool/events.rs:92 与 :114 完全一致的 struct/impl 块(3-way 遗留,
+          同 consensus post_merge_hardfork_fields 根因),删第二份 8 err
+          E0428/E0119/E0592/E0034 一齐消解;transaction_hashes_set/vec
+          gravity 糖方法迁 canonical impl Iterator + .collect(),3 处 caller
+          修
+        - reth-rpc-eth-types cache/mod.rs:537 provider.header(block_hash)
+          → header(&block_hash),BlockReader trait 参数从 owned 改 borrow
+        - ef-tests blockchain_test.rs 5 处综合:剔 gravity storage-v2 死符号
+          use StateWriteConfig/StorageSettingsCache;insert_block 新签名
+          2 参 + owned(genesis_block.clone() + StorageLocation);write_state
+          第 3 参 StateWriteConfig::default() → StorageLocation::StaticFiles;
+          剔 with_adapter! 宏包裹直调 StateRoot::overlay_root_with_updates;
+          clone_into_sorted() → clone() + into_sorted()
+    - ⟲ workspace check --all-features 剩 1 err / 1 crate:reth-node-core
+      node_config.rs:24 use StorageSettings 死符号(storage-v2 出局)+
+      node_config.rs:379-385 `storage_settings()` 方法 + 4 处 caller
+      (commands/db/{settings,migrate_v2}.rs、node/builder/src/launch/
+      {common,engine}.rs)属**设计决策项**(全剪 vs 补 shim),留下轮
+      subagent 收
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
