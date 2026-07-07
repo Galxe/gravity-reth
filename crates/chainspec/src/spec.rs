@@ -840,6 +840,9 @@ impl<H: BlockHeader> ChainSpec<H> {
             base_fee_params,
             prune_delete_limit,
             blob_params,
+            gravity_hardforks,
+            gravity_min_base_fee,
+            gravity_min_base_fee_activation_block,
         } = self;
         ChainSpec {
             chain,
@@ -851,6 +854,9 @@ impl<H: BlockHeader> ChainSpec<H> {
             base_fee_params,
             prune_delete_limit,
             blob_params,
+            gravity_hardforks,
+            gravity_min_base_fee,
+            gravity_min_base_fee_activation_block,
         }
     }
 }
