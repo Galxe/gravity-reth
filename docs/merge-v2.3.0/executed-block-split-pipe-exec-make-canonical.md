@@ -851,6 +851,31 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
 - [ ] 终验:`cargo check --workspace --all-features`(当前被 workspace
       依赖缺失阻塞)+ `grep -rl '^<<<<<<<' crates/ | wc -l` 相对基线
       只减不增 + pipe 两 crate 编译 + **跨组反向失效重扫**(§七教训 4)
+    - ⟲ 2026-07-07 进度(Task #3 收尾):三处已收
+        - `reth-trie-sparse` lib 12 处 `SparseTrieErrorKind::BlindedNode { path, hash }`
+          → tuple `BlindedNode(path)` 迁移(canonical 定义在
+          `crates/evm/execution-errors/src/trie.rs:169`,丢弃 hash 参数);顺带
+          test line 2888 assert_matches 同步;`cargo check -p reth-trie-sparse
+          --all-features` 绿
+        - `reth-execution-types` chain.rs 3 处:`serde_bincode_compat::ExecutionOutcome<'a, N::Receipt>`
+          → 去 typed generic 为 `<'a>`(bincode compat 层 struct 无 T 参数,
+          只在 From impl 层解耦 RLP encode/decode);`as_repr()/from_repr()`
+          → 标准 `.into()`;`cargo check -p reth-execution-types --all-features` 绿
+        - `examples/custom-hardforks` chainspec.rs 补 `EthChainSpec::gravity_hardforks`
+          delegate 到 `self.inner`;`cargo check -p custom-hardforks --all-features` 绿
+        - 顺带:`reth-trie-sparse-parallel` trie.rs 2 处同 BlindedNode 迁移
+          (跨 crate 同一 canonical form)
+    - 当前 workspace check --all-features 剩 4 errors × 2 crates(不属 Task #3
+      三处目标):
+        - `reth-consensus-common` validation.rs:197 与 :241
+          `post_merge_hardfork_fields` **函数重复定义**(E0428)——3-way merge
+          未合并的双份 impl,第一版实现 EIP-7825 per-tx gas,第二版实现
+          shanghai/cancun/7934 但 doc 一致 → 需选一取舍
+        - `reth-storage-api` chain.rs:17 `FullNodePrimitives` 从
+          `reth_primitives_traits` 找不到(E0432),连带 :46 / :79 `Primitives::Block`
+          associated type 缺失(E0220);属 upstream 上游 refactor 面
+    - B 阶段三 crate 复测(`cargo check -p reth-node-core -p reth-node-ethereum`)
+      被 storage-api / consensus-common 传导阻塞,B 三文件本身未新增红
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
