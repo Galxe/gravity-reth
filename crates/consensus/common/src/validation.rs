@@ -193,50 +193,7 @@ where
 ///   information about the specific checks in [`validate_shanghai_withdrawals`].
 /// * EIP-4844 blob gas validation, if cancun is active based on the given chainspec. See more
 ///   information about the specific checks in [`validate_cancun_gas`].
-/// * EIP-7934 block size limit validation, if osaka is active based on the given chainspec.
-pub fn post_merge_hardfork_fields<B, ChainSpec>(
-    block: &SealedBlock<B>,
-    chain_spec: &ChainSpec,
-) -> Result<(), ConsensusError>
-where
-    B: Block,
-    ChainSpec: EthereumHardforks,
-{
-    // Check ommers hash
-    let ommers_hash = block.body().calculate_ommers_root();
-    if Some(block.ommers_hash()) != ommers_hash {
-        return Err(ConsensusError::BodyOmmersHashDiff(
-            GotExpected {
-                got: ommers_hash.unwrap_or(EMPTY_OMMER_ROOT_HASH),
-                expected: block.ommers_hash(),
-            }
-            .into(),
-        ))
-    }
-    // EIP-7825 validation
-    if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) {
-        for tx in block.body().transactions() {
-            if tx.gas_limit() > MAX_TX_GAS_LIMIT_OSAKA {
-                return Err(TxGasLimitTooHighErr {
-                    tx_hash: *tx.tx_hash(),
-                    gas_limit: tx.gas_limit(),
-                    max_allowed: MAX_TX_GAS_LIMIT_OSAKA,
-                }
-                .into());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Validates the ommers hash and other fork-specific fields.
-///
-/// These fork-specific validations are:
-/// * EIP-4895 withdrawals validation, if shanghai is active based on the given chainspec. See more
-///   information about the specific checks in [`validate_shanghai_withdrawals`].
-/// * EIP-4844 blob gas validation, if cancun is active based on the given chainspec. See more
-///   information about the specific checks in [`validate_cancun_gas`].
+/// * EIP-7825 per-tx gas limit validation, if osaka is active based on the given chainspec.
 /// * EIP-7934 block size limit validation, if osaka is active based on the given chainspec.
 pub fn post_merge_hardfork_fields<B, ChainSpec>(
     block: &SealedBlock<B>,
@@ -267,13 +224,25 @@ where
         validate_cancun_gas(block)?;
     }
 
-    if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) &&
-        block.rlp_length() > MAX_RLP_BLOCK_SIZE
-    {
-        return Err(ConsensusError::BlockTooLarge {
-            rlp_length: block.rlp_length(),
-            max_rlp_length: MAX_RLP_BLOCK_SIZE,
-        })
+    if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) {
+        // EIP-7825: per-tx gas limit
+        for tx in block.body().transactions() {
+            if tx.gas_limit() > MAX_TX_GAS_LIMIT_OSAKA {
+                return Err(TxGasLimitTooHighErr {
+                    tx_hash: *tx.tx_hash(),
+                    gas_limit: tx.gas_limit(),
+                    max_allowed: MAX_TX_GAS_LIMIT_OSAKA,
+                }
+                .into());
+            }
+        }
+        // EIP-7934: block size limit
+        if block.rlp_length() > MAX_RLP_BLOCK_SIZE {
+            return Err(ConsensusError::BlockTooLarge {
+                rlp_length: block.rlp_length(),
+                max_rlp_length: MAX_RLP_BLOCK_SIZE,
+            })
+        }
     }
 
     Ok(())
