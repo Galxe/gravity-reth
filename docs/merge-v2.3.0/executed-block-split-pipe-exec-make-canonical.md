@@ -1055,6 +1055,65 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
           - crates/storage/provider/src/providers/mod.rs(前轮遗留)
           - crates/storage/provider/src/test_utils/mod.rs
           - crates/storage/provider/src/writer/mod.rs
+    - ⟲ 2026-07-07 Task #7 workspace 尾款收官(部分落地 + 决策上升):
+        - **A 已落**(reth-exex-types 88→0 err,纯机械修):
+          crates/exex/types/src/notification.rs `serde_bincode_compat` 模块
+          5 处 impl 补 `N::BlockHeader: SerdeBincodeCompat` +
+          `N::BlockBody: SerdeBincodeCompat` 边界(enum def + 2 处 From impl +
+          SerializeAs impl + DeserializeAs impl),同时 use 一并引入
+          `serde_bincode_compat::SerdeBincodeCompat`。
+          根因:gravity 端 `crates/evm/execution-types/src/chain.rs` 的
+          `serde_bincode_compat::Chain<'a, N>` 保留了 pre-#23158
+          `Block: Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat>`
+          边界(upstream 已用 RLP 替代该 trait,gravity 未跟进 —— 属 Task#3+#4
+          已 clean 决策范围,本轮不动),而 exex-types 侧 `ExExNotification`
+          `From`/`SerializeAs`/`DeserializeAs` 未同步传播这条边界。
+          修法:传播边界(与 chain.rs 同风,`N::BlockHeader: SerdeBincodeCompat`
+          比 `RlpBincode` 弱一档,更宽容)。1 文件 ~11 行改动,`cargo check
+          -p reth-exex-types --all-features` exit=0。
+        - **B 停下决策**(gravity-precompiles 5 err):
+          revm-precompile 36.0.3 对 PrecompileError 做了**语义拆分** —— 分为
+          fatal `PrecompileError::Fatal(String)`(tx abort)与非致命
+          `PrecompileHalt::{OutOfGas, Other(Cow), ...}`(halt via
+          `PrecompileOutput::halt(...)`,tx 继续),`PrecompileOutput.reverted`
+          字段被删。gravity 3 类错误(`OutOfGas`、`Other`、`reverted: false`)
+          迁移涉及**语义决策**:输入长度错 / provider 查询错应 halt(非致命)
+          还是 fatal?`handler_raw` 是否要扩签名带 reservoir?决策文档见
+          `_local/2026-07-07/task7-decisions.md` §决策 1(推荐 P1
+          halt-non-fatal,`reservoir=0`,unit test 断言从 `.is_err()`
+          改成 `.status.is_halt()`)。
+          扩批面(超本 crate,同 API):`pipe-exec-layer-ext-v2/execute/src/
+          {bls,mint}_precompile.rs`、`engine/tree/src/tree/precompile_cache.rs`
+          共 ~10 err(不在本 Task 允许改动的 3 crate 范围内,登记 handoff)。
+        - **C 停下决策**(reth-evm-ethereum 7 err):
+          alloy-evm 0.36 对 `BlockExecutor` / `BlockExecutorFactory` /
+          `SystemCaller` 做**系统性重构** —— (i) `StateChangeSource`/
+          `StateChangePostBlockSource` 从 `alloy_evm::block` 剔除(gravity
+          已在 `engine/tree/.../multiproof.rs` vendored,但 `evm-ethereum`
+          位于其下游不宜反引);(ii) `SystemCaller::try_on_state_with`
+          state-hook 机制**整个删除**(upstream 认为 state-hook 应在 EVM 外部完成);
+          (iii) `BlockExecutorFactory` 增 `TxExecutionResult` / `Executor`(GAT)
+          关联类型;(iv) `BlockExecutor` 增 `Result` / `receipts()`、`commit_
+          transaction` 签名变(去掉 `impl ExecutableTx<Self>` 参数)、
+          `set_state_hook` 剔除;(v) `BlockExecutorFor` 从 trait 变成 type alias。
+          `crates/ethereum/evm/src/{parallel_execute,test_utils}.rs` 老形态
+          全面不兼容,需按上述 (i)(ii) 的 gravity 侧适配路径 + (iii)(iv)(v)
+          的 mock 补齐 一起做。决策文档见 §决策 2(推荐:剔除
+          `try_on_state_with` 走 upstream + test_utils 按新 API 补齐 GAT/
+          关联类型,~30 行改动)。
+        - **workspace check --all-features 终态**: 26 err(A 修完后由
+          reth-exex-types 阻塞释放,曝光新一批 workspace err);失败 crate 6:
+          gravity-precompiles 5(B)、reth-evm-ethereum 7(C)、
+          **新曝光 4 crate 共 8 err**(reth-static-file 1
+          `Provider::get_static_file_writer` upstream rename;
+          reth-execution-cache 3 `witness()` 3→4 参 + `ExecutionWitnessMode`
+          在 `reth_trie` 找不到;reth-prune 2 `MINIMUM_PRUNING_DISTANCE` 未
+          导出 —— Task #6 rename 遗漏 caller 侧,机械修 use path 即可;
+          reth-downloaders 2 `VecDeque::pop_front_if` unstable + `writer.
+          append_header` 少 U256 difficulty 参)。四者均**不在**本 Task
+          允许改动的 3 crate 范围,登记后续 subagent。
+        - **未 commit 变更**(1 文件):
+          - crates/exex/types/src/notification.rs
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
