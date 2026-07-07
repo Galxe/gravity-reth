@@ -78,10 +78,10 @@ where
         &mut self,
         block: &RecoveredBlock<Block>,
     ) -> Result<(), BlockExecutionError> {
-        // Set state clear flag if the block is after the Spurious Dragon hardfork.
-        let state_clear_flag = self.chain_spec.is_spurious_dragon_active_at_block(block.number);
+        // revm v40+ dropped pre-EIP-161 support: both the DB layer and grevm's
+        // `ParallelState` always apply post-Spurious-Dragon commit semantics, so the
+        // caller-side `set_state_clear_flag` toggle has been removed.
         let state = self.state.as_mut().unwrap();
-        state.set_state_clear_flag(state_clear_flag);
         let mut evm =
             self.evm_config.evm_for_block(WrapDatabaseRef(state), block.header()).map_err(|e| {
                 BlockExecutionError::Internal(InternalBlockExecutionError::Other(Box::new(e)))

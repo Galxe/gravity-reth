@@ -235,13 +235,11 @@ where
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
-        // System transactions execute before the per-block `apply_pre_execution_changes`
-        // sets the EIP-161 state-clear flag, so set it here to match the parallel
-        // (grevm `ParallelState`) backend — whose state-clear is enabled by default.
-        // Without this, the serial `disable-grevm` path retains empty-touched accounts
-        // (e.g. the zero-reward coinbase) that grevm prunes, forking the state root on
-        // system-tx blocks.
-        db.set_state_clear_flag(evm_env.cfg_env.spec >= SpecId::SPURIOUS_DRAGON);
+        // revm v40+ removed `set_state_clear_flag`: the database layer always applies
+        // post-EIP-161 commit semantics, and grevm's `ParallelState::set_state_clear_flag`
+        // is now a no-op stub. The PR #363 invariant (serial `disable-grevm` ↔ parallel
+        // grevm backend must agree on system-tx block state roots) is now upheld by
+        // default on both sides without a caller-side toggle.
         let (execution_result, evm_state) = {
             let mut evm = self.evm_with_env(&mut *db, evm_env);
             for (addr, precompile) in precompiles {
