@@ -606,9 +606,9 @@ where
             let prune_config = self.prune_config();
             let pruning_mode =
                 PruneConfigKind::from_config(&prune_config, self.chain_spec().as_ref()).as_str();
-            // Report the configured storage settings. Gravity keeps its own RocksDB-backed
-            // storage layout, so the upstream stored-settings cache is not used here.
-            let storage_settings = self.node_config().storage_settings();
+            // Gravity uses its own RocksDB-backed storage layout, not the upstream v1/v2
+            // toggle — the `storage_v2` label is emitted as `false` for backwards compatibility
+            // with dashboards that expect the metric.
             let config = MetricServerConfig::new(
                 addr,
                 VersionInfo {
@@ -625,7 +625,7 @@ where
                 self.data_dir().pprof_dumps(),
             )
             .with_storage_settings_info(StorageSettingsInfo {
-                storage_v2: storage_settings.storage_v2,
+                storage_v2: false,
                 pruning_mode,
                 prune_config: serde_json::to_string(&prune_config)
                     .expect("serializing PruneConfig should not fail"),

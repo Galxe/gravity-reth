@@ -115,10 +115,11 @@ impl EngineNodeLauncher {
             .with_genesis()?
             .inspect(|this: &LaunchContextWith<Attached<WithConfigs<<T::Types as NodeTypes>::ChainSpec>, _>>| {
                 info!(target: "reth::cli", "\n{}", this.chain_spec().display_hardforks());
-                let settings = this.node_config().storage_settings();
+                // Gravity uses its own RocksDB-backed storage layout; only pruning mode is
+                // meaningful here.
                 let pruning_mode =
                     PruneConfigKind::from_config(&this.prune_config(), this.chain_spec().as_ref()).as_str();
-                info!(target: "reth::cli", ?settings, ?pruning_mode, "Loaded storage settings");
+                info!(target: "reth::cli", ?pruning_mode, "Loaded storage settings");
             })
             .with_metrics_task()
             // passing FullNodeTypes as type parameter here so that we can build

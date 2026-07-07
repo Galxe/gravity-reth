@@ -21,7 +21,6 @@ use reth_primitives_traits::SealedHeader;
 use reth_stages_types::StageId;
 use reth_storage_api::{
     BlockHashReader, DatabaseProviderFactory, HeaderProvider, StageCheckpointReader,
-    StorageSettings,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_transaction_pool::TransactionPool;
@@ -369,19 +368,6 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
         ChainSpec: EthereumHardforks,
     {
         self.pruning.prune_config(&self.chain)
-    }
-
-    /// Returns the effective storage settings for this node.
-    ///
-    /// Determined by the `--storage.v2` flag (defaults to `true`).
-    /// Existing databases retain whatever settings are persisted in their
-    /// metadata (checked during genesis init).
-    pub const fn storage_settings(&self) -> StorageSettings {
-        if self.storage.v2 {
-            StorageSettings::v2()
-        } else {
-            StorageSettings::v1()
-        }
     }
 
     /// Returns the max block that the node should run to, looking it up from the network if
