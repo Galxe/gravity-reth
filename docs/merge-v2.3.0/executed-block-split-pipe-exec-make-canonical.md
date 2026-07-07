@@ -1171,6 +1171,50 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
           - crates/ethereum/evm/src/test_utils.rs
           - crates/prune/prune/src/segments/static_file/headers.rs
           - crates/prune/prune/src/segments/user/receipts_by_logs.rs
+    - ⟲ 2026-07-07 Task #9B 承 Task #7/#8 的 4 机械 crate 一波清:
+        - **reth-execution-cache 已落**(3→0 err):`cached_state.rs` 中
+          `witness()` impl 签名多带的第 4 参 `mode: reth_trie::
+          ExecutionWitnessMode` 是 stale,`reth-storage-api` 里 trait
+          `witness(&self, TrieInput, HashedPostState) -> ProviderResult<
+          Vec<Bytes>>` 只有 3 参 —— 反向:是 execution-cache 侧写多了,不
+          是 trait 加参。删掉 `mode` 参 + call 站点第 3 参即可。
+        - **reth-static-file 已落**(1→0 err):`segments/receipts.rs` 中
+          `provider.get_static_file_writer(...)` 上游剔除,改走 `let
+          static_file_provider = provider.static_file_provider();` 分离
+          binding + `static_file_provider.get_writer(...)`,同时 `use
+          reth_provider::providers::StaticFileWriter` 把 trait 拉进 scope
+          (临时值 lifetime 借用问题 → 需拆两行,单 chain 会被 E0716)。
+        - **reth-downloaders 已落**(2→0 err):
+          (i) `bodies/request.rs:248` `VecDeque::pop_front_if` 是 nightly
+          unstable `vec_deque_pop_if` feature,手动展开成
+          `while this.pending_headers.front().is_some_and(|h| h.is_empty())
+          { let header = this.pending_headers.pop_front().expect(...); }`。
+          (ii) `bodies/test_utils.rs:57` `writer.append_header(header, hash)`
+          → `writer.append_header(header, U256::ZERO, hash)`(PoS 后
+          total_difficulty 恒 0,与 upstream test-utils canonical 一致);
+          补 `use alloy_primitives::U256`。
+        - **reth-db-common 已落**(1→0 err):`init.rs` storage 用
+          `.collect::<HashMap<_, _>>()` 走 `DefaultHashBuilder`,但目标类型
+          `BundleStateInit` 内层是 `B256Map<(U256, U256)>` =
+          `HashMap<B256, _, FbBuildHasher<32>>`,collect 应改
+          `.collect::<B256Map<_>>()`;补 `use alloy_primitives::map::B256Map`。
+        - **workspace check --all-features 终态**: 10 err / 2 crate
+          (较 Task #8 baseline 16 err/5 crate 净下降 6)。剩余:
+          reth-evm-ethereum 9 err(Task #8 §决策 1 待拍板,不动);
+          reth-payload-builder 1 err(NEW 曝光 — service.rs:19 `use
+          reth_trie_parallel::state_root_task::StateRootHandle` 找不到,
+          `state_root_task.rs` 文件仍在 crates/trie/parallel/src/ 但
+          `lib.rs` 未 `pub mod state_root_task;` 导出;整型 Task #6 后的
+          module 注册漏落,机械修:trie/parallel/lib.rs 补 `pub mod
+          state_root_task;`,或验证是否该模块本身已废弃 → 若废弃则
+          reth-payload-builder 侧改成使用其他 handle。留下轮 subagent。
+          原被 evm-ethereum 阻塞未见)。
+        - **未 commit 变更**(5 文件):
+          - crates/engine/execution-cache/src/cached_state.rs
+          - crates/static-file/static-file/src/segments/receipts.rs
+          - crates/net/downloaders/src/bodies/request.rs
+          - crates/net/downloaders/src/bodies/test_utils.rs
+          - crates/storage/db-common/src/init.rs
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 
