@@ -36,7 +36,7 @@ use reth_db_api::{
 };
 use reth_ethereum_primitives::{Receipt, TransactionSigned};
 use reth_nippy_jar::{NippyJar, NippyJarChecker, CONFIG_FILE_EXTENSION};
-use reth_node_types::{FullNodePrimitives, NodePrimitives};
+use reth_node_types::NodePrimitives;
 use reth_primitives_traits::{RecoveredBlock, SealedHeader, SignedTransaction};
 use reth_stages_types::{PipelineTarget, StageId};
 use reth_static_file_types::{
@@ -413,9 +413,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             Some(path) => StaticFileSegment::parse_filename(
                 &path
                     .file_name()
-                    .ok_or_else(|| {
-                        ProviderError::MissingStaticFilePath(segment, path.to_path_buf())
-                    })?
+                    .ok_or_else(|| ProviderError::MissingStaticFilePath(path.to_path_buf()))?
                     .to_string_lossy(),
             )
             .and_then(|(parsed_segment, block_range)| {
@@ -616,7 +614,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
 
                     // Current block range has the same block start as `fixed_range``, but block end
                     // might be different if we are still filling this static file.
-                    if let Some(current_block_range) = jar.user_header().block_range().copied() {
+                    if let Some(current_block_range) = jar.user_header().block_range() {
                         // Considering that `update_index` is called when we either append/truncate,
                         // we are sure that we are handling the latest data
                         // points.
@@ -983,9 +981,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
                 StaticFileSegment::Transactions => StageId::Bodies,
                 StaticFileSegment::Receipts => StageId::Execution,
                 // gravity does not maintain storage-v2 static file segments (filtered above)
-                _ => unreachable!(
-                    "gravity static files only cover Headers/Transactions/Receipts"
-                ),
+                _ => unreachable!("gravity static files only cover Headers/Transactions/Receipts"),
             })?
             .unwrap_or_default()
             .block_number;
@@ -1651,8 +1647,8 @@ impl<N: NodePrimitives<SignedTx: Value + SignedTransaction, Receipt: Value>> Rec
     }
 }
 
-impl<N: FullNodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>>
-    TransactionsProviderExt for StaticFileProvider<N>
+impl<N: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>> TransactionsProviderExt
+    for StaticFileProvider<N>
 {
     fn transaction_hashes_by_range(
         &self,
@@ -1851,7 +1847,7 @@ impl<N: NodePrimitives> BlockNumReader for StaticFileProvider<N> {
     }
 }
 
-impl<N: FullNodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>> BlockReader
+impl<N: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>> BlockReader
     for StaticFileProvider<N>
 {
     type Block = N::Block;

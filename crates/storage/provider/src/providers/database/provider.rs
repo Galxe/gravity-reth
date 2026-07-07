@@ -2346,7 +2346,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriterV2 for DatabaseProvid
                     }
                     // Dup subkey encodes as `[len+1][pack(nibbles)]`, so the length byte dominates
                     // the memcmp order: sort by nibble length first, then nibble content (which for
-                    // equal length equals packed-byte memcmp). Merge removed + updated; updated wins.
+                    // equal length equals packed-byte memcmp). Merge removed + updated; updated
+                    // wins.
                     let mut storage_updates = storage_trie_update
                         .removed_nodes
                         .iter()

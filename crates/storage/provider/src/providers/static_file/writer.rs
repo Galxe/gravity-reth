@@ -52,9 +52,9 @@ impl<N: NodePrimitives> StaticFileWriters<N> {
             StaticFileSegment::Transactions => self.transactions.write(),
             StaticFileSegment::Receipts => self.receipts.write(),
             // gravity does not maintain storage-v2 static file segments
-            _ => unreachable!(
-                "gravity static file writer only covers Headers/Transactions/Receipts"
-            ),
+            _ => {
+                unreachable!("gravity static file writer only covers Headers/Transactions/Receipts")
+            }
         };
 
         if write_guard.is_none() {
