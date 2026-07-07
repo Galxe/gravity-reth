@@ -1,26 +1,30 @@
 use crate::EthEvmConfig;
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-use alloy_consensus::Header;
+use alloy_consensus::{Header, TxType};
 use alloy_eips::eip7685::Requests;
-use alloy_evm::precompiles::PrecompilesMap;
+use alloy_evm::{
+    block::{GasOutput, StateDB},
+    eth::EthTxResult,
+    precompiles::PrecompilesMap,
+};
 use alloy_primitives::Bytes;
 use alloy_rpc_types_engine::ExecutionData;
+use core::marker::PhantomData;
 use parking_lot::Mutex;
 use reth_ethereum_primitives::{Receipt, TransactionSigned};
 use reth_evm::{
-    block::{
-        BlockExecutionError, BlockExecutor, BlockExecutorFactory, BlockExecutorFor, ExecutableTx,
-    },
+    block::{BlockExecutionError, BlockExecutor, BlockExecutorFactory, ExecutableTx},
     eth::{EthBlockExecutionCtx, EthEvmContext},
     parallel_execute::ParallelExecutor,
-    ConfigureEngineEvm, ConfigureEvm, Database, EthEvm, EthEvmFactory, Evm, EvmEnvFor, EvmFactory,
+    ConfigureEngineEvm, ConfigureEvm, EthEvm, EthEvmFactory, EvmEnvFor, EvmFactory,
     ExecutableTxIterator, ExecutionCtxFor, ParallelDatabase,
 };
 use reth_execution_types::{BlockExecutionResult, ExecutionOutcome};
 use reth_primitives_traits::{BlockTy, SealedBlock, SealedHeader};
 use revm::{
-    context::result::{ExecutionResult, Output, ResultAndState, SuccessReason},
-    database::State,
+    context::result::{
+        ExecutionResult, HaltReason, Output, ResultAndState, ResultGas, SuccessReason,
+    },
     Inspector,
 };
 
@@ -52,6 +56,11 @@ impl BlockExecutorFactory for MockEvmConfig {
     type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
     type Receipt = Receipt;
     type Transaction = TransactionSigned;
+    // Mock transactions are not backed by a real EVM run, so we reuse the canonical
+    // Ethereum per-transaction result type but leave `result` / `blob_gas_used` at their
+    // defaults from `execute_transaction_without_commit`.
+    type TxExecutionResult = EthTxResult<HaltReason, TxType>;
+    type Executor<'a, DB: StateDB, I: Inspector<EthEvmContext<DB>>> = MockExecutor<'a, DB, I>;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         self.inner.evm_factory()
@@ -59,32 +68,34 @@ impl BlockExecutorFactory for MockEvmConfig {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: EthEvm<&'a mut State<DB>, I, PrecompilesMap>,
+        evm: EthEvm<DB, I, PrecompilesMap>,
         _ctx: Self::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self, DB, I>
+    ) -> Self::Executor<'a, DB, I>
     where
-        DB: Database + 'a,
-        I: Inspector<<Self::EvmFactory as EvmFactory>::Context<&'a mut State<DB>>> + 'a,
+        DB: StateDB,
+        I: Inspector<<Self::EvmFactory as EvmFactory>::Context<DB>>,
     {
-        MockExecutor { result: self.exec_results.lock().pop().unwrap(), evm, hook: None }
+        MockExecutor { result: self.exec_results.lock().pop().unwrap(), evm, _phantom: PhantomData }
     }
 }
 
 /// Mock executor that returns a fixed execution result.
+///
+/// The `'a` lifetime carries no data of its own: it exists purely to satisfy the
+/// `BlockExecutor` GAT introduced in alloy-evm 0.36 (`type Executor<'a, DB, I>`), where
+/// the executor is tied to the factory that created it.
 #[derive(derive_more::Debug)]
-pub struct MockExecutor<'a, DB: Database, I> {
+pub struct MockExecutor<'a, DB: StateDB, I: Inspector<EthEvmContext<DB>>> {
     result: ExecutionOutcome,
-    evm: EthEvm<&'a mut State<DB>, I, PrecompilesMap>,
-    #[debug(skip)]
-    hook: Option<Box<dyn reth_evm::OnStateHook>>,
+    evm: EthEvm<DB, I, PrecompilesMap>,
+    _phantom: PhantomData<&'a ()>,
 }
 
-impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExecutor
-    for MockExecutor<'a, DB, I>
-{
-    type Evm = EthEvm<&'a mut State<DB>, I, PrecompilesMap>;
+impl<'a, DB: StateDB, I: Inspector<EthEvmContext<DB>>> BlockExecutor for MockExecutor<'a, DB, I> {
+    type Evm = EthEvm<DB, I, PrecompilesMap>;
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
+    type Result = EthTxResult<HaltReason, TxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         Ok(())
@@ -93,32 +104,31 @@ impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExec
     fn execute_transaction_without_commit(
         &mut self,
         _tx: impl ExecutableTx<Self>,
-    ) -> Result<ResultAndState<<Self::Evm as Evm>::HaltReason>, BlockExecutionError> {
-        Ok(ResultAndState::new(
-            ExecutionResult::Success {
-                reason: SuccessReason::Return,
-                gas_used: 0,
-                gas_refunded: 0,
-                logs: vec![],
-                output: Output::Call(Bytes::from(vec![])),
-            },
-            Default::default(),
-        ))
+    ) -> Result<Self::Result, BlockExecutionError> {
+        Ok(EthTxResult {
+            result: ResultAndState::new(
+                ExecutionResult::Success {
+                    reason: SuccessReason::Return,
+                    gas: ResultGas::default(),
+                    logs: vec![],
+                    output: Output::Call(Bytes::from(vec![])),
+                },
+                Default::default(),
+            ),
+            blob_gas_used: 0,
+            tx_type: TxType::Legacy,
+        })
     }
 
-    fn commit_transaction(
-        &mut self,
-        _output: ResultAndState<<Self::Evm as Evm>::HaltReason>,
-        _tx: impl ExecutableTx<Self>,
-    ) -> Result<u64, BlockExecutionError> {
-        Ok(0)
+    fn commit_transaction(&mut self, _output: Self::Result) -> GasOutput {
+        GasOutput::new(0)
     }
 
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        let Self { result, mut evm, .. } = self;
-        let ExecutionOutcome { bundle, receipts, requests, first_block: _ } = result;
+        let Self { result, evm, .. } = self;
+        let ExecutionOutcome { bundle: _, receipts, requests, first_block: _ } = result;
         let result = BlockExecutionResult {
             receipts: receipts.into_iter().flatten().collect(),
             requests: requests.into_iter().fold(Requests::default(), |mut reqs, req| {
@@ -126,15 +136,14 @@ impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExec
                 reqs
             }),
             gas_used: 0,
+            blob_gas_used: 0,
         };
-
-        evm.db_mut().bundle_state = bundle;
-
+        // Note: alloy-evm 0.36 no longer requires re-attaching a `BundleState` onto the
+        // executor's DB; downstream test consumers only observe `ExecutionOutcome` shape and
+        // never inspect the mock DB directly. Preserving the pre-0.36 `bundle_state = bundle`
+        // line would require constraining `DB` to `State<InnerDB>`, breaking the trait's
+        // generic `DB: StateDB` contract.
         Ok((evm, result))
-    }
-
-    fn set_state_hook(&mut self, hook: Option<Box<dyn reth_evm::OnStateHook>>) {
-        self.hook = hook;
     }
 
     fn evm(&self) -> &Self::Evm {
@@ -143,6 +152,10 @@ impl<'a, DB: Database, I: Inspector<EthEvmContext<&'a mut State<DB>>>> BlockExec
 
     fn evm_mut(&mut self) -> &mut Self::Evm {
         &mut self.evm
+    }
+
+    fn receipts(&self) -> &[Self::Receipt] {
+        &[]
     }
 }
 

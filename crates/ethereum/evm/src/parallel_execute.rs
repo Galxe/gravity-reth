@@ -1,11 +1,11 @@
 //! Parallel EVM executor using Grevm
 
 use crate::RethReceiptBuilder;
-use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::BlockHeader;
 use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
 use alloy_evm::{
-    block::{calc, StateChangePostBlockSource, StateChangeSource, SystemCaller},
+    block::{calc, SystemCaller},
     eth::{dao_fork, eip6110, spec::EthExecutorSpec, EthBlockExecutorFactory},
     precompiles::DynPrecompile,
     EvmEnv,
@@ -207,18 +207,14 @@ where
         }
         // increment balances
         state
-            .increment_balances(balance_increments.clone())
+            .increment_balances(balance_increments)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
-        // call state hook with changes due to balance increments.
-        self.system_caller.try_on_state_with(|| {
-            balance_increment_state(&balance_increments, state).map(|state| {
-                (
-                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
-                    Cow::Owned(state),
-                )
-            })
-        })?;
+        // Note: `SystemCaller::try_on_state_with` (source-aware `OnStateHook` notification)
+        // was removed from alloy-evm in 0.36 together with `StateChangeSource` /
+        // `StateChangePostBlockSource`. Follow upstream: skip the balance-increment state
+        // notification here; the engine-tree payload processor derives the resulting delta
+        // from the final bundle instead of relying on an in-executor hook.
 
         Ok(requests)
     }
@@ -248,7 +244,11 @@ where
             self.execute_transactions(block)?
         };
         let requests = self.apply_post_execution_changes(block, &receipts)?;
-        Ok(BlockExecutionResult { receipts, gas_used, requests })
+        // `blob_gas_used` was added to `BlockExecutionResult` in reth v2.3.0 to track
+        // per-block blob gas separately from execution gas. The Grevm parallel path does
+        // not track blob gas separately (the sum is derived from receipts by the caller),
+        // so we report 0 here and mirror upstream's `EthBlockExecutor::finish` shape.
+        Ok(BlockExecutionResult { receipts, gas_used, requests, blob_gas_used: 0 })
     }
 
     fn take_bundle(&mut self) -> BundleState {
@@ -378,37 +378,11 @@ fn insert_post_block_withdrawals_balance_increments(
     }
 }
 
-fn balance_increment_state<DB: ParallelDatabase>(
-    balance_increments: &HashMap<Address, u128>,
-    state: &ParallelState<DB>,
-) -> Result<EvmState, BlockExecutionError> {
-    let load_account = |address: &Address| -> Result<(Address, Account), BlockExecutionError> {
-        let info = state
-            .cache
-            .accounts
-            .get(address)
-            .and_then(|account| account.value().account.clone())
-            .ok_or_else(|| {
-                BlockExecutionError::msg("could not load account for balance increment")
-            })?;
-
-        Ok((
-            *address,
-            Account {
-                info,
-                storage: Default::default(),
-                status: AccountStatus::Touched,
-                transaction_id: 0,
-            },
-        ))
-    };
-
-    balance_increments
-        .iter()
-        .filter(|&(_, &balance)| balance != 0)
-        .map(|(addr, _)| load_account(addr))
-        .collect::<Result<EvmState, _>>()
-}
+// `balance_increment_state` was removed alongside the `SystemCaller::try_on_state_with`
+// hook call: the source-aware `OnStateHook` mechanism was dropped in alloy-evm 0.36, so
+// gravity no longer needs to synthesize an `EvmState` delta for balance increments here.
+// The engine-tree payload processor derives the resulting delta from the final bundle
+// after `finish` runs, matching upstream's approach.
 
 #[cfg(test)]
 mod tests {
