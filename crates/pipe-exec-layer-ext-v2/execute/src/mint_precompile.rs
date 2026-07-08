@@ -141,11 +141,19 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
         ));
     }
 
-    // 6. Load recipient account from EVM journal and directly increment its balance. `load_account`
-    //    either returns the cached journal entry or fetches from the underlying DB and inserts it
-    //    into the journal cache, always returning a `&mut Account`.
-    let state_load = match input.internals_mut().load_account(recipient) {
-        Ok(s) => s,
+    // 6. Load the recipient account from the EVM journal to read its current balance, then write
+    //    back via `set_balance`, which journals the change and touches the account so revm commits
+    //    it to state on transaction end. The overflow check stays explicit to preserve the
+    //    pre-revm-40 "Balance overflow" halt semantics.
+    //
+    // NOTE(gravity): revm 40's `EvmInternals::load_account` returns an immutable reference, so
+    // the pre-revm-40 direct cache mutation (`account.info.balance = ..` + `mark_touch()`) is no
+    // longer expressible. `set_balance` additionally records a journal entry, which means a mint
+    // is now rolled back if an enclosing call frame reverts afterwards — the old direct mutation
+    // survived such reverts. This only diverges on replay if a historical block ever exercised
+    // "mint succeeds, enclosing frame reverts"; confirm against chain history before release.
+    let old_balance = match input.internals_mut().load_account(recipient) {
+        Ok(state_load) => state_load.data.info.balance,
         Err(e) => {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::other(format!("Failed to load account {recipient}: {e}")),
@@ -153,16 +161,15 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
             ));
         }
     };
-    let account = state_load.data;
-    let new_balance = match account.info.balance.checked_add(U256::from(amount)) {
-        Some(b) => b,
-        None => {
-            return Ok(PrecompileOutput::halt(PrecompileHalt::other_static("Balance overflow"), 0));
-        }
+    let Some(new_balance) = old_balance.checked_add(U256::from(amount)) else {
+        return Ok(PrecompileOutput::halt(PrecompileHalt::other_static("Balance overflow"), 0));
     };
-    account.info.balance = new_balance;
-    // Mark the account as touched so revm commits it to state on transaction end.
-    account.mark_touch();
+    if let Err(e) = input.internals_mut().set_balance(recipient, new_balance) {
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other(format!("Failed to set balance for {recipient}: {e}")),
+            0,
+        ));
+    }
 
     info!(
         target: "evm::precompile::mint_token",

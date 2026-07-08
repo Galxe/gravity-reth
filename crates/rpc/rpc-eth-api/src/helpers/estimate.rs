@@ -15,7 +15,7 @@ use reth_evm::{
 };
 use reth_revm::{
     database::{EvmStateProvider, StateProviderDatabase},
-    db::State,
+    db::{bal::EvmDatabaseError, State},
 };
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
@@ -144,9 +144,9 @@ pub trait EstimateCall: Call {
         // If the provided gas limit is less than computed cap, use that
         tx_env.set_gas_limit(tx_env.gas_limit().min(highest_gas_limit));
 
-        let block_number = evm_env.block_env.number;
-        let block_timestamp = evm_env.block_env.timestamp;
-        let current_randomness = evm_env.block_env.prevrandao;
+        let block_number = evm_env.block_env.number();
+        let block_timestamp = evm_env.block_env.timestamp();
+        let current_randomness = evm_env.block_env.prevrandao();
 
         // Create EVM instance once and reuse it throughout the entire estimation process
         let mut evm = self.evm_config().evm_with_env(&mut db, evm_env);
@@ -345,7 +345,7 @@ pub trait EstimateCall: Call {
         max_gas_limit: u64,
     ) -> Result<U256, Self::Error>
     where
-        DB: Database<Error = ProviderError>,
+        DB: Database<Error = EvmDatabaseError<ProviderError>>,
         EthApiError: From<DB::Error>,
     {
         let req_gas_limit = tx_env.gas_limit();

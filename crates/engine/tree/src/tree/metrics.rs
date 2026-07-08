@@ -8,7 +8,7 @@ use alloy_rpc_types_engine::{PayloadStatus, PayloadStatusEnum};
 use core::borrow::BorrowMut;
 use reth_engine_primitives::{ForkchoiceStatus, OnForkChoiceUpdated};
 use reth_errors::{BlockExecutionError, ProviderError};
-use reth_evm::{metrics::ExecutorMetrics, OnStateHook};
+use reth_evm::{metrics::ExecutorMetrics, OnStateHook, RecoveredTx};
 use reth_execution_types::BlockExecutionOutput;
 use reth_metrics::{
     metrics::{Counter, Gauge, Histogram},
@@ -151,7 +151,9 @@ impl EngineApiMetrics {
     pub(crate) fn execute_metered<E, DB>(
         &self,
         executor: E,
-        transactions: impl Iterator<Item = Result<impl ExecutableTx<E>, BlockExecutionError>>,
+        transactions: impl Iterator<
+            Item = Result<impl ExecutableTx<E> + RecoveredTx<E::Transaction>, BlockExecutionError>,
+        >,
         state_hook: Box<dyn OnStateHook>,
     ) -> Result<BlockExecutionOutput<E::Receipt>, BlockExecutionError>
     where
@@ -636,6 +638,8 @@ pub struct BlockValidationMetrics {
     pub state_root_duration: Gauge,
     /// Histogram for state root duration ie the time spent blocked waiting for the state root
     pub state_root_histogram: Histogram,
+    /// Trie input computation duration
+    pub trie_input_duration: Histogram,
     /// Histogram of deferred trie computation duration.
     pub deferred_trie_compute_duration: Histogram,
     /// Payload conversion and validation latency

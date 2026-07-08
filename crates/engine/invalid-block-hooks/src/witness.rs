@@ -160,11 +160,7 @@ fn generate(
     hashed_state: reth_trie::HashedPostState,
     state_provider: Box<dyn StateProvider>,
 ) -> eyre::Result<ExecutionWitness> {
-    let state = state_provider.witness(
-        Default::default(),
-        hashed_state,
-        reth_trie::ExecutionWitnessMode::Legacy,
-    )?;
+    let state = state_provider.witness(Default::default(), hashed_state)?;
     Ok(ExecutionWitness {
         state,
         codes: codes.into_values().collect(),
@@ -243,7 +239,6 @@ where
                 DebugApiClient::<()>::debug_execution_witness(
                     healthy_node_client,
                     block_number.into(),
-                    None,
                 )
                 .await
             })?;

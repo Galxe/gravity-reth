@@ -243,12 +243,12 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                 .unwrap_or_default() as u64,
             tx.authorization_list().map(|l| l.len()).unwrap_or_default() as u64,
         );
-        if tx.gas_limit() < intrinsic.initial_gas || tx.gas_limit() < intrinsic.floor_gas {
+        if tx.gas_limit() < intrinsic.initial_total_gas() || tx.gas_limit() < intrinsic.floor_gas {
             info!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 gas_limit=?tx.gas_limit(),
-                initial_gas=?intrinsic.initial_gas,
+                initial_gas=?intrinsic.initial_total_gas(),
                 floor_gas=?intrinsic.floor_gas,
                 "intrinsic gas too low"
             );

@@ -363,6 +363,22 @@ impl EngineNodeLauncher {
                     payload = built_payloads.select_next_some(), if !built_payloads.is_terminated() => {
                         if let Some(executed_block) = payload.executed_block() {
                             debug!(target: "reth::cli", block=?executed_block.recovered_block.num_hash(),  "inserting built payload");
+                            // Bridge the v2.3.0 `BuiltPayloadExecutedBlock` into the gravity-form
+                            // `ExecutedBlockWithTrieUpdates`. The payload builder computes only the
+                            // legacy trie updates; nested (V2) trie updates are left empty because
+                            // this local-payload path is not used by gravity consensus (pipe-exec
+                            // drives the canonical chain).
+                            let block_number = executed_block.recovered_block.number();
+                            let executed_block = reth_chain_state::ExecutedBlockWithTrieUpdates::new(
+                                executed_block.recovered_block,
+                                Arc::new(reth_provider::ExecutionOutcome::single(
+                                    block_number,
+                                    Arc::unwrap_or_clone(executed_block.execution_output),
+                                )),
+                                executed_block.hashed_state,
+                                reth_chain_state::ExecutedTrieUpdates::Present(executed_block.trie_updates),
+                                Default::default(),
+                            );
                             orchestrator.handler_mut().handler_mut().on_event(EngineApiRequest::InsertExecutedBlock(executed_block).into());
                         }
                     }

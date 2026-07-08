@@ -2,17 +2,17 @@
 
 use crate::{engine::DownloadRequest, metrics::BlockDownloaderMetrics};
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{map::B256Set, B256};
+use alloy_primitives::B256;
 use futures::FutureExt;
 use reth_consensus::Consensus;
 use reth_network_p2p::{
     full_block::{FetchFullBlockFuture, FetchFullBlockRangeFuture, FullBlockClient},
     BlockClient,
 };
-use reth_primitives_traits::{Block, SealedBlock};
+use reth_primitives_traits::{Block, RecoveredBlock, SealedBlock};
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{binary_heap::PeekMut, BinaryHeap, VecDeque},
+    collections::{binary_heap::PeekMut, BinaryHeap, HashSet, VecDeque},
     fmt::Debug,
     sync::Arc,
     task::{Context, Poll},
@@ -44,7 +44,7 @@ pub enum DownloadAction {
 #[derive(Debug)]
 pub enum DownloadOutcome<B: Block> {
     /// Downloaded blocks.
-    Blocks(Vec<SealedBlock<B>>),
+    Blocks(Vec<RecoveredBlock<B>>),
     /// New download started.
     NewDownloadStarted {
         /// How many blocks are pending in this download.
@@ -68,7 +68,7 @@ where
     inflight_block_range_requests: Vec<FetchFullBlockRangeFuture<Client>>,
     /// Buffered blocks from downloads - this is a min-heap of blocks, using the block number for
     /// ordering. This means the blocks will be popped from the heap with ascending block numbers.
-    set_buffered_blocks: BinaryHeap<Reverse<OrderedSealedBlock<B>>>,
+    set_buffered_blocks: BinaryHeap<Reverse<OrderedRecoveredBlock<B>>>,
     /// Engine download metrics.
     metrics: BlockDownloaderMetrics,
     /// Pending events to be emitted.
@@ -109,7 +109,7 @@ where
     }
 
     /// Processes a block set download request.
-    fn download_block_set(&mut self, hashes: B256Set) {
+    fn download_block_set(&mut self, hashes: HashSet<B256>) {
         for hash in hashes {
             self.download_full_block(hash);
         }
@@ -226,8 +226,15 @@ where
             let mut request = self.inflight_block_range_requests.swap_remove(idx);
             if let Poll::Ready(blocks) = request.poll_unpin(cx) {
                 trace!(target: "engine::download", len=?blocks.len(), first=?blocks.first().map(|b| b.num_hash()), last=?blocks.last().map(|b| b.num_hash()), "Received full block range, buffering");
-                self.set_buffered_blocks
-                    .extend(blocks.into_iter().map(OrderedSealedBlock).map(Reverse));
+                self.set_buffered_blocks.extend(
+                    blocks
+                        .into_iter()
+                        .map(|b| {
+                            let senders = b.senders().unwrap_or_default();
+                            OrderedRecoveredBlock(RecoveredBlock::new_sealed(b, senders))
+                        })
+                        .map(Reverse),
+                );
             } else {
                 // still pending
                 self.inflight_block_range_requests.push(request);
@@ -241,7 +248,8 @@ where
         }
 
         // drain all unique element of the block buffer if there are any
-        let mut downloaded_blocks = Vec::with_capacity(self.set_buffered_blocks.len());
+        let mut downloaded_blocks: Vec<RecoveredBlock<B>> =
+            Vec::with_capacity(self.set_buffered_blocks.len());
         while let Some(block) = self.set_buffered_blocks.pop() {
             // peek ahead and pop duplicates
             while let Some(peek) = self.set_buffered_blocks.peek_mut() {
@@ -257,31 +265,32 @@ where
     }
 }
 
-/// A wrapper type around [`SealedBlock`] that implements the [Ord]
+/// A wrapper type around [`RecoveredBlock`] that implements the [Ord]
 /// trait by block number.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OrderedSealedBlock<B: Block>(SealedBlock<B>);
+struct OrderedRecoveredBlock<B: Block>(RecoveredBlock<B>);
 
-impl<B: Block> PartialOrd for OrderedSealedBlock<B> {
+impl<B: Block> PartialOrd for OrderedRecoveredBlock<B> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<B: Block> Ord for OrderedSealedBlock<B> {
+impl<B: Block> Ord for OrderedRecoveredBlock<B> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.number().cmp(&other.0.number())
     }
 }
 
-impl<B: Block> From<SealedBlock<B>> for OrderedSealedBlock<B> {
+impl<B: Block> From<SealedBlock<B>> for OrderedRecoveredBlock<B> {
     fn from(block: SealedBlock<B>) -> Self {
-        Self(block)
+        let senders = block.senders().unwrap_or_default();
+        Self(RecoveredBlock::new_sealed(block, senders))
     }
 }
 
-impl<B: Block> From<OrderedSealedBlock<B>> for SealedBlock<B> {
-    fn from(value: OrderedSealedBlock<B>) -> Self {
+impl<B: Block> From<OrderedRecoveredBlock<B>> for RecoveredBlock<B> {
+    fn from(value: OrderedRecoveredBlock<B>) -> Self {
         value.0
     }
 }

@@ -1,5 +1,7 @@
 //! Contains common `reth` arguments
 
+pub use reth_primitives_traits::header::HeaderMut;
+
 use alloy_primitives::B256;
 use clap::Parser;
 use gravity_primitives::get_gravity_config;
@@ -147,9 +149,8 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
     where
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
     {
-        let has_receipt_pruning = config.prune.as_ref().is_some_and(|a| a.has_receipts_pruning());
-        let prune_modes =
-            config.prune.as_ref().map(|prune| prune.segments.clone()).unwrap_or_default();
+        let has_receipt_pruning = config.prune.has_receipts_pruning();
+        let prune_modes = config.prune.segments.clone();
         let factory = ProviderFactory::<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>::new(
             db,
             self.chain.clone(),

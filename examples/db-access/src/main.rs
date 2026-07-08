@@ -25,12 +25,8 @@ fn main() -> eyre::Result<()> {
 
     // Instantiate a provider factory for Ethereum mainnet using the provided datadir path.
     let spec = ChainSpecBuilder::mainnet().build();
-    let runtime = reth_ethereum::tasks::Runtime::test();
-    let factory = EthereumNode::provider_factory_builder().open_read_only(
-        spec.into(),
-        ReadOnlyConfig::from_datadir(datadir),
-        runtime,
-    )?;
+    let factory = EthereumNode::provider_factory_builder()
+        .open_read_only(spec.into(), ReadOnlyConfig::from_datadir(datadir))?;
 
     // This call opens a RO transaction on the database. To write to the DB you'd need to call
     // the `provider_rw` function and look for the `Writer` variants of the traits.
@@ -64,7 +60,7 @@ fn header_provider_example<T: HeaderProvider>(provider: T, number: u64) -> eyre:
 
     // Can also query the header by hash!
     let header_by_hash =
-        provider.header(sealed_header.hash())?.ok_or(eyre::eyre!("header by hash not found"))?;
+        provider.header(&sealed_header.hash())?.ok_or(eyre::eyre!("header by hash not found"))?;
     assert_eq!(sealed_header.header(), &header_by_hash);
 
     // Can query headers by range as well, already sealed!

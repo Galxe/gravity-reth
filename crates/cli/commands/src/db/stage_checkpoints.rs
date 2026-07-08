@@ -3,7 +3,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use reth_db_common::DbTool;
 use reth_provider::{
-    providers::ProviderNodeTypes, DBProvider, DatabaseProviderFactory, StageCheckpointReader,
+    providers::ProviderNodeTypes, DatabaseProviderFactory, StageCheckpointReader,
     StageCheckpointWriter,
 };
 use reth_stages::StageId;

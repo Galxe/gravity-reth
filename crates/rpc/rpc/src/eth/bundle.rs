@@ -157,9 +157,9 @@ where
                 let mut total_gas_fees = U256::ZERO;
                 let mut hasher = Keccak256::new();
 
-                let block_number = evm_env.block_env.number;
-                let block_timestamp = evm_env.block_env.timestamp;
-                let current_randomness = evm_env.block_env.prevrandao;
+                let block_number = evm_env.block_env.number();
+                let block_timestamp = evm_env.block_env.timestamp();
+                let current_randomness = evm_env.block_env.prevrandao();
                 let mut evm = eth_api.evm_config().evm_with_env(db, evm_env);
                 eth_api.register_custom_precompiles(
                     &mut evm,

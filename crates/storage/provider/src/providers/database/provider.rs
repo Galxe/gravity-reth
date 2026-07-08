@@ -221,6 +221,14 @@ impl<TX, N: NodeTypes> StaticFileProviderFactory for DatabaseProvider<TX, N> {
     fn static_file_provider(&self) -> StaticFileProvider<Self::Primitives> {
         self.static_file_provider.clone()
     }
+
+    fn get_static_file_writer(
+        &self,
+        block: BlockNumber,
+        segment: StaticFileSegment,
+    ) -> ProviderResult<crate::providers::StaticFileProviderRWRefMut<'_, Self::Primitives>> {
+        self.static_file_provider.get_writer(block, segment)
+    }
 }
 
 impl<TX: Debug + Send + Sync, N: NodeTypes<ChainSpec: EthChainSpec + 'static>> ChainSpecProvider

@@ -26,7 +26,6 @@ use reth_testing_utils::generators::{self, sign_tx_with_key_pair};
 use revm::{
     database::{CacheDB, EmptyDB, TransitionState},
     precompile::{PrecompileId, PrecompileOutput, PrecompileResult},
-    primitives::address,
     state::{AccountInfo, Bytecode, EvmState},
     Database,
 };
@@ -75,11 +74,7 @@ fn create_custom_precompile() -> DynPrecompile {
     (
         PrecompileId::custom("test_custom_precompile"),
         |_input: PrecompileInput<'_>| -> PrecompileResult {
-            Ok(PrecompileOutput {
-                gas_used: CUSTOM_PRECOMPILE_GAS,
-                bytes: Bytes::from(vec![0x42; 64]),
-                reverted: false,
-            })
+            Ok(PrecompileOutput::new(CUSTOM_PRECOMPILE_GAS, Bytes::from(vec![0x42; 64]), 0))
         },
     )
         .into()

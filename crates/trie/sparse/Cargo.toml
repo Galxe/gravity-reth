@@ -25,12 +25,10 @@ alloy-rlp.workspace = true
 
 # misc
 auto_impl.workspace = true
-either.workspace = true
 rayon = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
 smallvec.workspace = true
-slotmap = { workspace = true, optional = true }
 
 # metrics
 reth-metrics = { workspace = true, optional = true }
@@ -40,6 +38,7 @@ metrics = { workspace = true, optional = true }
 reth-primitives-traits = { workspace = true, features = ["arbitrary"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-storage-api.workspace = true
+reth-testing-utils.workspace = true
 reth-trie = { workspace = true, features = ["test-utils"] }
 reth-trie-common = { workspace = true, features = ["test-utils", "arbitrary"] }
 reth-trie-db = { workspace = true, features = ["test-utils"] }
@@ -47,6 +46,7 @@ reth-tracing.workspace = true
 
 arbitrary.workspace = true
 assert_matches.workspace = true
+criterion.workspace = true
 itertools.workspace = true
 pretty_assertions.workspace = true
 proptest-arbitrary-interop.workspace = true
@@ -58,7 +58,6 @@ rand_08.workspace = true
 default = ["std", "metrics"]
 std = [
     "dep:rayon",
-    "dep:slotmap",
     "alloy-primitives/std",
     "alloy-rlp/std",
     "alloy-trie/std",
@@ -71,7 +70,6 @@ std = [
     "serde?/std",
     "serde_json?/std",
     "reth-tracing/std",
-    "either/std",
 ]
 metrics = ["dep:reth-metrics", "dep:metrics", "std"]
 trie-debug = ["std", "dep:serde", "dep:serde_json", "alloy-primitives/serde", "alloy-trie/serde"]
@@ -91,3 +89,11 @@ arbitrary = [
     "reth-trie-common/arbitrary",
     "smallvec/arbitrary",
 ]
+
+[[bench]]
+name = "root"
+harness = false
+
+[[bench]]
+name = "rlp_node"
+harness = false

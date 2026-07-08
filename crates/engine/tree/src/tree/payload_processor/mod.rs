@@ -13,7 +13,7 @@ use crate::tree::{
     sparse_trie::SparseTrieTask,
     StateProviderBuilder, TreeConfig,
 };
-use alloy_evm::ToTxEnv;
+
 use alloy_primitives::B256;
 use executor::WorkloadExecutor;
 use multiproof::{SparseTrieUpdate, *};
@@ -22,7 +22,7 @@ use prewarm::PrewarmMetrics;
 use reth_engine_primitives::ExecutableTxIterator;
 use reth_evm::{
     execute::{ExecutableTxFor, WithTxEnv},
-    ConfigureEvm, EvmEnvFor, OnStateHook, SpecFor, TxEnvFor,
+    ConfigureEvm, ConvertTx, EvmEnvFor, OnStateHook, SpecFor, TxEnvFor,
 };
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
@@ -114,14 +114,16 @@ where
             executor,
             execution_cache: Default::default(),
             trie_metrics: Default::default(),
-            cross_block_cache_size: config.cross_block_cache_size(),
-            disable_transaction_prewarming: config.disable_caching_and_prewarming(),
+            cross_block_cache_size: config.cross_block_cache_size() as u64,
+            disable_transaction_prewarming: config.disable_prewarming(),
             evm_config,
             precompile_cache_disabled: config.precompile_cache_disabled(),
             precompile_cache_map,
             sparse_state_trie: Arc::default(),
             trie_input: None,
-            disable_parallel_sparse_trie: config.disable_parallel_sparse_trie(),
+            // The `disable-parallel-sparse-trie` knob was removed from the v2.3.0
+            // `TreeConfig`; the parallel sparse trie is always enabled (baseline default).
+            disable_parallel_sparse_trie: false,
         }
     }
 }
@@ -170,8 +172,8 @@ where
         provider_builder: StateProviderBuilder<N, P>,
         consistent_view: ConsistentDbView<P>,
         trie_input: TrieInput,
-        config: &TreeConfig,
-    ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Tx>, I::Error>
+        _config: &TreeConfig,
+    ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Recovered>, I::Error>
     where
         P: DatabaseProviderFactory<Provider: BlockReader>
             + BlockReader
@@ -192,7 +194,9 @@ where
             state_root_config.state_sorted.clone(),
             state_root_config.prefix_sets.clone(),
         );
-        let max_proof_task_concurrency = config.max_proof_task_concurrency() as usize;
+        // The `max-proof-task-concurrency` knob was removed from the v2.3.0 `TreeConfig`;
+        // use the baseline default (256).
+        let max_proof_task_concurrency = 256usize;
         let proof_task = ProofTaskManager::new(
             self.executor.handle().clone(),
             state_root_config.consistent_view.clone(),
@@ -258,7 +262,7 @@ where
         env: ExecutionEnv<Evm>,
         transactions: I,
         provider_builder: StateProviderBuilder<N, P>,
-    ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Tx>, I::Error>
+    ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Recovered>, I::Error>
     where
         P: BlockReader + StateProviderFactory + StateReader + Clone + 'static,
     {
@@ -278,14 +282,15 @@ where
         &self,
         transactions: I,
     ) -> (
-        mpsc::Receiver<WithTxEnv<TxEnvFor<Evm>, I::Tx>>,
-        mpsc::Receiver<Result<WithTxEnv<TxEnvFor<Evm>, I::Tx>, I::Error>>,
+        mpsc::Receiver<WithTxEnv<TxEnvFor<Evm>, I::Recovered>>,
+        mpsc::Receiver<Result<WithTxEnv<TxEnvFor<Evm>, I::Recovered>, I::Error>>,
     ) {
         let (prewarm_tx, prewarm_rx) = mpsc::channel();
         let (execute_tx, execute_rx) = mpsc::channel();
         self.executor.spawn_blocking(move || {
-            for tx in transactions {
-                let tx = tx.map(|tx| WithTxEnv { tx_env: tx.to_tx_env(), tx: Arc::new(tx) });
+            let (transactions, convert) = transactions.into_parts();
+            for raw in transactions {
+                let tx = convert.convert(raw).map(WithTxEnv::new);
                 // only send Ok(_) variants to prewarming task
                 if let Ok(tx) = &tx {
                     let _ = prewarm_tx.send(tx.clone());

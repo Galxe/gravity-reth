@@ -9,9 +9,9 @@ use crate::tree::{
     persistence_state::CurrentPersistenceAction,
     precompile_cache::{CachedPrecompile, CachedPrecompileMetrics, PrecompileCacheMap},
     sparse_trie::StateRootComputeOutcome,
-    CacheWaitDurations, ConsistentDbView, EngineApiMetrics, EngineApiTreeState, ExecutionEnv,
-    PayloadHandle, PersistenceState, PersistingKind, StateProviderBuilder, StateProviderDatabase,
-    TreeConfig, WaitForCaches,
+    CacheWaitDurations, EngineApiMetrics, EngineApiTreeState, ExecutionEnv, PayloadHandle,
+    PersistenceState, PersistingKind, StateProviderBuilder, StateProviderDatabase, TreeConfig,
+    WaitForCaches,
 };
 use alloy_consensus::transaction::Either;
 use alloy_eips::{eip1898::BlockWithParent, NumHash};
@@ -33,17 +33,20 @@ use reth_payload_primitives::{
     BuiltPayload, InvalidPayloadAttributesError, NewPayloadError, PayloadTypes,
 };
 use reth_primitives_traits::{
-    AlloyBlockHeader, BlockTy, GotExpected, NodePrimitives, RecoveredBlock, SealedHeader,
+    transaction::signed::RecoveryError, AlloyBlockHeader, BlockBody as _, BlockTy, GotExpected,
+    NodePrimitives, Recovered, RecoveredBlock, SealedHeader, SignedTransaction as _,
 };
 use reth_provider::{
-    BlockExecutionOutput, BlockHashReader, BlockNumReader, BlockReader, DBProvider,
-    DatabaseProviderFactory, ExecutionOutcome, HashedPostStateProvider, HeaderProvider,
-    ProviderError, StateProvider, StateProviderFactory, StateReader, StateRootProvider,
+    providers::ConsistentDbView, BlockExecutionOutput, BlockHashReader, BlockNumReader,
+    BlockReader, DBProvider, DatabaseProviderFactory, ExecutionOutcome, HashedPostStateProvider,
+    HeaderProvider, ProviderError, StateProvider, StateProviderFactory, StateReader,
+    StateRootProvider,
 };
 use reth_revm::db::State;
 use reth_trie::{updates::TrieUpdates, HashedPostState, KeccakKeyHasher, TrieInput};
 use reth_trie_db::DatabaseHashedPostState;
 use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
+use revm::context::Block as _;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tracing::{debug, debug_span, error, info, trace, warn};
 
@@ -231,7 +234,7 @@ where
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
         match input {
-            BlockOrPayload::Payload(payload) => Ok(self.evm_config.evm_env_for_payload(payload)),
+            BlockOrPayload::Payload(payload) => Ok(self.evm_config.evm_env_for_payload(payload)?),
             BlockOrPayload::Block(block) => Ok(self.evm_config.evm_env(block.header())?),
         }
     }
@@ -245,15 +248,22 @@ where
         V: PayloadValidator<T, Block = N::Block>,
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
-        match input {
-            BlockOrPayload::Payload(payload) => Ok(Either::Left(
-                self.evm_config.tx_iterator_for_payload(payload).map(|res| res.map(Either::Left)),
-            )),
-            BlockOrPayload::Block(block) => {
-                let transactions = block.clone_transactions_recovered().collect::<Vec<_>>();
-                Ok(Either::Right(transactions.into_iter().map(|tx| Ok(Either::Right(tx)))))
+        Ok(match input {
+            BlockOrPayload::Payload(payload) => {
+                let iter = self
+                    .evm_config
+                    .tx_iterator_for_payload(payload)
+                    .map_err(NewPayloadError::other)?;
+                Either::Left(iter)
             }
-        }
+            BlockOrPayload::Block(block) => {
+                // The block is already recovered — reuse its senders instead of re-running
+                // per-transaction ECDSA recovery on the validation hot path.
+                let txs = block.clone_transactions_recovered().collect::<Vec<_>>();
+                let convert = |tx: Recovered<N::SignedTx>| Ok::<_, RecoveryError>(tx);
+                Either::Right((txs, convert))
+            }
+        })
     }
 
     /// Returns a [`ExecutionCtxFor`] for the given payload or block.
@@ -266,7 +276,7 @@ where
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
         match input {
-            BlockOrPayload::Payload(payload) => Ok(self.evm_config.context_for_payload(payload)),
+            BlockOrPayload::Payload(payload) => Ok(self.evm_config.context_for_payload(payload)?),
             BlockOrPayload::Block(block) => Ok(self.evm_config.context_for_block(block)?),
         }
     }
@@ -730,7 +740,7 @@ where
         T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
-        let num_hash = NumHash::new(env.evm_env.block_env.number.to(), env.hash);
+        let num_hash = NumHash::new(env.evm_env.block_env.number().to(), env.hash);
 
         let span = debug_span!(target: "engine::tree", "execute_block", num = ?num_hash.number, hash = ?num_hash.hash);
         let _enter = span.enter();
@@ -739,7 +749,6 @@ where
         let mut db = State::builder()
             .with_database(StateProviderDatabase::new(&state_provider))
             .with_bundle_update()
-            .without_state_clear()
             .build();
 
         let evm = self.evm_config.evm_with_env(&mut db, env.evm_env.clone());
@@ -748,20 +757,22 @@ where
         let mut executor = self.evm_config.create_executor(evm, ctx);
 
         if !self.config.precompile_cache_disabled() {
-            // Only cache pure precompiles to avoid issues with stateful precompiles
-            executor.evm_mut().precompiles_mut().map_pure_precompiles(|address, precompile| {
-                let metrics = self
-                    .precompile_cache_metrics
-                    .entry(*address)
-                    .or_insert_with(|| CachedPrecompileMetrics::new_with_address(*address))
-                    .clone();
-                CachedPrecompile::wrap(
-                    precompile,
-                    self.precompile_cache_map.cache_for_address(*address),
-                    *env.evm_env.spec_id(),
-                    Some(metrics),
-                )
-            });
+            // Only cache cacheable (pure) precompiles to avoid issues with stateful precompiles
+            executor.evm_mut().precompiles_mut().map_cacheable_precompiles(
+                |address, precompile| {
+                    let metrics = self
+                        .precompile_cache_metrics
+                        .entry(*address)
+                        .or_insert_with(|| CachedPrecompileMetrics::new_with_address(*address))
+                        .clone();
+                    CachedPrecompile::wrap(
+                        precompile,
+                        self.precompile_cache_map.cache_for_address(*address),
+                        *env.evm_env.spec_id(),
+                        Some(metrics),
+                    )
+                },
+            );
         }
 
         let execution_start = Instant::now();
@@ -1126,8 +1137,6 @@ where
     }
 }
 
-/// Enum representing either block or payload being validated.
-#[derive(Debug)]
 impl<P, Evm, V> WaitForCaches for BasicEngineValidator<P, Evm, V>
 where
     Evm: ConfigureEvm,
@@ -1140,6 +1149,8 @@ where
     }
 }
 
+/// Enum representing either block or payload being validated.
+#[derive(Debug)]
 pub enum BlockOrPayload<T: PayloadTypes> {
     /// Payload.
     Payload(T::ExecutionData),

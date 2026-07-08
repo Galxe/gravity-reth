@@ -3,7 +3,7 @@ use alloy_primitives::hex;
 use clap::{builder::RangedU64ValueParser, Parser};
 use eyre::WrapErr;
 use reth_chainspec::EthereumHardforks;
-use reth_db::{transaction::DbTx, DatabaseEnv};
+use reth_db::DatabaseEnv;
 use reth_db_api::{database::Database, table::Table, RawValue, TableViewer, Tables};
 use reth_db_common::{DbTool, ListFilter};
 use reth_node_builder::{NodeTypes, NodeTypesWithDBAdapter};
@@ -98,9 +98,6 @@ impl<N: NodeTypes> TableViewer<()> for ListTableViewer<'_, N> {
 
     fn view<T: Table>(&self) -> Result<(), Self::Error> {
         self.tool.provider_factory.db_ref().view(|tx| {
-            // We may be using the tui for a long time
-            tx.disable_long_read_transaction_safety();
-
             let total_entries = tx.table_entries(self.args.table.name()).wrap_err("Could not open db.")?;
             let final_entry_idx = total_entries.saturating_sub(1);
             if self.args.skip > final_entry_idx {

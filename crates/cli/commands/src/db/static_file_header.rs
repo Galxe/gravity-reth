@@ -34,7 +34,11 @@ impl Command {
     /// Execute `db static-file-header` command
     pub fn execute<N: ProviderNodeTypes>(self, tool: &DbTool<N>) -> eyre::Result<()> {
         let static_file_provider = tool.provider_factory.static_file_provider();
-        if let Err(err) = static_file_provider.check_consistency(&tool.provider_factory.provider()?)
+        let db_provider = tool.provider_factory.provider()?;
+        // NOTE(gravity): check_consistency takes an explicit `has_receipt_pruning` flag; derive it
+        // from the provider's prune modes.
+        if let Err(err) = static_file_provider
+            .check_consistency(&db_provider, db_provider.prune_modes_ref().has_receipts_pruning())
         {
             warn!("Error checking consistency of static files: {err}");
         }
@@ -42,12 +46,29 @@ impl Command {
         // Get the provider based on the source
         let provider = match self.source {
             Source::Path { path } => {
-                static_file_provider.get_segment_provider_for_path(&path)?.ok_or_else(|| {
-                    eyre::eyre!("Could not find static file segment for path: {}", path.display())
-                })?
+                // NOTE(gravity): no `get_segment_provider_for_path`; parse the segment from the
+                // file name and resolve the jar through `get_segment_provider`.
+                let segment = path
+                    .file_name()
+                    .and_then(|name| StaticFileSegment::parse_filename(&name.to_string_lossy()))
+                    .map(|(segment, _)| segment)
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "Could not find static file segment for path: {}",
+                            path.display()
+                        )
+                    })?;
+                static_file_provider
+                    .get_segment_provider(segment, || None, Some(&path))?
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "Could not find static file segment for path: {}",
+                            path.display()
+                        )
+                    })?
             }
             Source::Block { segment, block } => {
-                static_file_provider.get_segment_provider(segment, block)?
+                static_file_provider.get_segment_provider_from_block(segment, block, None)?
             }
         };
 

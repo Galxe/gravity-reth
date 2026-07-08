@@ -23,6 +23,7 @@ use reth_node_types::{BlockTy, HeaderTy, ReceiptTy, TxTy};
 use reth_primitives_traits::{Account, BlockBody, RecoveredBlock, SealedHeader, StorageEntry};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
+use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
     BlockBodyIndicesProvider, DatabaseProviderFactory, NodePrimitivesProvider, StateProvider,
     StorageChangeSetReader, TryIntoHistoricalStateProvider,
@@ -640,6 +641,14 @@ impl<N: ProviderNodeTypes> NodePrimitivesProvider for ConsistentProvider<N> {
 impl<N: ProviderNodeTypes> StaticFileProviderFactory for ConsistentProvider<N> {
     fn static_file_provider(&self) -> StaticFileProvider<N::Primitives> {
         self.storage_provider.static_file_provider()
+    }
+
+    fn get_static_file_writer(
+        &self,
+        block: BlockNumber,
+        segment: StaticFileSegment,
+    ) -> ProviderResult<crate::providers::StaticFileProviderRWRefMut<'_, Self::Primitives>> {
+        self.storage_provider.get_static_file_writer(block, segment)
     }
 }
 

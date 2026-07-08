@@ -14,7 +14,10 @@ use reth_evm::{
     TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
-use reth_revm::{database::StateProviderDatabase, db::State};
+use reth_revm::{
+    database::StateProviderDatabase,
+    db::{bal::EvmDatabaseError, State},
+};
 use reth_rpc_eth_types::cache::db::StateCacheDb;
 use reth_storage_api::{ProviderBlock, ProviderTx};
 use revm::{context::Block, context_interface::result::ResultAndState};
@@ -33,12 +36,12 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         inspector: I,
     ) -> Result<ResultAndState<HaltReasonFor<Self::Evm>>, Self::Error>
     where
-        DB: Database<Error = ProviderError>,
+        DB: Database<Error = EvmDatabaseError<ProviderError>>,
         I: InspectorFor<Self::Evm, DB>,
     {
-        let block_number = evm_env.block_env.number;
-        let block_timestamp = evm_env.block_env.timestamp;
-        let current_randomness = evm_env.block_env.prevrandao;
+        let block_number = evm_env.block_env.number();
+        let block_timestamp = evm_env.block_env.timestamp();
+        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
         self.register_custom_precompiles(
             &mut evm,
@@ -308,9 +311,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
 
                 let mut idx = 0;
 
-                let evm_block_number = evm_env.block_env.number;
-                let evm_block_timestamp = evm_env.block_env.timestamp;
-                let current_randomness = evm_env.block_env.prevrandao;
+                let evm_block_number = evm_env.block_env.number();
+                let evm_block_timestamp = evm_env.block_env.timestamp();
+                let current_randomness = evm_env.block_env.prevrandao();
                 let mut evm = this.evm_config().evm_factory().create_evm_with_inspector(
                     &mut db,
                     evm_env,

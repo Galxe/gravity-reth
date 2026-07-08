@@ -7,7 +7,7 @@ use eyre::{eyre, Result};
 use reth_chainspec::{ChainSpec, EthChainSpec, Hardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::{
-    common::{CliComponentsBuilder, CliNodeTypes, HeaderMut},
+    common::{CliComponentsBuilder, CliHeader, CliNodeTypes},
     launcher::{FnLauncher, Launcher},
 };
 use reth_cli_runner::CliRunner;
@@ -87,12 +87,12 @@ where
         mut self,
         components: impl CliComponentsBuilder<N>,
         launcher: impl AsyncFnOnce(
-            WithLaunchContext<NodeBuilder<DatabaseEnv, C::ChainSpec>>,
+            WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>,
             Ext,
         ) -> Result<()>,
     ) -> Result<()>
     where
-        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>,
+        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: CliHeader>, ChainSpec: Hardforks>,
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
     {
         let runner = match self.runner.take() {
@@ -155,7 +155,7 @@ pub(crate) fn run_commands_with<C, Ext, Rpc, N, SubCmd>(
     runner: CliRunner,
     components: impl CliComponentsBuilder<N>,
     launcher: impl AsyncFnOnce(
-        WithLaunchContext<NodeBuilder<DatabaseEnv, C::ChainSpec>>,
+        WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>,
         Ext,
     ) -> Result<()>,
 ) -> Result<()>
@@ -163,7 +163,7 @@ where
     C: ChainSpecParser<ChainSpec = N::ChainSpec>,
     Ext: clap::Args + fmt::Debug,
     Rpc: RpcModuleValidator,
-    N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>,
+    N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: CliHeader>, ChainSpec: Hardforks>,
     SubCmd: ExtendedCommand + Subcommand + fmt::Debug,
 {
     let rt = runner.runtime();

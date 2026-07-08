@@ -54,7 +54,6 @@ exclude = [".github/"]
 
 [workspace]
 members = [
-    "bin/reth-bb/",
     "bin/reth/",
     "crates/storage/rpc-provider/",
     "crates/chain-state/",
@@ -173,9 +172,7 @@ members = [
     "examples/beacon-api-sse/",
     "examples/bsc-p2p",
     "examples/custom-dev-node/",
-    "examples/custom-state-root/",
     "examples/custom-engine-types/",
-    "examples/custom-evm/",
     "examples/custom-hardforks/",
     "examples/custom-inspector/",
     "examples/custom-node-components/",
@@ -195,8 +192,6 @@ members = [
     "examples/node-custom-rpc/",
     "examples/node-event-hooks/",
     "examples/polygon-p2p/",
-    "examples/rpc-db/",
-    "examples/precompile-cache/",
     "examples/txpool-tracing/",
     "examples/custom-beacon-withdrawals",
     "testing/ef-tests/",

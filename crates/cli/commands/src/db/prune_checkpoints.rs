@@ -2,7 +2,7 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use reth_db_common::DbTool;
-use reth_provider::{providers::ProviderNodeTypes, DBProvider, DatabaseProviderFactory};
+use reth_provider::{providers::ProviderNodeTypes, DatabaseProviderFactory};
 use reth_prune_types::{PruneCheckpoint, PruneMode, PruneSegment};
 use reth_storage_api::{PruneCheckpointReader, PruneCheckpointWriter};
 

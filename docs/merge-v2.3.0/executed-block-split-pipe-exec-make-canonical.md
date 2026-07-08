@@ -848,9 +848,15 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
       (含手动删 v2.3.0 独有 `rpc_response.rs`);死符号反扫全绿;连带断点
       `TryFromTransactionResponse` 已按原则 2 裁决并落地 = 从 baseline 加回
       rpc-convert(见 9.4 补记)。证据:冲突标记归零 + rustfmt parse + 死符号扫描(2026-07-05 落地);编译证据待 cargo workspace 修复后回填
-- [ ] 终验:`cargo check --workspace --all-features`(当前被 workspace
-      依赖缺失阻塞)+ `grep -rl '^<<<<<<<' crates/ | wc -l` 相对基线
-      只减不增 + pipe 两 crate 编译 + **跨组反向失效重扫**(§七教训 4)
+- [x] 终验:`cargo check --workspace --all-features` + `grep -rl '^<<<<<<<'
+      crates/ | wc -l` 相对基线只减不增 + pipe 两 crate 编译 +
+      **跨组反向失效重扫**(§七教训 4)——**✅ 2026-07-08 全项通过**
+      (Task #12):workspace check --all-features 与默认 features 均
+      **0 error**;全仓冲突标记 **0**(含 CI/workflow/toml);
+      `reth-pipe-exec-layer-ext-v2` / `reth-pipe-exec-layer-event-bus` /
+      `gravity-storage` 全绿;`cargo +nightly fmt --all` 通过;
+      reth-evm-ethereum + gravity-precompiles nextest 35/35。
+      全量 `cargo nextest run --workspace` 留 CI 回归(§阅读指南收尾步骤)
     - ⟲ 2026-07-07 进度(Task #3 收尾):三处已收
         - `reth-trie-sparse` lib 12 处 `SparseTrieErrorKind::BlindedNode { path, hash }`
           → tuple `BlindedNode(path)` 迁移(canonical 定义在
@@ -1274,6 +1280,104 @@ v2.3.0 validator API,后者按 §9.1 裁决出局,harness 随之)。gravity 专�
           58 err / reth-exex 23 err / reth-ress-provider 1 err),均**独立于
           storage 决策**、单独 `cargo check -p <crate>` 复现,不属 task #11
           范畴,留下轮 rpc / exex / ress 组任务收
+
+    - ⟲ 2026-07-08 Task #12 workspace 全绿收官 + infra 落地 + rebase 对齐
+      (终验框翻勾的实证轮;与 upstream Task #7–#11 同期并行,rebase 时
+      同题冲突 12 文件全部取 upstream 侧后对齐):
+        - **A. workspace 尾款全链清零**(承 Task #11 登记的 3 crate 红 +
+          级联新曝光,依赖链逐层解锁顺序:downloaders → stages(6)→
+          engine-tree(35)→ invalid-block-hooks/node-events/rpc(11)→
+          engine-util(5)→ node-builder(1)→ cli-commands(40+,子 agent)
+          → examples 尾巴):
+          - engine-tree 为最大单体:路线甲回 baseline 的 payload_validator /
+            payload_processor 首次在 v2.3 依赖下编译,ExecutableTx 元组契约
+            (`into_parts`/`ConvertTx`/`WithTxEnv::new`)、TreeConfig 方法面
+            (`disable_prewarming`、cross_block_cache_size usize、
+            `disable_parallel_sparse_trie`/`max_proof_task_concurrency` 已删
+            → 内联 baseline 默认值)、`map_cacheable_precompiles`、
+            crossbeam Sender(engine.rs 服务形态跟 v2.3)、download.rs 回
+            baseline RecoveredBlock 形态、error.rs 补回 `MissingAncestor` +
+            剔 bal 孤儿、`WaitForCaches` 桩错位修复(桩曾插进
+            `BlockOrPayload` enum 的 doc/derive 与本体之间)、
+            persistence_state `current_action` 误加的 `#[cfg(test)]` 摘除
+          - rpc-eth-api/rpc-eth-types:`EvmDatabaseError<ProviderError>` 包装
+            全面迁移(error/mod.rs 补 `From<EvmDatabaseError>` +
+            `From<BalError>` 两 impl,api.rs `FromEvmError` 改
+            `EvmErrorFor<Evm, EvmDatabaseError<ProviderError>>`,
+            call/estimate/trace.rs bound 与 `block_env` 字段→方法);
+            `RpcNodeCore` 的 `PruneCheckpointReader` 需求经
+            `FullProvider` 补 bound 满足(traits/full.rs +2 行)
+          - exex 链:execution-types `serde_bincode_compat::Chain` 重写为
+            上游 v2.3 原生 RLP-repr 形态(blocks 存 rlp+senders,免
+            SerdeBincodeCompat 边界)→ exex-types 保持无边界原样,
+            reth-exex wal/manager/notifications 全链绿。
+            **⚠ 覆盖 Task #7 的 +11/-1 边界传播**(8612fa7a16):rebase 后
+            已将 exex-types/notification.rs 回退到无边界版;理由 = Task #7
+            handoff 自己登记的连坐 crate(reth-exex wal 层)在边界方案下
+            仍红,RLP-repr 为根治且与纯 v2.3 设计逐字一致
+          - 加法移植:`StaticFileProviderFactory::get_static_file_writer`
+            下沉 5 个 provider impl(reth-static-file receipts 段消费方
+            上游同形);Chain `find_transaction_and_receipt_by_hash`
+            (send_raw_transaction_sync 消费);`BodyDownloader` 补回
+            baseline `+ Sync`(gravity Stage: Send+Sync 契约)
+          - ress-provider `TaskSpawner` → `Runtime.spawn_blocking_task`;
+            node/core `mod ress_args` 挂载丢失补回;prune 2 处
+            MINIMUM_PRUNING_DISTANCE caller(Task #8 之外的 segments/
+            static_file/headers.rs + user/receipts_by_logs.rs)
+          - cli-commands(子 agent,40+ err):`Arc<DatabaseEnv>` 契约统一
+            (launcher/ethereum-cli/stage-unwind/init_state)、db 子命令回
+            baseline 形态(repair_trie 整文件、copy.rs 按 mdbx 孤儿卸载)、
+            re_execute `block_cache_size`、download manifest_cmd 用根
+            re-export 的 `DatabaseArguments`;`reth-prune-types`/
+            `reth-stages-types` 依 upstream 转非 optional
+        - **B. workspace member 摘除**(孤儿治理,文件留盘/删除见注):
+          `bin/reth-bb`(上游 BAL 专用工具,BAL 已全线剔除,目录删除)、
+          `examples/custom-state-root`(依赖被拒的 CustomStateRoot/
+          ChangesetCache,目录删除)、`examples/{rpc-db,custom-evm,
+          precompile-cache}`(两侧形态均对不上受限 `ConfigureEvm` impl
+          ——grevm 仅默认 EvmFactory;文件留盘,记 v2.4+ example 债)、
+          `crates/storage/db/benches`(跟 upstream 删除:目录 + 3 个
+          `[[bench]]` + criterion dev-dep + 空 bench feature;baseline 版
+          benches 本身 bit-rot——`tx.inner` 在 baseline rocksdb Tx 上也
+          不存在,CI bench job 恒 `if: false`)
+        - **C. infra 文件落地**(tests-infra 组登记盲区收口,详见该文档
+          ⟲ 落地实录):9 个 workflow + nextest/zepter/deny/typos 共 13 文件
+          ~53 块归零
+        - **D. rebase 对齐**(2026-07-08 `git pull --rebase`,本地
+          `fix compile & test` 重放到 Task #11 之上):同题冲突 12 文件
+          (evm 4 + precompile 3 + launch 2 + init/maintain/ef-tests)
+          全取 upstream;对齐 4 件:①跟随 03bffd095b 复活 payload-builder
+          生产路径,回退本地 trie_handle 剪除(payload/{builder,basic}、
+          ethereum/payload、custom-engine-types 回 upstream 版,tree/mod.rs
+          补 `trie_handle: None` 接线);②exex-types 覆盖 Task #7(见 A);
+          ③mint precompile 采 `set_balance` 版(upstream 版直接改写在
+          revm 40 不可编译:`load_account` 返回不可变引用);
+          ④launch/engine.rs 重套 `BuiltPayloadExecutedBlock` →
+          `ExecutedBlockWithTrieUpdates` 桥接(upstream handoff 自登记的
+          未适配点;triev2 以空 Default 桥接,风险注释在码)
+        - **E. 多智能体审查台账**(26 agent,10 findings;2 已修 / 2 已缓解
+          建档 / 6 登记):
+          - 已修:payload_validator 对已恢复块逐笔重跑 ECDSA(改复用
+            senders);node/events MGAS_TO_GAS 死 import
+          - 已缓解 + 码内建档待确认:mint `set_balance` journal 语义差异
+            (外层 revert 会回滚 mint,旧直接改写不会;需对链史确认
+            「mint 成功后外层 revert」是否出现过);launch/engine.rs
+            triev2 空桥接(仅 eth-mode 本地出块路径受影响)
+          - 登记(baseline 既有 / 上游同形):download.rs
+            `senders().unwrap_or_default()` 吞恢复失败(与 baseline 逐字
+            一致,建议两树同修);repair_trie 只查 legacy 表、嵌套 V2 无
+            修复工具(工具债);chain.rs bincode 反序列化对坏 RLP panic
+            (纯 v2.3 上游逐字同形)+ exex WAL 磁盘格式变化(升级带非空
+            WAL 不可读;gravity 未用 ExEx 则无影响);死 CLI flag
+            (`--engine.slow-block-threshold`、
+            `--engine.share-sparse-trie-with-payload-builder`,route-A 下
+            恒 None)建议后续统一摘除;examples 留盘孤儿;sparse
+            benches/update.rs 未声明(与 baseline 一致)
+        - **终验实测**(2026-07-08):`cargo check --workspace
+          --all-features` = 0 err;默认 features = 0 err;全仓
+          `grep -rl '^<<<<<<<'` = 0;pipe 两 crate + gravity-storage 绿;
+          `cargo +nightly fmt --all` 通过;nextest 抽验
+          reth-evm-ethereum 29/29 + gravity-precompiles 6/6
 
 ## 九、未决策问题(f89d9d4e23 后)——⟲ 2026-07-05 已全部裁决
 

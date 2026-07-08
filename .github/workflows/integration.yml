@@ -14,11 +14,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SEED: rustethereumethereumrust
-<<<<<<< HEAD
   CARGO_INCREMENTAL: 0
-=======
   RUSTC_WRAPPER: "sccache"
->>>>>>> v2.3.0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -30,13 +27,9 @@ jobs:
   test:
     name: test / ${{ matrix.network }}
     if: github.event_name != 'schedule'
-<<<<<<< HEAD
-    runs-on: ubuntu-latest
-=======
     runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-4' || 'ubuntu-latest' }}
     permissions:
       contents: read
->>>>>>> v2.3.0
     env:
       RUST_BACKTRACE: 1
       GRETH_DISABLE_PIPE_EXECUTION: 1
@@ -45,7 +38,6 @@ jobs:
         network: ["ethereum"]
     timeout-minutes: 60
     steps:
-<<<<<<< HEAD
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -56,14 +48,10 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: true
-      - uses: actions/checkout@v5
-      - uses: rui314/setup-mold@v1
-=======
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
->>>>>>> v2.3.0
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Geth
         run: .github/scripts/install_geth.sh
@@ -77,7 +65,7 @@ jobs:
       - name: Run tests
         run: |
           cargo nextest run \
-<<<<<<< HEAD
+            --no-fail-fast \
             --locked --features "asm-keccak ${{ matrix.network }} config-from-env" \
             --workspace --exclude ef-tests \
             --exclude "reth-pipe-exec-layer-*" \
@@ -91,6 +79,8 @@ jobs:
     name: gravity pipe test
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       RUST_BACKTRACE: 1
       RUST_MIN_STACK: 16777216
@@ -108,13 +98,18 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: true
-      - uses: actions/checkout@v4
-      - uses: rui314/setup-mold@v1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@1f2425cdb59f8fffb99ee16a5968edf6f57a2b93 # v2.75.24
+        with:
+          tool: nextest
       - name: Run gravity pipe + EIP-7702 / EIP-2935 integration tests
         # `--test <name>` is required (vs. just `-E 'binary(...)'`) because
         # nextest's filterset only filters at *run* time — without `--test`,
@@ -129,24 +124,13 @@ jobs:
             --test gravity_pipe_test \
             --test gravity_eip2935_test \
             --test gravity_eip7702_test
-=======
-            --no-fail-fast \
-            --locked --features "asm-keccak" \
-            --workspace --exclude ef-tests \
-            -E "kind(test) and not binary(e2e_testsuite)"
->>>>>>> v2.3.0
 
   integration-success:
     name: integration success
     runs-on: ubuntu-latest
     if: always() && github.event_name != 'schedule'
-<<<<<<< HEAD
     needs: [test, gravity-pipe-test]
     timeout-minutes: 60
-=======
-    needs: [test]
-    timeout-minutes: 30
->>>>>>> v2.3.0
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # release/v1
@@ -154,24 +138,9 @@ jobs:
           jobs: ${{ toJSON(needs) }}
 
   era-files:
-<<<<<<< HEAD
-    name: era1 file integration tests once a day
-    # if: github.event_name == 'schedule'
-    if: false # FIXME: remove this line to enable the era1 file integration tests job after fixing the issues with the test suite.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: run era1 files integration tests
-        run: cargo nextest run --package reth-era --test it -- --ignored
-=======
     name: era/era1/ere file integration tests once a day
-    if: github.event_name == 'schedule' && github.repository == 'paradigmxyz/reth'
+    # if: github.event_name == 'schedule' && github.repository == 'paradigmxyz/reth'
+    if: false # FIXME: remove this line to enable the era1 file integration tests job after fixing the issues with the test suite.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -190,4 +159,3 @@ jobs:
           cache-on-failure: true
       - name: run era/era1/ere files integration tests
         run: cargo nextest run --no-fail-fast --release --package reth-era --test it -- --ignored
->>>>>>> v2.3.0

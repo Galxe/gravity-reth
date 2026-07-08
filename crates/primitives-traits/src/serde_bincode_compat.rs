@@ -331,5 +331,4 @@ mod block_bincode {
             repr.into()
         }
     }
-
 }
