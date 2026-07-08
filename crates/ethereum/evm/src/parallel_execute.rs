@@ -442,17 +442,13 @@ mod tests {
             balance: U256::ZERO,
             code_hash,
             code: Some(Bytecode::new_raw(code)),
+            ..Default::default()
         };
         let mut state_diff = EvmState::default();
-        state_diff.insert(
-            HISTORY_STORAGE_ADDRESS,
-            Account {
-                info,
-                storage: Default::default(),
-                status: AccountStatus::Created | AccountStatus::Touched,
-                transaction_id: 0,
-            },
-        );
+        let mut account = Account::default();
+        account.info = info;
+        account.status = AccountStatus::Created | AccountStatus::Touched;
+        state_diff.insert(HISTORY_STORAGE_ADDRESS, account);
         state_diff
     }
 
@@ -605,18 +601,18 @@ mod tests {
         // `code` field. revm's `state.commit` semantics preserve previously
         // committed code if the new diff doesn't supply one.
         let code_hash = keccak256(HISTORY_STORAGE_CODE.as_ref());
-        let bumped_info =
-            AccountInfo { nonce: 2, balance: U256::from(100u64), code_hash, code: None };
+        let bumped_info = AccountInfo {
+            nonce: 2,
+            balance: U256::from(100u64),
+            code_hash,
+            code: None,
+            ..Default::default()
+        };
         let mut second_diff = EvmState::default();
-        second_diff.insert(
-            HISTORY_STORAGE_ADDRESS,
-            Account {
-                info: bumped_info,
-                storage: Default::default(),
-                status: AccountStatus::Touched,
-                transaction_id: 0,
-            },
-        );
+        let mut bumped_account = Account::default();
+        bumped_account.info = bumped_info;
+        bumped_account.status = AccountStatus::Touched;
+        second_diff.insert(HISTORY_STORAGE_ADDRESS, bumped_account);
         executor.apply_state_change(second_diff).unwrap();
 
         let bundle = executor.take_bundle();

@@ -27,7 +27,11 @@ use reth_evm::{
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
-use reth_revm::{cancelled::CancelOnDrop, database::StateProviderDatabase, db::State};
+use reth_revm::{
+    cancelled::CancelOnDrop,
+    database::StateProviderDatabase,
+    db::{bal::EvmDatabaseError, State},
+};
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
     cache::db::StateProviderTraitObjWrapper,
@@ -192,9 +196,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         }
                     };
 
-                    let block_number = evm_env.block_env.number;
-                    let block_timestamp = evm_env.block_env.timestamp;
-                    let current_randomness = evm_env.block_env.prevrandao;
+                    let block_number = evm_env.block_env.number();
+                    let block_timestamp = evm_env.block_env.timestamp();
+                    let current_randomness = evm_env.block_env.prevrandao();
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs
@@ -604,11 +608,11 @@ pub trait Call:
         tx_env: TxEnvFor<Self::Evm>,
     ) -> Result<ResultAndState<HaltReasonFor<Self::Evm>>, Self::Error>
     where
-        DB: Database<Error = ProviderError> + fmt::Debug,
+        DB: Database<Error = EvmDatabaseError<ProviderError>> + fmt::Debug,
     {
-        let block_number = evm_env.block_env.number;
-        let block_timestamp = evm_env.block_env.timestamp;
-        let current_randomness = evm_env.block_env.prevrandao;
+        let block_number = evm_env.block_env.number();
+        let block_timestamp = evm_env.block_env.timestamp();
+        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
         self.register_custom_precompiles(
             &mut evm,
@@ -631,12 +635,12 @@ pub trait Call:
         inspector: I,
     ) -> Result<ResultAndState<HaltReasonFor<Self::Evm>>, Self::Error>
     where
-        DB: Database<Error = ProviderError> + fmt::Debug,
+        DB: Database<Error = EvmDatabaseError<ProviderError>> + fmt::Debug,
         I: InspectorFor<Self::Evm, DB>,
     {
-        let block_number = evm_env.block_env.number;
-        let block_timestamp = evm_env.block_env.timestamp;
-        let current_randomness = evm_env.block_env.prevrandao;
+        let block_number = evm_env.block_env.number();
+        let block_timestamp = evm_env.block_env.timestamp();
+        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
         self.register_custom_precompiles(
             &mut evm,
@@ -827,12 +831,12 @@ pub trait Call:
         target_tx_hash: B256,
     ) -> Result<usize, Self::Error>
     where
-        DB: Database<Error = ProviderError> + DatabaseCommit + core::fmt::Debug,
+        DB: Database<Error = EvmDatabaseError<ProviderError>> + DatabaseCommit + core::fmt::Debug,
         I: IntoIterator<Item = Recovered<&'a ProviderTx<Self::Provider>>>,
     {
-        let block_number = evm_env.block_env.number;
-        let block_timestamp = evm_env.block_env.timestamp;
-        let current_randomness = evm_env.block_env.prevrandao;
+        let block_number = evm_env.block_env.number();
+        let block_timestamp = evm_env.block_env.timestamp();
+        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
         self.register_custom_precompiles(
             &mut evm,

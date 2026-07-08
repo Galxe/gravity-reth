@@ -878,9 +878,6 @@ where
         // start timing for the new payload process
         let start = Instant::now();
 
-        // start timing for the new payload process
-        let start = Instant::now();
-
         // Ensures that the given payload does not violate any consensus rules that concern the
         // block's layout, like:
         //    - missing or invalid base fee
@@ -3497,7 +3494,7 @@ where
 
         // gravity(route-A): the baseline validator exposes no cache/sparse-trie sharing
         // APIs (`cache_for`/`sparse_trie_handle_for` are v2.3.0-only), so the payload
-        // builder handoff always starts without shared caches.
+        // builder handoff always starts without shared caches or a background trie task.
         let cache = None;
         let trie_handle = None;
 

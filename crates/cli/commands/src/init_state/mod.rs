@@ -10,8 +10,7 @@ use reth_db_common::init::init_from_state_dump;
 use reth_node_api::NodePrimitives;
 use reth_primitives_traits::{BlockHeader, SealedHeader};
 use reth_provider::{
-    BlockNumReader, DBProvider, DatabaseProviderFactory, StaticFileProviderFactory,
-    StaticFileWriter,
+    BlockNumReader, DatabaseProviderFactory, StaticFileProviderFactory, StaticFileWriter,
 };
 use std::{io::BufReader, path::PathBuf, sync::Arc};
 use tracing::info;
@@ -78,10 +77,9 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> InitStateC
             self.env.init::<N>(AccessRights::RW, runtime)?;
 
         let static_file_provider = provider_factory.static_file_provider();
+        let provider_rw = provider_factory.database_provider_rw()?;
 
         if self.without_evm {
-            let provider_rw = provider_factory.database_provider_rw()?;
-
             // ensure header, total difficulty and header hash are provided
             let header = self.header.ok_or_else(|| eyre::eyre!("Header file must be provided"))?;
             let header = without_evm::read_header_from_file::<
@@ -114,15 +112,15 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> InitStateC
                     "Data directory should be empty when calling init-state with --without-evm."
                 ));
             }
-
-            provider_rw.commit()?;
         }
 
         info!(target: "reth::cli", "Initiating state dump");
 
         let reader = BufReader::new(reth_fs_util::open(self.state)?);
 
-        let hash = init_from_state_dump(reader, &provider_factory, config.stages.etl)?;
+        let hash = init_from_state_dump(reader, &provider_rw, config.stages.etl)?;
+
+        provider_rw.commit()?;
 
         info!(target: "reth::cli", hash = ?hash, "Genesis block written");
         Ok(())

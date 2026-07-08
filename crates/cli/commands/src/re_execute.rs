@@ -85,8 +85,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
     {
         // Default to 4GB RocksDB block cache for re-execute unless explicitly set.
-        if self.env.db.rocksdb_block_cache_size.is_none() {
-            self.env.db.rocksdb_block_cache_size = Some(4 << 30);
+        if self.env.db.block_cache_size.is_none() {
+            self.env.db.block_cache_size = Some(4 << 30);
         }
 
         let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO, runtime)?;
@@ -146,11 +146,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                 let provider = provider_factory.database_provider_ro()?.disable_long_read_transaction_safety();
 
                 let db_at = {
-                    |block_number: u64| {
+                    let provider_factory = provider_factory.clone();
+                    move |block_number: u64| {
                         StateProviderDatabase(
-                            provider
-                                .history_by_block_number(block_number)
-                                .unwrap(),
+                            provider_factory.history_by_block_number(block_number).unwrap(),
                         )
                     }
                 };

@@ -3717,19 +3717,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-custom-evm"
-version = "0.0.0"
-dependencies = [
- "alloy-evm",
- "alloy-genesis",
- "alloy-primitives",
- "eyre",
- "reth-ethereum",
- "reth-tracing",
- "tokio",
-]
-
-[[package]]
 name = "example-custom-inspector"
 version = "0.0.0"
 dependencies = [
@@ -3787,22 +3774,6 @@ dependencies = [
  "reth-ethereum",
  "tower",
  "tracing",
-]
-
-[[package]]
-name = "example-custom-state-root"
-version = "0.0.0"
-dependencies = [
- "alloy-genesis",
- "alloy-network",
- "alloy-primitives",
- "alloy-rpc-types-engine",
- "eyre",
- "reth-engine-tree",
- "reth-ethereum",
- "reth-trie",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -3918,32 +3889,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
-]
-
-[[package]]
-name = "example-precompile-cache"
-version = "0.0.0"
-dependencies = [
- "alloy-evm",
- "alloy-genesis",
- "alloy-primitives",
- "eyre",
- "parking_lot",
- "reth-ethereum",
- "reth-tracing",
- "schnellru",
- "tokio",
-]
-
-[[package]]
-name = "example-rpc-db"
-version = "0.0.0"
-dependencies = [
- "eyre",
- "futures",
- "jsonrpsee",
- "reth-ethereum",
- "tokio",
 ]
 
 [[package]]
@@ -7865,7 +7810,7 @@ dependencies = [
  "reth-node-metrics",
  "reth-payload-builder",
  "reth-payload-primitives",
- "reth-primitives",
+ "reth-primitives-traits",
  "reth-provider",
  "reth-ress-protocol",
  "reth-ress-provider",
@@ -7910,54 +7855,6 @@ dependencies = [
  "reth-tasks",
  "reth-trie-parallel",
  "serde",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reth-bb"
-version = "2.3.0"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-evm",
- "alloy-hardforks 0.4.7",
- "alloy-primitives",
- "alloy-rlp",
- "alloy-rpc-types",
- "async-trait",
- "clap",
- "crossbeam-channel",
- "derive_more",
- "eyre",
- "jsonrpsee",
- "metrics",
- "reth-chain-state",
- "reth-chainspec",
- "reth-cli-util",
- "reth-consensus",
- "reth-engine-primitives",
- "reth-engine-tree",
- "reth-errors",
- "reth-ethereum-cli",
- "reth-ethereum-consensus",
- "reth-ethereum-forks",
- "reth-ethereum-primitives",
- "reth-evm",
- "reth-evm-ethereum",
- "reth-node-api",
- "reth-node-builder",
- "reth-node-core",
- "reth-node-ethereum",
- "reth-payload-primitives",
- "reth-primitives-traits",
- "reth-provider",
- "reth-revm",
- "reth-rpc-api",
- "reth-rpc-engine-api",
- "reth-storage-errors",
- "revm",
- "revm-primitives",
  "tokio",
  "tracing",
 ]
@@ -8258,7 +8155,6 @@ dependencies = [
  "alloy-primitives",
  "arbitrary",
  "assert_matches",
- "codspeed-criterion-compat",
  "derive_more",
  "eyre",
  "fail",
@@ -11000,6 +10896,7 @@ dependencies = [
  "proptest",
  "proptest-arbitrary-interop",
  "rand 0.9.4",
+ "reth-ethereum-primitives",
  "reth-execution-errors",
  "reth-metrics",
  "reth-primitives-traits",
@@ -11124,7 +11021,7 @@ dependencies = [
  "arbitrary",
  "assert_matches",
  "auto_impl",
- "either",
+ "codspeed-criterion-compat",
  "itertools 0.14.0",
  "metrics",
  "pretty_assertions",
@@ -11138,13 +11035,13 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
+ "reth-testing-utils",
  "reth-tracing",
  "reth-trie",
  "reth-trie-common",
  "reth-trie-db",
  "serde",
  "serde_json",
- "slotmap",
  "smallvec",
  "tracing",
 ]
@@ -12300,15 +12197,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "slotmap"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
-dependencies = [
- "version_check",
-]
 
 [[package]]
 name = "small_btree"

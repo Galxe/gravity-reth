@@ -1,12 +1,12 @@
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{BlockNumber, B256};
+use alloy_primitives::{BlockNumber, B256, U256};
 use alloy_rlp::Decodable;
 use reth_codecs::Compact;
 use reth_node_builder::NodePrimitives;
 use reth_primitives_traits::{SealedBlock, SealedHeader, SealedHeaderFor};
 use reth_provider::{
     providers::StaticFileProvider, BlockWriter, ProviderResult, StageCheckpointWriter,
-    StaticFileProviderFactory, StaticFileWriter,
+    StaticFileProviderFactory, StaticFileWriter, StorageLocation,
 };
 use reth_stages::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
@@ -84,17 +84,29 @@ where
         + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>,
 {
     provider_rw.insert_block(
-        &SealedBlock::<<Provider::Primitives as NodePrimitives>::Block>::from_sealed_parts(
+        SealedBlock::<<Provider::Primitives as NodePrimitives>::Block>::from_sealed_parts(
             header.clone(),
             Default::default(),
         )
         .try_recover()
         .expect("no senders or txes"),
+        StorageLocation::Database,
     )?;
 
     let sf_provider = provider_rw.static_file_provider();
 
+    // NOTE(gravity): `insert_block` only writes to the database here, so the static file
+    // segments are advanced explicitly. The total difficulty column is filled with zero,
+    // matching the dummy chain headers (the CLI no longer takes a total difficulty).
+    sf_provider.latest_writer(StaticFileSegment::Headers)?.append_header(
+        header,
+        U256::ZERO,
+        &header.hash(),
+    )?;
+
     sf_provider.latest_writer(StaticFileSegment::Receipts)?.increment_block(header.number())?;
+
+    sf_provider.latest_writer(StaticFileSegment::Transactions)?.increment_block(header.number())?;
 
     Ok(())
 }
@@ -152,7 +164,7 @@ where
             for block_num in 1..=target_height {
                 // TODO: should we fill with real parent_hash?
                 let header = header_factory(block_num);
-                writer.append_header(&header, &B256::ZERO)?;
+                writer.append_header(&header, U256::ZERO, &B256::ZERO)?;
             }
             Ok(())
         });

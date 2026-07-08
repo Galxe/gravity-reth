@@ -68,6 +68,10 @@ pub use engine::{DefaultEngineValues, EngineArgs};
 mod gravity;
 pub use gravity::GravityArgs;
 
+/// `RessArgs` for configuring ress subprotocol.
+mod ress_args;
+pub use ress_args::RessArgs;
+
 /// `EraArgs` for configuring ERA files import.
 mod era;
 pub use era::{DefaultEraHost, EraArgs, EraSourceArgs};

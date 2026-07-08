@@ -24,7 +24,7 @@ use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, map::B256Set, B256};
 use metrics::{Counter, Gauge, Histogram};
-use reth_evm::{execute::ExecutableTxFor, ConfigureEvm, Evm, EvmFor, SpecFor};
+use reth_evm::{execute::ExecutableTxFor, ConfigureEvm, Evm, EvmFor, RecoveredTx, SpecFor};
 use reth_metrics::Metrics;
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{BlockReader, StateProviderFactory, StateReader};
@@ -278,7 +278,7 @@ where
             metrics,
             terminate_execution,
             precompile_cache_disabled,
-            mut precompile_cache_map,
+            precompile_cache_map,
         } = self;
 
         let state_provider = match provider.build() {
@@ -313,7 +313,7 @@ where
 
         if !precompile_cache_disabled {
             // Only cache pure precompiles to avoid issues with stateful precompiles
-            evm.precompiles_mut().map_pure_precompiles(|address, precompile| {
+            evm.precompiles_mut().map_cacheable_precompiles(|address, precompile| {
                 CachedPrecompile::wrap(
                     precompile,
                     precompile_cache_map.cache_for_address(*address),
@@ -352,7 +352,8 @@ where
 
             // create the tx env
             let start = Instant::now();
-            let res = match evm.transact(&tx) {
+            let (tx_env, tx) = tx.into_parts();
+            let res = match evm.transact(tx_env) {
                 Ok(res) => res,
                 Err(err) => {
                     trace!(

@@ -12,8 +12,8 @@ use reth_etl::Collector;
 use reth_primitives_traits::StorageEntry;
 use reth_provider::{DBProvider, HashingWriter, StatsReader, StorageReader};
 use reth_stages_api::{
-    BlockRangeOutput, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError,
-    StageId, StorageHashingCheckpoint, UnwindInput, UnwindOutput,
+    EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId,
+    StorageHashingCheckpoint, UnwindInput, UnwindOutput,
 };
 use reth_storage_errors::provider::ProviderResult;
 use std::{
@@ -168,7 +168,7 @@ where
         } else {
             // Stream changesets entry-by-entry, bounded by both block count
             // (commit_threshold) and entry count (commit_entries), whichever comes first.
-            let BlockRangeOutput { block_range, is_final_range } =
+            let (block_range, is_final_range) =
                 input.next_block_range_with_threshold(self.commit_threshold);
             let (from_block, to_block) = block_range.into_inner();
 

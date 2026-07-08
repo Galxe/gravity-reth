@@ -1,5 +1,14 @@
 # Merge v2.3.0 — 冲突分析总索引
 
+> **当前状态(2026-07-08,Task #12 终验通过)**:12 组开放问题全部
+> 决策+落地;全仓冲突标记归零(含 CI/workflow/配置文件);
+> `cargo check --workspace --all-features` 与默认 features 均 **0 error**;
+> `cargo +nightly fmt --all` 通过;pipe 金丝雀 crate 全绿。
+> 剩余:全量 `cargo nextest run --workspace` 回归(留 CI)、部分 crate
+> 的 `--tests`/`--benches` 目标 bit-rot 回填、审查台账跟进项(mint
+> journal 语义对链史确认、triev2 空桥接、download.rs senders 吞错等,
+> 详见 executed-block 文档 §终验 Task #12 §E)。
+
 ## 摘要
 
 - **155 个冲突文件**（124 UU + 26 AA + 5 AU），从 `merge-v2.3.0` 分支（HEAD `e6b7e5ba32`）`git status --porcelain` 直接采样，按 crate 目录聚合后按 12 个分组文档展开分析。
@@ -180,3 +189,4 @@ grep -c '^   - \[x\] 冲突解决' docs/merge-v2.3.0/*.md   # 已落地数
    - **末梢**：`tests-examples-config-infra`。
 3. 每读一个子文档，回到本 README 的 §Gravity 保留 commits 交叉引用表对照 commit hash，确认正在保留的语义来源正确。
 4. 收尾阶段：执行 `git status --porcelain | awk '/^(UU|AA|DU|AU|UA|DD)/'` 应为空；再 `cargo update -w && cargo check --workspace` 触发 `Cargo.lock` 重生成与编译验证；最后跑 `cargo nextest run --workspace --no-fail-fast` 留作 PR 前回归。
+   —— ⟲ 2026-07-08:前两步已完成(unmerged 0、workspace check 双 feature 集 0 error、Cargo.lock 已随多轮 check 自然重生成);全量 nextest 留 CI。

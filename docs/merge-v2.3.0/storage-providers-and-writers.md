@@ -76,11 +76,14 @@
 **孤儿文件**(在磁盘、不在 mod 树):`provider/src/bal.rs`。
 
 **遗留断点(本组范围)**:
-1. **`crates/storage/rpc-provider`(workspace member,不在本组 13 文件清单)被自动合并到上游侧**
-   (与 baseline diff 4 files, +205/-126,实测):`src/lib.rs:1306` 引用
-   `reth_trie::ExecutionWitnessMode` — trie 还原 baseline 后该类型不存在 → 编译断点。
-   修法:该 crate 同样还原 baseline(gravity 对其无自有改动时最省),或就地去 mode 参数对齐 gravity trait。
-2. **`SubkeyContainedValue` 链接前置**(与 api/db 组共享,详见各自 ⟲ 节):定义待 primitives-traits 组恢复。
+1. ~~**`crates/storage/rpc-provider` 被自动合并到上游侧**~~ —— ✅ 已关闭
+   (2026-07-08 销记;实际由 e9965cd3bf ExecutedBlock 链路落地时随
+   「rpc-provider 整 crate 回 baseline」(§9.4)修掉):全仓
+   `rg 'ExecutionWitnessMode' crates/storage/rpc-provider` 零命中(实测),
+   `cargo check -p reth-storage-rpc-provider` 随 workspace 全绿
+   (2026-07-08 Task #12 终验)。
+2. ~~**`SubkeyContainedValue` 链接前置**~~ —— ✅ 已关闭(cargo 组
+   6a54e53528,2026-07-06;详见 api/db 组 ⟲ 节)。
 
 **跨组下游提醒**(转引 TODO「下游 crate 对齐」):storage 层现为纯 gravity API
 (`UnifiedStorageWriter`/`StorageLocation`/`commit_view`/`TrieWriterV2`/`NestedStateRoot`/

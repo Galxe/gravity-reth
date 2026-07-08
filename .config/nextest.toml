@@ -16,7 +16,6 @@ slow-timeout = { period = "2m", terminate-after = 10 }
 filter = "binary(e2e_testsuite)"
 slow-timeout = { period = "2m", terminate-after = 3 }
 
-<<<<<<< HEAD
 # Gravity pipe-exec-layer integration tests: each test boots a full reth node
 # and pushes 100s–1000s of blocks through MockConsensus + PipeExecLayerApi.
 # Mirror the effective contract of the pre-nextest CI command (plain
@@ -30,7 +29,7 @@ slow-timeout = { period = "2m", terminate-after = 3 }
 filter = "binary(gravity_pipe_test) + binary(gravity_eip2935_test) + binary(gravity_eip7702_test)"
 slow-timeout = { period = "5m", terminate-after = 6 }
 retries = 0
-=======
+
 [[profile.default.overrides]]
 filter = "package(reth-era) and binary(it)"
 slow-timeout = { period = "2m", terminate-after = 10 }
@@ -39,4 +38,3 @@ slow-timeout = { period = "2m", terminate-after = 10 }
 [[profile.default.overrides]]
 filter = "package(reth-node-ethereum) and binary(e2e)"
 slow-timeout = { period = "1m", terminate-after = 5 }
->>>>>>> v2.3.0

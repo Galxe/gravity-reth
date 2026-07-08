@@ -425,9 +425,15 @@ Baseline 形态：
    同模式:「上游已删且无引用」前提在 bin/reth 处不成立,属当时核查遗漏)。
    连带:根 Cargo.toml 缺 `reth-primitives` workspace dep(实测零定义,即
    当前 cargo metadata 报错点)同属 cargo 组的根依赖修复批次。
-   - [ ] 冲突解决:待 cargo 组落地根 Cargo.toml(ress 2 members + 2 deps +
-     reth-primitives 等 ~20 缺失 deps);随后 bin/reth/Cargo.toml 7 块按本文
-     建议解块。
+   - [x] 冲突解决:已落地(2026-07-08 销记;实质早已满足)——前置由
+     cargo 组 6a54e53528 兑现:根 Cargo.toml `reth-primitives`(:453)、
+     `reth-ress-protocol`/`reth-ress-provider`(:498-499)、ress 2 members
+     (:133-134)均实测在位(实际缺失面 7 项,非预估 ~20);
+     bin/reth/Cargo.toml 7 块已随 OQ4 落地(2026-07-06)归零。本框所述
+     「随后解 7 块」半句早被 OQ4 兑现,系账面漏销。连带:ress-provider
+     的 `TaskSpawner` → `Runtime` API 迁移与 node/core `mod ress_args`
+     挂载丢失补回已于 2026-07-08 Task #12 完成(见 executed-block 文档),
+     `cargo check -p reth-ress-provider` 绿。
 
 ## ⟲ 落地实录(2026-07-06)
 

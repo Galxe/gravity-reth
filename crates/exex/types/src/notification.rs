@@ -74,7 +74,7 @@ impl<P: NodePrimitives> From<CanonStateNotification<P>> for ExExNotification<P> 
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub(super) mod serde_bincode_compat {
     use reth_execution_types::serde_bincode_compat::Chain;
-    use reth_primitives_traits::{serde_bincode_compat::SerdeBincodeCompat, NodePrimitives};
+    use reth_primitives_traits::NodePrimitives;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
     use std::sync::Arc;
@@ -104,8 +104,6 @@ pub(super) mod serde_bincode_compat {
     pub enum ExExNotification<'a, N>
     where
         N: NodePrimitives,
-        N::BlockHeader: SerdeBincodeCompat,
-        N::BlockBody: SerdeBincodeCompat,
     {
         /// Chain got committed without a reorg, and only the new chain is returned.
         ChainCommitted {
@@ -129,8 +127,6 @@ pub(super) mod serde_bincode_compat {
     impl<'a, N> From<&'a super::ExExNotification<N>> for ExExNotification<'a, N>
     where
         N: NodePrimitives,
-        N::BlockHeader: SerdeBincodeCompat,
-        N::BlockBody: SerdeBincodeCompat,
     {
         fn from(value: &'a super::ExExNotification<N>) -> Self {
             match value {
@@ -153,8 +149,6 @@ pub(super) mod serde_bincode_compat {
     impl<'a, N> From<ExExNotification<'a, N>> for super::ExExNotification<N>
     where
         N: NodePrimitives,
-        N::BlockHeader: SerdeBincodeCompat,
-        N::BlockBody: SerdeBincodeCompat,
     {
         fn from(value: ExExNotification<'a, N>) -> Self {
             match value {
@@ -174,8 +168,6 @@ pub(super) mod serde_bincode_compat {
     impl<N> SerializeAs<super::ExExNotification<N>> for ExExNotification<'_, N>
     where
         N: NodePrimitives,
-        N::BlockHeader: SerdeBincodeCompat,
-        N::BlockBody: SerdeBincodeCompat,
     {
         fn serialize_as<S>(
             source: &super::ExExNotification<N>,
@@ -191,8 +183,6 @@ pub(super) mod serde_bincode_compat {
     impl<'de, N> DeserializeAs<'de, super::ExExNotification<N>> for ExExNotification<'de, N>
     where
         N: NodePrimitives,
-        N::BlockHeader: SerdeBincodeCompat,
-        N::BlockBody: SerdeBincodeCompat,
     {
         fn deserialize_as<D>(deserializer: D) -> Result<super::ExExNotification<N>, D::Error>
         where

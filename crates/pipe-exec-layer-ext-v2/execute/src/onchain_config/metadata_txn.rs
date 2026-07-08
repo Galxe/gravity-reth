@@ -196,6 +196,7 @@ pub(crate) fn system_txns_into_executed_ordered_block_result(
                 receipts,
                 requests: Default::default(),
                 gas_used: total_gas_used,
+                blob_gas_used: 0,
             },
         },
         txs_info: vec![],

@@ -635,3 +635,61 @@ git add Cargo.lock
 - [x] 8. **⟲ 新增:`e2e-test-utils` 上游 RocksDB E2E 测试摘除** — `tests/rocksdb/main.rs`(v2.3.0 独有、零冲突入库、清单漏项)全文引用死符号 `RocksDBProviderFactory`/`.rocksdb_provider()`;`Cargo.toml`(零冲突侧翻)挂 `[[test]] name = "rocksdb"`(:75-77)。
    → **决策**(2026-07-05,依据 node-builder 文档开放问题 1「RocksDB 不并存」裁决 + 原则②):摘除 `Cargo.toml` 的 `[[test]] rocksdb` 段,`tests/rocksdb/main.rs` 留盘作磁盘孤儿(仓库惯例),v2.4+ 上游 RocksDB 路径再议时一并回收。
    - [x] 冲突解决:已落地(2026-07-06):`Cargo.toml` 的 `[[test]] name = "rocksdb"` 段已摘除;`tests/rocksdb/main.rs` 留盘作磁盘孤儿(按裁决)。
+
+## ⟲ 落地实录(2026-07-08)— 阶段 3/4 登记盲区收口 + Cargo.lock 勘误
+
+> 本组 8 条开放问题(上表)只覆盖点状问题;playbook 阶段 3(workflows)
+> 与阶段 4(四个配置文件)此前无 checklist 追踪(「有方案、未执行」的
+> 登记盲区)。本轮全部落地,全仓 `grep -rl '^<<<<<<<'`(除本 docs 目录)
+> **归零**。
+
+- **阶段 4 配置文件 ×4**(机械并集,按本文档逐文件方案执行):
+  - `.config/nextest.toml`(1 块):保 gravity 三个 `gravity_*_test`
+    override(5m×6 / retries=0),叠加上游 `reth-era`、`reth-node-ethereum`
+    override。**nextest 可解析实测**(曾阻塞 `cargo nextest run`)。
+  - `deny.toml`(3 块):advisories ignore 并集去重(RUSTSEC-2026-0173
+    上游重复条目收一)、licenses exceptions 保 gravity
+    `[option-ext, webpki-root-certs]` 形态、`allow-git` 并集
+    (gravity aptos 两条 + 上游 slotmap/discv5)。
+  - `typos.toml`(2 块):词表并集(`consts`/`Consts` 重叠去重,收上游
+    `BA`/`writeable`/`arena.txt`)。
+  - `.config/zepter.yaml`(2 块):feature 列表取上游扩展版,保 gravity
+    `--ignore-missing-propagate=reth-evm-ethereum/test-utils:grevm/test-utils`。
+- **阶段 3 workflows ×9**(~41 块,keep-gravity 门控 + 上游供应链加固
+  叠加;子 agent 执行,9 文件 YAML 解析全过、无重复 job key):
+  - `lint.yml`(15):保全部 `if: false # FIXME` 屏蔽、nightly pin、
+    `features` job(`make check-features` target 已失,内联为
+    `cargo hack check -p reth-primitives-traits -p reth-primitives
+    --feature-powerset`);叠 SHA pin/permissions/sccache/分片;消重复
+    feature-propagation/deny job。
+  - `unit.yml`(9):保分片、`GRETH_DISABLE_PIPE_EXECUTION=1`、
+    free-disk-space、op-reth exclude 列表(裁决保留;这三个包现不在
+    workspace,若 nextest 对未命中 exclude 报错属首跑暴露项);
+    叠 SHA pin/`--no-fail-fast`。
+  - `integration.yml`(6):env 并集;保 `gravity-pipe-test` job(补
+    SHA pin + sccache step)、era-files 保 `if: false`。
+  - `e2e.yml`(5):保 free-disk-space + gravity exclude(修复 HEAD 侧
+    残缺 checkout);采上游新 `rocksdb` job(目标在盘)。
+  - `hive.yml`(3):规则 3 整文件 keep-gravity,丢上游 amsterdam/osaka
+    matrix。
+  - `compact.yml`(3):`workflow_dispatch` 唯一触发;删 op-reth matrix
+    条目;采上游加固。
+  - `book.yml`(3):`workflow_dispatch` 唯一触发;body 采上游
+    (bun 1.2.23 / Vocs v2 `dist/public`)。
+  - `bench.yml`(3,共同区被上游 1735 行重写污染):keep-gravity 以合并前
+    41 行版整文件重写(codspeed、workflow_dispatch-only)+ permissions/
+    SHA pin;上游 schelk/ClickHouse/Slack 重写丢弃(`.github/scripts/
+    bench-*` 留盘不引用)。
+  - `lint-actions.yml`(1):取 v2.3.0 SHA-pinned checkout,保
+    `workflow_dispatch` 门控。
+  - 未 pin 项:`CodSpeedHQ/action@v4`、`jlumbroso/free-disk-space@main`
+    无上游 SHA 参照,维持原 ref。
+- **勘误**:§概览的「`Cargo.lock` 767(DEFER)」已过期——cargo 组
+  6a54e53528 整取一侧后 cargo 自愈,本轮终验时实测 **0 冲突块**,
+  且随 workspace 全绿多轮 `cargo check` 已自然重生成;§阶段 9 的
+  「最终重生成」步骤视同完成(全量 nextest 留 CI)。
+- **连带登记**(存储组 db benches):`crates/storage/db/benches` 整目录
+  已跟 upstream 删除(2026-07-08 用户拍板)——baseline 版 benches 本身
+  bit-rot(`tx.inner` 于 baseline rocksdb `Tx` 亦不存在,bench CI 恒
+  `if: false`),连同 3 个 `[[bench]]`、criterion dev-dep、空 `bench = []`
+  feature 一并移除;详见 executed-block 文档 Task #12 §B。

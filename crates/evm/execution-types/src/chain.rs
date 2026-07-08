@@ -7,8 +7,8 @@ use alloy_eips::{eip1898::ForkBlock, eip2718::Encodable2718, BlockNumHash};
 use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash};
 use core::{fmt, ops::RangeInclusive};
 use reth_primitives_traits::{
-    transaction::signed::SignedTransaction, Block, BlockBody, NodePrimitives, RecoveredBlock,
-    SealedHeader,
+    transaction::signed::SignedTransaction, Block, BlockBody, IndexedTx, NodePrimitives,
+    RecoveredBlock, SealedHeader,
 };
 use reth_trie_common::updates::TrieUpdates;
 use revm::database::BundleState;
@@ -40,6 +40,13 @@ pub struct Chain<N: NodePrimitives = reth_ethereum_primitives::EthPrimitives> {
     /// single-block chains that extend the canonical chain.
     trie_updates: Option<TrieUpdates>,
 }
+
+type ChainTxReceiptMeta<'a, N> = (
+    &'a RecoveredBlock<<N as NodePrimitives>::Block>,
+    IndexedTx<'a, <N as NodePrimitives>::Block>,
+    &'a <N as NodePrimitives>::Receipt,
+    &'a [<N as NodePrimitives>::Receipt],
+);
 
 impl<N: NodePrimitives> Default for Chain<N> {
     fn default() -> Self {
@@ -183,6 +190,24 @@ impl<N: NodePrimitives> Chain<N> {
         &self,
     ) -> impl Iterator<Item = (&RecoveredBlock<N::Block>, &Vec<N::Receipt>)> + '_ {
         self.blocks_iter().zip(self.block_receipts_iter())
+    }
+
+    /// Finds a transaction by hash and returns it along with its corresponding receipt data.
+    ///
+    /// Returns `None` if the transaction is not found in this chain.
+    pub fn find_transaction_and_receipt_by_hash(
+        &self,
+        tx_hash: TxHash,
+    ) -> Option<ChainTxReceiptMeta<'_, N>> {
+        for (block, receipts) in self.blocks_and_receipts() {
+            let Some(indexed_tx) = block.find_indexed(tx_hash) else {
+                continue;
+            };
+            let receipt = receipts.get(indexed_tx.index())?;
+            return Some((block, indexed_tx, receipt, receipts.as_slice()));
+        }
+
+        None
     }
 
     /// Get the block at which this chain forked.
@@ -417,15 +442,14 @@ pub struct BlockReceipts<T = reth_ethereum_primitives::Receipt> {
 #[cfg(feature = "serde-bincode-compat")]
 pub(super) mod serde_bincode_compat {
     use crate::serde_bincode_compat;
-    use alloc::{borrow::Cow, collections::BTreeMap};
-    use alloy_primitives::BlockNumber;
+    use alloc::{collections::BTreeMap, vec::Vec};
+    use alloy_primitives::{Address, BlockNumber, Bytes};
+    use alloy_rlp::Decodable;
+    use core::marker::PhantomData;
     use reth_ethereum_primitives::EthPrimitives;
-    use reth_primitives_traits::{
-        serde_bincode_compat::{RecoveredBlock, SerdeBincodeCompat},
-        Block, NodePrimitives,
-    };
+    use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
     use reth_trie_common::serde_bincode_compat::updates::TrieUpdates;
-    use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_with::{DeserializeAs, SerializeAs};
 
     /// Bincode-compatible [`super::Chain`] serde implementation.
@@ -444,66 +468,42 @@ pub(super) mod serde_bincode_compat {
     /// }
     /// ```
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(bound = "")]
     pub struct Chain<'a, N = EthPrimitives>
     where
-        N: NodePrimitives<
-            Block: Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat> + 'static,
-        >,
+        N: NodePrimitives,
     {
-        blocks: RecoveredBlocks<'a, N::Block>,
+        #[serde(skip)]
+        _phantom: PhantomData<N>,
+        blocks: BTreeMap<BlockNumber, RecoveredBlockRepr>,
         execution_outcome: serde_bincode_compat::ExecutionOutcome<'a>,
         trie_updates: Option<TrieUpdates<'a>>,
     }
 
-    #[derive(Debug)]
-    struct RecoveredBlocks<
-        'a,
-        B: reth_primitives_traits::Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat>
-            + 'static,
-    >(Cow<'a, BTreeMap<BlockNumber, reth_primitives_traits::RecoveredBlock<B>>>);
-
-    impl<B> Serialize for RecoveredBlocks<'_, B>
-    where
-        B: Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat> + 'static,
-    {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let mut state = serializer.serialize_map(Some(self.0.len()))?;
-
-            for (block_number, block) in self.0.iter() {
-                state.serialize_entry(block_number, &RecoveredBlock::<'_, B>::from(block))?;
-            }
-
-            state.end()
-        }
-    }
-
-    impl<'de, B> Deserialize<'de> for RecoveredBlocks<'_, B>
-    where
-        B: Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat> + 'static,
-    {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            Ok(Self(Cow::Owned(
-                BTreeMap::<BlockNumber, RecoveredBlock<'_, B>>::deserialize(deserializer)
-                    .map(|blocks| blocks.into_iter().map(|(n, b)| (n, b.into())).collect())?,
-            )))
-        }
+    /// Blocks are stored as their RLP encoding plus recovered senders, so no
+    /// `SerdeBincodeCompat` bounds are required on the header/body types.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct RecoveredBlockRepr {
+        rlp: Bytes,
+        senders: Vec<Address>,
     }
 
     impl<'a, N> From<&'a super::Chain<N>> for Chain<'a, N>
     where
-        N: NodePrimitives<
-            Block: Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat> + 'static,
-        >,
+        N: NodePrimitives,
     {
         fn from(value: &'a super::Chain<N>) -> Self {
             Self {
-                blocks: RecoveredBlocks(Cow::Borrowed(&value.blocks)),
+                _phantom: PhantomData,
+                blocks: value
+                    .blocks
+                    .iter()
+                    .map(|(num, recovered)| {
+                        let senders = recovered.senders().to_vec();
+                        let rlp = Bytes::from(alloy_rlp::encode(recovered.sealed_block()));
+                        (*num, RecoveredBlockRepr { rlp, senders })
+                    })
+                    .collect(),
                 execution_outcome: (&value.execution_outcome).into(),
                 trie_updates: value.trie_updates.as_ref().map(Into::into),
             }
@@ -512,13 +512,21 @@ pub(super) mod serde_bincode_compat {
 
     impl<'a, N> From<Chain<'a, N>> for super::Chain<N>
     where
-        N: NodePrimitives<
-            Block: Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat> + 'static,
-        >,
+        N: NodePrimitives,
     {
         fn from(value: Chain<'a, N>) -> Self {
+            let blocks = value
+                .blocks
+                .into_iter()
+                .map(|(num, repr)| {
+                    let block = N::Block::decode(&mut repr.rlp.as_ref())
+                        .expect("invalid RLP for block in serde_bincode_compat");
+                    (num, RecoveredBlock::new_unhashed(block, repr.senders))
+                })
+                .collect();
+
             Self {
-                blocks: value.blocks.0.into_owned(),
+                blocks,
                 execution_outcome: value.execution_outcome.into(),
                 trie_updates: value.trie_updates.map(Into::into),
             }
@@ -527,9 +535,7 @@ pub(super) mod serde_bincode_compat {
 
     impl<N> SerializeAs<super::Chain<N>> for Chain<'_, N>
     where
-        N: NodePrimitives<
-            Block: Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat> + 'static,
-        >,
+        N: NodePrimitives,
     {
         fn serialize_as<S>(source: &super::Chain<N>, serializer: S) -> Result<S::Ok, S::Error>
         where
@@ -541,9 +547,7 @@ pub(super) mod serde_bincode_compat {
 
     impl<'de, N> DeserializeAs<'de, super::Chain<N>> for Chain<'de, N>
     where
-        N: NodePrimitives<
-            Block: Block<Header: SerdeBincodeCompat, Body: SerdeBincodeCompat> + 'static,
-        >,
+        N: NodePrimitives,
     {
         fn deserialize_as<D>(deserializer: D) -> Result<super::Chain<N>, D::Error>
         where

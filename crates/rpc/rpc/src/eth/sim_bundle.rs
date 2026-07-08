@@ -318,9 +318,9 @@ where
                 let mut refundable_value = U256::ZERO;
                 let mut flat_logs: Vec<Vec<Log>> = Vec::new();
 
-                let block_number = evm_env.block_env.number;
-                let block_timestamp = evm_env.block_env.timestamp;
-                let current_randomness = evm_env.block_env.prevrandao;
+                let block_number = evm_env.block_env.number();
+                let block_timestamp = evm_env.block_env.timestamp();
+                let current_randomness = evm_env.block_env.prevrandao();
                 let mut evm = eth_api.evm_config().evm_with_env(db, evm_env);
                 eth_api.register_custom_precompiles(
                     &mut evm,
