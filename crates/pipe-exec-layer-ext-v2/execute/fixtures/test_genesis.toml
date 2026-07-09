@@ -1,0 +1,16 @@
+[dependencies.genesis_contracts]
+repo = "https://github.com/Galxe/gravity_chain_core_contracts.git"
+ref = "gravity-testnet-v1.0.0"
+
+[output]
+path = "../gravity_hardfork.json"
+
+[genesis]
+chain_id = 7771625
+timestamp = 1687223762
+
+[genesis.hardforks]
+alphaTime = 5
+betaBlock = 10
+gammaBlock = 20
+deltaBlock = 25

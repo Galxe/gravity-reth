@@ -1,0 +1,92 @@
+{
+  "_comment": "Single node genesis config for gravity_chain_core_contracts Genesis.initialize(GenesisInitParams)",
+  "validatorConfig": {
+    "_comment": "ValidatorConfig.initialize params",
+    "minimumBond": "1000000000000000000",
+    "maximumBond": "1000000000000000000000000",
+    "unbondingDelayMicros": 604800000000,
+    "allowValidatorSetChange": true,
+    "votingPowerIncreaseLimitPct": 20,
+    "maxValidatorSetSize": "100",
+    "autoEvictEnabled": false,
+    "autoEvictThreshold": "0"
+  },
+  "stakingConfig": {
+    "_comment": "StakingConfig.initialize params - for governance staking",
+    "minimumStake": "1000000000000000000",
+    "lockupDurationMicros": 86400000000,
+    "unbondingDelayMicros": 86400000000,
+    "minimumProposalStake": "10000000000000000000"
+  },
+  "governanceConfig": {
+    "_comment": "GovernanceConfig.initialize params",
+    "minVotingThreshold": "1000000000000000000",
+    "requiredProposerStake": "10000000000000000000",
+    "votingDurationMicros": 604800000000
+  },
+  "epochIntervalMicros": 7200000000,
+  "majorVersion": 1,
+  "consensusConfig": "0x0301010a00000000000000280000000000000001010000000a000000000000000100010200000000000000000020000000000000",
+  "executionConfig": "0x00",
+  "randomnessConfig": {
+    "_comment": "RandomnessConfig - variant: 0=Off, 1=V2",
+    "variant": 0,
+    "configV2": {
+      "secrecyThreshold": 0,
+      "reconstructionThreshold": 0,
+      "fastPathSecrecyThreshold": 0
+    }
+  },
+  "oracleConfig": {
+    "_comment": "NativeOracle.initialize - sourceType 1 = JWK, 0 = Blockchain",
+    "sourceTypes": [
+      1
+    ],
+    "callbacks": [
+      "0x00000000000000000000000000000001625F4001"
+    ],
+    "bridgeConfig": {
+      "deploy": true,
+      "trustedBridge": "0x3fc870008B1cc26f3614F14a726F8077227CA2c3"
+    },
+    "tasks": [
+      {
+        "sourceType": 0,
+        "sourceId": 11155111,
+        "taskName": "events",
+        "config": "gravity://0/11155111/events?contract=0x0f761B1B3c1aC9232C9015A7276692560aD6a05F&eventSignature=0x5646e682c7d994bf11f5a2c8addb60d03c83cda3b65025a826346589df43406e&fromBlock=10201260"
+      }
+    ]
+  },
+  "jwkConfig": {
+    "_comment": "JWKManager.initialize - issuers and jwks",
+    "issuers": [
+      "0x68747470733a2f2f6163636f756e74732e676f6f676c652e636f6d"
+    ],
+    "jwks": [
+      [
+        {
+          "kid": "f5f4c0ae6e6090a65ab0a694d6ba6f19d5d0b4e6",
+          "kty": "RSA",
+          "alg": "RS256",
+          "e": "AQAB",
+          "n": "2K7epoJWl_aBoYGpXmDBBiEnwQ0QdVRU1gsbGXNrEbrZEQdY5KjH5P5gZMq3d3KvT1j5KsD2tF_9jFMDLqV4VWDNJRLgSNJxhJuO_oLO2BXUSL9a7fLHxnZCUfJvT2K-O8AXjT3_ZM8UuL8d4jBn_fZLzdEI4MHrZLVSaHDvvKqL_mExQo6cFD-qyLZ-T6aHv2x8R7L_3X7E1nGMjKVVZMveQ_HMeXvnGxKf5yfEP0hIQlC_kFm4L_1kV1S0UPmMptZL2qI4VnXqmqI6TZJyE-3VXHgNn1Z1O_9QZlPC0fF0spLHf2S3nNqI0v3k2E7q3DkqxVf5xvn7q_X-gPqzVE9Jw"
+        }
+      ]
+    ]
+  },
+  "validators": [
+    {
+      "operator": "0x6e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f",
+      "owner": "0x6e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f",
+      "stakeAmount": "20000000000000000000000",
+      "moniker": "validator-1",
+      "consensusPubkey": "0x851d41932d866f5fabed6673898e15473e6a0adcf5033d2c93816c6b115c85ad3451e0bac61d570d5ed9f23e1e7f77c4",
+      "consensusPop": "0x",
+      "networkAddresses": "/ip4/127.0.0.1/tcp/2024/noise-ik/2d86b40a1d692c0749a0a0426e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f/handshake/0",
+      "fullnodeAddresses": "/ip4/127.0.0.1/tcp/2024/noise-ik/2d86b40a1d692c0749a0a0426e2021ee24e2430da0f5bb9c2ae6c586bf3e0a0f/handshake/0",
+      "votingPower": "20000000000000000000000"
+    }
+  ],
+  "chainId": 7771625
+}

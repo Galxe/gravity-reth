@@ -11,7 +11,7 @@ Genesis (v1.0.0 old contracts) → run N blocks → gammaBlock triggers apply_ga
 ```
 
 1. **Build an old-version Genesis**: Check out a historical tag (e.g. `gravity-testnet-v1.0.0`) from the contracts repo, then run `scripts/generate_genesis_single.sh` to produce a `genesis.json` containing legacy contract bytecodes.
-2. **Inject hardfork config**: Add `gravityHardforks.gammaBlock` to the genesis JSON's `config` object.
+2. **Inject hardfork config**: Add Gravity hardfork activation fields to the genesis JSON's `config` object (`alphaTime`, `betaBlock`, `gammaBlock`, `deltaBlock`, ...).
 3. **Boot a reth node**: Start a single-node reth instance using the modified genesis.
 4. **Push blocks via MockConsensus**: Use `PipeExecLayerApi` to push empty blocks across the `gammaBlock` boundary.
 5. **Verify bytecode replacement**:
@@ -24,7 +24,9 @@ Genesis (v1.0.0 old contracts) → run N blocks → gammaBlock triggers apply_ga
 | File | Description |
 |------|-------------|
 | `gravity_hardfork_test.rs` | Integration test code |
-| `gravity_hardfork.json` | Legacy genesis with `gammaBlock` injected |
+| `gravity_hardfork.json` | Legacy genesis with Gravity hardfork activation fields injected |
+| `fixtures/test_genesis.toml` | Reproducible fixture source of truth: contracts ref plus reth-side hardfork knobs |
+| `fixtures/regen.sh` | Regenerates `gravity_hardfork.json` with the standalone contracts `genesis-tool` |
 | `HARDFORK_TESTING.md` | This document |
 
 Core code paths:
@@ -32,7 +34,7 @@ Core code paths:
 | File | Description |
 |------|-------------|
 | `crates/chainspec/src/gravity.rs` | `GravityHardfork` enum (Alpha/Beta/Gamma) |
-| `crates/chainspec/src/spec.rs` | Parses `gravityHardforks.gammaBlock` from genesis JSON |
+| `crates/chainspec/src/spec.rs` | Parses Gravity hardfork fields such as `alphaTime`, `betaBlock`, `gammaBlock`, and `deltaBlock` from genesis JSON |
 | `crates/chainspec/src/api.rs` | `gamma_transitions_at_block()` trait method |
 | `crates/ethereum/evm/src/hardfork/gamma.rs` | Gamma bytecode constants and addresses |
 | `crates/ethereum/evm/src/parallel_execute.rs` | `apply_gamma()` bytecode replacement logic |
@@ -50,11 +52,12 @@ cd /tmp/gcc-v1.0.0 && npm install
 # 3. Generate genesis
 bash scripts/generate_genesis_single.sh
 
-# 4. Inject gammaBlock
+# 4. Inject hardfork activation fields
 python3 -c "
 import json
 with open('genesis.json') as f: g = json.load(f)
-g['config']['gravityHardforks'] = {'gammaBlock': 20}
+g['config']['gammaBlock'] = 20
+g['config']['deltaBlock'] = 25
 with open('gravity_hardfork.json', 'w') as f: json.dump(g, f, indent=2)
 "
 
@@ -78,8 +81,8 @@ RUSTFLAGS="--cfg tokio_unstable" cargo test --test gravity_hardfork_test -- --no
 ### 1. Genesis build requires node_modules
 `generate_genesis_single.sh` depends on `node_modules` (forge-std, openzeppelin). After checking out an old tag, you **must** run `npm install` first — otherwise Forge compilation will fail.
 
-### 2. `gravityHardforks` must be a top-level config key
-reth's `alloy_genesis` handles unknown config fields via `#[serde(flatten)]` into `extra_fields`. This means `gravityHardforks` must be a top-level key inside the `config` object — it cannot be nested under any other field.
+### 2. Gravity hardfork fields must be top-level config keys
+reth's `alloy_genesis` handles unknown config fields via `#[serde(flatten)]` into `extra_fields`. This means fields such as `alphaTime`, `betaBlock`, `gammaBlock`, and `deltaBlock` must be top-level keys inside the `config` object — they cannot be nested under another field.
 
 ### 3. Contracts that didn't exist in the old genesis
 Contracts added after v1.0.0 (e.g. `OracleRequestQueue` at 0x1625F4002) won't be present in the legacy genesis. `apply_gamma()` already handles this by checking `if let Some(ref info)` and skipping missing accounts. The test must tolerate this as well.
@@ -104,7 +107,7 @@ Using a hypothetical "Delta" hardfork as an example:
 
 ```
 crates/chainspec/src/gravity.rs             → Add Delta variant to GravityHardfork enum
-crates/chainspec/src/spec.rs                → Parse gravityHardforks.deltaBlock
+crates/chainspec/src/spec.rs                -> Parse config.deltaBlock
 crates/chainspec/src/api.rs                 → Add delta_transitions_at_block()
 crates/ethereum/evm/src/hardfork/delta.rs   → New file with updated bytecode constants
 crates/ethereum/evm/src/parallel_execute.rs → Add apply_delta() call
