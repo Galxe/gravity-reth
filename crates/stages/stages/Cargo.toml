@@ -117,4 +117,5 @@ test-utils = [
     "reth-ethereum-primitives?/test-utils",
     "reth-evm-ethereum/test-utils",
     "reth-trie-db/test-utils",
+    "reth-tasks/test-utils"
 ]

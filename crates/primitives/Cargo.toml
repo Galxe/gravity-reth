@@ -57,6 +57,7 @@ std = [
     "alloy-rlp/std",
     "alloy-primitives/std",
     "reth-static-file-types/std",
+    "reth-codecs/std"
 ]
 reth-codec = [
     "std",
@@ -79,6 +80,8 @@ arbitrary = [
 ]
 secp256k1 = [
     "reth-primitives-traits/secp256k1",
+    "alloy-consensus/secp256k1",
+    "alloy-primitives/secp256k1",
 ]
 c-kzg = [
     "dep:c-kzg",

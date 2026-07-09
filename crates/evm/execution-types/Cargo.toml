@@ -57,6 +57,7 @@ serde-bincode-compat = [
     "serde_with",
     "alloy-consensus/serde-bincode-compat",
     "alloy-eips/serde-bincode-compat",
+    "reth-primitives-traits/serde-bincode-compat"
 ]
 std = [
     "alloy-eips/std",

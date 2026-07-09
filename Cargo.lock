@@ -6724,6 +6724,7 @@ version = "3.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "799781ae679d79a948e13d4824a40970bfa500058d245760dd857301059810fa"
 dependencies = [
+ "arbitrary",
  "arrayvec",
  "bitvec",
  "byte-slice-cast",
@@ -8208,6 +8209,7 @@ dependencies = [
  "reth-trie-common",
  "roaring",
  "serde",
+ "serde_json",
  "test-fuzz",
 ]
 
