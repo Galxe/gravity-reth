@@ -818,49 +818,35 @@ Database:
           - trace:   Enables logging for trace debug-level messages
           - extra:   Enables logging for extra debug-level messages
 
-      --db.exclusive <EXCLUSIVE>
-          Open environment in exclusive/monopolistic mode. Makes it possible to open a database on an NFS volume
+      --db.block-cache-size <BLOCK_CACHE_SIZE>
+          Block cache size in bytes (e.g., 8GB, 4096MB). This is the LRU cache for uncompressed blocks. Higher values improve read performance. Default: 8GB
 
-          [possible values: true, false]
+      --db.write-buffer-size <WRITE_BUFFER_SIZE>
+          Write buffer size in bytes (e.g., 256MB, 512MB). Larger values improve write performance but use more memory. Default: 256MB
 
-      --db.max-size <MAX_SIZE>
-          Maximum database size (e.g., 4TB, 8TB).
+      --db.max-background-jobs <MAX_BACKGROUND_JOBS>
+          Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
-          This sets the "map size" of the database. If the database grows beyond this limit, the node will stop with an "environment map size limit reached" error.
+      --db.max-open-files <MAX_OPEN_FILES>
+          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
 
-          The default value is 8TB.
+      --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
+          Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6
 
-      --db.page-size <PAGE_SIZE>
-          Database page size (e.g., 4KB, 8KB, 16KB).
+      --db.compaction-readahead-size <COMPACTION_READAHEAD_SIZE>
+          Compaction readahead size in bytes (e.g., 4MB, 8MB). Larger values improve compaction performance with sequential I/O. Default: 4MB
 
-          Specifies the page size used by the MDBX database.
+      --db.level0-file-num-compaction-trigger <LEVEL0_FILE_NUM_COMPACTION_TRIGGER>
+          Number of L0 files to trigger compaction. Lower values reduce read amplification but increase write amplification. Default: 4
 
-          The page size determines the maximum database size. MDBX supports up to 2^31 pages, so with the default 4KB page size, the maximum database size is 8TB. To allow larger databases, increase this value to 8KB or higher.
+      --db.max-bytes-for-level-base <MAX_BYTES_FOR_LEVEL_BASE>
+          Maximum bytes for level 1 (e.g., 512MB, 1GB). This controls the target size for L1, affecting LSM tree structure. Default: 512MB
 
-          WARNING: This setting is only configurable at database creation; changing it later requires re-syncing.
+      --db.bytes-per-sync <BYTES_PER_SYNC>
+          Bytes to write before background sync (e.g., 4MB, 8MB). Larger values reduce I/O overhead but may affect durability. Default: 4MB
 
-      --db.growth-step <GROWTH_STEP>
-          Database growth step (e.g., 4GB, 4KB)
-
-      --db.read-transaction-timeout <READ_TRANSACTION_TIMEOUT>
-          Read transaction timeout in seconds, 0 means no timeout
-
-      --db.max-readers <MAX_READERS>
-          Maximum number of readers allowed to access the database concurrently
-
-      --db.sync-mode <SYNC_MODE>
-          Controls how aggressively the database synchronizes data to disk
-
-      --db.rocksdb-block-cache-size <ROCKSDB_BLOCK_CACHE_SIZE>
-          `RocksDB` block cache size (e.g., 512MB, 4GB).
-
-          Controls the size of the in-memory LRU cache for decompressed `RocksDB` blocks. A larger cache reduces repeated decompression of hot blocks, improving read performance for history lookups.
-
-      --db.balstore-cache-size <BALSTORE_CACHE_SIZE>
-          Number of recent blocks to keep in the in-memory BAL store cache
-
-      --db.disable-metrics
-          Disable built-in database metrics
+      --db.sharding-directories <SHARDING_DIRECTORIES>
+          Semicolon separated `RocksDB` sharding directories. Accepts 2 or 3 paths. Always creates 3 databases (state, `account_trie`, `storage_trie`). - 0 paths (default): Creates subdirs under --datadir: state/, `account_trie`/, `storage_trie`/ - 2 paths: First dir contains state + `account_trie`; second dir contains `storage_trie` - 3 paths: First dir is state, second is `account_trie`, third is `storage_trie`
 
 Dev testnet:
       --dev
@@ -971,6 +957,34 @@ Pruning:
       --prune.minimum-distance <BLOCKS>
           Minimum pruning distance from the tip. This controls the safety margin for reorgs and manual unwinds
 
+Gravity:
+      --gravity.disable-pipe-execution
+          Disable pipe execution. default false
+
+      --gravity.disable-grevm
+          Disable the Grevm executor. default false
+
+      --gravity.cache.max-persist-gap <CACHE_MAX_PERSIST_GAP>
+          The max block height between merged and pesist block height
+
+          [default: 128]
+
+      --gravity.persist.merge-blocks
+          Persist consecutive blocks as one merged commit per group to amortize the per-commit fsync (much faster from-genesis catch-up). default false
+
+      --gravity.cache.capacity <CACHE_CAPACITY>
+          The max size of cached items
+
+          [default: 2000000]
+
+      --gravity.report-db-metrics
+          Report db metrics. default false
+
+      --gravity.trie.parallel-level <TRIE_PARALLEL_LEVELS>
+          Max parallel level in nested hash
+
+          [default: 1]
+
 Engine:
       --engine.persistence-threshold <PERSISTENCE_THRESHOLD>
           Configure persistence threshold for the engine. This determines how many canonical blocks must be in-memory, ahead of the last persisted block, before flushing canonical blocks to disk again.
@@ -1006,6 +1020,9 @@ Engine:
 
       --engine.disable-prewarming
           Disable parallel prewarming
+
+      --engine.disable-parallel-sparse-trie
+          Disable the parallel sparse trie in the engine
 
       --engine.state-provider-metrics
           Enable state provider latency metrics. This allows the engine to collect and report stats about how long state provider calls took during execution, but this does introduce slight overhead to state provider calls
@@ -1067,14 +1084,10 @@ Engine:
 
           [default: 1000]
 
-      --engine.slow-block-threshold <DURATION>
-          Configure the slow block logging threshold in milliseconds.
+      --engine.max-proof-task-concurrency <MAX_PROOF_TASK_CONCURRENCY>
+          Configure the maximum number of concurrent proof tasks
 
-          When set, blocks that take longer than this threshold to execute will be logged with detailed metrics including timing, state operations, and cache statistics.
-
-          Set to 0 to log all blocks (useful for debugging/profiling).
-
-          When not set, slow block logging is disabled (default).
+          [default: 256]
 
       --engine.disable-sparse-trie-cache-pruning
           Fully disable sparse trie cache pruning. When set, the cached sparse trie is preserved without any node pruning or storage trie eviction between blocks. Useful for benchmarking the effects of retaining the full trie cache
@@ -1094,15 +1107,6 @@ Engine:
           When enabled, each payload job will get an instance of cross-block execution cache from the engine.
 
           Note: this should only be enabled if node would not be requested to process any payloads in parallel with payload building.
-
-      --engine.share-sparse-trie-with-payload-builder
-          Whether to share the sparse trie with the payload builder.
-
-          Replaces the payload builder's blocking `state_root_with_updates()` call with the sparse trie, computing the state root concurrently with transaction execution.
-
-          The engine and payload builder contend for the same trie — if a builder task is still running when `newPayload` arrives, the engine will block until the trie is stored back.
-
-          The builder also anchors the trie at the built block's state root, so if the next `newPayload` is not on top of that block, the trie cache is invalidated and cleared.
 
       --engine.suppress-persistence-during-build
           Suppress persistence while building a payload.
@@ -1160,6 +1164,30 @@ Storage:
 
           [default: true]
           [possible values: true, false]
+
+Ress:
+      --ress.enable
+          Enable support for `ress` subprotocol
+
+      --ress.max-active-connections <MAX_ACTIVE_CONNECTIONS>
+          The maximum number of active connections for `ress` subprotocol
+
+          [default: 5]
+
+      --ress.max-witness-window <MAX_WITNESS_WINDOW>
+          The maximum witness lookback window
+
+          [default: 1024]
+
+      --ress.witness-max-parallel <WITNESS_MAX_PARALLEL>
+          The maximum number of witnesses to generate in parallel
+
+          [default: 5]
+
+      --ress.witness-cache-size <WITNESS_CACHE_SIZE>
+          Witness cache size
+
+          [default: 10]
 
 Logging:
       --log.stdout.format <FORMAT>

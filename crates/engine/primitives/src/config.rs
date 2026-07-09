@@ -45,6 +45,9 @@ pub const DEFAULT_SPARSE_TRIE_MAX_HOT_ACCOUNTS: usize = 1000;
 /// Default timeout for the state root task before spawning a sequential fallback.
 pub const DEFAULT_STATE_ROOT_TASK_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Default maximum concurrency for proof tasks.
+pub const DEFAULT_MAX_PROOF_TASK_CONCURRENCY: u64 = 256;
+
 const DEFAULT_BLOCK_BUFFER_LIMIT: u32 = EPOCH_SLOTS as u32 * 2;
 const DEFAULT_MAX_INVALID_HEADER_CACHE_LENGTH: u32 = 256;
 const DEFAULT_MAX_EXECUTE_BLOCK_BATCH_SIZE: usize = 4;
@@ -163,10 +166,10 @@ pub struct TreeConfig {
     sparse_trie_max_hot_slots: usize,
     /// LFU hot-account capacity: max account addresses retained across prune cycles.
     sparse_trie_max_hot_accounts: usize,
-    /// When set, blocks whose total processing time (execution + state reads + state root +
-    /// DB commit) exceeds this duration trigger a structured `warn!` log with detailed timing,
-    /// state-operation counts, and cache hit-rate metrics. `Duration::ZERO` logs every block.
-    slow_block_threshold: Option<Duration>,
+    /// Whether to disable the parallel sparse trie state root algorithm.
+    disable_parallel_sparse_trie: bool,
+    /// Maximum number of concurrent proof tasks.
+    max_proof_task_concurrency: u64,
     /// Whether to fully disable sparse trie cache pruning between blocks.
     disable_sparse_trie_cache_pruning: bool,
     /// Timeout for the state root task before spawning a sequential fallback computation.
@@ -176,8 +179,6 @@ pub struct TreeConfig {
     state_root_task_timeout: Option<Duration>,
     /// Whether to share execution cache with the payload builder.
     share_execution_cache_with_payload_builder: bool,
-    /// Whether to share sparse trie with the payload builder.
-    share_sparse_trie_with_payload_builder: bool,
     /// Whether to suppress persistence cycles while building a payload.
     ///
     /// When enabled, persistence is deferred from the moment an FCU with payload attributes
@@ -232,11 +233,11 @@ impl Default for TreeConfig {
             sparse_trie_prune_depth: DEFAULT_SPARSE_TRIE_PRUNE_DEPTH,
             sparse_trie_max_hot_slots: DEFAULT_SPARSE_TRIE_MAX_HOT_SLOTS,
             sparse_trie_max_hot_accounts: DEFAULT_SPARSE_TRIE_MAX_HOT_ACCOUNTS,
-            slow_block_threshold: None,
+            disable_parallel_sparse_trie: false,
+            max_proof_task_concurrency: DEFAULT_MAX_PROOF_TASK_CONCURRENCY,
             disable_sparse_trie_cache_pruning: false,
             state_root_task_timeout: Some(DEFAULT_STATE_ROOT_TASK_TIMEOUT),
             share_execution_cache_with_payload_builder: false,
-            share_sparse_trie_with_payload_builder: false,
             suppress_persistence_during_build: false,
             disable_bal_parallel_execution: false,
             disable_bal_parallel_state_root: false,
@@ -275,10 +276,10 @@ impl TreeConfig {
         sparse_trie_prune_depth: usize,
         sparse_trie_max_hot_slots: usize,
         sparse_trie_max_hot_accounts: usize,
-        slow_block_threshold: Option<Duration>,
+        disable_parallel_sparse_trie: bool,
+        max_proof_task_concurrency: u64,
         state_root_task_timeout: Option<Duration>,
         share_execution_cache_with_payload_builder: bool,
-        share_sparse_trie_with_payload_builder: bool,
     ) -> Self {
         assert_backpressure_threshold_invariant(
             persistence_threshold,
@@ -309,11 +310,11 @@ impl TreeConfig {
             sparse_trie_prune_depth,
             sparse_trie_max_hot_slots,
             sparse_trie_max_hot_accounts,
-            slow_block_threshold,
+            disable_parallel_sparse_trie,
+            max_proof_task_concurrency,
             disable_sparse_trie_cache_pruning: false,
             state_root_task_timeout,
             share_execution_cache_with_payload_builder,
-            share_sparse_trie_with_payload_builder,
             suppress_persistence_during_build: false,
             disable_bal_parallel_execution: false,
             disable_bal_parallel_state_root: false,
@@ -629,21 +630,31 @@ impl TreeConfig {
         self
     }
 
-    /// Returns the slow block threshold, if configured.
-    ///
-    /// When `Some`, blocks whose total processing time exceeds this duration emit a structured
-    /// warning with timing, state-operation, and cache-hit-rate details. `Duration::ZERO` logs
-    /// every block.
-    pub const fn slow_block_threshold(&self) -> Option<Duration> {
-        self.slow_block_threshold
+    /// Returns whether the parallel sparse trie is disabled.
+    pub const fn disable_parallel_sparse_trie(&self) -> bool {
+        self.disable_parallel_sparse_trie
     }
 
-    /// Setter for slow block threshold.
-    pub const fn with_slow_block_threshold(
+    /// Setter for whether to disable the parallel sparse trie.
+    pub const fn with_disable_parallel_sparse_trie(
         mut self,
-        slow_block_threshold: Option<Duration>,
+        disable_parallel_sparse_trie: bool,
     ) -> Self {
-        self.slow_block_threshold = slow_block_threshold;
+        self.disable_parallel_sparse_trie = disable_parallel_sparse_trie;
+        self
+    }
+
+    /// Returns the maximum number of concurrent proof tasks.
+    pub const fn max_proof_task_concurrency(&self) -> u64 {
+        self.max_proof_task_concurrency
+    }
+
+    /// Setter for maximum number of concurrent proof tasks.
+    pub const fn with_max_proof_task_concurrency(
+        mut self,
+        max_proof_task_concurrency: u64,
+    ) -> Self {
+        self.max_proof_task_concurrency = max_proof_task_concurrency;
         self
     }
 
@@ -674,11 +685,6 @@ impl TreeConfig {
         self.share_execution_cache_with_payload_builder
     }
 
-    /// Returns whether to share sparse trie with the payload builder.
-    pub const fn share_sparse_trie_with_payload_builder(&self) -> bool {
-        self.share_sparse_trie_with_payload_builder
-    }
-
     /// Setter for whether to share execution cache with the payload builder.
     pub const fn with_share_execution_cache_with_payload_builder(
         mut self,
@@ -686,15 +692,6 @@ impl TreeConfig {
     ) -> Self {
         self.share_execution_cache_with_payload_builder =
             share_execution_cache_with_payload_builder;
-        self
-    }
-
-    /// Setter for whether to share sparse trie with the payload builder.
-    pub const fn with_share_sparse_trie_with_payload_builder(
-        mut self,
-        share_sparse_trie_with_payload_builder: bool,
-    ) -> Self {
-        self.share_sparse_trie_with_payload_builder = share_sparse_trie_with_payload_builder;
         self
     }
 

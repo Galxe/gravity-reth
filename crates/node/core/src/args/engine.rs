@@ -5,11 +5,10 @@ use clap::{
     Args,
 };
 use eyre::ensure;
-use reth_cli_util::{parse_duration_from_secs_or_ms, parsers::format_duration_as_secs_or_ms};
 use reth_engine_primitives::{
-    TreeConfig, DEFAULT_INVALID_HEADER_HIT_EVICTION_THRESHOLD, DEFAULT_MULTIPROOF_TASK_CHUNK_SIZE,
-    DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD, DEFAULT_SPARSE_TRIE_MAX_HOT_ACCOUNTS,
-    DEFAULT_SPARSE_TRIE_MAX_HOT_SLOTS,
+    TreeConfig, DEFAULT_INVALID_HEADER_HIT_EVICTION_THRESHOLD, DEFAULT_MAX_PROOF_TASK_CONCURRENCY,
+    DEFAULT_MULTIPROOF_TASK_CHUNK_SIZE, DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD,
+    DEFAULT_SPARSE_TRIE_MAX_HOT_ACCOUNTS, DEFAULT_SPARSE_TRIE_MAX_HOT_SLOTS,
 };
 use std::{sync::OnceLock, time::Duration};
 
@@ -49,11 +48,10 @@ pub struct DefaultEngineValues {
     cache_metrics_disabled: bool,
     sparse_trie_max_hot_slots: usize,
     sparse_trie_max_hot_accounts: usize,
-    slow_block_threshold: Option<Duration>,
+    max_proof_task_concurrency: u64,
     disable_sparse_trie_cache_pruning: bool,
     state_root_task_timeout: Option<String>,
     share_execution_cache_with_payload_builder: bool,
-    share_sparse_trie_with_payload_builder: bool,
     suppress_persistence_during_build: bool,
     bal_parallel_execution_disabled: bool,
     bal_parallel_state_root_disabled: bool,
@@ -211,9 +209,9 @@ impl DefaultEngineValues {
         self
     }
 
-    /// Set the default slow block threshold.
-    pub const fn with_slow_block_threshold(mut self, v: Option<Duration>) -> Self {
-        self.slow_block_threshold = v;
+    /// Set the default maximum number of concurrent proof tasks
+    pub const fn with_max_proof_task_concurrency(mut self, v: u64) -> Self {
+        self.max_proof_task_concurrency = v;
         self
     }
 
@@ -232,12 +230,6 @@ impl DefaultEngineValues {
     /// Set whether to share the execution cache with the payload builder by default
     pub const fn with_share_execution_cache_with_payload_builder(mut self, v: bool) -> Self {
         self.share_execution_cache_with_payload_builder = v;
-        self
-    }
-
-    /// Set whether to share the sparse trie with the payload builder by default
-    pub const fn with_share_sparse_trie_with_payload_builder(mut self, v: bool) -> Self {
-        self.share_sparse_trie_with_payload_builder = v;
         self
     }
 
@@ -286,11 +278,10 @@ impl Default for DefaultEngineValues {
             cache_metrics_disabled: false,
             sparse_trie_max_hot_slots: DEFAULT_SPARSE_TRIE_MAX_HOT_SLOTS,
             sparse_trie_max_hot_accounts: DEFAULT_SPARSE_TRIE_MAX_HOT_ACCOUNTS,
-            slow_block_threshold: None,
+            max_proof_task_concurrency: DEFAULT_MAX_PROOF_TASK_CONCURRENCY,
             disable_sparse_trie_cache_pruning: false,
             state_root_task_timeout: Some("4s".to_string()),
             share_execution_cache_with_payload_builder: false,
-            share_sparse_trie_with_payload_builder: false,
             suppress_persistence_during_build: false,
             bal_parallel_execution_disabled: false,
             bal_parallel_state_root_disabled: false,
@@ -356,14 +347,14 @@ pub struct EngineArgs {
     #[arg(long = "engine.disable-prewarming", alias = "engine.disable-caching-and-prewarming", default_value_t = DefaultEngineValues::get_global().prewarming_disabled)]
     pub prewarming_disabled: bool,
 
-    /// CAUTION: This CLI flag has no effect anymore. The parallel sparse trie is always enabled.
+    /// CAUTION: This CLI flag has no effect anymore, use --engine.disable-parallel-sparse-trie
+    /// if you want to disable usage of the `ParallelSparseTrie`.
     #[deprecated]
     #[arg(long = "engine.parallel-sparse-trie", default_value = "true", hide = true)]
     pub parallel_sparse_trie_enabled: bool,
 
-    /// CAUTION: This CLI flag has no effect anymore. The parallel sparse trie is always enabled.
-    #[deprecated]
-    #[arg(long = "engine.disable-parallel-sparse-trie", default_value = "false", hide = true)]
+    /// Disable the parallel sparse trie in the engine.
+    #[arg(long = "engine.disable-parallel-sparse-trie", default_value = "false")]
     pub parallel_sparse_trie_disabled: bool,
 
     /// Enable state provider latency metrics. This allows the engine to collect and report stats
@@ -450,16 +441,9 @@ pub struct EngineArgs {
     #[arg(long = "engine.sparse-trie-max-hot-accounts", default_value_t = DefaultEngineValues::get_global().sparse_trie_max_hot_accounts)]
     pub sparse_trie_max_hot_accounts: usize,
 
-    /// Configure the slow block logging threshold in milliseconds.
-    ///
-    /// When set, blocks that take longer than this threshold to execute will be logged
-    /// with detailed metrics including timing, state operations, and cache statistics.
-    ///
-    /// Set to 0 to log all blocks (useful for debugging/profiling).
-    ///
-    /// When not set, slow block logging is disabled (default).
-    #[arg(long = "engine.slow-block-threshold", value_parser = parse_duration_from_secs_or_ms, value_name = "DURATION", default_value = Resettable::from(DefaultEngineValues::get_global().slow_block_threshold.map(|threshold| format_duration_as_secs_or_ms(threshold).into())))]
-    pub slow_block_threshold: Option<Duration>,
+    /// Configure the maximum number of concurrent proof tasks
+    #[arg(long = "engine.max-proof-task-concurrency", default_value_t = DefaultEngineValues::get_global().max_proof_task_concurrency)]
+    pub max_proof_task_concurrency: u64,
 
     /// Fully disable sparse trie cache pruning. When set, the cached sparse trie is preserved
     /// without any node pruning or storage trie eviction between blocks. Useful for benchmarking
@@ -494,23 +478,6 @@ pub struct EngineArgs {
         default_value_t = DefaultEngineValues::get_global().share_execution_cache_with_payload_builder,
     )]
     pub share_execution_cache_with_payload_builder: bool,
-
-    /// Whether to share the sparse trie with the payload builder.
-    ///
-    /// Replaces the payload builder's blocking `state_root_with_updates()` call with the
-    /// sparse trie, computing the state root concurrently with transaction execution.
-    ///
-    /// The engine and payload builder contend for the same trie — if a builder task is
-    /// still running when `newPayload` arrives, the engine will block until the trie is
-    /// stored back.
-    ///
-    /// The builder also anchors the trie at the built block's state root, so if the next
-    /// `newPayload` is not on top of that block, the trie cache is invalidated and cleared.
-    #[arg(
-        long = "engine.share-sparse-trie-with-payload-builder",
-        default_value_t = DefaultEngineValues::get_global().share_sparse_trie_with_payload_builder,
-    )]
-    pub share_sparse_trie_with_payload_builder: bool,
 
     /// Suppress persistence while building a payload.
     ///
@@ -578,11 +545,10 @@ impl Default for EngineArgs {
             cache_metrics_disabled,
             sparse_trie_max_hot_slots,
             sparse_trie_max_hot_accounts,
-            slow_block_threshold,
+            max_proof_task_concurrency,
             disable_sparse_trie_cache_pruning,
             state_root_task_timeout,
             share_execution_cache_with_payload_builder,
-            share_sparse_trie_with_payload_builder,
             suppress_persistence_during_build,
             bal_parallel_execution_disabled,
             bal_parallel_state_root_disabled,
@@ -615,13 +581,12 @@ impl Default for EngineArgs {
             cache_metrics_disabled,
             sparse_trie_max_hot_slots,
             sparse_trie_max_hot_accounts,
-            slow_block_threshold,
+            max_proof_task_concurrency,
             disable_sparse_trie_cache_pruning,
             state_root_task_timeout: state_root_task_timeout
                 .as_deref()
                 .map(|s| humantime::parse_duration(s).expect("valid default duration")),
             share_execution_cache_with_payload_builder,
-            share_sparse_trie_with_payload_builder,
             suppress_persistence_during_build,
             bal_parallel_execution_disabled,
             bal_parallel_state_root_disabled,
@@ -680,14 +645,12 @@ impl EngineArgs {
             .without_cache_metrics(self.cache_metrics_disabled)
             .with_sparse_trie_max_hot_slots(self.sparse_trie_max_hot_slots)
             .with_sparse_trie_max_hot_accounts(self.sparse_trie_max_hot_accounts)
-            .with_slow_block_threshold(self.slow_block_threshold)
+            .with_disable_parallel_sparse_trie(self.parallel_sparse_trie_disabled)
+            .with_max_proof_task_concurrency(self.max_proof_task_concurrency)
             .with_disable_sparse_trie_cache_pruning(self.disable_sparse_trie_cache_pruning)
             .with_state_root_task_timeout(self.state_root_task_timeout.filter(|d| !d.is_zero()))
             .with_share_execution_cache_with_payload_builder(
                 self.share_execution_cache_with_payload_builder,
-            )
-            .with_share_sparse_trie_with_payload_builder(
-                self.share_sparse_trie_with_payload_builder,
             )
             .with_suppress_persistence_during_build(self.suppress_persistence_during_build)
             .without_bal_parallel_execution(self.bal_parallel_execution_disabled)
@@ -803,11 +766,10 @@ mod tests {
             cache_metrics_disabled: true,
             sparse_trie_max_hot_slots: 100,
             sparse_trie_max_hot_accounts: 500,
-            slow_block_threshold: None,
+            max_proof_task_concurrency: 128,
             disable_sparse_trie_cache_pruning: true,
             state_root_task_timeout: Some(Duration::from_secs(2)),
             share_execution_cache_with_payload_builder: false,
-            share_sparse_trie_with_payload_builder: false,
             suppress_persistence_during_build: false,
             bal_parallel_execution_disabled: true,
             bal_parallel_state_root_disabled: true,
@@ -853,6 +815,8 @@ mod tests {
             "100",
             "--engine.sparse-trie-max-hot-accounts",
             "500",
+            "--engine.max-proof-task-concurrency",
+            "128",
             "--engine.disable-sparse-trie-cache-pruning",
             "--engine.state-root-task-timeout",
             "2s",
@@ -903,33 +867,37 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_slow_block_threshold() {
-        // Test default value (None - disabled)
+    fn test_parse_disable_parallel_sparse_trie() {
         let args = CommandParser::<EngineArgs>::parse_from(["reth"]).args;
-        assert_eq!(args.slow_block_threshold, None);
-
-        // Test setting to 0 (log all blocks)
-        let args =
-            CommandParser::<EngineArgs>::parse_from(["reth", "--engine.slow-block-threshold", "0"])
-                .args;
-        assert_eq!(args.slow_block_threshold, Some(Duration::ZERO));
-
-        // Test setting to custom value
-        let args = CommandParser::<EngineArgs>::parse_from([
-            "reth",
-            "--engine.slow-block-threshold",
-            "500",
-        ])
-        .args;
-        assert_eq!(args.slow_block_threshold, Some(Duration::from_secs(500)));
+        assert!(!args.parallel_sparse_trie_disabled);
+        assert!(!args.tree_config().disable_parallel_sparse_trie());
 
         let args = CommandParser::<EngineArgs>::parse_from([
             "reth",
-            "--engine.slow-block-threshold",
-            "500ms",
+            "--engine.disable-parallel-sparse-trie",
         ])
         .args;
-        assert_eq!(args.slow_block_threshold, Some(Duration::from_millis(500)));
+        assert!(args.parallel_sparse_trie_disabled);
+        assert!(args.tree_config().disable_parallel_sparse_trie());
+    }
+
+    #[test]
+    fn test_parse_max_proof_task_concurrency() {
+        let args = CommandParser::<EngineArgs>::parse_from(["reth"]).args;
+        assert_eq!(args.max_proof_task_concurrency, DEFAULT_MAX_PROOF_TASK_CONCURRENCY);
+        assert_eq!(
+            args.tree_config().max_proof_task_concurrency(),
+            DEFAULT_MAX_PROOF_TASK_CONCURRENCY
+        );
+
+        let args = CommandParser::<EngineArgs>::parse_from([
+            "reth",
+            "--engine.max-proof-task-concurrency",
+            "32",
+        ])
+        .args;
+        assert_eq!(args.max_proof_task_concurrency, 32);
+        assert_eq!(args.tree_config().max_proof_task_concurrency(), 32);
     }
 
     #[test]
@@ -952,20 +920,5 @@ mod tests {
         .args;
         assert_eq!(args.invalid_header_hit_eviction_threshold, 0);
         assert_eq!(args.tree_config().invalid_header_hit_eviction_threshold(), 0);
-    }
-
-    #[test]
-    fn test_parse_share_sparse_trie_flag() {
-        let args = CommandParser::<EngineArgs>::parse_from(["reth"]).args;
-        assert!(!args.share_sparse_trie_with_payload_builder);
-        assert!(!args.tree_config().share_sparse_trie_with_payload_builder());
-
-        let args = CommandParser::<EngineArgs>::parse_from([
-            "reth",
-            "--engine.share-sparse-trie-with-payload-builder",
-        ])
-        .args;
-        assert!(args.share_sparse_trie_with_payload_builder);
-        assert!(args.tree_config().share_sparse_trie_with_payload_builder());
     }
 }

@@ -121,9 +121,7 @@ where
             precompile_cache_map,
             sparse_state_trie: Arc::default(),
             trie_input: None,
-            // The `disable-parallel-sparse-trie` knob was removed from the v2.3.0
-            // `TreeConfig`; the parallel sparse trie is always enabled (baseline default).
-            disable_parallel_sparse_trie: false,
+            disable_parallel_sparse_trie: config.disable_parallel_sparse_trie(),
         }
     }
 }
@@ -172,7 +170,7 @@ where
         provider_builder: StateProviderBuilder<N, P>,
         consistent_view: ConsistentDbView<P>,
         trie_input: TrieInput,
-        _config: &TreeConfig,
+        config: &TreeConfig,
     ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Recovered>, I::Error>
     where
         P: DatabaseProviderFactory<Provider: BlockReader>
@@ -194,9 +192,7 @@ where
             state_root_config.state_sorted.clone(),
             state_root_config.prefix_sets.clone(),
         );
-        // The `max-proof-task-concurrency` knob was removed from the v2.3.0 `TreeConfig`;
-        // use the baseline default (256).
-        let max_proof_task_concurrency = 256usize;
+        let max_proof_task_concurrency = config.max_proof_task_concurrency() as usize;
         let proof_task = ProofTaskManager::new(
             self.executor.handle().clone(),
             state_root_config.consistent_view.clone(),
