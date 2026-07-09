@@ -102,7 +102,7 @@ pub use header_sync_gap::HeaderSyncGapProvider;
 #[cfg(feature = "db-api")]
 mod metadata;
 #[cfg(feature = "db-api")]
-pub use metadata::*;
+pub use metadata::{keys as metadata_keys, MetadataProvider, MetadataWriter, StorageSettingsCache};
 
 mod full;
 pub use full::*;
