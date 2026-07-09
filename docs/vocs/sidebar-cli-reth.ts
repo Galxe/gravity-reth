@@ -93,6 +93,10 @@ export const rethCliSidebar: SidebarItem = {
                     link: "/cli/reth/db/repair-trie"
                 },
                 {
+                    text: "reth db migrate-changesets",
+                    link: "/cli/reth/db/migrate-changesets"
+                },
+                {
                     text: "reth db static-file-header",
                     link: "/cli/reth/db/static-file-header",
                     collapsed: true,
