@@ -42,3 +42,20 @@ pub trait MetadataWriter: Send {
         self.write_metadata(keys::GRAVITY_STORAGE_SETTINGS, settings.to_metadata_bytes())
     }
 }
+
+/// Trait for caching storage settings on a provider factory.
+///
+/// Routing decisions read this cache on every call, so it must stay in memory; the persisted
+/// entry in the metadata table is only read once at startup (and updated by `init_genesis` or
+/// an explicit migration).
+#[auto_impl::auto_impl(&, Arc)]
+pub trait StorageSettingsCache: Send + Sync {
+    /// Gets the cached storage settings.
+    fn cached_storage_settings(&self) -> GravityStorageSettings;
+
+    /// Sets the cached storage settings.
+    ///
+    /// IMPORTANT: This does not persist the settings; that is done by
+    /// [`MetadataWriter::write_storage_settings`].
+    fn set_storage_settings_cache(&self, settings: GravityStorageSettings);
+}

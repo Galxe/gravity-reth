@@ -1,5 +1,4 @@
 use alloy_primitives::{Address, B256, U256};
-use reth_primitives_traits::ValueWithSubKey;
 
 /// Storage entry as it is saved in the static files.
 ///
@@ -15,14 +14,6 @@ pub struct StorageBeforeTx {
     pub key: B256,
     /// Value on storage key.
     pub value: U256,
-}
-
-impl ValueWithSubKey for StorageBeforeTx {
-    type SubKey = B256;
-
-    fn get_subkey(&self) -> Self::SubKey {
-        self.key
-    }
 }
 
 // NOTE: Removing reth_codec and manually encode subkey
@@ -46,6 +37,3 @@ impl reth_codecs::Compact for StorageBeforeTx {
         (Self { address, key, value }, out)
     }
 }
-
-#[cfg(any(test, feature = "reth-codec"))]
-reth_codecs::impl_compression_for_compact!(StorageBeforeTx);

@@ -150,7 +150,8 @@ where
 
     // Persist the storage layout before any data is written. Only a fresh datadir reaches
     // this point: existing databases keep the settings already stored in their metadata.
-    provider_rw.write_storage_settings(GravityStorageSettings::current())?;
+    let genesis_storage_settings = GravityStorageSettings::current();
+    provider_rw.write_storage_settings(genesis_storage_settings)?;
 
     insert_world_trie(&provider_rw, alloc.iter())?;
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
@@ -176,6 +177,15 @@ where
 
     let segment = StaticFileSegment::Transactions;
     static_file_provider.latest_writer(segment)?.increment_block(0)?;
+
+    // Changeset segments only exist under the changesets-in-static-files layout; genesis has
+    // no changesets, so an empty block 0 anchors the append chain.
+    if genesis_storage_settings.changesets_in_static_files {
+        for segment in [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+        {
+            static_file_provider.latest_writer(segment)?.increment_block(0)?;
+        }
+    }
 
     // `commit_unwind`` will first commit the DB and then the static file provider, which is
     // necessary on `init_genesis`.

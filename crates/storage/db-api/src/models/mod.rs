@@ -27,8 +27,8 @@ pub use blocks::*;
 pub use integer_list::IntegerList;
 pub use metadata::GravityStorageSettings;
 pub use reth_db_models::{
-    AccountBeforeTx, ClientVersion, StaticFileBlockWithdrawals, StoredBlockBodyIndices,
-    StoredBlockWithdrawals,
+    AccountBeforeTx, ClientVersion, StaticFileBlockWithdrawals, StorageBeforeTx,
+    StoredBlockBodyIndices, StoredBlockWithdrawals,
 };
 pub use sharded_key::ShardedKey;
 
@@ -258,6 +258,7 @@ impl_compression_for_compact!(
     StageCheckpoint,
     PruneCheckpoint,
     ClientVersion,
+    StorageBeforeTx,
     // Non-DB
     GenesisAccount
 );
