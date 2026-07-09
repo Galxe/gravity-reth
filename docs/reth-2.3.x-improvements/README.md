@@ -9,6 +9,9 @@
 - [`state-root.md`](./state-root.md) — state root / trie 计算(sparse-trie / proof-v2 / 写入 / cursor),12 主题。
 - [`cache.md`](./cache.md) — 缓存与预热(payload processor / execution cache / prewarm / precompile / CachedReads),9 主题。
 
+深读补充:
+- [`state-root-deep-dive.md`](./state-root-deep-dive.md) — state root 四大件(proof_v2 / arena sparse trie / state_root_task 流水线 / sorted overlay API)的**算法级**解析:数据结构、算法步骤、优化动机、作用、gravity 缺失影响;§5 附 **nested hash 逐维度对比**(两套引擎各自的运行域最优性 + nested 可借鉴清单)。port 结论以本 README 与 `state-root.md` 为准。
+
 ## 一句话结论
 
 上游 2.3.x 在这三块的**"大件"全部紧耦合 reth 自己的架构**(MDBX 主库 + 原生 RocksDB 辅助 + sparse-trie + 顺序执行器 + engine-tree),而这几件事 gravity 已用**另一套自研体系**(rocksdb 全量后端 + nested-trie + grevm + PersistBlockCache)覆盖——所以主线**不建议整块 port**。真正值得拿的是从中**拆出来的、后端/引擎无关的性能与正确性改进**。

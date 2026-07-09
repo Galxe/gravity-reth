@@ -662,6 +662,15 @@ where
                 }
             }
 
+            // Pipe mode never sees `LoopEvent::PersistenceComplete` (that is `run_inner`'s
+            // event loop), so this poll is the only place persistence results are absorbed.
+            // Without it `in_progress()` stays true after the first batch, no further batches
+            // start, and persistence waiters are never notified.
+            if let Err(err) = self.try_poll_persistence() {
+                error!(target: "engine::tree", %err, "Polling persistence failed");
+                return
+            }
+
             if let Err(err) = self.advance_persistence() {
                 error!(target: "engine::tree", %err, "Advancing persistence failed");
                 return

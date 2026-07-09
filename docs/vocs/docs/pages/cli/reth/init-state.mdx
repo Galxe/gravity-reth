@@ -59,77 +59,35 @@ Database:
           - trace:   Enables logging for trace debug-level messages
           - extra:   Enables logging for extra debug-level messages
 
-      --db.exclusive <EXCLUSIVE>
-          Open environment in exclusive/monopolistic mode. Makes it possible to open a database on an NFS volume
+      --db.block-cache-size <BLOCK_CACHE_SIZE>
+          Block cache size in bytes (e.g., 8GB, 4096MB). This is the LRU cache for uncompressed blocks. Higher values improve read performance. Default: 8GB
 
-          [possible values: true, false]
+      --db.write-buffer-size <WRITE_BUFFER_SIZE>
+          Write buffer size in bytes (e.g., 256MB, 512MB). Larger values improve write performance but use more memory. Default: 256MB
 
-      --db.max-size <MAX_SIZE>
-          Maximum database size (e.g., 4TB, 8TB).
+      --db.max-background-jobs <MAX_BACKGROUND_JOBS>
+          Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
-          This sets the "map size" of the database. If the database grows beyond this limit, the node will stop with an "environment map size limit reached" error.
+      --db.max-open-files <MAX_OPEN_FILES>
+          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
 
-          The default value is 8TB.
+      --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
+          Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6
 
-      --db.page-size <PAGE_SIZE>
-          Database page size (e.g., 4KB, 8KB, 16KB).
+      --db.compaction-readahead-size <COMPACTION_READAHEAD_SIZE>
+          Compaction readahead size in bytes (e.g., 4MB, 8MB). Larger values improve compaction performance with sequential I/O. Default: 4MB
 
-          Specifies the page size used by the MDBX database.
+      --db.level0-file-num-compaction-trigger <LEVEL0_FILE_NUM_COMPACTION_TRIGGER>
+          Number of L0 files to trigger compaction. Lower values reduce read amplification but increase write amplification. Default: 4
 
-          The page size determines the maximum database size. MDBX supports up to 2^31 pages, so with the default 4KB page size, the maximum database size is 8TB. To allow larger databases, increase this value to 8KB or higher.
+      --db.max-bytes-for-level-base <MAX_BYTES_FOR_LEVEL_BASE>
+          Maximum bytes for level 1 (e.g., 512MB, 1GB). This controls the target size for L1, affecting LSM tree structure. Default: 512MB
 
-          WARNING: This setting is only configurable at database creation; changing it later requires re-syncing.
+      --db.bytes-per-sync <BYTES_PER_SYNC>
+          Bytes to write before background sync (e.g., 4MB, 8MB). Larger values reduce I/O overhead but may affect durability. Default: 4MB
 
-      --db.growth-step <GROWTH_STEP>
-          Database growth step (e.g., 4GB, 4KB)
-
-      --db.read-transaction-timeout <READ_TRANSACTION_TIMEOUT>
-          Read transaction timeout in seconds, 0 means no timeout
-
-      --db.max-readers <MAX_READERS>
-          Maximum number of readers allowed to access the database concurrently
-
-      --db.sync-mode <SYNC_MODE>
-          Controls how aggressively the database synchronizes data to disk
-
-      --db.rocksdb-block-cache-size <ROCKSDB_BLOCK_CACHE_SIZE>
-          `RocksDB` block cache size (e.g., 512MB, 4GB).
-
-          Controls the size of the in-memory LRU cache for decompressed `RocksDB` blocks. A larger cache reduces repeated decompression of hot blocks, improving read performance for history lookups.
-
-      --db.balstore-cache-size <BALSTORE_CACHE_SIZE>
-          Number of recent blocks to keep in the in-memory BAL store cache
-
-      --db.disable-metrics
-          Disable built-in database metrics
-
-Static Files:
-      --static-files.blocks-per-file.headers <BLOCKS_PER_FILE_HEADERS>
-          Number of blocks per file for the headers segment
-
-      --static-files.blocks-per-file.transactions <BLOCKS_PER_FILE_TRANSACTIONS>
-          Number of blocks per file for the transactions segment
-
-      --static-files.blocks-per-file.receipts <BLOCKS_PER_FILE_RECEIPTS>
-          Number of blocks per file for the receipts segment
-
-      --static-files.blocks-per-file.transaction-senders <BLOCKS_PER_FILE_TRANSACTION_SENDERS>
-          Number of blocks per file for the transaction senders segment
-
-      --static-files.blocks-per-file.account-change-sets <BLOCKS_PER_FILE_ACCOUNT_CHANGE_SETS>
-          Number of blocks per file for the account changesets segment
-
-      --static-files.blocks-per-file.storage-change-sets <BLOCKS_PER_FILE_STORAGE_CHANGE_SETS>
-          Number of blocks per file for the storage changesets segment
-
-Storage:
-      --storage.v2 [<V2>]
-          Enable V2 (hot/cold) storage layout for new databases.
-
-          When set, new databases will be initialized with the V2 storage layout that separates hot and cold data. Existing databases always use the settings persisted in their metadata regardless of this flag.
-
-          [default: true]
-          [possible values: true, false]
+      --db.sharding-directories <SHARDING_DIRECTORIES>
+          Semicolon separated `RocksDB` sharding directories. Accepts 2 or 3 paths. Always creates 3 databases (state, `account_trie`, `storage_trie`). - 0 paths (default): Creates subdirs under --datadir: state/, `account_trie`/, `storage_trie`/ - 2 paths: First dir contains state + `account_trie`; second dir contains `storage_trie` - 3 paths: First dir is state, second is `account_trie`, third is `storage_trie`
 
       --without-evm
           Specifies whether to initialize the state without relying on EVM historical data.
