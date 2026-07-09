@@ -3444,6 +3444,78 @@ mod tests {
     use reth_testing_utils::generators::{self, random_block, BlockParams};
 
     #[test]
+    fn changeset_routing_reads_from_static_files_under_new_layout() {
+        use crate::StaticFileWriter;
+        use alloy_primitives::{Address, B256, U256};
+        use reth_db_api::models::{AccountBeforeTx, StorageBeforeTx};
+        use reth_primitives_traits::Account;
+        use reth_static_file_types::StaticFileSegment;
+
+        let factory = create_test_provider_factory();
+        // Enable the changesets-in-static-files layout for this factory (and every provider it
+        // hands out, which share the settings cache).
+        factory.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+
+        let addr = Address::with_last_byte(1);
+        let sf = factory.static_file_provider();
+
+        // Genesis anchor (empty block 0) then two blocks of changes, mirroring how
+        // write_state_reverts appends per block.
+        {
+            let mut acc = sf.latest_writer(StaticFileSegment::AccountChangeSets).unwrap();
+            acc.increment_block(0).unwrap();
+            acc.append_account_changeset(
+                vec![AccountBeforeTx { address: addr, info: None }],
+                1,
+            )
+            .unwrap();
+            acc.append_account_changeset(
+                vec![AccountBeforeTx { address: addr, info: Some(Account::default()) }],
+                2,
+            )
+            .unwrap();
+            acc.commit().unwrap();
+
+            let mut stor = sf.latest_writer(StaticFileSegment::StorageChangeSets).unwrap();
+            stor.increment_block(0).unwrap();
+            stor.append_storage_changeset(
+                vec![StorageBeforeTx {
+                    address: addr,
+                    key: B256::with_last_byte(7),
+                    value: U256::from(3),
+                }],
+                1,
+            )
+            .unwrap();
+            stor.append_storage_changeset(Vec::new(), 2).unwrap();
+            stor.commit().unwrap();
+        }
+
+        let provider = factory.provider().unwrap();
+
+        // Single-block readers route to the static files.
+        assert_eq!(provider.account_block_changeset(1).unwrap().len(), 1);
+        assert_eq!(provider.storage_changeset(1).unwrap().len(), 1);
+        assert!(provider.storage_changeset(2).unwrap().is_empty());
+
+        // Range readers (used by hashing/history unwinds) route too.
+        assert_eq!(provider.changed_accounts_with_range(1..=2).unwrap(), [addr].into());
+        assert_eq!(
+            provider.account_changesets_range(1..=2).unwrap().len(),
+            2,
+            "both blocks' account changesets should come from the static files"
+        );
+
+        // A legacy-layout provider over the same (empty) database tables sees nothing, proving
+        // the reads above really came from the static files.
+        let legacy = create_test_provider_factory();
+        let legacy_provider = legacy.provider().unwrap();
+        assert!(legacy_provider.account_block_changeset(1).unwrap().is_empty());
+    }
+
+    #[test]
     fn test_receipts_by_block_range_empty_range() {
         let factory = create_test_provider_factory();
         let provider = factory.provider().unwrap();

@@ -370,3 +370,65 @@ panic);一致性检查算出 unwind target==0 时直接 panic。
 > trie 对比,其中「磁盘模型/写路径」维度与本文 §9 互补)、
 > [`../merge-v2.3.0/STORAGE-RESOLUTION-TODO.md`](../merge-v2.3.0/STORAGE-RESOLUTION-TODO.md)
 > (Phase 2 债的执行路径)。
+
+---
+
+## 附录:changesets → static file 落地实录(gravity 侧,2026-07-10)
+
+§10 借鉴清单第 2 项(changesets → static file)已按「布局版本门禁 → SF
+变长段引擎 → 双轨路由 → 持久化/恢复集成 → 迁移命令」分阶段落地。核心
+设计:**存量节点走旧逻辑、新节点走新逻辑、可显式迁移**,由持久化的布局
+标记裁决,而非编译期开关。
+
+### 落地范围(已完成)
+
+- **Phase A — 布局版本门禁**:`Metadata` 表 + `GravityStorageSettings`
+  (单 flag `changesets_in_static_files`,JSON 序列化容忍 schema 演进);
+  `init_genesis` 只对全新数据目录写入标记,已初始化的库永远沿用库内
+  标记,CLI/代码不得覆盖;`ProviderFactory` 启动时从 `Metadata` 表加载
+  (缺失=legacy)并经 `StorageSettingsCache` 与所有 `DatabaseProvider`
+  共享内存缓存,热路径零 DB 访问。
+- **Phase B — SF 变长段引擎**:移植上游 `.csoff` 偏移边车全生命周期
+  (每块 offset、header 提交前先 flush+sync 边车保证崩溃一致、header/
+  NippyJar 行数/边车三方 heal)、两个 change-based 段的批量/流式 append
+  (writer 内按 address(+key) 排序)、按块截断的 prune(边车随之对齐、
+  跨文件回退删/重建边车);读侧 `LoadedJar` 缓存受 header 长度封顶的
+  `ChangesetOffsetReader`,jar provider O(1) 定位每块行区间。行编码与
+  上游逐字节兼容(`AccountBeforeTx`/`StorageBeforeTx`)。
+- **Phase C — 双轨路由**:`write_state_reverts` 在新布局下把逐块
+  changeset 追加到 SF 段;所有 changeset 消费者(单块读、range 走查、
+  hashing/history unwind、`changed_accounts/storages_with_range`、
+  `unwind_trie_state_range`、historical state provider 的 `InChangeset`
+  查找、take/remove unwind)按标记选择数据源;`NestedStateRoot` 新增
+  `read_hashed_state_from_changesets` 接受调用方传入的 changeset(因为
+  原实现走 DB 表,SF 布局下为空)。
+- **Phase D — 持久化定序 + 恢复**:SF 段的提交沿用既有的「static file
+  先于 database 提交」顺序(`persistence.rs`),崩溃后由
+  `check_consistency_pipe_execution` 的 changeset 分支按 `Execution`
+  checkpoint 截断多写的块;`StorageRecoveryHelper` 的 hashing/merkle
+  恢复经 Phase C 的路由自动从正确数据源读取。往返 + 截断由
+  `changeset_segments_roundtrip`(SF 层)与
+  `changeset_routing_reads_from_static_files_under_new_layout`
+  (provider 层)锁定。
+
+**默认行为不变**:`GravityStorageSettings::current()` 仍等于
+`legacy()`,所有现存节点与新节点默认走数据库 changeset 路径;新布局
+只有在迁移命令(Phase E)显式启用后才生效。
+
+### 已知边界(登记,非本轮交付)
+
+1. **eth-mode 全量 sync 的 hashing/index stages 未适配**:
+   `AccountHashing`/`StorageHashing` stage 的 `execute` 直接用
+   cursor 走 DB changeset 表(`hashing_account.rs:231`、
+   `hashing_storage.rs:175`),SF 布局下这些表为空。这些 stage **只在
+   `--gravity.disable-pipe-execution`(eth-mode)全量 sync 时运行**;
+   gravity 生产是 pipe 模式,不经过。因此 SF 布局的目标场景是 **pipe
+   生产节点**,eth-mode 全量 sync 下启用 SF 布局属未支持组合。迁移
+   命令(Phase E)应 gate 到 pipe 模式或在 eth-mode 下拒绝启用。
+2. **history expiry(前向删旧块)未支持**:SF 段是 append-only + 尾部
+   截断,`prune_account/storage_changesets(last_block)` 截断的是
+   `last_block` 之后的块(服务 unwind/reorg),不能删最旧的块。上游用
+   `min_block_range` + 整文件删除实现 expiry(SF 引擎 Phase 2 能力),
+   本轮未移植。SF 布局下 changeset 历史数据永久保留;需要 expiry 时
+   再评估整段删除。legacy 布局的 DB changeset prune 不受影响(SF 布局
+   下 DB changeset 表为空,`prune_table_with_range` 对空表 no-op)。
