@@ -55,9 +55,9 @@ use reth_prune_types::{PruneCheckpoint, PruneMode, PruneModes, PruneSegment, MIN
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
-    BlockBodyIndicesProvider, BlockBodyReader, MetadataProvider, MetadataWriter,
-    NodePrimitivesProvider, StateProvider, StorageChangeSetReader, StorageSettingsCache,
-    TryIntoHistoricalStateProvider,
+    BlockBodyIndicesProvider, BlockBodyReader, ChangesetRangeReader, MetadataProvider,
+    MetadataWriter, NodePrimitivesProvider, StateProvider, StorageChangeSetReader,
+    StorageSettingsCache, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
@@ -330,7 +330,15 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
         // Use gravity-reth's NestedStateRoot algorithm for state root calculation,
         // matching the approach used in MerkleStage::unwind.
         let nested_state_root = NestedStateRoot::new(&self.tx, None);
-        let hashed_state = nested_state_root.read_hashed_state(Some(range.clone()))?;
+        let hashed_state = if self.cached_storage_settings().changesets_in_static_files {
+            // `changed_accounts`/`changed_storages` above already hold this range's changesets.
+            nested_state_root.read_hashed_state_from_changesets(
+                changed_accounts.iter().cloned(),
+                changed_storages.iter().copied(),
+            )?
+        } else {
+            nested_state_root.read_hashed_state(Some(range.clone()))?
+        };
         let (new_state_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
 
         let parent_number = range.start().saturating_sub(1);
@@ -962,6 +970,22 @@ impl<TX: DbTx, N: NodeTypes> StorageChangeSetReader for DatabaseProvider<TX, N> 
             .walk_range(storage_range)?
             .map(|result| -> ProviderResult<_> { Ok(result?) })
             .collect()
+    }
+}
+
+impl<TX: DbTx, N: NodeTypes> ChangesetRangeReader for DatabaseProvider<TX, N> {
+    fn account_changesets_range(
+        &self,
+        range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<(BlockNumber, AccountBeforeTx)>> {
+        self.account_changesets_by_block_range(range)
+    }
+
+    fn storage_changesets_range(
+        &self,
+        range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<(BlockNumberAddress, StorageEntry)>> {
+        self.storage_changesets_by_block_range(range)
     }
 }
 

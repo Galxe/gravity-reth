@@ -49,7 +49,10 @@ pub use reth_chain_state::{
 };
 
 // reexport traits to avoid breaking changes
-pub use reth_storage_api::{HistoryWriter, MetadataProvider, MetadataWriter, StatsReader};
+pub use reth_storage_api::{
+    ChangesetRangeReader, HistoryWriter, MetadataProvider, MetadataWriter, StatsReader,
+    StorageSettingsCache,
+};
 
 /// Changeset walkers over static files.
 pub mod changeset_walker;

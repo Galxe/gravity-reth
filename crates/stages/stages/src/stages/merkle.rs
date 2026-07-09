@@ -9,8 +9,8 @@ use reth_db_api::{
 };
 use reth_primitives_traits::{GotExpected, SealedHeader};
 use reth_provider::{
-    DBProvider, HeaderProvider, ProviderError, StageCheckpointReader, StageCheckpointWriter,
-    StatsReader, TrieWriter, TrieWriterV2,
+    ChangesetRangeReader, DBProvider, HeaderProvider, ProviderError, StageCheckpointReader,
+    StageCheckpointWriter, StatsReader, StorageSettingsCache, TrieWriter, TrieWriterV2,
 };
 use reth_stages_api::{
     BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
@@ -161,7 +161,9 @@ where
         + StatsReader
         + HeaderProvider
         + StageCheckpointReader
-        + StageCheckpointWriter,
+        + StageCheckpointWriter
+        + ChangesetRangeReader
+        + StorageSettingsCache,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {
@@ -300,8 +302,17 @@ where
                 // Use optimized nested hash algorithm for state root calculation
                 // Create a read-only transaction for parallel trie calculation
                 let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
-                // Read the hashed state from database for the specified range
-                let hashed_state = nested_state_root.read_hashed_state(Some(chunk_range))?;
+                // Read the hashed state for the specified range, fetching changesets from
+                // wherever the storage layout keeps them.
+                let hashed_state = if provider.cached_storage_settings().changesets_in_static_files
+                {
+                    nested_state_root.read_hashed_state_from_changesets(
+                        provider.account_changesets_range(chunk_range.clone())?,
+                        provider.storage_changesets_range(chunk_range.clone())?,
+                    )?
+                } else {
+                    nested_state_root.read_hashed_state(Some(chunk_range))?
+                };
                 let (root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
                 provider.write_trie_updatesv2(&trie_updates_v2)?;
                 provider.tx_ref().commit_view()?;
@@ -373,7 +384,14 @@ where
         } else {
             // Use optimized nested hash algorithm for state root calculation
             let nested_state_root = NestedStateRoot::new(provider.tx_ref(), None);
-            let hashed_state = nested_state_root.read_hashed_state(Some(range))?;
+            let hashed_state = if provider.cached_storage_settings().changesets_in_static_files {
+                nested_state_root.read_hashed_state_from_changesets(
+                    provider.account_changesets_range(range.clone())?,
+                    provider.storage_changesets_range(range.clone())?,
+                )?
+            } else {
+                nested_state_root.read_hashed_state(Some(range))?
+            };
             let (block_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
 
             // Validate the calculated state root
