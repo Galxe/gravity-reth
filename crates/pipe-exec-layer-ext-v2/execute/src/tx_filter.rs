@@ -280,6 +280,50 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         let total_spent = gas_spent.saturating_add(tx.value());
         account.balance -= total_spent;
         account.nonce += 1;
+        // EIP-7702 self-authorization nonce side-effect. revm bumps the caller's nonce once
+        // above (mirroring `validate_against_state_and_deduct_caller`), then bumps it AGAIN for
+        // every valid authorization whose authority is this same account, when it applies the
+        // delegation (`apply_auth_list` → `delegate()` → `bump_nonce`). A self-sponsored SetCode
+        // tx therefore advances the sender's nonce by 2, not 1. If the filter only counts +1, a
+        // following same-sender tx at `nonce+1` co-located in the block passes here but hits
+        // `NonceTooLow` in revm → executor panic at `lib.rs:1329` → persistent halt. Mirror
+        // revm's `apply_auth_list` acceptance EXACTLY (revm-handler `pre_execution.rs`).
+        // Closes gravity-audit#822 (self-authorization case).
+        //
+        // Scope: only `authority == sender` is handled here — a cross-account authorization
+        // bumps a *different* account's nonce, which this per-sender pass cannot observe. That
+        // variant requires a block-order simulation over a shared nonce map (tracked in #822).
+        if tx.is_eip7702() {
+            if let Some(auth_list) = tx.authorization_list() {
+                for auth in auth_list {
+                    // chain_id must be 0 (any chain) or the current chain.
+                    if !auth.chain_id().is_zero() && *auth.chain_id() != U256::from(cfg_chain_id) {
+                        continue;
+                    }
+                    // revm skips authorities whose nonce is u64::MAX.
+                    if auth.nonce() == u64::MAX {
+                        continue;
+                    }
+                    // Only a self-authorization advances THIS account's simulated nonce.
+                    let Ok(authority) = auth.recover_authority() else {
+                        continue;
+                    };
+                    if authority != *sender {
+                        continue;
+                    }
+                    // authority == sender: its code is empty-or-7702 (a sender with
+                    // non-delegation code was already dropped by the EIP-3607 gate, and a
+                    // delegation only ever writes the 0xef0100 designator), so revm's code
+                    // check always passes here. Its current simulated nonce is `account.nonce`
+                    // (post caller-bump). revm applies the delegation and bumps the nonce iff
+                    // `auth.nonce == authority.nonce`; multiple self-auths chain off the
+                    // evolving nonce, exactly as this loop does.
+                    if auth.nonce() == account.nonce {
+                        account.nonce += 1;
+                    }
+                }
+            }
+        }
         true
     };
 
