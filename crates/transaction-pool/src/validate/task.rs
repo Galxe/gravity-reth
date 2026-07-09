@@ -281,15 +281,7 @@ where
                 self.to_validation_task.send(fut).await
             };
             if res.is_err() {
-                return hashes
-                    .into_iter()
-                    .map(|hash| {
-                        TransactionValidationOutcome::Error(
-                            hash,
-                            Box::new(TransactionValidatorError::ValidationServiceUnreachable),
-                        )
-                    })
-                    .collect();
+                return validation_service_error_outcomes(hashes)
             }
         }
         match rx.await {
@@ -551,5 +543,60 @@ mod tests {
             .expect("configured validation workers must process jobs");
             assert!(matches!(outcome, TransactionValidationOutcome::Valid { .. }));
         }
+    }
+
+    #[derive(Debug)]
+    struct SameOriginBatchValidator;
+
+    impl TransactionValidator for SameOriginBatchValidator {
+        type Transaction = MockTransaction;
+        type Block = reth_ethereum_primitives::Block;
+
+        async fn validate_transaction(
+            &self,
+            _origin: TransactionOrigin,
+            _transaction: Self::Transaction,
+        ) -> TransactionValidationOutcome<Self::Transaction> {
+            panic!("same-origin batches must use the batch validator")
+        }
+
+        async fn validate_transactions_with_origin(
+            &self,
+            origin: TransactionOrigin,
+            transactions: impl IntoIterator<Item = Self::Transaction, IntoIter: Send> + Send,
+        ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
+            transactions
+                .into_iter()
+                .map(|transaction| TransactionValidationOutcome::Valid {
+                    balance: U256::ZERO,
+                    state_nonce: 0,
+                    bytecode_hash: None,
+                    transaction: ValidTransaction::Valid(transaction),
+                    propagate: matches!(origin, TransactionOrigin::Local),
+                    authorities: None,
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_forwards_same_origin_batches() {
+        let (executor, task) = TransactionValidationTaskExecutor::new(SameOriginBatchValidator);
+        tokio::spawn(task.run());
+
+        let transactions = vec![MockTransaction::legacy(), MockTransaction::eip1559()];
+        let expected_hashes = transactions.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
+        let outcomes = executor
+            .validate_transactions_with_origin(TransactionOrigin::Local, transactions)
+            .await;
+
+        assert_eq!(outcomes.len(), expected_hashes.len());
+        assert!(outcomes.into_iter().zip(expected_hashes).all(|(outcome, expected_hash)| {
+            matches!(
+                outcome,
+                TransactionValidationOutcome::Valid { transaction, propagate: true, .. }
+                    if transaction.hash() == &expected_hash
+            )
+        }));
     }
 }
