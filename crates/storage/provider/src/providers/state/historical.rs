@@ -14,7 +14,8 @@ use reth_db_api::{
 };
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
-    BlockNumReader, BytecodeReader, DBProvider, StateProofProvider, StorageRootProvider,
+    BlockNumReader, BytecodeReader, ChangeSetReader, DBProvider, StateProofProvider,
+    StorageChangeSetReader, StorageRootProvider, StorageSettingsCache,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
@@ -240,22 +241,41 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'_, Provi
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader> AccountReader
-    for HistoricalStateProviderRef<'_, Provider>
+impl<
+        Provider: DBProvider
+            + BlockNumReader
+            + StorageSettingsCache
+            + ChangeSetReader
+            + StorageChangeSetReader,
+    > AccountReader for HistoricalStateProviderRef<'_, Provider>
 {
     /// Get basic account information.
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
         match self.account_history_lookup(*address)? {
             HistoryInfo::NotYetWritten => Ok(None),
-            HistoryInfo::InChangeset(changeset_block_number) => Ok(self
-                .tx()
-                .cursor_dup_read::<tables::AccountChangeSets>()?
-                .get_by_key_subkey(changeset_block_number, *address)?
-                .ok_or(ProviderError::AccountChangesetNotFound {
-                    block_number: changeset_block_number,
-                    address: *address,
-                })?
-                .info),
+            HistoryInfo::InChangeset(changeset_block_number) => {
+                if self.provider.cached_storage_settings().changesets_in_static_files {
+                    return Ok(self
+                        .provider
+                        .account_block_changeset(changeset_block_number)?
+                        .into_iter()
+                        .find(|change| change.address == *address)
+                        .ok_or(ProviderError::AccountChangesetNotFound {
+                            block_number: changeset_block_number,
+                            address: *address,
+                        })?
+                        .info)
+                }
+                Ok(self
+                    .tx()
+                    .cursor_dup_read::<tables::AccountChangeSets>()?
+                    .get_by_key_subkey(changeset_block_number, *address)?
+                    .ok_or(ProviderError::AccountChangesetNotFound {
+                        block_number: changeset_block_number,
+                        address: *address,
+                    })?
+                    .info)
+            }
             HistoryInfo::InPlainState | HistoryInfo::MaybeInPlainState => {
                 Ok(self.tx().get_by_encoded_key::<tables::PlainAccountState>(address)?)
             }
@@ -389,8 +409,14 @@ impl<Provider: Sync> HashedPostStateProvider for HistoricalStateProviderRef<'_, 
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader + BlockHashReader> StateProvider
-    for HistoricalStateProviderRef<'_, Provider>
+impl<
+        Provider: DBProvider
+            + BlockNumReader
+            + BlockHashReader
+            + StorageSettingsCache
+            + ChangeSetReader
+            + StorageChangeSetReader,
+    > StateProvider for HistoricalStateProviderRef<'_, Provider>
 {
     /// Get storage.
     fn storage(
@@ -400,17 +426,36 @@ impl<Provider: DBProvider + BlockNumReader + BlockHashReader> StateProvider
     ) -> ProviderResult<Option<StorageValue>> {
         match self.storage_history_lookup(address, storage_key)? {
             HistoryInfo::NotYetWritten => Ok(None),
-            HistoryInfo::InChangeset(changeset_block_number) => Ok(Some(
-                self.tx()
-                    .cursor_dup_read::<tables::StorageChangeSets>()?
-                    .get_by_key_subkey((changeset_block_number, address).into(), storage_key)?
-                    .ok_or_else(|| ProviderError::StorageChangesetNotFound {
-                        block_number: changeset_block_number,
-                        address,
-                        storage_key: Box::new(storage_key),
-                    })?
-                    .value,
-            )),
+            HistoryInfo::InChangeset(changeset_block_number) => {
+                if self.provider.cached_storage_settings().changesets_in_static_files {
+                    return Ok(Some(
+                        self.provider
+                            .storage_changeset(changeset_block_number)?
+                            .into_iter()
+                            .find(|(bna, entry)| {
+                                bna.address() == address && entry.key == storage_key
+                            })
+                            .ok_or_else(|| ProviderError::StorageChangesetNotFound {
+                                block_number: changeset_block_number,
+                                address,
+                                storage_key: Box::new(storage_key),
+                            })?
+                            .1
+                            .value,
+                    ))
+                }
+                Ok(Some(
+                    self.tx()
+                        .cursor_dup_read::<tables::StorageChangeSets>()?
+                        .get_by_key_subkey((changeset_block_number, address).into(), storage_key)?
+                        .ok_or_else(|| ProviderError::StorageChangesetNotFound {
+                            block_number: changeset_block_number,
+                            address,
+                            storage_key: Box::new(storage_key),
+                        })?
+                        .value,
+                ))
+            }
             HistoryInfo::InPlainState | HistoryInfo::MaybeInPlainState => Ok(self
                 .tx()
                 .cursor_dup_read::<tables::PlainStorageState>()?
@@ -478,7 +523,7 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
 }
 
 // Delegates all provider impls to [HistoricalStateProviderRef]
-delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader ]);
+delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader + StorageSettingsCache + ChangeSetReader + StorageChangeSetReader ]);
 
 /// Lowest blocks at which different parts of the state are available.
 /// They may be [Some] if pruning is enabled.

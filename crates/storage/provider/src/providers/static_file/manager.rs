@@ -789,17 +789,16 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         };
 
         for segment in StaticFileSegment::iter().filter(|s| {
-            // gravity maintains only Headers/Transactions/Receipts static files; storage-v2
-            // segments (senders/changesets) live in RocksDB and never have static files here.
-            matches!(
-                s,
-                StaticFileSegment::Headers |
-                    StaticFileSegment::Transactions |
-                    StaticFileSegment::Receipts
-            )
+            // gravity keeps transaction senders in the database and never has this segment;
+            // changeset segments only exist under the changesets-in-static-files layout.
+            !matches!(s, StaticFileSegment::TransactionSenders)
         }) {
             if has_receipt_pruning && segment.is_receipts() {
                 // Pruned nodes (including full node) do not store receipts as static files.
+                continue
+            }
+            if segment.is_change_based() && self.get_highest_static_file_block(segment).is_none() {
+                // Legacy layout: changesets live in the database.
                 continue
             }
 
@@ -1069,15 +1068,12 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         info!(target: "reth::cli", "Verifying storage consistency (pipe execution mode).");
 
         // Phase 1: Heal NippyJar file-level inconsistencies.
+        //
+        // Changeset segments only exist under the changesets-in-static-files layout; the
+        // per-segment existence guard below skips them on legacy datadirs.
         for segment in StaticFileSegment::iter().filter(|s| {
-            // gravity maintains only Headers/Transactions/Receipts static files; storage-v2
-            // segments (senders/changesets) live in RocksDB and never have static files here.
-            matches!(
-                s,
-                StaticFileSegment::Headers |
-                    StaticFileSegment::Transactions |
-                    StaticFileSegment::Receipts
-            )
+            // gravity keeps transaction senders in the database and never has this segment
+            !matches!(s, StaticFileSegment::TransactionSenders)
         }) {
             if has_receipt_pruning && segment.is_receipts() {
                 continue;
@@ -1092,14 +1088,8 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             provider.get_stage_checkpoint(StageId::Execution)?.unwrap_or_default().block_number;
 
         for segment in StaticFileSegment::iter().filter(|s| {
-            // gravity maintains only Headers/Transactions/Receipts static files; storage-v2
-            // segments (senders/changesets) live in RocksDB and never have static files here.
-            matches!(
-                s,
-                StaticFileSegment::Headers |
-                    StaticFileSegment::Transactions |
-                    StaticFileSegment::Receipts
-            )
+            // gravity keeps transaction senders in the database and never has this segment
+            !matches!(s, StaticFileSegment::TransactionSenders)
         }) {
             if has_receipt_pruning && segment.is_receipts() {
                 continue;
@@ -1143,6 +1133,16 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         let mut writer = self.latest_writer(segment)?;
         if segment.is_headers() {
             writer.prune_headers(highest_static_file_block - target_block)?;
+        } else if segment.is_change_based() {
+            match segment {
+                StaticFileSegment::AccountChangeSets => {
+                    writer.prune_account_changesets(target_block)?
+                }
+                StaticFileSegment::StorageChangeSets => {
+                    writer.prune_storage_changesets(target_block)?
+                }
+                _ => unreachable!("is_change_based covers exactly these segments"),
+            }
         } else if let Some(block) = provider.block_body_indices(target_block)? {
             let highest_tx = self.get_highest_static_file_tx(segment).unwrap_or_default();
             let to_delete = highest_tx - block.last_tx_num();
