@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn write_prune_checkpoints_sets_all_segments() {
         let dir = tempfile::tempdir().unwrap();
-        let db = reth_db::init_db(dir.path(), reth_db::mdbx::DatabaseArguments::default()).unwrap();
+        let db = reth_db::init_db(dir.path(), reth_db::DatabaseArguments::default()).unwrap();
 
         let mut selections = BTreeMap::new();
         selections.insert(SnapshotComponentType::State, ComponentSelection::All);
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn write_prune_checkpoints_archive_no_checkpoints() {
         let dir = tempfile::tempdir().unwrap();
-        let db = reth_db::init_db(dir.path(), reth_db::mdbx::DatabaseArguments::default()).unwrap();
+        let db = reth_db::init_db(dir.path(), reth_db::DatabaseArguments::default()).unwrap();
 
         // Archive node — no pruning configured, so no checkpoints written
         let mut selections = BTreeMap::new();
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn reset_index_stage_checkpoints_clears_only_rocksdb_index_stages() {
         let dir = tempfile::tempdir().unwrap();
-        let db = reth_db::init_db(dir.path(), reth_db::mdbx::DatabaseArguments::default()).unwrap();
+        let db = reth_db::init_db(dir.path(), reth_db::DatabaseArguments::default()).unwrap();
 
         // Simulate a fully synced node: set stage checkpoints at tip
         let tip_checkpoint = StageCheckpoint::new(24_500_000);
