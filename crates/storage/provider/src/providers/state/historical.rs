@@ -568,7 +568,10 @@ mod tests {
         BlockNumberList,
     };
     use reth_primitives_traits::{Account, StorageEntry};
-    use reth_storage_api::{BlockHashReader, BlockNumReader, DBProvider, DatabaseProviderFactory};
+    use reth_storage_api::{
+        BlockHashReader, BlockNumReader, ChangeSetReader, DBProvider, DatabaseProviderFactory,
+        StorageChangeSetReader, StorageSettingsCache,
+    };
     use reth_storage_errors::provider::ProviderError;
 
     const ADDRESS: Address = address!("0x0000000000000000000000000000000000000001");
@@ -578,7 +581,14 @@ mod tests {
 
     const fn assert_state_provider<T: StateProvider>() {}
     #[expect(dead_code)]
-    const fn assert_historical_state_provider<T: DBProvider + BlockNumReader + BlockHashReader>() {
+    const fn assert_historical_state_provider<
+        T: DBProvider
+            + BlockNumReader
+            + BlockHashReader
+            + StorageSettingsCache
+            + ChangeSetReader
+            + StorageChangeSetReader,
+    >() {
         assert_state_provider::<HistoricalStateProvider<T>>();
     }
 
