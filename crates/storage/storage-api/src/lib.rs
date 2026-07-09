@@ -99,5 +99,10 @@ pub use state_writer::*;
 mod header_sync_gap;
 pub use header_sync_gap::HeaderSyncGapProvider;
 
+#[cfg(feature = "db-api")]
+mod metadata;
+#[cfg(feature = "db-api")]
+pub use metadata::*;
+
 mod full;
 pub use full::*;

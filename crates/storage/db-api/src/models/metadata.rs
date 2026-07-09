@@ -1,93 +1,81 @@
-//! Storage metadata models.
+//! Node-local storage layout metadata.
 
-use reth_codecs::{add_arbitrary_tests, Compact};
 use serde::{Deserialize, Serialize};
 
-/// Storage configuration settings for this node.
+/// Persisted storage layout settings for this node.
 ///
-/// Controls whether this node uses v2 storage layout (static files + `RocksDB` routing)
-/// or v1/legacy layout (everything in MDBX).
+/// The layout is decided once per datadir: `init_genesis` persists the settings for a fresh
+/// database, and existing databases always keep the settings stored in their [`Metadata`]
+/// table — a missing entry means the legacy layout that predates this struct. CLI flags must
+/// never override persisted settings, so a binary upgrade can not silently reinterpret data
+/// written under another layout.
 ///
-/// These should be set during `init_genesis` or `init_db` depending on whether we want dictate
-/// behaviour of new or old nodes respectively.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Compact, Serialize, Deserialize)]
-#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
-#[add_arbitrary_tests(compact)]
-pub struct StorageSettings {
-    /// Whether this node uses v2 storage layout.
-    ///
-    /// When `true`, enables all v2 storage features:
-    /// - Receipts and transaction senders in static files
-    /// - History indices in `RocksDB` (accounts, storages, transaction hashes)
-    /// - Account and storage changesets in static files
-    /// - Hashed state tables as canonical state representation
-    ///
-    /// When `false`, uses v1/legacy layout (everything in MDBX).
-    pub storage_v2: bool,
+/// Serialized as JSON so that unknown fields from newer binaries are tolerated and missing
+/// fields from older entries fall back to their legacy default.
+///
+/// [`Metadata`]: crate::tables::Metadata
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GravityStorageSettings {
+    /// Whether account/storage changesets live in static files instead of the state `RocksDB`.
+    #[serde(default)]
+    pub changesets_in_static_files: bool,
 }
 
-impl StorageSettings {
-    /// Returns the default base `StorageSettings`.
-    pub const fn base() -> Self {
-        Self::v2()
+impl GravityStorageSettings {
+    /// Layout of databases created before settings were persisted.
+    pub const fn legacy() -> Self {
+        Self { changesets_in_static_files: false }
     }
 
-    /// Creates `StorageSettings` for v2 nodes with all storage features enabled:
-    /// - Receipts and transaction senders in static files
-    /// - History indices in `RocksDB` (storages, accounts, transaction hashes)
-    /// - Account and storage changesets in static files
-    /// - Hashed state as canonical state representation
+    /// Layout written for freshly initialized databases.
     ///
-    /// Use this when the `--storage.v2` CLI flag is set.
-    pub const fn v2() -> Self {
-        Self { storage_v2: true }
+    /// Still the legacy layout: flips `changesets_in_static_files` once the static-file
+    /// changeset write path lands.
+    pub const fn current() -> Self {
+        Self::legacy()
     }
 
-    /// Creates `StorageSettings` for v1/legacy nodes.
+    /// Encodes the settings for storage in the metadata table.
+    pub fn to_metadata_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("struct of plain fields serializes infallibly")
+    }
+
+    /// Decodes settings from the metadata table.
     ///
-    /// This keeps all data in MDBX, matching the original storage layout.
-    pub const fn v1() -> Self {
-        Self { storage_v2: false }
+    /// Returns `None` when the bytes can't be deserialized (e.g. the schema changed) so that
+    /// callers can fall back to [`Self::legacy`] and tooling like `db` commands keeps working
+    /// across metadata schema changes.
+    pub fn from_metadata_bytes(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_roundtrip() {
+        let settings = GravityStorageSettings { changesets_in_static_files: true };
+        let bytes = settings.to_metadata_bytes();
+        assert_eq!(GravityStorageSettings::from_metadata_bytes(&bytes), Some(settings));
     }
 
-    /// Returns `true` if this node uses v2 storage layout.
-    pub const fn is_v2(&self) -> bool {
-        self.storage_v2
-    }
-
-    /// Whether receipts are stored in static files.
-    pub const fn receipts_in_static_files(&self) -> bool {
-        self.storage_v2
-    }
-
-    /// Whether transaction senders are stored in static files.
-    pub const fn transaction_senders_in_static_files(&self) -> bool {
-        self.storage_v2
-    }
-
-    /// Whether storages history is stored in `RocksDB`.
-    pub const fn storages_history_in_rocksdb(&self) -> bool {
-        self.storage_v2
-    }
-
-    /// Whether transaction hash numbers are stored in `RocksDB`.
-    pub const fn transaction_hash_numbers_in_rocksdb(&self) -> bool {
-        self.storage_v2
-    }
-
-    /// Whether account history is stored in `RocksDB`.
-    pub const fn account_history_in_rocksdb(&self) -> bool {
-        self.storage_v2
-    }
-
-    /// Whether to use hashed state tables (`HashedAccounts`/`HashedStorages`) as the canonical
-    /// state representation instead of plain state tables. Implied by v2 storage layout.
-    pub const fn use_hashed_state(&self) -> bool {
-        self.storage_v2
-    }
-
-    /// Returns `true` if any tables are configured to be stored in `RocksDB`.
-    pub const fn any_in_rocksdb(&self) -> bool {
-        self.storage_v2
+    #[test]
+    fn tolerates_schema_evolution() {
+        // Entry written before the field existed: falls back to the field's default.
+        assert_eq!(
+            GravityStorageSettings::from_metadata_bytes(b"{}"),
+            Some(GravityStorageSettings::legacy())
+        );
+        // Entry written by a newer binary with extra fields: unknown fields are ignored.
+        assert_eq!(
+            GravityStorageSettings::from_metadata_bytes(
+                br#"{"changesets_in_static_files":true,"future_field":42}"#
+            ),
+            Some(GravityStorageSettings { changesets_in_static_files: true })
+        );
+        // Garbage decodes to `None` rather than an error.
+        assert_eq!(GravityStorageSettings::from_metadata_bytes(b"not json"), None);
     }
 }

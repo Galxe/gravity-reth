@@ -54,8 +54,8 @@ use reth_prune_types::{PruneCheckpoint, PruneMode, PruneModes, PruneSegment, MIN
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
-    BlockBodyIndicesProvider, BlockBodyReader, NodePrimitivesProvider, StateProvider,
-    StorageChangeSetReader, TryIntoHistoricalStateProvider,
+    BlockBodyIndicesProvider, BlockBodyReader, MetadataProvider, MetadataWriter,
+    NodePrimitivesProvider, StateProvider, StorageChangeSetReader, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
@@ -1715,6 +1715,18 @@ impl<TX: DbTxMut, N: NodeTypes> StageCheckpointWriter for DatabaseProvider<TX, N
         }
 
         Ok(())
+    }
+}
+
+impl<TX: DbTx, N: NodeTypes> MetadataProvider for DatabaseProvider<TX, N> {
+    fn get_metadata(&self, key: &str) -> ProviderResult<Option<Vec<u8>>> {
+        Ok(self.tx.get::<tables::Metadata>(key.to_string())?)
+    }
+}
+
+impl<TX: DbTxMut, N: NodeTypes> MetadataWriter for DatabaseProvider<TX, N> {
+    fn write_metadata(&self, key: &str, value: Vec<u8>) -> ProviderResult<()> {
+        Ok(self.tx.put::<tables::Metadata>(key.to_string(), value)?)
     }
 }
 

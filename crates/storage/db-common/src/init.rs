@@ -10,7 +10,7 @@ use alloy_primitives::{
 use reth_chainspec::EthChainSpec;
 use reth_codecs::Compact;
 use reth_config::config::EtlConfig;
-use reth_db_api::{tables, transaction::DbTxMut, DatabaseError};
+use reth_db_api::{models::GravityStorageSettings, tables, transaction::DbTxMut, DatabaseError};
 use reth_etl::Collector;
 use reth_execution_errors::StateRootError;
 use reth_primitives_traits::{Account, Bytecode, GotExpected, NodePrimitives, StorageEntry};
@@ -18,8 +18,9 @@ use reth_provider::{
     errors::provider::ProviderResult, providers::StaticFileWriter, writer::UnifiedStorageWriter,
     BlockHashReader, BlockNumReader, BundleStateInit, ChainSpecProvider, DBProvider,
     DatabaseProviderFactory, ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter,
-    OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader, StageCheckpointWriter,
-    StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter, TrieWriterV2,
+    MetadataWriter, OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader,
+    StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter,
+    TrieWriterV2,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
@@ -103,6 +104,7 @@ where
         + StateWriter
         + TrieWriterV2
         + TrieWriter
+        + MetadataWriter
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
 {
@@ -145,6 +147,11 @@ where
 
     // use transaction to insert genesis header
     let provider_rw = factory.database_provider_rw()?;
+
+    // Persist the storage layout before any data is written. Only a fresh datadir reaches
+    // this point: existing databases keep the settings already stored in their metadata.
+    provider_rw.write_storage_settings(GravityStorageSettings::current())?;
+
     insert_world_trie(&provider_rw, alloc.iter())?;
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
     insert_genesis_history(&provider_rw, alloc.iter())?;
@@ -752,6 +759,35 @@ mod tests {
 
         // actual, expected
         assert_eq!(genesis_hash, SEPOLIA_GENESIS_HASH);
+    }
+
+    #[test]
+    fn init_genesis_persists_storage_settings() {
+        use reth_provider::MetadataProvider;
+
+        let factory = create_test_provider_factory_with_chain_spec(MAINNET.clone());
+
+        // A fresh database has no persisted settings: readers fall back to the legacy layout.
+        assert_eq!(factory.database_provider_ro().unwrap().storage_settings().unwrap(), None);
+
+        init_genesis(&factory).unwrap();
+        assert_eq!(
+            factory.database_provider_ro().unwrap().storage_settings().unwrap(),
+            Some(GravityStorageSettings::current())
+        );
+
+        // Re-running against an initialized database must keep the persisted settings.
+        let marker = GravityStorageSettings { changesets_in_static_files: true };
+        {
+            let provider_rw = factory.database_provider_rw().unwrap();
+            provider_rw.write_storage_settings(marker).unwrap();
+            provider_rw.commit().unwrap();
+        }
+        init_genesis(&factory).unwrap();
+        assert_eq!(
+            factory.database_provider_ro().unwrap().storage_settings().unwrap(),
+            Some(marker)
+        );
     }
 
     #[test]

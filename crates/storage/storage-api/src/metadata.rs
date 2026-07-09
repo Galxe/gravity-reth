@@ -1,65 +1,44 @@
-//! Metadata provider trait for reading and writing node metadata.
+//! Metadata provider traits for node-local storage layout settings.
 
 use alloc::vec::Vec;
-use reth_db_api::models::StorageSettings;
-use reth_storage_errors::provider::{ProviderError, ProviderResult};
+use reth_db_api::models::GravityStorageSettings;
+use reth_storage_errors::provider::ProviderResult;
 
 /// Metadata keys.
 pub mod keys {
-    /// Storage configuration settings for this node.
-    pub const STORAGE_SETTINGS: &str = "storage_settings";
+    /// Persisted storage layout settings for this node.
+    pub const GRAVITY_STORAGE_SETTINGS: &str = "gravity_storage_settings";
 }
 
 /// Client trait for reading node metadata from the database.
 #[auto_impl::auto_impl(&, Arc)]
 pub trait MetadataProvider: Send {
-    /// Get a metadata value by key
+    /// Get a metadata value by key.
     fn get_metadata(&self, key: &str) -> ProviderResult<Option<Vec<u8>>>;
 
-    /// Get storage settings for this node.
+    /// Get the persisted storage layout settings.
     ///
-    /// If the stored metadata can't be deserialized (e.g. the format changed),
-    /// this returns `None` instead of an error so commands like `db clear` can
-    /// still operate without requiring a compatible metadata schema.
-    fn storage_settings(&self) -> ProviderResult<Option<StorageSettings>> {
+    /// Returns `None` when the entry is missing or can't be deserialized — callers treat both
+    /// as [`GravityStorageSettings::legacy`] so a database that predates the settings (or a
+    /// metadata schema change) keeps working without migration.
+    fn storage_settings(&self) -> ProviderResult<Option<GravityStorageSettings>> {
         Ok(self
-            .get_metadata(keys::STORAGE_SETTINGS)?
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok()))
+            .get_metadata(keys::GRAVITY_STORAGE_SETTINGS)?
+            .and_then(|bytes| GravityStorageSettings::from_metadata_bytes(&bytes)))
     }
 }
 
 /// Client trait for writing node metadata to the database.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait MetadataWriter: Send {
-    /// Write a metadata value
+    /// Write a metadata value by key.
     fn write_metadata(&self, key: &str, value: Vec<u8>) -> ProviderResult<()>;
 
-    /// Write storage settings for this node
+    /// Persist the storage layout settings.
     ///
-    /// Be sure to update provider factory cache with
-    /// [`StorageSettingsCache::set_storage_settings_cache`].
-    fn write_storage_settings(&self, settings: StorageSettings) -> ProviderResult<()> {
-        self.write_metadata(
-            keys::STORAGE_SETTINGS,
-            serde_json::to_vec(&settings).map_err(ProviderError::other)?,
-        )
+    /// Only `init_genesis` should call this for a fresh database: existing databases keep the
+    /// settings persisted in their metadata, and CLI flags must never override them.
+    fn write_storage_settings(&self, settings: GravityStorageSettings) -> ProviderResult<()> {
+        self.write_metadata(keys::GRAVITY_STORAGE_SETTINGS, settings.to_metadata_bytes())
     }
-}
-
-/// Trait for caching storage settings on a provider factory.
-pub trait StorageSettingsCache: Send {
-    /// Gets the cached storage settings.
-    fn cached_storage_settings(&self) -> StorageSettings;
-
-    /// Sets the storage settings of this `ProviderFactory`.
-    ///
-    /// IMPORTANT: It does not save settings in storage, that should be done by
-    /// [`MetadataWriter::write_storage_settings`]
-    fn set_storage_settings_cache(&self, settings: StorageSettings);
-}
-
-/// Trait for accessing the database directory path.
-#[cfg(feature = "std")]
-pub trait StoragePath: Send {
-    /// Returns the path to the database directory (e.g. `<datadir>/db`).
-    fn storage_path(&self) -> std::path::PathBuf;
 }

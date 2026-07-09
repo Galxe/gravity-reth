@@ -31,6 +31,7 @@ alloy-genesis.workspace = true
 modular-bitfield.workspace = true
 roaring.workspace = true
 serde = { workspace = true, default-features = false }
+serde_json.workspace = true
 # gravity: `mod scale;` is unconditional (crates/storage/db-api/src/scale.rs)
 parity-scale-codec = { workspace = true, features = ["bytes"] }
 
@@ -83,4 +84,5 @@ arbitrary = [
     "reth-stages-types/arbitrary",
     "alloy-consensus/arbitrary",
     "reth-ethereum-primitives/arbitrary",
+    "parity-scale-codec/arbitrary",
 ]
