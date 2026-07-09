@@ -1040,6 +1040,18 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         Provider: DBProvider + BlockReader + StageCheckpointReader,
     {
         if self.access.is_read_only() {
+            // Healing needs write access; still validate so a corrupted static file
+            // fails loudly here instead of surfacing later as truncated read data.
+            for segment in [
+                StaticFileSegment::Headers,
+                StaticFileSegment::Transactions,
+                StaticFileSegment::Receipts,
+            ] {
+                if has_receipt_pruning && segment.is_receipts() {
+                    continue;
+                }
+                self.check_segment_consistency(segment)?;
+            }
             return Ok(None);
         }
 
