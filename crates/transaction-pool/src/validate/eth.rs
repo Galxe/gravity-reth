@@ -31,7 +31,10 @@ use reth_primitives_traits::{
     transaction::error::InvalidTransactionError, Account, BlockTy, GotExpected, HeaderTy,
     SealedBlock,
 };
-use reth_storage_api::{AccountInfoReader, BlockReaderIdExt, BytecodeReader, StateProviderFactory};
+use reth_storage_api::{
+    errors::ProviderError, AccountInfoReader, BlockReaderIdExt, BytecodeReader, StateProviderBox,
+    StateProviderFactory,
+};
 use reth_tasks::Runtime;
 use revm::context_interface::Cfg;
 use revm_primitives::U256;
@@ -79,6 +82,8 @@ pub type StatefulValidationFn<T> = Arc<
 pub struct EthTransactionValidator<Client, T, Evm> {
     /// This type fetches account info from the db
     client: Client,
+    /// The chain ID transactions must use.
+    chain_id: u64,
     /// Blobstore used for fetching re-injected blob transactions.
     blob_store: Box<dyn BlobStore>,
     /// tracks activated forks relevant for transaction validation
@@ -164,11 +169,8 @@ impl<Client, Tx, Evm> EthTransactionValidator<Client, Tx, Evm> {
     }
 
     /// Returns the configured chain id
-    pub fn chain_id(&self) -> u64
-    where
-        Client: ChainSpecProvider,
-    {
-        self.client().chain_spec().chain().id()
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 
     /// Returns the configured client
@@ -371,7 +373,8 @@ where
         origin: TransactionOrigin,
         transaction: Tx,
     ) -> TransactionValidationOutcome<Tx> {
-        self.validate_one_with_provider(origin, transaction, &mut None)
+        let mut state: Option<StateProviderBox> = None;
+        self.validate_one_with_provider(origin, transaction, &mut state, || self.client.latest())
     }
 
     /// Validates a single transaction with the provided state provider.
@@ -386,26 +389,33 @@ where
         transaction: Tx,
         state: &mut Option<Box<dyn AccountInfoReader + Send>>,
     ) -> TransactionValidationOutcome<Tx> {
-        self.validate_one_with_provider(origin, transaction, state)
+        self.validate_one_with_provider(origin, transaction, state, || {
+            self.client.latest().map(|state| Box::new(state) as Box<dyn AccountInfoReader + Send>)
+        })
     }
 
     /// Validates a single transaction using an optional cached state provider.
     /// If no provider is passed, a new one will be created. This allows reusing
     /// the same provider across multiple txs.
-    fn validate_one_with_provider(
+    fn validate_one_with_provider<P, F>(
         &self,
         origin: TransactionOrigin,
         transaction: Tx,
-        maybe_state: &mut Option<Box<dyn AccountInfoReader + Send>>,
-    ) -> TransactionValidationOutcome<Tx> {
+        maybe_state: &mut Option<P>,
+        state_provider: F,
+    ) -> TransactionValidationOutcome<Tx>
+    where
+        P: AccountInfoReader,
+        F: FnOnce() -> Result<P, ProviderError>,
+    {
         match self.validate_stateless(origin, &transaction) {
             Ok(()) => {
                 // stateless checks passed, pass transaction down stateful validation pipeline
                 // If we don't have a state provider yet, fetch the latest state
                 if maybe_state.is_none() {
-                    match self.client.latest() {
+                    match state_provider() {
                         Ok(new_state) => {
-                            *maybe_state = Some(Box::new(new_state));
+                            *maybe_state = Some(new_state);
                         }
                         Err(err) => {
                             return TransactionValidationOutcome::Error(
@@ -416,7 +426,7 @@ where
                     }
                 }
 
-                let state = maybe_state.as_deref().expect("provider is set");
+                let state = maybe_state.as_ref().expect("provider is set");
 
                 self.validate_stateful(origin, transaction, state)
             }
@@ -859,10 +869,12 @@ where
         &self,
         transactions: impl IntoIterator<Item = (TransactionOrigin, Tx)>,
     ) -> Vec<TransactionValidationOutcome<Tx>> {
-        let mut provider = None;
+        let mut provider: Option<StateProviderBox> = None;
         transactions
             .into_iter()
-            .map(|(origin, tx)| self.validate_one_with_provider(origin, tx, &mut provider))
+            .map(|(origin, tx)| {
+                self.validate_one_with_provider(origin, tx, &mut provider, || self.client.latest())
+            })
             .collect()
     }
 
@@ -872,10 +884,12 @@ where
         origin: TransactionOrigin,
         transactions: impl IntoIterator<Item = Tx> + Send,
     ) -> Vec<TransactionValidationOutcome<Tx>> {
-        let mut provider = None;
+        let mut provider: Option<StateProviderBox> = None;
         transactions
             .into_iter()
-            .map(|tx| self.validate_one_with_provider(origin, tx, &mut provider))
+            .map(|tx| {
+                self.validate_one_with_provider(origin, tx, &mut provider, || self.client.latest())
+            })
             .collect()
     }
 
@@ -998,6 +1012,8 @@ where
 #[derive(Debug)]
 pub struct EthTransactionValidatorBuilder<Client, Evm> {
     client: Client,
+    /// The chain ID transactions must use.
+    chain_id: u64,
     /// The EVM configuration to use for validation.
     evm_config: Evm,
     /// Fork indicator whether we are in the Shanghai stage.
@@ -1080,6 +1096,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
         Self {
             block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M.into(),
             client,
+            chain_id: chain_spec.chain().id(),
             evm_config,
             minimum_priority_fee: None,
             additional_tasks: 1,
@@ -1306,6 +1323,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
     {
         let Self {
             client,
+            chain_id,
             evm_config,
             shanghai,
             cancun,
@@ -1345,6 +1363,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
 
         EthTransactionValidator {
             client,
+            chain_id,
             eip2718,
             eip1559,
             fork_tracker,
@@ -1482,12 +1501,13 @@ pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
 mod tests {
     use super::*;
     use crate::{
+        test_utils::TransactionBuilder,
         blobstore::InMemoryBlobStore, error::PoolErrorKind, traits::PoolTransaction,
         CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
     };
     use alloy_consensus::Transaction;
     use alloy_eips::eip2718::Decodable2718;
-    use alloy_primitives::{hex, Bytes, U256};
+    use alloy_primitives::{hex, Address, Bytes, U256};
     use reth_ethereum_primitives::PooledTransactionVariant;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_primitives_traits::SignedTransaction;
@@ -1580,6 +1600,36 @@ mod tests {
         let outcome = validator.validate_one(TransactionOrigin::External, transaction);
 
         assert!(outcome.is_valid());
+    }
+
+    #[test]
+    fn validates_configured_chain_id() {
+        let provider = provider_with_genesis_block();
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .build(InMemoryBlobStore::default());
+        let transaction = |chain_id| {
+            EthPooledTransaction::try_from_consensus(
+                TransactionBuilder::default()
+                    .chain_id(chain_id)
+                    .gas_limit(21_000)
+                    .to(Address::ZERO)
+                    .into_eip1559()
+                    .try_into_recovered()
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+
+        assert!(validator
+            .validate_stateless(TransactionOrigin::External, &transaction(validator.chain_id()))
+            .is_ok());
+        assert!(matches!(
+            validator.validate_stateless(
+                TransactionOrigin::External,
+                &transaction(validator.chain_id() + 1)
+            ),
+            Err(InvalidPoolTransactionError::Consensus(InvalidTransactionError::ChainIdMismatch))
+        ));
     }
 
     // <https://github.com/paradigmxyz/reth/issues/8550>
