@@ -65,6 +65,14 @@ pub fn create_mint_token_precompile() -> DynPrecompile {
 /// - `Balance overflow` - Adding amount would overflow the recipient's balance
 /// - `Failed to load account` - Journal failed to load the recipient account
 fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
+    // Charge-gas check before parsing input or touching the EVM journal. The EVM
+    // dispatcher charges `gas_used` after a successful precompile return; if the
+    // precompile reports more gas than was forwarded, the dispatcher can panic
+    // instead of producing a normal out-of-gas result.
+    if MINT_BASE_GAS > input.gas {
+        return Err(PrecompileError::OutOfGas);
+    }
+
     // 1. Validate caller address
     if input.caller != AUTHORIZED_CALLER {
         warn!(
