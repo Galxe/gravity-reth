@@ -11,6 +11,7 @@
 
 深读补充:
 - [`state-root-deep-dive.md`](./state-root-deep-dive.md) — state root 四大件(proof_v2 / arena sparse trie / state_root_task 流水线 / sorted overlay API)的**算法级**解析:数据结构、算法步骤、优化动机、作用、gravity 缺失影响;§5 附 **nested hash 逐维度对比**(两套引擎各自的运行域最优性 + nested 可借鉴清单)。port 结论以本 README 与 `state-root.md` 为准。
+- [`storage-v2-deep-dive.md`](./storage-v2-deep-dive.md) — storage-v2 的**架构级**解析:五项数据搬迁(changesets/receipts/senders→static file、三表→RocksDB、plain state 删除)、单开关版本协商、CommitOrder/visible_tip 跨存储一致性、static-file 引擎升级;§9 附与 gravity 全量 RocksDB 栈的逐维度对比与借鉴清单。**注意两处口径更新**:v2 在 2.3.0 已是新库默认、`db migrate-v2` 已支持原地迁移(FAQ 文档滞后)。
 
 ## 一句话结论
 
