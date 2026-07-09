@@ -432,3 +432,32 @@ panic);一致性检查算出 unwind target==0 时直接 panic。
    本轮未移植。SF 布局下 changeset 历史数据永久保留;需要 expiry 时
    再评估整段删除。legacy 布局的 DB changeset prune 不受影响(SF 布局
    下 DB changeset 表为空,`prune_table_with_range` 对空表 no-op)。
+
+### Phase E — 迁移命令(2026-07-10 补)
+
+`reth db migrate-changesets`(`cli/commands/src/db/migrate_changesets.rs`)
+把数据库 changeset 表搬进 SF 段并翻转布局标记,单向棘轮五步:预检
+(已是新布局则跳过;SF 段必须为空;拒绝已 prune 的库)→ 单次 `walk`
+遍历两张表按块分组写 SF(含空块以对齐 offset 边车)→ 翻 `Metadata`
+标记并刷新缓存(棘轮点)→ 清空 DB 表回收空间。棘轮点前崩溃可重跑,
+之后崩溃重启补清表。端到端由 `migrates_changesets_and_flips_layout`
+覆盖(seed DB → 迁移 → 校验 SF 读回 + 标记翻转 + DB 表清空 + 重跑幂等)。
+
+**迁移读源用整表 `walk` 而非单块 reader**,原因见下条发现。
+
+### 附带发现:gravity 单块 `walk_range(b..=b)` 在 dup changeset 表上返空
+
+移植过程中发现:gravity RocksDB 的 `cursor_read::<AccountChangeSets>()
+.walk_range(b..=b)`(单块闭区间)对 dup changeset 表返回空——复合键
+`block‖address` 的 seek 对单块上界处理有 off-by-one(实测该表有 2 行时
+`account_block_changeset(1)` 返回 0)。这是**上游代码合并进 gravity 的
+休眠问题**,非本轮引入:gravity 生产不走这条(状态根用
+`NestedStateRoot`,历史查询用 `get_by_key_subkey` 点查),`read_hashed_state`
+用的是多块 range(`1..=tip`,`RangeWalker` 按解码后的块号比较,正常)。
+- **对本特性无影响**:SF 布局下 `account_block_changeset`/`storage_changeset`
+  路由到 SF provider(实测可用);legacy 布局下 historical provider 用
+  点查、迁移命令用整表 `walk`,都不触发单块 `walk_range`。
+- **登记**:`DatabaseProvider` 的 `ChangeSetReader::account_block_changeset`
+  / `StorageChangeSetReader::storage_changeset` 的 legacy 分支(上游原样
+  代码)在 gravity 单块调用下不可靠;若将来有代码在 legacy 布局下单块
+  调用它们,需先修 gravity cursor 的单块 dup range seek。

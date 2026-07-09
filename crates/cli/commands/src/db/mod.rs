@@ -14,6 +14,7 @@ mod clear;
 mod diff;
 mod get;
 mod list;
+mod migrate_changesets;
 mod prune_checkpoints;
 mod repair_trie;
 mod stage_checkpoints;
@@ -55,6 +56,8 @@ pub enum Subcommands {
     Clear(clear::Command),
     /// Verifies trie consistency and outputs any inconsistencies
     RepairTrie(repair_trie::Command),
+    /// Migrates changesets from the database into static file segments
+    MigrateChangesets(migrate_changesets::Command),
     /// Reads and displays the static file segment header
     StaticFileHeader(static_file_header::Command),
     /// Lists current and local database versions
@@ -190,6 +193,11 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
                 println!("{}", db_path.display());
             }
             Subcommands::PruneCheckpoints(command) => {
+                db_exec!(self.env, tool, N, command.access_rights(), {
+                    command.execute(&tool)?;
+                });
+            }
+            Subcommands::MigrateChangesets(command) => {
                 db_exec!(self.env, tool, N, command.access_rights(), {
                     command.execute(&tool)?;
                 });
