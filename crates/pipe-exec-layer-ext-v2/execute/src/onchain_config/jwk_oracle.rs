@@ -167,20 +167,20 @@ pub fn construct_oracle_record_transaction(
         .ok_or_else(|| format!("No JWKs found for issuer: {}", issuer_str))?;
 
     if is_rsa_jwk(first_jwk) {
-        // RSA JWK path is not currently used in production. All JWK data flows through
-        // the UnsupportedJWK (blockchain event) path. If this is reached, something
-        // unexpected has changed in the consensus layer.
-        error!(
+        // RSA JWK path is not exercised in production today — all JWK data flows through the
+        // UnsupportedJWK (blockchain event) path. If it is ever reached, route it to the
+        // real RSA record handler and return a recoverable `Result`. It must NEVER panic:
+        // this runs on the deterministic execute_ordered_block system-tx path (over
+        // consensus `extra_data`), whose `Err` return the caller logs + skips (lib.rs), so
+        // a panic here would deterministically halt every validator on this ordered block
+        // and re-halt on restart (gravity-audit#822 class).
+        warn!(
             target: "gravity::onchain_config::jwk_oracle",
             issuer = %issuer_str,
             jwk_count = provider_jwks.jwks.len(),
-            "RSA JWK path entered unexpectedly — this code path should be unreachable"
+            "RSA JWK path entered unexpectedly — routing to RSA record handler (should not occur in production)"
         );
-        panic!(
-            "RSA JWK oracle record path is unreachable: issuer={}, jwk_count={}",
-            issuer_str,
-            provider_jwks.jwks.len()
-        );
+        construct_jwk_record_transaction(provider_jwks, nonce, gas_price)
     } else if is_unsupported_jwk(first_jwk) {
         // Blockchain/oracle events - use recordBatch for ALL logs
         construct_blockchain_batch_transaction(provider_jwks, nonce, gas_price)
