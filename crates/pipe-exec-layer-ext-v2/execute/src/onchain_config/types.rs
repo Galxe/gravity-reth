@@ -111,10 +111,7 @@ pub fn convert_validator_consensus_info(
 
     GravityValidatorInfo::new(
         account_address,
-        // Saturating (not panicking `to::<u64>()`): this runs on the deterministic epoch
-        // -boundary conversion path, so an overflow would halt every validator. Matches the
-        // sibling saturating conversion in dkg.rs. (gravity-audit#822 hardening.)
-        power_ether.saturating_to::<u64>(),
+        power_ether.to::<u64>(),
         ValidatorConfig::new(
             info.consensusPubkey.clone().into(),
             info.networkAddresses.to_vec(),
@@ -138,19 +135,13 @@ pub fn convert_validators_to_bcs(
     pending_active: &[ValidatorConsensusInfo],
     pending_inactive: &[ValidatorConsensusInfo],
 ) -> Bytes {
-    // Calculate total voting power from active validators (in Ether units).
-    // Saturating cast + fold (not panicking `to::<u128>()` / overflow-panicking `sum()`):
-    // on the deterministic epoch-boundary path an overflow must not halt validators.
-    let total_voting_power: u128 = active_validators
-        .iter()
-        .map(|v| wei_to_ether(v.votingPower).saturating_to::<u128>())
-        .fold(0u128, u128::saturating_add);
+    // Calculate total voting power from active validators (in Ether units)
+    let total_voting_power: u128 =
+        active_validators.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
 
     // Calculate total joining power from pending_active validators
-    let total_joining_power: u128 = pending_active
-        .iter()
-        .map(|v| wei_to_ether(v.votingPower).saturating_to::<u128>())
-        .fold(0u128, u128::saturating_add);
+    let total_joining_power: u128 =
+        pending_active.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
 
     let gravity_validator_set = GravityValidatorSet {
         active_validators: active_validators.iter().map(convert_validator_consensus_info).collect(),
