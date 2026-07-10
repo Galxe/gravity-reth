@@ -5,9 +5,11 @@
 //! from the static files afterwards.
 //!
 //! The migration is a one-way ratchet: the layout flag is flipped only after both segments are
-//! written and verified, and the database tables are cleared last. A crash before the flag flip
-//! leaves the node on the legacy layout (rerun the migration); a crash after it leaves the flag
-//! set with the tables still present (rerun clears them).
+//! written, and the database tables are cleared last. Both crash windows recover on rerun:
+//! - Crash before the flag flip: the node is still on the legacy layout. A rerun deletes any
+//!   partially-written segments (they are append-only) and redoes the migration.
+//! - Crash after the flag flip but before the tables are cleared: the node is on the new layout. A
+//!   rerun re-runs the idempotent table clear and finishes.
 
 use crate::common::AccessRights;
 use clap::Parser;
@@ -20,11 +22,11 @@ use reth_db_api::{
 use reth_db_common::DbTool;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockNumReader,
-    DatabaseProviderFactory, MetadataProvider, MetadataWriter, StaticFileProviderFactory,
-    StaticFileWriter, StorageSettingsCache,
+    DatabaseProviderFactory, MetadataProvider, MetadataWriter, ProviderFactory,
+    StaticFileProviderFactory, StaticFileWriter, StorageSettingsCache,
 };
 use reth_static_file_types::StaticFileSegment;
-use tracing::info;
+use tracing::{info, warn};
 
 /// `reth db migrate-changesets` command.
 #[derive(Debug, Parser)]
@@ -40,20 +42,34 @@ impl Command {
     pub fn execute<N: ProviderNodeTypes>(self, tool: &DbTool<N>) -> eyre::Result<()> {
         let factory = &tool.provider_factory;
 
-        // Preflight: refuse to run unless the node is on the legacy layout with empty segments.
         let provider = factory.database_provider_ro()?;
         let settings = provider.storage_settings()?.unwrap_or_else(GravityStorageSettings::legacy);
+        let sf = factory.static_file_provider();
+
+        // Crash-recovery: if the layout flag was already flipped, a previous run got past the
+        // ratchet point but may have died before clearing the database tables. Clearing is
+        // idempotent, so just (re)run it and finish.
         if settings.changesets_in_static_files {
-            info!(target: "reth::cli", "Already on the static-file changeset layout; nothing to do");
+            info!(target: "reth::cli", "Layout already flipped; ensuring database tables are cleared");
+            Self::clear_database_tables(factory)?;
             return Ok(());
         }
-        let sf = factory.static_file_provider();
+
+        // Crash-recovery: a previous run wrote the segments but died before the flag flip. The
+        // segments are append-only, so restart from a clean slate by deleting them, then redo.
         for segment in [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
         {
-            eyre::ensure!(
-                sf.get_highest_static_file_block(segment).is_none(),
-                "{segment:?} static file already has data; migration target must be empty"
-            );
+            // `delete_jar` removes both the `.jar` and its `.csoff` sidecar and re-initializes
+            // the index; walk down the fixed ranges until no segment file remains.
+            while let Some(block) = sf.get_highest_static_file_block(segment) {
+                warn!(
+                    target: "reth::cli",
+                    ?segment,
+                    "Partially migrated {segment:?} segment found (layout still legacy); \
+                     resetting it before redoing the migration"
+                );
+                sf.delete_jar(segment, block)?;
+            }
         }
 
         let tip = provider.last_block_number()?;
@@ -64,7 +80,7 @@ impl Command {
                 .tx_ref()
                 .cursor_read::<tables::AccountChangeSets>()?
                 .first()?
-                .is_none_or(|(block, _)| block <= 1),
+                .is_none_or(|(block, _)| block == 1),
             "changeset history is pruned; migrating a pruned database is not yet supported"
         );
         drop(provider);
@@ -83,13 +99,21 @@ impl Command {
         info!(target: "reth::cli", "Storage layout flipped to static-file changesets");
 
         // Clear the now-superseded database tables. Safe to rerun after a crash here.
+        Self::clear_database_tables(factory)?;
+
+        info!(target: "reth::cli", "Changeset migration complete");
+        Ok(())
+    }
+
+    /// Clears the database changeset tables. Idempotent: safe to rerun after a crash.
+    fn clear_database_tables<N: ProviderNodeTypes>(
+        factory: &ProviderFactory<N>,
+    ) -> eyre::Result<()> {
         let provider_rw = factory.database_provider_rw()?;
         provider_rw.tx_ref().clear::<tables::AccountChangeSets>()?;
         provider_rw.tx_ref().clear::<tables::StorageChangeSets>()?;
         UnifiedStorageWriter::commit(provider_rw)?;
         info!(target: "reth::cli", "Cleared database changeset tables");
-
-        info!(target: "reth::cli", "Changeset migration complete");
         Ok(())
     }
 
@@ -292,5 +316,87 @@ mod tests {
 
         // Rerunning is a no-op.
         Command.execute(&tool).unwrap();
+    }
+
+    /// A crash after the flag flip but before the tables are cleared: rerun clears them.
+    #[test]
+    fn rerun_after_flag_flip_clears_tables() {
+        let factory = create_test_provider_factory();
+        let addr = Address::with_last_byte(1);
+
+        // Simulate the post-flip crash state: layout is new, but the database tables still hold
+        // rows (they were never cleared).
+        {
+            let provider_rw = factory.database_provider_rw().unwrap();
+            provider_rw
+                .tx_ref()
+                .put::<tables::AccountChangeSets>(1, AccountBeforeTx { address: addr, info: None })
+                .unwrap();
+            provider_rw
+                .write_storage_settings(GravityStorageSettings { changesets_in_static_files: true })
+                .unwrap();
+            provider_rw.commit().unwrap();
+        }
+
+        let tool = DbTool::new(factory.clone()).unwrap();
+        Command.execute(&tool).unwrap();
+
+        let provider = factory.database_provider_ro().unwrap();
+        let rows = provider
+            .tx_ref()
+            .cursor_read::<tables::AccountChangeSets>()
+            .unwrap()
+            .walk(None)
+            .unwrap()
+            .count();
+        assert_eq!(rows, 0, "rerun after flag flip should clear the database tables");
+    }
+
+    /// A crash before the flag flip that left partially-written segments: rerun resets them and
+    /// migrates cleanly.
+    #[test]
+    fn rerun_with_partial_segments_resets_and_migrates() {
+        let factory = create_test_provider_factory();
+        let addr = Address::with_last_byte(1);
+
+        // Seed the legacy tables.
+        {
+            let provider_rw = factory.database_provider_rw().unwrap();
+            provider_rw
+                .tx_ref()
+                .put::<tables::AccountChangeSets>(1, AccountBeforeTx { address: addr, info: None })
+                .unwrap();
+            provider_rw
+                .tx_ref()
+                .put::<tables::StorageChangeSets>(
+                    BlockNumberAddress((1, addr)),
+                    StorageEntry { key: B256::with_last_byte(7), value: U256::from(3) },
+                )
+                .unwrap();
+            provider_rw.commit().unwrap();
+        }
+
+        // Simulate a partially-written account segment from a crashed run (layout still legacy).
+        {
+            let sf = factory.static_file_provider();
+            let mut writer = sf.latest_writer(StaticFileSegment::AccountChangeSets).unwrap();
+            writer.increment_block(0).unwrap();
+            writer
+                .append_account_changeset(vec![AccountBeforeTx { address: addr, info: None }], 1)
+                .unwrap();
+            writer.commit().unwrap();
+            assert!(sf
+                .get_highest_static_file_block(StaticFileSegment::AccountChangeSets)
+                .is_some());
+        }
+
+        let tool = DbTool::new(factory.clone()).unwrap();
+        Command.execute(&tool).unwrap();
+
+        // Migration succeeded despite the partial segment.
+        let provider = factory.database_provider_ro().unwrap();
+        assert!(provider.storage_settings().unwrap().unwrap().changesets_in_static_files);
+        assert_eq!(provider.account_block_changeset(1).unwrap().len(), 1);
+        assert_eq!(provider.storage_changeset(1).unwrap().len(), 1);
     }
 }
