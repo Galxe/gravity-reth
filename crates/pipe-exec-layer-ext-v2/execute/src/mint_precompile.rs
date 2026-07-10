@@ -58,6 +58,7 @@ pub fn create_mint_token_precompile() -> DynPrecompile {
 ///
 /// # Errors
 ///
+/// - `OutOfGas` - Less than `MINT_BASE_GAS` gas was forwarded
 /// - `Unauthorized caller` - Caller is not the authorized JWK Manager
 /// - `Invalid input length` - Input data is less than 53 bytes
 /// - `Invalid function ID` - Function ID is not 0x01
@@ -69,9 +70,7 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
     // dispatcher charges `gas_used` after a successful precompile return; if the
     // precompile reports more gas than was forwarded, the dispatcher can panic
     // instead of producing a normal out-of-gas result.
-    if MINT_BASE_GAS > input.gas {
-        return Err(PrecompileError::OutOfGas);
-    }
+    ensure_mint_gas(input.gas)?;
 
     // 1. Validate caller address
     if input.caller != AUTHORIZED_CALLER {
@@ -156,4 +155,19 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
     );
 
     Ok(PrecompileOutput { gas_used: MINT_BASE_GAS, bytes: Bytes::new(), reverted: false })
+}
+
+fn ensure_mint_gas(gas: u64) -> Result<(), PrecompileError> {
+    (gas >= MINT_BASE_GAS).then_some(()).ok_or(PrecompileError::OutOfGas)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_insufficient_forwarded_gas() {
+        assert!(matches!(ensure_mint_gas(MINT_BASE_GAS - 1), Err(PrecompileError::OutOfGas)));
+        assert!(ensure_mint_gas(MINT_BASE_GAS).is_ok());
+    }
 }
