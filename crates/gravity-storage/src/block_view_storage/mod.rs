@@ -53,7 +53,8 @@ pub struct BlockViewStorage<Client> {
 
 impl<Client> BlockViewStorage<Client>
 where
-    Client: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
+    Client: HeaderProvider
+        + DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
         + StateProviderFactory
         + Clone
         + Send
@@ -68,7 +69,8 @@ where
 
 impl<Client> GravityStorage for BlockViewStorage<Client>
 where
-    Client: DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
+    Client: HeaderProvider
+        + DatabaseProviderFactory<Provider: BlockNumReader + HeaderProvider + BlockReader>
         + StateProviderFactory
         + Clone
         + Send
@@ -118,8 +120,7 @@ where
     }
 
     fn randomness_by_height(&self, block_number: u64) -> ProviderResult<Option<B256>> {
-        let provider = self.client.database_provider_ro()?;
-        Ok(provider.header_by_number(block_number)?.and_then(|header| header.mix_hash()))
+        Ok(self.client.header_by_number(block_number)?.and_then(|header| header.mix_hash()))
     }
 }
 
@@ -277,13 +278,28 @@ mod tests {
     use super::*;
     use alloy_consensus::Header;
     use alloy_eips::BlockNumHash;
+    use alloy_primitives::{BlockHash, BlockNumber, U256};
+    use core::ops::RangeBounds;
     use reth_chainspec::ChainInfo;
     use reth_db_api::mock::{DatabaseMock, TxMock};
+    use reth_primitives_traits::SealedHeader;
     use reth_provider::{test_utils::MockEthProvider, BlockHashReader, BlockIdReader};
 
     #[derive(Clone, Debug)]
     struct TestClient {
         provider: MockEthProvider,
+        headers: BTreeMap<u64, Header>,
+    }
+
+    impl TestClient {
+        fn new(provider: MockEthProvider) -> Self {
+            Self { provider, headers: BTreeMap::new() }
+        }
+
+        fn with_header(mut self, number: u64, header: Header) -> Self {
+            self.headers.insert(number, header);
+            self
+        }
     }
 
     impl DatabaseProviderFactory for TestClient {
@@ -339,6 +355,51 @@ mod tests {
 
         fn finalized_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
             self.provider.finalized_block_num_hash()
+        }
+    }
+
+    impl HeaderProvider for TestClient {
+        type Header = Header;
+
+        fn header(&self, block_hash: &BlockHash) -> ProviderResult<Option<Self::Header>> {
+            self.provider.header(block_hash)
+        }
+
+        fn header_by_number(&self, num: u64) -> ProviderResult<Option<Self::Header>> {
+            if let Some(header) = self.headers.get(&num) {
+                return Ok(Some(header.clone()))
+            }
+            self.provider.header_by_number(num)
+        }
+
+        fn header_td(&self, hash: &BlockHash) -> ProviderResult<Option<U256>> {
+            self.provider.header_td(hash)
+        }
+
+        fn header_td_by_number(&self, number: BlockNumber) -> ProviderResult<Option<U256>> {
+            self.provider.header_td_by_number(number)
+        }
+
+        fn headers_range(
+            &self,
+            range: impl RangeBounds<BlockNumber>,
+        ) -> ProviderResult<Vec<Self::Header>> {
+            self.provider.headers_range(range)
+        }
+
+        fn sealed_header(
+            &self,
+            number: BlockNumber,
+        ) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
+            self.provider.sealed_header(number)
+        }
+
+        fn sealed_headers_while(
+            &self,
+            range: impl RangeBounds<BlockNumber>,
+            predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
+        ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
+            self.provider.sealed_headers_while(range, predicate)
         }
     }
 
@@ -424,7 +485,19 @@ mod tests {
             block_hash,
             Header { number: 7, mix_hash: randomness, ..Default::default() },
         );
-        let storage = BlockViewStorage::new(TestClient { provider });
+        let storage = BlockViewStorage::new(TestClient::new(provider));
+
+        assert_eq!(GravityStorage::randomness_by_height(&storage, 7).unwrap(), Some(randomness));
+    }
+
+    #[test]
+    fn randomness_by_height_reads_client_header_provider_before_db_provider() {
+        let provider = MockEthProvider::new();
+        let randomness = B256::repeat_byte(0x33);
+        let storage = BlockViewStorage::new(
+            TestClient::new(provider)
+                .with_header(7, Header { number: 7, mix_hash: randomness, ..Default::default() }),
+        );
 
         assert_eq!(GravityStorage::randomness_by_height(&storage, 7).unwrap(), Some(randomness));
     }
@@ -436,7 +509,7 @@ mod tests {
             B256::repeat_byte(0x11),
             Header { number: 7, mix_hash: B256::repeat_byte(0x22), ..Default::default() },
         );
-        let storage = BlockViewStorage::new(TestClient { provider });
+        let storage = BlockViewStorage::new(TestClient::new(provider));
 
         assert_eq!(GravityStorage::randomness_by_height(&storage, 8).unwrap(), None);
     }
