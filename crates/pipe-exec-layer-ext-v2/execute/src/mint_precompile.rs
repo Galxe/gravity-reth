@@ -58,6 +58,7 @@ pub fn create_mint_token_precompile() -> DynPrecompile {
 ///
 /// # Errors
 ///
+/// - `OutOfGas` - Less than `MINT_BASE_GAS` gas was forwarded
 /// - `Unauthorized caller` - Caller is not the authorized JWK Manager
 /// - `Invalid input length` - Input data is less than 53 bytes
 /// - `Invalid function ID` - Function ID is not 0x01
@@ -65,6 +66,12 @@ pub fn create_mint_token_precompile() -> DynPrecompile {
 /// - `Balance overflow` - Adding amount would overflow the recipient's balance
 /// - `Failed to load account` - Journal failed to load the recipient account
 fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
+    // Charge-gas check before parsing input or touching the EVM journal. The EVM
+    // dispatcher charges `gas_used` after a successful precompile return; if the
+    // precompile reports more gas than was forwarded, the dispatcher can panic
+    // instead of producing a normal out-of-gas result.
+    ensure_mint_gas(input.gas)?;
+
     // 1. Validate caller address
     if input.caller != AUTHORIZED_CALLER {
         warn!(
@@ -148,4 +155,54 @@ fn mint_token_handler(mut input: PrecompileInput<'_>) -> PrecompileResult {
     );
 
     Ok(PrecompileOutput { gas_used: MINT_BASE_GAS, bytes: Bytes::new(), reverted: false })
+}
+
+fn ensure_mint_gas(gas: u64) -> Result<(), PrecompileError> {
+    (gas >= MINT_BASE_GAS).then_some(()).ok_or(PrecompileError::OutOfGas)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_evm::{eth::EthEvmContext, precompiles::Precompile, EvmInternals};
+    use revm::{context::JournalTr, database::EmptyDB};
+
+    fn mint_calldata(recipient: Address, amount: U256) -> [u8; 53] {
+        let mut data = [0; 53];
+        data[0] = FUNC_MINT;
+        data[1..21].copy_from_slice(recipient.as_slice());
+        data[21..].copy_from_slice(&amount.to_be_bytes::<32>());
+        data
+    }
+
+    fn call_mint(ctx: &mut EthEvmContext<EmptyDB>, data: &[u8]) -> PrecompileResult {
+        create_mint_token_precompile().call(PrecompileInput {
+            data,
+            gas: MINT_BASE_GAS,
+            caller: AUTHORIZED_CALLER,
+            value: U256::ZERO,
+            target_address: Address::ZERO,
+            bytecode_address: Address::ZERO,
+            internals: EvmInternals::new(&mut ctx.journaled_state, &ctx.block),
+        })
+    }
+
+    #[test]
+    fn rejects_insufficient_forwarded_gas() {
+        assert!(matches!(ensure_mint_gas(MINT_BASE_GAS - 1), Err(PrecompileError::OutOfGas)));
+        assert!(ensure_mint_gas(MINT_BASE_GAS).is_ok());
+    }
+
+    #[test]
+    fn mints_and_touches_recipient() {
+        let recipient = address!("0x1111111111111111111111111111111111111111");
+        let amount = U256::from(42);
+        let data = mint_calldata(recipient, amount);
+        let mut ctx = EthEvmContext::new(EmptyDB::default(), Default::default());
+        let output = call_mint(&mut ctx, &data).unwrap();
+        let account = ctx.journaled_state.load_account(recipient).unwrap().data;
+        assert_eq!(output.gas_used, MINT_BASE_GAS);
+        assert_eq!(account.info.balance, amount);
+        assert!(account.is_touched());
+    }
 }
