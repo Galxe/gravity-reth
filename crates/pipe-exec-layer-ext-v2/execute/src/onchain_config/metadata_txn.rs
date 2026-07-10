@@ -211,19 +211,12 @@ pub(crate) fn system_txns_into_executed_ordered_block_result(
 pub fn transact_system_txn(
     evm: &mut impl Evm<DB = impl Database, Error: Debug, Tx = TxEnv, HaltReason = HaltReason>,
     txn: TransactionSigned,
-) -> Result<(SystemTxnResult, EvmState), String> {
+) -> (SystemTxnResult, EvmState) {
     use reth_evm::IntoTxEnv;
     use reth_primitives::Recovered;
 
     let tx_env = Recovered::new_unchecked(txn.clone(), SYSTEM_CALLER).into_tx_env();
-    // A system tx is node-constructed (SYSTEM_CALLER), so revm should never reject it at
-    // tx-level validation — but if it ever does, return a recoverable error instead of
-    // `.unwrap()`-panicking, which on the deterministic execution path halts every validator
-    // (gravity-audit#822 class). This free helper has NO production caller today (the live
-    // path uses the executor method); hardened so wiring it in cannot reintroduce a halt.
-    let result = evm
-        .transact_raw(tx_env)
-        .map_err(|e| format!("system tx transact_raw returned tx-level error: {e:?}"))?;
+    let result = evm.transact_raw(tx_env).unwrap();
 
     // DESIGN: System transaction failures are intentionally logged, not asserted.
     // DKG and JWK system transactions can legitimately fail or revert, so a hard
@@ -233,7 +226,7 @@ pub fn transact_system_txn(
         super::errors::log_execution_error(&result.result);
     }
 
-    Ok((SystemTxnResult { result: result.result, txn }, result.state))
+    (SystemTxnResult { result: result.result, txn }, result.state)
 }
 
 /// Execute a metadata contract call (onBlockStart from Blocker.sol)
