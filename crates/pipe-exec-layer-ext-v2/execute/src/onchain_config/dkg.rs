@@ -235,7 +235,21 @@ fn convert_randomness_config(
     let variant = match config.variant {
         ConfigVariant::Off => gravity_api_types::on_chain_config::dkg::ConfigVariant::Off,
         ConfigVariant::V2 => gravity_api_types::on_chain_config::dkg::ConfigVariant::V2,
-        ConfigVariant::__Invalid => panic!("Invalid ConfigVariant"),
+        // An out-of-range on-chain ConfigVariant (alloy decodes an unknown enum byte to
+        // `__Invalid` on the non-validating log path) must NOT panic — this runs on the
+        // deterministic event-decode path in execute_ordered_block, so a panic would halt
+        // every validator on the block emitting it and re-halt on restart (gravity-audit#822
+        // class). Degrade to the safe `Off` (randomness disabled) and log loudly: this is a
+        // system-contract / config-version mismatch signal, never a valid steady state.
+        ConfigVariant::__Invalid => {
+            tracing::error!(
+                target: "gravity::onchain_config::dkg",
+                "unexpected out-of-range RandomnessConfig variant decoded on-chain; \
+                 treating as Off — indicates a system-contract/config-version mismatch, \
+                 NOT a valid state"
+            );
+            gravity_api_types::on_chain_config::dkg::ConfigVariant::Off
+        }
     };
 
     // For Off variant, configV1 should be default/empty
