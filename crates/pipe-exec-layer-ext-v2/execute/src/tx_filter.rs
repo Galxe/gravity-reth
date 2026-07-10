@@ -44,9 +44,9 @@
 //!   init-code-tx type gate.
 //! - `TxGasLimitGreaterThanCap` — EIP-7825 tx gas-limit cap. `validate_tx_env`
 //!   (`validation.rs:116-123`) rejects `tx.gas_limit() > cfg.tx_gas_limit_cap()`; that cap is
-//!   `u64::MAX` pre-OSAKA and `eip7825::TX_GAS_LIMIT_CAP` (2^24) from OSAKA on
-//!   (`revm-context cfg.rs:272-278`), so it cannot fire on Gravity's Prague spec. Adding Osaka
-//!   requires a `tx.gas_limit() <= 2^24` gate here.
+//!   `u64::MAX` pre-OSAKA and `eip7825::TX_GAS_LIMIT_CAP` (2^24) from OSAKA on (`revm-context
+//!   cfg.rs:272-278`), so it cannot fire on Gravity's Prague spec. Adding Osaka requires a
+//!   `tx.gas_limit() <= 2^24` gate here.
 //!
 //! Procedure on upgrade: `grep 'return Err(InvalidTransaction::'` in
 //! `revm-handler/src/` for the new pin, diff against the "unreachable" list above,
