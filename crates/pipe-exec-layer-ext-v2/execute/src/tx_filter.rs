@@ -55,7 +55,6 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     Address, U256,
 };
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chainspec::{ChainSpec, EthChainSpec};
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm::ParallelDatabase;
@@ -108,11 +107,6 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                 break;
             }
         }
-    }
-
-    let mut sender_idx: HashMap<&Address, Vec<usize>> = HashMap::default();
-    for (i, sender) in senders[..gas_limit_exceeded_tx_idx].iter().enumerate() {
-        sender_idx.entry(sender).or_default().push(i);
     }
 
     let cfg_chain_id = chain_spec.chain_id();
@@ -283,39 +277,100 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         true
     };
 
-    let mut invalid_tx_idxs = sender_idx
-        .into_par_iter()
-        .flat_map(|(sender, idxs)| {
-            let Some(mut account) = db.basic_ref(*sender).unwrap() else {
-                // Sender does not exist in the state trie, balance is 0
-                info!(target: "filter_invalid_txs",
-                    tx_hash=?txs[idxs[0]].hash(),
-                    sender=?sender,
-                    "insufficient balance"
-                );
-                return idxs;
-            };
-            // EIP-3607 gate: a sender with non-empty code cannot originate transactions,
-            // unless the code is a valid EIP-7702 delegation designator (Pectra relaxed
-            // 3607 to permit delegated EOAs). revm fires `RejectCallerWithCode`
-            // otherwise. Per-sender, not per-tx — if the sender has unauthorised code,
-            // all its txs in this batch are invalid. Closes audit#710 gap 6.
-            if account.code_hash != KECCAK_EMPTY {
-                let bytecode =
-                    account.code.clone().or_else(|| db.code_by_hash_ref(account.code_hash).ok());
-                let is_7702_delegation = bytecode.as_ref().map(|b| b.is_eip7702()).unwrap_or(false);
-                if !is_7702_delegation {
-                    info!(target: "filter_invalid_txs",
-                        sender=?sender,
-                        code_hash=?account.code_hash,
-                        "EIP-3607: sender has non-delegation code"
-                    );
-                    return idxs;
+    // `true` if the account's code is empty or a valid EIP-7702 delegation designator —
+    // i.e. it may originate a tx (EIP-3607, closes audit#710 gap 6) and, as an
+    // authorization authority, revm will apply its delegation.
+    let code_permits = |acct: &AccountInfo| -> bool {
+        acct.code_hash == KECCAK_EMPTY ||
+            acct.code
+                .clone()
+                .or_else(|| db.code_by_hash_ref(acct.code_hash).ok())
+                .map(|b| b.is_eip7702())
+                .unwrap_or(false)
+    };
+
+    // Block-order sequential simulation. `sim[addr]` is the address's account evolved
+    // in-block (nonce + balance), seeded lazily from the certified parent state; `None`
+    // marks an address absent from state. It holds BOTH tx senders AND EIP-7702
+    // authorities: a self-sponsored OR cross-account authorization bumps ITS authority's
+    // nonce during execution (revm `apply_auth_list` -> `delegate()` -> `bump_nonce`), so
+    // a *later same-block* tx from that authority must see the bumped nonce, or it hits
+    // `NonceTooLow` in revm and panics the executor (gravity-audit#822).
+    //
+    // This is sequential (not the previous per-sender-parallel pass) because cross-account
+    // nonce effects cross sender groups, so the simulation must advance in a single global
+    // block order. The per-tx guards are cheap; the extra `recover_authority()` ECDSA
+    // recovery runs only for type-4 txs.
+    let mut sim: HashMap<Address, Option<AccountInfo>> = HashMap::default();
+    let mut invalid_tx_idxs: HashSet<usize> = HashSet::default();
+    for idx in 0..gas_limit_exceeded_tx_idx {
+        let tx = &txs[idx];
+        let sender = senders[idx];
+
+        // Validate the tx against the simulated sender account and apply the caller nonce
+        // bump + balance deduction. Scoped so the `sim[sender]` borrow is released before
+        // the authorization loop re-borrows `sim` (an authority may be any account).
+        let valid = {
+            let sender_acct = sim.entry(sender).or_insert_with(|| db.basic_ref(sender).unwrap());
+            match sender_acct.as_mut() {
+                // Sender absent from state -> cannot pay for / originate the tx.
+                None => false,
+                Some(account) => {
+                    if !code_permits(account) {
+                        info!(target: "filter_invalid_txs",
+                            sender=?sender,
+                            code_hash=?account.code_hash,
+                            "EIP-3607: sender has non-delegation code"
+                        );
+                        false
+                    } else {
+                        // Mutates `account` (caller nonce bump + balance deduct) on success.
+                        is_tx_valid(tx, &sender, account)
+                    }
                 }
             }
-            idxs.into_iter().filter(|&idx| !is_tx_valid(&txs[idx], sender, &mut account)).collect()
-        })
-        .collect::<HashSet<_>>();
+        };
+        if !valid {
+            invalid_tx_idxs.insert(idx);
+            continue;
+        }
+
+        // Mirror revm `apply_auth_list`: for a type-4 tx every valid authorization bumps
+        // ITS authority's nonce once — self (authority == sender) AND cross-account. The
+        // caller bump above already advanced the sender, so a self-authorization matching
+        // `sender_nonce + 1` bumps it a second time; chained authorizations advance off the
+        // evolving simulated nonce exactly as revm applies them in order.
+        if tx.is_eip7702() {
+            if let Some(auth_list) = tx.authorization_list() {
+                for auth in auth_list {
+                    if !auth.chain_id().is_zero() && *auth.chain_id() != U256::from(cfg_chain_id) {
+                        continue;
+                    }
+                    if auth.nonce() == u64::MAX {
+                        continue;
+                    }
+                    let Ok(authority) = auth.recover_authority() else { continue };
+                    let auth_acct =
+                        sim.entry(authority).or_insert_with(|| db.basic_ref(authority).unwrap());
+                    // revm applies the delegation iff the authority's (block-start) code is
+                    // empty/7702 and its *current* nonce equals the authorization nonce; a
+                    // nonexistent authority has nonce 0 and is created on delegation.
+                    let (authority_nonce, code_ok) = match auth_acct.as_ref() {
+                        Some(a) => (a.nonce, code_permits(a)),
+                        None => (0, true),
+                    };
+                    if code_ok && auth.nonce() == authority_nonce {
+                        match auth_acct {
+                            Some(a) => a.nonce = a.nonce.saturating_add(1),
+                            None => {
+                                *auth_acct = Some(AccountInfo { nonce: 1, ..Default::default() })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     invalid_tx_idxs.extend(gas_limit_exceeded_tx_idx..txs.len());
     invalid_tx_idxs
 }
