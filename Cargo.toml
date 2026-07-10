@@ -366,7 +366,11 @@ incremental = false
 
 [workspace.dependencies]
 # reth
-gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "b1f68dc85781ef0d28a568d9d64604b153be9d9e" }
+# Pinned to the gravity-sdk gaptos rev (b1f68dc) so the SDK and greth share ONE
+# api-types instance. api-types is byte-identical between e9544c8 and b1f68dc,
+# so this is a source-alignment only (no semantic change to greth). URL matches
+# gaptos's (.git suffix) so cargo unifies them.
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos.git", rev = "b1f68dc85781ef0d28a568d9d64604b153be9d9e" }
 reth = { path = "bin/reth" }
 reth-storage-rpc-provider = { path = "crates/storage/rpc-provider" }
 reth-basic-payload-builder = { path = "crates/payload/basic" }
