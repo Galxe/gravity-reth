@@ -73,7 +73,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
-    ops::{Deref, DerefMut, Range, RangeBounds, RangeInclusive},
+    ops::{Bound, Deref, DerefMut, Range, RangeBounds, RangeInclusive},
     sync::{mpsc, Arc},
     thread,
 };
@@ -276,6 +276,41 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
         } else {
             self.tx
                 .cursor_read::<tables::AccountChangeSets>()?
+                .walk_range(range)?
+                .map(|r| r.map_err(Into::into))
+                .collect()
+        }
+    }
+
+    /// Collects storage changesets for a `BlockNumberAddress` range, routed by the persisted
+    /// storage layout.
+    ///
+    /// Callers build the range via [`BlockNumberAddress::range`], whose end bound is the
+    /// exclusive `(last_block + 1, 0)`. Under the legacy layout the composite-key walk handles
+    /// that directly; under the static-file layout we map it back to an inclusive block range.
+    fn storage_changesets_by_bna_range(
+        &self,
+        range: impl RangeBounds<BlockNumberAddress>,
+    ) -> ProviderResult<Vec<(BlockNumberAddress, StorageEntry)>> {
+        if self.cached_storage_settings().changesets_in_static_files {
+            let start = match range.start_bound() {
+                Bound::Included(bna) => bna.block_number(),
+                Bound::Excluded(bna) => bna.block_number().saturating_add(1),
+                Bound::Unbounded => 0,
+            };
+            let end = match range.end_bound() {
+                Bound::Included(bna) => bna.block_number(),
+                // `BlockNumberAddress::range` produces an exclusive `(last_block + 1, 0)` end,
+                // so the last inclusive block is one below the excluded bound's block.
+                Bound::Excluded(bna) => bna.block_number().saturating_sub(1),
+                // Unreachable for the `BlockNumberAddress::range` callers; the SF reader caps
+                // the end to the segment tip anyway.
+                Bound::Unbounded => u64::MAX,
+            };
+            self.static_file_provider.storage_changesets_range(start..=end)
+        } else {
+            self.tx
+                .cursor_read::<tables::StorageChangeSets>()?
                 .walk_range(range)?
                 .map(|r| r.map_err(Into::into))
                 .collect()
@@ -2731,28 +2766,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HashingWriter for DatabaseProvi
         &self,
         range: impl RangeBounds<BlockNumberAddress>,
     ) -> ProviderResult<HashMap<B256, BTreeSet<B256>>> {
-        let changesets = if self.cached_storage_settings().changesets_in_static_files {
-            // Map the composite-key bounds back to block bounds; callers construct this range
-            // via `BlockNumberAddress::range`, which spans whole blocks.
-            let start = match range.start_bound() {
-                std::ops::Bound::Included(bna) | std::ops::Bound::Excluded(bna) => {
-                    bna.block_number()
-                }
-                std::ops::Bound::Unbounded => 0,
-            };
-            let end = match range.end_bound() {
-                std::ops::Bound::Included(bna) | std::ops::Bound::Excluded(bna) => {
-                    bna.block_number()
-                }
-                std::ops::Bound::Unbounded => self.last_block_number()?,
-            };
-            self.static_file_provider.storage_changesets_range(start..=end)?
-        } else {
-            self.tx
-                .cursor_read::<tables::StorageChangeSets>()?
-                .walk_range(range)?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let changesets = self.storage_changesets_by_bna_range(range)?;
         self.unwind_storage_hashing(changesets.into_iter())
     }
 
@@ -2855,11 +2869,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HistoryWriter for DatabaseProvi
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<usize> {
-        let changesets = self
-            .tx
-            .cursor_read::<tables::AccountChangeSets>()?
-            .walk_range(range)?
-            .collect::<Result<Vec<_>, _>>()?;
+        let changesets = self.account_changesets_by_block_range(range)?;
         self.unwind_account_history_indices(changesets.iter())
     }
 
@@ -2927,11 +2937,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HistoryWriter for DatabaseProvi
         &self,
         range: impl RangeBounds<BlockNumberAddress>,
     ) -> ProviderResult<usize> {
-        let changesets = self
-            .tx
-            .cursor_read::<tables::StorageChangeSets>()?
-            .walk_range(range)?
-            .collect::<Result<Vec<_>, _>>()?;
+        let changesets = self.storage_changesets_by_bna_range(range)?;
         self.unwind_storage_history_indices(changesets.into_iter())
     }
 
@@ -3466,11 +3472,8 @@ mod tests {
         {
             let mut acc = sf.latest_writer(StaticFileSegment::AccountChangeSets).unwrap();
             acc.increment_block(0).unwrap();
-            acc.append_account_changeset(
-                vec![AccountBeforeTx { address: addr, info: None }],
-                1,
-            )
-            .unwrap();
+            acc.append_account_changeset(vec![AccountBeforeTx { address: addr, info: None }], 1)
+                .unwrap();
             acc.append_account_changeset(
                 vec![AccountBeforeTx { address: addr, info: Some(Account::default()) }],
                 2,
