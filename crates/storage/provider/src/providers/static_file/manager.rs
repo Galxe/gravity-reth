@@ -509,6 +509,10 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             NippyJar::<SegmentHeader>::load(&file).map_err(ProviderError::other)?
         };
 
+        // Deleting the file invalidates any cached writer for this segment; drop it so a
+        // later `latest_writer` reopens fresh state instead of stale block/offset tracking.
+        self.writers.remove(segment);
+
         // Delete the sidecar file for changeset segments before deleting the main jar
         if segment.is_change_based() {
             let csoff_path = jar.data_path().with_extension("csoff");

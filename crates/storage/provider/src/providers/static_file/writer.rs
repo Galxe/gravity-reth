@@ -107,6 +107,24 @@ impl<N: NodePrimitives> StaticFileWriters<N> {
         Ok(StaticFileProviderRWRefMut(write_guard))
     }
 
+    /// Drops the cached writer for `segment` so the next `get_or_create` opens a fresh one.
+    ///
+    /// Used after the underlying segment files are deleted, since the cached writer would
+    /// otherwise keep stale block/offset state.
+    pub(crate) fn remove(&self, segment: StaticFileSegment) {
+        let mut write_guard = match segment {
+            StaticFileSegment::Headers => self.headers.write(),
+            StaticFileSegment::Transactions => self.transactions.write(),
+            StaticFileSegment::Receipts => self.receipts.write(),
+            StaticFileSegment::AccountChangeSets => self.account_change_sets.write(),
+            StaticFileSegment::StorageChangeSets => self.storage_change_sets.write(),
+            StaticFileSegment::TransactionSenders => {
+                unreachable!("gravity static file writer does not cover TransactionSenders")
+            }
+        };
+        *write_guard = None;
+    }
+
     pub(crate) fn commit(&self) -> ProviderResult<()> {
         for writer_lock in [
             &self.headers,
