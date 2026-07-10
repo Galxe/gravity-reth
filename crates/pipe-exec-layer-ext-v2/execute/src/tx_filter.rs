@@ -42,6 +42,11 @@
 //!   `account.nonce += 1`.
 //! - `Eip7873NotSupported` / `Eip7873MissingTarget` — activates on OSAKA. Adding Osaka requires an
 //!   init-code-tx type gate.
+//! - `TxGasLimitGreaterThanCap` — EIP-7825 tx gas-limit cap. `validate_tx_env`
+//!   (`validation.rs:116-123`) rejects `tx.gas_limit() > cfg.tx_gas_limit_cap()`; that cap is
+//!   `u64::MAX` pre-OSAKA and `eip7825::TX_GAS_LIMIT_CAP` (2^24) from OSAKA on
+//!   (`revm-context cfg.rs:272-278`), so it cannot fire on Gravity's Prague spec. Adding Osaka
+//!   requires a `tx.gas_limit() <= 2^24` gate here.
 //!
 //! Procedure on upgrade: `grep 'return Err(InvalidTransaction::'` in
 //! `revm-handler/src/` for the new pin, diff against the "unreachable" list above,
@@ -255,6 +260,14 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         // would pass here and panic in revm with `LackOfFundForMaxFee`. Closes audit#710
         // gap 4. The per-sender simulated balance is then reduced by the *effective*
         // cost so subsequent txs from the same sender see what revm sees post-refund.
+        //
+        // The `saturating_*` arithmetic below is also load-bearing for a second revm variant:
+        // `validate_against_state_and_deduct_caller` calls `tx.max_balance_spending()`
+        // (`pre_execution.rs:135`), which returns `OverflowPaymentInTransaction` when
+        // `gas_limit * max_fee (+ value)` overflows. Saturating to `U256::MAX` and rejecting via
+        // the `balance < max_total` comparison is a strict superset of that reject for every
+        // physically-possible balance (a real divergence needs balance >= 2^128 wei). Keep these
+        // saturating — switching to checked/wrapping would drop the implicit gate.
         let max_charge =
             U256::from(tx.max_fee_per_gas()).saturating_mul(U256::from(tx.gas_limit()));
         let max_total = max_charge.saturating_add(tx.value());
