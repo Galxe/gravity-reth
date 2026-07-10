@@ -417,15 +417,46 @@ panic);一致性检查算出 unwind target==0 时直接 panic。
 
 ### 已知边界(登记,非本轮交付)
 
-1. **eth-mode 全量 sync 的 hashing/index stages 未适配**:
-   `AccountHashing`/`StorageHashing` stage 的 `execute` 直接用
-   cursor 走 DB changeset 表(`hashing_account.rs:231`、
-   `hashing_storage.rs:175`),SF 布局下这些表为空。这些 stage **只在
-   `--gravity.disable-pipe-execution`(eth-mode)全量 sync 时运行**;
-   gravity 生产是 pipe 模式,不经过。因此 SF 布局的目标场景是 **pipe
-   生产节点**,eth-mode 全量 sync 下启用 SF 布局属未支持组合。迁移
-   命令(Phase E)应 gate 到 pipe 模式或在 eth-mode 下拒绝启用。
-2. **history expiry(前向删旧块)未支持**:SF 段是 append-only + 尾部
+1. **pipeline backfill 的 hashing/index stages 未适配 SF changeset**
+   (⟲ 2026-07-10 review 扩大范围):`AccountHashing`/`StorageHashing`
+   stage 的 `execute` incremental 分支(`hashing_account.rs:231`、
+   `hashing_storage.rs:175`)与 `IndexAccountHistory`/`IndexStorageHistory`
+   的 `collect_history_indices`(`index_account_history.rs:105` 等)直接
+   用 cursor 走 DB changeset 表,SF 布局下这些表为空。**原判「只在
+   eth-mode 触发」不准确**——gravity 的 `disabled_stages()` 默认 `&[]`,
+   所以 **任何 pipeline backfill**(eth-mode 全量 sync,或 pipe 模式节点
+   落后过多触发的批量追块)都跑完整 DefaultStages。后果:迁移后跑
+   backfill,`ExecutionStage` 把 changeset 写进 SF,但 IndexHistory 读 DB
+   空表 → history 索引建不出(`eth_getStorageAt`/历史 `basic_account`
+   **静默错误**);Hashing incremental 读空 → MerkleStage 用已路由的
+   `read_hashed_state_from_changesets` 拿正确 changed set 但 seek 陈旧
+   hashed 值 → **root mismatch 硬失败**(backfill 阻断)。
+   - **本轮已修的相邻遗漏**:`DatabaseProvider::unwind_{account,storage}_history_indices_range`
+     与 `unwind_storage_hashing_range` 的 range 变体先前仍直读 DB 表,
+     已改走 `{account,storage}_changesets_by_block_range` /
+     `storage_changesets_by_bna_range`(见「本轮修复」)。
+   - **未修**:上述 stage 的 **forward execute** 路径(4 处 stage 内部
+     cursor + 泛型 `collect_history_indices`)。完整路由需重写 stage 内部
+     逻辑与泛型 helper,属独立工程(应有自身测试与 benchmark),不在
+     review 修复轮做。
+   - **当前保护**:无运行时 gate。**SF 布局的目标场景是 pipe 生产节点
+     且不触发 pipeline backfill**;启用 SF 布局的运维方必须确保节点
+     不跑 pipeline backfill 的 index/hashing stages,否则遇上述静默错误/
+     硬失败。后续应给这些 stage 加布局断言(静默→显式失败)或完整
+     路由。
+   - 同类未加断言的 legacy-only 消费者:`trie/db/{state.rs,storage.rs,
+     prefix_set.rs}` 的 `StateRoot`/`PrefixSetLoader`(gravity 用
+     `NestedStateRoot` 取代,推测不在 live 路径,未验证)。
+2. **historical state provider 的 SF 分支性能**(⟲ 2026-07-10 登记):
+   `HistoricalStateProviderRef::{basic_account,storage}` 的 `InChangeset`
+   分支对每个历史地址/槽位调 `account_block_changeset(block)` /
+   `storage_changeset(block)` **重载整块** changeset 再线扫匹配。legacy
+   用 dup cursor `get_by_key_subkey` 是 O(log n) 点查。正确性一致(每
+   `(block,address[,key])` 一条 revert,`.find()` 首条即唯一),但重放
+   大量槽位的 `debug_trace*` 会退化到 O(块内变更数 × 查询数)。根治需
+   在 SF changeset reader 上加 subkey-seek(避免整块重载),属需
+   benchmark 的独立优化,本轮未做。
+3. **history expiry(前向删旧块)未支持**:SF 段是 append-only + 尾部
    截断,`prune_account/storage_changesets(last_block)` 截断的是
    `last_block` 之后的块(服务 unwind/reorg),不能删最旧的块。上游用
    `min_block_range` + 整文件删除实现 expiry(SF 引擎 Phase 2 能力),
@@ -461,3 +492,31 @@ panic);一致性检查算出 unwind target==0 时直接 panic。
   / `StorageChangeSetReader::storage_changeset` 的 legacy 分支(上游原样
   代码)在 gravity 单块调用下不可靠;若将来有代码在 legacy 布局下单块
   调用它们,需先修 gravity cursor 的单块 dup range seek。
+
+### 本轮修复(2026-07-10 code review)
+
+对从 `ae3d615fc0` 起的 changeset 特性做了三维度 review(与上游一致性 /
+gravity 适配漏洞 / 简洁性能)。核心结论:**所有移植的 changeset 函数体
+与上游 v2.3.0 逐字一致**;live 路径(persistence state_handle)的 commit
+时序、并发、崩溃一致性、csoff 边车、rocksdb per-CF 均已核验安全。修复项:
+
+- **一致性**:`changeset_walker.rs` 改 import 后与上游**逐字节完全一致**
+  (rebase 可直接接受上游演进)。评估后不做「合并 `ChangesetRangeReader`
+  回原 trait / 补 `get_*_before_block` 点查」——会强制 alloy-provider /
+  consistent / mock 等 6+ 无关 impl 改动且 gravity 无调用需求,独立 trait
+  反而隔离冲突;登记为已知 rebase 冲突点。
+- **遗漏路由**:`unwind_{account,storage}_history_indices_range` 与
+  `unwind_storage_hashing_range`(Phase C 声称路由全部消费者时漏掉)已
+  按布局路由;抽出共用 `storage_changesets_by_bna_range`。
+- **latent bug**:`storage_changesets_by_bna_range` 对 `BlockNumberAddress::range`
+  的 exclusive end `(b+1,0)` 修正为 `b`(原取 `b+1` 多读一块,之前被
+  `bound_range` cap 到 SF tip 恰好掩盖,部分 unwind 时会暴露)。
+- **迁移崩溃恢复**:重写 preflight 使两条 rerun 路径都成立——flag 已翻转
+  则补跑幂等清表;flag 仍 legacy 但 SF 段非空(部分迁移)则删段重做。
+  preflight 收紧为「首块 == 1」。顺带发现并修复更广的隐患:`delete_jar`
+  之前不清 `StaticFileWriters` 缓存的 writer(任何 delete+reuse 都 stale),
+  移植上游 `StaticFileWriters::remove` 并在 `delete_jar` 里调用。两条恢复
+  路径由 `rerun_after_flag_flip_clears_tables` /
+  `rerun_with_partial_segments_resets_and_migrates` 覆盖。
+- **不改**:walker 边界 `n+1` 溢出(与上游逐字一致,上游同样无 saturating;
+  经 `bound_range` cap 实际不触发)。
