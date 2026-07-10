@@ -54,7 +54,11 @@ pub const DEAD_ADDRESS: Address = address!("000000000000000000000000000000000000
 // ============================================================================
 
 // Consensus Engine (0x1625F0xxx)
-pub const SYSTEM_CALLER: Address = address!("00000000000000000000000000000001625f0000");
+//
+// `SYSTEM_CALLER` is re-exported from `reth_chainspec` so the literal lives in a
+// single source of truth (see `crates/chainspec/src/gravity.rs`). Downstream
+// modules continue to import it from this module path for backwards compatibility.
+pub use reth_chainspec::SYSTEM_CALLER;
 pub const GENESIS_ADDR: Address = address!("00000000000000000000000000000001625f0001");
 
 // Runtime Configurations (0x1625F1xxx)
@@ -90,7 +94,6 @@ pub const ORACLE_REQUEST_QUEUE_ADDR: Address = address!("00000000000000000000000
 // Precompiles (0x1625F5xxx)
 pub const NATIVE_MINT_PRECOMPILE_ADDR: Address =
     address!("00000000000000000000000000000001625f5000");
-pub const BLS_PRECOMPILE_ADDR: Address = address!("00000000000000000000000000000001625f5001");
 pub use gravity_precompiles::randomness_by_height::RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR;
 
 // Legacy aliases (for backward compatibility)

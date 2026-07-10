@@ -16,3 +16,4 @@ alloy-primitives.workspace = true
 reth-evm = { workspace = true, features = ["std"] }
 revm.workspace = true
 tracing.workspace = true
+blst = "0.3"

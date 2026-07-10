@@ -20,7 +20,7 @@ reth-chainspec.workspace = true
 reth-ethereum-forks.workspace = true
 reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
-revm.workspace = true
+revm = { workspace = true, features = ["optional_balance_check", "optional_no_base_fee"] }
 reth-evm.workspace = true
 grevm.workspace = true
 gravity-primitives.workspace = true

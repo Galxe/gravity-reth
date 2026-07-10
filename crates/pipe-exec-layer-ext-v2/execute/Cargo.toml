@@ -58,7 +58,6 @@ bcs = "0.1"
 serde.workspace = true
 hex = { version = "0.4.3", features = ["serde"] }
 tiny-keccak = { version = "2.0", features = ["sha3"] }
-blst = "0.3"
 
 [dev-dependencies]
 reth-engine-primitives.workspace = true
@@ -69,6 +68,7 @@ reth-node-ethereum.workspace = true
 reth-node-builder.workspace = true
 reth-provider.workspace = true
 reth-ethereum-cli.workspace = true
+reth-ethereum-forks.workspace = true
 reth-revm.workspace = true
 reth-db.workspace = true
 reth-node-api.workspace = true
@@ -81,6 +81,7 @@ alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 alloy-rlp.workspace = true
 alloy-genesis.workspace = true
+alloy-rpc-types-trace.workspace = true
 reth-trie = { workspace = true, features = ["test-utils"] }
 ureq = { version = "2", features = ["json"] }
 

@@ -16,7 +16,10 @@ use async_trait::async_trait;
 use futures::Stream;
 use jsonrpsee::core::RpcResult;
 use parking_lot::RwLock;
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{
+    is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider, EthChainSpec,
+    EthereumHardforks,
+};
 use reth_engine_primitives::ConsensusEngineEvent;
 use reth_errors::RethError;
 use reth_evm::{block::BlockExecutor, execute::Executor, ConfigureEvm, EvmEnvFor};
@@ -39,7 +42,9 @@ use reth_storage_api::{
 };
 use reth_tasks::{pool::BlockingTaskGuard, Runtime};
 use reth_trie_common::{updates::TrieUpdates, HashedPostState, HashedStorage};
-use revm::{database::states::bundle_state::BundleRetention, Database, DatabaseCommit};
+use revm::{
+    context::Block, database::states::bundle_state::BundleRetention, Database, DatabaseCommit,
+};
 use revm_inspectors::tracing::{DebugInspector, TransactionContext};
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc};
@@ -120,18 +125,32 @@ where
 
                 eth_api.apply_pre_execution_changes(&block, &mut db)?;
 
+                // Gravity Alpha (system-tx gas-exempt) RPC block-family wiring,
+                // single-tx branch. Each tx already clones `evm_env` per-iteration
+                // (so this loop is naturally per-tx cfg-isolated); we just toggle
+                // the disables on the clone for txs whose recovered sender ==
+                // SYSTEM_CALLER, gated on the replayed block's timestamp.
+                let exempt_fork_active = is_system_tx_gas_exempt(
+                    eth_api.provider().chain_spec().as_ref(),
+                    evm_env.block_env.timestamp().saturating_to::<u64>(),
+                );
+
                 let mut transactions = block.transactions_recovered().enumerate().peekable();
                 let mut inspector = DebugInspector::new(opts).map_err(Eth::Error::from_eth_err)?;
                 while let Some((index, tx)) = transactions.next() {
                     let tx_hash = *tx.tx_hash();
+                    let tx_sender_is_system_caller = is_gravity_system_caller(tx.signer());
+
+                    let mut per_tx_evm_env = evm_env.clone();
+                    if exempt_fork_active && tx_sender_is_system_caller {
+                        per_tx_evm_env.cfg_env.disable_base_fee = true;
+                        per_tx_evm_env.cfg_env.disable_balance_check = true;
+                    }
+
                     let tx_env = eth_api.evm_config().tx_env(tx);
 
-                    let res = eth_api.inspect(
-                        &mut db,
-                        evm_env.clone(),
-                        tx_env.clone(),
-                        &mut inspector,
-                    )?;
+                    let res =
+                        eth_api.inspect(&mut db, per_tx_evm_env, tx_env.clone(), &mut inspector)?;
                     let result = inspector
                         .get_result(
                             Some(TransactionContext {
@@ -247,9 +266,31 @@ where
 
                 let tx_env = eth_api.evm_config().tx_env(&tx);
 
+                // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring
+                // for the *target* tx. `replay_transactions_until` above toggles
+                // the cfg for pre-target replay txs internally, but the target
+                // tx trace uses `evm_env` unmodified — so a post-Alpha system tx
+                // (`gas_price = 0` vs `basefee > 0`) would fail with
+                // `GasPriceLessThanBasefee`. Mirrors the parity-namespace path
+                // in `spawn_trace_transaction_in_block_with_inspector`
+                // (`crates/rpc/rpc-eth-api/src/helpers/trace.rs`).
+                let mut target_evm_env = evm_env.clone();
+                if is_system_tx_gas_exempt(
+                    eth_api.provider().chain_spec().as_ref(),
+                    target_evm_env.block_env.timestamp().saturating_to::<u64>(),
+                ) && is_gravity_system_caller(tx.signer())
+                {
+                    target_evm_env.cfg_env.disable_base_fee = true;
+                    target_evm_env.cfg_env.disable_balance_check = true;
+                }
+
                 let mut inspector = DebugInspector::new(opts).map_err(Eth::Error::from_eth_err)?;
-                let res =
-                    eth_api.inspect(&mut db, evm_env.clone(), tx_env.clone(), &mut inspector)?;
+                let res = eth_api.inspect(
+                    &mut db,
+                    target_evm_env.clone(),
+                    tx_env.clone(),
+                    &mut inspector,
+                )?;
                 let trace = inspector
                     .get_result(
                         Some(TransactionContext {
@@ -258,7 +299,7 @@ where
                             tx_hash: Some(*tx.tx_hash()),
                         }),
                         &tx_env,
-                        &evm_env.block_env,
+                        &target_evm_env.block_env,
                         &res,
                         &mut db,
                     )

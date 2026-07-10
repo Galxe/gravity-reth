@@ -270,8 +270,8 @@ mod tests {
         SystemTxnResult {
             result: ExecutionResult::Success {
                 reason: SuccessReason::Return,
-                gas_used,
-                gas_refunded: 0,
+                gas: revm::context_interface::result::ResultGas::default()
+                    .with_total_gas_spent(gas_used),
                 logs: vec![],
                 output: Output::Call(Bytes::new()),
             },

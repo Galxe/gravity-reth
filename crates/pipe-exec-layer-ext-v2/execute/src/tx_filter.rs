@@ -519,6 +519,7 @@ mod tests {
             nonce: 5,                                          // 账户 nonce 是 5
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender, account);
 
@@ -554,6 +555,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender, account);
 
@@ -593,6 +595,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender, account);
 
@@ -633,6 +636,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -667,6 +671,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender, account);
 
@@ -703,6 +708,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender1, account1);
 
@@ -711,6 +717,7 @@ mod tests {
             nonce: 5,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender2, account2);
 
@@ -719,6 +726,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender3, account3);
 
@@ -770,6 +778,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -807,6 +816,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -843,6 +853,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -871,6 +882,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -899,6 +911,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -929,6 +942,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -997,6 +1011,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1026,6 +1041,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1059,6 +1075,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1157,6 +1174,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1192,6 +1210,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1229,6 +1248,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1258,6 +1278,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1301,6 +1322,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1340,6 +1362,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1366,6 +1389,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1392,6 +1416,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1426,6 +1451,7 @@ mod tests {
                 // actual bytecode via `account.code` first (no DB fetch needed).
                 code_hash: B256::repeat_byte(0xab),
                 code: Some(code),
+                account_id: None,
             },
         );
 
@@ -1457,6 +1483,7 @@ mod tests {
                 nonce: 0,
                 code_hash: B256::repeat_byte(0xcd),
                 code: Some(Bytecode::new_eip7702(target)),
+                account_id: None,
             },
         );
 
