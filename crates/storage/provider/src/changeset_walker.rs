@@ -3,7 +3,8 @@
 
 use crate::ProviderResult;
 use alloy_primitives::BlockNumber;
-use reth_db_api::models::{AccountBeforeTx, BlockNumberAddress};
+use reth_db::models::AccountBeforeTx;
+use reth_db_api::models::BlockNumberAddress;
 use reth_primitives_traits::StorageEntry;
 use reth_storage_api::{ChangeSetReader, StorageChangeSetReader};
 use std::ops::{Bound, RangeBounds};
