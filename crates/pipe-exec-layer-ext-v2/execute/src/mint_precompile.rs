@@ -164,10 +164,45 @@ fn ensure_mint_gas(gas: u64) -> Result<(), PrecompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth_evm::{eth::EthEvmContext, precompiles::Precompile, EvmInternals};
+    use revm::{context::JournalTr, database::EmptyDB};
+
+    fn mint_calldata(recipient: Address, amount: U256) -> [u8; 53] {
+        let mut data = [0; 53];
+        data[0] = FUNC_MINT;
+        data[1..21].copy_from_slice(recipient.as_slice());
+        data[21..].copy_from_slice(&amount.to_be_bytes::<32>());
+        data
+    }
+
+    fn call_mint(ctx: &mut EthEvmContext<EmptyDB>, data: &[u8]) -> PrecompileResult {
+        create_mint_token_precompile().call(PrecompileInput {
+            data,
+            gas: MINT_BASE_GAS,
+            caller: AUTHORIZED_CALLER,
+            value: U256::ZERO,
+            target_address: Address::ZERO,
+            bytecode_address: Address::ZERO,
+            internals: EvmInternals::new(&mut ctx.journaled_state, &ctx.block),
+        })
+    }
 
     #[test]
     fn rejects_insufficient_forwarded_gas() {
         assert!(matches!(ensure_mint_gas(MINT_BASE_GAS - 1), Err(PrecompileError::OutOfGas)));
         assert!(ensure_mint_gas(MINT_BASE_GAS).is_ok());
+    }
+
+    #[test]
+    fn mints_and_touches_recipient() {
+        let recipient = address!("0x1111111111111111111111111111111111111111");
+        let amount = U256::from(42);
+        let data = mint_calldata(recipient, amount);
+        let mut ctx = EthEvmContext::new(EmptyDB::default(), Default::default());
+        let output = call_mint(&mut ctx, &data).unwrap();
+        let account = ctx.journaled_state.load_account(recipient).unwrap().data;
+        assert_eq!(output.gas_used, MINT_BASE_GAS);
+        assert_eq!(account.info.balance, amount);
+        assert!(account.is_touched());
     }
 }
