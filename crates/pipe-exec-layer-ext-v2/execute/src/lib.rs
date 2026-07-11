@@ -1090,14 +1090,36 @@ impl<Storage: GravityStorage> Core<Storage> {
             let validator_result = SystemTxnResult { result: execution_result, txn };
 
             if !validator_result.result.is_success() {
-                error!(target: "execute_ordered_block",
-                    index=?index,
-                    is_dkg=?is_dkg,
-                    block_number=?block_number,
-                    gas_used=?validator_result.result.gas_used(),
-                    output=?validator_result.result.output(),
-                    "validator system transaction reverted"
-                );
+                // Classify the revert by severity. A recoverable revert — e.g. a duplicate
+                // oracle attestation rejected by NativeOracle's sequential-nonce replay guard
+                // (NonceNotSequential) — is expected and must log at WARN, not ERROR, so it
+                // does not look like a failure or trip alerting. Unknown/fatal reverts stay ERROR.
+                let recoverable = validator_result
+                    .result
+                    .output()
+                    .and_then(|out| onchain_config::errors::decode_revert_error(out))
+                    .is_some_and(|e| {
+                        e.severity == onchain_config::errors::ErrorSeverity::Recoverable
+                    });
+                if recoverable {
+                    warn!(target: "execute_ordered_block",
+                        index=?index,
+                        is_dkg=?is_dkg,
+                        block_number=?block_number,
+                        gas_used=?validator_result.result.gas_used(),
+                        output=?validator_result.result.output(),
+                        "validator system transaction reverted (recoverable)"
+                    );
+                } else {
+                    error!(target: "execute_ordered_block",
+                        index=?index,
+                        is_dkg=?is_dkg,
+                        block_number=?block_number,
+                        gas_used=?validator_result.result.gas_used(),
+                        output=?validator_result.result.output(),
+                        "validator system transaction reverted"
+                    );
+                }
             } else {
                 // DKG transactions may trigger epoch change
                 if is_dkg {
