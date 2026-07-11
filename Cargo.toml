@@ -477,7 +477,12 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types", default-features = false }
 reth-revm = { path = "crates/revm", default-features = false }
-grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", rev = "2a42859a56f03197fce5be4ceb475d9f1a7d7c3d" }
+# grevm#110's `with_skip_invalid_txn` opt-in (consumed below). NOTE: grevm main is on revm 40 but
+# gravity-reth is on revm 29, so #110's PR head (revm 40) is NOT consumable here — this pins the
+# revm-29 backport of the same feature (Richard1048576/grevm `feat/skip-invalid-txn-optin-revm29`),
+# which also carries the parallel-path commit-detected-skip fix. Re-point to a Galxe/grevm commit
+# once the revm-29-vs-40 alignment is decided (backport upstreamed, or gravity-reth upgraded).
+grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", rev = "d0d0911ee0ca5ca7397325c9fd42d87710521e7c" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }
