@@ -86,8 +86,10 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
     ) -> impl Future<Output = Result<B256, Self::Error>> + Send {
         async move {
             let recovered = recover_raw_transaction::<PoolPooledTx<Self::Pool>>(&tx)?;
-            self.send_transaction(TransactionOrigin::External, WithEncoded::new(tx, recovered))
-                .await
+            // RPC-submitted transactions are Local (exempt from per-sender slot limits);
+            // upstream regressed this to External in #21969 and restored it in #25412,
+            // which landed after this merge base.
+            self.send_transaction(TransactionOrigin::Local, WithEncoded::new(tx, recovered)).await
         }
     }
 
