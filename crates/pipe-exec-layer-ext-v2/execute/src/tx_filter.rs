@@ -89,6 +89,10 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     chain_spec: &ChainSpec,
     block_timestamp: u64,
     block_number: u64,
+    // Emergency EIP-7702 lockdown (gravity-audit#838). When false, base behaviour is
+    // unchanged; when true, additionally drop every type-4 tx (L1) and every tx from/to a
+    // delegated account (L2/L3). CONSENSUS-CRITICAL — must be identical on every node.
+    eip7702_lockdown: bool,
 ) -> HashSet<usize> {
     let spec_id =
         revm_spec_by_timestamp_and_block_number(chain_spec, block_timestamp, block_number);
@@ -177,12 +181,28 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
             );
             return false;
         }
-        // EIP-7702 gates. Pre-Prague: reject the whole tx type (revm fires
-        // `Eip7702NotSupported`; `calculate_initial_tx_gas` below also ignores auth-list
-        // cost pre-Prague, so a 21k-gas TxEip7702 would slip the intrinsic check).
-        // Post-Prague: reject empty authorization_list (revm fires
-        // `EmptyAuthorizationList`). Closes audit#696 P-2 and audit#710 gap 3.
+        // EIP-7702 gates.
+        //
+        // Base (always): reject a pre-Prague type-4 tx (revm `Eip7702NotSupported`) and a
+        // post-Prague type-4 tx with an empty `authorization_list` (`EmptyAuthorizationList`);
+        // both would otherwise reach the executor as InvalidTransaction. Closes audit#696 P-2
+        // and audit#710 gap 3.
+        //
+        // EMERGENCY LOCKDOWN — L1 (audit#838 + #822, gated on `eip7702_lockdown`): when enabled,
+        // reject the ENTIRE type-4 tx type wholesale (a strict superset of the base gate) so no
+        // NEW delegations can be created. Together with the from-/to-delegated drops (L2/L3)
+        // below this closes the 7702 nonce-bump halt surface — the authorization-apply bump
+        // (#822) and the un-modelled execution-time CREATE bump (#838). REVERT (drop the flag)
+        // once the executor-skip fix (gravity-reth #388 + grevm #110) is deployed.
         if tx.is_eip7702() {
+            if eip7702_lockdown {
+                info!(target: "filter_invalid_txs",
+                    tx_hash=?tx.hash(),
+                    sender=?sender,
+                    "7702-lockdown: EIP-7702 (SetCode) tx rejected wholesale (audit#838)"
+                );
+                return false;
+            }
             if !spec_id.is_enabled_in(SpecId::PRAGUE) {
                 info!(target: "filter_invalid_txs",
                     tx_hash=?tx.hash(),
@@ -192,8 +212,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                 );
                 return false;
             }
-            let auth_count = tx.authorization_list().map(|l| l.len()).unwrap_or(0);
-            if auth_count == 0 {
+            if tx.authorization_list().map(|l| l.len()).unwrap_or(0) == 0 {
                 info!(target: "filter_invalid_txs",
                     tx_hash=?tx.hash(),
                     sender=?sender,
@@ -302,6 +321,22 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                 .unwrap_or(false)
     };
 
+    // EMERGENCY EIP-7702 LOCKDOWN — L2/L3 helper. `true` if the account CURRENTLY
+    // carries a 7702 delegation designator (`0xef 0x01 0x00 || address`), read from
+    // block-start state. Used to drop any tx originated BY (L2) or sent TO (L3) a
+    // delegated account, so neither the delegated account's own stale tx nor an
+    // inbound CALL that triggers its delegated CREATE can reach the executor. Note
+    // this differs from `code_permits`: an empty-code EOA is NOT delegated.
+    // REVERT WHEN THE SKIP FIX IS DEPLOYED.
+    let is_delegated = |acct: &AccountInfo| -> bool {
+        acct.code_hash != KECCAK_EMPTY &&
+            acct.code
+                .clone()
+                .or_else(|| db.code_by_hash_ref(acct.code_hash).ok())
+                .map(|b| b.is_eip7702())
+                .unwrap_or(false)
+    };
+
     // Block-order sequential simulation. `sim[addr]` is the address's account evolved
     // in-block (nonce + balance), seeded lazily from the certified parent state; `None`
     // marks an address absent from state. It holds BOTH tx senders AND EIP-7702
@@ -320,6 +355,25 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         let tx = &txs[idx];
         let sender = senders[idx];
 
+        // EMERGENCY EIP-7702 LOCKDOWN — L3 (gated on `eip7702_lockdown`): drop any tx whose
+        // recipient is a currently-delegated account, so no inbound CALL can trigger the
+        // callee's delegated CREATE (which bumps the callee's own nonce mid-block — the #838
+        // primitive). Read against block-start state (L1 rejects all type-4, so no delegation
+        // is created in-block). `to()` is `None` for a contract-creation tx.
+        if eip7702_lockdown && let Some(to) = tx.to() {
+            let to_delegated =
+                db.basic_ref(to).ok().flatten().map(|a| is_delegated(&a)).unwrap_or(false);
+            if to_delegated {
+                info!(target: "filter_invalid_txs",
+                    tx_hash=?tx.hash(),
+                    to=?to,
+                    "7702-lockdown: tx to delegated account rejected (audit#838)"
+                );
+                invalid_tx_idxs.insert(idx);
+                continue;
+            }
+        }
+
         // Validate the tx against the simulated sender account and apply the caller nonce
         // bump + balance deduction. Scoped so the `sim[sender]` borrow is released before
         // the authorization loop re-borrows `sim` (an authority may be any account).
@@ -329,7 +383,18 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                 // Sender absent from state -> cannot pay for / originate the tx.
                 None => false,
                 Some(account) => {
-                    if !code_permits(account) {
+                    if eip7702_lockdown && is_delegated(account) {
+                        // EMERGENCY EIP-7702 LOCKDOWN — L2 (gated on `eip7702_lockdown`): the
+                        // delegated sender's own execution-time CREATE can bump its nonce (not
+                        // modelled by this filter's auth-list simulation), making this
+                        // current-nonce tx `NonceTooLow` -> executor halt (audit#838). Drop it.
+                        info!(target: "filter_invalid_txs",
+                            tx_hash=?tx.hash(),
+                            sender=?sender,
+                            "7702-lockdown: tx from delegated account rejected (audit#838)"
+                        );
+                        false
+                    } else if !code_permits(account) {
                         info!(target: "filter_invalid_txs",
                             sender=?sender,
                             code_hash=?account.code_hash,
@@ -478,6 +543,36 @@ mod tests {
         )
     }
 
+    /// Legacy tx with a caller-chosen recipient — for the 7702-lockdown L3
+    /// (tx-to-delegated) tests.
+    fn create_test_transaction_to(
+        nonce: u64,
+        gas_limit: u64,
+        gas_price: u128,
+        to: Address,
+    ) -> TransactionSigned {
+        TransactionSigned::new_unhashed(
+            Transaction::Legacy(TxLegacy {
+                nonce,
+                gas_price,
+                gas_limit,
+                to: TxKind::Call(to),
+                ..Default::default()
+            }),
+            Signature::test_signature(),
+        )
+    }
+
+    /// A block-start-state account carrying a 7702 delegation designator to `target`.
+    fn delegated_account(target: Address) -> AccountInfo {
+        AccountInfo {
+            balance: U256::from(1_000_000_000_000_000_000u64),
+            nonce: 0,
+            code_hash: B256::repeat_byte(0xcd),
+            code: Some(Bytecode::new_eip7702(target)),
+        }
+    }
+
     fn create_test_transaction_with_value(
         nonce: u64,
         gas_limit: u64,
@@ -546,6 +641,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert!(invalid_idxs.is_empty());
     }
@@ -571,6 +667,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 1);
         assert!(invalid_idxs.contains(&0));
@@ -606,6 +703,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 1);
         assert!(invalid_idxs.contains(&0));
@@ -644,6 +742,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 2);
         assert!(invalid_idxs.contains(&0));
@@ -681,6 +780,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 1);
         assert!(invalid_idxs.contains(&1));
@@ -718,6 +818,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 2);
         assert!(invalid_idxs.contains(&0));
@@ -755,6 +856,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert!(invalid_idxs.is_empty());
     }
@@ -815,6 +917,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 5, "invalid_idxs: {invalid_idxs:?}");
         assert!(invalid_idxs.contains(&1));
@@ -858,12 +961,14 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 1, "intrinsic-gas-too-low 7702 tx should be discarded");
         assert!(invalid_idxs.contains(&0));
     }
 
-    /// Sanity check: same 7702 tx with a `gas_limit` at or above the floor passes the filter.
+    /// Sanity check (lockdown OFF): a 7702 tx with `gas_limit` at/above the intrinsic floor
+    /// passes the filter — base behaviour, unchanged by the lockdown flag.
     #[test]
     fn test_filter_invalid_txs_eip7702_intrinsic_gas_just_enough_under_prague() {
         let mut db = MockDatabase::new();
@@ -878,7 +983,7 @@ mod tests {
             },
         );
 
-        // exactly 21000 + 25000 = 46000 — at the floor, should pass
+        // exactly 21000 + 25000 = 46000 — at the floor, should pass (lockdown off).
         let tx = create_test_7702_transaction(0, 46_000, 1);
         let txs = vec![tx];
         let senders = vec![sender];
@@ -894,12 +999,16 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
-        assert!(invalid_idxs.is_empty(), "got: {invalid_idxs:?}");
+        assert!(
+            invalid_idxs.is_empty(),
+            "base 7702 tx at floor must pass (lockdown off): {invalid_idxs:?}"
+        );
     }
 
-    /// U-1 (acceptance design §3.1): a 7702 tx with `authorization_list.len() == 2` and
-    /// `gas_limit = 21000 + 25000 * 2 + 1000 = 72000` passes the filter under Prague.
+    /// U-1 (acceptance design §3.1, lockdown OFF): a 7702 tx with two authorizations and
+    /// sufficient gas passes the filter — base behaviour, unchanged by the lockdown flag.
     #[test]
     fn test_filter_invalid_txs_eip7702_two_auths_gas_sufficient() {
         let mut db = MockDatabase::new();
@@ -918,11 +1027,20 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert!(
             invalid_idxs.is_empty(),
-            "two-auth 7702 tx with 72k gas must pass: {invalid_idxs:?}"
+            "base two-auth 7702 tx with 72k gas must pass (lockdown off): {invalid_idxs:?}"
         );
     }
 
@@ -946,8 +1064,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(invalid_idxs.len(), 1, "three-auth 7702 tx at 21k gas must be discarded");
         assert!(invalid_idxs.contains(&0));
     }
@@ -977,8 +1104,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &shanghai_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &shanghai_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(invalid_idxs.len(), 1, "7702 tx must be discarded when spec_id < PRAGUE");
         assert!(invalid_idxs.contains(&0));
     }
@@ -1004,8 +1140,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert!(
             invalid_idxs.is_empty(),
             "legacy 21k-gas tx must not be regressed by the 7702 intrinsic fix: {invalid_idxs:?}"
@@ -1074,8 +1219,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(invalid_idxs.len(), 1, "type-3 (blob) tx must be discarded on Gravity");
         assert!(invalid_idxs.contains(&0));
     }
@@ -1103,8 +1257,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(
             invalid_idxs.len(),
             1,
@@ -1137,8 +1300,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 10_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            10_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert!(
             invalid_idxs.is_empty(),
             "Create tx at exactly MAX_INITCODE_SIZE must pass the size gate: {invalid_idxs:?}"
@@ -1242,6 +1414,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 1, "legacy tx with gas_price < base_fee must be discarded");
         assert!(invalid_idxs.contains(&0));
@@ -1277,6 +1450,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(invalid_idxs.len(), 1, "1559 tx with max_fee < base_fee must be discarded");
         assert!(invalid_idxs.contains(&0));
@@ -1305,8 +1479,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(invalid_idxs.len(), 1, "1559 tx with prio > max must be discarded");
         assert!(invalid_idxs.contains(&0));
     }
@@ -1335,8 +1518,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(
             invalid_idxs.len(),
             1,
@@ -1385,6 +1577,7 @@ mod tests {
             &prague_chain_spec(),
             0,
             0,
+            false,
         );
         assert_eq!(
             invalid_idxs.len(),
@@ -1416,8 +1609,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(invalid_idxs.len(), 1, "1559 tx with wrong chain_id must be discarded");
         assert!(invalid_idxs.contains(&0));
     }
@@ -1441,8 +1643,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(invalid_idxs.len(), 1, "legacy tx with chain_id=Some(2) must be discarded");
         assert!(invalid_idxs.contains(&0));
     }
@@ -1467,8 +1678,17 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert!(
             invalid_idxs.is_empty(),
             "pre-EIP-155 legacy tx must pass the chain-id gate: {invalid_idxs:?}"
@@ -1503,40 +1723,218 @@ mod tests {
         let txs = vec![tx1, tx2];
         let senders = vec![sender, sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert_eq!(invalid_idxs.len(), 2, "all txs from coded sender must be discarded");
         assert!(invalid_idxs.contains(&0));
         assert!(invalid_idxs.contains(&1));
     }
 
-    /// EIP-3607 delegation exception: sender whose code is an EIP-7702 delegation
-    /// designator (`0xef 0x01 0x00 + address`) is allowed to send txs — Pectra
-    /// relaxed 3607 precisely to permit delegated EOAs.
+    /// 7702 LOCKDOWN (L2): pre-lockdown, EIP-3607 was relaxed so a delegated EOA could
+    /// originate txs. Under the lockdown a tx FROM a delegated account is dropped, because
+    /// its execution-time CREATE can bump its own nonce and halt the executor (#838).
+    /// Revert to "accepted" when the skip fix is deployed.
     #[test]
-    fn test_filter_invalid_txs_sender_with_7702_delegation_accepted() {
+    fn test_filter_invalid_txs_sender_with_7702_delegation_rejected_under_lockdown() {
         let mut db = MockDatabase::new();
         let sender = Address::random();
         let target = Address::repeat_byte(0x42);
-        db.insert_account(
-            sender,
-            AccountInfo {
-                balance: U256::from(1_000_000_000_000_000_000u64),
-                nonce: 0,
-                code_hash: B256::repeat_byte(0xcd),
-                code: Some(Bytecode::new_eip7702(target)),
-            },
-        );
+        db.insert_account(sender, delegated_account(target));
 
         let tx = create_test_transaction(0, 21_000, 25_000_000_000);
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
-            filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            true,
+        );
+        assert_eq!(
+            invalid_idxs.len(),
+            1,
+            "7702-lockdown L2 must drop a tx from a delegated sender: {invalid_idxs:?}"
+        );
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    /// EIP-3607 delegation exception (lockdown OFF): a delegated EOA (`0xef0100…` designator)
+    /// may originate txs — Pectra relaxed 3607 for delegated EOAs. Base behaviour, unchanged
+    /// by the lockdown flag.
+    #[test]
+    fn test_filter_invalid_txs_sender_with_7702_delegation_accepted_base() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(sender, delegated_account(Address::repeat_byte(0x42)));
+
+        let tx = create_test_transaction(0, 21_000, 25_000_000_000);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            false,
+        );
         assert!(
             invalid_idxs.is_empty(),
-            "tx from EIP-7702-delegated sender must pass: {invalid_idxs:?}"
+            "delegated sender must pass with lockdown off (EIP-3607 exception): {invalid_idxs:?}"
+        );
+    }
+
+    /// 7702 LOCKDOWN (L3): a tx whose recipient is a delegated account is dropped, so an
+    /// inbound CALL cannot trigger the callee's delegated CREATE.
+    #[test]
+    fn test_filter_invalid_txs_recipient_delegated_rejected_under_lockdown() {
+        let mut db = MockDatabase::new();
+        let caller = Address::random();
+        let delegated = Address::repeat_byte(0xa1);
+        db.insert_account(
+            caller,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            },
+        );
+        db.insert_account(delegated, delegated_account(Address::repeat_byte(0x42)));
+
+        // caller (normal EOA) -> delegated account.
+        let tx = create_test_transaction_to(0, 21_000, 25_000_000_000, delegated);
+        let txs = vec![tx];
+        let senders = vec![caller];
+
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            true,
+        );
+        assert_eq!(
+            invalid_idxs.len(),
+            1,
+            "7702-lockdown L3 must drop a tx to a delegated recipient: {invalid_idxs:?}"
+        );
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    /// 7702 LOCKDOWN — audit#838 attack shape neutralised: block = [X (funder -> delegated
+    /// A), A@M (from delegated A)]. Pre-lockdown A@M reached the executor as `NonceTooLow`
+    /// after X's inbound CALL bumped A's nonce via a delegated CREATE -> halt. Under the
+    /// lockdown BOTH are dropped: X by L3 (to delegated), A@M by L2 (from delegated).
+    #[test]
+    fn test_filter_invalid_txs_audit838_attack_shape_neutralised() {
+        let mut db = MockDatabase::new();
+        let funder = Address::random();
+        let a = Address::repeat_byte(0xaa);
+        db.insert_account(
+            funder,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            },
+        );
+        db.insert_account(a, delegated_account(Address::repeat_byte(0xcc)));
+
+        let x = create_test_transaction_to(0, 21_000, 25_000_000_000, a); // funder -> A (L3)
+        let a_at_m = create_test_transaction(0, 21_000, 25_000_000_000); // from A (L2)
+        let txs = vec![x, a_at_m];
+        let senders = vec![funder, a];
+
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            true,
+        );
+        assert_eq!(
+            invalid_idxs.len(),
+            2,
+            "both legs of the audit#838 attack shape must be dropped: {invalid_idxs:?}"
+        );
+        assert!(invalid_idxs.contains(&0) && invalid_idxs.contains(&1));
+    }
+
+    /// 7702 LOCKDOWN precision: a normal tx between NON-delegated accounts (recipient has
+    /// ordinary contract code, not a 7702 designator) is unaffected — the lockdown only
+    /// touches 7702 delegations, not general traffic.
+    #[test]
+    fn test_filter_invalid_txs_non_delegated_traffic_unaffected_by_lockdown() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        let contract = Address::repeat_byte(0xbe);
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            },
+        );
+        // Recipient has ordinary (non-7702) code.
+        db.insert_account(
+            contract,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash: B256::repeat_byte(0x11),
+                code: Some(Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00, 0x60, 0x00]))),
+            },
+        );
+
+        let tx = create_test_transaction_to(0, 21_000, 25_000_000_000, contract);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+            true,
+        );
+        assert!(
+            invalid_idxs.is_empty(),
+            "non-delegated traffic must be unaffected by the 7702 lockdown: {invalid_idxs:?}"
         );
     }
 }
