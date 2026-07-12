@@ -108,6 +108,38 @@ fn gravity_prague_chainspec(prague_time: Option<u64>) -> String {
     json.to_string()
 }
 
+/// Chainspec for the Finding-A / audit#838 lockdown test. On top of Prague activation,
+/// pre-seeds two accounts into the genesis alloc:
+///   - `c` — code = minimal CREATE runtime (`0x600060006000f0`).
+///   - `a` — code = the 7702 delegation designator `0xef0100 || c`, funded, nonce 0.
+///
+/// Seeding A as *already delegated* models the exploit faithfully: Finding A attacks an
+/// account delegated in a PRIOR (permissionless) block, before the lockdown filter is in
+/// force — the lockdown's L1 blocks NEW delegations, so an in-band `SetCode` could not set it up.
+fn finding_a_chainspec(prague_time: Option<u64>, a: Address, c: Address) -> String {
+    let mut json: serde_json::Value =
+        serde_json::from_str(include_str!("../gravity_hardfork.json"))
+            .expect("gravity_hardfork.json must parse as JSON");
+    if let Some(ts) = prague_time {
+        json["config"]["pragueTime"] = serde_json::json!(ts);
+    }
+    let a_key = format!("0x{}", alloy_primitives::hex::encode(a.as_slice()));
+    let c_key = format!("0x{}", alloy_primitives::hex::encode(c.as_slice()));
+    let designator = {
+        let mut v = vec![0xefu8, 0x01, 0x00];
+        v.extend_from_slice(c.as_slice());
+        format!("0x{}", alloy_primitives::hex::encode(&v))
+    };
+    json["alloc"][&c_key] =
+        serde_json::json!({ "balance": "0x0", "nonce": 0, "code": "0x600060006000f0" });
+    json["alloc"][&a_key] = serde_json::json!({
+        "balance": "0x3635c9adc5dea00000", // 1000 ETH
+        "nonce": 0,
+        "code": designator,
+    });
+    json.to_string()
+}
+
 /// Anvil account 0 — pre-funded in `gravity_hardfork.json` (`0x2e51 ETH`).
 /// Used as the tx sender (wallet_B / relayer) in every 7702 scenario.
 const FUNDED_PRIVKEY_HEX: &[u8; 32] = &[
@@ -120,6 +152,13 @@ const FUNDED_ADDR: Address = address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb9226
 /// 7702 designator is `0xef0100 || target`; the target's code (or lack
 /// thereof) only matters if the authority is subsequently CALLed.
 const TARGET_ADDR: Address = address!("0x0000000000000000000000000000000000001234");
+
+/// Finding-A / audit#838 scenario: `FA_C_ADDR` is genesis-seeded with the minimal
+/// CREATE runtime `PUSH1 0; PUSH1 0; PUSH1 0; CREATE` (`0x600060006000f0`). An account
+/// delegated to it bumps its OWN nonce whenever it is CALLed. `DEAD_ADDR` is A@M's inert
+/// recipient.
+const FA_C_ADDR: Address = address!("0x000000000000000000000000000000000000c0de");
+const DEAD_ADDR: Address = address!("0x000000000000000000000000000000000000dEaD");
 
 fn funded_signer() -> PrivateKeySigner {
     PrivateKeySigner::from_bytes(&B256::from(*FUNDED_PRIVKEY_HEX))
@@ -194,6 +233,37 @@ fn build_signed_eip7702_tx(
     // Persist the precomputed hash so downstream consumers see the same tx hash as the signer did.
     let _ = signed_tx.hash();
     debug_assert_eq!(*signed_tx.hash(), hash);
+    (signed_tx, sender.address())
+}
+
+/// Build + sign a plain EIP-1559 tx (used for the Finding-A attack legs X and A@M, both of
+/// which are ordinary txs — not type-4). Returns the tx plus its recovered sender.
+fn build_signed_1559_tx(
+    sender: &PrivateKeySigner,
+    nonce: u64,
+    gas_limit: u64,
+    to: alloy_primitives::TxKind,
+    input: Bytes,
+) -> (TransactionSigned, Address) {
+    use alloy_consensus::{SignableTransaction, TxEip1559};
+
+    let tx = TxEip1559 {
+        chain_id: CHAIN_ID,
+        nonce,
+        gas_limit,
+        max_fee_per_gas: 1_000_000_000,
+        max_priority_fee_per_gas: 0,
+        to,
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input,
+    };
+    let sig_hash = tx.signature_hash();
+    let signature: Signature = sender.sign_hash_sync(&sig_hash).expect("tx signing must succeed");
+    let signed = tx.into_signed(signature);
+    let (tx, sig, _hash) = signed.into_parts();
+    let signed_tx = TransactionSigned::new_unhashed(Transaction::Eip1559(tx), sig);
+    let _ = signed_tx.hash();
     (signed_tx, sender.address())
 }
 
@@ -503,6 +573,11 @@ async fn run_p13_happy_path(
     Ok(state_root)
 }
 
+// P-13/P-14 are positive controls that a valid 7702 SetCode tx delegates the authority. The
+// EIP7702_LOCKDOWN build (const = true) intentionally drops ALL type-4 txs (L1), so 7702
+// delegation cannot happen and these tests cannot pass. Ignored while the lockdown ships;
+// un-ignore when the const is flipped back to false (skip fix deployed, 7702 re-enabled).
+#[ignore = "7702 delegation is disabled by EIP7702_LOCKDOWN; un-ignore when the lockdown is lifted"]
 #[test]
 fn test_p13_happy_path_grevm() {
     let state_root = run_pipe_e2e_test(
@@ -514,6 +589,7 @@ fn test_p13_happy_path_grevm() {
     println!("[eip7702_test] grevm state root = {state_root:?}");
 }
 
+#[ignore = "7702 delegation is disabled by EIP7702_LOCKDOWN; un-ignore when the lockdown is lifted"]
 #[test]
 fn test_p13_happy_path_disable_grevm() {
     let state_root = run_pipe_e2e_test(
@@ -604,6 +680,107 @@ fn test_p12_low_gas_eip7702_discarded_disable_grevm() {
         "data/gravity_eip7702_p12_disable_grevm_test",
         true,
         run_p12_filter_discard,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Finding A / audit#838 — EIP-7702 lockdown end-to-end.
+//
+// A is genesis-delegated to a CREATE contract C (already-delegated variant — the
+// permissionless prior-block setup the lockdown's L1 can no longer produce). The
+// activation block carries the attack pair:
+//   X    : FUNDER -> A   (an inbound CALL that runs A's delegated CREATE, bumping A's nonce)
+//   A@M  : A -> DEAD      (A's current-nonce tx, which the CREATE bump would turn NonceTooLow)
+//
+// WITHOUT the lockdown, A@M reaches the executor as NonceTooLow and panics it at lib.rs
+// (whole-network halt — the control, reproduced live on the isolated devnet earlier). WITH
+// the lockdown, L3 drops X (to a delegated account) and L2 drops A@M (from a delegated
+// account), so the block executes with zero user txs and the chain keeps advancing.
+// ---------------------------------------------------------------------------
+
+async fn run_finding_a_lockdown_survive(
+    builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>,
+) -> eyre::Result<B256> {
+    let (_chain_spec, provider, pipeline_api, latest_block_number) = boot_pipeline(builder).await?;
+
+    let mut epoch: u64 = pipeline_api
+        .fetch_config_bytes(OnChainConfig::Epoch, BlockNumber::Latest)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let consensus = MockConsensus::new(pipeline_api, Box::new(p3_ts_us));
+    consensus.push_empty_range(&mut epoch, latest_block_number + 1, P3_ACTIVATION_BLOCK - 1).await;
+
+    let funder = funded_signer();
+    let a = authority_signer(0xAA);
+
+    // Sanity: the genesis seeding really made A an already-delegated account.
+    assert_designator(&provider, P3_ACTIVATION_BLOCK - 1, a.address(), FA_C_ADDR);
+
+    // Attack block 100 (Prague active): [X (FUNDER -> A), A@M (A -> DEAD, nonce 0)].
+    let (x_tx, x_from) = build_signed_1559_tx(
+        &funder,
+        0,
+        200_000,
+        alloy_primitives::TxKind::Call(a.address()),
+        Bytes::new(),
+    );
+    let (am_tx, am_from) = build_signed_1559_tx(
+        &a,
+        0,
+        40_000,
+        alloy_primitives::TxKind::Call(DEAD_ADDR),
+        Bytes::new(),
+    );
+
+    let block = ordered_block_with_txs(
+        epoch,
+        P3_ACTIVATION_BLOCK,
+        mock_block_id(P3_ACTIVATION_BLOCK),
+        mock_block_id(P3_ACTIVATION_BLOCK - 1),
+        p3_ts_us(P3_ACTIVATION_BLOCK),
+        vec![x_tx, am_tx],
+        vec![x_from, am_from],
+    );
+    // If the lockdown filter did NOT drop both legs, A@M would reach the executor as
+    // NonceTooLow and the panic hook would `process::exit(1)` — so a clean return IS survival.
+    let result = consensus.push_one(&mut epoch, block).await;
+    let pipeline_api = consensus.into_inner();
+    pipeline_api.wait_for_block_persistence(P3_ACTIVATION_BLOCK).await.unwrap();
+    println!(
+        "[eip7702_test] ✅ Finding-A attack block executed WITHOUT halt: {:?}",
+        result.block_hash
+    );
+
+    // Both attack legs were filtered: A is untouched (still delegated, CREATE never fired).
+    assert_designator(&provider, P3_ACTIVATION_BLOCK, a.address(), FA_C_ADDR);
+
+    // Prove the chain keeps making progress past the attack block.
+    let mut epoch_after = epoch;
+    let consensus = MockConsensus::new(pipeline_api, Box::new(p3_ts_us));
+    consensus
+        .push_empty_range(&mut epoch_after, P3_ACTIVATION_BLOCK + 1, P3_ACTIVATION_BLOCK + 1)
+        .await;
+    println!("[eip7702_test] ✅ Finding-A lockdown: chain progressed past the attack block.");
+
+    Ok(read_state_root(&provider, P3_ACTIVATION_BLOCK))
+}
+
+// Full-pipeline proof of the lockdown: with `EIP7702_LOCKDOWN = true` (this build) the audit#838
+// attack block [X -> delegated A, A@M] executes with zero user txs — both legs filtered (X by L3,
+// A@M by L2) — and the chain advances, instead of panicking the executor at lib.rs on A@M's
+// NonceTooLow. If the const is flipped back to `false`, this same block would instead halt the
+// executor (the survive-vs-halt A/B was verified manually both ways).
+#[test]
+fn test_finding_a_lockdown_survives_grevm() {
+    let a = authority_signer(0xAA).address();
+    let spec = finding_a_chainspec(Some(PRAGUE_TS_BLOCK_100), a, FA_C_ADDR);
+    let _ = run_pipe_e2e_test(
+        &spec,
+        "data/gravity_eip7702_finding_a_lockdown_grevm",
+        false,
+        run_finding_a_lockdown_survive,
     );
 }
 

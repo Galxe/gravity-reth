@@ -1294,6 +1294,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             &self.chain_spec,
             block_timestamp,
             block_number,
+            gravity_primitives::EIP7702_LOCKDOWN,
         );
         if invalid_idxs.is_empty() {
             let mut txs_info = Vec::with_capacity(txs.len());
