@@ -6,7 +6,7 @@
 
 use super::{
     base::OnchainConfigFetcher,
-    oracle_task_helpers::{OracleTaskClient, SOURCE_TYPE_BLOCKCHAIN},
+    oracle_task_helpers::{OracleTaskClient, RELAYER_BACKED_SOURCE_TYPES},
     NATIVE_ORACLE_ADDR, SYSTEM_CALLER,
 };
 use alloy_eips::BlockId;
@@ -106,48 +106,48 @@ where
         })
     }
 
-    /// Fetch all oracle source states for registered blockchain tasks
+    /// Fetch all oracle source states for registered relayer-backed tasks.
     ///
     /// Returns BCS-serialized OracleSourceStates for registered sources.
     pub fn fetch(&self, block_id: BlockId) -> Option<Bytes> {
         let task_client = OracleTaskClient::new(self.base_fetcher);
         let mut results = Vec::new();
 
-        // Get all registered blockchain source IDs
-        let source_ids = task_client
-            .fetch_registered_source_ids(SOURCE_TYPE_BLOCKCHAIN, block_id)
-            .unwrap_or_default();
-
-        info!(
-            target: "oracle_state",
-            source_count = source_ids.len(),
-            "Fetching oracle source states"
-        );
-
-        for source_id in source_ids {
-            // Get latest nonce for this source
-            let latest_nonce = task_client
-                .call_get_latest_nonce(SOURCE_TYPE_BLOCKCHAIN, source_id, block_id)
-                .unwrap_or(0);
-
-            // Fetch the latest record if nonce > 0
-            let latest_record =
-                self.fetch_latest_record(SOURCE_TYPE_BLOCKCHAIN, source_id, latest_nonce, block_id);
+        for source_type in RELAYER_BACKED_SOURCE_TYPES {
+            let source_ids =
+                task_client.fetch_registered_source_ids(*source_type, block_id).unwrap_or_default();
 
             info!(
                 target: "oracle_state",
-                source_id = source_id.to_string(),
-                latest_nonce,
-                has_record = latest_record.is_some(),
-                "Fetched oracle source state"
+                source_type,
+                source_count = source_ids.len(),
+                "Fetching oracle source states"
             );
 
-            results.push(OracleSourceState {
-                source_type: SOURCE_TYPE_BLOCKCHAIN,
-                source_id: source_id.try_into().unwrap_or(0),
-                latest_nonce,
-                latest_record,
-            });
+            for source_id in source_ids {
+                let latest_nonce = task_client
+                    .call_get_latest_nonce(*source_type, source_id, block_id)
+                    .unwrap_or(0);
+
+                let latest_record =
+                    self.fetch_latest_record(*source_type, source_id, latest_nonce, block_id);
+
+                info!(
+                    target: "oracle_state",
+                    source_type,
+                    source_id = source_id.to_string(),
+                    latest_nonce,
+                    has_record = latest_record.is_some(),
+                    "Fetched oracle source state"
+                );
+
+                results.push(OracleSourceState {
+                    source_type: *source_type,
+                    source_id: source_id.try_into().unwrap_or(0),
+                    latest_nonce,
+                    latest_record,
+                });
+            }
         }
 
         Some(bcs::to_bytes(&results).expect("Failed to BCS serialize OracleSourceStates").into())

@@ -1,0 +1,203 @@
+# Oracle Relayer Protocol
+
+The relayer converts deterministic external observations into bytes consumed by
+the existing UnsupportedJWK consensus path. The production-candidate oracle
+adapters are:
+
+| sourceType | Adapter | Upstream |
+| --- | --- | --- |
+| `3` | `binance_index_kline_v1` | Binance USD-M closed index-price kline |
+| `6` | `polymarket_settlement` | Finalized Polygon CTF resolution log |
+
+The existing `sourceType=0` bridge event adapter remains independent from these
+oracle products.
+
+## Configuration split
+
+The on-chain `gravity://` URI is the consensus task identity. It contains only
+public deterministic parameters. The relayer JSON config maps the exact URI to
+a validator-local upstream URL.
+
+```json
+{
+  "uri_mappings": {
+    "gravity://3/1001/price_feed?...": "https://provider.example",
+    "gravity://6/7202626/polymarket_settlement?...": "https://polygon.example"
+  }
+}
+```
+
+Do not put API keys, tenant paths, URL userinfo, or provider URLs in the on-chain
+URI. The Binance adapter rejects `baseUrl` as a URI parameter.
+
+## Consensus wrapper
+
+Every adapter returns one or more `OracleData` values:
+
+```rust
+OracleData {
+    nonce: u128,
+    payload: abi.encode(nonce, source_block_or_time, resolver_payload),
+}
+```
+
+The JWK execution path unwraps this tuple and calls:
+
+```solidity
+NativeOracle.recordBatch(
+    sourceType,
+    sourceId,
+    nonces,
+    blockNumbers,
+    resolverPayloads,
+    callbackGasLimits
+)
+```
+
+The execution layer assigns a `2,000,000` gas callback budget per record. This
+budget is covered by the resolver's maximum-size observation test; failed
+callbacks do not discard the raw `NativeOracle` record and can be replayed.
+
+Delivery nonce is sequential for each `(sourceType, sourceId)`. It is not a
+Binance round id and it is not a Polygon log index.
+
+## Binance price feed
+
+URI shape:
+
+```text
+gravity://3/<feedId>/price_feed
+  ?provider=binance_index_kline_v1
+  &pair=<PAIR>
+  &interval=1m
+  &bucketStartMs=<aligned start>
+  &continuous=true
+  &decimals=8
+  &aggregationMode=2
+  &minSourceCount=1
+  &minTotalWeight=1
+  &maxStaleness=<milliseconds>
+  &graceMs=<milliseconds>
+```
+
+For delivery nonce `n` in continuous mode:
+
+```text
+bucketStart(n) = configuredBucketStart + (n - 1) * intervalMs
+bucketEnd(n)   = bucketStart(n) + intervalMs - 1
+roundId(n)     = bucketStart(n) / intervalMs
+resolvedAt(n)  = bucketEnd(n)
+```
+
+`bucketStartMs` is the bucket origin for nonce `1` and is immutable for the
+lifetime of a `feedId`. Startup reconciliation rejects a confirmed cursor that
+does not match this mapping. Use a new `feedId` when introducing a new origin.
+For fixed, non-continuous tasks, a confirmed cursor equal to the target bucket
+means the URI was already delivered and must not be fetched again. A newer
+bucket uses the next delivery nonce; a bucket older than confirmed history is
+rejected.
+
+`round`, `resolvedAt`, and `blockNumber` are derived from the exact bucket and
+cannot be overridden in a Binance task URI.
+
+The request is:
+
+```text
+GET /fapi/v1/indexPriceKlines
+  ?pair=<PAIR>
+  &interval=<interval>
+  &startTime=<bucketStart>
+  &endTime=<bucketEnd>
+  &limit=1
+```
+
+Canonical acceptance rules:
+
+- pair is 1-32 uppercase ASCII letters or digits
+- interval is one of the fixed-duration Binance intervals supported in code
+- bucket start is interval-aligned
+- local time is at least `bucketEnd + graceMs`
+- response has exactly one row
+- row `openTime` and `closeTime` exactly match the requested bucket
+- close price is a positive decimal string
+- response body is streamed into a buffer capped at 64 KiB
+- connection timeout is 5 seconds and total request timeout is 15 seconds
+- decimals are at most 18 and observations are capped at 16
+
+The resolver payload is ABI encoding of `PriceFeedResolver.PricePayload`. The
+default Binance observation id is:
+
+```text
+keccak256("binance:usdm:indexPriceKlines:<PAIR>:<INTERVAL>:close")
+```
+
+`provider=inline_fixture_v1` is an explicit deterministic test adapter. Missing
+`provider` is rejected, so fixture payloads cannot be selected accidentally by
+an incomplete production task URI.
+
+## Polymarket settlement mirror
+
+URI shape:
+
+```text
+gravity://6/<mirrorId>/polymarket_settlement
+  ?ctf=<CTF address>
+  &condition=<conditionId>
+  &fromBlock=<exclusive finalized cursor>
+  &maxBlocksPerPoll=<bounded range>
+```
+
+`condition` is required. One source id represents one reviewed CTF condition;
+the adapter does not scan all Polymarket settlements and ask the callback to
+filter them later.
+
+On first poll the RPC endpoint must report chain id `137`. Each poll then:
+
+1. reads Polygon's finalized block number;
+2. scans after the exclusive `fromBlock` cursor, at most 10,000 finalized
+   blocks per poll;
+3. filters the configured CTF address, `ConditionResolution` signature, and
+   exact condition topic;
+4. validates block number, log index, transaction hash, slot count (maximum
+   32), and a
+   non-zero payout vector;
+5. sorts by `(blockNumber, logIndex, txHash)` and deduplicates identical logs;
+6. rejects multiple distinct settlements for one condition and assigns one
+   sequential Gravity delivery nonce.
+
+Filtered logs with malformed ABI or missing source identity fail the poll and
+do not advance the cursor. Once one settlement has been returned, the one-shot
+source stops scanning; cached resend and restart reconciliation handle pending
+consensus delivery.
+
+The resolver payload contains mirror id, Polygon chain id, CTF and oracle
+addresses, condition and question ids, payout vector, transaction hash, log
+index, and settlement kind.
+
+## Progress and retries
+
+The source advances its in-memory cursor when it returns data. The SDK wrapper
+caches that complete `PollResult`; while the returned nonce is ahead of
+`NativeOracle.latestNonce`, it resends the cached bytes instead of polling the
+upstream again.
+
+Persisted relayer progress tracks fetched data, not confirmed data. On restart:
+
+- on-chain ahead: fast-forward local state;
+- persisted and on-chain equal: restore cursor;
+- persisted ahead: roll back to the confirmed on-chain nonce and block;
+- no state: start from configured cursor.
+
+This contract between `gravity-sdk` and `gravity-reth` is required for liveness.
+Do not change source cursor semantics without updating the cached-resend and
+restart-reconciliation tests together.
+
+## Test commands
+
+```bash
+cargo test -p reth-pipe-exec-layer-relayer
+cargo test -p reth-pipe-exec-layer-ext-v2 --lib jwk_oracle
+```
+
+Tests requiring public Binance or Polygon traffic are ignored by default. The
+normal suite is deterministic and local.

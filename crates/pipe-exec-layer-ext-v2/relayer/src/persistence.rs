@@ -51,11 +51,10 @@ impl RelayerState {
 
     /// Load state from a file
     pub fn load(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read state file: {}", path.display()))?;
+        let content = fs::read_to_string(path).context("Failed to read relayer state file")?;
 
-        let state: Self = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse state file: {}", path.display()))?;
+        let state: Self =
+            serde_json::from_str(&content).context("Failed to parse relayer state file")?;
 
         if state.version != SCHEMA_VERSION {
             // Return a fresh state instead of loading incompatible data.
@@ -68,7 +67,7 @@ impl RelayerState {
             return Ok(Self::new());
         }
 
-        debug!("Loaded relayer state with {} sources from {}", state.sources.len(), path.display());
+        debug!("Loaded relayer state with {} sources", state.sources.len());
 
         Ok(state)
     }
@@ -77,22 +76,18 @@ impl RelayerState {
     pub fn save(&self, path: &Path) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).context("Failed to create relayer state directory")?;
         }
 
         let content = serde_json::to_string_pretty(self).context("Failed to serialize state")?;
 
         // Write to temp file first, then rename for atomicity
         let temp_path = path.with_extension("json.tmp");
-        fs::write(&temp_path, &content)
-            .with_context(|| format!("Failed to write temp file: {}", temp_path.display()))?;
+        fs::write(&temp_path, &content).context("Failed to write temporary relayer state file")?;
 
-        fs::rename(&temp_path, path).with_context(|| {
-            format!("Failed to rename {} to {}", temp_path.display(), path.display())
-        })?;
+        fs::rename(&temp_path, path).context("Failed to commit relayer state file")?;
 
-        debug!("Saved relayer state to {}", path.display());
+        debug!("Saved relayer state");
         Ok(())
     }
 
@@ -135,7 +130,7 @@ pub fn state_file_path(datadir: &Path) -> PathBuf {
 pub fn load_state_if_exists(datadir: &Path) -> Option<RelayerState> {
     let path = state_file_path(datadir);
     if !path.exists() {
-        info!("No existing relayer state at {}", path.display());
+        info!("No existing relayer state");
         return None;
     }
 

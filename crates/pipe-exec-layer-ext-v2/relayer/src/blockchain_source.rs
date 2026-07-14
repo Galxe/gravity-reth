@@ -363,7 +363,7 @@ mod tests {
     const ANVIL_PORTAL_ADDRESS: &str = "0x0f761B1B3c1aC9232C9015A7276692560aD6a05F";
 
     /// GBridgeSender address on local Anvil (deterministic, nonce 2)
-    const ANVIL_SENDER_ADDRESS: &str = "0x3fc870008B1cc26f3614F14a726F8077227CA2c3";
+    const _ANVIL_SENDER_ADDRESS: &str = "0x3fc870008B1cc26f3614F14a726F8077227CA2c3";
 
     /// Anvil RPC URL
     const ANVIL_RPC_URL: &str = "https://sepolia.drpc.org";
@@ -425,6 +425,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a configured external RPC endpoint and seeded events"]
     async fn test_poll_anvil_events() {
         use crate::eth_client::EthHttpCli;
 

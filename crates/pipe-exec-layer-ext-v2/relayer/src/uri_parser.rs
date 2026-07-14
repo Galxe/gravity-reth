@@ -10,6 +10,14 @@
 //!
 //! ### Examples
 //! - Blockchain events: `gravity://0/1/events?portal=0x283fC6...&fromBlock=9565280`
+//! - Inline price fixture:
+//!   `gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&
+//!   aggregationMode=1&observations=source-a:2000:10000000000:1,...`
+//! - Binance index kline price feed:
+//!   `gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&
+//!   bucketStartMs=1710000000000&decimals=8`
+//! - Polymarket settlement mirror:
+//!   `gravity://6/42/polymarket_settlement?ctf=0x4D97...&fromBlock=50000000&condition=0x...`
 
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
@@ -22,7 +30,7 @@ pub struct ParsedOracleTask {
     /// Original URI string
     pub uri: String,
 
-    /// Source type (0=BLOCKCHAIN)
+    /// Source type (0=BLOCKCHAIN, 3=PRICE_FEED, 6=POLYMARKET_SETTLEMENT)
     pub source_type: u32,
 
     /// Source identifier (chain ID, etc.)
@@ -56,6 +64,16 @@ impl ParsedOracleTask {
     /// Check if this is a blockchain source
     pub fn is_blockchain(&self) -> bool {
         self.source_type == 0
+    }
+
+    /// Check if this is a price feed source
+    pub fn is_price_feed(&self) -> bool {
+        self.source_type == 3
+    }
+
+    /// Check if this is a Polymarket settlement mirror source
+    pub fn is_polymarket_settlement(&self) -> bool {
+        self.source_type == 6
     }
 }
 
@@ -126,6 +144,34 @@ mod tests {
         assert_eq!(task.task_type, "events");
         assert_eq!(task.from_block(), 9565280);
         assert!(task.portal_address().is_ok());
+    }
+
+    #[test]
+    fn test_parse_price_feed_uri() {
+        let uri = "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:2000:10000000000:1,source-b:2000:10200000000:2";
+        let task = parse_oracle_uri(uri).unwrap();
+
+        assert_eq!(task.source_type, 3);
+        assert_eq!(task.source_id, 1);
+        assert_eq!(task.task_type, "price_feed");
+        assert!(task.is_price_feed());
+        assert_eq!(task.params.get("decimals").unwrap(), "8");
+    }
+
+    #[test]
+    fn test_parse_polymarket_settlement_uri() {
+        let uri = "gravity://6/42/polymarket_settlement?ctf=0x4D97DCd97eC945f40cF65F87097ACe5EA0476045&fromBlock=50000000&condition=0x1111111111111111111111111111111111111111111111111111111111111111";
+        let task = parse_oracle_uri(uri).unwrap();
+
+        assert_eq!(task.source_type, 6);
+        assert_eq!(task.source_id, 42);
+        assert_eq!(task.task_type, "polymarket_settlement");
+        assert!(task.is_polymarket_settlement());
+        assert_eq!(task.from_block(), 50000000);
+        assert_eq!(
+            task.params.get("condition").unwrap(),
+            "0x1111111111111111111111111111111111111111111111111111111111111111"
+        );
     }
 
     #[test]
