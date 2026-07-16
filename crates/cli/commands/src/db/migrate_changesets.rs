@@ -10,6 +10,13 @@
 //!   partially-written segments (they are append-only) and redoes the migration.
 //! - Crash after the flag flip but before the tables are cleared: the node is on the new layout. A
 //!   rerun re-runs the idempotent table clear and finishes.
+//!
+//! Genesis initialization writes the genesis-alloc reverts at block 0 (`insert_genesis_state`),
+//! so on every stock datadir the changeset tables start at block 0. Those rows are migrated as a
+//! regular block-0 changeset — not dropped in favor of an empty anchor — because the history
+//! indices point at block 0 for every genesis account and the static-file read path treats a
+//! missing changeset row as an error rather than as "did not exist" (see
+//! `HistoricalStateProviderRef::basic_account`).
 
 use crate::common::AccessRights;
 use clap::Parser;
@@ -75,12 +82,15 @@ impl Command {
         let tip = provider.last_block_number()?;
         // Pruned nodes whose earliest changeset is above block 1 are not supported: the static
         // file segments are append-only from genesis and gravity has no prune-aware start yet.
+        // Block 0 is expected, not evidence of pruning: genesis initialization writes the
+        // genesis-alloc reverts at block 0 on every chain (see `insert_genesis_state`), so stock
+        // datadirs start at 0 and databases seeded without genesis state start at 1 (#391).
         eyre::ensure!(
             provider
                 .tx_ref()
                 .cursor_read::<tables::AccountChangeSets>()?
                 .first()?
-                .is_none_or(|(block, _)| block == 1),
+                .is_none_or(|(block, _)| block <= 1),
             "changeset history is pruned; migrating a pruned database is not yet supported"
         );
         drop(provider);
@@ -126,14 +136,15 @@ impl Command {
         let sf = factory.static_file_provider();
 
         let mut writer = sf.latest_writer(StaticFileSegment::AccountChangeSets)?;
-        // Anchor the append chain at genesis, matching init_genesis.
-        writer.increment_block(0)?;
 
         // Walk the table once, grouping rows by block. The table is sorted by (block, address),
-        // so rows for a block arrive contiguously. Every block up to the tip is appended — even
-        // empty ones — so the offset sidecar stays aligned with block numbers.
+        // so rows for a block arrive contiguously. Every block from genesis up to the tip is
+        // appended — even empty ones — so the offset sidecar stays aligned with block numbers.
+        // The genesis-alloc reverts at block 0 are appended as a regular changeset, anchoring the
+        // append chain; when the table has no block-0 rows the gap fill below writes the same
+        // empty block-0 anchor that `init_genesis` produces on the static-file layout.
         let mut count = 0u64;
-        let mut next_block = 1u64;
+        let mut next_block = 0u64;
         let mut current: Vec<reth_db_api::models::AccountBeforeTx> = Vec::new();
         let mut current_block = 0u64;
         let mut cursor = provider.tx_ref().cursor_read::<tables::AccountChangeSets>()?;
@@ -183,12 +194,12 @@ impl Command {
         let sf = factory.static_file_provider();
 
         let mut writer = sf.latest_writer(StaticFileSegment::StorageChangeSets)?;
-        writer.increment_block(0)?;
 
         // The table is keyed by (block, address) with a storage entry per dup; walk once and
-        // regroup into per-block `StorageBeforeTx` rows.
+        // regroup into per-block `StorageBeforeTx` rows. Block 0 (genesis-alloc storage reverts)
+        // is appended as data, mirroring `migrate_account_changesets`.
         let mut count = 0u64;
-        let mut next_block = 1u64;
+        let mut next_block = 0u64;
         let mut current: Vec<StorageBeforeTx> = Vec::new();
         let mut current_block = 0u64;
         let mut cursor = provider.tx_ref().cursor_read::<tables::StorageChangeSets>()?;
@@ -235,16 +246,21 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_genesis::{Genesis, GenesisAccount};
     use alloy_primitives::{Address, B256, U256};
+    use reth_chainspec::{Chain, ChainSpec};
     use reth_db_api::{
         cursor::DbCursorRO,
         models::{AccountBeforeTx, BlockNumberAddress},
     };
+    use reth_db_common::init::init_genesis;
     use reth_primitives_traits::{Account, StorageEntry};
     use reth_provider::{
-        test_utils::create_test_provider_factory, ChangeSetReader, DatabaseProviderFactory,
+        test_utils::{create_test_provider_factory, create_test_provider_factory_with_chain_spec},
+        AccountReader, ChangeSetReader, DatabaseProviderFactory, HistoricalStateProviderRef,
         StorageChangeSetReader, StorageSettingsCache,
     };
+    use std::{collections::BTreeMap, sync::Arc};
 
     #[test]
     fn migrates_changesets_and_flips_layout() {
@@ -350,6 +366,129 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(rows, 0, "rerun after flag flip should clear the database tables");
+    }
+
+    /// A stock datadir — genesis initialization writes the alloc reverts at block 0 — must pass
+    /// the preflight and migrate the block-0 rows into the static files (#391).
+    #[test]
+    fn migrates_stock_datadir_with_block0_genesis_reverts() {
+        let address_with_balance = Address::with_last_byte(1);
+        let address_with_storage = Address::with_last_byte(2);
+        let storage_key = B256::with_last_byte(1);
+        let chain_spec = Arc::new(ChainSpec {
+            chain: Chain::from_id(1),
+            genesis: Genesis {
+                alloc: BTreeMap::from([
+                    (
+                        address_with_balance,
+                        GenesisAccount { balance: U256::from(1), ..Default::default() },
+                    ),
+                    (
+                        address_with_storage,
+                        GenesisAccount {
+                            storage: Some(BTreeMap::from([(storage_key, B256::with_last_byte(9))])),
+                            ..Default::default()
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis(&factory).unwrap();
+
+        // Genesis wrote the alloc reverts at block 0 — the exact shape that used to trip the
+        // pruned-history preflight.
+        {
+            let provider = factory.database_provider_ro().unwrap();
+            let first = provider
+                .tx_ref()
+                .cursor_read::<tables::AccountChangeSets>()
+                .unwrap()
+                .first()
+                .unwrap();
+            assert_eq!(first.map(|(block, _)| block), Some(0), "genesis reverts live at block 0");
+        }
+
+        // One post-genesis change so the migration walks a multi-block history with a gap.
+        {
+            let provider_rw = factory.database_provider_rw().unwrap();
+            provider_rw
+                .tx_ref()
+                .put::<tables::AccountChangeSets>(
+                    2,
+                    AccountBeforeTx {
+                        address: address_with_balance,
+                        info: Some(Account::default()),
+                    },
+                )
+                .unwrap();
+            provider_rw.commit().unwrap();
+        }
+
+        // Legacy-path baseline: at block 0 the history index resolves to the block-0 changeset
+        // and the alloc accounts read as nonexistent (pre-genesis state).
+        {
+            let provider = factory.database_provider_ro().unwrap();
+            let state = HistoricalStateProviderRef::new(&provider, 0);
+            assert_eq!(state.basic_account(&address_with_balance).unwrap(), None);
+            assert_eq!(state.basic_account(&address_with_storage).unwrap(), None);
+        }
+
+        let tool = DbTool::new(factory.clone()).unwrap();
+        Command.execute(&tool).unwrap();
+
+        // Layout flipped; the genesis reverts now live in the block-0 static file entry.
+        let provider = factory.database_provider_ro().unwrap();
+        assert!(provider.storage_settings().unwrap().unwrap().changesets_in_static_files);
+        let block0 = provider.account_block_changeset(0).unwrap();
+        assert_eq!(block0.len(), 2, "block 0 should carry the genesis-alloc account reverts");
+        assert!(block0.iter().all(|change| change.info.is_none()));
+        assert_eq!(
+            provider.storage_changeset(0).unwrap().len(),
+            1,
+            "block 0 should carry the genesis-alloc storage revert"
+        );
+        assert_eq!(provider.account_block_changeset(1).unwrap().len(), 0, "gap block is empty");
+        assert_eq!(provider.account_block_changeset(2).unwrap().len(), 1);
+
+        // Read equivalence: the same history-index lookup must keep resolving on the static-file
+        // layout instead of erroring on a missing block-0 row.
+        let state = HistoricalStateProviderRef::new(&provider, 0);
+        assert_eq!(state.basic_account(&address_with_balance).unwrap(), None);
+        assert_eq!(state.basic_account(&address_with_storage).unwrap(), None);
+
+        // Database tables were cleared.
+        let rows = provider
+            .tx_ref()
+            .cursor_read::<tables::AccountChangeSets>()
+            .unwrap()
+            .walk(None)
+            .unwrap()
+            .count();
+        assert_eq!(rows, 0);
+    }
+
+    /// A genuinely pruned history — earliest changeset above block 1 — is still refused.
+    #[test]
+    fn rejects_pruned_history_starting_above_block_one() {
+        let factory = create_test_provider_factory();
+        {
+            let provider_rw = factory.database_provider_rw().unwrap();
+            provider_rw
+                .tx_ref()
+                .put::<tables::AccountChangeSets>(
+                    2,
+                    AccountBeforeTx { address: Address::with_last_byte(1), info: None },
+                )
+                .unwrap();
+            provider_rw.commit().unwrap();
+        }
+
+        let tool = DbTool::new(factory.clone()).unwrap();
+        let err = Command.execute(&tool).unwrap_err();
+        assert!(err.to_string().contains("pruned"), "unexpected error: {err}");
     }
 
     /// A crash before the flag flip that left partially-written segments: rerun resets them and
