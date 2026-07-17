@@ -34,24 +34,27 @@ impl DefaultStorageValues {
 
 impl Default for DefaultStorageValues {
     fn default() -> Self {
-        Self { v2: true }
+        // Off by default: enabling V2 is an explicit opt-in for fresh databases. Flipping
+        // this default (to match upstream reth, where v2 is the default layout) is a product
+        // decision — it would switch every new datadir over.
+        Self { v2: false }
     }
 }
 
 /// Parameters for storage configuration.
 ///
-/// `--storage.v2` controls whether new databases use the hot/cold V2 storage layout.
-/// Defaults to `true`.
+/// `--storage.v2` controls whether new databases are initialized with the V2 storage
+/// layout (changesets in static files). Defaults to `false` (legacy layout).
 ///
 /// Existing databases always use the settings persisted in their metadata.
 #[derive(Debug, Args, PartialEq, Eq, Clone, Copy)]
 #[command(next_help_heading = "Storage")]
 pub struct StorageArgs {
-    /// Enable V2 (hot/cold) storage layout for new databases.
+    /// Enable the V2 storage layout (changesets in static files) for new databases.
     ///
-    /// When set, new databases will be initialized with the V2 storage layout that
-    /// separates hot and cold data. Existing databases always use the settings
-    /// persisted in their metadata regardless of this flag.
+    /// When set, new databases are initialized with account/storage changesets stored in
+    /// static file segments instead of the state database. Existing databases always use
+    /// the settings persisted in their metadata regardless of this flag.
     #[arg(
         long = "storage.v2",
         default_value_t = DefaultStorageValues::get_global().v2,
@@ -83,7 +86,7 @@ mod tests {
     #[test]
     fn test_default_storage_args() {
         let args = CommandParser::<StorageArgs>::parse_from(["reth"]).args;
-        assert!(args.v2);
+        assert!(!args.v2);
     }
 
     #[test]
