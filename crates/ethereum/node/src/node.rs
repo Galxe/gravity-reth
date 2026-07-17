@@ -488,6 +488,12 @@ where
 
         let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
             .with_head_timestamp(ctx.head().timestamp)
+            // Gravity does not support EIP-4844: blob txs can never be executed (the pipe-exec
+            // layer drops every type-3 tx before grevm), so reject them at the pool validator.
+            // This is origin-independent, so it covers every mempool ingress — RPC
+            // `eth_sendRawTransaction` (Local) and PFN broadcast (External via
+            // `add_external_transaction`) alike.
+            .no_eip4844()
             .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
             .kzg_settings(ctx.kzg_settings()?)
             .with_local_transactions_config(pool_config.local_transactions_config.clone())
