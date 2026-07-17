@@ -140,9 +140,10 @@ impl Command {
         // Walk the table once, grouping rows by block. The table is sorted by (block, address),
         // so rows for a block arrive contiguously. Every block from genesis up to the tip is
         // appended — even empty ones — so the offset sidecar stays aligned with block numbers.
-        // The genesis-alloc reverts at block 0 are appended as a regular changeset, anchoring the
-        // append chain; when the table has no block-0 rows the gap fill below writes the same
-        // empty block-0 anchor that `init_genesis` produces on the static-file layout.
+        // The genesis-alloc reverts at block 0 are appended as a regular changeset, anchoring
+        // the append chain with the same entity representation `init_genesis_with_settings`
+        // writes for a fresh static-file datadir; when the table has no block-0 rows the gap
+        // fill below writes the empty block-0 anchor instead (the empty-alloc degenerate case).
         let mut count = 0u64;
         let mut next_block = 0u64;
         let mut current: Vec<reth_db_api::models::AccountBeforeTx> = Vec::new();

@@ -27,10 +27,11 @@ impl GravityStorageSettings {
         Self { changesets_in_static_files: false }
     }
 
-    /// Layout written for freshly initialized databases.
+    /// Default layout written for freshly initialized databases.
     ///
-    /// Still the legacy layout: flips `changesets_in_static_files` once the static-file
-    /// changeset write path lands.
+    /// Still the legacy layout: the static-file changeset layout is opt-in per fresh datadir
+    /// (`--storage.v2`, wired through `init_genesis_with_settings`). Flipping this default is
+    /// a product decision that would switch every new datadir over.
     pub const fn current() -> Self {
         Self::legacy()
     }
