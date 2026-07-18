@@ -14,6 +14,7 @@ use alloy_primitives::{BlockNumber, B256, U256};
 use eyre::eyre;
 use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
 use reth_config::config::PruneConfig;
+use reth_db::models::GravityStorageSettings;
 use reth_engine_local::MiningMode;
 use reth_ethereum_forks::{EthereumHardforks, Head};
 use reth_network_p2p::headers::client::HeadersClient;
@@ -370,6 +371,15 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
         self.pruning.prune_config(&self.chain)
     }
 
+    /// Returns the storage layout a *fresh* datadir should be initialized with, as selected by
+    /// `--storage.v2`.
+    ///
+    /// An already initialized datadir keeps the settings persisted in its metadata; this value
+    /// never overrides them (see `init_genesis_with_settings`).
+    pub const fn storage_settings(&self) -> GravityStorageSettings {
+        GravityStorageSettings { changesets_in_static_files: self.storage.v2 }
+    }
+
     /// Returns the max block that the node should run to, looking it up from the network if
     /// necessary
     pub async fn max_block<Provider, Client>(
@@ -608,5 +618,21 @@ impl<ChainSpec> Clone for NodeConfig<ChainSpec> {
             static_files: self.static_files,
             storage: self.storage,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_settings_follow_the_v2_flag() {
+        let mut config = NodeConfig::test();
+
+        config.storage.v2 = false;
+        assert_eq!(config.storage_settings(), GravityStorageSettings::legacy());
+
+        config.storage.v2 = true;
+        assert!(config.storage_settings().changesets_in_static_files);
     }
 }

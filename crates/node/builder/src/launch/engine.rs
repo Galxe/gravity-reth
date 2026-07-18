@@ -35,7 +35,7 @@ use reth_node_core::{
 use reth_node_events::node;
 use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider},
-    BlockNumReader,
+    BlockNumReader, StorageSettingsCache,
 };
 use reth_tasks::TaskExecutor;
 use reth_tokio_util::EventSender;
@@ -115,11 +115,20 @@ impl EngineNodeLauncher {
             .with_genesis()?
             .inspect(|this: &LaunchContextWith<Attached<WithConfigs<<T::Types as NodeTypes>::ChainSpec>, _>>| {
                 info!(target: "reth::cli", "\n{}", this.chain_spec().display_hardforks());
-                // Gravity uses its own RocksDB-backed storage layout; only pruning mode is
-                // meaningful here.
+                // Genesis init has run, so the cache holds the layout persisted in the datadir
+                // — for an existing datadir that is its stored layout, not what `--storage.v2`
+                // asked for. Reporting it unconditionally is the only way an operator can tell
+                // which layout is live: the flag is a plain bool with no "unspecified" state,
+                // so a stored-vs-requested mismatch can not distinguish "your flag was ignored"
+                // from "you booted a migrated datadir without repeating the flag".
+                let storage_layout = if this.provider_factory().cached_storage_settings().changesets_in_static_files {
+                    "static-files"
+                } else {
+                    "legacy"
+                };
                 let pruning_mode =
                     PruneConfigKind::from_config(&this.prune_config(), this.chain_spec().as_ref()).as_str();
-                info!(target: "reth::cli", ?pruning_mode, "Loaded storage settings");
+                info!(target: "reth::cli", storage_layout, ?pruning_mode, "Loaded storage settings");
             })
             .with_metrics_task()
             // passing FullNodeTypes as type parameter here so that we can build

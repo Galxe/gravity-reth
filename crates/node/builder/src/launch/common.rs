@@ -42,9 +42,7 @@ use rayon::ThreadPoolBuilder;
 use reth_chainspec::{Chain, EthChainSpec, EthereumHardforks};
 use reth_config::{config::EtlConfig, PruneConfig};
 use reth_consensus::noop::NoopConsensus;
-use reth_db_api::{
-    database::Database, database_metrics::DatabaseMetrics, models::GravityStorageSettings,
-};
+use reth_db_api::{database::Database, database_metrics::DatabaseMetrics};
 use reth_db_common::init::{init_genesis_with_settings, InitStorageError};
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
 use reth_engine_local::MiningMode;
@@ -608,9 +606,17 @@ where
             let prune_config = self.prune_config();
             let pruning_mode =
                 PruneConfigKind::from_config(&prune_config, self.chain_spec().as_ref()).as_str();
-            // The `storage_v2` label reflects the datadir's persisted layout (changesets in
-            // static files). Genesis init runs before the metrics endpoint starts, so the
-            // settings cache is authoritative here.
+            // The `storage_v2` label reflects the datadir's layout (changesets in static
+            // files). On an initialized datadir the persisted settings are authoritative and
+            // the factory already cached them. A fresh datadir has no storage metadata yet —
+            // this endpoint starts before genesis init — so the cache still holds the legacy
+            // fallback and the configured setting is what genesis is about to persist.
+            let storage_settings =
+                if self.provider_factory().get_stage_checkpoint(StageId::Headers)?.is_some() {
+                    self.provider_factory().cached_storage_settings()
+                } else {
+                    self.node_config().storage_settings()
+                };
             let config = MetricServerConfig::new(
                 addr,
                 VersionInfo {
@@ -627,10 +633,7 @@ where
                 self.data_dir().pprof_dumps(),
             )
             .with_storage_settings_info(StorageSettingsInfo {
-                storage_v2: self
-                    .provider_factory()
-                    .cached_storage_settings()
-                    .changesets_in_static_files,
+                storage_v2: storage_settings.changesets_in_static_files,
                 pruning_mode,
                 prune_config: serde_json::to_string(&prune_config)
                     .expect("serializing PruneConfig should not fail"),
@@ -658,10 +661,7 @@ where
     /// existing database keeps the settings persisted in its metadata (the flag never
     /// overrides them).
     pub fn init_genesis(&self) -> Result<B256, InitStorageError> {
-        init_genesis_with_settings(
-            self.provider_factory(),
-            GravityStorageSettings { changesets_in_static_files: self.node_config().storage.v2 },
-        )
+        init_genesis_with_settings(self.provider_factory(), self.node_config().storage_settings())
     }
 
     /// Creates a new `WithMeteredProvider` container and attaches it to the
