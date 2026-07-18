@@ -13,11 +13,14 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolValue};
 use gravity_api_types::on_chain_config::jwks::{JWKStruct, ProviderJWKs};
 use reth_ethereum_primitives::TransactionSigned;
-use reth_pipe_exec_layer_relayer::parse_oracle_uri;
+use reth_pipe_exec_layer_relayer::{parse_oracle_uri, source_types};
 use tracing::{debug, info, warn};
 
-/// Default callback gas limit for oracle updates
-const CALLBACK_GAS_LIMIT: u64 = 2_000_000;
+/// Existing bridge callbacks and price resolvers fit within the legacy budget.
+const STANDARD_CALLBACK_GAS_LIMIT: u64 = 500_000;
+
+/// Polymarket payouts may contain up to 32 outcome slots.
+const POLYMARKET_CALLBACK_GAS_LIMIT: u64 = 2_000_000;
 
 // =============================================================================
 // Solidity Types (NativeOracle function signatures)
@@ -65,6 +68,14 @@ fn parse_source_from_issuer(issuer: &[u8]) -> Option<(u32, u64)> {
     let issuer_str = std::str::from_utf8(issuer).ok()?;
     let task = parse_oracle_uri(issuer_str).ok()?;
     Some((task.source_type, task.source_id))
+}
+
+fn callback_gas_limit(source_type: u32) -> Result<u64, String> {
+    match source_type {
+        source_types::BLOCKCHAIN | source_types::PRICE_FEED => Ok(STANDARD_CALLBACK_GAS_LIMIT),
+        source_types::POLYMARKET_SETTLEMENT => Ok(POLYMARKET_CALLBACK_GAS_LIMIT),
+        _ => Err(format!("Unsupported oracle source type: {source_type}")),
+    }
 }
 
 /// Extract a canonical ABI `(uint128 nonce, uint256 blockNumber, bytes payload)` tuple.
@@ -163,6 +174,7 @@ fn construct_unsupported_oracle_batch_transaction(
     // Parse NativeOracle coordinates from issuer
     let (source_type, source_id) = parse_source_from_issuer(issuer)
         .ok_or_else(|| format!("Failed to parse source coordinates from issuer: {:?}", issuer))?;
+    let callback_gas_limit = callback_gas_limit(source_type)?;
     info!(
         target: "gravity::onchain_config::jwk_oracle",
         source_type,
@@ -206,7 +218,7 @@ fn construct_unsupported_oracle_batch_transaction(
         // Use the inner payload (the original resolver payload)
         // This is what the user put in and what gets passed to the callback
         payloads.push(inner_payload.into());
-        gas_limits.push(U256::from(CALLBACK_GAS_LIMIT));
+        gas_limits.push(U256::from(callback_gas_limit));
 
         debug!(
             idx = idx,
@@ -332,7 +344,32 @@ mod tests {
         assert_eq!(call.nonces, vec![1]);
         assert_eq!(call.blockNumbers, vec![U256::from(3020u64)]);
         assert_eq!(call.payloads, vec![Bytes::copy_from_slice(resolver_payload)]);
-        assert_eq!(call.callbackGasLimits, vec![U256::from(CALLBACK_GAS_LIMIT)]);
+        assert_eq!(call.callbackGasLimits, vec![U256::from(STANDARD_CALLBACK_GAS_LIMIT)]);
+    }
+
+    #[test]
+    fn test_construct_unsupported_batch_preserves_legacy_blockchain_coordinates_and_gas() {
+        let resolver_payload = b"bridge-event-payload";
+        let wrapped_payload =
+            SolValue::abi_encode(&(7u128, U256::from(22_000_123u64), resolver_payload.as_slice()));
+        let provider = ProviderJWKs {
+            issuer: b"gravity://0/1/events?fromBlock=22000000".to_vec(),
+            version: 1,
+            jwks: vec![JWKStruct {
+                type_name: "0x1::jwks::Unsupported_JWK".to_string(),
+                data: wrapped_payload,
+            }],
+        };
+
+        let tx = construct_oracle_record_transaction(provider, 0, 0).expect("construct tx");
+        let call = recordBatchCall::abi_decode(tx.input()).expect("decode recordBatch call");
+
+        assert_eq!(call.sourceType, source_types::BLOCKCHAIN);
+        assert_eq!(call.sourceId, U256::from(1));
+        assert_eq!(call.nonces, vec![7]);
+        assert_eq!(call.blockNumbers, vec![U256::from(22_000_123u64)]);
+        assert_eq!(call.payloads, vec![Bytes::copy_from_slice(resolver_payload)]);
+        assert_eq!(call.callbackGasLimits, vec![U256::from(STANDARD_CALLBACK_GAS_LIMIT)]);
     }
 
     #[test]
@@ -357,6 +394,24 @@ mod tests {
         assert_eq!(call.nonces, vec![1]);
         assert_eq!(call.blockNumbers, vec![U256::from(89_222_209u64)]);
         assert_eq!(call.payloads, vec![Bytes::copy_from_slice(resolver_payload)]);
+        assert_eq!(call.callbackGasLimits, vec![U256::from(POLYMARKET_CALLBACK_GAS_LIMIT)]);
+    }
+
+    #[test]
+    fn test_construct_unsupported_batch_rejects_unknown_source_type() {
+        let wrapped_payload =
+            SolValue::abi_encode(&(1u128, U256::from(1u64), b"payload".as_slice()));
+        let provider = ProviderJWKs {
+            issuer: b"gravity://99/1/custom".to_vec(),
+            version: 1,
+            jwks: vec![JWKStruct {
+                type_name: "0x1::jwks::Unsupported_JWK".to_string(),
+                data: wrapped_payload,
+            }],
+        };
+
+        let err = construct_oracle_record_transaction(provider, 0, 0).unwrap_err();
+        assert_eq!(err, "Unsupported oracle source type: 99");
     }
 
     #[tokio::test]
