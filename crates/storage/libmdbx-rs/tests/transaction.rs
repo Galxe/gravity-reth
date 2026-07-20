@@ -52,7 +52,7 @@ fn test_put_get_del_multi() {
     let txn = env.begin_rw_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
     {
-        let mut cur = txn.cursor(dbi).unwrap();
+        let mut cur = txn.cursor_with_dbi(dbi).unwrap();
         let iter = cur.iter_dup_of::<(), [u8; 4]>(b"key1");
         let vals = iter.map(|x| x.unwrap()).map(|(_, x)| x).collect::<Vec<_>>();
         assert_eq!(vals, vec![*b"val1", *b"val2", *b"val3"]);
@@ -68,7 +68,7 @@ fn test_put_get_del_multi() {
     let txn = env.begin_rw_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
     {
-        let mut cur = txn.cursor(dbi).unwrap();
+        let mut cur = txn.cursor_with_dbi(dbi).unwrap();
         let iter = cur.iter_dup_of::<(), [u8; 4]>(b"key1");
         let vals = iter.map(|x| x.unwrap()).map(|(_, x)| x).collect::<Vec<_>>();
         assert_eq!(vals, vec![*b"val1", *b"val3"]);
@@ -103,11 +103,11 @@ fn test_reserve() {
     let env = Environment::builder().open(dir.path()).unwrap();
 
     let txn = env.begin_rw_txn().unwrap();
-    let dbi = txn.open_db(None).unwrap().dbi();
+    let db = txn.open_db(None).unwrap();
     {
         unsafe {
             // SAFETY: the returned slice is used before the transaction is committed or aborted.
-            let mut writer = txn.reserve(dbi, b"key1", 4, WriteFlags::empty()).unwrap();
+            let mut writer = txn.reserve(&db, b"key1", 4, WriteFlags::empty()).unwrap();
             writer.write_all(b"val1").unwrap();
         }
     }
@@ -185,9 +185,9 @@ fn test_drop_db() {
         }
         {
             let txn = env.begin_rw_txn().unwrap();
-            let dbi = txn.open_db(Some("test")).unwrap().dbi();
+            let db = txn.open_db(Some("test")).unwrap();
             unsafe {
-                txn.drop_db(dbi).unwrap();
+                txn.drop_db(db).unwrap();
             }
             assert!(matches!(txn.open_db(Some("test")).unwrap_err(), Error::NotFound));
             txn.commit().unwrap();
@@ -295,7 +295,7 @@ fn test_stat() {
     {
         let txn = env.begin_ro_txn().unwrap();
         let dbi = txn.open_db(None).unwrap().dbi();
-        let stat = txn.db_stat(dbi).unwrap();
+        let stat = txn.db_stat_with_dbi(dbi).unwrap();
         assert_eq!(stat.entries(), 3);
     }
 
@@ -308,7 +308,7 @@ fn test_stat() {
     {
         let txn = env.begin_ro_txn().unwrap();
         let dbi = txn.open_db(None).unwrap().dbi();
-        let stat = txn.db_stat(dbi).unwrap();
+        let stat = txn.db_stat_with_dbi(dbi).unwrap();
         assert_eq!(stat.entries(), 1);
     }
 
@@ -322,7 +322,7 @@ fn test_stat() {
     {
         let txn = env.begin_ro_txn().unwrap();
         let dbi = txn.open_db(None).unwrap().dbi();
-        let stat = txn.db_stat(dbi).unwrap();
+        let stat = txn.db_stat_with_dbi(dbi).unwrap();
         assert_eq!(stat.entries(), 4);
     }
 }
@@ -349,7 +349,7 @@ fn test_stat_dupsort() {
     {
         let txn = env.begin_ro_txn().unwrap();
         let dbi = txn.open_db(None).unwrap().dbi();
-        let stat = txn.db_stat(dbi).unwrap();
+        let stat = txn.db_stat_with_dbi(dbi).unwrap();
         assert_eq!(stat.entries(), 9);
     }
 
@@ -362,7 +362,7 @@ fn test_stat_dupsort() {
     {
         let txn = env.begin_ro_txn().unwrap();
         let dbi = txn.open_db(None).unwrap().dbi();
-        let stat = txn.db_stat(dbi).unwrap();
+        let stat = txn.db_stat_with_dbi(dbi).unwrap();
         assert_eq!(stat.entries(), 5);
     }
 
@@ -376,7 +376,7 @@ fn test_stat_dupsort() {
     {
         let txn = env.begin_ro_txn().unwrap();
         let dbi = txn.open_db(None).unwrap().dbi();
-        let stat = txn.db_stat(dbi).unwrap();
+        let stat = txn.db_stat_with_dbi(dbi).unwrap();
         assert_eq!(stat.entries(), 8);
     }
 }

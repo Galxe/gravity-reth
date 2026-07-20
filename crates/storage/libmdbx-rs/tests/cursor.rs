@@ -11,13 +11,13 @@ fn test_get() {
     let txn = env.begin_rw_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
 
-    assert_eq!(None, txn.cursor(dbi).unwrap().first::<(), ()>().unwrap());
+    assert_eq!(None, txn.cursor_with_dbi(dbi).unwrap().first::<(), ()>().unwrap());
 
     txn.put(dbi, b"key1", b"val1", WriteFlags::empty()).unwrap();
     txn.put(dbi, b"key2", b"val2", WriteFlags::empty()).unwrap();
     txn.put(dbi, b"key3", b"val3", WriteFlags::empty()).unwrap();
 
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
     assert_eq!(cursor.first().unwrap(), Some((*b"key1", *b"val1")));
     assert_eq!(cursor.get_current().unwrap(), Some((*b"key1", *b"val1")));
     assert_eq!(cursor.next().unwrap(), Some((*b"key2", *b"val2")));
@@ -42,7 +42,7 @@ fn test_get_dup() {
     txn.put(dbi, b"key2", b"val2", WriteFlags::empty()).unwrap();
     txn.put(dbi, b"key2", b"val3", WriteFlags::empty()).unwrap();
 
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
     assert_eq!(cursor.first().unwrap(), Some((*b"key1", *b"val1")));
     assert_eq!(cursor.first_dup().unwrap(), Some(*b"val1"));
     assert_eq!(cursor.get_current().unwrap(), Some((*b"key1", *b"val1")));
@@ -87,7 +87,7 @@ fn test_get_dupfixed() {
     txn.put(dbi, b"key2", b"val5", WriteFlags::empty()).unwrap();
     txn.put(dbi, b"key2", b"val6", WriteFlags::empty()).unwrap();
 
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
     assert_eq!(cursor.first().unwrap(), Some((*b"key1", *b"val1")));
     assert_eq!(cursor.get_multiple().unwrap(), Some(*b"val1val2val3"));
     assert_eq!(cursor.next_multiple::<(), ()>().unwrap(), None);
@@ -116,7 +116,7 @@ fn test_iter() {
 
     let txn = env.begin_ro_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
 
     // Because Result implements FromIterator, we can collect the iterator
     // of items of type Result<_, E> into a Result<Vec<_, E>> by specifying
@@ -157,7 +157,7 @@ fn test_iter_empty_database() {
     let env = Environment::builder().open(dir.path()).unwrap();
     let txn = env.begin_ro_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
 
     assert!(cursor.iter::<(), ()>().next().is_none());
     assert!(cursor.iter_start::<(), ()>().next().is_none());
@@ -175,7 +175,7 @@ fn test_iter_empty_dup_database() {
 
     let txn = env.begin_ro_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
 
     assert!(cursor.iter::<(), ()>().next().is_none());
     assert!(cursor.iter_start::<(), ()>().next().is_none());
@@ -225,7 +225,7 @@ fn test_iter_dup() {
 
     let txn = env.begin_ro_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
     assert_eq!(items, cursor.iter_dup().flatten().collect::<Result<Vec<_>>>().unwrap());
 
     cursor.set::<()>(b"b").unwrap();
@@ -274,7 +274,7 @@ fn test_iter_del_get() {
         let txn = env.begin_rw_txn().unwrap();
         let dbi = txn.create_db(None, DatabaseFlags::DUP_SORT).unwrap().dbi();
         assert_eq!(
-            txn.cursor(dbi)
+            txn.cursor_with_dbi(dbi)
                 .unwrap()
                 .iter_dup_of::<(), ()>(b"a")
                 .collect::<Result<Vec<_>>>()
@@ -296,7 +296,7 @@ fn test_iter_del_get() {
 
     let txn = env.begin_rw_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
     assert_eq!(items, cursor.iter_dup().flatten().collect::<Result<Vec<_>>>().unwrap());
 
     assert_eq!(
@@ -318,7 +318,7 @@ fn test_put_del() {
 
     let txn = env.begin_rw_txn().unwrap();
     let dbi = txn.open_db(None).unwrap().dbi();
-    let mut cursor = txn.cursor(dbi).unwrap();
+    let mut cursor = txn.cursor_with_dbi(dbi).unwrap();
 
     cursor.put(b"key1", b"val1", WriteFlags::empty()).unwrap();
     cursor.put(b"key2", b"val2", WriteFlags::empty()).unwrap();
