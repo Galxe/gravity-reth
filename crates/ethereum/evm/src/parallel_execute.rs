@@ -367,7 +367,12 @@ where
         );
     }
 
-    // process withdrawals
+    // Gravity ordered blocks cannot carry proposer-controlled withdrawals: the Gravity SDK
+    // consensus block has no withdrawals field and every honest node's reth adapter constructs an
+    // empty list. A Byzantine node that modifies its local adapter would compute a different block
+    // hash, while commit votes bind the execution result, so that result cannot join an honest
+    // quorum. Keep the standard withdrawal processing here because this generic executor is also
+    // used to replay and validate post-Shanghai Ethereum mainnet history.
     insert_post_block_withdrawals_balance_increments(
         chain_spec,
         block.header().timestamp(),

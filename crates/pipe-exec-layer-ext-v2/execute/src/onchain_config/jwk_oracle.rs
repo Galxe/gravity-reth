@@ -7,17 +7,13 @@
 //! For blockchain events, the payload from relayer is ABI-encoded and passed through unchanged.
 //! This ensures byte-exact match between relayer, on-chain storage, and read-back for comparison.
 
-use super::{
-    new_system_call_txn,
-    types::{GaptosRsaJwk, OracleRSA_JWK, SOURCE_TYPE_JWK},
-    NATIVE_ORACLE_ADDR,
-};
-use alloy_primitives::{keccak256, Bytes, U256};
+use super::{new_system_call_txn, NATIVE_ORACLE_ADDR};
+use alloy_primitives::{Bytes, U256};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall;
 use gravity_api_types::on_chain_config::jwks::{JWKStruct, ProviderJWKs};
 use reth_ethereum_primitives::TransactionSigned;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Default callback gas limit for oracle updates
 const CALLBACK_GAS_LIMIT: u64 = 500_000;
@@ -60,18 +56,6 @@ fn is_rsa_jwk(jwk: &JWKStruct) -> bool {
 /// Check if a JWKStruct is an UnsupportedJWK (blockchain/other oracle data)
 fn is_unsupported_jwk(jwk: &JWKStruct) -> bool {
     jwk.type_name == "0x1::jwks::Unsupported_JWK"
-}
-
-/// Parse RSA JWK from BCS-encoded data
-fn parse_rsa_jwk_from_bcs(data: &[u8]) -> Option<OracleRSA_JWK> {
-    let gaptos_jwk: GaptosRsaJwk = bcs::from_bytes(data).ok()?;
-    Some(OracleRSA_JWK {
-        kid: gaptos_jwk.kid,
-        kty: gaptos_jwk.kty,
-        alg: gaptos_jwk.alg,
-        e: gaptos_jwk.e,
-        n: gaptos_jwk.n,
-    })
 }
 
 /// Parse chain_id from issuer URI
@@ -167,20 +151,24 @@ pub fn construct_oracle_record_transaction(
         .ok_or_else(|| format!("No JWKs found for issuer: {}", issuer_str))?;
 
     if is_rsa_jwk(first_jwk) {
-        // RSA JWK path is not currently used in production. All JWK data flows through
-        // the UnsupportedJWK (blockchain event) path. If this is reached, something
-        // unexpected has changed in the consensus layer.
-        error!(
+        // RSA JWK path is not exercised in production today — all JWK data flows through the
+        // UnsupportedJWK (blockchain event) path, and the RSA record construction has never
+        // been audited/exercised. Fail CLOSED: return a recoverable `Err` rather than run
+        // unverified construction logic. It must NEVER panic — this runs on the deterministic
+        // execute_ordered_block system-tx path (over consensus `extra_data`), whose `Err` the
+        // caller logs + skips (lib.rs), so a panic here would deterministically halt every
+        // validator on this ordered block (gravity-audit#822 class).
+        warn!(
             target: "gravity::onchain_config::jwk_oracle",
             issuer = %issuer_str,
             jwk_count = provider_jwks.jwks.len(),
-            "RSA JWK path entered unexpectedly — this code path should be unreachable"
+            "RSA JWK path entered unexpectedly — rejecting (unsupported in production)"
         );
-        panic!(
-            "RSA JWK oracle record path is unreachable: issuer={}, jwk_count={}",
+        Err(format!(
+            "RSA JWK oracle record path is not supported: issuer={}, jwk_count={}",
             issuer_str,
             provider_jwks.jwks.len()
-        );
+        ))
     } else if is_unsupported_jwk(first_jwk) {
         // Blockchain/oracle events - use recordBatch for ALL logs
         construct_blockchain_batch_transaction(provider_jwks, nonce, gas_price)
@@ -188,46 +176,6 @@ pub fn construct_oracle_record_transaction(
         warn!(target: "gravity::onchain_config::jwk_oracle", "Unknown JWK type '{}' for issuer: {}", first_jwk.type_name, issuer_str);
         Err(format!("Unknown JWK type '{}' for issuer: {}", first_jwk.type_name, issuer_str))
     }
-}
-
-/// Construct transaction for JWK update (sourceType=1)
-fn construct_jwk_record_transaction(
-    provider_jwks: ProviderJWKs,
-    nonce: u64,
-    gas_price: u128,
-) -> Result<TransactionSigned, String> {
-    let issuer = &provider_jwks.issuer;
-    let version = provider_jwks.version;
-
-    // All JWKs are guaranteed to be RSA type when entering this function
-    let rsa_jwks: Vec<OracleRSA_JWK> =
-        provider_jwks.jwks.iter().filter_map(|jwk| parse_rsa_jwk_from_bcs(&jwk.data)).collect();
-
-    info!(
-        issuer = %String::from_utf8_lossy(issuer),
-        version = version,
-        jwk_count = rsa_jwks.len(),
-        "Constructing JWK record transaction"
-    );
-
-    // sourceId = keccak256(issuer)
-    let issuer_hash = keccak256(issuer);
-    let source_id = U256::from_be_bytes(issuer_hash.0);
-
-    // Encode payload: (bytes issuer, uint64 version, OracleRSA_JWK[] jwks)
-    let payload = alloy_sol_types::SolValue::abi_encode(&(issuer.as_slice(), version, rsa_jwks));
-
-    let call = recordCall {
-        sourceType: SOURCE_TYPE_JWK,
-        sourceId: source_id,
-        nonce: version as u128,
-        blockNumber: U256::ZERO, // JWK records don't have a source block number
-        payload: payload.into(),
-        callbackGasLimit: U256::from(CALLBACK_GAS_LIMIT),
-    };
-
-    let input: Bytes = call.abi_encode().into();
-    Ok(new_system_call_txn(NATIVE_ORACLE_ADDR, nonce, gas_price, input))
 }
 
 /// Construct transaction for blockchain events using recordBatch()
