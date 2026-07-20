@@ -213,11 +213,13 @@ mod tests {
         create_mint_token_precompile().call(PrecompileInput {
             data,
             gas: MINT_BASE_GAS,
+            reservoir: 0,
             caller: AUTHORIZED_CALLER,
             value: U256::ZERO,
+            is_static: false,
             target_address: Address::ZERO,
             bytecode_address: Address::ZERO,
-            internals: EvmInternals::new(&mut ctx.journaled_state, &ctx.block),
+            internals: EvmInternals::from_context(ctx),
         })
     }
 
