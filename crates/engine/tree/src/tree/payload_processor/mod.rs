@@ -635,7 +635,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{multiproof::StateChangeSource, ExecutionCache};
+    use super::ExecutionCache;
     use crate::tree::{
         cached_state::{CachedStateMetrics, ExecutionCacheBuilder, SavedCache},
         payload_processor::{
@@ -659,7 +659,7 @@ mod tests {
     use reth_testing_utils::generators;
     use reth_trie::{test_utils::state_root, HashedPostState, TrieInput};
     use revm_primitives::{Address, HashMap, B256, KECCAK_EMPTY, U256};
-    use revm_state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot};
+    use revm_state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId};
     use std::sync::Arc;
 
     fn make_saved_cache(hash: B256) -> SavedCache {
@@ -754,23 +754,22 @@ mod tests {
                             EvmStorageSlot::new_changed(
                                 U256::ZERO,
                                 U256::from(rng.random::<u64>()),
-                                0,
+                                TransactionId::default(),
                             ),
                         );
                     }
                 }
 
-                let account = revm_state::Account {
-                    info: AccountInfo {
-                        balance: U256::from(rng.random::<u64>()),
-                        nonce: rng.random::<u64>(),
-                        code_hash: KECCAK_EMPTY,
-                        code: Some(Default::default()),
-                    },
-                    storage,
-                    status: AccountStatus::Touched,
-                    transaction_id: 0,
+                let mut account = revm_state::Account::default();
+                account.info = AccountInfo {
+                    balance: U256::from(rng.random::<u64>()),
+                    nonce: rng.random::<u64>(),
+                    code_hash: KECCAK_EMPTY,
+                    code: Some(Default::default()),
+                    account_id: None,
                 };
+                account.storage = storage;
+                account.status = AccountStatus::Touched;
 
                 state_update.insert(address, account);
             }
@@ -842,7 +841,9 @@ mod tests {
         let provider = BlockchainProvider::new(factory).unwrap();
         let mut handle = payload_processor.spawn(
             Default::default(),
-            core::iter::empty::<Result<Recovered<TransactionSigned>, core::convert::Infallible>>(),
+            (Vec::<Recovered<TransactionSigned>>::new(), |tx: Recovered<TransactionSigned>| {
+                Ok::<_, core::convert::Infallible>(tx)
+            }),
             StateProviderBuilder::new(provider.clone(), genesis_hash, None),
             ConsistentDbView::new_with_latest_tip(provider).unwrap(),
             TrieInput::from_state(hashed_state),
@@ -851,8 +852,8 @@ mod tests {
 
         let mut state_hook = handle.state_hook();
 
-        for (i, update) in state_updates.into_iter().enumerate() {
-            state_hook.on_state(StateChangeSource::Transaction(i), &update);
+        for update in state_updates {
+            state_hook.on_state(&update);
         }
         drop(state_hook);
 

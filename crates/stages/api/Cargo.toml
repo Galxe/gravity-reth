@@ -56,5 +56,5 @@ test-utils = [
     "reth-provider/test-utils",
     "reth-stages-types/test-utils",
     "reth-primitives-traits/test-utils",
-    "reth-codecs/test-utils"
+    "reth-codecs/test-utils",
 ]

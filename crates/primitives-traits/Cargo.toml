@@ -108,7 +108,7 @@ std = [
     "revm-state/std",
     "alloy-rpc-types-eth?/std",
     "reth-codecs?/std",
-    "serde_with?/std"
+    "serde_with?/std",
 ]
 test-utils = [
     "arbitrary",

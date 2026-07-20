@@ -17,7 +17,7 @@
   - `0b4091726c` PR #176 `fix(nested_hash): HashNode for leaf may not have hash`（`merkle.rs`）
   - `1539b6cafc` PR #224 `opt(persist): not write index tables if validator node only`（`index_account_history.rs` 测试、`index_storage_history.rs` 测试、`stages/mod.rs`）
   - `1224ae1846` PR #213 `refactor(parallel): remove the read provider factory that supports parallel reading`（本分组每个文件机械重命名 `<Provider, ProviderRO>` → `<Provider>`，但当前 worktree 看到的 baseline 文件头泛型反而是 `<ProviderRW>` — 见各文件说明）
-  - `24f03242db` PR #220 `refactor(fmt): nighlty fmt`（每个文件的格式化噪声）
+  - `24f03242db` PR #220 `refactor(fmt): nightly fmt`（每个文件的格式化噪声）
   - `9974ad0618` PR #241 `fix(test): fix CI test of unit.yml`（`bodies.rs`、`hashing_account.rs`、`hashing_storage.rs`、`merkle.rs`、`mod.rs`、`sender_recovery.rs`、`tx_lookup.rs` 的测试断言；普遍把 `processed` 改成 `_` 因为 RocksDB `count_entries` 用 estimate-num-keys）
   - `a1d7365bd6` PR #212 `feat(rocksdb): Integrating RocksDB into Reth`（仅触动 `Cargo.toml`，不直接改本分组其它文件）
   - `acc458846c` PR #340 `fix(rocksdb): flush batch data into storage to make sure stage is completed`（`UnifiedStorageWriter::commit` 是 rocksdb batch 刷盘承重点；只读不改本分组文件，但 `pipeline/mod.rs` 中必须保留 `UnifiedStorageWriter::{commit, commit_unwind}` 调用）

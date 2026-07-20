@@ -77,6 +77,10 @@ zstd.workspace = true
 [features]
 default = ["jemalloc", "reth-revm/portable", "asm-keccak", "keccak-cache-global"]
 
+# no-op feature flag for switching between the `optimism` and default functionality in CI
+# matrices (the `reth-bench` crate that used to provide it is not part of this fork)
+ethereum = []
+
 dev = ["reth-ethereum-cli/dev"]
 
 asm-keccak = [

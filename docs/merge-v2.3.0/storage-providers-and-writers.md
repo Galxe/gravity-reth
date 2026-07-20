@@ -190,7 +190,7 @@
 
 **模块:** `ProviderFactoryBuilder` (`ProviderFactory::open_read_only` 的 typed-state builder)
 **冲突类型:** AA
-**上游变更 (v1.8.3 → v2.3.0):** 8 个上游 commit:`#23357` "catch-up for read-only ProviderFactorys" 给 `open_read_only` 加 `runtime: reth_tasks::Runtime` 参数、返回类型从 `Arc<DatabaseEnv>` 解包为 `DatabaseEnv`、要求 `NodeTypesForProvider`;`#23109` 引入 RocksDB secondary-instance 路径(`rocksdb_dir`、`RocksDBProvider::builder().with_read_only(true)`);把 `DatabaseArguments` 的导入路径从 `reth_db::{DatabaseArguments, ...}` 改为 `reth_db::mdbx::{DatabaseArguments, MaxReadTransactionDuration}`;`#22049` 移除 `TypesAnd1-5` staging types;`#21641` 给 `DatabaseEnv` derive `Clone` (因此可去掉 `Arc<>`);`#19384`/`#20253`/`#20416` 把 RocksDB / `with_default_tables` / `Metadata` 接入 builder。
+**上游变更 (v1.8.3 → v2.3.0):** 8 个上游 commit:`#23357` "catch-up for read-only ProviderFactories" 给 `open_read_only` 加 `runtime: reth_tasks::Runtime` 参数、返回类型从 `Arc<DatabaseEnv>` 解包为 `DatabaseEnv`、要求 `NodeTypesForProvider`;`#23109` 引入 RocksDB secondary-instance 路径(`rocksdb_dir`、`RocksDBProvider::builder().with_read_only(true)`);把 `DatabaseArguments` 的导入路径从 `reth_db::{DatabaseArguments, ...}` 改为 `reth_db::mdbx::{DatabaseArguments, MaxReadTransactionDuration}`;`#22049` 移除 `TypesAnd1-5` staging types;`#21641` 给 `DatabaseEnv` derive `Clone` (因此可去掉 `Arc<>`);`#19384`/`#20253`/`#20416` 把 RocksDB / `with_default_tables` / `Metadata` 接入 builder。
 **Gravity 侧变更 (baseline `0cb1687c1c` 上):** 来自 `a1d7365bd6` #212 的 RocksDB 集成痕迹 —
   - `disable_long_read_transaction_safety` 体内 `// TODO: Implement max_read_transaction_duration for RocksDB` (函数体 noop, baseline `:160-162`);
   - `open_read_only` 返回类型仍为 `Arc<DatabaseEnv>` (上游 v2.3.0 已改为 `DatabaseEnv`)。

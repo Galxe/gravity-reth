@@ -406,7 +406,7 @@ mod tests {
 
         // send block set download request
         block_downloader.on_action(DownloadAction::Download(DownloadRequest::BlockSet(
-            B256Set::from_iter([tip.hash(), tip.parent_hash]),
+            std::collections::HashSet::from([tip.hash(), tip.parent_hash]),
         )));
 
         // ensure we have TOTAL_BLOCKS in flight full block request
@@ -449,7 +449,7 @@ mod tests {
         )));
 
         // send block set download request
-        let download_set = B256Set::from_iter([tip.hash(), tip.parent_hash]);
+        let download_set = std::collections::HashSet::from([tip.hash(), tip.parent_hash]);
         block_downloader
             .on_action(DownloadAction::Download(DownloadRequest::BlockSet(download_set.clone())));
 

@@ -166,7 +166,7 @@ grep -c '^   - \[x\] 冲突解决' docs/merge-v2.3.0/*.md   # 已落地数
 | `d33a2e7670` | `feat: implement bls verify precompile for gravity pipe execution (#254)` | engine-evm-execution-chainspec | BLS verify precompile；与 #283/#346 一起保留 |
 | `605c372de6` | `feat(trie): support eth_getProof for nested hash, step 1 (#237)` | trie-all-layers, rpc-eth-and-debug | nested hash 下的 `eth_getProof` 第一步 |
 | `0b57bc2340` | `opt(trie): add parallel level in nested hash (#219)` | trie-all-layers | nested hash 并行层 |
-| `24f03242db` | `refactor(fmt): nighlty fmt the whole project (#220)` | tests-examples-config-infra, *跨多组* | nightly fmt 全项目，影响所有源文件的 hunk 对齐 |
+| `24f03242db` | `refactor(fmt): nightly fmt the whole project (#220)` | tests-examples-config-infra, *跨多组* | nightly fmt 全项目，影响所有源文件的 hunk 对齐 |
 | `6ddb557b5e` | `feat: Add block number tracking and oracle state fetching #245` | engine-evm-execution-chainspec | oracle 状态拉取 |
 | `fd250d53d8` | `fix(rpc): set safe and finalized block when making canonical (#251)` | rpc-eth-and-debug, engine-evm-execution-chainspec | `safe`/`finalized` 写入；与 `a0d11f2288 #259` 一起 |
 | `2ef67318b3` | `feat(rpc-provider): add MeteredBatchRequests(Future) (#19779) (#282)` | rpc-eth-and-debug | batched rpc metrics |

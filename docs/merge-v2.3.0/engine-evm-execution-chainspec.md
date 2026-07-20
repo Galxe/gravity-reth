@@ -297,7 +297,7 @@ gravity 的 `persist_commit_duration_seconds` / `save_duration_per_block_seconds
   返回 `JoinHandle`、shutdown 协议。
 - `fix(provider): fix race between save_blocks and rocksdb pruning` (#23081) —
   `BalProvider`、`SaveBlocksMode` 接入。
-- `feat: catch-up for read-only ProviderFactorys` (#23357) —
+- `feat: catch-up for read-only ProviderFactories` (#23357) —
   `DatabaseProviderFactory<Provider: BlockHashReader + StorageChangeSetReader>`。
 - `feat(trie): in-memory trie changesets` (#20997) — `TrieInput` 流转方式变了。
 - `fix(engine): flush BAL store after saving blocks` (#24087)、
@@ -1203,7 +1203,7 @@ trie-cache / state-root 三处流转的核心 type；强行换成上游统一 `E
 **冲突类型**: UU。
 
 **上游变更** (v1.8.3..v2.3.0)：
-- `feat: catch-up for read-only ProviderFactorys` (#23357) — fixture 适配
+- `feat: catch-up for read-only ProviderFactories` (#23357) — fixture 适配
   read-only provider。
 - `revert: undo Chain crate, add LazyTrieData to trie-common` (#21155) +
   `perf: make Chain use DeferredTrieData` (#21137) +

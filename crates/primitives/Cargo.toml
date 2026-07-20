@@ -57,7 +57,7 @@ std = [
     "alloy-rlp/std",
     "alloy-primitives/std",
     "reth-static-file-types/std",
-    "reth-codecs/std"
+    "reth-codecs/std",
 ]
 reth-codec = [
     "std",

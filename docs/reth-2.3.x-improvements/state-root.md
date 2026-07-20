@@ -68,7 +68,7 @@ gravity 的 state root 引擎与上游完全不同,核心是 **每个 MPT 节点
 - **关键 PR / commit**:`c57792cff4`(#19687 skeleton)、`b72bb6790a`(#19863 核心算法)、`7cfb19c98e`(#21196 reveal/target)、`b79c58d835`(#20336 partial)、`a9e36923e1`(#20075 cached branch)、`f85fcba872`+`2ac7d719f3`(#21214/#21316 account proof)、`3667d3b5aa`(#20873)、`346cc0da71`(#21197)、`117b212e2e`(#22021)、`5e744326a4`(#22946)、`6f9a3242ef`(#22270)。
 - **涉及文件**:`crates/trie/trie/src/proof_v2/{mod,node,value,target}.rs`、`crates/trie/trie/src/trie_cursor/depth_first.rs`、`crates/trie/common/src/{target_v2,trie_node_v2,proofs}.rs`、`crates/trie/parallel/src/{value_encoder,proof_task,targets_v2}.rs`。
 - **与 gravity nested-trie 的关系**:算法本体是 **HashBuilder 血统的替代引擎**(基于「排序叶子 + cursor」),与 nested-trie 懒加载互斥;但**类型系统 / 输出格式是可移植 API**:`ProofV2Target{key_nibbles,min_len}`、`MultiProofV2`、`TrieNodeV2`(ext+branch 合一)、`DecodedMultiProofV2`——任何引擎(含 nested-trie)都能产出/消费这套结构来表达 partial proof、喂 witness。
-- **是否建议 port**:引擎本体 **否(强)**;**proof v2 的 target/结果类型**作为对外 proof/witness API **可弱建议对齐**(利于跨客户端 proof 互操作、statless),难度中,不触碰 on-disk 格式。gravity 若要增强 `NestedStateRoot::multiproof`(目前含 `todo!()`),可参考 `min_len` 语义做 partial/多目标证明。
+- **是否建议 port**:引擎本体 **否(强)**;**proof v2 的 target/结果类型**作为对外 proof/witness API **可弱建议对齐**(利于跨客户端 proof 互操作、stateless),难度中,不触碰 on-disk 格式。gravity 若要增强 `NestedStateRoot::multiproof`(目前含 `todo!()`),可参考 `min_len` 语义做 partial/多目标证明。
 
 ### 3. Sparse trie 当缓存 + LFU 热点保留(互斥主引擎技巧)
 

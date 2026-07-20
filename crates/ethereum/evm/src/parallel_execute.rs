@@ -730,7 +730,7 @@ mod tests {
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(
             SYSTEM_CALLER,
-            AccountInfo { balance, nonce, code_hash: KECCAK_EMPTY, code: None },
+            AccountInfo { balance, nonce, code_hash: KECCAK_EMPTY, code: None, account_id: None },
         );
         db
     }
