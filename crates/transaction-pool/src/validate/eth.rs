@@ -2039,4 +2039,78 @@ mod tests {
             other => panic!("expected Invalid outcome, got {other:?}"),
         }
     }
+
+    /// Gravity disables EIP-4844 at the pool validator (`.no_eip4844()` in `EthereumPoolBuilder`).
+    /// A blob transaction must therefore be rejected with `Eip4844Disabled` on *every* mempool
+    /// ingress. The type check in `validate_one` is origin-independent, so this covers RPC
+    /// `eth_sendRawTransaction` (Local) and PFN broadcast (External via `add_external_transaction`)
+    /// alike.
+    #[tokio::test]
+    async fn no_eip4844_rejects_blob_tx_on_every_origin() {
+        use alloy_consensus::TxEip4844;
+        use alloy_primitives::Signature;
+        use reth_ethereum_primitives::TransactionSigned;
+        use reth_primitives_traits::Recovered;
+
+        let blob_tx = {
+            let tx = TxEip4844 {
+                chain_id: 1,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 1,
+                max_priority_fee_per_gas: 0,
+                to: Default::default(),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input: Default::default(),
+                blob_versioned_hashes: Default::default(),
+                max_fee_per_blob_gas: Default::default(),
+            };
+            let signed = TransactionSigned::new_unhashed(
+                reth_ethereum_primitives::Transaction::Eip4844(tx),
+                Signature::test_signature(),
+            );
+            EthPooledTransaction::new(Recovered::new_unchecked(signed, Default::default()), 300)
+        };
+
+        let validator = EthTransactionValidatorBuilder::new(
+            provider_with_genesis_block(),
+            EthEvmConfig::mainnet(),
+        )
+        .no_eip4844()
+        .build(InMemoryBlobStore::default());
+
+        // Both RPC (Local) and PFN (External) ingress must reject the blob tx.
+        for origin in [TransactionOrigin::Local, TransactionOrigin::External] {
+            match validator.validate_one(origin, blob_tx.clone()) {
+                TransactionValidationOutcome::Invalid(_, err) => assert!(
+                    matches!(
+                        err,
+                        InvalidPoolTransactionError::Consensus(
+                            InvalidTransactionError::Eip4844Disabled
+                        )
+                    ),
+                    "expected Eip4844Disabled for {origin:?}, got {err:?}"
+                ),
+                other => panic!("expected Invalid outcome for {origin:?}, got {other:?}"),
+            }
+        }
+
+        // The PFN broadcast receive path calls `add_external_transaction`; the blob must be
+        // rejected there too and never land in the pool.
+        let pool = Pool::new(
+            validator,
+            CoinbaseTipOrdering::default(),
+            InMemoryBlobStore::default(),
+            Default::default(),
+        );
+        let err = pool.add_external_transaction(blob_tx.clone()).await.unwrap_err();
+        assert!(matches!(
+            err.kind,
+            PoolErrorKind::InvalidTransaction(InvalidPoolTransactionError::Consensus(
+                InvalidTransactionError::Eip4844Disabled
+            ))
+        ));
+        assert!(pool.get(blob_tx.hash()).is_none());
+    }
 }

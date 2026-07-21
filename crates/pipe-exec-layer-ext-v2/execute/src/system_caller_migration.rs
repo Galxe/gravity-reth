@@ -766,4 +766,139 @@ mod tests {
         // No additional read here — the per-block assertions already pin
         // the cumulative invariant.
     }
+
+    // --- U-6e: absent SYSTEM_CALLER, activation block, serial-vs-grevm
+    //     end-of-block bundle equivalence (audit#882 / audit#921 case-6) ---
+
+    /// `u6e`: pins the "genesis omits SYSTEM_CALLER" variant that u6b/u6c do
+    /// not reach (both seed a non-empty account). The migration hook fires on
+    /// block 1 with SYSTEM_CALLER `LoadedNotExisting`, so it commits a Touched
+    /// **empty** account (balance=0, nonce=0, no code) — serial with
+    /// `state_clear=false`, grevm with `state_clear=true`. That flag asymmetry
+    /// gives the two backends different *transient* empty-account transitions,
+    /// which is the crux of audit#921's "fork backend state" claim.
+    ///
+    /// This test refutes that claim: the per-block metadata system tx (nonce 0,
+    /// gas-exempt self-call) bumps SYSTEM_CALLER's nonce to 1 within the same
+    /// block, so the **final** `BundleState` — the only thing the state root is
+    /// derived from — is byte-identical across backends. The transient flag
+    /// asymmetry does not survive end-of-block. Unlike the balance-present
+    /// `nonce=0` form (which deterministically panics network-wide, not
+    /// forks), the absent form neither panics nor diverges.
+    #[test]
+    fn u6e_absent_system_caller_serial_grevm_converge_at_activation() {
+        const ALPHA_C: u64 = 1000;
+        let mut spec = ChainSpecBuilder::from(&*MAINNET)
+            .shanghai_activated()
+            .cancun_activated()
+            .prague_activated()
+            .build();
+        spec.gravity_hardforks =
+            ChainHardforks::from([(GravityHardfork::Alpha, ForkCondition::Timestamp(ALPHA_C))]);
+        let chain_spec = Arc::new(spec);
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+
+        // Absent SYSTEM_CALLER on BOTH backends: EmptyDB, no seed. The hook
+        // reads `LoadedNotExisting`; Alpha activates at block 1 (parent 999 <
+        // 1000 = ts), so `initial_nonce = 0` and the hook fires.
+        let mut serial = WrapExecutor::new(BasicBlockExecutor::new(
+            evm_config.clone(),
+            CacheDB::new(EmptyDB::default()),
+        ));
+        let mut grevm = reth_evm_ethereum::parallel_execute::GrevmExecutor::new(
+            chain_spec.clone(),
+            &evm_config,
+            CacheDB::new(EmptyDB::default()),
+        );
+
+        let header = alloy_consensus::Header {
+            parent_hash: alloy_primitives::B256::ZERO,
+            timestamp: 1000,
+            number: 1,
+            requests_hash: Some(alloy_eips::eip7685::EMPTY_REQUESTS_HASH),
+            excess_blob_gas: Some(0),
+            blob_gas_used: Some(0),
+            parent_beacon_block_root: Some(alloy_primitives::B256::ZERO),
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..alloy_consensus::Header::default()
+        };
+        let evm_env = <EthEvmConfig as reth_evm::ConfigureEvm>::evm_env(&evm_config, &header)
+            .expect("evm_env must build");
+
+        // 1) migration hook fires on block 1 for both backends: a Touched empty-account diff,
+        //    committed under the asymmetric state-clear flag.
+        apply_state_changes_for_block(
+            &mut serial
+                as &mut dyn ParallelExecutor<
+                    Primitives = EthPrimitives,
+                    Error = BlockExecutionError,
+                >,
+            chain_spec.as_ref(),
+            1000,
+            999,
+            1,
+        );
+        apply_state_changes_for_block(
+            &mut grevm
+                as &mut dyn ParallelExecutor<
+                    Primitives = EthPrimitives,
+                    Error = BlockExecutionError,
+                >,
+            chain_spec.as_ref(),
+            1000,
+            999,
+            1,
+        );
+
+        // 2) same-block metadata-shaped system tx (nonce 0, gas-exempt self-call) — the per-block
+        //    tx that bumps SYSTEM_CALLER's nonce and re-converges both backends.
+        let tx = revm::context::TxEnv {
+            caller: SYSTEM_CALLER,
+            gas_limit: 1_000_000,
+            gas_price: 0,
+            kind: revm::primitives::TxKind::Call(SYSTEM_CALLER),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            nonce: 0,
+            chain_id: Some(chain_id),
+            ..revm::context::TxEnv::default()
+        };
+        serial
+            .transact_system_txn(evm_env.clone(), Vec::new(), tx.clone())
+            .expect("serial metadata tx must succeed");
+        grevm.transact_system_txn(evm_env, Vec::new(), tx).expect("grevm metadata tx must succeed");
+
+        let bs = serial.take_bundle();
+        let bg = grevm.take_bundle();
+
+        // Load-bearing: after the same-block metadata tx, the final bundle
+        // state (state-root input) is byte-identical across backends. Same
+        // field selection as u6b/u6c — `reverts`/`reverts_size` skipped because
+        // grevm does not populate `reverts_size` (not consensus-affecting).
+        assert_eq!(
+            bs.state, bg.state,
+            "absent SYSTEM_CALLER: state map drift between serial and grevm"
+        );
+        assert_eq!(
+            bs.contracts, bg.contracts,
+            "absent SYSTEM_CALLER: contracts drift between serial and grevm"
+        );
+        assert_eq!(
+            bs.state_size, bg.state_size,
+            "absent SYSTEM_CALLER: state_size drift between serial and grevm"
+        );
+
+        // Sanity: both converge to a live account (nonce bumped to 1 keeps it
+        // non-empty under EIP-161, so state-clear never prunes it).
+        let info = bs
+            .state
+            .get(&SYSTEM_CALLER)
+            .and_then(|a| a.info.as_ref())
+            .expect("SYSTEM_CALLER present after metadata tx");
+        assert_eq!(info.balance, U256::ZERO, "balance stays zero (migration + gas-exempt tx)");
+        assert_eq!(info.nonce, 1, "nonce bumped to 1 by the metadata tx");
+        assert!(!info.is_empty(), "post-tx SYSTEM_CALLER survives EIP-161 (nonce > 0)");
+    }
 }
