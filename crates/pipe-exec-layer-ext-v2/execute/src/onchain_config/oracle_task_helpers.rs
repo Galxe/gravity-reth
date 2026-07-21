@@ -33,6 +33,10 @@ pub const SOURCE_TYPE_POLYMARKET_SETTLEMENT: u32 = 6;
 pub const RELAYER_BACKED_SOURCE_TYPES: &[u32] =
     &[SOURCE_TYPE_BLOCKCHAIN, SOURCE_TYPE_PRICE_FEED, SOURCE_TYPE_POLYMARKET_SETTLEMENT];
 
+fn has_valid_task_cardinality(source_type: u32, task_count: usize) -> bool {
+    !RELAYER_BACKED_SOURCE_TYPES.contains(&source_type) || task_count == 1
+}
+
 // Re-export SOURCE_TYPE_JWK from types for consistency
 pub use super::types::SOURCE_TYPE_JWK;
 
@@ -85,6 +89,17 @@ mod tests {
         assert!(RELAYER_BACKED_SOURCE_TYPES.contains(&SOURCE_TYPE_BLOCKCHAIN));
         assert!(RELAYER_BACKED_SOURCE_TYPES.contains(&SOURCE_TYPE_PRICE_FEED));
         assert!(RELAYER_BACKED_SOURCE_TYPES.contains(&SOURCE_TYPE_POLYMARKET_SETTLEMENT));
+    }
+
+    #[test]
+    fn relayer_backed_sources_require_exactly_one_task() {
+        for source_type in RELAYER_BACKED_SOURCE_TYPES {
+            assert!(!has_valid_task_cardinality(*source_type, 0));
+            assert!(has_valid_task_cardinality(*source_type, 1));
+            assert!(!has_valid_task_cardinality(*source_type, 2));
+        }
+
+        assert!(has_valid_task_cardinality(SOURCE_TYPE_JWK, 2));
     }
 }
 
@@ -243,6 +258,17 @@ where
             length = task_names.len(),
             "oracle task task names length"
         );
+
+        if !has_valid_task_cardinality(source_type, task_names.len()) {
+            warn!(
+                target: "oracle_task_helper",
+                source_type,
+                source_id = source_id.to_string(),
+                task_count = task_names.len(),
+                "Relayer-backed oracle source must have exactly one task; skipping source"
+            );
+            return;
+        }
 
         for task_name in task_names {
             self.process_single_task(source_type, source_id, task_name, nonce, block_id, results);
