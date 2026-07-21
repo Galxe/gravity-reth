@@ -18,8 +18,8 @@ use reth_etl::Collector;
 use reth_fs_util as fs;
 use reth_primitives_traits::{Block, FullBlockBody, FullBlockHeader, NodePrimitives};
 use reth_provider::{
-    providers::StaticFileProviderRWRefMut, BlockReader, BlockWriter, StaticFileProviderFactory,
-    StaticFileSegment, StaticFileWriter,
+    providers::StaticFileProviderRWRefMut, writer::UnifiedStorageWriter, BlockReader, BlockWriter,
+    StaticFileProviderFactory, StaticFileSegment, StaticFileWriter,
 };
 use reth_stages_types::{
     CheckpointBlockRange, EntitiesCheckpoint, HeadersCheckpoint, StageCheckpoint, StageId,
@@ -129,14 +129,17 @@ where
 
         save_stage_checkpoints(&provider, from, height, height, height)?;
 
-        provider.commit()?;
+        // Commit both the database and static files. Gravity's `DatabaseProvider::commit` only
+        // commits the DB transaction, so headers/bodies staged in static files must be flushed
+        // through `UnifiedStorageWriter` or they are lost on commit.
+        UnifiedStorageWriter::commit(provider)?;
     }
 
     let provider = provider_factory.database_provider_rw()?;
 
     build_index(&provider, hash_collector)?;
 
-    provider.commit()?;
+    UnifiedStorageWriter::commit(provider)?;
 
     Ok(height)
 }

@@ -11,18 +11,20 @@ use reth_network::{
     NetworkEvent, NetworkEventListenerProvider, Peers,
 };
 use reth_network_api::{events::PeerEvent, PeerKind, PeersInfo};
-use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+use reth_provider::test_utils::ExtendedAccount;
 use reth_transaction_pool::{
     test_utils::TransactionGenerator, AddedTransactionOutcome, PoolTransaction, TransactionPool,
 };
 use std::sync::Arc;
 use tokio::join;
 
+use crate::provider_with_genesis_block;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tx_gossip() {
     reth_tracing::init_test_tracing();
 
-    let provider = MockEthProvider::default();
+    let provider = provider_with_genesis_block();
     let net = Testnet::create_with(2, provider.clone()).await;
 
     // install request handlers
@@ -62,7 +64,7 @@ async fn test_tx_gossip() {
 async fn test_tx_propagation_policy_trusted_only() {
     reth_tracing::init_test_tracing();
 
-    let provider = MockEthProvider::default();
+    let provider = provider_with_genesis_block();
 
     let policy = TransactionPropagationKind::Trusted;
     let net = Testnet::create_with(2, provider.clone()).await;
@@ -132,7 +134,7 @@ async fn test_tx_propagation_policy_trusted_only() {
 async fn test_tx_ingress_policy_trusted_only() {
     reth_tracing::init_test_tracing();
 
-    let provider = MockEthProvider::default();
+    let provider = provider_with_genesis_block();
 
     let tx_manager_config = TransactionsManagerConfig {
         ingress_policy: TransactionIngressPolicy::Trusted,
@@ -198,7 +200,7 @@ async fn test_tx_ingress_policy_trusted_only() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_4844_tx_gossip_penalization() {
     reth_tracing::init_test_tracing();
-    let provider = MockEthProvider::default();
+    let provider = provider_with_genesis_block();
     let net = Testnet::create_with(2, provider.clone()).await;
 
     // install request handlers
@@ -250,7 +252,7 @@ async fn test_4844_tx_gossip_penalization() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_sending_invalid_transactions() {
     reth_tracing::init_test_tracing();
-    let provider = MockEthProvider::default();
+    let provider = provider_with_genesis_block();
     let net = Testnet::create_with(2, provider.clone()).await;
     // install request handlers
     let net = net.with_eth_pool();

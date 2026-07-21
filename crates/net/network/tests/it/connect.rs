@@ -1,5 +1,6 @@
 //! Connection tests
 
+use crate::provider_with_genesis_block;
 use alloy_primitives::map::HashSet;
 use futures::StreamExt;
 use reth_chainspec::{MAINNET, SEPOLIA};
@@ -19,7 +20,6 @@ use reth_network_p2p::{
     sync::{NetworkSyncUpdater, SyncState},
 };
 use reth_network_peers::{mainnet_nodes, NodeRecord, TrustedPeer};
-use reth_provider::test_utils::MockEthProvider;
 use reth_storage_api::noop::NoopProvider;
 use reth_tasks::Runtime;
 use reth_tracing::init_test_tracing;
@@ -662,7 +662,7 @@ async fn new_random_peer(
 async fn test_connect_many() {
     reth_tracing::init_test_tracing();
 
-    let provider = MockEthProvider::default();
+    let provider = provider_with_genesis_block();
     let net = Testnet::create_with(5, provider).await;
 
     // install request handlers

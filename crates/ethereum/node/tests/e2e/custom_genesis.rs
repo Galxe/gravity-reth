@@ -9,7 +9,11 @@ use reth_stages_types::StageId;
 use std::sync::Arc;
 
 /// Tests that a node can initialize and advance with a custom genesis block number.
+// Gravity deliberately restored the pre-v2.3.0 storage baseline (#375), which anchors genesis at
+// block 0 and does not implement upstream's custom-genesis-block-number feature. This upstream test
+// exercises a non-zero genesis and cannot pass without reverting that storage decision.
 #[tokio::test]
+#[ignore = "gravity uses a block-0 genesis baseline (#375); non-zero custom genesis block number unsupported by design"]
 async fn can_run_eth_node_with_custom_genesis_number() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -62,7 +66,10 @@ async fn can_run_eth_node_with_custom_genesis_number() -> eyre::Result<()> {
 }
 
 /// Tests that block queries respect custom genesis boundaries.
+// See `can_run_eth_node_with_custom_genesis_number`: gravity's block-0 genesis baseline (#375)
+// does not support the non-zero custom genesis block number this test relies on.
 #[tokio::test]
+#[ignore = "gravity uses a block-0 genesis baseline (#375); non-zero custom genesis block number unsupported by design"]
 async fn custom_genesis_block_query_boundaries() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

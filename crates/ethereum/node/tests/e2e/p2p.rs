@@ -176,7 +176,11 @@ async fn e2e_test_send_transactions() -> eyre::Result<()> {
     Ok(())
 }
 
+// Gravity's consensus is BFT-final: persistence is forward-only and the state cache enforces a
+// monotonic persist-block invariant. reth's native deep-reorg drives persistence backwards, which
+// that invariant forbids by design, so this upstream reorg test is inapplicable to gravity.
 #[tokio::test]
+#[ignore = "gravity BFT persistence is forward-only; reth native deep-reorg unsupported by design"]
 async fn test_long_reorg() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -232,7 +236,10 @@ async fn test_long_reorg() -> eyre::Result<()> {
     Ok(())
 }
 
+// See `test_long_reorg`: gravity's forward-only BFT persistence invariant is incompatible with
+// reth's native deep-reorg flow this test drives.
 #[tokio::test]
+#[ignore = "gravity BFT persistence is forward-only; reth native deep-reorg unsupported by design"]
 async fn test_reorg_through_backfill() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

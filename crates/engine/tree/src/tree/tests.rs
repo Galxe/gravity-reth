@@ -622,8 +622,8 @@ async fn test_tree_state_on_new_head_reorg() {
         })
     );
 
-    // after advancing persistence, we should be at `None` for the next action
-    test_harness.tree.advance_persistence().unwrap();
+    // after polling persistence completion, we should be at `None` for the next action
+    test_harness.tree.try_poll_persistence().unwrap();
     let current_action = test_harness.tree.persistence_state.current_action().cloned();
     assert_eq!(current_action, None);
 
@@ -861,6 +861,15 @@ async fn test_engine_tree_live_sync_transition_required_blocks_requested() {
     test_harness.provider.add_block(backfill_tip_block.hash(), backfill_tip_block.into_block());
     let _ = test_harness.tree.on_engine_message(FromEngine::Event(backfill_finished)).unwrap();
 
+    let event = test_harness.from_tree_rx.recv().await.unwrap();
+    match event {
+        EngineApiEvent::Download(DownloadRequest::BlockSet(hash_set)) => {
+            assert_eq!(hash_set, HashSet::from_iter([main_chain_last_hash]));
+        }
+        _ => panic!("Unexpected event: {event:#?}"),
+    }
+
+    // After backfill completes with the head not buffered, we also request the head download
     let event = test_harness.from_tree_rx.recv().await.unwrap();
     match event {
         EngineApiEvent::Download(DownloadRequest::BlockSet(hash_set)) => {

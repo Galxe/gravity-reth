@@ -304,6 +304,25 @@ struct RuntimeInner {
     task_manager_handle: Mutex<Option<JoinHandle<Result<(), PanickedTaskError>>>>,
 }
 
+impl Drop for RuntimeInner {
+    fn drop(&mut self) {
+        // The owned tokio runtime blocks on its blocking-pool teardown when dropped, which
+        // tokio forbids from within an async context (it panics with "Cannot drop a runtime
+        // in a context where blocking is not allowed"). Since `Runtime` is a cheaply cloned
+        // `Arc<RuntimeInner>` handed out as `TaskExecutor`, the last clone can be released by a
+        // spawned task that finishes on a tokio worker thread — i.e. inside an async context.
+        // When that happens, hand the runtime off to a non-blocking background shutdown instead
+        // of the blocking drop. Outside an async context (e.g. the dedicated `rt-shutdown`
+        // thread `CliRunner` uses) keep the blocking drop so callers can wait for full teardown.
+        let Some(tokio_runtime) = self._tokio_runtime.take() else { return };
+        if Handle::try_current().is_ok() {
+            tokio_runtime.shutdown_background();
+        } else {
+            drop(tokio_runtime);
+        }
+    }
+}
+
 // ── Runtime ───────────────────────────────────────────────────────────
 
 /// A cheaply cloneable handle to the runtime resources.
