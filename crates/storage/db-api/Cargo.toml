@@ -39,7 +39,6 @@ parity-scale-codec = { workspace = true, features = ["bytes"] }
 metrics.workspace = true
 
 # misc
-arrayvec.workspace = true
 derive_more.workspace = true
 bytes.workspace = true
 

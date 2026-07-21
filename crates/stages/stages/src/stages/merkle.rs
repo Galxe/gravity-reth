@@ -387,7 +387,7 @@ where
             let hashed_state = if provider.cached_storage_settings().changesets_in_static_files {
                 nested_state_root.read_hashed_state_from_changesets(
                     provider.account_changesets_range(range.clone())?,
-                    provider.storage_changesets_range(range.clone())?,
+                    provider.storage_changesets_range(range)?,
                 )?
             } else {
                 nested_state_root.read_hashed_state(Some(range))?

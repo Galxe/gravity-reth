@@ -33,3 +33,11 @@ pub use revm::{self, database::State, *};
 /// Helper types for execution witness generation.
 #[cfg(feature = "witness")]
 pub mod witness;
+
+// The `witness` feature pulls in `alloy-rlp` and `alloy-rpc-types-debug`, but the trimmed
+// witness module no longer references them directly. Park them so they don't trip
+// `unused_crate_dependencies` when the feature is enabled.
+#[cfg(feature = "witness")]
+use alloy_rlp as _;
+#[cfg(feature = "witness")]
+use alloy_rpc_types_debug as _;

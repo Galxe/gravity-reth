@@ -149,8 +149,8 @@ impl Command {
         let mut current: Vec<reth_db_api::models::AccountBeforeTx> = Vec::new();
         let mut current_block = 0u64;
         let mut cursor = provider.tx_ref().cursor_read::<tables::AccountChangeSets>()?;
-        let mut walker = cursor.walk(None)?;
-        while let Some(entry) = walker.next() {
+        let walker = cursor.walk(None)?;
+        for entry in walker {
             let (block, change) = entry?;
             if block != current_block && !current.is_empty() {
                 while next_block < current_block {
@@ -204,8 +204,8 @@ impl Command {
         let mut current: Vec<StorageBeforeTx> = Vec::new();
         let mut current_block = 0u64;
         let mut cursor = provider.tx_ref().cursor_read::<tables::StorageChangeSets>()?;
-        let mut walker = cursor.walk(None)?;
-        while let Some(entry) = walker.next() {
+        let walker = cursor.walk(None)?;
+        for entry in walker {
             let (bna, storage_entry) = entry?;
             let block = bna.block_number();
             if block != current_block && !current.is_empty() {

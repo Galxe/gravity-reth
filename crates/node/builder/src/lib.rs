@@ -64,3 +64,6 @@ pub use reth_node_api::*;
 use aquamarine as _;
 
 use reth_rpc as _;
+
+// Kept for its `metrics` / `test-utils` feature forwards; not referenced in code directly.
+use reth_trie_db as _;

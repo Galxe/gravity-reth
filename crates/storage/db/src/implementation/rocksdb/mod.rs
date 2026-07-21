@@ -334,7 +334,7 @@ impl DatabaseEnv {
     ///
     /// Only `DBOptions`-level settings belong here. Column-family-level tuning
     /// (memtables, compaction, compression, block cache) must go through
-    /// [`Self::create_cf_options`]: RocksDB silently ignores CF-level fields on the
+    /// [`Self::create_cf_options`]: `RocksDB` silently ignores CF-level fields on the
     /// database `Options` for named column families.
     fn create_db_options(args: &DatabaseArguments) -> Options {
         let mut opts = Options::default();

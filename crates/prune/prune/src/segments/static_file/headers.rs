@@ -39,6 +39,8 @@ where
     Provider: StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Value>>
         + DBProvider<Tx: DbTxMut>,
 {
+    // `PruneSegment::Headers` is deprecated but index-stable; this segment still prunes it.
+    #[allow(deprecated)]
     fn segment(&self) -> PruneSegment {
         PruneSegment::Headers
     }

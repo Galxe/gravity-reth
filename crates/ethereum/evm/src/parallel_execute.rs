@@ -32,7 +32,7 @@ use revm::{
     database::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
-    state::{Account, AccountInfo, AccountStatus, EvmState},
+    state::{AccountInfo, EvmState},
     Database, DatabaseCommit,
 };
 
@@ -141,7 +141,7 @@ where
         for (result, tx_type) in
             results.into_iter().zip(block.body().transactions().map(|tx| tx.tx_type()))
         {
-            cumulative_gas_used += result.gas_used();
+            cumulative_gas_used += result.tx_gas_used();
             receipts.push(Receipt {
                 tx_type,
                 success: result.is_success(),
@@ -447,7 +447,7 @@ mod tests {
         context::TxEnv,
         database::{CacheDB, EmptyDB},
         primitives::TxKind,
-        state::AccountInfo,
+        state::{Account, AccountInfo, AccountStatus},
     };
 
     fn prague_chainspec() -> Arc<ChainSpec> {
@@ -853,7 +853,7 @@ mod tests {
             "system tx execution must succeed (no insufficient-funds / GasPriceLessThanBasefee)"
         );
         assert!(
-            result.gas_used() > 0,
+            result.tx_gas_used() > 0,
             "gas_used must stay positive — gas metering is not bypassed"
         );
 
@@ -925,7 +925,7 @@ mod tests {
         let result_pre = pre_executor
             .transact_system_txn(evm_env_pre, Vec::new(), tx_pre)
             .expect("pre-Alpha system tx must succeed (production fallback path)");
-        let gas_used_pre = result_pre.gas_used();
+        let gas_used_pre = result_pre.tx_gas_used();
         assert!(result_pre.is_success(), "pre-Alpha system tx must succeed");
 
         // Post-Alpha chainspec: Alpha = Timestamp(1), block_ts = 1 ⇒ gate active.
@@ -946,7 +946,7 @@ mod tests {
         let result_post = post_executor
             .transact_system_txn(evm_env_post, Vec::new(), tx_post)
             .expect("post-Alpha system tx must succeed (gas-exempt path)");
-        let gas_used_post = result_post.gas_used();
+        let gas_used_post = result_post.tx_gas_used();
         assert!(result_post.is_success(), "post-Alpha system tx must succeed");
 
         // The core invariant: gas metering doesn't change across the fork.

@@ -7,7 +7,7 @@ use alloy_eips::{
     eip4895::Withdrawals,
     eip7685::RequestsOrHash,
 };
-use alloy_primitives::{BlockHash, BlockNumber, Bytes, Sealable, B128, B256, U64};
+use alloy_primitives::{BlockHash, BlockNumber, Sealable, B128, B256, U64};
 use alloy_rpc_types_engine::{
     CancunPayloadFields, ClientVersionV1, ExecutionData, ExecutionPayloadBodiesV1,
     ExecutionPayloadBodiesV2, ExecutionPayloadBodyV1, ExecutionPayloadBodyV2,
@@ -708,7 +708,7 @@ where
         start: BlockNumber,
         count: u64,
     ) -> EngineApiResult<ExecutionPayloadBodiesV2> {
-        let mut payload_bodies = self
+        let payload_bodies = self
             .get_payload_bodies_by_range_with(start, count, |block| {
                 let block_hash = block.header().hash_slow();
                 (

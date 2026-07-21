@@ -9,8 +9,11 @@ static STORAGE_DEFAULTS: OnceLock<DefaultStorageValues> = OnceLock::new();
 /// Default values for storage that can be customized
 ///
 /// Global defaults can be set via [`DefaultStorageValues::try_init`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DefaultStorageValues {
+    // Off by default: enabling V2 is an explicit opt-in for fresh databases. Flipping this
+    // default (to match upstream reth, where v2 is the default layout) is a product decision —
+    // it would switch every new datadir over.
     v2: bool,
 }
 
@@ -29,15 +32,6 @@ impl DefaultStorageValues {
     pub const fn with_v2(mut self, v: bool) -> Self {
         self.v2 = v;
         self
-    }
-}
-
-impl Default for DefaultStorageValues {
-    fn default() -> Self {
-        // Off by default: enabling V2 is an explicit opt-in for fresh databases. Flipping
-        // this default (to match upstream reth, where v2 is the default layout) is a product
-        // decision — it would switch every new datadir over.
-        Self { v2: false }
     }
 }
 

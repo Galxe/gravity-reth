@@ -21,6 +21,10 @@ pub mod node;
 pub mod pubsub;
 pub mod types;
 
+// `helpers/bal.rs` (EIP-7928 Block Access List support) is not yet wired into the module tree;
+// park its dependency so it stays available without tripping `unused_crate_dependencies`.
+use alloy_eip7928 as _;
+
 pub use bundle::{EthBundleApiServer, EthCallBundleApiServer};
 pub use core::{EthApiServer, FullEthApiServer};
 pub use ext::L2EthApiExtServer;

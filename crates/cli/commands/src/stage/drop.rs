@@ -34,6 +34,9 @@ pub struct Command<C: ChainSpecParser> {
 
 impl<C: ChainSpecParser> Command<C> {
     /// Execute `db` command
+    // `PruneSegment::Transactions` is deprecated but index-stable; still reset when dropping
+    // bodies.
+    #[allow(deprecated)]
     pub async fn execute<N: CliNodeTypes>(self, runtime: reth_tasks::Runtime) -> eyre::Result<()>
     where
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,

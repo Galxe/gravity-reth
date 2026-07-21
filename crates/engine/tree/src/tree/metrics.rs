@@ -33,7 +33,7 @@ const NUM_GAS_BUCKETS: usize = GAS_BUCKET_THRESHOLDS.len() + 1;
 
 /// Metrics for the `EngineApi`.
 #[derive(Debug, Default)]
-pub struct EngineApiMetrics {
+pub(crate) struct EngineApiMetrics {
     /// Engine API-specific metrics.
     pub engine: EngineMetrics,
     /// Block executor metrics.
@@ -46,17 +46,22 @@ pub struct EngineApiMetrics {
     #[allow(dead_code)]
     pub(crate) bal: BalMetrics,
     /// Gas-bucketed execution sub-phase metrics.
+    #[allow(dead_code)]
     pub(crate) execution_gas_buckets: ExecutionGasBucketMetrics,
     /// Gas-bucketed block validation sub-phase metrics.
+    #[allow(dead_code)]
     pub(crate) block_validation_gas_buckets: BlockValidationGasBucketMetrics,
 }
 
+// These per-phase recording methods are currently unwired after the engine merge; kept as the
+// intended metrics API surface. See report note on orphaned engine metrics.
+#[allow(dead_code)]
 impl EngineApiMetrics {
     /// Records metrics for block execution.
     ///
     /// This method updates metrics for execution time, gas usage, and the number
     /// of accounts, storage slots and bytecodes updated.
-    pub fn record_block_execution<R>(
+    pub(crate) fn record_block_execution<R>(
         &self,
         output: &BlockExecutionOutput<R>,
         execution_duration: Duration,
@@ -83,22 +88,22 @@ impl EngineApiMetrics {
     }
 
     /// Returns a reference to the executor metrics for use in state hooks.
-    pub const fn executor_metrics(&self) -> &ExecutorMetrics {
+    pub(crate) const fn executor_metrics(&self) -> &ExecutorMetrics {
         &self.executor
     }
 
     /// Records the duration of block pre-execution changes (e.g., beacon root update).
-    pub fn record_pre_execution(&self, elapsed: Duration) {
+    pub(crate) fn record_pre_execution(&self, elapsed: Duration) {
         self.executor.pre_execution_histogram.record(elapsed);
     }
 
     /// Records the duration of block post-execution changes (e.g., finalization).
-    pub fn record_post_execution(&self, elapsed: Duration) {
+    pub(crate) fn record_post_execution(&self, elapsed: Duration) {
         self.executor.post_execution_histogram.record(elapsed);
     }
 
     /// Records execution duration into the gas-bucketed execution histogram.
-    pub fn record_block_execution_gas_bucket(&self, gas_used: u64, elapsed: Duration) {
+    pub(crate) fn record_block_execution_gas_bucket(&self, gas_used: u64, elapsed: Duration) {
         let idx = GasBucketMetrics::bucket_index(gas_used);
         self.execution_gas_buckets.buckets[idx]
             .execution_gas_bucket_histogram
@@ -106,7 +111,7 @@ impl EngineApiMetrics {
     }
 
     /// Records state root duration into the gas-bucketed block validation histogram.
-    pub fn record_state_root_gas_bucket(&self, gas_used: u64, elapsed_secs: f64) {
+    pub(crate) fn record_state_root_gas_bucket(&self, gas_used: u64, elapsed_secs: f64) {
         let idx = GasBucketMetrics::bucket_index(gas_used);
         self.block_validation_gas_buckets.buckets[idx]
             .state_root_gas_bucket_histogram
@@ -114,12 +119,12 @@ impl EngineApiMetrics {
     }
 
     /// Records the time spent waiting for the next transaction from the iterator.
-    pub fn record_transaction_wait(&self, elapsed: Duration) {
+    pub(crate) fn record_transaction_wait(&self, elapsed: Duration) {
         self.executor.transaction_wait_histogram.record(elapsed);
     }
 
     /// Records the duration of a single transaction execution.
-    pub fn record_transaction_execution(&self, elapsed: Duration) {
+    pub(crate) fn record_transaction_execution(&self, elapsed: Duration) {
         self.executor.transaction_execution_histogram.record(elapsed);
     }
 
@@ -233,7 +238,7 @@ impl OnStateHook for MeteredStateHook {
 /// Metrics for the entire blockchain tree
 #[derive(Metrics)]
 #[metrics(scope = "blockchain_tree")]
-pub struct TreeMetrics {
+pub(crate) struct TreeMetrics {
     /// The highest block number in the canonical chain
     pub canonical_chain_height: Gauge,
     /// Metrics for reorgs.
@@ -249,7 +254,7 @@ pub struct TreeMetrics {
 
 /// Metrics for reorgs.
 #[derive(Debug)]
-pub struct ReorgMetrics {
+pub(crate) struct ReorgMetrics {
     /// The number of head block reorgs
     pub head: Counter,
     /// The number of safe block reorgs
@@ -271,7 +276,7 @@ impl Default for ReorgMetrics {
 /// Metrics for the `EngineApi`.
 #[derive(Metrics)]
 #[metrics(scope = "consensus.engine.beacon")]
-pub struct EngineMetrics {
+pub(crate) struct EngineMetrics {
     /// Engine API forkchoiceUpdated response type metrics
     #[metric(skip)]
     pub(crate) forkchoice_updated: ForkchoiceUpdatedMetrics,
@@ -456,6 +461,7 @@ pub(crate) struct ExecutionGasBucketSeries {
 /// Holds pre-initialized [`ExecutionGasBucketSeries`] instances, one per gas bucket.
 #[derive(Debug)]
 pub(crate) struct ExecutionGasBucketMetrics {
+    #[allow(dead_code)]
     buckets: [ExecutionGasBucketSeries; NUM_GAS_BUCKETS],
 }
 
@@ -481,6 +487,7 @@ pub(crate) struct BlockValidationGasBucketSeries {
 /// Holds pre-initialized [`BlockValidationGasBucketSeries`] instances, one per gas bucket.
 #[derive(Debug)]
 pub(crate) struct BlockValidationGasBucketMetrics {
+    #[allow(dead_code)]
     buckets: [BlockValidationGasBucketSeries; NUM_GAS_BUCKETS],
 }
 
@@ -625,7 +632,7 @@ pub(crate) struct BalMetrics {
 /// Metrics for non-execution related block validation.
 #[derive(Metrics, Clone)]
 #[metrics(scope = "sync.block_validation")]
-pub struct BlockValidationMetrics {
+pub(crate) struct BlockValidationMetrics {
     /// Total number of storage tries updated in the state root calculation
     pub state_root_storage_tries_updated_total: Counter,
     /// Total number of times the parallel state root computation fell back to regular.
@@ -660,7 +667,7 @@ pub struct BlockValidationMetrics {
 
 impl BlockValidationMetrics {
     /// Records a new state root time, updating both the histogram and state root gauge
-    pub fn record_state_root(&self, trie_output: &TrieUpdates, elapsed_as_secs: f64) {
+    pub(crate) fn record_state_root(&self, trie_output: &TrieUpdates, elapsed_as_secs: f64) {
         self.state_root_storage_tries_updated_total
             .increment(trie_output.storage_tries_ref().len() as u64);
         self.state_root_duration.set(elapsed_as_secs);
@@ -669,7 +676,7 @@ impl BlockValidationMetrics {
 
     /// Records a new payload validation time, updating both the histogram and the payload
     /// validation gauge
-    pub fn record_payload_validation(&self, elapsed_as_secs: f64) {
+    pub(crate) fn record_payload_validation(&self, elapsed_as_secs: f64) {
         self.payload_validation_duration.set(elapsed_as_secs);
         self.payload_validation_histogram.record(elapsed_as_secs);
     }

@@ -33,8 +33,8 @@ use reth_payload_primitives::{
     BuiltPayload, InvalidPayloadAttributesError, NewPayloadError, PayloadTypes,
 };
 use reth_primitives_traits::{
-    transaction::signed::RecoveryError, AlloyBlockHeader, BlockBody as _, BlockTy, GotExpected,
-    NodePrimitives, Recovered, RecoveredBlock, SealedHeader, SignedTransaction as _,
+    transaction::signed::RecoveryError, AlloyBlockHeader, BlockTy, GotExpected, NodePrimitives,
+    Recovered, RecoveredBlock, SealedHeader,
 };
 use reth_provider::{
     providers::ConsistentDbView, BlockExecutionOutput, BlockHashReader, BlockNumReader,

@@ -175,6 +175,9 @@ where
         Ok(HashedPostState { accounts, storages })
     }
 
+    /// Reads the hashed post-state for the given block range by walking the account and
+    /// storage changeset tables. When `range` is `None`, reads the full hashed state from
+    /// the `HashedAccounts`/`HashedStorages` tables instead.
     pub fn read_hashed_state(
         &self,
         range: Option<RangeInclusive<BlockNumber>>,

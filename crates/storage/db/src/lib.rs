@@ -37,6 +37,15 @@ pub use crate::implementation::rocksdb::{
 pub use models::ClientVersion;
 pub use reth_db_api::*;
 
+// The MDBX backend source (`src/mdbx.rs`, `src/implementation/mdbx/`, `src/utils.rs`) is
+// retained but not wired into the module tree — RocksDB is the active backend. Park the
+// dependencies it references so they don't trip `unused_crate_dependencies`.
+use libc as _;
+#[cfg(feature = "mdbx")]
+use page_size as _;
+#[cfg(feature = "mdbx")]
+use reth_libmdbx as _;
+
 /// Generic failpoint injection macro that panics when triggered.
 /// When `failpoints` feature is enabled, this triggers the failpoint and panics if activated.
 /// When disabled, this is a no-op (compiles to nothing).

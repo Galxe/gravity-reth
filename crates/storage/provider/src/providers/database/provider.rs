@@ -2281,7 +2281,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                 let storage_changeset =
                     self.static_file_provider.storage_changesets_range(range.clone())?;
                 let account_changeset =
-                    self.static_file_provider.account_changesets_range(range.clone())?;
+                    self.static_file_provider.account_changesets_range(range)?;
                 self.static_file_provider
                     .latest_writer(StaticFileSegment::StorageChangeSets)?
                     .prune_storage_changesets(block)?;
@@ -2399,7 +2399,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                 let storage_changeset =
                     self.static_file_provider.storage_changesets_range(range.clone())?;
                 let account_changeset =
-                    self.static_file_provider.account_changesets_range(range.clone())?;
+                    self.static_file_provider.account_changesets_range(range)?;
                 self.static_file_provider
                     .latest_writer(StaticFileSegment::StorageChangeSets)?
                     .prune_storage_changesets(block)?;
