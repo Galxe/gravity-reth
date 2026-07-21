@@ -93,6 +93,37 @@ jobs:
         with:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
+      - name: Restore Gravity genesis fixture cache
+        id: gravity-genesis-fixture-cache
+        uses: actions/cache@v4
+        with:
+          path: crates/pipe-exec-layer-ext-v2/execute/fixtures/.cache/gravity_hardfork.json
+          key: gravity-genesis-fixture-${{ runner.os }}-${{ hashFiles('crates/pipe-exec-layer-ext-v2/execute/fixtures/**') }}
+      - uses: actions/setup-node@v4
+        if: steps.gravity-genesis-fixture-cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 20
+      - uses: foundry-rs/foundry-toolchain@v1
+        if: steps.gravity-genesis-fixture-cache.outputs.cache-hit != 'true'
+        with:
+          version: stable
+      - name: Regenerate Gravity genesis fixture
+        run: |
+          set -euo pipefail
+
+          fixture_dir="crates/pipe-exec-layer-ext-v2/execute/fixtures"
+          cache_file="$fixture_dir/.cache/gravity_hardfork.json"
+          target="$fixture_dir/../gravity_hardfork.json"
+
+          if [[ "${{ steps.gravity-genesis-fixture-cache.outputs.cache-hit }}" == "true" ]]; then
+            cp "$cache_file" "$target"
+          else
+            "$fixture_dir/regen.sh"
+            mkdir -p "$(dirname "$cache_file")"
+            cp "$target" "$cache_file"
+          fi
+
+          git diff --exit-code -- "$target"
       - name: Check Gravity invariants (ripgrep)
         # Long-term regression-prevention lint for the Alpha system-tx
         # gas-exempt design. Living as a bash + ripgrep script (not a Rust
