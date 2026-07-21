@@ -114,7 +114,15 @@ where
                 state,
                 false,
                 self.custom_precompiles.clone(),
-            );
+            )
+            // Downgrade a tx-level-invalid tx (EVMError::Transaction — e.g. NonceTooLow from an
+            // EIP-7702 delegate-then-CREATE nonce double-bump) from a whole-block panic to a
+            // deterministic per-tx skip in grevm's sequential fallback. Closes the
+            // execution-induced halt class that the pre-execution filter fundamentally cannot
+            // model (gravity-audit#838, durable close-out of #823). This is an STF change (a bad
+            // tx goes halt -> skip); deploy behind a coordinated upgrade. Requires grevm built
+            // with `with_skip_invalid_txn` (Galxe/grevm#110).
+            .with_skip_invalid_txn(true);
             executor.parallel_execute(None).map_err(|e| {
                 // `e.txid` is grevm's per-tx index; for block-level errors it can be a
                 // sentinel or out-of-bounds value. Use a saturating lookup so the error

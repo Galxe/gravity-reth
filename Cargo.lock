@@ -4361,7 +4361,7 @@ dependencies = [
 [[package]]
 name = "grevm"
 version = "2.2.2"
-source = "git+https://github.com/Galxe/grevm?rev=2a42859a56f03197fce5be4ceb475d9f1a7d7c3d#2a42859a56f03197fce5be4ceb475d9f1a7d7c3d"
+source = "git+https://github.com/Galxe/grevm?rev=d0d0911ee0ca5ca7397325c9fd42d87710521e7c#d0d0911ee0ca5ca7397325c9fd42d87710521e7c"
 dependencies = [
  "ahash",
  "alloy-evm",
