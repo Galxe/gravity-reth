@@ -24,6 +24,20 @@ fn reth_ok(args: &[&str]) -> String {
 /// Discovery is disabled and peer limits are zeroed so the node is fully
 /// isolated.  Each call gets a unique temporary data directory so that
 /// concurrent test runs never collide on the default `reth/dev/` path.
+///
+/// `--gravity.disable-pipe-execution` is required for the `--dev` local miner to
+/// make progress. Gravity replaces reth's native block production with a
+/// pipe-execution / BFT flow whose canonical chain is driven by an external
+/// consensus driver (gravity-sdk) that initializes the pipe-exec event bus. A
+/// standalone dev node has no such driver, so in the default (pipe) mode the
+/// engine thread busy-waits on `get_pipe_exec_layer_event_bus()` and never
+/// processes the local miner's Engine-API `newPayload`/`forkchoiceUpdated` — the
+/// node would never mine and any mining test hangs. Disabling pipe execution
+/// routes the engine through the upstream `run_inner` path where the local miner
+/// drives block production normally. The `GRETH_DISABLE_PIPE_EXECUTION` env var
+/// the integration CI job sets does *not* reach a spawned node: `reth node`
+/// initializes the global gravity config from CLI args before any env-based
+/// default is read, so the flag must be passed explicitly here.
 fn spawn_dev() -> (alloy_node_bindings::RethInstance, tempfile::TempDir) {
     use alloy_node_bindings::Reth;
 
@@ -33,7 +47,13 @@ fn spawn_dev() -> (alloy_node_bindings::RethInstance, tempfile::TempDir) {
         .dev()
         .disable_discovery()
         .data_dir(datadir.path())
-        .args(["--max-outbound-peers", "0", "--max-inbound-peers", "0"])
+        .args([
+            "--max-outbound-peers",
+            "0",
+            "--max-inbound-peers",
+            "0",
+            "--gravity.disable-pipe-execution",
+        ])
         .spawn();
 
     // Return the TempDir alongside the instance so it lives as long as the node.
