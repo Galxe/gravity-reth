@@ -52,6 +52,14 @@ jobs:
         with:
           cache-on-failure: true
       - name: Run e2e tests
+        # The upstream `e2e_testsuite` binaries self-drive block production through
+        # the standard engine loop (`run_inner`). Gravity's default (pipe execution
+        # enabled) reroutes the engine to consume from the consensus-driven
+        # PipeExecLayerEventBus, which these tests never initialize — every node they
+        # spawn would then block 120s and panic. None of these tests exercise the
+        # pipe-exec path, so run them with it disabled against the standard engine.
+        env:
+          GRETH_DISABLE_PIPE_EXECUTION: "1"
         run: |
           cargo nextest run \
             --no-fail-fast \
