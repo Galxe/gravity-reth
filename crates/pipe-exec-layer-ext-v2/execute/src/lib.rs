@@ -8,6 +8,37 @@ pub mod onchain_config;
 pub mod randomness_precompile;
 mod system_caller_migration;
 mod tx_filter;
+
+/// 差分测试预言机（differential oracle）：机械化验证 `tx_filter ⊇ revm 交易级校验`。
+/// 仅在 `difftx` feature 下编译，不进入生产构建面。
+#[cfg(feature = "difftx")]
+pub mod difftx;
+
+/// serial(revm) ⟷ grevm 执行差分：同一批交易分别过串行执行器与 grevm 并行执行器，
+/// diff state root / bundle / receipts，任何差异 = 共识 state-fork（静态看不出的一类）。
+/// 仅在 `difftx_exec` feature 下编译。
+#[cfg(feature = "difftx_exec")]
+pub mod difftx_exec;
+
+/// 交易序列 fuzz 生成器：对 `difftx` 的两侧预言机做 property/fuzz 驱动，量产 halt 变体。
+/// 纯测试期 harness（用 proptest/rand dev-dep），不进生产/库面。
+#[cfg(all(test, feature = "difftx"))]
+mod difftx_fuzz;
+
+/// A×B 融合：proptest 生成对抗块 → serial(revm) 与 grevm
+/// 双后端执行差分（`difftx_exec::run_exec_diff`） → 搜 state-fork / 单侧
+/// panic。把量产生成器接到执行差分上的最强 hunt。纯测试期 harness。
+#[cfg(all(test, feature = "difftx_exec"))]
+mod difftx_exec_fuzz;
+
+/// Gravity 自定义 precompile（mint / randomness）预言机：caller 门 + 畸形输入不 panic +
+/// 应用自定义 precompile 后 serial⟷grevm 执行一致（precompile 直改 journal state 的 fork 风险）。
+#[cfg(all(test, feature = "difftx_precompile"))]
+mod difftx_precompile;
+
+/// EIP-2935 HISTORY_STORAGE / BLOCKHASH exec-time 预言机 + warm-restart 截断窗口 BlockTooOld 风险。
+#[cfg(all(test, feature = "difftx_2935"))]
+mod difftx_2935;
 use alloy_sol_types::SolEvent;
 
 use channel::Channel;

@@ -84,11 +84,33 @@ alloy-genesis.workspace = true
 alloy-rpc-types-trace.workspace = true
 reth-trie = { workspace = true, features = ["test-utils"] }
 ureq = { version = "2", features = ["json"] }
+# difftx_fuzz：交易序列 property/fuzz 生成器（仅测试期）。
+proptest = "1"
 
 [features]
 pipe_test = ["reth-provider/pipe_test"]
 config-from-env = ["gravity-primitives/config-from-env"]
+# 差分预言机（tx_filter ⊇ revm）：编译 difftx 模块与 difftx 工具二进制。
+difftx = []
+# serial ⟷ grevm 执行差分：编译 difftx_exec 模块与 difftx_exec 工具二进制。
+difftx_exec = ["difftx"]
+# Gravity 自定义 precompile（mint/randomness）预言机（测试期）。
+difftx_precompile = ["difftx_exec"]
+# EIP-2935 / BLOCKHASH exec-time + 截断窗口预言机（测试期）。
+difftx_2935 = ["difftx_exec"]
 
 [[bench]]
 name = "bls_pop_verify_bench"
 harness = false
+
+# 差分预言机命令行工具：跑 revm 变体覆盖矩阵 + 7702 执行诱导 TOCTOU 自检。
+[[bin]]
+name = "difftx"
+path = "src/bin/difftx.rs"
+required-features = ["difftx"]
+
+# serial(revm) ⟷ grevm 执行差分预言机命令行工具：跑 baseline+adversarial 块，对比双后端。
+[[bin]]
+name = "difftx_exec"
+path = "src/bin/difftx_exec.rs"
+required-features = ["difftx_exec"]
