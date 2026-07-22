@@ -13,6 +13,17 @@ mod tx_filter;
 /// 仅在 `difftx` feature 下编译，不进入生产构建面。
 #[cfg(feature = "difftx")]
 pub mod difftx;
+
+/// serial(revm) ⟷ grevm 执行差分：同一批交易分别过串行执行器与 grevm 并行执行器，
+/// diff state root / bundle / receipts，任何差异 = 共识 state-fork（静态看不出的一类）。
+/// 仅在 `difftx_exec` feature 下编译。
+#[cfg(feature = "difftx_exec")]
+pub mod difftx_exec;
+
+/// 交易序列 fuzz 生成器：对 `difftx` 的两侧预言机做 property/fuzz 驱动，量产 halt 变体。
+/// 纯测试期 harness（用 proptest/rand dev-dep），不进生产/库面。
+#[cfg(all(test, feature = "difftx"))]
+mod difftx_fuzz;
 use alloy_sol_types::SolEvent;
 
 use channel::Channel;
