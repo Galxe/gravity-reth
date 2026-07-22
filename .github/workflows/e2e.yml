@@ -58,6 +58,11 @@ jobs:
         # PipeExecLayerEventBus, which these tests never initialize — every node they
         # spawn would then block 120s and panic. None of these tests exercise the
         # pipe-exec path, so run them with it disabled against the standard engine.
+        #
+        # The three excluded tests deliberately reorg on disk / diverge across nodes,
+        # which regresses the persisted block height. Gravity has immediate finality
+        # and never reorgs, so its storage cache asserts a strictly monotonic persist
+        # height (storage-api/src/cache.rs) — these scenarios are not applicable.
         env:
           GRETH_DISABLE_PIPE_EXECUTION: "1"
         run: |
@@ -74,4 +79,4 @@ jobs:
             --exclude "reth-optimism-*" \
             --exclude 'reth' \
             --exclude 'reth-pipe-exec-layer-*' \
-            -E 'binary(e2e_testsuite)'
+            -E 'binary(e2e_testsuite) and not test(test_engine_tree_disk_reorg_v1_e2e) and not test(test_engine_tree_disk_reorg_v2_e2e) and not test(test_testsuite_multinode_block_production)'
