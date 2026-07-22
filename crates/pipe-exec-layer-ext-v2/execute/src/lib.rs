@@ -24,6 +24,12 @@ pub mod difftx_exec;
 /// 纯测试期 harness（用 proptest/rand dev-dep），不进生产/库面。
 #[cfg(all(test, feature = "difftx"))]
 mod difftx_fuzz;
+
+/// A×B 融合：proptest 生成对抗块 → serial(revm) 与 grevm
+/// 双后端执行差分（`difftx_exec::run_exec_diff`） → 搜 state-fork / 单侧
+/// panic。把量产生成器接到执行差分上的最强 hunt。纯测试期 harness。
+#[cfg(all(test, feature = "difftx_exec"))]
+mod difftx_exec_fuzz;
 use alloy_sol_types::SolEvent;
 
 use channel::Channel;
