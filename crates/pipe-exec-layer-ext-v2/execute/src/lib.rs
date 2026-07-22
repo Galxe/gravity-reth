@@ -8,6 +8,11 @@ pub mod onchain_config;
 pub mod randomness_precompile;
 mod system_caller_migration;
 mod tx_filter;
+
+/// 差分测试预言机（differential oracle）：机械化验证 `tx_filter ⊇ revm 交易级校验`。
+/// 仅在 `difftx` feature 下编译，不进入生产构建面。
+#[cfg(feature = "difftx")]
+pub mod difftx;
 use alloy_sol_types::SolEvent;
 
 use channel::Channel;

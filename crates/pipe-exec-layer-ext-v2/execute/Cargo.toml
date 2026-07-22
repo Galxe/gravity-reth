@@ -88,7 +88,15 @@ ureq = { version = "2", features = ["json"] }
 [features]
 pipe_test = ["reth-provider/pipe_test"]
 config-from-env = ["gravity-primitives/config-from-env"]
+# 差分预言机（tx_filter ⊇ revm）：编译 difftx 模块与 difftx 工具二进制。
+difftx = []
 
 [[bench]]
 name = "bls_pop_verify_bench"
 harness = false
+
+# 差分预言机命令行工具：跑 revm 变体覆盖矩阵 + 7702 执行诱导 TOCTOU 自检。
+[[bin]]
+name = "difftx"
+path = "src/bin/difftx.rs"
+required-features = ["difftx"]
