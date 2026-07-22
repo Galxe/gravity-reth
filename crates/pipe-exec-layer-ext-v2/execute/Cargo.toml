@@ -94,6 +94,10 @@ config-from-env = ["gravity-primitives/config-from-env"]
 difftx = []
 # serial ⟷ grevm 执行差分：编译 difftx_exec 模块与 difftx_exec 工具二进制。
 difftx_exec = ["difftx"]
+# Gravity 自定义 precompile（mint/randomness）预言机（测试期）。
+difftx_precompile = ["difftx_exec"]
+# EIP-2935 / BLOCKHASH exec-time + 截断窗口预言机（测试期）。
+difftx_2935 = ["difftx_exec"]
 
 [[bench]]
 name = "bls_pop_verify_bench"

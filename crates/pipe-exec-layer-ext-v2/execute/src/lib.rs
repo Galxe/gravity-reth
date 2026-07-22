@@ -30,6 +30,15 @@ mod difftx_fuzz;
 /// panic。把量产生成器接到执行差分上的最强 hunt。纯测试期 harness。
 #[cfg(all(test, feature = "difftx_exec"))]
 mod difftx_exec_fuzz;
+
+/// Gravity 自定义 precompile（mint / randomness）预言机：caller 门 + 畸形输入不 panic +
+/// 应用自定义 precompile 后 serial⟷grevm 执行一致（precompile 直改 journal state 的 fork 风险）。
+#[cfg(all(test, feature = "difftx_precompile"))]
+mod difftx_precompile;
+
+/// EIP-2935 HISTORY_STORAGE / BLOCKHASH exec-time 预言机 + warm-restart 截断窗口 BlockTooOld 风险。
+#[cfg(all(test, feature = "difftx_2935"))]
+mod difftx_2935;
 use alloy_sol_types::SolEvent;
 
 use channel::Channel;
