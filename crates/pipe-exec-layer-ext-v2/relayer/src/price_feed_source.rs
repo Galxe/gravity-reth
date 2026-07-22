@@ -88,16 +88,11 @@ enum PriceFeedMode {
 #[derive(Debug, Clone)]
 struct BinanceIndexKlineConfig {
     base_url: String,
-    endpoint_url: String,
     pair: String,
     interval: String,
     interval_ms: u64,
-    continuous: bool,
     bucket_start_ms: u64,
-    bucket_end_ms: u64,
     grace_ms: u64,
-    round_id: u64,
-    resolved_at: u64,
     decimals: u8,
     aggregation_mode: u8,
     min_source_count: u64,
@@ -105,8 +100,6 @@ struct BinanceIndexKlineConfig {
     max_staleness: u64,
     weight: U256,
     data_source_id: B256,
-    delivery_nonce: u128,
-    block_number: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -122,33 +115,21 @@ struct BinanceIndexKlineRound {
 
 impl BinanceIndexKlineConfig {
     fn round_for_delivery_nonce(&self, delivery_nonce: u128) -> Result<BinanceIndexKlineRound> {
-        if !self.continuous {
-            return Ok(BinanceIndexKlineRound {
-                endpoint_url: self.endpoint_url.clone(),
-                bucket_start_ms: self.bucket_start_ms,
-                bucket_end_ms: self.bucket_end_ms,
-                round_id: self.round_id,
-                resolved_at: self.resolved_at,
-                delivery_nonce: self.delivery_nonce,
-                block_number: self.block_number,
-            });
-        }
-
         let offset = delivery_nonce
             .checked_sub(1)
-            .ok_or_else(|| anyhow!("Binance continuous delivery nonce must start at 1"))?;
+            .ok_or_else(|| anyhow!("Binance delivery nonce must start at 1"))?;
         let offset_ms = u128::from(self.interval_ms)
             .checked_mul(offset)
-            .ok_or_else(|| anyhow!("Binance continuous bucket offset overflow"))?;
+            .ok_or_else(|| anyhow!("Binance bucket offset overflow"))?;
         let bucket_start_ms = u128::from(self.bucket_start_ms)
             .checked_add(offset_ms)
-            .ok_or_else(|| anyhow!("Binance continuous bucket start overflow"))?;
+            .ok_or_else(|| anyhow!("Binance bucket start overflow"))?;
         let bucket_start_ms = u64::try_from(bucket_start_ms)
-            .map_err(|_| anyhow!("Binance continuous bucket start exceeds u64"))?;
+            .map_err(|_| anyhow!("Binance bucket start exceeds u64"))?;
         let bucket_end_ms = bucket_start_ms
             .checked_add(self.interval_ms)
             .and_then(|value| value.checked_sub(1))
-            .ok_or_else(|| anyhow!("Binance continuous bucket end overflow"))?;
+            .ok_or_else(|| anyhow!("Binance bucket end overflow"))?;
         let round_id = bucket_start_ms / self.interval_ms;
         let endpoint_url = build_binance_index_kline_url(
             &self.base_url,
@@ -314,7 +295,11 @@ impl PriceFeedSource {
         validate_binance_pair(&pair)?;
         let interval = task.params.get("interval").cloned().unwrap_or_else(|| "1m".to_string());
         let interval_ms = binance_interval_ms(&interval)?;
-        let continuous = parse_optional(task, "continuous")?.unwrap_or(false);
+        if task.params.contains_key("continuous") {
+            return Err(anyhow!(
+                "Binance index kline parameter 'continuous' is unsupported; price feeds are always continuous"
+            ));
+        }
         let bucket_start_ms = parse_required::<u64>(task, "bucketStartMs")?;
         if bucket_start_ms % interval_ms != 0 {
             return Err(anyhow!(
@@ -330,7 +315,7 @@ impl PriceFeedSource {
         for derived in ["round", "resolvedAt", "blockNumber"] {
             if task.params.contains_key(derived) {
                 return Err(anyhow!(
-                    "Binance index kline parameter '{derived}' is derived from the exact bucket"
+                    "Binance index kline parameter '{derived}' is derived from the delivery bucket"
                 ));
             }
         }
@@ -378,14 +363,6 @@ impl PriceFeedSource {
             ));
         }
         let base_url = binance_base_url(rpc_url)?;
-        let endpoint_url = build_binance_index_kline_url(
-            &base_url,
-            &pair,
-            &interval,
-            bucket_start_ms,
-            bucket_end_ms,
-        )?;
-
         validate_observations(
             &[PriceObservation {
                 data_source_id,
@@ -408,18 +385,13 @@ impl PriceFeedSource {
             .timeout(BINANCE_HTTP_TIMEOUT)
             .build()
             .context("failed to build Binance index kline HTTP client")?;
-        let mut config = BinanceIndexKlineConfig {
+        let config = BinanceIndexKlineConfig {
             base_url,
-            endpoint_url,
             pair,
             interval,
             interval_ms,
-            continuous,
             bucket_start_ms,
-            bucket_end_ms,
             grace_ms,
-            round_id,
-            resolved_at,
             decimals,
             aggregation_mode,
             min_source_count,
@@ -427,18 +399,16 @@ impl PriceFeedSource {
             max_staleness,
             weight,
             data_source_id,
-            delivery_nonce: 0,
-            block_number,
         };
 
         let previous_block = if latest_onchain_nonce == 0 {
             None
-        } else if continuous {
+        } else {
             let expected = config.round_for_delivery_nonce(latest_onchain_nonce)?.block_number;
             if let Some(confirmed) = confirmed_cursor {
                 if confirmed != expected {
                     return Err(anyhow!(
-                        "Binance continuous task history mismatch: nonce {} implies block {}, confirmed cursor is {}; use a new feedId for a new bucket origin",
+                        "Binance task history mismatch: nonce {} implies block {}, confirmed cursor is {}; use a new feedId for a new bucket origin or interval",
                         latest_onchain_nonce,
                         expected,
                         confirmed
@@ -446,29 +416,6 @@ impl PriceFeedSource {
                 }
             }
             Some(expected)
-        } else {
-            Some(confirmed_cursor.unwrap_or(block_number))
-        };
-
-        if !continuous {
-            if let Some(confirmed) = confirmed_cursor {
-                if latest_onchain_nonce > 0 && block_number < confirmed {
-                    return Err(anyhow!(
-                        "Binance fixed task bucket is older than confirmed history: bucket block {}, confirmed cursor {}; use a newer bucket or a new feedId",
-                        block_number,
-                        confirmed
-                    ));
-                }
-            }
-        }
-        let already_delivered =
-            !continuous && latest_onchain_nonce > 0 && confirmed_cursor == Some(block_number);
-        config.delivery_nonce = if already_delivered {
-            latest_onchain_nonce
-        } else {
-            latest_onchain_nonce
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("Binance index kline delivery nonce overflow"))?
         };
         let last_round = previous_block
             .map(|block| LastPriceRound { nonce: latest_onchain_nonce, block })
@@ -481,11 +428,9 @@ impl PriceFeedSource {
             provider = PROVIDER_BINANCE_INDEX_KLINE,
             pair = config.pair.as_str(),
             interval = config.interval.as_str(),
-            continuous,
             round_id,
             bucket_start_ms,
             latest_onchain_nonce,
-            delivery_nonce = config.delivery_nonce,
             "Created Binance index kline PriceFeedSource"
         );
 
@@ -551,20 +496,12 @@ impl OracleDataSource for PriceFeedSource {
                 Ok(vec![OracleData { nonce: *round_id as u128, payload: payload.clone() }])
             }
             PriceFeedMode::BinanceIndexKline { config, client } => {
-                let next_delivery_nonce = if config.continuous {
-                    state
-                        .nonce
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow!("Binance index kline delivery nonce overflow"))?
-                } else {
-                    config.delivery_nonce
-                };
-                if state.nonce >= next_delivery_nonce {
-                    return Ok(vec![]);
-                }
-
+                let next_delivery_nonce = state
+                    .nonce
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("Binance index kline delivery nonce overflow"))?;
                 let round = config.round_for_delivery_nonce(next_delivery_nonce)?;
-                if config.continuous && !is_binance_bucket_ready(config, &round)? {
+                if !is_binance_bucket_ready(config, &round)? {
                     return Ok(vec![]);
                 }
 
@@ -827,7 +764,7 @@ fn binance_interval_ms(interval: &str) -> Result<u64> {
         "1d" => Ok(86_400_000),
         "3d" => Ok(259_200_000),
         "1w" => Ok(604_800_000),
-        _ => Err(anyhow!("Unsupported fixed Binance kline interval '{interval}'")),
+        _ => Err(anyhow!("Unsupported Binance index kline interval '{interval}'")),
     }
 }
 
@@ -1190,7 +1127,7 @@ mod tests {
     fn test_binance_index_kline_source_config() {
         let task = parse_oracle_uri(binance_uri()).unwrap();
         let source =
-            PriceFeedSource::from_task_with_rpc(&task, 41, Some("https://fapi.binance.com"))
+            PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
                 .unwrap();
         let PriceFeedMode::BinanceIndexKline { config, .. } = &source.mode else {
             panic!("expected Binance index kline mode");
@@ -1199,20 +1136,20 @@ mod tests {
         assert_eq!(config.pair, "TSLAUSDT");
         assert_eq!(config.interval, "1m");
         assert_eq!(config.interval_ms, 60_000);
-        assert!(!config.continuous);
         assert_eq!(config.bucket_start_ms, 1_710_000_000_000);
-        assert_eq!(config.bucket_end_ms, 1_710_000_059_999);
-        assert_eq!(config.round_id, 28_500_000);
-        assert_eq!(config.delivery_nonce, 42);
+        let round = config.round_for_delivery_nonce(1).unwrap();
+        assert_eq!(round.delivery_nonce, 1);
+        assert_eq!(round.bucket_end_ms, 1_710_000_059_999);
+        assert_eq!(round.round_id, 28_500_000);
         assert_eq!(
-            config.endpoint_url,
+            round.endpoint_url,
             "https://fapi.binance.com/fapi/v1/indexPriceKlines?pair=TSLAUSDT&interval=1m&startTime=1710000000000&endTime=1710000059999&limit=1"
         );
     }
 
     #[test]
-    fn test_binance_index_kline_continuous_round_mapping() {
-        let uri = "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8&continuous=true";
+    fn test_binance_index_kline_round_mapping() {
+        let uri = "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8";
         let task = parse_oracle_uri(uri).unwrap();
         let source =
             PriceFeedSource::from_task_with_rpc(&task, 2, Some("https://fapi.binance.com"))
@@ -1221,8 +1158,6 @@ mod tests {
             panic!("expected Binance index kline mode");
         };
 
-        assert!(config.continuous);
-        assert_eq!(config.delivery_nonce, 3);
         assert_eq!(source.cursor(), 1_710_000_119_999);
         let round = config.round_for_delivery_nonce(3).unwrap();
         assert_eq!(round.delivery_nonce, 3);
@@ -1236,60 +1171,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_fixed_binance_bucket_is_idempotent_after_restart() {
-        let task = parse_oracle_uri(binance_uri()).unwrap();
-        let source = PriceFeedSource::from_task_with_reconciled_cursor(
-            &task,
-            41,
-            Some("https://fapi.binance.com"),
-            Some(1_710_000_059_999),
-        )
-        .unwrap();
-        let PriceFeedMode::BinanceIndexKline { config, .. } = &source.mode else {
-            panic!("expected Binance index kline mode");
-        };
-
-        assert_eq!(config.delivery_nonce, 41);
-        assert_eq!(source.cursor(), 1_710_000_059_999);
-        assert!(source.poll().await.unwrap().is_empty());
-    }
-
     #[test]
-    fn test_fixed_binance_new_bucket_uses_next_delivery_nonce() {
+    fn test_binance_rejects_mismatched_history() {
         let task = parse_oracle_uri(binance_uri()).unwrap();
-        let source = PriceFeedSource::from_task_with_reconciled_cursor(
-            &task,
-            41,
-            Some("https://fapi.binance.com"),
-            Some(1_709_999_999_999),
-        )
-        .unwrap();
-        let PriceFeedMode::BinanceIndexKline { config, .. } = &source.mode else {
-            panic!("expected Binance index kline mode");
-        };
-
-        assert_eq!(config.delivery_nonce, 42);
-    }
-
-    #[test]
-    fn test_fixed_binance_rejects_bucket_older_than_confirmed_history() {
-        let task = parse_oracle_uri(binance_uri()).unwrap();
-        let err = PriceFeedSource::from_task_with_reconciled_cursor(
-            &task,
-            41,
-            Some("https://fapi.binance.com"),
-            Some(1_710_000_119_999),
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("older than confirmed history"));
-    }
-
-    #[test]
-    fn test_continuous_binance_rejects_mismatched_history() {
-        let uri = "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8&continuous=true";
-        let task = parse_oracle_uri(uri).unwrap();
         let err = PriceFeedSource::from_task_with_reconciled_cursor(
             &task,
             2,
@@ -1302,6 +1186,19 @@ mod tests {
     }
 
     #[test]
+    fn test_binance_rejects_legacy_continuous_parameter() {
+        for value in ["true", "false"] {
+            let uri = format!("{}&continuous={value}", binance_uri());
+            let task = parse_oracle_uri(&uri).unwrap();
+            let err =
+                PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
+                    .unwrap_err();
+
+            assert!(err.to_string().contains("price feeds are always continuous"));
+        }
+    }
+
+    #[test]
     fn test_binance_rejects_derived_time_overrides() {
         for parameter in ["round=1", "resolvedAt=1", "blockNumber=1"] {
             let uri = format!("{}&{}", binance_uri(), parameter);
@@ -1309,7 +1206,7 @@ mod tests {
             let err =
                 PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
                     .unwrap_err();
-            assert!(err.to_string().contains("derived from the exact bucket"));
+            assert!(err.to_string().contains("derived from the delivery bucket"));
         }
     }
 
@@ -1346,7 +1243,7 @@ mod tests {
             "0"
         ]]);
 
-        let round = config.round_for_delivery_nonce(config.delivery_nonce).unwrap();
+        let round = config.round_for_delivery_nonce(1).unwrap();
         let observation =
             binance_index_kline_observation_from_response(config, &round, &response).unwrap();
 
@@ -1385,7 +1282,7 @@ mod tests {
             1710000119999u64
         ]]);
 
-        let round = config.round_for_delivery_nonce(config.delivery_nonce).unwrap();
+        let round = config.round_for_delivery_nonce(1).unwrap();
         let err =
             binance_index_kline_observation_from_response(config, &round, &response).unwrap_err();
 
@@ -1414,7 +1311,7 @@ mod tests {
             .unwrap();
         let now_ms = server_time.get("serverTime").and_then(Value::as_u64).unwrap();
         let interval_ms = binance_interval_ms("1m").unwrap();
-        let bucket_start_ms = now_ms.saturating_sub(5 * interval_ms) / interval_ms * interval_ms;
+        let bucket_start_ms = now_ms.saturating_sub(2 * interval_ms) / interval_ms * interval_ms;
         let uri = format!(
             "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair={pair}&interval=1m&bucketStartMs={bucket_start_ms}&decimals=8&aggregationMode=2&graceMs=0"
         );
@@ -1428,7 +1325,13 @@ mod tests {
         assert_eq!(source.last_nonce().await, Some(1));
 
         let second = source.poll().await.unwrap();
-        assert!(second.is_empty());
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].nonce, 2);
+        assert!(!second[0].payload.is_empty());
+        assert_eq!(source.last_nonce().await, Some(2));
+
+        let third = source.poll().await.unwrap();
+        assert!(third.is_empty());
     }
 
     #[test]

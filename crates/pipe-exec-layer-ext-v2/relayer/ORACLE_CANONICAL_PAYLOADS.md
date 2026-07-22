@@ -71,7 +71,6 @@ gravity://3/<feedId>/price_feed
   &pair=<PAIR>
   &interval=1m
   &bucketStartMs=<aligned start>
-  &continuous=true
   &decimals=8
   &aggregationMode=2
   &minSourceCount=1
@@ -80,7 +79,11 @@ gravity://3/<feedId>/price_feed
   &graceMs=<milliseconds>
 ```
 
-For delivery nonce `n` in continuous mode:
+The `binance_index_kline_v1` adapter is always continuous. It rejects the
+legacy `continuous` parameter so a task cannot switch between one-shot and
+long-lived nonce semantics.
+
+For delivery nonce `n`:
 
 ```text
 bucketStart(n) = configuredBucketStart + (n - 1) * intervalMs
@@ -91,13 +94,10 @@ resolvedAt(n)  = bucketEnd(n)
 
 `bucketStartMs` is the bucket origin for nonce `1` and is immutable for the
 lifetime of a `feedId`. Startup reconciliation rejects a confirmed cursor that
-does not match this mapping. Use a new `feedId` when introducing a new origin.
-For fixed, non-continuous tasks, a confirmed cursor equal to the target bucket
-means the URI was already delivered and must not be fetched again. A newer
-bucket uses the next delivery nonce; a bucket older than confirmed history is
-rejected.
+does not match this mapping. The interval is also immutable. Use a new
+`feedId` when introducing a new origin or interval.
 
-`round`, `resolvedAt`, and `blockNumber` are derived from the exact bucket and
+`round`, `resolvedAt`, and `blockNumber` are derived from the delivery bucket and
 cannot be overridden in a Binance task URI.
 
 The request is:
