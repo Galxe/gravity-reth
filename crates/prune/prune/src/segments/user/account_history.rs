@@ -1,11 +1,16 @@
 use crate::{
     db_ext::DbTxPruneExt,
-    segments::{user::history::prune_history_indices, PruneInput, Segment},
+    segments::{
+        user::history::{finalize_history_prune, HistoryPruneResult},
+        PruneInput, Segment,
+    },
     PrunerError,
 };
-use itertools::Itertools;
+use alloy_primitives::BlockNumber;
 use reth_db_api::{models::ShardedKey, tables, transaction::DbTxMut};
-use reth_provider::DBProvider;
+use reth_provider::{
+    DBProvider, StaticFileProviderFactory, StaticFileSegment, StorageSettingsCache,
+};
 use reth_prune_types::{
     PruneMode, PrunePurpose, PruneSegment, SegmentOutput, SegmentOutputCheckpoint,
 };
@@ -31,7 +36,7 @@ impl AccountHistory {
 
 impl<Provider> Segment<Provider> for AccountHistory
 where
-    Provider: DBProvider<Tx: DbTxMut>,
+    Provider: DBProvider<Tx: DbTxMut> + StaticFileProviderFactory + StorageSettingsCache,
 {
     fn segment(&self) -> PruneSegment {
         PruneSegment::AccountHistory
@@ -56,6 +61,106 @@ where
         };
         let range_end = *range.end();
 
+        // Under storage-v2 the account changesets live in static files and the database changeset
+        // table is empty, so pruning the DB table would no-op while the jars leak. Walk the static
+        // files and reclaim their jars instead.
+        if provider.cached_storage_settings().changesets_in_static_files {
+            self.prune_static_files(provider, input, range, range_end)
+        } else {
+            self.prune_database(provider, input, range, range_end)
+        }
+    }
+}
+
+impl AccountHistory {
+    /// Prunes account history when changesets are stored in static files.
+    ///
+    /// Walks the changesets from static files to prune the [`tables::AccountsHistory`] index, then
+    /// reclaims any changeset jar that has fallen entirely below the prune horizon.
+    fn prune_static_files<Provider>(
+        &self,
+        provider: &Provider,
+        input: PruneInput,
+        range: std::ops::RangeInclusive<BlockNumber>,
+        range_end: BlockNumber,
+    ) -> Result<SegmentOutput, PrunerError>
+    where
+        Provider: DBProvider<Tx: DbTxMut> + StaticFileProviderFactory,
+    {
+        // Split the budget across both tables, matching the database path: the changeset walk and
+        // the history-index prune each get half.
+        let mut limiter = if let Some(limit) = input.limiter.deleted_entries_limit() {
+            input.limiter.set_deleted_entries_limit(limit / ACCOUNT_HISTORY_TABLES_TO_PRUNE)
+        } else {
+            input.limiter
+        };
+
+        // The limiter may already be exhausted by a previous segment in the same prune run.
+        if limiter.is_limit_reached() {
+            return Ok(SegmentOutput::not_done(
+                limiter.interrupt_reason(),
+                input.previous_checkpoint.map(SegmentOutputCheckpoint::from_prune_checkpoint),
+            ))
+        }
+
+        // Deleted account changeset keys (account addresses) with the highest block number deleted
+        // for that key. Bounded the same way as the database path below.
+        let mut highest_deleted_accounts = FxHashMap::default();
+        let mut last_changeset_pruned_block = None;
+        let mut pruned_changesets = 0;
+        let mut done = true;
+
+        let walker = provider.static_file_provider().walk_account_changeset_range(range);
+        for result in walker {
+            if limiter.is_limit_reached() {
+                done = false;
+                break
+            }
+            let (block_number, changeset) = result?;
+            highest_deleted_accounts.insert(changeset.address, block_number);
+            last_changeset_pruned_block = Some(block_number);
+            pruned_changesets += 1;
+            limiter.increment_deleted_entries_count();
+        }
+
+        // Reclaim whole jars only once the range is fully processed, so a jar straddling the
+        // horizon is never removed while it still holds live blocks (`delete_segment_below_block`
+        // additionally refuses to delete the highest jar).
+        if done && let Some(last_block) = last_changeset_pruned_block {
+            provider
+                .static_file_provider()
+                .delete_segment_below_block(StaticFileSegment::AccountChangeSets, last_block + 1)?;
+        }
+        trace!(target: "pruner", pruned = %pruned_changesets, %done, "Pruned account history (changesets from static files)");
+
+        let result = HistoryPruneResult {
+            highest_deleted: highest_deleted_accounts,
+            last_pruned_block: last_changeset_pruned_block,
+            pruned_count: pruned_changesets,
+            done,
+        };
+        finalize_history_prune::<_, tables::AccountsHistory, _, _>(
+            provider,
+            result,
+            range_end,
+            &limiter,
+            ShardedKey::new,
+            |a, b| a.key == b.key,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Prunes account history when changesets are stored in the database changeset table.
+    fn prune_database<Provider>(
+        &self,
+        provider: &Provider,
+        input: PruneInput,
+        range: std::ops::RangeInclusive<BlockNumber>,
+        range_end: BlockNumber,
+    ) -> Result<SegmentOutput, PrunerError>
+    where
+        Provider: DBProvider<Tx: DbTxMut>,
+    {
         let mut limiter = if let Some(limit) = input.limiter.deleted_entries_limit() {
             input.limiter.set_deleted_entries_limit(limit / ACCOUNT_HISTORY_TABLES_TO_PRUNE)
         } else {
@@ -68,7 +173,6 @@ where
             ))
         }
 
-        let mut last_changeset_pruned_block = None;
         // Deleted account changeset keys (account addresses) with the highest block number deleted
         // for that key.
         //
@@ -78,6 +182,7 @@ where
         // size should be up to 0.5MB + some hashmap overhead. `blocks_since_last_run` is
         // additionally limited by the `max_reorg_depth`, so no OOM is expected here.
         let mut highest_deleted_accounts = FxHashMap::default();
+        let mut last_changeset_pruned_block = None;
         let (pruned_changesets, done) =
             provider.tx_ref().prune_table_with_range::<tables::AccountChangeSets>(
                 range,
@@ -88,39 +193,23 @@ where
                     last_changeset_pruned_block = Some(block_number);
                 },
             )?;
-        trace!(target: "pruner", pruned = %pruned_changesets, %done, "Pruned account history (changesets)");
+        trace!(target: "pruner", pruned = %pruned_changesets, %done, "Pruned account history (changesets from database)");
 
-        let last_changeset_pruned_block = last_changeset_pruned_block
-            // If there's more account changesets to prune, set the checkpoint block number to
-            // previous, so we could finish pruning its account changesets on the next run.
-            .map(|block_number| if done { block_number } else { block_number.saturating_sub(1) })
-            .unwrap_or(range_end);
-
-        // Sort highest deleted block numbers by account address and turn them into sharded keys.
-        // We did not use `BTreeMap` from the beginning, because it's inefficient for hashes.
-        let highest_sharded_keys = highest_deleted_accounts
-            .into_iter()
-            .sorted_unstable() // Unstable is fine because no equal keys exist in the map
-            .map(|(address, block_number)| {
-                ShardedKey::new(address, block_number.min(last_changeset_pruned_block))
-            });
-        let outcomes = prune_history_indices::<Provider, tables::AccountsHistory, _>(
+        let result = HistoryPruneResult {
+            highest_deleted: highest_deleted_accounts,
+            last_pruned_block: last_changeset_pruned_block,
+            pruned_count: pruned_changesets,
+            done,
+        };
+        finalize_history_prune::<_, tables::AccountsHistory, _, _>(
             provider,
-            highest_sharded_keys,
+            result,
+            range_end,
+            &limiter,
+            ShardedKey::new,
             |a, b| a.key == b.key,
-        )?;
-        trace!(target: "pruner", ?outcomes, %done, "Pruned account history (indices)");
-
-        let progress = limiter.progress(done);
-
-        Ok(SegmentOutput {
-            progress,
-            pruned: pruned_changesets + outcomes.deleted,
-            checkpoint: Some(SegmentOutputCheckpoint {
-                block_number: Some(last_changeset_pruned_block),
-                tx_number: None,
-            }),
-        })
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -132,8 +221,11 @@ mod tests {
     };
     use alloy_primitives::{BlockNumber, B256};
     use assert_matches::assert_matches;
-    use reth_db_api::{tables, BlockNumberList};
-    use reth_provider::{DatabaseProviderFactory, PruneCheckpointReader};
+    use reth_db_api::{models::GravityStorageSettings, tables, BlockNumberList};
+    use reth_provider::{
+        DatabaseProviderFactory, PruneCheckpointReader, StaticFileProviderFactory,
+        StaticFileSegment, StorageSettingsCache,
+    };
     use reth_prune_types::{
         PruneCheckpoint, PruneInterruptReason, PruneMode, PruneProgress, PruneSegment,
     };
@@ -302,5 +394,98 @@ mod tests {
         );
         test_prune(998, 2, (PruneProgress::Finished, 998));
         test_prune(1400, 3, (PruneProgress::Finished, 804));
+    }
+
+    /// Exercises the static-file changeset path. With `changesets_in_static_files` enabled the
+    /// changesets live in static files (the DB changeset table is empty), so pruning must walk the
+    /// static files to prune the `AccountsHistory` index and to reclaim below-horizon jars.
+    #[test]
+    fn prune_static_files_path() {
+        let db = TestStageDB::default();
+        let mut rng = generators::rng();
+
+        let blocks = random_block_range(
+            &mut rng,
+            0..=100,
+            BlockRangeParams { parent: Some(B256::ZERO), tx_count: 0..1, ..Default::default() },
+        );
+        db.insert_blocks(blocks.iter(), StorageKind::Database(None)).expect("insert blocks");
+
+        let accounts = random_eoa_accounts(&mut rng, 2).into_iter().collect::<BTreeMap<_, _>>();
+        let (changesets, _) = random_changeset_range(
+            &mut rng,
+            blocks.iter(),
+            accounts.into_iter().map(|(addr, acc)| (addr, (acc, Vec::new()))),
+            0..0,
+            0..0,
+        );
+
+        // Changesets in static files, history index in the database.
+        db.insert_changesets_to_static_files(changesets.clone(), None)
+            .expect("insert changesets to static files");
+        db.insert_history(changesets.clone(), None).expect("insert history");
+
+        // Under this configuration the database changeset table stays empty.
+        assert!(db.table::<tables::AccountChangeSets>().unwrap().is_empty());
+
+        let count_index_blocks = || {
+            db.table::<tables::AccountsHistory>()
+                .unwrap()
+                .iter()
+                .map(|(_, blocks)| blocks.iter().count())
+                .sum::<usize>()
+        };
+        let blocks_before = count_index_blocks();
+        assert!(blocks_before > 0);
+
+        let to_block: BlockNumber = 50;
+        let prune_mode = PruneMode::Before(to_block);
+        let input =
+            PruneInput { previous_checkpoint: None, to_block, limiter: PruneLimiter::default() };
+        let segment = AccountHistory::new(prune_mode);
+
+        // Route to the static-file path.
+        db.factory.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+
+        let provider = db.factory.database_provider_rw().unwrap();
+        let result = segment.prune(&provider, input).unwrap();
+
+        assert_matches!(
+            result,
+            SegmentOutput { progress: PruneProgress::Finished, pruned, checkpoint: Some(_) }
+                if pruned > 0
+        );
+
+        segment
+            .save_checkpoint(&provider, result.checkpoint.unwrap().as_prune_checkpoint(prune_mode))
+            .unwrap();
+        provider.commit().expect("commit");
+
+        // The history index no longer references pruned blocks, and it shrank.
+        assert!(count_index_blocks() < blocks_before);
+        for (_, blocks) in db.table::<tables::AccountsHistory>().unwrap() {
+            assert!(blocks.iter().all(|b| b > to_block));
+        }
+
+        // Checkpoint advanced to the prune horizon.
+        assert_eq!(
+            db.factory
+                .provider()
+                .unwrap()
+                .get_prune_checkpoint(PruneSegment::AccountHistory)
+                .unwrap(),
+            Some(PruneCheckpoint { block_number: Some(to_block), tx_number: None, prune_mode })
+        );
+
+        // The single changeset jar spans the tip, so it is not reclaimed, but nothing above the
+        // horizon is lost: the static-file tip is preserved.
+        assert_eq!(
+            db.factory
+                .static_file_provider()
+                .get_highest_static_file_block(StaticFileSegment::AccountChangeSets),
+            Some(100)
+        );
     }
 }
