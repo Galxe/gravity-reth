@@ -15,7 +15,7 @@ payload, nonce, and recovery invariants.
 ## Binance index-price feed
 
 ```text
-gravity://3/<feedId>/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=<alignedMs>&decimals=8&aggregationMode=2&minSourceCount=1&minTotalWeight=1&maxStaleness=180000&graceMs=120000
+gravity://3/<feedId>/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=<alignedMs>&decimals=8&graceMs=120000
 ```
 
 `binance_index_kline_v1` is always a continuous price feed; one-shot delivery
@@ -23,6 +23,8 @@ is not supported and the legacy `continuous` parameter is rejected.
 `bucketStartMs` identifies the first delivery bucket. Delivery nonce `n` maps
 to that start plus `(n - 1) * intervalMs`. Validators request one exact closed
 bucket from `/fapi/v1/indexPriceKlines` and reject mismatched timestamps.
+The payload contains that bucket's close directly; multi-source weights,
+thresholds, and aggregation modes are not supported.
 
 The bucket origin and interval are immutable for a `feedId`. Use a new
 `feedId` when either value changes so confirmed history remains unambiguous.

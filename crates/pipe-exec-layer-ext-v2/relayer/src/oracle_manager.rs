@@ -416,7 +416,7 @@ mod tests {
     use super::*;
 
     fn price_uri() -> &'static str {
-        "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:2000:10000000000:1,source-b:2000:10200000000:2,source-c:2000:9800000000:1"
+        "gravity://3/1/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8"
     }
 
     fn polymarket_uri() -> &'static str {
@@ -424,24 +424,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_and_poll_price_feed_uri() {
+    async fn test_add_binance_price_feed_uri() {
         let datadir = tempfile::tempdir().unwrap();
         let manager = OracleRelayerManager::new(datadir.path().to_path_buf());
 
-        manager.add_uri(price_uri(), "", 0, 0).await.unwrap();
+        manager.add_uri(price_uri(), "http://localhost:18547", 0, 0).await.unwrap();
         assert!(manager.has_uri(price_uri()).await);
-
-        let first = manager.poll_uri(price_uri(), None, None).await.unwrap();
-        assert!(first.updated);
-        assert_eq!(first.nonce, Some(1));
-        assert_eq!(first.max_block_number, 2010);
-        assert_eq!(first.jwk_structs.len(), 1);
-        assert_eq!(first.jwk_structs[0].type_name, source_types::PRICE_FEED.to_string());
-        assert!(!first.jwk_structs[0].data.is_empty());
-
-        let second = manager.poll_uri(price_uri(), None, None).await.unwrap();
-        assert!(!second.updated);
-        assert_eq!(second.jwk_structs.len(), 0);
     }
 
     #[tokio::test]

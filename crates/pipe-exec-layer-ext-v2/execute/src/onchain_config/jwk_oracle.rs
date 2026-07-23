@@ -257,28 +257,17 @@ fn construct_unsupported_oracle_batch_transaction(
 mod tests {
     use super::*;
     use alloy_consensus::Transaction;
+    use alloy_primitives::I256;
     use alloy_sol_macro::sol;
     use alloy_sol_types::SolValue;
-    use reth_pipe_exec_layer_relayer::{OracleDataSource, PriceFeedSource};
 
     sol! {
-        struct PriceObservationForTest {
-            bytes32 dataSourceId;
-            uint64 observedAt;
-            int256 price;
-            uint256 weight;
-        }
-
         struct PricePayloadForTest {
             uint256 feedId;
             uint64 roundId;
             uint64 resolvedAt;
             uint8 decimals;
-            uint8 aggregationMode;
-            uint256 minSourceCount;
-            uint256 minTotalWeight;
-            uint64 maxStaleness;
-            PriceObservationForTest[] observations;
+            int256 price;
         }
     }
 
@@ -328,7 +317,7 @@ mod tests {
         let wrapped_payload =
             SolValue::abi_encode(&(1u128, U256::from(3020u64), resolver_payload.as_slice()));
         let provider = ProviderJWKs {
-            issuer: b"gravity://3/1001/price_feed?provider=inline_fixture_v1&round=1".to_vec(),
+            issuer: b"gravity://3/1001/price_feed?provider=binance_index_kline_v1".to_vec(),
             version: 1,
             jwks: vec![JWKStruct {
                 type_name: "0x1::jwks::Unsupported_JWK".to_string(),
@@ -414,20 +403,26 @@ mod tests {
         assert_eq!(err, "Unsupported oracle source type: 99");
     }
 
-    #[tokio::test]
-    async fn test_price_feed_source_payload_reaches_record_batch() {
-        let uri = "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:2000:10000000000:1,source-b:2000:10200000000:2,source-c:2000:9800000000:1";
-        let task = parse_oracle_uri(uri).expect("parse price feed uri");
-        let source = PriceFeedSource::from_task(&task, 0).expect("create price feed source");
-        let data = source.poll().await.expect("poll price feed source");
-        assert_eq!(data.len(), 1);
+    #[test]
+    fn test_price_feed_payload_reaches_record_batch() {
+        let uri = "gravity://3/1/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1980000&decimals=8";
+        let resolver_payload = PricePayloadForTest {
+            feedId: U256::from(1),
+            roundId: 33,
+            resolvedAt: 2_039_999,
+            decimals: 8,
+            price: "10000000000".parse::<I256>().unwrap(),
+        }
+        .abi_encode();
+        let wrapped_payload =
+            SolValue::abi_encode(&(1u128, U256::from(2_039_999u64), resolver_payload.as_slice()));
 
         let provider = ProviderJWKs {
             issuer: uri.as_bytes().to_vec(),
             version: 1,
             jwks: vec![JWKStruct {
                 type_name: "0x1::jwks::Unsupported_JWK".to_string(),
-                data: data[0].payload.to_vec(),
+                data: wrapped_payload,
             }],
         };
 
@@ -437,16 +432,15 @@ mod tests {
         assert_eq!(call.sourceType, 3);
         assert_eq!(call.sourceId, U256::from(1));
         assert_eq!(call.nonces, vec![1]);
-        assert_eq!(call.blockNumbers, vec![U256::from(2010u64)]);
+        assert_eq!(call.blockNumbers, vec![U256::from(2_039_999u64)]);
         assert_eq!(call.payloads.len(), 1);
 
         let payload =
             PricePayloadForTest::abi_decode(&call.payloads[0]).expect("decode resolver payload");
         assert_eq!(payload.feedId, U256::from(1));
-        assert_eq!(payload.roundId, 1);
-        assert_eq!(payload.resolvedAt, 2010);
+        assert_eq!(payload.roundId, 33);
+        assert_eq!(payload.resolvedAt, 2_039_999);
         assert_eq!(payload.decimals, 8);
-        assert_eq!(payload.aggregationMode, 1);
-        assert_eq!(payload.observations.len(), 3);
+        assert_eq!(payload.price, "10000000000".parse::<I256>().unwrap());
     }
 }

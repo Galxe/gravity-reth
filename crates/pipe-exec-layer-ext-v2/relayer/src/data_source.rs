@@ -68,7 +68,7 @@ pub mod source_types {
 pub enum DataSourceKind {
     /// Blockchain cross-chain events (sourceType=0)
     Blockchain(BlockchainEventSource),
-    /// Price feed observations (sourceType=3)
+    /// Binance index-price feed (sourceType=3)
     PriceFeed(PriceFeedSource),
     /// Polymarket CTF settlement observations (sourceType=6)
     PolymarketSettlement(PolymarketSettlementSource),

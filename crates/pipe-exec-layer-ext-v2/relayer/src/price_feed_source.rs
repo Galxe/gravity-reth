@@ -1,18 +1,14 @@
-//! Price feed oracle source.
+//! Binance index-price feed source.
 //!
-//! Data source for feeding deterministic price rounds through the
-//! existing UnsupportedJWK consensus path.
-//!
-//! The explicit `provider=inline_fixture_v1` mode keeps all observations in the
-//! `gravity://` URI for byte-identical tests. The production
-//! `provider=binance_index_kline_v1` mode fetches a closed Binance USD-M
-//! index-price candle and normalizes it into the same resolver payload shape.
+//! Each delivery nonce maps to one immutable, closed Binance USD-M
+//! `indexPriceKlines` bucket. The adapter verifies the exact bucket timestamps
+//! and emits one close price through the existing UnsupportedJWK consensus path.
 
 use crate::{
     data_source::{source_types, OracleData, OracleDataSource},
     uri_parser::ParsedOracleTask,
 };
-use alloy_primitives::{keccak256, Bytes, B256, I256, U256};
+use alloy_primitives::{Bytes, I256, U256};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Context, Result};
@@ -27,44 +23,22 @@ use tokio::sync::Mutex;
 use tracing::info;
 use url::Url;
 
-const PRICE_AGG_WEIGHTED_MEAN: u8 = 1;
-const PRICE_AGG_WEIGHTED_MEDIAN: u8 = 2;
-const PROVIDER_INLINE_FIXTURE: &str = "inline_fixture_v1";
 const PROVIDER_BINANCE_INDEX_KLINE: &str = "binance_index_kline_v1";
-const DEFAULT_BINANCE_INDEX_FIELD: &str = "close";
 const DEFAULT_BINANCE_GRACE_MS: u64 = 120_000;
 const BINANCE_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BINANCE_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_PRICE_OBSERVATIONS: usize = 16;
 const MAX_PRICE_DECIMALS: u8 = 18;
+const BINANCE_TASK_PARAMETERS: &[&str] =
+    &["provider", "pair", "interval", "bucketStartMs", "decimals", "graceMs"];
 
 sol! {
-    struct PriceObservationSol {
-        bytes32 dataSourceId;
-        uint64 observedAt;
-        int256 price;
-        uint256 weight;
-    }
-
     struct PricePayloadSol {
         uint256 feedId;
         uint64 roundId;
         uint64 resolvedAt;
         uint8 decimals;
-        uint8 aggregationMode;
-        uint256 minSourceCount;
-        uint256 minTotalWeight;
-        uint64 maxStaleness;
-        PriceObservationSol[] observations;
+        int256 price;
     }
-}
-
-#[derive(Debug, Clone)]
-struct PriceObservation {
-    data_source_id: B256,
-    observed_at: u64,
-    price: I256,
-    weight: U256,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -79,12 +53,6 @@ impl LastPriceRound {
     }
 }
 
-#[derive(Debug)]
-enum PriceFeedMode {
-    Static { round_id: u64, block_number: u64, payload: Bytes },
-    BinanceIndexKline { config: BinanceIndexKlineConfig, client: Client },
-}
-
 #[derive(Debug, Clone)]
 struct BinanceIndexKlineConfig {
     base_url: String,
@@ -94,12 +62,6 @@ struct BinanceIndexKlineConfig {
     bucket_start_ms: u64,
     grace_ms: u64,
     decimals: u8,
-    aggregation_mode: u8,
-    min_source_count: u64,
-    min_total_weight: U256,
-    max_staleness: u64,
-    weight: U256,
-    data_source_id: B256,
 }
 
 #[derive(Debug, Clone)]
@@ -155,20 +117,22 @@ impl BinanceIndexKlineConfig {
 #[derive(Debug)]
 pub struct PriceFeedSource {
     feed_id: u64,
-    mode: PriceFeedMode,
+    config: BinanceIndexKlineConfig,
+    client: Client,
     cursor: AtomicU64,
     last_round: Mutex<LastPriceRound>,
 }
 
 impl PriceFeedSource {
-    /// Create a price feed source from a `gravity://3/<feed_id>/price_feed` URI.
+    /// Create a source without a validator-local endpoint mapping.
+    ///
+    /// Binance sources require a URL mapping, so production callers use
+    /// [`Self::from_task_with_rpc`] or [`Self::from_task_with_reconciled_cursor`].
     pub fn from_task(task: &ParsedOracleTask, latest_onchain_nonce: u128) -> Result<Self> {
         Self::from_task_with_rpc(task, latest_onchain_nonce, None)
     }
 
-    /// Create a price feed source and optionally supply the validator-local
-    /// upstream URL from relayer config. The URL is intentionally not part of
-    /// the on-chain URI for secret-bearing endpoints.
+    /// Create a source with the validator-local Binance base URL.
     pub fn from_task_with_rpc(
         task: &ParsedOracleTask,
         latest_onchain_nonce: u128,
@@ -186,107 +150,30 @@ impl PriceFeedSource {
         if task.source_type != source_types::PRICE_FEED {
             return Err(anyhow!("PriceFeedSource requires sourceType={}", source_types::PRICE_FEED));
         }
+        if task.task_type != "price_feed" {
+            return Err(anyhow!(
+                "PriceFeedSource requires task type 'price_feed', got '{}'",
+                task.task_type
+            ));
+        }
 
-        match task.params.get("provider").map(|p| p.as_str()) {
-            Some(PROVIDER_BINANCE_INDEX_KLINE) => {
-                return Self::from_binance_index_kline_task(
-                    task,
-                    latest_onchain_nonce,
-                    rpc_url,
-                    confirmed_cursor,
-                );
-            }
-            Some(PROVIDER_INLINE_FIXTURE) => {}
+        match task.params.get("provider").map(String::as_str) {
+            Some(PROVIDER_BINANCE_INDEX_KLINE) => {}
             Some(provider) => return Err(anyhow!("Unsupported price feed provider '{provider}'")),
             None => return Err(anyhow!("Missing 'provider' parameter for price feed")),
         }
 
-        let round_id = parse_required::<u64>(task, "round")?;
-        let resolved_at = parse_required::<u64>(task, "resolvedAt")?;
-        let decimals = parse_required::<u8>(task, "decimals")?;
-        if decimals > MAX_PRICE_DECIMALS {
+        if task.params.contains_key("baseUrl") {
             return Err(anyhow!(
-                "price feed decimals {} exceeds maximum {}",
-                decimals,
-                MAX_PRICE_DECIMALS
+                "Binance baseUrl must be validator-local relayer config, not an on-chain URI parameter"
             ));
         }
-        let aggregation_mode = parse_required::<u8>(task, "aggregationMode")?;
-        let max_staleness = parse_optional(task, "maxStaleness")?.unwrap_or(60u64);
-        let block_number = parse_optional(task, "blockNumber")?.unwrap_or(resolved_at);
-        let mut observations = parse_observations(task)?;
+        for parameter in task.params.keys() {
+            if !BINANCE_TASK_PARAMETERS.contains(&parameter.as_str()) {
+                return Err(anyhow!("Unsupported Binance index kline parameter '{parameter}'"));
+            }
+        }
 
-        observations.sort_by(|a, b| a.data_source_id.as_slice().cmp(b.data_source_id.as_slice()));
-
-        let source_count = observations.len() as u64;
-        let total_weight = observations.iter().try_fold(U256::ZERO, |acc, obs| {
-            acc.checked_add(obs.weight).ok_or_else(|| anyhow!("price feed total weight overflow"))
-        })?;
-        let min_source_count = parse_optional(task, "minSourceCount")?.unwrap_or(source_count);
-        let min_total_weight =
-            parse_optional::<U256>(task, "minTotalWeight")?.unwrap_or(total_weight);
-        validate_observations(
-            &observations,
-            resolved_at,
-            aggregation_mode,
-            min_source_count,
-            min_total_weight,
-            max_staleness,
-            total_weight,
-        )?;
-
-        let resolver_payload = encode_price_payload(
-            task.source_id,
-            round_id,
-            resolved_at,
-            decimals,
-            aggregation_mode,
-            min_source_count,
-            min_total_weight,
-            max_staleness,
-            &observations,
-        );
-
-        let wrapped_payload = SolValue::abi_encode(&(
-            round_id as u128,
-            U256::from(block_number),
-            resolver_payload.as_slice(),
-        ));
-
-        let last_round = if latest_onchain_nonce > 0 {
-            LastPriceRound { nonce: latest_onchain_nonce, block: block_number }
-        } else {
-            LastPriceRound::default()
-        };
-
-        info!(
-            target: "price_feed_source",
-            feed_id = task.source_id,
-            round_id,
-            source_count,
-            total_weight = %total_weight,
-            latest_onchain_nonce,
-            "Created PriceFeedSource"
-        );
-
-        Ok(Self {
-            feed_id: task.source_id,
-            mode: PriceFeedMode::Static {
-                round_id,
-                block_number,
-                payload: Bytes::from(wrapped_payload),
-            },
-            cursor: AtomicU64::new(block_number),
-            last_round: Mutex::new(last_round),
-        })
-    }
-
-    fn from_binance_index_kline_task(
-        task: &ParsedOracleTask,
-        latest_onchain_nonce: u128,
-        rpc_url: Option<&str>,
-        confirmed_cursor: Option<u64>,
-    ) -> Result<Self> {
         let pair = task
             .params
             .get("pair")
@@ -295,11 +182,6 @@ impl PriceFeedSource {
         validate_binance_pair(&pair)?;
         let interval = task.params.get("interval").cloned().unwrap_or_else(|| "1m".to_string());
         let interval_ms = binance_interval_ms(&interval)?;
-        if task.params.contains_key("continuous") {
-            return Err(anyhow!(
-                "Binance index kline parameter 'continuous' is unsupported; price feeds are always continuous"
-            ));
-        }
         let bucket_start_ms = parse_required::<u64>(task, "bucketStartMs")?;
         if bucket_start_ms % interval_ms != 0 {
             return Err(anyhow!(
@@ -308,20 +190,6 @@ impl PriceFeedSource {
                 interval
             ));
         }
-        let bucket_end_ms = bucket_start_ms
-            .checked_add(interval_ms)
-            .and_then(|value| value.checked_sub(1))
-            .ok_or_else(|| anyhow!("Binance index kline bucket end overflow"))?;
-        for derived in ["round", "resolvedAt", "blockNumber"] {
-            if task.params.contains_key(derived) {
-                return Err(anyhow!(
-                    "Binance index kline parameter '{derived}' is derived from the delivery bucket"
-                ));
-            }
-        }
-        let grace_ms = parse_optional(task, "graceMs")?.unwrap_or(DEFAULT_BINANCE_GRACE_MS);
-        let round_id = bucket_start_ms / interval_ms;
-        let resolved_at = bucket_end_ms;
         let decimals = parse_required::<u8>(task, "decimals")?;
         if decimals > MAX_PRICE_DECIMALS {
             return Err(anyhow!(
@@ -330,54 +198,8 @@ impl PriceFeedSource {
                 MAX_PRICE_DECIMALS
             ));
         }
-        let aggregation_mode =
-            parse_optional(task, "aggregationMode")?.unwrap_or(PRICE_AGG_WEIGHTED_MEDIAN);
-        let field = task
-            .params
-            .get("field")
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_BINANCE_INDEX_FIELD.to_string());
-        if field != DEFAULT_BINANCE_INDEX_FIELD {
-            return Err(anyhow!(
-                "Binance index kline adapter only supports field={}",
-                DEFAULT_BINANCE_INDEX_FIELD
-            ));
-        }
-        let weight = parse_optional(task, "weight")?.unwrap_or(U256::from(1));
-        let min_source_count = parse_optional(task, "minSourceCount")?.unwrap_or(1u64);
-        let min_total_weight = parse_optional(task, "minTotalWeight")?.unwrap_or(weight);
-        let max_staleness =
-            parse_optional(task, "maxStaleness")?.unwrap_or(interval_ms.saturating_mul(3));
-        let block_number = bucket_end_ms;
-        let source_label =
-            task.params.get("dataSourceLabel").cloned().unwrap_or_else(|| {
-                format!("binance:usdm:indexPriceKlines:{pair}:{interval}:{field}")
-            });
-        let data_source_id = match task.params.get("dataSourceId") {
-            Some(explicit) => source_id_from_label(explicit)?,
-            None => source_id_from_label(&source_label)?,
-        };
-        if task.params.contains_key("baseUrl") {
-            return Err(anyhow!(
-                "Binance baseUrl must be validator-local relayer config, not an on-chain URI parameter"
-            ));
-        }
+        let grace_ms = parse_optional(task, "graceMs")?.unwrap_or(DEFAULT_BINANCE_GRACE_MS);
         let base_url = binance_base_url(rpc_url)?;
-        validate_observations(
-            &[PriceObservation {
-                data_source_id,
-                observed_at: bucket_end_ms,
-                price: I256::ONE,
-                weight,
-            }],
-            resolved_at,
-            aggregation_mode,
-            min_source_count,
-            min_total_weight,
-            max_staleness,
-            weight,
-        )?;
-
         let client = Client::builder()
             .no_proxy()
             .use_rustls_tls()
@@ -393,12 +215,6 @@ impl PriceFeedSource {
             bucket_start_ms,
             grace_ms,
             decimals,
-            aggregation_mode,
-            min_source_count,
-            min_total_weight,
-            max_staleness,
-            weight,
-            data_source_id,
         };
 
         let previous_block = if latest_onchain_nonce == 0 {
@@ -420,7 +236,8 @@ impl PriceFeedSource {
         let last_round = previous_block
             .map(|block| LastPriceRound { nonce: latest_onchain_nonce, block })
             .unwrap_or_default();
-        let initial_cursor = previous_block.unwrap_or(block_number);
+        let initial_cursor =
+            previous_block.unwrap_or(config.round_for_delivery_nonce(1)?.block_number);
 
         info!(
             target: "price_feed_source",
@@ -428,7 +245,6 @@ impl PriceFeedSource {
             provider = PROVIDER_BINANCE_INDEX_KLINE,
             pair = config.pair.as_str(),
             interval = config.interval.as_str(),
-            round_id,
             bucket_start_ms,
             latest_onchain_nonce,
             "Created Binance index kline PriceFeedSource"
@@ -436,19 +252,20 @@ impl PriceFeedSource {
 
         Ok(Self {
             feed_id: task.source_id,
-            mode: PriceFeedMode::BinanceIndexKline { config, client },
+            config,
+            client,
             cursor: AtomicU64::new(initial_cursor),
             last_round: Mutex::new(last_round),
         })
     }
 
-    /// Last round nonce returned or reconciled from NativeOracle.
+    /// Last delivery nonce returned or reconciled from `NativeOracle`.
     pub async fn last_nonce(&self) -> Option<u128> {
         let state = *self.last_round.lock().await;
         state.is_initialized().then_some(state.nonce)
     }
 
-    /// Block number associated with the last returned or reconciled round.
+    /// Bucket close timestamp associated with the last delivery nonce.
     pub async fn last_nonce_block(&self) -> Option<u64> {
         let state = *self.last_round.lock().await;
         state.is_initialized().then_some(state.block)
@@ -460,12 +277,12 @@ impl PriceFeedSource {
         self.cursor.store(block, Ordering::Relaxed);
     }
 
-    /// Current block cursor used for relayer persistence.
+    /// Current bucket-close cursor used for relayer persistence.
     pub fn cursor(&self) -> u64 {
         self.cursor.load(Ordering::Relaxed)
     }
 
-    /// Feed identifier used as NativeOracle sourceId.
+    /// Feed identifier used as `NativeOracle` sourceId.
     pub fn feed_id(&self) -> u64 {
         self.feed_id
     }
@@ -483,76 +300,42 @@ impl OracleDataSource for PriceFeedSource {
 
     async fn poll(&self) -> Result<Vec<OracleData>> {
         let mut state = self.last_round.lock().await;
-        match &self.mode {
-            PriceFeedMode::Static { round_id, block_number, payload } => {
-                if state.nonce >= *round_id as u128 {
-                    return Ok(vec![]);
-                }
-
-                state.nonce = *round_id as u128;
-                state.block = *block_number;
-                self.cursor.store(*block_number, Ordering::Relaxed);
-
-                Ok(vec![OracleData { nonce: *round_id as u128, payload: payload.clone() }])
-            }
-            PriceFeedMode::BinanceIndexKline { config, client } => {
-                let next_delivery_nonce = state
-                    .nonce
-                    .checked_add(1)
-                    .ok_or_else(|| anyhow!("Binance index kline delivery nonce overflow"))?;
-                let round = config.round_for_delivery_nonce(next_delivery_nonce)?;
-                if !is_binance_bucket_ready(config, &round)? {
-                    return Ok(vec![]);
-                }
-
-                let observation =
-                    fetch_binance_index_kline_observation(client, config, &round).await?;
-                let total_weight = observation.weight;
-                validate_observations(
-                    std::slice::from_ref(&observation),
-                    round.resolved_at,
-                    config.aggregation_mode,
-                    config.min_source_count,
-                    config.min_total_weight,
-                    config.max_staleness,
-                    total_weight,
-                )?;
-
-                let resolver_payload = encode_price_payload(
-                    self.feed_id,
-                    round.round_id,
-                    round.resolved_at,
-                    config.decimals,
-                    config.aggregation_mode,
-                    config.min_source_count,
-                    config.min_total_weight,
-                    config.max_staleness,
-                    &[observation],
-                );
-                let wrapped_payload = SolValue::abi_encode(&(
-                    round.delivery_nonce,
-                    U256::from(round.block_number),
-                    resolver_payload.as_slice(),
-                ));
-
-                state.nonce = round.delivery_nonce;
-                state.block = round.block_number;
-                self.cursor.store(round.block_number, Ordering::Relaxed);
-
-                Ok(vec![OracleData {
-                    nonce: round.delivery_nonce,
-                    payload: Bytes::from(wrapped_payload),
-                }])
-            }
+        let next_delivery_nonce = state
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("Binance index kline delivery nonce overflow"))?;
+        let round = self.config.round_for_delivery_nonce(next_delivery_nonce)?;
+        if !is_binance_bucket_ready(&self.config, &round)? {
+            return Ok(vec![]);
         }
+
+        let price = fetch_binance_index_kline_price(&self.client, &self.config, &round).await?;
+        let resolver_payload = encode_price_payload(
+            self.feed_id,
+            round.round_id,
+            round.resolved_at,
+            self.config.decimals,
+            price,
+        );
+        let wrapped_payload = SolValue::abi_encode(&(
+            round.delivery_nonce,
+            U256::from(round.block_number),
+            resolver_payload.as_slice(),
+        ));
+
+        state.nonce = round.delivery_nonce;
+        state.block = round.block_number;
+        self.cursor.store(round.block_number, Ordering::Relaxed);
+
+        Ok(vec![OracleData { nonce: round.delivery_nonce, payload: Bytes::from(wrapped_payload) }])
     }
 }
 
-async fn fetch_binance_index_kline_observation(
+async fn fetch_binance_index_kline_price(
     client: &Client,
     config: &BinanceIndexKlineConfig,
     round: &BinanceIndexKlineRound,
-) -> Result<PriceObservation> {
+) -> Result<I256> {
     ensure_binance_bucket_ready(config, round)?;
     let response = client
         .get(&round.endpoint_url)
@@ -565,7 +348,7 @@ async fn fetch_binance_index_kline_observation(
     let response: Value = serde_json::from_slice(&response)
         .context("failed to decode Binance index price kline response")?;
 
-    binance_index_kline_observation_from_response(config, round, &response)
+    binance_index_kline_price_from_response(config, round, &response)
 }
 
 async fn read_binance_response_limited(mut response: reqwest::Response) -> Result<Vec<u8>> {
@@ -595,31 +378,23 @@ fn binance_response_too_large() -> anyhow::Error {
     anyhow!("Binance index price kline response exceeds {} bytes", MAX_BINANCE_RESPONSE_BYTES)
 }
 
-fn binance_index_kline_observation_from_response(
+fn binance_index_kline_price_from_response(
     config: &BinanceIndexKlineConfig,
     round: &BinanceIndexKlineRound,
     response: &Value,
-) -> Result<PriceObservation> {
-    let row = parse_binance_index_kline_row(round, response)?;
-    let price = parse_fixed_decimal(row.close, config.decimals)?;
-    Ok(PriceObservation {
-        data_source_id: config.data_source_id,
-        observed_at: row.close_time,
-        price,
-        weight: config.weight,
-    })
+) -> Result<I256> {
+    let close = parse_binance_index_kline_close(round, response)?;
+    let price = parse_fixed_decimal(close, config.decimals)?;
+    if price <= I256::ZERO {
+        return Err(anyhow!("Binance index price kline close must be positive"));
+    }
+    Ok(price)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct BinanceIndexKlineRow<'a> {
-    close: &'a str,
-    close_time: u64,
-}
-
-fn parse_binance_index_kline_row<'a>(
+fn parse_binance_index_kline_close<'a>(
     round: &BinanceIndexKlineRound,
     response: &'a Value,
-) -> Result<BinanceIndexKlineRow<'a>> {
+) -> Result<&'a str> {
     let rows = response
         .as_array()
         .ok_or_else(|| anyhow!("Binance index price kline response must be an array"))?;
@@ -659,7 +434,7 @@ fn parse_binance_index_kline_row<'a>(
         ));
     }
 
-    Ok(BinanceIndexKlineRow { close, close_time })
+    Ok(close)
 }
 
 fn ensure_binance_bucket_ready(
@@ -773,88 +548,16 @@ fn encode_price_payload(
     round_id: u64,
     resolved_at: u64,
     decimals: u8,
-    aggregation_mode: u8,
-    min_source_count: u64,
-    min_total_weight: U256,
-    max_staleness: u64,
-    observations: &[PriceObservation],
+    price: I256,
 ) -> Vec<u8> {
-    let encoded_observations: Vec<PriceObservationSol> = observations
-        .iter()
-        .map(|obs| PriceObservationSol {
-            dataSourceId: obs.data_source_id,
-            observedAt: obs.observed_at,
-            price: obs.price,
-            weight: obs.weight,
-        })
-        .collect();
-
     PricePayloadSol {
         feedId: U256::from(feed_id),
         roundId: round_id,
         resolvedAt: resolved_at,
         decimals,
-        aggregationMode: aggregation_mode,
-        minSourceCount: U256::from(min_source_count),
-        minTotalWeight: min_total_weight,
-        maxStaleness: max_staleness,
-        observations: encoded_observations,
+        price,
     }
     .abi_encode()
-}
-
-fn parse_observations(task: &ParsedOracleTask) -> Result<Vec<PriceObservation>> {
-    let raw = task
-        .params
-        .get("observations")
-        .ok_or_else(|| anyhow!("Missing 'observations' parameter in price feed URI"))?;
-    if raw.trim().is_empty() {
-        return Err(anyhow!("Price feed observations cannot be empty"));
-    }
-    let observations: Vec<_> = raw
-        .split(',')
-        .enumerate()
-        .map(|(idx, item)| parse_observation(idx, item))
-        .collect::<Result<_>>()?;
-    if observations.len() > MAX_PRICE_OBSERVATIONS {
-        return Err(anyhow!(
-            "price feed observation count {} exceeds maximum {}",
-            observations.len(),
-            MAX_PRICE_OBSERVATIONS
-        ));
-    }
-    Ok(observations)
-}
-
-fn parse_observation(index: usize, raw: &str) -> Result<PriceObservation> {
-    let parts: Vec<&str> = raw.split(':').collect();
-    if parts.len() != 4 {
-        return Err(anyhow!(
-            "Invalid price observation at index {}: expected source:observedAt:price:weight",
-            index
-        ));
-    }
-
-    Ok(PriceObservation {
-        data_source_id: source_id_from_label(parts[0])?,
-        observed_at: parse_str(parts[1], "observedAt")?,
-        price: parse_str(parts[2], "price")?,
-        weight: parse_str(parts[3], "weight")?,
-    })
-}
-
-fn source_id_from_label(label: &str) -> Result<B256> {
-    if label.is_empty() {
-        return Err(anyhow!("price observation source label cannot be empty"));
-    }
-
-    if label.starts_with("0x") {
-        return label
-            .parse()
-            .map_err(|e| anyhow!("invalid explicit price observation source id: {e}"));
-    }
-
-    Ok(keccak256(label.as_bytes()))
 }
 
 fn parse_fixed_decimal(value: &str, decimals: u8) -> Result<I256> {
@@ -885,92 +588,6 @@ fn parse_fixed_decimal(value: &str, decimals: u8) -> Result<I256> {
     let scaled = scaled.trim_start_matches('0');
     let scaled = if scaled.is_empty() { "0" } else { scaled };
     scaled.parse::<I256>().map_err(|e| anyhow!("invalid scaled decimal price: {e}"))
-}
-
-fn validate_observations(
-    observations: &[PriceObservation],
-    resolved_at: u64,
-    aggregation_mode: u8,
-    min_source_count: u64,
-    min_total_weight: U256,
-    max_staleness: u64,
-    total_weight: U256,
-) -> Result<()> {
-    if observations.len() > MAX_PRICE_OBSERVATIONS {
-        return Err(anyhow!(
-            "price feed observation count {} exceeds maximum {}",
-            observations.len(),
-            MAX_PRICE_OBSERVATIONS
-        ));
-    }
-    match aggregation_mode {
-        PRICE_AGG_WEIGHTED_MEAN | PRICE_AGG_WEIGHTED_MEDIAN => {}
-        _ => return Err(anyhow!("invalid price feed aggregationMode {aggregation_mode}")),
-    }
-    if min_source_count == 0 {
-        return Err(anyhow!("price feed minSourceCount cannot be zero"));
-    }
-    if min_source_count > observations.len() as u64 {
-        return Err(anyhow!(
-            "price feed minSourceCount {} exceeds observation count {}",
-            min_source_count,
-            observations.len()
-        ));
-    }
-    if min_total_weight > total_weight {
-        return Err(anyhow!(
-            "price feed minTotalWeight {} exceeds total weight {}",
-            min_total_weight,
-            total_weight
-        ));
-    }
-    let max_int256 = U256::MAX >> 1;
-    if total_weight > max_int256 {
-        return Err(anyhow!("price feed total weight exceeds int256 max"));
-    }
-
-    for (index, observation) in observations.iter().enumerate() {
-        if observation.data_source_id == B256::ZERO {
-            return Err(anyhow!("price observation {index} has zero dataSourceId"));
-        }
-        if observation.price <= I256::ZERO {
-            return Err(anyhow!("price observation {index} has non-positive price"));
-        }
-        if observation.weight.is_zero() {
-            return Err(anyhow!("price observation {index} has zero weight"));
-        }
-        if observation.weight > max_int256 {
-            return Err(anyhow!("price observation {index} weight exceeds int256 max"));
-        }
-        if observation.observed_at > resolved_at {
-            return Err(anyhow!(
-                "price observation {index} is from the future: observedAt={}, resolvedAt={}",
-                observation.observed_at,
-                resolved_at
-            ));
-        }
-        let stale = max_staleness > 0 &&
-            match observation.observed_at.checked_add(max_staleness) {
-                Some(fresh_until) => fresh_until < resolved_at,
-                None => true,
-            };
-        if stale {
-            return Err(anyhow!(
-                "price observation {index} is stale: observedAt={}, resolvedAt={}, maxStaleness={}",
-                observation.observed_at,
-                resolved_at,
-                max_staleness
-            ));
-        }
-        if index > 0 && observations[index - 1].data_source_id == observation.data_source_id {
-            return Err(anyhow!(
-                "duplicate price observation dataSourceId {:?}",
-                observation.data_source_id
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 fn parse_required<T>(task: &ParsedOracleTask, name: &str) -> Result<T>
@@ -1004,12 +621,8 @@ mod tests {
     use crate::uri_parser::parse_oracle_uri;
     use std::{env, fs, path::Path};
 
-    fn price_uri() -> &'static str {
-        "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:2000:10000000000:1,source-b:2000:10200000000:2,source-c:2000:9800000000:1"
-    }
-
     fn binance_uri() -> &'static str {
-        "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8&aggregationMode=2"
+        "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8"
     }
 
     fn env_or_dotenv(name: &str) -> Option<String> {
@@ -1031,96 +644,17 @@ mod tests {
             .unwrap_or_else(|| "https://testnet.binancefuture.com".to_string())
     }
 
-    #[tokio::test]
-    async fn test_price_feed_source_polls_once() {
-        let task = parse_oracle_uri(price_uri()).unwrap();
-        let source = PriceFeedSource::from_task(&task, 0).unwrap();
-
-        let first = source.poll().await.unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].nonce, 1);
-        assert!(!first[0].payload.is_empty());
-        assert_eq!(source.last_nonce().await, Some(1));
-
-        let second = source.poll().await.unwrap();
-        assert!(second.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_price_feed_source_canonicalizes_observation_order() {
-        let uri_a = "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:2000:10000000000:1,source-b:2000:10200000000:2,source-c:2000:9800000000:1";
-        let uri_b = "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-c:2000:9800000000:1,source-a:2000:10000000000:1,source-b:2000:10200000000:2";
-
-        let task_a = parse_oracle_uri(uri_a).unwrap();
-        let task_b = parse_oracle_uri(uri_b).unwrap();
-        let source_a = PriceFeedSource::from_task(&task_a, 0).unwrap();
-        let source_b = PriceFeedSource::from_task(&task_b, 0).unwrap();
-
-        let data_a = source_a.poll().await.unwrap();
-        let data_b = source_b.poll().await.unwrap();
-
-        assert_eq!(data_a.len(), 1);
-        assert_eq!(data_b.len(), 1);
-        assert_eq!(data_a[0].payload, data_b[0].payload);
-    }
-
     #[test]
-    fn test_price_feed_source_accepts_explicit_data_source_id() {
-        let explicit = "0x00000000000000000000000000000000000000000000000000000000000000aa";
-        assert_eq!(source_id_from_label(explicit).unwrap(), explicit.parse::<B256>().unwrap());
-    }
-
-    #[test]
-    fn test_price_feed_source_rejects_duplicate_data_source_id() {
-        let uri = "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:2000:10000000000:1,source-a:2000:10200000000:2";
-        let task = parse_oracle_uri(uri).unwrap();
-        let err = PriceFeedSource::from_task(&task, 0).unwrap_err();
-
-        assert!(err.to_string().contains("duplicate price observation dataSourceId"));
-    }
-
-    #[test]
-    fn test_price_feed_source_rejects_invalid_aggregation_mode() {
-        let uri = "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=9&observations=source-a:2000:10000000000:1";
-        let task = parse_oracle_uri(uri).unwrap();
-        let err = PriceFeedSource::from_task(&task, 0).unwrap_err();
-
-        assert!(err.to_string().contains("invalid price feed aggregationMode"));
-    }
-
-    #[test]
-    fn test_price_feed_source_rejects_stale_observation() {
-        let uri = "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:1900:10000000000:1&maxStaleness=60";
-        let task = parse_oracle_uri(uri).unwrap();
-        let err = PriceFeedSource::from_task(&task, 0).unwrap_err();
-
-        assert!(err.to_string().contains("price observation 0 is stale"));
-    }
-
-    #[test]
-    fn test_price_feed_source_rejects_unknown_provider() {
-        let uri = "gravity://3/1/price_feed?provider=hype";
-        let task = parse_oracle_uri(uri).unwrap();
-        let err = PriceFeedSource::from_task(&task, 0).unwrap_err();
-
-        assert!(err.to_string().contains("Unsupported price feed provider"));
-    }
-
-    #[test]
-    fn test_price_feed_source_requires_explicit_provider() {
-        let uri = "gravity://3/1/price_feed?round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:2000:10000000000:1";
-        let task = parse_oracle_uri(uri).unwrap();
-        let err = PriceFeedSource::from_task(&task, 0).unwrap_err();
-
-        assert!(err.to_string().contains("Missing 'provider' parameter"));
-    }
-
-    #[test]
-    fn test_binance_interval_ms() {
-        assert_eq!(binance_interval_ms("1m").unwrap(), 60_000);
-        assert_eq!(binance_interval_ms("4h").unwrap(), 14_400_000);
-        assert_eq!(binance_interval_ms("1d").unwrap(), 86_400_000);
-        assert!(binance_interval_ms("1x").unwrap_err().to_string().contains("Unsupported"));
+    fn test_price_feed_requires_binance_provider() {
+        for uri in [
+            "gravity://3/1/price_feed?pair=TSLAUSDT",
+            "gravity://3/1/price_feed?provider=hype",
+            "gravity://3/1/price_feed?provider=inline_fixture_v1",
+        ] {
+            let task = parse_oracle_uri(uri).unwrap();
+            let err = PriceFeedSource::from_task(&task, 0).unwrap_err();
+            assert!(err.to_string().contains("provider"), "unexpected error: {err}");
+        }
     }
 
     #[test]
@@ -1129,15 +663,12 @@ mod tests {
         let source =
             PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
                 .unwrap();
-        let PriceFeedMode::BinanceIndexKline { config, .. } = &source.mode else {
-            panic!("expected Binance index kline mode");
-        };
 
-        assert_eq!(config.pair, "TSLAUSDT");
-        assert_eq!(config.interval, "1m");
-        assert_eq!(config.interval_ms, 60_000);
-        assert_eq!(config.bucket_start_ms, 1_710_000_000_000);
-        let round = config.round_for_delivery_nonce(1).unwrap();
+        assert_eq!(source.config.pair, "TSLAUSDT");
+        assert_eq!(source.config.interval, "1m");
+        assert_eq!(source.config.interval_ms, 60_000);
+        assert_eq!(source.config.bucket_start_ms, 1_710_000_000_000);
+        let round = source.config.round_for_delivery_nonce(1).unwrap();
         assert_eq!(round.delivery_nonce, 1);
         assert_eq!(round.bucket_end_ms, 1_710_000_059_999);
         assert_eq!(round.round_id, 28_500_000);
@@ -1149,26 +680,18 @@ mod tests {
 
     #[test]
     fn test_binance_index_kline_round_mapping() {
-        let uri = "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8";
-        let task = parse_oracle_uri(uri).unwrap();
+        let task = parse_oracle_uri(binance_uri()).unwrap();
         let source =
             PriceFeedSource::from_task_with_rpc(&task, 2, Some("https://fapi.binance.com"))
                 .unwrap();
-        let PriceFeedMode::BinanceIndexKline { config, .. } = &source.mode else {
-            panic!("expected Binance index kline mode");
-        };
 
         assert_eq!(source.cursor(), 1_710_000_119_999);
-        let round = config.round_for_delivery_nonce(3).unwrap();
+        let round = source.config.round_for_delivery_nonce(3).unwrap();
         assert_eq!(round.delivery_nonce, 3);
         assert_eq!(round.bucket_start_ms, 1_710_000_120_000);
         assert_eq!(round.bucket_end_ms, 1_710_000_179_999);
         assert_eq!(round.round_id, 28_500_002);
         assert_eq!(round.resolved_at, 1_710_000_179_999);
-        assert_eq!(
-            round.endpoint_url,
-            "https://fapi.binance.com/fapi/v1/indexPriceKlines?pair=TSLAUSDT&interval=1m&startTime=1710000120000&endTime=1710000179999&limit=1"
-        );
     }
 
     #[test]
@@ -1186,48 +709,59 @@ mod tests {
     }
 
     #[test]
-    fn test_binance_rejects_legacy_continuous_parameter() {
-        for value in ["true", "false"] {
-            let uri = format!("{}&continuous={value}", binance_uri());
+    fn test_binance_rejects_removed_or_derived_parameters() {
+        for parameter in [
+            "aggregationMode=2",
+            "weight=1",
+            "minSourceCount=1",
+            "minTotalWeight=1",
+            "maxStaleness=180000",
+            "observations=source-a:1:1:1",
+            "field=close",
+            "dataSourceLabel=binance",
+            "dataSourceId=0x01",
+            "continuous=true",
+            "round=1",
+            "resolvedAt=1",
+            "blockNumber=1",
+        ] {
+            let uri = format!("{}&{parameter}", binance_uri());
             let task = parse_oracle_uri(&uri).unwrap();
             let err =
                 PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
                     .unwrap_err();
-
-            assert!(err.to_string().contains("price feeds are always continuous"));
+            assert!(
+                err.to_string().contains("Unsupported Binance index kline parameter"),
+                "parameter {parameter}: {err}"
+            );
         }
     }
 
     #[test]
-    fn test_binance_rejects_derived_time_overrides() {
-        for parameter in ["round=1", "resolvedAt=1", "blockNumber=1"] {
-            let uri = format!("{}&{}", binance_uri(), parameter);
-            let task = parse_oracle_uri(&uri).unwrap();
-            let err =
-                PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
-                    .unwrap_err();
-            assert!(err.to_string().contains("derived from the delivery bucket"));
-        }
+    fn test_binance_rejects_onchain_base_url() {
+        let uri = format!("{}&baseUrl=https://example.com", binance_uri());
+        let task = parse_oracle_uri(&uri).unwrap();
+        let err = PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
+            .unwrap_err();
+        assert!(err.to_string().contains("validator-local"));
     }
 
     #[test]
-    fn test_binance_index_kline_rejects_unaligned_bucket() {
+    fn test_binance_rejects_unaligned_bucket() {
         let uri = "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000001&decimals=8";
         let task = parse_oracle_uri(uri).unwrap();
-        let err = PriceFeedSource::from_task_with_rpc(&task, 0, None).unwrap_err();
+        let err = PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
+            .unwrap_err();
 
         assert!(err.to_string().contains("not aligned"));
     }
 
     #[test]
-    fn test_binance_index_kline_observation_from_response() {
+    fn test_binance_index_kline_price_from_response() {
         let task = parse_oracle_uri(binance_uri()).unwrap();
         let source =
             PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
                 .unwrap();
-        let PriceFeedMode::BinanceIndexKline { config, .. } = &source.mode else {
-            panic!("expected Binance index kline mode");
-        };
         let response = serde_json::json!([[
             1710000000000u64,
             "400.67293",
@@ -1243,13 +777,65 @@ mod tests {
             "0"
         ]]);
 
-        let round = config.round_for_delivery_nonce(1).unwrap();
-        let observation =
-            binance_index_kline_observation_from_response(config, &round, &response).unwrap();
+        let round = source.config.round_for_delivery_nonce(1).unwrap();
+        let price =
+            binance_index_kline_price_from_response(&source.config, &round, &response).unwrap();
+        assert_eq!(price, "40067545000".parse::<I256>().unwrap());
+    }
 
-        assert_eq!(observation.observed_at, 1_710_000_059_999);
-        assert_eq!(observation.price, "40067545000".parse::<I256>().unwrap());
-        assert_eq!(observation.weight, U256::from(1));
+    #[test]
+    fn test_binance_index_kline_rejects_zero_price() {
+        let task = parse_oracle_uri(binance_uri()).unwrap();
+        let source =
+            PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
+                .unwrap();
+        let response =
+            serde_json::json!([[1710000000000u64, "0", "0", "0", "0", "0", 1710000059999u64]]);
+
+        let round = source.config.round_for_delivery_nonce(1).unwrap();
+        let err =
+            binance_index_kline_price_from_response(&source.config, &round, &response).unwrap_err();
+        assert!(err.to_string().contains("must be positive"));
+    }
+
+    #[test]
+    fn test_binance_index_kline_rejects_wrong_open_time() {
+        let task = parse_oracle_uri(binance_uri()).unwrap();
+        let source =
+            PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
+                .unwrap();
+        let response = serde_json::json!([[
+            1710000060000u64,
+            "400.67293",
+            "400.67546",
+            "400.67293",
+            "400.67545",
+            "0",
+            1710000119999u64
+        ]]);
+
+        let round = source.config.round_for_delivery_nonce(1).unwrap();
+        let err =
+            binance_index_kline_price_from_response(&source.config, &round, &response).unwrap_err();
+        assert!(err.to_string().contains("openTime mismatch"));
+    }
+
+    #[test]
+    fn test_price_payload_has_single_price() {
+        let encoded = encode_price_payload(
+            2001,
+            28_500_000,
+            1_710_000_059_999,
+            8,
+            "40067545000".parse::<I256>().unwrap(),
+        );
+        let payload = PricePayloadSol::abi_decode(&encoded).unwrap();
+
+        assert_eq!(payload.feedId, U256::from(2001));
+        assert_eq!(payload.roundId, 28_500_000);
+        assert_eq!(payload.resolvedAt, 1_710_000_059_999);
+        assert_eq!(payload.decimals, 8);
+        assert_eq!(payload.price, "40067545000".parse::<I256>().unwrap());
     }
 
     #[test]
@@ -1264,29 +850,9 @@ mod tests {
     }
 
     #[test]
-    fn test_binance_index_kline_rejects_wrong_open_time() {
-        let task = parse_oracle_uri(binance_uri()).unwrap();
-        let source =
-            PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
-                .unwrap();
-        let PriceFeedMode::BinanceIndexKline { config, .. } = &source.mode else {
-            panic!("expected Binance index kline mode");
-        };
-        let response = serde_json::json!([[
-            1710000060000u64,
-            "400.67293",
-            "400.67546",
-            "400.67293",
-            "400.67545",
-            "0",
-            1710000119999u64
-        ]]);
-
-        let round = config.round_for_delivery_nonce(1).unwrap();
-        let err =
-            binance_index_kline_observation_from_response(config, &round, &response).unwrap_err();
-
-        assert!(err.to_string().contains("openTime mismatch"));
+    fn test_fixed_decimal_truncates_to_configured_decimals() {
+        assert_eq!(parse_fixed_decimal("195.389", 2).unwrap(), "19538".parse::<I256>().unwrap());
+        assert_eq!(parse_fixed_decimal("195", 8).unwrap(), "19500000000".parse::<I256>().unwrap());
     }
 
     #[tokio::test]
@@ -1313,7 +879,7 @@ mod tests {
         let interval_ms = binance_interval_ms("1m").unwrap();
         let bucket_start_ms = now_ms.saturating_sub(2 * interval_ms) / interval_ms * interval_ms;
         let uri = format!(
-            "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair={pair}&interval=1m&bucketStartMs={bucket_start_ms}&decimals=8&aggregationMode=2&graceMs=0"
+            "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair={pair}&interval=1m&bucketStartMs={bucket_start_ms}&decimals=8&graceMs=0"
         );
         let task = parse_oracle_uri(&uri).unwrap();
         let source = PriceFeedSource::from_task_with_rpc(&task, 0, Some(&base_url)).unwrap();
@@ -1332,11 +898,5 @@ mod tests {
 
         let third = source.poll().await.unwrap();
         assert!(third.is_empty());
-    }
-
-    #[test]
-    fn test_fixed_decimal_truncates_to_configured_decimals() {
-        assert_eq!(parse_fixed_decimal("195.389", 2).unwrap(), "19538".parse::<I256>().unwrap());
-        assert_eq!(parse_fixed_decimal("195", 8).unwrap(), "19500000000".parse::<I256>().unwrap());
     }
 }

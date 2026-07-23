@@ -10,9 +10,6 @@
 //!
 //! ### Examples
 //! - Blockchain events: `gravity://0/1/events?portal=0x283fC6...&fromBlock=9565280`
-//! - Inline price fixture:
-//!   `gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&
-//!   aggregationMode=1&observations=source-a:2000:10000000000:1,...`
 //! - Binance index kline price feed:
 //!   `gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&
 //!   bucketStartMs=1710000000000&decimals=8`
@@ -148,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_parse_price_feed_uri() {
-        let uri = "gravity://3/1/price_feed?provider=inline_fixture_v1&round=1&resolvedAt=2010&decimals=8&aggregationMode=1&observations=source-a:2000:10000000000:1,source-b:2000:10200000000:2";
+        let uri = "gravity://3/1/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8";
         let task = parse_oracle_uri(uri).unwrap();
 
         assert_eq!(task.source_type, 3);

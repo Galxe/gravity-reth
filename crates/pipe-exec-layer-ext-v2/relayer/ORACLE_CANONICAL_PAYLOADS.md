@@ -54,9 +54,9 @@ NativeOracle.recordBatch(
 )
 ```
 
-The execution layer assigns a `2,000,000` gas callback budget per record. This
-budget is covered by the resolver's maximum-size observation test; failed
-callbacks do not discard the raw `NativeOracle` record and can be replayed.
+The execution layer assigns the standard callback budget to Binance records and
+a larger budget to bounded Polymarket payout vectors. Failed callbacks do not
+discard the raw `NativeOracle` record and can be replayed.
 
 Delivery nonce is sequential for each `(sourceType, sourceId)`. It is not a
 Binance round id and it is not a Polygon log index.
@@ -72,16 +72,13 @@ gravity://3/<feedId>/price_feed
   &interval=1m
   &bucketStartMs=<aligned start>
   &decimals=8
-  &aggregationMode=2
-  &minSourceCount=1
-  &minTotalWeight=1
-  &maxStaleness=<milliseconds>
   &graceMs=<milliseconds>
 ```
 
-The `binance_index_kline_v1` adapter is always continuous. It rejects the
-legacy `continuous` parameter so a task cannot switch between one-shot and
-long-lived nonce semantics.
+The `binance_index_kline_v1` adapter is always continuous. Its accepted task
+parameters are exactly `provider`, `pair`, `interval`, `bucketStartMs`,
+`decimals`, and `graceMs`. Legacy aggregation and fixture parameters are
+rejected.
 
 For delivery nonce `n`:
 
@@ -122,18 +119,22 @@ Canonical acceptance rules:
 - close price is a positive decimal string
 - response body is streamed into a buffer capped at 64 KiB
 - connection timeout is 5 seconds and total request timeout is 15 seconds
-- decimals are at most 18 and observations are capped at 16
+- decimals are at most 18
 
-The resolver payload is ABI encoding of `PriceFeedResolver.PricePayload`. The
-default Binance observation id is:
+The resolver payload is the ABI encoding of one Binance close:
 
-```text
-keccak256("binance:usdm:indexPriceKlines:<PAIR>:<INTERVAL>:close")
+```solidity
+struct PricePayload {
+    uint256 feedId;
+    uint64 roundId;
+    uint64 resolvedAt;
+    uint8 decimals;
+    int256 price;
+}
 ```
 
-`provider=inline_fixture_v1` is an explicit deterministic test adapter. Missing
-`provider` is rejected, so fixture payloads cannot be selected accidentally by
-an incomplete production task URI.
+There is no provider weight, source count, threshold, aggregation mode, or
+inline fixture in the source-type-3 protocol.
 
 ## Polymarket settlement mirror
 
