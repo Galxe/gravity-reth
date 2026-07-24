@@ -111,7 +111,11 @@ pub fn convert_validator_consensus_info(
 
     GravityValidatorInfo::new(
         account_address,
-        power_ether.to::<u64>(),
+        // Defensive: `to::<u64>()` panics on overflow, which on the epoch-boundary
+        // NewEpochEvent path would halt the node. Clamp instead (only reachable above ~1.8e19
+        // tokens for a single validator — far past total supply; a safety net, not a live
+        // path). gravity-audit#823.
+        power_ether.saturating_to::<u64>(),
         ValidatorConfig::new(
             info.consensusPubkey.clone().into(),
             info.networkAddresses.to_vec(),
@@ -135,13 +139,19 @@ pub fn convert_validators_to_bcs(
     pending_active: &[ValidatorConsensusInfo],
     pending_inactive: &[ValidatorConsensusInfo],
 ) -> Bytes {
-    // Calculate total voting power from active validators (in Ether units)
-    let total_voting_power: u128 =
-        active_validators.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
+    // Calculate total voting power from active validators (in Ether units). Saturating
+    // per-element cast + saturating fold so a pathological votingPower cannot panic (overflow)
+    // on the epoch-boundary path and halt the node. gravity-audit#823.
+    let total_voting_power: u128 = active_validators
+        .iter()
+        .map(|v| wei_to_ether(v.votingPower).saturating_to::<u128>())
+        .fold(0u128, |acc, x| acc.saturating_add(x));
 
     // Calculate total joining power from pending_active validators
-    let total_joining_power: u128 =
-        pending_active.iter().map(|v| wei_to_ether(v.votingPower).to::<u128>()).sum();
+    let total_joining_power: u128 = pending_active
+        .iter()
+        .map(|v| wei_to_ether(v.votingPower).saturating_to::<u128>())
+        .fold(0u128, |acc, x| acc.saturating_add(x));
 
     let gravity_validator_set = GravityValidatorSet {
         active_validators: active_validators.iter().map(convert_validator_consensus_info).collect(),

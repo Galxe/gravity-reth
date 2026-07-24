@@ -316,9 +316,32 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     // recovery runs only for type-4 txs.
     let mut sim: HashMap<Address, Option<AccountInfo>> = HashMap::default();
     let mut invalid_tx_idxs: HashSet<usize> = HashSet::default();
+    // CREATE-halt stopgap (gravity-audit#838). An account delegated in-block via a 7702
+    // authorization can, if its delegated code runs CREATE/CREATE2, have its nonce bumped a
+    // *second* time during execution — an effect the filter cannot model without executing.
+    // Once an account is delegated here, every LATER same-block tx from it has an unpredictable
+    // nonce, so we drop those txs (halt-safe over-rejection). KNOWN GAP: this does not cover an
+    // account already delegated at block start that is then called (possibly via an inner call
+    // the filter cannot see); closing that fully would require rejecting all delegated-EOA txs,
+    // which breaks legitimate 7702. The complete fix is executor-side (do not panic on a
+    // tx-level InvalidTransaction); tracked in gravity-audit#838 / #823.
+    let mut delegated_in_block: HashSet<Address> = HashSet::default();
     for idx in 0..gas_limit_exceeded_tx_idx {
         let tx = &txs[idx];
         let sender = senders[idx];
+
+        // Stopgap gate: `sender` was delegated earlier in this block, so its post-execution
+        // nonce is not predictable here — drop this later tx rather than risk NonceTooLow ->
+        // executor panic (gravity-audit#838).
+        if delegated_in_block.contains(&sender) {
+            info!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                "sender delegated as a 7702 authority earlier in-block; dropping later tx (gravity-audit#838)"
+            );
+            invalid_tx_idxs.insert(idx);
+            continue;
+        }
 
         // Validate the tx against the simulated sender account and apply the caller nonce
         // bump + balance deduction. Scoped so the `sim[sender]` borrow is released before
@@ -378,6 +401,13 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                             None => {
                                 *auth_acct = Some(AccountInfo { nonce: 1, ..Default::default() })
                             }
+                        }
+                        // This authorization installs runnable 7702 code on `authority` (a
+                        // non-zero delegate; the zero address is a revocation that installs empty
+                        // code and cannot CREATE). Mark it so its LATER same-block txs are
+                        // dropped by the stopgap gate above (gravity-audit#838).
+                        if !auth.address().is_zero() {
+                            delegated_in_block.insert(authority);
                         }
                     }
                 }
@@ -1564,6 +1594,73 @@ mod tests {
         assert!(
             invalid_idxs.is_empty(),
             "tx from EIP-7702-delegated sender must pass: {invalid_idxs:?}"
+        );
+    }
+
+    /// gravity-audit#838 stopgap: once an account is delegated in-block via a 7702
+    /// authorization to non-zero code, its LATER same-block txs are dropped (their nonce may be
+    /// bumped a second time by an execution-induced CREATE the filter cannot model). Without the
+    /// stopgap the filter admits `tx2` (its nonce matches the post-auth-bump sim nonce) — that
+    /// is the halt. tx1 (the delegating tx) itself is kept.
+    #[test]
+    fn test_filter_drops_later_tx_from_in_block_delegated_authority() {
+        use alloy_consensus::TxEip7702;
+        use alloy_signer::SignerSync;
+        use alloy_signer_local::PrivateKeySigner;
+
+        let sponsor = Address::repeat_byte(0x11);
+        let authority_signer = PrivateKeySigner::from_bytes(&B256::with_last_byte(0x22)).unwrap();
+        let authority = authority_signer.address();
+        let implementation = Address::repeat_byte(0x33);
+        let funded = U256::from(1_000_000_000_000_000_000u64);
+
+        // non-zero delegate => installs runnable 7702 code on `authority`.
+        let auth = Authorization {
+            chain_id: U256::from(MAINNET_CHAIN_ID),
+            address: implementation,
+            nonce: 0,
+        };
+        let signed_auth = auth
+            .clone()
+            .into_signed(authority_signer.sign_hash_sync(&auth.signature_hash()).unwrap());
+
+        let tx1 = TransactionSigned::new_unhashed(
+            Transaction::Eip7702(TxEip7702 {
+                chain_id: MAINNET_CHAIN_ID,
+                nonce: 0,
+                gas_limit: 200_000,
+                max_fee_per_gas: 1,
+                max_priority_fee_per_gas: 0,
+                to: authority,
+                authorization_list: vec![signed_auth],
+                ..Default::default()
+            }),
+            Signature::test_signature(),
+        );
+        // authority's later tx at its post-auth-bump nonce (1) — admitted without the stopgap.
+        let tx2 = create_test_transaction(1, 21_000, 1);
+
+        let mut db = MockDatabase::new();
+        for a in [sponsor, authority] {
+            db.insert_account(
+                a,
+                AccountInfo { balance: funded, nonce: 0, code_hash: KECCAK_EMPTY, code: None },
+            );
+        }
+        let invalid = filter_invalid_txs(
+            &db,
+            &[tx1, tx2],
+            &[sponsor, authority],
+            0,
+            30_000_000,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
+        assert!(!invalid.contains(&0), "tx1 (the delegating tx) must be kept: {invalid:?}");
+        assert!(
+            invalid.contains(&1),
+            "tx2 (later tx from in-block-delegated authority) must be dropped by #838 stopgap: {invalid:?}"
         );
     }
 }
