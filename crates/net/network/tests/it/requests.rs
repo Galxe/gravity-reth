@@ -6,12 +6,13 @@ use rand::Rng;
 use reth_eth_wire::{EthVersion, HeadersDirection};
 use reth_ethereum_primitives::Block;
 use reth_network::{
-    test_utils::{NetworkEventStream, PeerConfig, Testnet},
+    test_utils::{NetworkEventStream, PeerConfig, Testnet, TestnetHandle},
     BlockDownloaderProvider, NetworkEventListenerProvider,
 };
 use reth_network_api::{NetworkInfo, Peers};
 use reth_network_p2p::{
     bodies::client::BodiesClient,
+    error::RequestError,
     headers::client::{HeadersClient, HeadersRequest},
 };
 use reth_provider::test_utils::MockEthProvider;

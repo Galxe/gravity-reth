@@ -1,7 +1,7 @@
 use clap::Args;
 use reth_rpc_server_types::constants::cache::{
-    DEFAULT_BLOCK_CACHE_MAX_LEN, DEFAULT_CONCURRENT_DB_REQUESTS, DEFAULT_HEADER_CACHE_MAX_LEN,
-    DEFAULT_RECEIPT_CACHE_MAX_LEN,
+    DEFAULT_BAL_CACHE_MAX_LEN, DEFAULT_BLOCK_CACHE_MAX_LEN, DEFAULT_CONCURRENT_DB_REQUESTS,
+    DEFAULT_HEADER_CACHE_MAX_LEN, DEFAULT_MAX_CACHED_TX_HASHES, DEFAULT_RECEIPT_CACHE_MAX_LEN,
 };
 
 /// Parameters to configure RPC state cache.
@@ -30,12 +30,26 @@ pub struct RpcStateCacheArgs {
     )]
     pub max_headers: u32,
 
+    /// Max number of revm block access lists in cache.
+    #[arg(
+        long = "rpc-cache.max-bals",
+        default_value_t = DEFAULT_BAL_CACHE_MAX_LEN,
+    )]
+    pub max_bals: u32,
+
     /// Max number of concurrent database requests.
     #[arg(
         long = "rpc-cache.max-concurrent-db-requests",
         default_value_t = DEFAULT_CONCURRENT_DB_REQUESTS,
     )]
     pub max_concurrent_db_requests: usize,
+
+    /// Maximum number of transaction hashes to cache for transaction lookups.
+    #[arg(
+        long = "rpc-cache.max-cached-tx-hashes",
+        default_value_t = DEFAULT_MAX_CACHED_TX_HASHES,
+    )]
+    pub max_cached_tx_hashes: u32,
 }
 
 impl RpcStateCacheArgs {
@@ -44,6 +58,7 @@ impl RpcStateCacheArgs {
         self.max_blocks = 0;
         self.max_receipts = 0;
         self.max_headers = 0;
+        self.max_bals = 0;
     }
 }
 
@@ -53,7 +68,9 @@ impl Default for RpcStateCacheArgs {
             max_blocks: DEFAULT_BLOCK_CACHE_MAX_LEN,
             max_receipts: DEFAULT_RECEIPT_CACHE_MAX_LEN,
             max_headers: DEFAULT_HEADER_CACHE_MAX_LEN,
+            max_bals: DEFAULT_BAL_CACHE_MAX_LEN,
             max_concurrent_db_requests: DEFAULT_CONCURRENT_DB_REQUESTS,
+            max_cached_tx_hashes: DEFAULT_MAX_CACHED_TX_HASHES,
         }
     }
 }

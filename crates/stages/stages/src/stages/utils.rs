@@ -119,7 +119,10 @@ where
     P: Copy + Default + Eq,
 {
     let mut write_cursor = provider.tx_ref().cursor_write::<H>()?;
-    let mut current_partial = P::default();
+    // `None` sentinel instead of `P::default()`: a real first key equal to the default value
+    // (e.g. `Address::ZERO`) must still trigger the merge with its existing last shard below,
+    // otherwise its previous history indices get overwritten on incremental sync (PR #21222).
+    let mut current_partial: Option<P> = None;
     let mut current_list = Vec::<u64>::new();
 
     // observability
@@ -139,26 +142,28 @@ where
         // StorageHistory: `Address.StorageKey`.
         let partial_key = get_partial(sharded_key);
 
-        if current_partial != partial_key {
+        if current_partial != Some(partial_key) {
             // We have reached the end of this subset of keys so
             // we need to flush its last indice shard.
-            load_indices(
-                &mut write_cursor,
-                current_partial,
-                &mut current_list,
-                &sharded_key_factory,
-                append_only,
-                LoadMode::Flush,
-            )?;
+            if let Some(prev_partial) = current_partial {
+                load_indices(
+                    &mut write_cursor,
+                    prev_partial,
+                    &mut current_list,
+                    &sharded_key_factory,
+                    append_only,
+                    LoadMode::Flush,
+                )?;
+            }
 
-            current_partial = partial_key;
+            current_partial = Some(partial_key);
             current_list.clear();
 
             // If it's not the first sync, there might an existing shard already, so we need to
             // merge it with the one coming from the collector
             if !append_only &&
                 let Some((_, last_database_shard)) =
-                    write_cursor.seek_exact(sharded_key_factory(current_partial, u64::MAX))?
+                    write_cursor.seek_exact(sharded_key_factory(partial_key, u64::MAX))?
             {
                 current_list.extend(last_database_shard.iter());
             }
@@ -167,7 +172,7 @@ where
         current_list.extend(new_list.iter());
         load_indices(
             &mut write_cursor,
-            current_partial,
+            partial_key,
             &mut current_list,
             &sharded_key_factory,
             append_only,
@@ -176,14 +181,16 @@ where
     }
 
     // There will be one remaining shard that needs to be flushed to DB.
-    load_indices(
-        &mut write_cursor,
-        current_partial,
-        &mut current_list,
-        &sharded_key_factory,
-        append_only,
-        LoadMode::Flush,
-    )?;
+    if let Some(current_partial) = current_partial {
+        load_indices(
+            &mut write_cursor,
+            current_partial,
+            &mut current_list,
+            &sharded_key_factory,
+            append_only,
+            LoadMode::Flush,
+        )?;
+    }
 
     Ok(())
 }

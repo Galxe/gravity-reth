@@ -6,7 +6,7 @@ use crate::{
 };
 use alloy_consensus::{transaction::TransactionMeta, BlockHeader};
 use alloy_eips::{BlockHashOrNumber, BlockNumHash};
-use alloy_primitives::{map::HashMap, BlockNumber, TxHash, B256};
+use alloy_primitives::{map::B256Map, BlockNumber, TxHash, B256};
 use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_ethereum_primitives::EthPrimitives;
@@ -57,7 +57,7 @@ pub(crate) struct InMemoryStateMetrics {
 #[derive(Debug, Default)]
 pub(crate) struct InMemoryState<N: NodePrimitives = EthPrimitives> {
     /// All canonical blocks that are not on disk yet.
-    blocks: RwLock<HashMap<B256, Arc<BlockState<N>>>>,
+    blocks: RwLock<B256Map<Arc<BlockState<N>>>>,
     /// Mapping of block numbers to block hashes.
     numbers: RwLock<BTreeMap<u64, B256>>,
     /// The pending block that has not yet been made canonical.
@@ -68,7 +68,7 @@ pub(crate) struct InMemoryState<N: NodePrimitives = EthPrimitives> {
 
 impl<N: NodePrimitives> InMemoryState<N> {
     pub(crate) fn new(
-        blocks: HashMap<B256, Arc<BlockState<N>>>,
+        blocks: B256Map<Arc<BlockState<N>>>,
         numbers: BTreeMap<u64, B256>,
         pending: Option<BlockState<N>>,
     ) -> Self {
@@ -89,14 +89,20 @@ impl<N: NodePrimitives> InMemoryState<N> {
     ///
     /// This tries to acquire a read lock. Drop any write locks before calling this.
     pub(crate) fn update_metrics(&self) {
-        let numbers = self.numbers.read();
-        if let Some((earliest_block_number, _)) = numbers.first_key_value() {
-            self.metrics.earliest_block.set(*earliest_block_number as f64);
+        let (count, earliest, latest) = {
+            let numbers = self.numbers.read();
+            let count = numbers.len();
+            let earliest = numbers.first_key_value().map(|(number, _)| *number);
+            let latest = numbers.last_key_value().map(|(number, _)| *number);
+            (count, earliest, latest)
+        };
+        if let Some(earliest_block_number) = earliest {
+            self.metrics.earliest_block.set(earliest_block_number as f64);
         }
-        if let Some((latest_block_number, _)) = numbers.last_key_value() {
-            self.metrics.latest_block.set(*latest_block_number as f64);
+        if let Some(latest_block_number) = latest {
+            self.metrics.latest_block.set(latest_block_number as f64);
         }
-        self.metrics.num_blocks.set(numbers.len() as f64);
+        self.metrics.num_blocks.set(count as f64);
     }
 
     /// Returns the state for a given block hash.
@@ -178,7 +184,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// Create a new in-memory state with the given blocks, numbers, pending state, and optional
     /// finalized header.
     pub fn new(
-        blocks: HashMap<B256, Arc<BlockState<N>>>,
+        blocks: B256Map<Arc<BlockState<N>>>,
         numbers: BTreeMap<u64, B256>,
         pending: Option<BlockState<N>>,
         finalized: Option<SealedHeader<N::BlockHeader>>,
@@ -203,7 +209,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
 
     /// Create an empty state.
     pub fn empty() -> Self {
-        Self::new(HashMap::default(), BTreeMap::new(), None, None, None)
+        Self::new(B256Map::default(), BTreeMap::new(), None, None, None)
     }
 
     /// Create a new in memory state with the given local head and finalized header
@@ -314,6 +320,7 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// This will update the links between blocks and remove all blocks that are [..
     /// `persisted_height`].
     pub fn remove_persisted_blocks(&self, persisted_num_hash: BlockNumHash) {
+        self.set_persisted(persisted_num_hash);
         // if the persisted hash is not in the canonical in memory state, do nothing, because it
         // means canonical blocks were not actually persisted.
         //
@@ -441,6 +448,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
         self.inner.chain_info_tracker.set_finalized(header);
     }
 
+    /// Persisted block setter.
+    pub fn set_persisted(&self, num_hash: BlockNumHash) {
+        self.inner.chain_info_tracker.set_persisted(num_hash);
+    }
+
     /// Canonical head getter.
     pub fn get_canonical_head(&self) -> SealedHeader<N::BlockHeader> {
         self.inner.chain_info_tracker.get_canonical_head()
@@ -454,6 +466,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     /// Safe header getter.
     pub fn get_safe_header(&self) -> Option<SealedHeader<N::BlockHeader>> {
         self.inner.chain_info_tracker.get_safe_header()
+    }
+
+    /// Persisted block `BlockNumHash` getter.
+    pub fn get_persisted_num_hash(&self) -> Option<BlockNumHash> {
+        self.inner.chain_info_tracker.get_persisted_num_hash()
     }
 
     /// Returns the `SealedHeader` corresponding to the pending state.
@@ -506,6 +523,11 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
         &self,
     ) -> watch::Receiver<Option<SealedHeader<N::BlockHeader>>> {
         self.inner.chain_info_tracker.subscribe_finalized_block()
+    }
+
+    /// Subscribe to new persisted block events.
+    pub fn subscribe_persisted_block(&self) -> watch::Receiver<Option<BlockNumHash>> {
+        self.inner.chain_info_tracker.subscribe_persisted_block()
     }
 
     /// Attempts to send a new [`CanonStateNotification`] to all active Receiver handles.
@@ -646,22 +668,14 @@ impl<N: NodePrimitives> BlockState<N> {
         receipts.first().cloned().unwrap_or_default()
     }
 
-    /// Returns a vector of __parent__ `BlockStates`.
+    /// Returns an iterator over __parent__ `BlockStates`.
     ///
-    /// The block state order in the output vector is newest to oldest (highest to lowest):
+    /// The block state order is newest to oldest (highest to lowest):
     /// `[5,4,3,2,1]`
     ///
     /// Note: This does not include self.
-    pub fn parent_state_chain(&self) -> Vec<&Self> {
-        let mut parents = Vec::new();
-        let mut current = self.parent.as_deref();
-
-        while let Some(parent) = current {
-            parents.push(parent);
-            current = parent.parent.as_deref();
-        }
-
-        parents
+    pub fn parent_state_chain(&self) -> impl Iterator<Item = &Self> + '_ {
+        std::iter::successors(self.parent.as_deref(), |state| state.parent.as_deref())
     }
 
     /// Returns a vector of `BlockStates` representing the entire in memory chain.
@@ -672,6 +686,11 @@ impl<N: NodePrimitives> BlockState<N> {
     }
 
     /// Appends the parent chain of this [`BlockState`] to the given vector.
+    ///
+    /// Parents are appended in order from newest to oldest (highest to lowest).
+    /// This does not include self, only the parent states.
+    ///
+    /// This is a convenience method equivalent to `chain.extend(self.parent_state_chain())`.
     pub fn append_parent_chain<'a>(&'a self, chain: &mut Vec<&'a Self>) {
         chain.extend(self.parent_state_chain());
     }
@@ -962,7 +981,7 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
     ///
     /// Returns the new tip for [`Self::Reorg`] and [`Self::Commit`] variants which commit at least
     /// 1 new block.
-    pub fn tip(&self) -> &SealedBlock<N::Block> {
+    pub fn tip(&self) -> &RecoveredBlock<N::Block> {
         match self {
             Self::Commit { new } | Self::Reorg { new, .. } => {
                 new.last().expect("non empty blocks").recovered_block()
@@ -986,8 +1005,8 @@ mod tests {
         StateProofProvider, StateProvider, StateRootProvider, StorageRootProvider,
     };
     use reth_trie::{
-        AccountProof, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
-        StorageProof, TrieInput,
+        updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
+        MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
     };
 
     fn create_mock_state(
@@ -1146,7 +1165,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_state_by_hash() {
-        let mut state_by_hash = HashMap::default();
+        let mut state_by_hash = B256Map::default();
         let number = rand::rng().random::<u64>();
         let mut test_block_builder: TestBlockBuilder = TestBlockBuilder::default();
         let state = Arc::new(create_mock_state(&mut test_block_builder, number, B256::random()));
@@ -1160,7 +1179,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_state_by_number() {
-        let mut state_by_hash = HashMap::default();
+        let mut state_by_hash = B256Map::default();
         let mut hash_by_number = BTreeMap::new();
 
         let number = rand::rng().random::<u64>();
@@ -1179,7 +1198,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_state_impl_head_state() {
-        let mut state_by_hash = HashMap::default();
+        let mut state_by_hash = B256Map::default();
         let mut hash_by_number = BTreeMap::new();
         let mut test_block_builder: TestBlockBuilder = TestBlockBuilder::default();
         let state1 = Arc::new(create_mock_state(&mut test_block_builder, 1, B256::random()));
@@ -1207,7 +1226,7 @@ mod tests {
         let pending_hash = pending_state.hash();
 
         let in_memory_state =
-            InMemoryState::new(HashMap::default(), BTreeMap::new(), Some(pending_state));
+            InMemoryState::new(B256Map::default(), BTreeMap::new(), Some(pending_state));
 
         let result = in_memory_state.pending_state();
         assert!(result.is_some());
@@ -1219,7 +1238,7 @@ mod tests {
     #[test]
     fn test_in_memory_state_impl_no_pending_state() {
         let in_memory_state: InMemoryState =
-            InMemoryState::new(HashMap::default(), BTreeMap::new(), None);
+            InMemoryState::new(B256Map::default(), BTreeMap::new(), None);
 
         assert_eq!(in_memory_state.pending_state(), None);
     }
@@ -1350,7 +1369,7 @@ mod tests {
         let state2 = Arc::new(BlockState::with_parent(block2.clone(), Some(state1.clone())));
         let state3 = Arc::new(BlockState::with_parent(block3.clone(), Some(state2.clone())));
 
-        let mut blocks = HashMap::default();
+        let mut blocks = B256Map::default();
         blocks.insert(block1.recovered_block().hash(), state1);
         blocks.insert(block2.recovered_block().hash(), state2);
         blocks.insert(block3.recovered_block().hash(), state3);
@@ -1390,15 +1409,14 @@ mod tests {
     #[test]
     fn test_canonical_in_memory_state_canonical_chain_empty() {
         let state: CanonicalInMemoryState = CanonicalInMemoryState::empty();
-        let chain: Vec<_> = state.canonical_chain().collect();
-        assert!(chain.is_empty());
+        assert!(state.canonical_chain().next().is_none());
     }
 
     #[test]
     fn test_canonical_in_memory_state_canonical_chain_single_block() {
         let block = TestBlockBuilder::eth().get_executed_block_with_number(1, B256::random());
         let hash = block.recovered_block().hash();
-        let mut blocks = HashMap::default();
+        let mut blocks = B256Map::default();
         blocks.insert(hash, Arc::new(BlockState::new(block)));
         let mut numbers = BTreeMap::new();
         numbers.insert(1, hash);
@@ -1460,19 +1478,18 @@ mod tests {
         let mut test_block_builder: TestBlockBuilder = TestBlockBuilder::default();
         let chain = create_mock_state_chain(&mut test_block_builder, 4);
 
-        let parents = chain[3].parent_state_chain();
+        let parents: Vec<_> = chain[3].parent_state_chain().collect();
         assert_eq!(parents.len(), 3);
         assert_eq!(parents[0].block().recovered_block().number, 3);
         assert_eq!(parents[1].block().recovered_block().number, 2);
         assert_eq!(parents[2].block().recovered_block().number, 1);
 
-        let parents = chain[2].parent_state_chain();
+        let parents: Vec<_> = chain[2].parent_state_chain().collect();
         assert_eq!(parents.len(), 2);
         assert_eq!(parents[0].block().recovered_block().number, 2);
         assert_eq!(parents[1].block().recovered_block().number, 1);
 
-        let parents = chain[0].parent_state_chain();
-        assert_eq!(parents.len(), 0);
+        assert_eq!(chain[0].parent_state_chain().count(), 0);
     }
 
     #[test]
@@ -1483,8 +1500,7 @@ mod tests {
             create_mock_state(&mut test_block_builder, single_block_number, B256::random());
         let single_block_hash = single_block.block().recovered_block().hash();
 
-        let parents = single_block.parent_state_chain();
-        assert_eq!(parents.len(), 0);
+        assert_eq!(single_block.parent_state_chain().count(), 0);
 
         let block_state_chain = single_block.chain().collect::<Vec<_>>();
         assert_eq!(block_state_chain.len(), 1);

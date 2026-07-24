@@ -1,6 +1,6 @@
 //! Debug consensus client.
 //!
-//! This is a worker that sends FCUs and new payloads by fetching recent blocks from an external
+//! This is a worker that sends FCUs and new payloads by fetching recent payloads from an external
 //! provider like Etherscan or an RPC endpoint. This allows to quickly test the execution client
 //! without running a consensus node.
 
@@ -10,10 +10,10 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod client;
 mod providers;
 
-pub use client::{BlockProvider, DebugConsensusClient};
+pub use client::{DebugConsensusClient, PayloadProvider};
 pub use providers::{EtherscanBlockProvider, RpcBlockProvider};

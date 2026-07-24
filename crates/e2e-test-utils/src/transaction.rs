@@ -1,7 +1,10 @@
-use alloy_consensus::{EnvKzgSettings, SidecarBuilder, SimpleCoder, TxEip4844Variant, TxEnvelope};
-use alloy_eips::eip7702::SignedAuthorization;
+use alloy_consensus::{
+    EnvKzgSettings, EthereumTxEnvelope, SidecarBuilder, SimpleCoder, TxEip4844Variant, TxEnvelope,
+};
+use alloy_eips::{eip7594::BlobTransactionSidecarVariant, eip7702::SignedAuthorization};
 use alloy_network::{
-    eip2718::Encodable2718, Ethereum, EthereumWallet, TransactionBuilder, TransactionBuilder4844,
+    eip2718::Encodable2718, Ethereum, EthereumWallet, NetworkTransactionBuilder,
+    TransactionBuilder4844,
 };
 use alloy_primitives::{hex, Address, Bytes, TxKind, B256, U256};
 use alloy_rpc_types_eth::{Authorization, TransactionInput, TransactionRequest};
@@ -33,6 +36,18 @@ impl TransactionTestContext {
     /// Creates a static transfer and signs it, returning bytes.
     pub async fn transfer_tx_bytes(chain_id: u64, wallet: PrivateKeySigner) -> Bytes {
         let signed = Self::transfer_tx(chain_id, wallet).await;
+        signed.encoded_2718().into()
+    }
+
+    /// Creates a transfer with a specific nonce and signs it, returning bytes.
+    /// Uses high `max_fee_per_gas` (1000 gwei) to ensure tx acceptance regardless of basefee.
+    pub async fn transfer_tx_bytes_with_nonce(
+        chain_id: u64,
+        wallet: PrivateKeySigner,
+        nonce: u64,
+    ) -> Bytes {
+        let tx = tx(chain_id, 21000, None, None, nonce, Some(1000e9 as u128));
+        let signed = Self::sign_tx(wallet, tx).await;
         signed.encoded_2718().into()
     }
 
@@ -103,7 +118,8 @@ impl TransactionTestContext {
 
         let mut builder = SidecarBuilder::<SimpleCoder>::new();
         builder.ingest(b"dummy blob");
-        tx.set_blob_sidecar(builder.build()?);
+        let sidecar: alloy_consensus::BlobTransactionSidecar = builder.build()?;
+        tx.set_blob_sidecar(alloy_eips::eip7594::BlobTransactionSidecarVariant::Eip4844(sidecar));
         tx.set_max_fee_per_blob_gas(15e9 as u128);
 
         let signed = Self::sign_tx(wallet, tx).await;
@@ -113,7 +129,9 @@ impl TransactionTestContext {
     /// Signs an arbitrary [`TransactionRequest`] using the provided wallet
     pub async fn sign_tx(wallet: PrivateKeySigner, tx: TransactionRequest) -> TxEnvelope {
         let signer = EthereumWallet::from(wallet);
-        <TransactionRequest as TransactionBuilder<Ethereum>>::build(tx, &signer).await.unwrap()
+        <TransactionRequest as NetworkTransactionBuilder<Ethereum>>::build(tx, &signer)
+            .await
+            .unwrap()
     }
 
     /// Creates a tx with blob sidecar and sign it, returning bytes
@@ -137,7 +155,7 @@ impl TransactionTestContext {
         ));
         let tx = tx(chain_id, 210000, Some(l1_block_info), None, nonce, Some(20e9 as u128));
         let signer = EthereumWallet::from(wallet);
-        <TransactionRequest as TransactionBuilder<Ethereum>>::build(tx, &signer)
+        <TransactionRequest as NetworkTransactionBuilder<Ethereum>>::build(tx, &signer)
             .await
             .unwrap()
             .encoded_2718()
@@ -146,11 +164,13 @@ impl TransactionTestContext {
 
     /// Validates the sidecar of a given tx envelope and returns the versioned hashes
     #[track_caller]
-    pub fn validate_sidecar(tx: TxEnvelope) -> Vec<B256> {
+    pub fn validate_sidecar(
+        tx: EthereumTxEnvelope<TxEip4844Variant<BlobTransactionSidecarVariant>>,
+    ) -> Vec<B256> {
         let proof_setting = EnvKzgSettings::Default;
 
         match tx {
-            TxEnvelope::Eip4844(signed) => match signed.tx() {
+            EthereumTxEnvelope::Eip4844(signed) => match signed.tx() {
                 TxEip4844Variant::TxEip4844WithSidecar(tx) => {
                     tx.validate_blob(proof_setting.get()).unwrap();
                     tx.sidecar.versioned_hashes().collect()

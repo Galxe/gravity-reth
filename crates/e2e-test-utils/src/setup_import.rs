@@ -1,6 +1,7 @@
 //! Setup utilities for importing RLP chain data before starting nodes.
 
 use crate::{node::NodeTestContext, NodeHelperType, Wallet};
+use alloy_rpc_types_engine::PayloadAttributes;
 use reth_chainspec::ChainSpec;
 use reth_cli_commands::import_core::{import_blocks_from_file, ImportConfig};
 use reth_config::Config;
@@ -15,7 +16,6 @@ use reth_provider::{
 };
 use reth_rpc_server_types::RpcModuleSelection;
 use reth_stages_types::StageId;
-use reth_tasks::TaskManager;
 use std::{path::Path, sync::Arc};
 use tempfile::TempDir;
 use tracing::{debug, info, span, Level};
@@ -24,8 +24,6 @@ use tracing::{debug, info, span, Level};
 pub struct ChainImportResult {
     /// The nodes that were created
     pub nodes: Vec<NodeHelperType<EthereumNode>>,
-    /// The task manager
-    pub task_manager: TaskManager,
     /// The wallet for testing
     pub wallet: Wallet,
     /// Temporary directories that must be kept alive for the duration of the test
@@ -62,14 +60,9 @@ pub async fn setup_engine_with_chain_import(
     is_dev: bool,
     tree_config: TreeConfig,
     rlp_path: &Path,
-    attributes_generator: impl Fn(u64) -> reth_payload_builder::EthPayloadBuilderAttributes
-        + Send
-        + Sync
-        + Copy
-        + 'static,
+    attributes_generator: impl Fn(u64) -> PayloadAttributes + Send + Sync + Copy + 'static,
 ) -> eyre::Result<ChainImportResult> {
-    let tasks = TaskManager::current();
-    let exec = tasks.executor();
+    let runtime = reth_tasks::Runtime::test();
 
     let network_config = NetworkArgs {
         discovery: DiscoveryArgs { disable_discovery: true, ..DiscoveryArgs::default() },
@@ -147,6 +140,7 @@ pub async fn setup_engine_with_chain_import(
             &config,
             evm_config,
             consensus,
+            runtime.clone(),
         )
         .await?;
 
@@ -217,7 +211,7 @@ pub async fn setup_engine_with_chain_import(
         let node = EthereumNode::default();
 
         let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config.clone())
-            .testing_node_with_datadir(exec.clone(), datadir.clone())
+            .testing_node_with_datadir(runtime.clone(), datadir.clone())
             .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
             .with_components(node.components_builder())
             .with_add_ons(node.add_ons())
@@ -239,7 +233,6 @@ pub async fn setup_engine_with_chain_import(
 
     Ok(ChainImportResult {
         nodes,
-        task_manager: tasks,
         wallet: crate::Wallet::default().with_chain_id(chain_spec.chain.id()),
         _temp_dirs: temp_dirs,
     })
@@ -272,10 +265,11 @@ pub fn load_forkchoice_state(path: &Path) -> eyre::Result<alloy_rpc_types_engine
 mod tests {
     use super::*;
     use crate::test_rlp_utils::{create_fcu_json, generate_test_blocks, write_blocks_to_rlp};
+    use alloy_rpc_types_engine::PayloadAttributes;
     use reth_chainspec::{ChainSpecBuilder, MAINNET};
     use reth_db::DatabaseArguments;
-    use reth_payload_builder::EthPayloadBuilderAttributes;
-    use reth_primitives::SealedBlock;
+    use reth_ethereum_primitives::Block;
+    use reth_primitives_traits::SealedBlock;
     use reth_provider::{
         test_utils::MockNodeTypesWithDB, BlockHashReader, BlockNumReader, BlockReaderIdExt,
     };
@@ -335,6 +329,7 @@ mod tests {
             let evm_config = reth_node_ethereum::EthEvmConfig::new(chain_spec.clone());
             // Use NoopConsensus to skip gas limit validation for test imports
             let consensus = reth_consensus::noop::NoopConsensus::arc();
+            let runtime = reth_tasks::Runtime::test();
 
             let result = import_blocks_from_file(
                 &rlp_path,
@@ -343,6 +338,7 @@ mod tests {
                 &config,
                 evm_config,
                 consensus,
+                runtime,
             )
             .await
             .unwrap();
@@ -433,7 +429,7 @@ mod tests {
         chain_spec: &ChainSpec,
         block_count: u64,
         temp_dir: &Path,
-    ) -> (Vec<SealedBlock>, PathBuf) {
+    ) -> (Vec<SealedBlock<Block>>, PathBuf) {
         let test_blocks = generate_test_blocks(chain_spec, block_count);
         assert_eq!(
             test_blocks.len(),
@@ -464,7 +460,8 @@ mod tests {
         let datadir = temp_dir.path().join("datadir");
         std::fs::create_dir_all(&datadir).unwrap();
         let db_path = datadir.join("db");
-        let db_env = reth_db::init_db(&db_path, DatabaseArguments::default()).unwrap();
+        let db_args = reth_node_core::args::DatabaseArgs::default().database_args();
+        let db_env = reth_db::init_db(&db_path, db_args).unwrap();
         let db = Arc::new(reth_db::test_utils::TempDatabase::new(db_env, db_path));
 
         // Create static files path
@@ -486,6 +483,7 @@ mod tests {
         let evm_config = reth_node_ethereum::EthEvmConfig::new(chain_spec.clone());
         // Use NoopConsensus to skip gas limit validation for test imports
         let consensus = reth_consensus::noop::NoopConsensus::arc();
+        let runtime = reth_tasks::Runtime::test();
 
         let result = import_blocks_from_file(
             &rlp_path,
@@ -494,6 +492,7 @@ mod tests {
             &config,
             evm_config,
             consensus,
+            runtime,
         )
         .await
         .unwrap();
@@ -541,7 +540,7 @@ mod tests {
             false,
             TreeConfig::default(),
             &rlp_path,
-            |_| EthPayloadBuilderAttributes::default(),
+            |_| PayloadAttributes::default(),
         )
         .await
         .expect("Failed to setup nodes with chain import");

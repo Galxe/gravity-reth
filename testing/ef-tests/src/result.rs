@@ -1,6 +1,5 @@
 //! Test results and errors
 
-use crate::Case;
 use reth_db::DatabaseError;
 use reth_provider::ProviderError;
 use std::path::{Path, PathBuf};
@@ -86,8 +85,8 @@ pub struct CaseResult {
 
 impl CaseResult {
     /// Create a new test result.
-    pub fn new(path: &Path, case: &impl Case, result: Result<(), Error>) -> Self {
-        Self { desc: case.description(), path: path.into(), result }
+    pub fn new(path: &Path, desc: String, result: Result<(), Error>) -> Self {
+        Self { desc, path: path.into(), result }
     }
 }
 

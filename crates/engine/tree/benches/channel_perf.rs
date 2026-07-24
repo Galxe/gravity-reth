@@ -7,7 +7,9 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use proptest::test_runner::TestRunner;
 use rand::Rng;
 use revm_primitives::{Address, HashMap};
-use revm_state::{Account, AccountInfo, AccountStatus, EvmState, EvmStorage, EvmStorageSlot};
+use revm_state::{
+    Account, AccountInfo, AccountStatus, EvmState, EvmStorage, EvmStorageSlot, TransactionId,
+};
 use std::{hint::black_box, thread};
 
 /// Creates a mock state with the specified number of accounts for benchmarking
@@ -17,20 +19,21 @@ fn create_bench_state(num_accounts: usize) -> EvmState {
     let mut state_changes = HashMap::default();
 
     for i in 0..num_accounts {
-        let storage =
-            EvmStorage::from_iter([(U256::from(i), EvmStorageSlot::new(U256::from(i + 1), 0))]);
+        let storage = EvmStorage::from_iter([(
+            U256::from(i),
+            EvmStorageSlot::new(U256::from(i + 1), TransactionId::default()),
+        )]);
 
-        let account = Account {
-            info: AccountInfo {
-                balance: U256::from(100),
-                nonce: 10,
-                code_hash: B256::from_slice(&rng.random::<[u8; 32]>()),
-                code: Default::default(),
-            },
-            storage,
-            status: AccountStatus::empty(),
-            transaction_id: 0,
+        let mut account = Account::default();
+        account.info = AccountInfo {
+            balance: U256::from(100),
+            nonce: 10,
+            code_hash: B256::from_slice(&rng.random::<[u8; 32]>()),
+            code: Default::default(),
+            account_id: None,
         };
+        account.storage = storage;
+        account.status = AccountStatus::empty();
 
         let address = Address::with_last_byte(i as u8);
         state_changes.insert(address, account);

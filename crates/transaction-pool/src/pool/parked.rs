@@ -151,6 +151,18 @@ impl<T: ParkedOrd> ParkedPool<T> {
             .collect()
     }
 
+    /// Returns all transactions for the given sender, using a `BTree` range query.
+    pub(crate) fn txs_by_sender(
+        &self,
+        sender: SenderId,
+    ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
+        self.by_id
+            .range((sender.start_bound(), Unbounded))
+            .take_while(move |(other, _)| sender == other.sender)
+            .map(|(_, tx)| Arc::clone(&tx.transaction))
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn get_senders_by_submission_id(
         &self,
@@ -180,17 +192,17 @@ impl<T: ParkedOrd> ParkedPool<T> {
             return Vec::new()
         }
 
-        let mut removed = Vec::new();
+        let mut removed = Vec::with_capacity(limit.tx_excess(self.len()).unwrap_or(1));
 
         while !self.last_sender_submission.is_empty() && limit.is_exceeded(self.len(), self.size())
         {
             // NOTE: This will not panic due to `!last_sender_transaction.is_empty()`
             let sender_id = self.last_sender_submission.last().unwrap().sender_id;
-            let list = self.get_txs_by_sender(sender_id);
 
             // Drop transactions from this sender until the pool is under limits
-            for txid in list.into_iter().rev() {
-                if let Some(tx) = self.remove_transaction(&txid) {
+            while let Some((tx_id, _)) = self.by_id.range(sender_id.range()).next_back() {
+                let tx_id = *tx_id;
+                if let Some(tx) = self.remove_transaction(&tx_id) {
                     removed.push(tx);
                 }
 
@@ -247,7 +259,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
         assert_eq!(
             self.last_sender_submission.len(),
             self.sender_transaction_count.len(),
-            "last_sender_transaction.len() != sender_to_last_transaction.len()"
+            "last_sender_submission.len() != sender_transaction_count.len()"
         );
     }
 }
@@ -260,35 +272,33 @@ impl<T: PoolTransaction> ParkedPool<BasefeeOrd<T>> {
         &self,
         basefee: u64,
     ) -> Vec<Arc<ValidPoolTransaction<T>>> {
-        let ids = self.satisfy_base_fee_ids(basefee as u128);
-        let mut txs = Vec::with_capacity(ids.len());
-        for id in ids {
-            txs.push(self.get(&id).expect("transaction exists").transaction.clone().into());
-        }
+        let mut txs = Vec::new();
+        self.satisfy_base_fee_ids(basefee as u128, |tx| {
+            txs.push(tx.clone());
+        });
         txs
     }
 
     /// Returns all transactions that satisfy the given basefee.
-    fn satisfy_base_fee_ids(&self, basefee: u128) -> Vec<TransactionId> {
-        let mut transactions = Vec::new();
-        {
-            let mut iter = self.by_id.iter().peekable();
+    fn satisfy_base_fee_ids<F>(&self, basefee: u128, mut tx_handler: F)
+    where
+        F: FnMut(&Arc<ValidPoolTransaction<T>>),
+    {
+        let mut iter = self.by_id.iter().peekable();
 
-            while let Some((id, tx)) = iter.next() {
-                if tx.transaction.transaction.max_fee_per_gas() < basefee {
-                    // still parked -> skip descendant transactions
-                    'this: while let Some((peek, _)) = iter.peek() {
-                        if peek.sender != id.sender {
-                            break 'this
-                        }
-                        iter.next();
+        while let Some((id, tx)) = iter.next() {
+            if tx.transaction.max_fee_per_gas() < basefee {
+                // still parked -> skip descendant transactions
+                'this: while let Some((peek, _)) = iter.peek() {
+                    if peek.sender != id.sender {
+                        break 'this
                     }
-                } else {
-                    transactions.push(*id);
+                    iter.next();
                 }
+            } else {
+                tx_handler(&tx.transaction);
             }
         }
-        transactions
     }
 
     /// Removes all transactions from this subpool that can afford the given basefee,
@@ -306,7 +316,10 @@ impl<T: PoolTransaction> ParkedPool<BasefeeOrd<T>> {
     where
         F: FnMut(Arc<ValidPoolTransaction<T>>),
     {
-        let to_remove = self.satisfy_base_fee_ids(basefee as u128);
+        let mut to_remove = Vec::new();
+        self.satisfy_base_fee_ids(basefee as u128, |tx| {
+            to_remove.push(*tx.id());
+        });
 
         for id in to_remove {
             if let Some(tx) = self.remove_transaction(&id) {
@@ -568,21 +581,31 @@ mod tests {
         assert_eq!(pool.len(), 2);
         // two dependent tx in the pool with decreasing fee
 
-        {
-            // TODO: test change might not be intended, re review
-            let mut pool2 = pool.clone();
-            let removed = pool2.enforce_basefee(root_tx.max_fee_per_gas() as u64);
-            assert_eq!(removed.len(), 1);
-            assert_eq!(pool2.len(), 1);
-            // root got popped - descendant should be skipped
-            assert!(!pool2.contains(root_tx.id()));
-            assert!(pool2.contains(descendant_tx.id()));
-        }
-
         // remove root transaction via descendant tx fee
         let removed = pool.enforce_basefee(descendant_tx.max_fee_per_gas() as u64);
         assert_eq!(removed.len(), 2);
         assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_enforce_parked_basefee_removes_only_eligible_ancestor() {
+        let mut f = MockTransactionFactory::default();
+        let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
+        let t = MockTransaction::eip1559().inc_price_by(10);
+
+        let root_tx = f.validated_arc(t.clone());
+        pool.add_transaction(root_tx.clone());
+
+        let descendant_tx = f.validated_arc(t.inc_nonce().decr_price());
+        pool.add_transaction(descendant_tx.clone());
+
+        let removed = pool.enforce_basefee(root_tx.max_fee_per_gas() as u64);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id(), root_tx.id());
+        assert_eq!(pool.len(), 1);
+        assert!(!pool.contains(root_tx.id()));
+        assert!(pool.contains(descendant_tx.id()));
     }
 
     #[test]

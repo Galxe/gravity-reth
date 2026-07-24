@@ -27,6 +27,12 @@ Datadir:
       --datadir.static-files <PATH>
           The absolute path to store static files in.
 
+      --datadir.rocksdb <PATH>
+          The absolute path to store `RocksDB` database in.
+
+      --datadir.pprof-dumps <PATH>
+          The absolute path to store pprof dumps in.
+
       --config <FILE>
           The path to the configuration file to use
 
@@ -53,22 +59,35 @@ Database:
           - trace:   Enables logging for trace debug-level messages
           - extra:   Enables logging for extra debug-level messages
 
-      --db.exclusive <EXCLUSIVE>
-          Open environment in exclusive/monopolistic mode. Makes it possible to open a database on an NFS volume
+      --db.block-cache-size <BLOCK_CACHE_SIZE>
+          Block cache size in bytes (e.g., 8GB, 4096MB). This is the LRU cache for uncompressed blocks. Higher values improve read performance. Default: 8GB
 
-          [possible values: true, false]
+      --db.write-buffer-size <WRITE_BUFFER_SIZE>
+          Write buffer size in bytes (e.g., 256MB, 512MB). Larger values improve write performance but use more memory. Default: 256MB
 
-      --db.max-size <MAX_SIZE>
-          Maximum database size (e.g., 4TB, 8MB)
+      --db.max-background-jobs <MAX_BACKGROUND_JOBS>
+          Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
-      --db.growth-step <GROWTH_STEP>
-          Database growth step (e.g., 4GB, 4KB)
+      --db.max-open-files <MAX_OPEN_FILES>
+          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
 
-      --db.read-transaction-timeout <READ_TRANSACTION_TIMEOUT>
-          Read transaction timeout in seconds, 0 means no timeout
+      --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
+          Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6
 
-      --db.max-readers <MAX_READERS>
-          Maximum number of readers allowed to access the database concurrently
+      --db.compaction-readahead-size <COMPACTION_READAHEAD_SIZE>
+          Compaction readahead size in bytes (e.g., 4MB, 8MB). Larger values improve compaction performance with sequential I/O. Default: 4MB
+
+      --db.level0-file-num-compaction-trigger <LEVEL0_FILE_NUM_COMPACTION_TRIGGER>
+          Number of L0 files to trigger compaction. Lower values reduce read amplification but increase write amplification. Default: 4
+
+      --db.max-bytes-for-level-base <MAX_BYTES_FOR_LEVEL_BASE>
+          Maximum bytes for level 1 (e.g., 512MB, 1GB). This controls the target size for L1, affecting LSM tree structure. Default: 512MB
+
+      --db.bytes-per-sync <BYTES_PER_SYNC>
+          Bytes to write before background sync (e.g., 4MB, 8MB). Larger values reduce I/O overhead but may affect durability. Default: 4MB
+
+      --db.sharding-directories <SHARDING_DIRECTORIES>
+          Semicolon separated `RocksDB` sharding directories. Accepts 2 or 3 paths. Always creates 3 databases (state, `account_trie`, `storage_trie`). - 0 paths (default): Creates subdirs under --datadir: state/, `account_trie`/, `storage_trie`/ - 2 paths: First dir contains state + `account_trie`; second dir contains `storage_trie` - 3 paths: First dir is state, second is `account_trie`, third is `storage_trie`
 
   <STAGE>
           Possible values:
@@ -98,7 +117,7 @@ Logging:
       --log.stdout.filter <FILTER>
           The filter to use for logs written to stdout
 
-          [default: ]
+          [default: ""]
 
       --log.file.format <FORMAT>
           The format to use for logs written to the log file
@@ -131,9 +150,9 @@ Logging:
           [default: 200]
 
       --log.file.max-files <COUNT>
-          The maximum amount of log files that will be stored. If set to 0, background file logging is disabled
+          The maximum amount of log files that will be stored. If set to 0, background file logging is disabled.
 
-          [default: 5]
+          Default: 5 for `node` command, 0 for non-node utility subcommands.
 
       --log.journald
           Write logs to journald
@@ -148,10 +167,28 @@ Logging:
 
           Possible values:
           - always: Colors on
-          - auto:   Colors on
+          - auto:   Auto-detect
           - never:  Colors off
 
           [default: always]
+
+      --logs-otlp[=<URL>]
+          Enable `Opentelemetry` logs export to an OTLP endpoint.
+
+          If no value provided, defaults based on protocol: - HTTP: `http://localhost:4318/v1/logs` - gRPC: `http://localhost:4317`
+
+          Example: --logs-otlp=http://collector:4318/v1/logs
+
+          [env: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=]
+
+      --logs-otlp.filter <FILTER>
+          Set a filter directive for the OTLP logs exporter. This controls the verbosity of logs sent to the OTLP endpoint. It follows the same syntax as the `RUST_LOG` environment variable.
+
+          Example: --logs-otlp.filter=info,reth=debug
+
+          Defaults to INFO if not specified.
+
+          [default: info]
 
 Display:
   -v, --verbosity...
@@ -165,4 +202,46 @@ Display:
 
   -q, --quiet
           Silence all log output
+
+Tracing:
+      --tracing-otlp[=<URL>]
+          Enable `Opentelemetry` tracing export to an OTLP endpoint.
+
+          If no value provided, defaults based on protocol: - HTTP: `http://localhost:4318/v1/traces` - gRPC: `http://localhost:4317`
+
+          Example: --tracing-otlp=http://collector:4318/v1/traces
+
+          [env: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=]
+
+      --tracing-otlp-protocol <PROTOCOL>
+          OTLP transport protocol to use for exporting traces and logs.
+
+          - `http`: expects endpoint path to end with `/v1/traces` or `/v1/logs` - `grpc`: expects endpoint without a path
+
+          Defaults to HTTP if not specified.
+
+          Possible values:
+          - http: HTTP/Protobuf transport, port 4318, requires `/v1/traces` path
+          - grpc: gRPC transport, port 4317
+
+          [env: OTEL_EXPORTER_OTLP_PROTOCOL=]
+          [default: http]
+
+      --tracing-otlp.filter <FILTER>
+          Set a filter directive for the OTLP tracer. This controls the verbosity of spans and events sent to the OTLP endpoint. It follows the same syntax as the `RUST_LOG` environment variable.
+
+          Example: --tracing-otlp.filter=info,reth=debug,hyper_util=off
+
+          Defaults to TRACE if not specified.
+
+          [default: debug]
+
+      --tracing-otlp.sample-ratio <RATIO>
+          Trace sampling ratio to control the percentage of traces to export.
+
+          Valid range: 0.0 to 1.0 - 1.0, default: Sample all traces - 0.01: Sample 1% of traces - 0.0: Disable sampling
+
+          Example: --tracing-otlp.sample-ratio=0.0.
+
+          [env: OTEL_TRACES_SAMPLER_ARG=]
 ```

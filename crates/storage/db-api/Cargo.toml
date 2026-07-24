@@ -24,17 +24,16 @@ reth-trie-common.workspace = true
 
 # ethereum
 alloy-primitives.workspace = true
-alloy-genesis.workspace = true
 alloy-consensus.workspace = true
-
-# optimism
-reth-optimism-primitives = { workspace = true, optional = true }
+alloy-genesis.workspace = true
 
 # codecs
 modular-bitfield.workspace = true
 roaring.workspace = true
-parity-scale-codec = { workspace = true, features = ["bytes"] }
 serde = { workspace = true, default-features = false }
+serde_json.workspace = true
+# gravity: `mod scale;` is unconditional (crates/storage/db-api/src/scale.rs)
+parity-scale-codec = { workspace = true, features = ["bytes"] }
 
 # metrics
 metrics.workspace = true
@@ -50,7 +49,9 @@ proptest = { workspace = true, optional = true }
 [dev-dependencies]
 # reth libs with arbitrary
 reth-codecs = { workspace = true, features = ["test-utils"] }
+reth-db-models = { workspace = true, features = ["arbitrary"] }
 
+alloy-primitives = { workspace = true, features = ["rand"] }
 rand.workspace = true
 
 test-fuzz.workspace = true
@@ -77,17 +78,10 @@ arbitrary = [
     "reth-primitives-traits/arbitrary",
     "reth-trie-common/arbitrary",
     "alloy-primitives/arbitrary",
-    "parity-scale-codec/arbitrary",
     "reth-codecs/arbitrary",
     "reth-prune-types/arbitrary",
     "reth-stages-types/arbitrary",
     "alloy-consensus/arbitrary",
-    "reth-optimism-primitives?/arbitrary",
     "reth-ethereum-primitives/arbitrary",
+    "parity-scale-codec/arbitrary",
 ]
-op = [
-    "dep:reth-optimism-primitives",
-    "reth-codecs/op",
-    "reth-primitives-traits/op",
-]
-bench = []

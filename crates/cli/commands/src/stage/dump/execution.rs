@@ -1,12 +1,12 @@
 use super::setup;
-use reth_consensus::{noop::NoopConsensus, ConsensusError, FullConsensus};
+use reth_consensus::{noop::NoopConsensus, FullConsensus};
 use reth_db::DatabaseEnv;
 use reth_db_api::{
     cursor::DbCursorRO, database::Database, table::TableImporter, tables, transaction::DbTx,
 };
 use reth_db_common::DbTool;
 use reth_evm::ConfigureEvm;
-use reth_node_builder::NodeTypesWithDB;
+use reth_node_api::{HeaderTy, TxTy};
 use reth_node_core::dirs::{ChainPath, DataDirPath};
 use reth_provider::{
     providers::{ProviderNodeTypes, StaticFileProvider},
@@ -28,7 +28,7 @@ pub(crate) async fn dump_execution_stage<N, E, C>(
 where
     N: ProviderNodeTypes<DB = Arc<DatabaseEnv>>,
     E: ConfigureEvm<Primitives = N::Primitives> + 'static,
-    C: FullConsensus<E::Primitives, Error = ConsensusError> + 'static,
+    C: FullConsensus<E::Primitives> + 'static,
 {
     let (output_db, tip_block_number) = setup(from, to, &output_datadir.db(), db_tool)?;
 
@@ -54,7 +54,7 @@ where
 }
 
 /// Imports all the tables that can be copied over a range.
-fn import_tables_with_range<N: NodeTypesWithDB>(
+fn import_tables_with_range<N: ProviderNodeTypes>(
     output_db: &DatabaseEnv,
     db_tool: &DbTool<N>,
     from: u64,
@@ -70,14 +70,7 @@ fn import_tables_with_range<N: NodeTypesWithDB>(
         )
     })??;
     output_db.update(|tx| {
-        tx.import_table_with_range::<tables::HeaderTerminalDifficulties, _>(
-            &db_tool.provider_factory.db_ref().tx()?,
-            Some(from),
-            to,
-        )
-    })??;
-    output_db.update(|tx| {
-        tx.import_table_with_range::<tables::Headers, _>(
+        tx.import_table_with_range::<tables::Headers<HeaderTy<N>>, _>(
             &db_tool.provider_factory.db_ref().tx()?,
             Some(from),
             to,
@@ -91,7 +84,7 @@ fn import_tables_with_range<N: NodeTypesWithDB>(
         )
     })??;
     output_db.update(|tx| {
-        tx.import_table_with_range::<tables::BlockOmmers, _>(
+        tx.import_table_with_range::<tables::BlockOmmers<HeaderTy<N>>, _>(
             &db_tool.provider_factory.db_ref().tx()?,
             Some(from),
             to,
@@ -113,7 +106,7 @@ fn import_tables_with_range<N: NodeTypesWithDB>(
     })??;
 
     output_db.update(|tx| {
-        tx.import_table_with_range::<tables::Transactions, _>(
+        tx.import_table_with_range::<tables::Transactions<TxTy<N>>, _>(
             &db_tool.provider_factory.db_ref().tx()?,
             Some(from_tx),
             to_tx,
@@ -175,7 +168,7 @@ fn dry_run<N, E, C>(
 where
     N: ProviderNodeTypes,
     E: ConfigureEvm<Primitives = N::Primitives> + 'static,
-    C: FullConsensus<E::Primitives, Error = ConsensusError> + 'static,
+    C: FullConsensus<E::Primitives> + 'static,
 {
     info!(target: "reth::cli", "Executing stage. [dry-run]");
 

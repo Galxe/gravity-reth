@@ -81,18 +81,14 @@ pub(crate) fn apply_state_changes_for_block(
         nonce: prev.nonce,
         code_hash: prev.code_hash,
         code: prev.code,
+        account_id: prev.account_id,
     };
 
     let mut state_diff = EvmState::default();
-    state_diff.insert(
-        SYSTEM_CALLER,
-        Account {
-            info: new_info,
-            storage: Default::default(),
-            status: AccountStatus::Touched,
-            transaction_id: 0,
-        },
-    );
+    let mut account = Account::default();
+    account.info = new_info;
+    account.status = AccountStatus::Touched;
+    state_diff.insert(SYSTEM_CALLER, account);
 
     executor
         .apply_state_change(state_diff)
@@ -229,6 +225,7 @@ mod tests {
             nonce: 5,
             code_hash,
             code: Some(code.clone()),
+            account_id: None,
         };
         let mut executor = fresh_executor(chain_spec.clone(), seed);
 
@@ -257,8 +254,13 @@ mod tests {
         let chain_spec = alpha_chainspec();
         let code = nonempty_code();
         let code_hash = code.hash_slow();
-        let seed =
-            AccountInfo { balance: sentinel_balance(), nonce: 5, code_hash, code: Some(code) };
+        let seed = AccountInfo {
+            balance: sentinel_balance(),
+            nonce: 5,
+            code_hash,
+            code: Some(code),
+            account_id: None,
+        };
         let mut executor = fresh_executor(chain_spec.clone(), seed);
 
         // First application — should zero balance and produce a bundle.
@@ -311,6 +313,7 @@ mod tests {
             nonce: 5,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         let mut executor = fresh_executor(chain_spec.clone(), seed);
 
@@ -339,6 +342,7 @@ mod tests {
             nonce: 5,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         let mut executor = fresh_executor(chain_spec.clone(), seed);
 
@@ -369,6 +373,7 @@ mod tests {
             nonce: 5,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         let mut executor = fresh_executor(chain_spec.clone(), seed);
 
@@ -486,6 +491,7 @@ mod tests {
             nonce: 5,
             code_hash,
             code: Some(code.clone()),
+            account_id: None,
         };
 
         // Serial: WrapExecutor over CacheDB<EmptyDB>, seeded identically.
@@ -607,6 +613,7 @@ mod tests {
             nonce: 1,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         let mut serial = fresh_executor(chain_spec.clone(), seed.clone());
         let mut grevm = fresh_grevm_executor(chain_spec.clone(), seed);

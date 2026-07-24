@@ -3,7 +3,7 @@ use crate::{
     table::{Decode, Encode},
     DatabaseError,
 };
-use alloy_primitives::BlockNumber;
+use alloy_primitives::{Address, BlockNumber};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
@@ -43,21 +43,33 @@ impl<T> ShardedKey<T> {
     }
 }
 
-impl<T: Encode> Encode for ShardedKey<T> {
-    type Encoded = Vec<u8>;
+/// Number of bytes in an encoded [`ShardedKey<Address>`]: 20-byte address + 8-byte BE block.
+const SHARDED_KEY_ADDRESS_BYTES_SIZE: usize = 20 + std::mem::size_of::<BlockNumber>();
+
+// Stack-allocated codec specialized for the only encoded shape, `ShardedKey<Address>` (the
+// `AccountsHistory` table key), avoiding a per-key heap allocation on the RocksDB history-index
+// write path (#21200). Bytes are identical to the previous `Vec<u8>` encoding:
+// `[20-byte address][8-byte big-endian block]`. All other `ShardedKey<T>` uses are `AsRef`-only
+// (`ShardedKey<B256>` is never encoded directly — `StorageShardedKey` encodes its fields itself).
+impl Encode for ShardedKey<Address> {
+    type Encoded = [u8; SHARDED_KEY_ADDRESS_BYTES_SIZE];
 
     fn encode(self) -> Self::Encoded {
-        let mut buf: Vec<u8> = Encode::encode(self.key).into();
-        buf.extend_from_slice(&self.highest_block_number.to_be_bytes());
+        let mut buf = [0u8; SHARDED_KEY_ADDRESS_BYTES_SIZE];
+        buf[..20].copy_from_slice(self.key.as_slice());
+        buf[20..].copy_from_slice(&self.highest_block_number.to_be_bytes());
         buf
     }
 }
 
-impl<T: Decode> Decode for ShardedKey<T> {
+impl Decode for ShardedKey<Address> {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        let (key, highest_tx_number) = value.split_last_chunk().ok_or(DatabaseError::Decode)?;
-        let key = T::decode(key)?;
-        let highest_tx_number = u64::from_be_bytes(*highest_tx_number);
-        Ok(Self::new(key, highest_tx_number))
+        if value.len() != SHARDED_KEY_ADDRESS_BYTES_SIZE {
+            return Err(DatabaseError::Decode)
+        }
+        let key = Address::from_slice(&value[..20]);
+        let highest_block_number =
+            u64::from_be_bytes(value[20..].try_into().map_err(|_| DatabaseError::Decode)?);
+        Ok(Self::new(key, highest_block_number))
     }
 }

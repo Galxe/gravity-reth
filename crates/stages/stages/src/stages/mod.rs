@@ -208,7 +208,7 @@ mod tests {
 
             if prune_modes.storage_history == Some(PruneMode::Full) {
                 // Full is not supported
-                assert!(acc_indexing_stage.execute(&provider, input).is_err());
+                assert!(storage_indexing_stage.execute(&provider, input).is_err());
             } else {
                 storage_indexing_stage.execute(&provider, input).unwrap();
 
@@ -223,7 +223,7 @@ mod tests {
 
         // In an unpruned configuration there is 1 receipt, 3 changed accounts and 1 changed
         // storage.
-        let mut prune = PruneModes::none();
+        let mut prune = PruneModes::default();
         check_pruning(test_db.factory.clone(), prune.clone(), 1, 3, 1).await;
 
         prune.receipts = Some(PruneMode::Full);

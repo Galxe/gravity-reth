@@ -1,4 +1,4 @@
-use alloy_eips::eip2718::Encodable2718;
+use alloy_consensus::transaction::TxHashRef;
 use alloy_primitives::{TxHash, TxNumber};
 use num_traits::Zero;
 use reth_config::config::{EtlConfig, TransactionLookupConfig};
@@ -213,7 +213,7 @@ where
             for tx_id in body.tx_num_range() {
                 // First delete the transaction and hash to id mapping
                 if let Some(transaction) = static_file_provider.transaction_by_id(tx_id)? &&
-                    tx_hash_number_cursor.seek_exact(transaction.trie_hash())?.is_some()
+                    tx_hash_number_cursor.seek_exact(*transaction.tx_hash())?.is_some()
                 {
                     tx_hash_number_cursor.delete_current()?;
                 }

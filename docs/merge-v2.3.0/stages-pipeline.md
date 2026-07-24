@@ -1,0 +1,566 @@
+# stages-pipeline
+
+## 分组概要
+
+- 文件数：17
+- 复杂度：高
+- baseline anchor：`0cb1687c1c`（gravity-reth main, 2026-06-09, 含 reth v1.8.3 catch-up `d620fd0eeb` PR #205）
+- target：reth v2.3.0
+- 涉及模块功能：
+  - `crates/stages/api/`：pipeline builder、runner（`run_loop` / `execute_stage_to_completion` / `unwind` / `on_stage_error`）、`Stage` / `StageExt` trait。
+  - `crates/stages/stages/`：stage set 装配（`DefaultStages` / `OnlineStages` / `OfflineStages` / `ExecutionStages` / `HashingStages` / `HistoryIndexingStages`）；各 stage 实现（`EraStage`、`HeaderStage`、`BodyStage`、`AccountHashingStage`、`StorageHashingStage`、`IndexAccountHistoryStage`、`IndexStorageHistoryStage`、`MerkleStage`、`SenderRecoveryStage`、`TransactionLookupStage`、`PruneStage`）；`stages/mod.rs` 中的集成测试；crate manifest。
+- 落在 baseline 上的 gravity-only commits（按本分组涉及文件统计）：
+  - `9acbf22633` PR #178 `fix(merkle): Update merkle in trunk when history sync`（`pipeline/mod.rs`，被 PR #246 回滚）
+  - `3ee6ac039e` PR #246 `fix(trie): fix merkle stage of history sync`（`pipeline/mod.rs`、`Cargo.toml`、`merkle.rs`、`prune.rs`）
+  - `3cd18422c9` PR #134 `use nested state root in history sync`（`merkle.rs` + 多文件 import 牵连）
+  - `671680af37` PR #149 `perf(state_root): compact trie node serialization and remove comptiable trie updates`（`Cargo.toml`、`merkle.rs`）
+  - `0b4091726c` PR #176 `fix(nested_hash): HashNode for leaf may not have hash`（`merkle.rs`）
+  - `1539b6cafc` PR #224 `opt(persist): not write index tables if validator node only`（`index_account_history.rs` 测试、`index_storage_history.rs` 测试、`stages/mod.rs`）
+  - `1224ae1846` PR #213 `refactor(parallel): remove the read provider factory that supports parallel reading`（本分组每个文件机械重命名 `<Provider, ProviderRO>` → `<Provider>`，但当前 worktree 看到的 baseline 文件头泛型反而是 `<ProviderRW>` — 见各文件说明）
+  - `24f03242db` PR #220 `refactor(fmt): nightly fmt`（每个文件的格式化噪声）
+  - `9974ad0618` PR #241 `fix(test): fix CI test of unit.yml`（`bodies.rs`、`hashing_account.rs`、`hashing_storage.rs`、`merkle.rs`、`mod.rs`、`sender_recovery.rs`、`tx_lookup.rs` 的测试断言；普遍把 `processed` 改成 `_` 因为 RocksDB `count_entries` 用 estimate-num-keys）
+  - `a1d7365bd6` PR #212 `feat(rocksdb): Integrating RocksDB into Reth`（仅触动 `Cargo.toml`，不直接改本分组其它文件）
+  - `acc458846c` PR #340 `fix(rocksdb): flush batch data into storage to make sure stage is completed`（`UnifiedStorageWriter::commit` 是 rocksdb batch 刷盘承重点；只读不改本分组文件，但 `pipeline/mod.rs` 中必须保留 `UnifiedStorageWriter::{commit, commit_unwind}` 调用）
+- 解决顺序依赖：
+  - **trie-all-layers** 先解决：`merkle.rs` 用了 `reth_trie_parallel::nested_hash::NestedStateRoot` 与 `provider.write_trie_updatesv2(&trie_updates_v2)`（gravity 独有）。上游 v2.3.0 改用 `reth_trie_db::with_adapter!(provider, |A| DbStateRoot::<_, A>::incremental_root_with_updates(provider, range))`。`merkle.rs` 跟随 trie-all-layers 分组的落地结果。
+  - **storage-db-and-mdbx** 先解决：provider trait bound（`StorageSettingsCache`、`ChangeSetReader`、`StorageChangeSetReader`、上游新的 `RocksDBProviderFactory`）+ `StaticFileProvider::check_consistency` 签名（gravity 多一个 `is_full_node: bool`）+ `BlockWriter::insert_block` vs `insert_historical_block` 命名 + `append_block_bodies` 去掉 `StorageLocation`。这些决策驱动 `prune.rs` / `bodies.rs` / `tx_lookup.rs` / `stages/mod.rs` / `hashing_*.rs` / `index_*_history.rs`。
+  - **chainspec/consensus** 先解决：`sets.rs` 的 `FullConsensus<E::Primitives, Error = ConsensusError>`（gravity 带显式 error 关联类型）vs `FullConsensus<E::Primitives>`（上游 PR #20843 收掉 `Consensus::Error` 关联类型）来自 `crates/consensus/consensus/src/lib.rs`。
+
+## ⟲ 现状核实与解块方向修正（2026-07-06，f89d9d4e23 + e9965cd3bf 之后）
+
+> 本节由核实轮补充，是本组解块的**权威方向表**；与下文逐文件分析冲突处以本节为准。
+> 基准：HEAD `a5e0201bd3`；实测手段 = 冲突标记清点 + 双基线对照（`0cb1687c1c` / `v2.3.0`）+ 符号存活扫描。
+> 裁决依据：决策总原则（2026-07-05 用户拍板，见 executed-block-split 文档 §九）：①storage 决策
+> （f89d9d4e23 整体还原 baseline）最高；②与之冲突的 v2.3.0 设计迎合 storage；③不冲突的在
+> 不破坏 gravity 功能前提下保留 v2.3.0 设计。
+
+### 三个顺序依赖已全部消解，本组无外部阻塞
+
+1. ~~等 trie-all-layers~~：f89d9d4e23 已把 trie 6 crate 整体还原 baseline。`NestedStateRoot` /
+   `write_trie_updatesv2`（storage-api/trie.rs + provider）/ `AccountsTrieV2`・`StoragesTrieV2`
+   （db-api/tables）全部存活（实测）；上游 `with_adapter!` / `DbStateRoot` /
+   `StorageRootMerkleCheckpoint` 全仓零定义（仅剩磁盘孤儿文件里的引用）。→ **merkle.rs
+   keep-gravity 定案**（开放问题 5）。
+2. ~~等 storage-db-and-mdbx~~：全部按 baseline 形态落定，签名实测见下表。
+3. ~~等 chainspec/consensus~~：consensus crate 未被还原、保持 v2.3.0——`FullConsensus<N>`
+   单参、无 `Error` 关联类型（consensus/consensus/src/lib.rs:74 实测）。→ sets.rs 采纳上游成立。
+
+### 符号存活实测（2026-07-06）
+
+| 类别 | 符号 | 状态 |
+|---|---|---|
+| gravity 承重 | `UnifiedStorageWriter::{commit, commit_unwind}`（writer/mod.rs:110）、`NestedStateRoot`、`write_trie_updatesv2`、`AccountsTrieV2`/`StoragesTrieV2`、`commit_view`（db-api/transaction.rs）、`insert_historical_block`（provider）、`save_prune_checkpoint`、`header_td_by_number` | **全部存活** ✓ |
+| 上游 storage-v2 | `EitherWriter`、`with_rocksdb_batch{,_auto_commit}`、`RocksDBProviderFactory`、`unwind_provider_rw`、`StorageRootMerkleCheckpoint`、`BlockRangeOutput`、`FastInstant`、`with_adapter!`/`DbStateRoot` | **全仓零定义（死）** |
+| 磁盘孤儿 | `StorageSettingsCache`（storage-api/metadata.rs 在盘、lib.rs 无挂载） | 不可引用 |
+| 存活可按需采纳 | `ChangeSetReader`/`StorageChangeSetReader`（baseline 旧 trait）、`reth_tasks::{spawn_os_thread, Runtime}`（v2.3.0 侧存活）、`std::sync::mpsc::SyncSender` | 按原则③处理 |
+
+> ⟲ 落地轮勘误（2026-07-06）：上表「上游 storage-v2」行两处误判——
+> ①`BlockRangeOutput`（连同 `TransactionRangeOutput`）实为**存活**：定义在
+> `crates/stages/api/src/stage.rs` 公共区（上游侧翻带入、自包含、无死依赖，且是已采纳的
+> sender-recovery prune-skip 语义载体），落地按原则③保留，4 个调用点已全组对齐；
+> ②`StorageRootMerkleCheckpoint` 在 **baseline 即存在**（`crates/stages/types/src/checkpoints.rs`，
+> v1.8.x 上游遗产，是 `MerkleCheckpoint.storage_root_checkpoint` 的字段类型），非 v2.3.0 新增、
+> 非死符号；merkle.rs 落地时剔除的是其 **import 漂移**（baseline merkle.rs 不 import 它），
+> 类型本身保留于 types crate。
+
+### baseline 签名回归实测（推翻原文多处 take-upstream 前提）
+
+| API | 当前形态（实测） | 对解块的影响 |
+|---|---|---|
+| `append_header`（static_file/writer.rs:522） | **三参含 `total_difficulty: U256`** | headers.rs / era.rs 不能纯采上游，td 泵线必须保留 |
+| `append_block_bodies`（storage-api/block_writer.rs:102） | **带 `write_to: StorageLocation`** | bodies.rs 生产代码**反转为 keep-gravity** |
+| `unwind_storage_hashing_range`（hashing.rs:58）/ `unwind_storage_history_indices_range`（history.rs:45） | 收 `impl RangeBounds<BlockNumberAddress>` | 保留 `BlockNumberAddress::range(range)` 调用形态 |
+| `check_consistency`（static_file/manager.rs:739） | 二参 `has_receipt_pruning: bool` | 保留双参调用。⟲ 纠正：该 bool 形参名为 `has_receipt_pruning`（v1.8.x 上游遗产、baseline 同名实测），原文「gravity 多一个 `is_full_node`」是 stages 测试侧的变量名，不是 manager 签名差异 |
+| `FullConsensus<N>`（consensus/lib.rs:74） | 单参无 Error | sets.rs 采纳上游成立 |
+| reth-era crate | v2.3.0 侧（`pub mod era1`，era/src/lib.rs:18） | era.rs import 必须取上游路径形态 |
+
+### 新增三个「零冲突侧翻」活断点（系统扫描全组零冲突文件，仅此三个）
+
+以下文件零冲突但整体落在 v2.3.0 侧、引用死符号，且 **gravity 增量 = 0**
+（`git diff v1.8.3 0cb1687c1c --` 三个文件均为空，复原无损）：
+
+| 文件 | 死符号 | 处置（开放问题 9-11） |
+|---|---|---|
+| `crates/stages/stages/src/stages/utils.rs` | 11 处（EitherWriter/with_rocksdb_batch/StorageSettings），且 baseline 的 `load_history_indices` 已不在（现为上游 `load_account_history`/`load_storage_history`） | **整文件复原 baseline** |
+| `crates/stages/stages/src/stages/execution/mod.rs` | 8 处（`EitherWriter::receipts_destination` 生产逻辑 :201、`StorageSettingsCache` bound :197/:274 等）+ 2 处 `Chain::new(.., BTreeMap::new())`（:433/:563，Chain 已回 baseline 签名） | **整文件复原 baseline**（顺带关闭 executed-block-split §九跨组台账中 stages 两处 `Chain::new` 断点） |
+| `crates/stages/stages/src/test_utils/test_db.rs` | 6 处（RocksDBProvider/StaticFileProviderBuilder 等） | **整文件复原 baseline**（顺带找回 `insert_headers_with_td`，与各 stage 测试保 baseline 形态配套） |
+
+### 每文件最终方向表
+
+| 文件 | 原建议 | ⟲ 最终方向（2026-07-06） |
+|---|---|---|
+| pipeline/builder.rs | 采纳上游 | 不变 ✓ |
+| pipeline/mod.rs | 机械合并 | 机械合并，一点反转：上游 `unwind_provider_rw().disable_long_read_transaction_safety()` **依赖死符号，改保 gravity `database_provider_rw()`**；其余采纳项（RAII unwind scope、safe-block 保存、`saturating_sub(1)`）与保留项（UnifiedStorageWriter 双调用、Instant 日志、无条件 MerkleExecute reset）不变 |
+| stage.rs | keep-gravity | **定案**（上游 mod tests 依赖 RocksDBProvider 等死符号，开放问题 1 已裁决） |
+| Cargo.toml | 机械合并 | 改为 **baseline 为底 + 按需增量**：headers.rs 采 RLP 则加 `alloy-rlp` 并去 bincode/serde-bincode-compat；上游 storage-v2 相关（`page_size`、`reth-trie-db` metrics 提升等）**不引入**；`reth-libmdbx`/`reth-tasks` 仅在解块后编译确需时加 |
+| sets.rs | 采纳上游 | 不变 ✓（`FullConsensus<N>` 单参、`PruneMode`、`EraImportSource`（era.rs:277）均实测存活）。caveat：`ExecutionStages` 内各 stage 构造点若与 baseline 复原后的 execution/mod.rs 签名不符，构造点回 baseline 形态（解块时核对，推断项） |
+| bodies.rs | 机械合并（生产采上游） | **生产代码反转 keep-gravity**（`append_block_bodies` 带 `StorageLocation`、`remove_bodies_above` 按 baseline 元数）；测试 setup 随 test_db.rs 复原保 baseline（`insert_headers_with_td` 回归）；PR #241 断言保留不变 |
+| era.rs | 采纳上游 | **改机械合并**：import 取上游路径（era crate 已 v2.3.0，冲突块 :8/:10 取 :10 形态）；td 泵线保 baseline（`append_header` 三参、`header_td_by_number` 存活）；跨组联动：`reth-era-utils`（1 个冲突文件）的导入助手须同向保 td 参数 |
+| hashing_account.rs | 机械合并 | 微调：上游 imports 的 `StorageSettingsCache`/`BlockRangeOutput` 死，剔除；其余不变 |
+| hashing_storage.rs | 机械合并 | 微调：`unwind_storage_hashing_range` **保 baseline `BlockNumberAddress::range(range)`**；死 import 剔除；PR #241 断言 + cursor 循环保留不变 |
+| headers.rs | 采纳上游 | **改机械合并**：bincode→RLP 采纳（开放问题 4 已裁决，etl 启动清理实测存在）；`append_header` 保三参 td；上游侧 `SealedHeader::new_unhashed` 构造器在当前 worktree 未定位到定义（实测 grep 无果），解块时以现存 SealedHeader API 编译驱动适配 |
+| index_account_history.rs / index_storage_history.rs | needs-port | **反转 keep-gravity/baseline**（`EitherWriter`/`with_rocksdb_batch` 死；utils.rs 复原后 `load_history_indices` 回归）；`unwind_storage_history_indices_range` 保 `BlockNumberAddress::range(range)`；PR #224 两参测试形态保留 |
+| merkle.rs | keep-gravity（待 trie-all-layers） | **定案 keep-gravity**（前置已消解，依赖符号全部实测存活） |
+| mod.rs（tests） | 机械合并 | 不变；`check_consistency` 双参调用保留（形参名纠正见签名表）；`insert_historical_block` 存活 ✓ |
+| prune.rs | 机械合并 | **定案**：trait bound 全按 baseline（开放问题 2/8 已裁决）；`commit_view()` 实测在公共区 :76，三个冲突块仅涉 imports/bounds 不触及该行（开放问题 7 核实通过） |
+| sender_recovery.rs | 采纳上游 | **改机械合并**：上游 `EitherWriter` 写路径 + `FastInstant` 死 → 写路径保 baseline cursor、计时用 `std::time::Instant`；可采纳项：`SyncSender` 限界通道、`reth_tasks::spawn_os_thread`、prune 跳过路径（`save_prune_checkpoint` 实测存活）；PR #241 断言保留 |
+| tx_lookup.rs | 跟随 storage-db-and-mdbx | **定案保 baseline 手写 cursor**（开放问题 3 已裁决）；可采纳：`TxHashRef` import、`Tables` 引入；PR #241 断言保留 |
+
+跨组提醒：①`reth-era-utils`（era.rs td 泵线联动，1 个冲突文件）；②node-builder 组解
+launch/common.rs（30 块）时须保留 :425-427 的 etl 启动清理段（公共区实测，开放问题 4 的依据）。
+
+## 逐文件分析
+
+> ⟲ 注意：下文为 f89d9d4e23 之前的分析存档。凡与上方「每文件最终方向表」冲突处，以方向表为准。
+
+### `crates/stages/api/src/pipeline/builder.rs`
+**模块：** `PipelineBuilder<…>` —— 单泛型 builder；`add_stage` / `add_stages` / `with_max_block` / `with_tip_sender`。
+**冲突类型：** UU
+**上游变更（v1.8.3 → v2.3.0）：**
+- `d278b75c3` PR #19923 `chore(stages): fix naming and simplify add_stages implementation` —— `add_stages` 由手写 for-loop `push` 改成 `extend(stages)`，`reserve_exact` 改为 `reserve`，局部变量 `states` → `stages`。doc 注释 `A receiver` → `A Sender`。
+- `3c3944459` PR #19655 `fix(stages): correct tip_tx field comment in PipelineBuilder` —— 同上 doc 注释修正。
+- 无语义变化。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** `1224ae1846` PR #213 把该文件的泛型参数从上游 v1.8.3 的 `<Provider>` 反向重命名为 `<ProviderRW>`（baseline `git show 0cb1687c1c:…/builder.rs` 显示当前是 `pub struct PipelineBuilder<ProviderRW>`，而上游 v1.8.3 已经是 `<Provider>`）。该重命名是纯文本，无语义变化。
+**影响范围：** Public API 签名。每个写成 `PipelineBuilder<DatabaseProviderRW<N>>` / `Stage<DatabaseProviderRW<N>>` 的调用点对泛型形参名无感。
+**解决方案建议：** 采纳上游 (take-upstream)
+**理由：** 上游 PR #19923 是 no-op 重构；gravity baseline 上 PR #213 的 `<ProviderRW>` 是反向命名，无任何语义价值 — 跟随上游对齐回 `<Provider>`，doc 注释也跟上游修正。
+
+### `crates/stages/api/src/pipeline/mod.rs`
+**模块：** `Pipeline<N>` —— 驱动 `run_loop` / `unwind` / `execute_stage_to_completion` / `on_stage_error`。
+**冲突类型：** UU（10 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `347c1325c` PR #23814 `fix: skip move_to_static_files for storage.v2` —— 在 imports 加入 `DBProvider`、`StorageSettingsCache`。
+- `4a6f9cd5c` PR #23335 `fix(provider): cap storage_v2 unwind history by MDBX tip` —— unwind 时把 `self.provider_factory.database_provider_rw()` 换成 `self.provider_factory.unwind_provider_rw()?.disable_long_read_transaction_safety()`。
+- `294e21507` PR #22995 `fix(provider): heal finalized/safe block numbers ahead of highest header` —— 在 unwind commit 块里新增 `last_saved_safe_block_number` 保存路径（注释从 "finalized block" 改为 "finalized and safe block"），同时把 `UnifiedStorageWriter::commit_unwind(provider_rw)?` 改为 `provider_rw.commit()?`（上游已删除 `UnifiedStorageWriter` writer 包装）。
+- `12cf3d685` PR #21311 `fix(provider): add CommitOrder for RocksDB/MDBX unwind atomicity` —— 把 `unwind` 入口对 `provider`、`prune_modes`、`checkpoints` 的取值收进一个 RAII 作用域块（避免长读事务跨越后续 unwind 循环）。
+- 上游同步把 `MissingStaticFileData` handler 里 `block.block.number - 1` 改为 `block.block.number.saturating_sub(1)`，避免 `block.number == 0` 时整数下溢。
+- 上游同步把 `Validation` 分支无条件 reset `MerkleExecute` 收窄为 `if stage_id == StageId::MerkleExecute` 时才执行。
+- 上游同步把 `stage(idx)` 的签名从 `&mut dyn Stage<DatabaseProviderRW<N>>` 改为 `&mut dyn Stage<<ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW>`（等价于内部 type alias 展开）。
+- 上游同步把 execute commit 路径的 `UnifiedStorageWriter::commit(provider_rw)?` 改为 `provider_rw.commit()?`，并且**没有** `let start = Instant::now()` + `execute_duration_ms` 日志。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：**
+- `9acbf22633` PR #178 引入 `SYNC_BATCH_SIZE: u64 = 10000` + `run_batch` 局部 target 循环，把 `to_block: Option<u64>` 透传到 `execute_stage_to_completion`，**已被** `3ee6ac039e` PR #246 反向回滚（baseline 上 `SYNC_BATCH_SIZE` 和 `run_batch` 都已经不存在 —— 在 `0cb1687c1c:.../pipeline/mod.rs` 中 grep 不到这两个符号）。
+- `3ee6ac039e` PR #246 在 execute 路径加入 `let start = Instant::now()`（行 ~476）+ commit 后的 `info!(target: "sync::pipeline", stage = %stage_id, prev_block, exec_output, execute_duration_ms = start.elapsed().as_millis(), "Stage has executed, …")`（行 ~483），并保留 `UnifiedStorageWriter::commit(provider_rw)?`。
+- baseline 保留 `UnifiedStorageWriter::commit_unwind(provider_rw)?`（行 ~392）和 `UnifiedStorageWriter::commit(provider_rw)?`（行 ~483 / ~589）—— `acc458846c` PR #340 依赖该 writer hook 把 rocksdb `WriteBatchWithIndex` 刷盘，没有它 staged-sync 写入永远停留在内存中。
+- baseline 中 `Validation` 分支**无条件** reset `MerkleExecute` 检查点（行 ~580 起），不带 `stage_id == StageId::MerkleExecute` 保护 —— 因为 gravity merkle 写 `TrieUpdatesV2`，任何 stage 失败都可能让 V2 trie 偏离已保存 checkpoint。
+- baseline 中 `MissingStaticFileData` 分支为 `block.block.number - 1`（无 `saturating_sub`，行 627）。
+- baseline 中 `stage(idx)` 签名为 `&mut dyn Stage<DatabaseProviderRW<N>>`（保留 type alias）。
+- baseline 中 unwind provider 构造为 `self.provider_factory.database_provider_rw()?`，没有 `disable_long_read_transaction_safety()`。
+**影响范围：** 影响每次节点启停。混合错误会导致 rocksdb 写入丢失（`acc458846c` 修复）或者 unwind 边界一字节偏差。破坏风险：高。
+**解决方案建议：** 机械合并 (mechanical-merge)
+**理由：**
+- imports 块：保留 gravity 的 `writer::UnifiedStorageWriter` import（commit_unwind/commit 调用点依赖），同时采纳上游新增的 `DBProvider`、`StorageSettingsCache`（后续 unwind 路径所需）。
+- `stage(idx)` 签名块（行 ~128）：采纳上游展开形式 `<ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW`，与 gravity `DatabaseProviderRW<N>` type alias 完全等价；表面变化无副作用。
+- `unwind` 入口 provider 作用域块（行 ~317）：采纳上游的 RAII let-bound `(latest_block, prune_modes, checkpoints) = { let provider = …; (…) };` —— `12cf3d685` 的 commit-order 修复必须落地。
+- unwind provider 构造（行 ~347）：采纳上游 `self.provider_factory.unwind_provider_rw()?.disable_long_read_transaction_safety()`（`4a6f9cd5c` storage v2 unwind cap 修复）。对 gravity rocksdb 后端 `disable_long_read_transaction_safety` 应为 no-op 或等价占位；若 rocksdb provider 上未实现该方法，本分组无法独立完成 — 必须等 storage-db-and-mdbx 落地后补适配。
+- finalized 注释 + safe-block 保存（行 ~411 + ~429）：采纳上游 `294e21507` 的 safe-block 保存路径与注释更新。
+- commit_unwind 调用（行 ~432）：**保留 gravity** `UnifiedStorageWriter::commit_unwind(provider_rw)?`（rocksdb 承重点）；安全地紧贴上面新加的 safe-block 保存块。
+- execute 路径 `let start = Instant::now()`（行 ~476）：**保留 gravity**（PR #246 marker）。
+- execute commit + 日志（行 ~481）：**保留 gravity** `UnifiedStorageWriter::commit(provider_rw)?` + `info!(…, execute_duration_ms, "Stage has executed, …")`（PR #246 marker；`UnifiedStorageWriter::commit` 是 rocksdb batch 刷盘承重点）。
+- Validation 分支 reset MerkleExecute（行 ~580）：**保留 gravity** 无条件 reset（gravity 把 merkle 绑定到 TrieWriterV2 状态，任何 validation 失败都可能破坏它）。
+- `block.number - 1`（行 ~627）：采纳上游 `saturating_sub(1)`（正确性，gravity 早晚自己也要打这个 patch）。
+
+### `crates/stages/api/src/stage.rs`
+**模块：** `Stage<Provider>` trait、`StageExt<Provider>` 扩展 trait。
+**冲突类型：** UU（1 个尾部冲突块）
+**上游变更（v1.8.3 → v2.3.0）：** 文件末尾加入 `#[cfg(test)] mod tests`，包含单测 `test_exec_input_next_block_range_with_transaction_threshold` —— 使用上游 storage-v2 的 `ProviderFactory::<MockNodeTypesWithDB>::new(create_test_rw_db(), MAINNET.clone(), StaticFileProviderBuilder::read_write(...).with_blocks_per_file(1).build().unwrap(), RocksDBProvider::builder(create_test_rocksdb_dir().0.keep()).build().unwrap(), reth_tasks::Runtime::test())`（5 个 `new` 参数，含上游 storage-v2 的 `RocksDBProvider`）。`662c0486a` PR #20253 `feat(storage): add rocksdb provider into database provider`、`95b8a8535` PR #19662 等多个 PR 累积引入。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** 仅 `1224ae1846` 重命名 + `24f03242db` 格式化 + `3cd18422c9` import 牵连（HEAD 一半到 `impl<Provider, S: Stage<Provider> + ?Sized> StageExt<Provider> for S {}` 之后即收尾，无 mod tests）。
+**影响范围：** 无生产代码冲突 —— 仅一个测试函数差异。但上游 mod tests 引入的 `RocksDBProvider`、`StaticFileProviderBuilder`、`reth_tasks::Runtime` 都需要 gravity-side 适配（gravity 的 `ProviderFactory::new` 元数不同，rocksdb provider 接入方式不同）。
+**解决方案建议：** 保留 gravity 侧 (keep-gravity) —— 丢弃上游 mod tests
+**理由：** 该 mod tests 的 `ProviderFactory::new` 5 参形态对应上游 storage-v2 的 rocksdb 接入；gravity 的 `ProviderFactory::new` 元数自 `a1d7365bd6` PR #212 RocksDB 集成以来与上游分歧，强 port 会触发 storage-db-and-mdbx 级联编译错误。该测试丢失不影响生产路径。开 open question 跟踪后续是否补 port。
+
+### `crates/stages/stages/Cargo.toml`
+**模块：** stages crate manifest。
+**冲突类型：** UU（11 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `8bb96ace6` PR #23158 `refactor: remove SerdeBincodeCompat trait, use RLP for block serialization` —— 去掉 `reth-primitives-traits` 上的 `serde-bincode-compat` feature。
+- `7551d9c5d` PR #23156 `refactor: remove bincode usage from HeaderStage`（与上游 `headers.rs` 联动）。
+- `b9969c5b1` PR #22954 `chore: remove rocksdb and edge feature gates, default to storage v2` —— 加入 `reth-libmdbx.workspace = true`、`reth-tasks.workspace = true`，把 `reth-trie = { workspace = true, features = ["metrics"] }` 提升为必选，加入 `reth-trie-db = { workspace = true, features = ["metrics"] }`。dev-deps `reth-db` 加 `mdbx` feature。
+- `598f228e2` PR #22627 `chore: remove criterion benchmarks and codspeed` —— 删除 `criterion` dev-dep 与 `[[bench]]` 块。
+- `815037e27` PR #22379 `feat(storage): slot preimage DB for plain changeset keys in v2` —— 加入 `page_size.workspace = true`。
+- `00f9bd2a9` PR #24494 `fix: use tx_hash for transaction identity` —— dev-deps 重组：`reth-downloaders` 加 `file-client` feature，加入 `reth-storage-api`、`alloy-genesis`、`alloy-eips`、`reth-db-common`。
+- 主线把 `alloy-rlp` 从 dev-dep 提升为 dep。
+- `[features].test-utils` 中 `reth-chainspec/test-utils`（无 `?`）和 `reth-trie-db/test-utils`、`reth-tasks/test-utils` 被加入。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：**
+- `a1d7365bd6` PR #212 RocksDB 集成 —— 影响该 manifest 的 dep 列表（pulls in rocksdb provider 间接依赖）。
+- `671680af37` PR #149 —— 把 `reth-trie` 改为 optional。
+- `3ee6ac039e` PR #246 —— 加入 `reth-trie = { workspace = true, optional = true }`，并让 `reth-trie-parallel` feature 拉入 `reth-trie`：`reth-trie-parallel = ["dep:reth-trie-parallel", "dep:reth-trie"]`；定义 `default = ["reth-trie-parallel"]`。
+- baseline 保留 `bincode.workspace = true` 与 `reth-primitives-traits = { workspace = true, features = ["serde-bincode-compat"] }`（用于 `headers.rs` 的 bincode ETL 路径）。
+- baseline 保留 `reth-downloaders.workspace = true`（无 `file-client` feature）。
+- baseline 保留 `criterion = { workspace = true, features = ["async_tokio"] }` dev-dep 与文件末尾 `[[bench]] name = "criterion"` 块。
+- baseline `reqwest = { workspace = true, default-features = false, features = ["rustls-tls-native-roots", "blocking"] }` —— 为 era downloader 显式锁定 rustls TLS。
+- baseline `[features].test-utils` 使用 `dep:reth-chainspec` + `reth-chainspec?/test-utils` optional-prefix 形式（因 `reth-chainspec` 在 dev-deps 中是 optional），同时含 `reth-trie-parallel/test-utils`、`reth-trie-db/test-utils`。
+**影响范围：** Crate 编译。上游移除 bincode 而 gravity `headers.rs` baseline 仍依赖 `bincode::deserialize::<serde_bincode_compat::SealedHeader>(…)`；如果 `headers.rs` 决策与 manifest 不配套会编译失败。
+**解决方案建议：** 机械合并 (mechanical-merge) —— 与 `headers.rs` 决策配套
+**理由：**
+- 保留 gravity `reth-trie = { workspace = true, optional = true }` + `reth-trie-parallel` feature 拉入 `reth-trie`（PR #246 marker，必须的，因为 `merkle.rs` 决策保留 `NestedStateRoot`）。
+- **与 headers.rs 决策配套**：如果 `headers.rs` 采纳上游 RLP（推荐），则去掉 `bincode.workspace = true` 与 `reth-primitives-traits` 的 `serde-bincode-compat` feature。
+- 采纳上游 `reth-libmdbx.workspace = true`、`reth-tasks.workspace = true`、`page_size.workspace = true`、`alloy-rlp.workspace = true`、`reth-trie-db = { workspace = true, features = ["metrics"] }`。
+- 保留 gravity `reqwest = { workspace = true, default-features = false, features = ["rustls-tls-native-roots", "blocking"] }`（gravity 构建环境绑 rustls）。
+- 保留 gravity `[features] default = ["reth-trie-parallel"]` + `reth-trie-parallel = ["dep:reth-trie-parallel", "dep:reth-trie"]` 块。
+- 采纳上游 dev-dep 增加：`alloy-genesis`、`alloy-eips`、`reth-db-common`、`reth-storage-api`、`reth-downloaders` 加 `file-client` feature。
+- 保留 gravity `criterion` dev-dep 与 `[[bench]]` 块（gravity 仍有活跃 stage 基准，由 bench 分组确认）。
+- 保留 gravity 的 `reth-chainspec?/test-utils` optional-prefix 形式 + `reth-trie-parallel/test-utils` 行。
+
+### `crates/stages/stages/src/sets.rs`
+**模块：** Stage-set 装配 —— `DefaultStages` / `OnlineStages` / `OfflineStages` / `ExecutionStages` / `HashingStages` / `HistoryIndexingStages`。
+**冲突类型：** UU（11 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `412f39e22` PR #20843 `chore(consensus): Remove associated type Consensus::Error` —— 所有 `FullConsensus<E::Primitives, Error = ConsensusError>` 收为 `FullConsensus<E::Primitives>`，imports 去掉 `ConsensusError`。
+- `7efaf4ca9` PR #20836 + `020eb6ad7` PR #19351 —— `EraStage::new` 改为条件插入：`if self.era_import_source.is_some() { builder = builder.add_stage(EraStage::new(self.era_import_source, …)); }`。
+- `352430cd8` PR #21918 `fix: skip sender recovery stage when senders fully pruned` —— `OfflineStages` 新增 `sender_recovery_prune_mode: Option<PruneMode>` 字段，透传到 `ExecutionStages::new(.., sender_recovery_prune_mode)`；`PruneStage` 改为无条件 `add_stage`（去掉原本的 `add_stage_opt(self.prune_modes.is_empty().not().then(...))`）。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** 仅 `1224ae1846` 形成的 `Provider`/`ProviderRO` 重命名牵连；本文件无 gravity-specific 业务改动。
+**影响范围：** Public stage-set 构造 API。所有 node builder 都要匹配 `FullConsensus<…>` 的新签名以及 `OfflineStages::new` / `ExecutionStages::new` 元数。
+**解决方案建议：** 采纳上游 (take-upstream)
+**理由：** 自 v1.8.3 catch-up 以来 gravity 无业务改动。`FullConsensus<…, Error = ConsensusError>` → `FullConsensus<…>` 由 chainspec/consensus 分组下游决定 — 默认采纳；`sender_recovery_prune_mode` 是上游新功能管线，无 gravity-specific 反对。
+
+### `crates/stages/stages/src/stages/bodies.rs`
+**模块：** `BodyStage<Downloader>` —— `provider.append_block_bodies(...)` 追加 block bodies，unwind 时 `remove_bodies_above(...)`。
+**冲突类型：** UU（6 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `b9969c5b1` PR #22954 / `058ffdc21` PR #18681 / `96c77fd8b` PR #20504 —— 去掉 `StorageLocation` 枚举。`provider.append_block_bodies(.., StorageLocation::StaticFiles)` → `provider.append_block_bodies(buffer.iter().map(|r| (r.block_number(), r.body())).collect())`；`remove_bodies_above(unwind_to, StorageLocation::Both)` → `remove_bodies_above(unwind_to)`。
+- `563ae0d30` PR #16660 `fix: drop support for total difficulty table` —— 测试 setup 把 `insert_headers_with_td` 切换为 `insert_headers`。
+- `39ef6216f` PR #19508 —— 测试 setup 包装 `if let Some((header, hash)) = …`（cursor API 返回 Option）。
+- `f53f90d71` PR #21686 —— `alloy_primitives::{Address, B256}` import 加入 `map::B256Map`。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** `9974ad0618` PR #241 把 mod tests 中多个 `processed == batch_size + 1` 断言改为 `processed: _`，加注释 `// RocksDB can't see uncommitted writes in count_entries`（rocksdb 不像 mdbx 那样能从未提交的 view tx 中看到自己的写入）。
+**影响范围：** 编译 + 测试断言。要匹配 storage-db-and-mdbx 分组的 `BlockWriter::append_block_bodies(impl IntoIterator)` 与 `remove_bodies_above(BlockNumber)` 新签名。
+**解决方案建议：** 机械合并 (mechanical-merge)
+**理由：**
+- 生产代码部分（imports、`append_block_bodies`、`remove_bodies_above`）：采纳上游 —— 去掉 `StorageLocation`。gravity 没有要保留 `StorageLocation` 语义的业务理由；`BlockWriter` trait 是否真去掉 `StorageLocation` 参数由 storage-db-and-mdbx 分组定，本分组跟随。
+- 测试 setup（`insert_headers_with_td` → `insert_headers`、`SealedHeader::new` Some/None 包装、`B256Map` import）：采纳上游 —— gravity 已合入 disable-PoW-rewards，TD 表对 gravity 无意义。
+- mod tests 断言部分：**保留 gravity** PR #241 的 `processed: _` + 注释（gravity rocksdb 不能从未提交的 view 里看到自己的写入 — 是真实运行时差异，上游 mdbx 默认能看见）。
+
+### `crates/stages/stages/src/stages/era.rs`
+**模块：** `EraStage<H>` —— 把合并前 era1 文件导入 static files + ETL 收集器。
+**冲突类型：** AA（两侧独立新增；merge base `75b7172cf7` 早于该文件，gravity 是从 `6b71a11f88` reth v1.5.0 catch-up 携带，upstream 是 `3218b3c63` PR #16008 引入）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `2ba17cf10` PR #19520 `refactor(era): move era types and file handling to new module` —— 模块路径重排：`reth_era::era1_file::Era1Reader` → `reth_era::era1::file::Era1Reader`；`reth_era::era_file_ops::StreamReader` → `reth_era::common::file_ops::StreamReader`。
+- `563ae0d30` PR #16660 + `e21048314` PR #19151 —— 移除 TD 管线：`static_file_provider.header_td_by_number(...)` 调用去掉，era 导入助手的 `&mut td` 参数去掉，测试断言去掉 TD 校验。`HeaderProvider` import 去掉。
+- `00f173307` PR #19000 `fix: Set Era pipeline stage to last checkpoint when there is no target` —— 无 era 文件时返回 `max(checkpoint, highest_header, target)`，`done` 条件放宽。
+- `020eb6ad7` PR #19351 + `7b2fbdcd5` PR #20516 —— 相关结构清理；imports 中去掉 `ProviderError`。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** 仅 `1224ae1846` 重命名 + `24f03242db` 格式化 + `3cd18422c9` import 牵连。gravity "ours" 版本 = v1.5.0 时期形态（pre-PR #19520 / pre-#16660）。
+**影响范围：** Era1 文件导入对 gravity 链 post-merge 启动**无业务意义**（无 pre-Merge header 需导入），但该 stage 仍要能编译，因为 `sets.rs` 把它装配进 `DefaultStages`（由 `era_import_source: Option<…>` 门控）。
+**解决方案建议：** 采纳上游 (take-upstream)
+**理由：** 自 v1.8.3 catch-up 以来 gravity 无业务改动。模块路径重命名 + TD 移除 + "no era files" fallback 均是上游严格改进；与 gravity 已合入 PR #293（disable PoW rewards）方向一致。`sets.rs` 采纳上游的 `if let Some(era_import_source)` 条件插入后，era.rs 在 gravity 部署中实际不会运行。
+
+### `crates/stages/stages/src/stages/hashing_account.rs`
+**模块：** `AccountHashingStage` —— 把 account changesets 回放进 `tables::HashedAccounts`。
+**冲突类型：** UU（6 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `e3fe6326b` PR #22042 + `ec982f868` PR #22206 —— imports 加入 `provider::StorageSettingsCache`，`reth_stages_api` 加入 `BlockRangeOutput`。
+- `936baf123` PR #19176 `refactor: remove FullNodePrimitives` —— 测试约束 `FullNodePrimitives` → `NodePrimitives`。
+- `96c77fd8b` PR #20504 `feat(storage): make insert_block() operate with references` —— 测试 setup `provider.insert_historical_block(...)` → `provider.insert_block(&...)`；imports 加入 `BlockWriter`。
+- `unwind_account_hashing_range` 调用前去掉旧注释 `// Aggregate all transition changesets …`。
+- 测试断言加上 `processed == total &&` 前置条件，`runner.db.table::<…>().unwrap().len()` → `runner.db.count_entries::<…>().unwrap()`（test-utils 访问器改名）。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** `9974ad0618` PR #241 把测试断言中的 `processed: _` 替换 `processed == total`（与 bodies.rs 同理）。无生产代码业务改动。
+**影响范围：** 仅编译 + 测试。`insert_historical_block` vs `insert_block(&recovered)` 的命名由 storage-db-and-mdbx 分组定。
+**解决方案建议：** 机械合并 (mechanical-merge)
+**理由：**
+- 生产路径（imports、trait bounds、`unwind_account_hashing_range` 调用、注释删除）：采纳上游。
+- 测试 setup `provider.insert_historical_block(...)` vs `provider.insert_block(&...)`：跟随 storage-db-and-mdbx 决策（默认保留 baseline 的 `insert_historical_block` —— gravity 的 `DatabaseProvider` 在 `crates/storage/provider/src/providers/database/provider.rs` 仍有该方法）。
+- 测试 trait bound `FullNodePrimitives` → `NodePrimitives`：采纳上游放宽。
+- 测试断言 `processed == total &&`：**保留 gravity** `processed: _` 形态（PR #241 marker — gravity rocksdb 限制）。
+
+### `crates/stages/stages/src/stages/hashing_storage.rs`
+**模块：** `StorageHashingStage` —— 把 storage slots 哈希进 `tables::HashedStorages`。
+**冲突类型：** UU（5 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `d8de8afa9` PR #22721 `fix(stages): bound storage hashing stages memory` —— 给 in-flight buffer 加上界。
+- `bd476289f` 间接 / `815037e27` PR #22379 / `effa0ab4c` PR #21528 —— slot preimage DB；imports 加入 `b256!`、`Address`。
+- `121160d24` PR #21115 + 上游 provider 简化：`unwind_storage_hashing_range(BlockNumberAddress::range(range))` → `unwind_storage_hashing_range(range)`（接受裸 `RangeInclusive<BlockNumber>`）。
+- 测试 hash collector 改为按块的 `tx_hash_numbers: Vec<(B256, u64)>` 批量插入 + `processed == total` 断言。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** `9974ad0618` PR #241 把 mod tests 断言 `processed == total` 改为 `processed: _, total: _`，附注 `// NOTE: Due to RocksDB limitation where count_entries uses estimate-num-keys which may not match actual count from cursor iteration, we only verify checkpoint structure exists.`；同时把 `while let Some((address, entry)) = storage_cursor.next()?` 改为 `storage_cursor.first()?` 定位 + `next()` 推进的循环（rocksdb cursor 行为差异）。
+**影响范围：** Provider 调用点签名要匹配 storage-db-and-mdbx 分组的 `unwind_storage_hashing_range` 元数；测试路径有 gravity-specific cursor 处理。
+**解决方案建议：** 机械合并 (mechanical-merge)
+**理由：**
+- 生产路径（imports `b256!`、上界 buffer、slot preimage 处理）：采纳上游。
+- `unwind_storage_hashing_range` 调用形态：跟随 storage-db-and-mdbx 决策（默认采纳上游裸 `range`，若 provider 仍要 `BlockNumberAddress::range(range)` 则回退该调用）。
+- mod tests 断言：**保留 gravity** PR #241 形态（`processed: _, total: _` + 注释）。
+- mod tests cursor 循环：**保留 gravity** `storage_cursor.first()?` + `current = storage_cursor.next()?` 模式（rocksdb cursor 行为；本分组无法独立改 cursor 语义）。
+- 测试 setup `tx_hash_numbers` 批量插入：采纳上游（不写入 `tables::TransactionHashNumbers` cursor 时同样能 build 起测试 fixture）。
+
+### `crates/stages/stages/src/stages/headers.rs`
+**模块：** `HeaderStage<Provider, Downloader>` —— 下载 headers、ETL 收集、写入 static files。
+**冲突类型：** UU（12 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `7551d9c5d` PR #23156 `refactor: remove bincode usage from HeaderStage` —— `bincode::deserialize::<serde_bincode_compat::SealedHeader<…>>(&header_buf)` → `SealedHeader::new_unhashed(Decodable::decode(&mut header_buf.as_slice())…)`；collector value 注释从 `BincodeSealedHeader` 改为 `RLP-encoded SealedHeader`；写入路径 `bincode::serialize(&serde_bincode_compat::SealedHeader::from(&header))` → `alloy_rlp::encode(&*header)`。
+- `8bb96ace6` PR #23158 —— 同方向，去掉 `serde_bincode_compat` import。
+- `e21048314` PR #19151 + `563ae0d30` PR #16660 —— `writer.append_header(header, td, header_hash)` → `writer.append_header(header, header_hash)`；去掉 `// Increase total difficulty` 块；测试去掉 `provider.header_td_by_number` 断言。
+- `ff8ac97e3` PR #21258 `fix(stages): clear ETL collectors on HeaderStage error paths` —— 把内联 `self.sync_gap = None` 抽成辅助函数 `self.clear_etl_state()`（错误路径同时清 ETL）。
+- imports 去掉 `serde_bincode_compat`、`HeaderSyncGapProvider`、`ProviderError`；加入 `HeaderTy`、`alloy_rlp::Decodable`。
+- 测试 setup `random_header_range(.., tip.number..tip.number + 10, ..)` → `tip.number + 1..tip.number + 10`（修复 off-by-one），unwind 测试改用 `provider.database_provider_rw()` + 直接 static file writer 而不是 `append_blocks_with_state`。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** 仅 `1224ae1846` 重命名 + `24f03242db` 格式化 + `3cd18422c9` import 牵连。本文件无 gravity-specific 业务改动。
+**影响范围：** ETL collector 序列化格式变化（bincode → RLP）。仅在升级时磁盘上残留半成品 ETL 临时目录才有兼容性问题；gravity 启动是全新开始 + reth 上游已在启动时清 ETL（PR #16770），需核对 gravity 是否同步。
+**解决方案建议：** 采纳上游 (take-upstream)
+**理由：** gravity 在本文件上无业务改动。bincode → RLP 是无 gravity-specific 反对意见的纯改进；TD 移除与 gravity 的 disable-PoW-rewards 方向一致；`clear_etl_state()` 是正确性改进。`Cargo.toml` 决策需与本文件配套去掉 `bincode` + `serde-bincode-compat`。
+
+### `crates/stages/stages/src/stages/index_account_history.rs`
+**模块：** `IndexAccountHistoryStage` —— 根据 changesets 构建 `tables::AccountsHistory` shard 索引。
+**冲突类型：** UU（3 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `bd144a4c4` PR #21165 + `a0df56111` PR #21334 + `b81489322` PR #21367 + `ab418642b` PR #21374 + `e3fe6326b` PR #22042 + `b9969c5b1` PR #22954 —— 上游把 collect/load 逻辑搬到专门的 `collect_account_history_indices` / `load_account_history`，加入 `provider.with_rocksdb_batch_auto_commit(|rocksdb_batch| { let mut writer = EitherWriter::new_accounts_history(provider, rocksdb_batch)?; load_account_history(collector, first_sync, &mut writer)?; … })` + `if use_rocksdb { provider.commit_pending_rocksdb_batches()?; provider.rocksdb_provider().flush(&[Tables::AccountsHistory.name()])?; }`。注意：**`with_rocksdb_batch_auto_commit` 是上游 v2.3.0 storage-v2 自己实现的 rocksdb API，与 gravity 的同名方法非同源**。
+- imports 加入 `EitherWriter`、`RocksDBProviderFactory`、`StorageSettingsCache`、`Tables`；去掉 `alloy_primitives::Address`、`reth_db_api::table::Decode`。
+- 测试 imports 加入 `Address`（用于新测试数据构造）。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** `1539b6cafc` PR #224 只动了 mod tests（把 `stage.execute(&provider, Box::new(move || factory.database_provider_ro()), input)` 这种三参形态收回到 `stage.execute(&provider, input)` 两参形态，因为 gravity 自己的 read provider factory 在 PR #213 之后已去除）。**baseline 生产路径中无 `with_rocksdb_batch_auto_commit` 调用 —— 用 `git show 0cb1687c1c:crates/stages/stages/src/stages/index_account_history.rs` 核对，execute body 仍是 `collect_history_indices` + `load_history_indices::<_, tables::AccountsHistory, _>`，没有 validator-only 判断、没有 `GravityConfig::disable_index_tables`、没有 rocksdb-batch 包装。**
+**影响范围：** Index 写入路径。上游引入 `EitherWriter`、`RocksDBProviderFactory`、`Tables` 全部依赖 storage-db-and-mdbx 分组的 provider 提供。
+**解决方案建议：** 跟随 storage-db-and-mdbx (needs-port / take-upstream-after-port)
+**理由：** baseline 在本文件**没有** gravity-specific 业务改动（PR #224 只动了测试调用形态）；可以直接采纳上游写法，但前提是 gravity 的 `DBProvider` 实现 `with_rocksdb_batch_auto_commit`、`commit_pending_rocksdb_batches`、`rocksdb_provider().flush(...)`、`RocksDBProviderFactory`、`EitherWriter::new_accounts_history` 这一整套上游 storage-v2 trait/类型 — 这是 storage-db-and-mdbx 分组的工作。如果 storage-db-and-mdbx 决定保留 gravity 自己的 rocksdb 接入（不抄上游 `RocksDBProviderFactory`），本文件需要回退到 baseline 的 `load_history_indices::<_, tables::AccountsHistory, _>(provider, collector, first_sync, ShardedKey::new, ShardedKey::<Address>::decode_owned, |key| key.key)?` 形态。测试调用形态：保留 gravity 的两参形式（PR #224 marker）。
+
+### `crates/stages/stages/src/stages/index_storage_history.rs`
+**模块：** `IndexStorageHistoryStage` —— 构建 `tables::StoragesHistory` shard 索引。
+**冲突类型：** UU（3 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：** 形态与 `index_account_history.rs` 一致 —— `collect_storage_history_indices` + `load_storage_history`、`with_rocksdb_batch_auto_commit` + `EitherWriter::new_storages_history`、`RocksDBProviderFactory` trait bound、`provider.unwind_storage_history_indices_range(BlockNumberAddress::range(range))` → `provider.unwind_storage_history_indices_range(range)`。imports 去掉 `table::Decode`。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** 同 `index_account_history.rs` —— `1539b6cafc` PR #224 只动测试调用形态；baseline 生产路径无 `with_rocksdb_batch_auto_commit`、`disable_index_tables`、`validator-only` 等 gravity-specific 路径。baseline 仍保留 `provider.unwind_storage_history_indices_range(BlockNumberAddress::range(range))` 形态。
+**影响范围：** 与 `index_account_history.rs` 同。
+**解决方案建议：** 跟随 storage-db-and-mdbx (needs-port / take-upstream-after-port)
+**理由：** 同 `index_account_history.rs`。`unwind_storage_history_indices_range` 的参数形态由 storage-db-and-mdbx 落地决定 —— 默认采纳上游裸 `range`，若 provider 仍要 `BlockNumberAddress::range(range)` 则保留 baseline 形态。
+
+### `crates/stages/stages/src/stages/merkle.rs`
+**模块：** `MerkleStage` —— 计算中间 state root，写入 `tables::AccountsTrieV2` / `StoragesTrieV2`。
+**冲突类型：** UU（13 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `80bf5532a` PR #22158 `perf(trie): pack StoredNibblesSubKey from 65→33 bytes, generic cursor factory` —— 重构 trie cursor factory；引入 `reth_trie_db::with_adapter!(provider, |A| { DbStateRoot::<_, A>::… })` 宏，trie provider 改为 adapter-bound 形式。
+- `b9969c5b1` PR #22954 + `e3fe6326b` PR #22042 —— `Stage<Provider>` trait bound 新增 `ChangeSetReader + StorageChangeSetReader + StorageSettingsCache`；imports 加入这三个 + `KECCAK_EMPTY`、`IntermediateStateRootState`、`StateRoot`、`StateRootProgress`、`StoredSubNode`、`reth_trie_db::DatabaseStateRoot`、`StorageRootMerkleCheckpoint`。去掉 `cursor::DbCursorRO`、`HashedPostState`、`HashedStorage`、`EMPTY_ROOT_HASH`、`NestedStateRoot`。
+- `52a259237` PR #24267 `fix(stages): fix off-by-one bug` —— 增量 chunk 推进的 off-by-one 修复。
+- 增量循环改写为 `for start_block in range.step_by(incremental_threshold as usize) { let chunk_to = std::cmp::min(start_block + incremental_threshold - 1, to_block); … reth_trie_db::with_adapter!(provider, |A| { DbStateRoot::<_, A>::incremental_root_with_updates(provider, chunk_range) })?; provider.write_trie_updates(updates)?; }`，并在循环后强制 `let final_root = final_root.ok_or(StageError::Fatal("Incremental merkle hashing did not produce a final root".into()))?;`。
+- "全量重建"路径改用上游的 checkpoint 序列化 + storage root state（含 `StorageRootMerkleCheckpoint`），`provider.write_trie_updates(updates)?`。
+- 上游写日志用 `debug!`，gravity 用 `info!`。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：**
+- `3cd18422c9` PR #134 `use nested state root in history sync` —— 引入 `NestedStateRoot::new(provider.tx_ref(), None).calculate(&hashed_state)`，把 trie 重建分为"chunk-by-chunk 重建" + "增量更新"两条路径。
+- `671680af37` PR #149 —— 移除与上游 TrieUpdates V1 的兼容；gravity 改用 `write_trie_updatesv2(&trie_updates_v2)` + `tables::AccountsTrieV2` / `tables::StoragesTrieV2` + `commit_view()`。
+- `0b4091726c` PR #176 `fix(nested_hash): HashNode for leaf may not have hash` —— 边角修复。
+- `3ee6ac039e` PR #246 —— 最终的 history-sync merkle 修复（与 `pipeline/mod.rs` 配套）。
+- baseline 生产路径用 `HashedPostState` / `HashedStorage` 做手工 walk_account 循环（不是上游基于 `range` 的 `incremental_root_with_updates`）；trait bound 含 `TrieWriterV2`；log target 为 `"sync::stages::merkle::exec"`，消息为 `"Rebuilding trie from hashed state"` / `"Incremental updating trie in chunks"`。
+**影响范围：** 核心 state root 计算 —— 直接决定共识 state_root 字段。混合会造成 chain-halt（一字节偏差即停链）。
+**解决方案建议：** 保留 gravity 侧 (keep-gravity) —— 顺序依赖 trie-all-layers 分组
+**理由：** 四个 gravity-marker commits（`3cd18422c9` / `671680af37` / `0b4091726c` / `3ee6ac039e`）落在 baseline 上构成承重路径。`NestedStateRoot` / `TrieUpdatesV2` / `write_trie_updatesv2` / `commit_view` 全是 gravity 独有的符号，必须保留。但本文件依赖的符号是否还存在由 trie-all-layers 分组决定 —— 如果 trie-all-layers 采纳上游 `with_adapter!` + `DbStateRoot::<_, A>` 并移除 `NestedStateRoot`，本文件必须按上游重写（gravity 共识改打 v1 trie 才能保 PR #149 之前的兼容）。**这是 chain-halt 关键路径，必须等 trie-all-layers 给出明确结论后再决定。**
+
+### `crates/stages/stages/src/stages/mod.rs`
+**模块：** `stages` 模块 —— re-exports + 集成测试。
+**冲突类型：** UU（8 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `a0df56111` PR #21334 + `a74cb9cbc` PR #20997 + `96c77fd8b` PR #20504 —— 测试 imports 加入 `reth_db::mdbx::{cursor::Cursor, RW}`、`BlockWriter`；`provider_rw.insert_historical_block(genesis.try_recover().unwrap())` → 拆成一个跟踪 `head` 变量的循环用 `provider_rw.insert_block(&block.try_recover().unwrap())`（注意上游把 `let mut head = block.hash();` 提到循环上方）。
+- `static_file_provider.check_consistency(&provider, is_full_node)` → `check_consistency(&provider)`（上游去掉 `is_full_node` bool）。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：**
+- `1539b6cafc` PR #224 大量动测试（baseline 中 `git show 0cb1687c1c:crates/stages/stages/src/stages/mod.rs | grep -n is_full_node` 仍看到 `is_full_node: bool` 参数和四处 `check_consistency(&provider, is_full_node)` / `check_consistency(&provider, false)` 调用；`provider_rw.insert_historical_block(…)` 在第 94/95/107 行仍是原形态）。
+- `is_full_node: bool` 是 gravity 区分 archive/full 与 validator-only 的 runtime 标志，传入生产路径 `crates/storage/provider/src/providers/static_file/manager.rs::check_consistency` —— 那个签名决策属于 storage-db-and-mdbx 分组。
+**影响范围：** 仅集成测试 —— 但 `check_consistency(provider, is_full_node)` 这个参数透传到生产 manager.rs 的签名，是承重决策点。
+**解决方案建议：** 机械合并 (mechanical-merge)
+**理由：**
+- 测试 imports：丢掉上游的 `reth_db::mdbx::{cursor::Cursor, RW}` —— gravity 测试不构造 mdbx-cursor 直接句柄。保留 gravity imports 形态。
+- `provider_rw.insert_historical_block` vs `insert_block(&…)`：跟随 storage-db-and-mdbx 决策；默认**保留** gravity baseline 的 `insert_historical_block`（baseline `0cb1687c1c:crates/storage/provider/src/providers/database/provider.rs` 中该方法仍存在）。
+- `check_consistency(&provider, is_full_node)` 全部调用点：**保留 gravity** `is_full_node` 参数（PR #224 marker；与 manager.rs 的 gravity 签名匹配）。
+
+### `crates/stages/stages/src/stages/prune.rs`
+**模块：** `PruneStage` / `PruneSenderRecoveryStage` —— 在配置的 segments 上跑 pruner。
+**冲突类型：** UU（3 个冲突块 —— 全部位于 trait bound 列表)
+**上游变更（v1.8.3 → v2.3.0）：**
+- `b9969c5b1` PR #22954 + `e3fe6326b` PR #22042 + `9f8c22e2c` PR #21331 —— `PruneStage` / `PruneSenderRecoveryStage` 的 `Provider` trait bound 新增 `ChainStateBlockReader + StageCheckpointReader + StorageSettingsCache + ChangeSetReader + StorageChangeSetReader + RocksDBProviderFactory`。
+- imports 中去掉 `use reth_db::transaction::DbTx;`（上游 execute body 中 `provider.tx_ref().commit_view()?` 调用已不存在，因此该 trait import 也无用）。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：**
+- `3ee6ac039e` PR #246 在 PruneStage execute body 内 `pruner.run_with_provider(provider, input.target())?` 之后保留 `provider.tx_ref().commit_view()?`（baseline `git show 0cb1687c1c:crates/stages/stages/src/stages/prune.rs:61` 验证）—— `commit_view` 是 gravity rocksdb 的 view-transaction commit（`crates/storage/db-api/src/transaction.rs:47` 定义；`crates/storage/db/src/implementation/rocksdb/tx.rs:264` 实现），对 mdbx 是 no-op (`Ok(false)`)。**该调用在当前 worktree 的冲突 diff 中未出现 —— 说明 baseline 与上游在 execute body 中并未在同一行冲突；冲突仅在 imports + trait bound 列表，需要在合并产物里手动确保这一行保留。**
+- 不需要上游的 `RocksDBProviderFactory` trait bound —— gravity 的 rocksdb 通过 `crates/storage/provider/src/providers/rocksdb/provider.rs` 的 `RocksDBProvider` + `DBProvider` 暴露。
+**影响范围：** Prune 执行 —— `commit_view()` 是 gravity rocksdb 真正把 prune 删除刷盘的承重点；缺它 pruned 字节直到下一个 stage commit 才落盘。
+**解决方案建议：** 机械合并 (mechanical-merge)
+**理由：**
+- imports：**保留** gravity `use reth_db::transaction::DbTx;`（execute body 中 `commit_view()` 依赖该 trait import）。
+- trait bound：丢掉上游 `RocksDBProviderFactory`（gravity rocksdb 接入方式不同；强加该 bound 会触发 gravity provider 树编译错误）。`StorageSettingsCache + ChangeSetReader + StorageChangeSetReader` 三个是否采纳跟随 storage-db-and-mdbx 决策 —— 保守做法：先丢，必要时补 fix-up commit。采纳上游新增的 `ChainStateBlockReader + StageCheckpointReader`（gravity `DBProvider` 实现已经提供）。
+- 合并产物里 **必须手动确认** `provider.tx_ref().commit_view()?` 调用仍位于 `pruner.run_with_provider(...)?` 之后 —— 这是 PR #246 marker；在当前 conflict 范围之外，但若上游 merge 工具误删需要立刻补回。
+
+### `crates/stages/stages/src/stages/sender_recovery.rs`
+**模块：** `SenderRecoveryStage` —— 并行 ECDSA recover，写入 `tables::TransactionSenders`。
+**冲突类型：** UU（12 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `ec982f868` PR #22206 `perf: bound more channels with known upper limits` —— `RecoveryResultSender` 的 `mpsc::Sender` → `mpsc::SyncSender`。
+- `46d670eca` PR #20972 + `e86c5fba5` PR #20897 + `cd8fec327` PR #20428 —— 引入 `EitherWriter<'_, CURSOR, Provider::Primitives>` writer 抽象（写 mdbx cursor 或 static file segment）。`recover_range(range, provider, tx_batch_sender, &mut senders_cursor)` → `recover_range(range, block_numbers, provider, tx_batch_sender, &mut writer)`（多出 `block_numbers: Vec<BlockNumber>` 用于 static-file 模式 + `writer.ensure_at_block(end_block)?`）。
+- `352430cd8` PR #21918 + `c558c1d10` PR #21988 —— execute 加入 prune 跳过路径：`if let Some((target_prunable_block, prune_mode)) = … { input.checkpoint = Some(StageCheckpoint::new(target_prunable_block)); … provider.save_prune_checkpoint(PruneSegment::SenderRecovery, …); }`。
+- `7594e1513` PR #22211 `perf: replace some std::time::Instant with quanta::Instant` —— `use reth_primitives_traits::FastInstant as Instant;` + 外层 `let start = Instant::now()`。
+- `386b774ed` PR #21788 `refactor: use spawn_os_thread for better tokio integration` —— `std::thread::spawn(move || …)` → `reth_tasks::spawn_os_thread("sender-recovery", move || …)`。
+- 测试 imports 加入 `reth_db_api::models::StorageSettings`、`reth_static_file_types::StaticFileSegment`。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** `9974ad0618` PR #241 改了两处测试断言（`processed: 1` → `processed: _`；`assert_eq!` 形态改 `assert_matches!`），无生产代码业务改动。
+**影响范围：** 编译 + 性能。上游 `EitherWriter` + `reth_tasks::spawn_os_thread` 依赖 `reth-tasks` 在 Cargo 已是必选（与上游 Cargo 改动配套）。
+**解决方案建议：** 采纳上游 (take-upstream)
+**理由：** gravity 在本文件无生产侧业务改动。上游 `SyncSender` 限界 channel + `EitherWriter` + `reth_tasks::spawn_os_thread` + prune 跳过 + `FastInstant` 全是严格改进，与 gravity 的 pipe-exec 模型不冲突（gravity 仍需 sender recover 给下游 stage 用）。测试断言部分：保留 gravity PR #241 的 `processed: _` + `assert_matches!` 形态。
+
+### `crates/stages/stages/src/stages/tx_lookup.rs`
+**模块：** `TransactionLookupStage` —— 构建 `tables::TransactionHashNumbers`。
+**冲突类型：** UU（9 个冲突块）
+**上游变更（v1.8.3 → v2.3.0）：**
+- `00f9bd2a9` PR #24494 `fix: use tx_hash for transaction identity` —— `alloy_eips::eip2718::Encodable2718` import 改为 `alloy_consensus::transaction::TxHashRef`；imports 加入 `reth_db_api::{table::{Decode, Decompress, Value}, …, Tables}`。
+- `b9969c5b1` PR #22954 + `7f970e136` PR #21722 + `b81489322` PR #21367 + `a0df56111` PR #21334 —— trait bound 加入 `StorageSettingsCache + RocksDBProviderFactory`。execute 路径中手工 cursor `txhash_cursor.append/insert` 改为 `provider.with_rocksdb_batch_auto_commit(|rocksdb_batch| { let mut writer = EitherWriter::new_transaction_hash_numbers(provider, rocksdb_batch)?; … writer.put_transaction_hash_number(hash, tx_num, append_only)?; … })`。
+- unwind 路径 `tx_hash_number_cursor.seek_exact / delete_current` 改为 `provider.with_rocksdb_batch(|rocksdb_batch| { let mut writer = EitherWriter::new_transaction_hash_numbers(provider, rocksdb_batch)?; … writer.delete_transaction_hash_number(*transaction.tx_hash())?; … })`。
+- 测试 imports 去掉 `StaticFileProviderFactory`，加入 `cursor::DbCursorRO`；断言 `static_file_provider().count_entries::<…>()` → `db.count_entries::<tables::Transactions>()` + `processed == total &&` 前置。
+**Gravity 侧变更（在 baseline `0cb1687c1c` 上）：** `9974ad0618` PR #241 把测试断言 `processed` 改为 `processed: _`，保留 baseline 的 `runner.db.factory.static_file_provider().count_entries::<tables::Transactions>().unwrap()` 形态。生产路径无 gravity-specific 业务改动 —— execute 是手写 cursor、unwind 是手写 `seek_exact + delete_current`。
+**影响范围：** 类型 imports + provider API 形态。**关键风险**：上游的 `with_rocksdb_batch` / `with_rocksdb_batch_auto_commit` 是上游 storage-v2 自己实现的 rocksdb API，命名与 gravity PR #212 在 `crates/storage/provider/src/providers/rocksdb/provider.rs` 上的同名 API 相同，但 closure 签名（接受 `&mut WriteBatchWithIndex` vs 上游自家的 batch 类型）可能不一致。
+**解决方案建议：** 跟随 storage-db-and-mdbx (mechanical-merge / take-upstream-after-port)
+**理由：** gravity 在本文件无生产业务改动，可采纳上游 `EitherWriter` / `with_rocksdb_batch*` 写法，但前提是 storage-db-and-mdbx 分组确认 gravity 的 `RocksDBProvider` 实现了与上游兼容的 `with_rocksdb_batch_auto_commit(|batch| F)` + `EitherWriter::new_transaction_hash_numbers` + `RocksDBProviderFactory`。如果签名分歧，本文件需要保留 baseline 的手写 cursor 路径。`TxHashRef` import + `Tables` 引入 + 测试 `processed: _` (gravity PR #241) 三块是独立的、可干净落地。
+
+## 分组级解决方案 playbook
+
+按以下顺序执行：
+
+> ⟲ 2026-07-06：原第 1-3 步的三个外部等待**已全部消解**（证据见「现状核实」节），本组无外部
+> 阻塞、即刻可开工。开工首步为复原三个侧翻文件（开放问题 9-11），它们是多个 stage 文件
+> 解块的编译前提（`load_history_indices` / `insert_headers_with_td` / `ExecutionStage` 签名）。
+
+1. ~~等待 chainspec/consensus~~ **已消解**：`FullConsensus<N>` 单参定版（consensus/lib.rs:74 实测），`sets.rs` 采纳上游。
+2. ~~等待 storage-db-and-mdbx~~ **已消解**，全部按 baseline 落定（实测）：`check_consistency` 双参（形参名 `has_receipt_pruning`）、保留 `insert_historical_block`、`append_block_bodies` **保留 `StorageLocation`**、`unwind_*range` 收 `BlockNumberAddress::range(...)`、`RocksDBProviderFactory` 与 `with_rocksdb_batch*`/`EitherWriter` 全仓零定义（不引入）。
+3. ~~等待 trie-all-layers~~ **已消解**：`NestedStateRoot` / `write_trie_updatesv2` / `AccountsTrieV2`・`StoragesTrieV2` 全部存活，merkle.rs keep-gravity 定案。
+4. 逐文件应用 —— ⟲ 方向以「现状核实」节的**每文件最终方向表**为准，下列原始指引与其冲突处已过时（存档保留）：
+   - `Cargo.toml` 优先（解决依赖图）；该文件改完后 `cargo check -p reth-stages`。
+   - `stage.rs`：保留 gravity 侧（丢上游 mod tests）。
+   - `pipeline/builder.rs`：采纳上游。
+   - `pipeline/mod.rs`：按上文 10 块指南机械合并。**保留** `UnifiedStorageWriter::{commit, commit_unwind}` + `Instant::now()` + `execute_duration_ms` 日志 + 无条件 MerkleExecute reset。**采纳上游**的 `unwind_provider_rw().disable_long_read_transaction_safety()`、safe-block 保存、`saturating_sub(1)`、RAII unwind scope。
+   - `sets.rs`：采纳上游。
+   - `bodies.rs`：生产代码采纳上游；测试断言保留 gravity PR #241。
+   - `era.rs`：采纳上游。
+   - `headers.rs`：采纳上游（与 Cargo.toml 去 bincode 配套）。
+   - `hashing_account.rs`：生产代码采纳上游；测试断言保留 gravity PR #241。
+   - `hashing_storage.rs`：生产代码采纳上游；测试断言 + cursor 循环保留 gravity PR #241。
+   - `merkle.rs`：保留 gravity 侧（在 trie-all-layers 之后）。
+   - `mod.rs`（tests）：保留 gravity `check_consistency(provider, is_full_node)` 调用 + `insert_historical_block` 测试 setup；丢上游 mdbx::Cursor/RW imports。
+   - `index_account_history.rs` / `index_storage_history.rs`：跟随 storage-db-and-mdbx；保留 gravity PR #224 的两参测试调用形态。
+   - `prune.rs`：机械合并 —— 保留 gravity `commit_view()` 调用 + `use reth_db::transaction::DbTx;` import；丢上游 `RocksDBProviderFactory` bound；采纳上游 `ChainStateBlockReader + StageCheckpointReader`。
+   - `sender_recovery.rs`：采纳上游；测试断言保留 gravity PR #241。
+   - `tx_lookup.rs`：跟随 storage-db-and-mdbx；`TxHashRef` import + 测试断言 (gravity PR #241) 干净落地。
+5. 验证：⟲ cargo 当前不可用（workspace 缺约 20 个 dep，归 cargo 组），落地验收 = 冲突标记归零 + rustfmt parse + 死符号扫描；cargo 修复后回补 `RUSTFLAGS=-D warnings cargo check -p reth-stages -p reth-stages-api --all-features`。（原「trie-all-layers 选 with_adapter!」情形已不存在。）
+
+## 开放问题
+
+> **决策追踪 checklist**:每条两个勾选框 —「决策」勾选 = 已拍板,条目末尾「→ **决策**: …」记录结论;「冲突解决」勾选 = 该决策已在 worktree 落地(相关冲突块已按决策解掉,经实测核实)。未勾选 = 待决策 / 待落地。
+
+- [x] 1. **stage.rs 上游 mod tests 是否值得 port** —— `test_exec_input_next_block_range_with_transaction_threshold` 依赖上游 `ProviderFactory::new` 5 参签名（含 `RocksDBProvider::builder`、`reth_tasks::Runtime::test()`）。→ **决策**: 不 port、解块时丢弃上游 mod tests（依据原则②：`RocksDBProvider`/`StaticFileProviderBuilder` 已随 f89d9d4e23 全仓零定义，2026-07-06 实测）。v2.4+ 上游 storage-v2 若再入库时重议。
+   - [x] 冲突解决: 已落地（2026-07-06）——1 块解毕，上游 mod tests 整块丢弃。⟲ 生产体勘误：`BlockRangeOutput`/`TransactionRangeOutput` 定义于本文件公共区（上游侧翻带入，「全仓零定义」实测过时），按原则③保留；4 个调用点已全组对齐（hashing×2 结构体解构、sender_recovery/tx_lookup 天然吻合）。⟲⟲ 复审修正（同日四维审计）：「自包含无死依赖」对**类型**成立、对**方法体**不成立——`next_block_range_with_transaction_threshold` 体内 `get_lowest_range_start`/`block_by_transaction_id` 两个 provider 方法全仓零定义，已手术回退 baseline 内部逻辑（`transaction_block` + 去 static-file 封顶 + bound 回 `BlockReader`），保留 `Option<TransactionRangeOutput>` 返回形态与 `start_block > target_block` 守卫（上游正当防御，原则③）。
+- [x] 2. **prune.rs 上游 trait bound** `StorageSettingsCache + ChangeSetReader + StorageChangeSetReader` —— → **决策**: trait bound 全按 baseline，三个上游新增 bound 都不加（依据原则②：`StorageSettingsCache` 已是磁盘孤儿（metadata.rs 在盘、storage-api lib.rs 无挂载，实测）；`ChangeSetReader`/`StorageChangeSetReader` 虽存活（baseline 旧 trait），但 pruner crate 已随 f89d9d4e23 整体还原 baseline，依赖这些 bound 的上游 PrunerBuilder 特性已出局——**无特性损失**，原「grep run_with_provider 确认」由 crate 级还原的构造性事实取代）。
+   - [x] 冲突解决: 已落地（2026-07-06）——3 块全解向 baseline bound 集；连带清理冲突块外 2 处死符号 imports（`reth_provider` 列表中三项 + `reth_storage_api` 三 trait 整行）；公共区干净合入的上游 unwind tx_number 同步逻辑保留（`PruneCheckpoint.tx_number` 实测存活）。
+- [x] 3. **tx_lookup.rs 上游 `with_rocksdb_batch{,_auto_commit}` closure 签名** —— → **决策**: 保留 baseline 手写 cursor 路径（依据原则②：`with_rocksdb_batch{,_auto_commit}` / `EitherWriter` 全仓零定义，2026-07-06 实测）。⟲ 前提纠正：原文「gravity PR #212 的同名 API 在 `providers/rocksdb/provider.rs:427+`」系误归因——该文件是**上游 v2.3.0** 的 storage-v2 文件、已随 f89d9d4e23 删除；gravity 的 rocksdb 在 `crates/storage/db/src/implementation/rocksdb/`（db 层），本就没有该 API，「兼容性比对」命题不存在。
+   - [x] 冲突解决: 已落地（2026-07-06）——9 块解毕，execute/unwind 均保 baseline 手写 cursor；采纳 `TxHashRef`（crates.io reth-primitives-traits 0.4.1 下实为必需，baseline 测试的 `*tx.tx_hash()` 依赖它）；公共区死符号清理 + 整删上游 `mod rocksdb_tests`（~150 行）；PR #241 断言与 `static_file_provider().count_entries` 形态保全。
+- [x] 4. **headers.rs ETL collector 格式变化（bincode → RLP）** —— → **决策**: 采纳上游 RLP（依据原则③）。前置核实**通过**：gravity 启动时已清 `etl_path`（`crates/node/builder/src/launch/common.rs:425-427`「Remove etl-path files on launch」，公共区实测，非冲突块内），半成品 ETL 误解析风险不存在，无需新增清理。连带：Cargo.toml 去 `bincode` + `serde-bincode-compat`，加 `alloy-rlp`。提醒 node-builder 组解 launch/common.rs 时保留该清理段。
+   - [x] 冲突解决: 已落地（2026-07-06）——12 块解毕：RLP 采纳（⟲ `SealedHeader::new_unhashed` 实测**存在**于 crates.io reth-primitives-traits 0.4.1，原「未定位到」系只 grep 了本仓，无需替代）；`append_header` 保三参 td；标记外恢复 3 处 auto-merge 静默丢弃（write_headers td 初始化、测试 td 种子 `insert_headers_with_td`、`HeaderTerminalDifficulties` unwind 清理+测试检查，provider 实测仍写/清该表）。⟲ `ProviderError::TotalDifficultyNotFound` 变体已被上游删除，2 处改用 `StageError::Fatal` 等价替代。跨组联动已执行：`era-utils/history.rs` 实测已整体翻侧（与上游逐字节同），按本文档授权恢复 td 泵线（三参 append_header + `StorageLocation::StaticFiles`，公开签名未变；其 `import` 提交路径仍为上游 `provider.commit()`，vs baseline `UnifiedStorageWriter::commit`，遗留跟进项）。⟲ 复审补漏（同日）：era-utils 上游测试 `process_does_not_mark_partially_consumed_file_processed` 的 `process` 调用停在无-td 五参形态，已补 `&mut total_difficulty` 第五参。
+- [x] 5. **merkle.rs vs trie-all-layers** —— → **决策**: keep-gravity **定案**（前置已被 f89d9d4e23 消解：`NestedStateRoot` / `write_trie_updatesv2` / `AccountsTrieV2`・`StoragesTrieV2` 全部存活，上游 `with_adapter!` / `DbStateRoot` / `StorageRootMerkleCheckpoint` 全仓零定义，2026-07-06 实测。「上游战胜 NestedStateRoot」的情形已不存在）。仍是 chain-halt 关键路径，建议本组最后解、逐块比对 baseline。
+   - [x] 冲突解决: 已落地（2026-07-06）——最终产物 = **baseline 全文 + 仅 1 行上游 doc 笔误修复**（StorageHashingStage 链接目标）。解法：keep-HEAD 解决稿与 baseline 全文 diff，公共区 7 处上游静默漂移全部回 baseline（`StorageRootMerkleCheckpoint` import、`DbStateRoot` GAT 别名、bound 三追加、测试 `count_entries`×2、`append_header` 双参、`state_root_prehashed` 实参形态）；承重符号 `NestedStateRoot`/`write_trie_updatesv2`/`TrieWriterV2` 共 9 处在位。
+- [x] 6. **pipeline/mod.rs `UnifiedStorageWriter` 符号是否仍存在** —— → **决策**: 存在，保留 gravity `UnifiedStorageWriter::{commit, commit_unwind}` 调用（`writer/mod.rs` 已随 f89d9d4e23 整体复活，`commit_unwind` 在 :110，实测；writer 侧冲突已归零）。连带反转：上游 `unwind_provider_rw().disable_long_read_transaction_safety()` 依赖死符号，unwind provider 构造保 gravity `database_provider_rw()`。
+   - [x] 冲突解决: 已落地（2026-07-06）——10 块按原指南 + 方向表反转解毕：保 `UnifiedStorageWriter::{commit,commit_unwind}` 双调用、`Instant` 日志、无条件 MerkleExecute reset、`database_provider_rw()`；采 RAII unwind scope、safe-block 保存（顺带关闭 net-prune 文档 OQ2）、`saturating_sub(1)`、`stage(idx)` 展开签名。⟲ 新增修复：公共区 :425 unwind 循环内 provider 再获取被静默翻至死符号 `unwind_provider_rw()`，已改回 `database_provider_rw()`（安全符号复核：`last_safe_block_number`/`save_safe_block_number` 实测存活于 provider.rs:3195/:3215）。⟲⟲ 复审修正（同日）：`move_to_static_files` 开头还渗入了上游 storage-v2 早退 `if cached_storage_settings().is_v2() { return Ok(()) }`（`cached_storage_settings` 是 metadata.rs 磁盘孤儿的方法，trait 名扫描漏了方法名调用），已删除该早退与配套 v2 doc 段落。
+- [x] 7. **prune.rs `commit_view()` 调用未在冲突 diff 中** —— → **决策/核实**: **通过**——`provider.tx_ref().commit_view()?` 实测位于公共区（prune.rs:76，awk 冲突分区判定），且现存 3 个冲突块仅覆盖 imports + trait bound、不触及该行，任何解法都不会碰掉它。
+   - [x] 冲突解决: 复核通过（2026-07-06）——解块后 grep 确认 `provider.tx_ref().commit_view()?` 在位（prune.rs:61，行号因 imports/bound 收窄自 :76 前移）。
+- [x] 8. **prune.rs trait bound 上游 `RocksDBProviderFactory`** —— → **决策**: 丢（依据原则②：全仓零定义，2026-07-06 实测；node-builder 文档开放问题 1 同源裁决「上游 RocksDB 路径不并存」）。`PrunerBuilder` 无此依赖——prune crate 已整体还原 baseline，bound 集与 baseline prune.rs 构造性自洽。
+   - [x] 冲突解决: 已落地（2026-07-06）——与开放问题 2 同批 3 块解毕；`RocksDBProviderFactory` 未引入（全组死符号总扫 0 命中）。
+- [x] 9. **（新增）utils.rs 零冲突侧翻** —— 整文件落在 v2.3.0 侧（vs baseline +458/−120），11 处死符号（EitherWriter/with_rocksdb_batch/StorageSettings），baseline 的 `load_history_indices` 被上游 `load_account_history`/`load_storage_history` 取代。gravity 增量 = 0（`git diff v1.8.3 0cb1687c1c` 为空）。→ **决策**: 整文件复原 baseline（原则②，复原无损）。它是 index_*_history.rs 解块的编译前提。
+   - [x] 冲突解决: 已执行（2026-07-06，`git restore --source=0cb1687c1c`）——`load_history_indices` 回归，index_*_history.rs 编译前提就位。⟲ 复审修正（同日）：不再逐字节一致——整文件复原把打在 baseline 本体上的**上游正确性修复 PR #21222 一并埋掉**（`load_history_indices` 用 `P::default()` 做哨兵，增量同步首 key 恰为 `Address::ZERO` 时跳过与 DB 既有末 shard 的合并、upsert 静默覆盖地址 0x0 的历史索引），已单独移植 `Option<P>` 哨兵（~15 行，`load_indices` 对空列表是 no-op 故除修复点外行为等价）。
+- [x] 10. **（新增）execution/mod.rs 零冲突侧翻** —— 8 处死符号（`EitherWriter::receipts_destination` 生产逻辑 :201、`StorageSettingsCache` bound :197/:274）+ 2 处 `Chain::new(.., BTreeMap::new())`（:433/:563，`Chain` 已随 e9965cd3bf 回 baseline 签名，`BTreeMap::new()` 第三参类型不符）。gravity 增量 = 0。→ **决策**: 整文件复原 baseline（原则②；顺带关闭 executed-block-split §九跨组台账中 stages 两处 `Chain::new` 断点）。caveat：sets.rs 采纳上游后 `ExecutionStages` 构造点与 baseline `ExecutionStage` 签名的吻合性解块时核对。
+   - [x] 冲突解决: 已执行（2026-07-06）——⟲ 路径勘误：baseline 是**单文件 `execution.rs`**（非 `execution/mod.rs`，原命令按该路径不可执行）；按 baseline 精确形态复原单文件并删除上游 `execution/` 目录（含全仓零引用的 `slot_preimages.rs`）。⟲ 「复原无损」例外（复审后共三类）：①consensus crate 保持 v2.3.0 单参 `FullConsensus`（`Error` 关联类型实测已不存在），4 处类型位点 + 1 处 import 单参适配；②⟲⟲ 复审补漏：类型适配漏了**方法调用位点**——:347 `validate_block_post_execution(&block, &result)` 两参 vs 保留在 v2.3.0 侧的四参 trait（多两个 `Option` 形参），已补 `, None, None`（与 engine 组「take_bal 默认 None」同思路，仓内其他调用方 re_execute.rs/validation.rs/payload_validator.rs 同形态）；③⟲⟲ 测试 2 处 `PruneModes::none()` 已死（新树仅 `derive(Default)`），改 `PruneModes::default()`（与 mod.rs/prune.rs 既有同型适配对齐）。两处 `Chain::new` 断点随复原关闭；sets.rs 构造点核对吻合（`from_config` 4 参、`execution_external_clean_threshold()` 存活于 config.rs:140）。
+- [x] 11. **（新增）test_db.rs 零冲突侧翻** —— 6 处死符号（RocksDBProvider/StaticFileProviderBuilder 等），且 baseline 的 `insert_headers_with_td` 已不在（各 stage 测试保 baseline 形态后必需）。gravity 增量 = 0。→ **决策**: 整文件复原 baseline（原则②，复原无损）。
+   - [x] 冲突解决: 已执行（2026-07-06，`git restore --source=0cb1687c1c`）——与 baseline 逐字节一致；`insert_headers_with_td` 回归（bodies/era/headers 测试种子就位）。
+
+## 落地待办清单（依赖序，2026-07-06 核实轮产出）
+
+> ⟲ 2026-07-06 落地轮：本清单 1-6 **已全部执行完毕**，验证结果与偏差实录见下方
+> 「落地实录」节。改动未提交，留 working tree 待 review。
+
+无外部阻塞，全组即刻可开工。验证手段 = 冲突标记归零 + rustfmt parse + 死符号扫描
+（cargo 待修复后回补编译证据）：
+
+1. 复原三个侧翻文件（开放问题 9-11 的三条 `git checkout`）——多个 stage 文件的编译前提；
+2. `crates/stages/stages/Cargo.toml`（11 块，baseline 为底 + RLP 增量，见方向表）；
+3. stages/api 三文件：builder.rs（1 块，采上游）→ stage.rs（1 块，keep-gravity）→
+   pipeline/mod.rs（10 块，按原 10 块指南 + 方向表的 unwind-provider 反转）；
+4. 各 stage 文件（互相独立，可并行）：sets.rs（11）、bodies.rs（6，生产 keep-gravity）、
+   era.rs（11，机械）、headers.rs（12，机械）、hashing_account.rs（6）、hashing_storage.rs（5）、
+   index_account_history.rs（3）、index_storage_history.rs（3）、prune.rs（3）、
+   sender_recovery.rs（12，机械）、tx_lookup.rs（9）、stages/mod.rs（8）；
+5. merkle.rs（13 块，keep-gravity，chain-halt 关键路径，最后解、逐块比对 baseline）；
+6. 收尾：全组 `grep -c '^<<<<<<<'` 归零 + 死符号总扫 + prune.rs:76 `commit_view` 存在性复核。
+
+## 落地实录（2026-07-06 落地轮）
+
+> 17 个冲突文件（125 块）+ 3 个已知侧翻 + 落地中新发现的 5 处侧翻全部解决。
+> **改动未提交，留 working tree 待 review。** 逐块裁决细节见各开放问题条目的落地注记。
+
+### 验证结果
+
+| 检查项 | 结果 |
+|---|---|
+| 冲突标记（crates/stages + era-utils，含 .toml） | 0 |
+| 死符号总扫（EitherWriter / with_rocksdb_batch* / RocksDBProviderFactory / StorageSettingsCache / FastInstant / with_adapter! / unwind_provider_rw / StaticFileProviderBuilder / load_account_history / load_storage_history / commit_pending_rocksdb_batches） | 0 命中 |
+| `prune.rs` `commit_view()` 复核 | 在位（:61） |
+| rustfmt --edition 2024 parse（全部改动文件） | 全过 |
+| 承重符号（UnifiedStorageWriter::commit*×3、merkle 的 NestedStateRoot/write_trie_updatesv2×9、bodies 的 StorageLocation×3、insert_headers_with_td、sender_recovery 三项采纳） | 在位 |
+| 依赖闭合（`reth_storage_api` src 零引用故 prod dep 去除安全；bincode/page_size/reth_libmdbx 零残留；reth-tasks/alloy-rlp 均有消费方） | 通过 |
+| ⚠️ cargo 编译验证 | 不可用（workspace 根缺 dep，归 cargo 组），修复后回补 `cargo check -p reth-stages -p reth-stages-api` + `stage_test_suite!` 宏展开验证 |
+
+### 落地中新发现的侧翻（核实轮 3 处之外）
+
+| # | 位置 | 处置 |
+|---|---|---|
+| 4 | `stages/api/src/stage.rs` 生产体（`BlockRangeOutput`/`TransactionRangeOutput` 及两个 ExecInput 方法的返回形态） | **保上游形态 + 方法体手术**（复审修正）：类型与 `Option` 返回形态保上游（prune-skip 语义载体，原则③）、4 个调用点对齐；但方法体内 `get_lowest_range_start`/`block_by_transaction_id` 两个 provider 方法全仓零定义，内部逻辑回退 baseline（`transaction_block`、去 static-file 封顶、bound 回 `BlockReader`），保留 `start_block > target_block` 守卫 |
+| 5 | `stages/api/src/pipeline/mod.rs:425` 公共区 `unwind_provider_rw()` | 改回 `database_provider_rw()`（死符号） |
+| 6 | `crates/era-utils/src/history.rs`（与上游逐字节同，td 泵线丢失） | 按本文档跨组授权恢复 td 泵线（三参 append_header + StorageLocation），公开签名未变，上游新结构（EraBlockReader 等）保留 |
+| 7 | `crates/stages/stages/tests/{pipeline,preimage}.rs`（上游新增集成测试，通体死符号，autotests 必编译） | 删除（同 storage 组「上游 storage-v2 文件删除」惯例） |
+| 8 | `crates/stages/stages/benches/` 被上游删除（PR #22627）但 baseline `[[bench]]` 保留 | ⟲ 二次裁决（2026-07-06，review 追问触发）：**跟随上游删除**——初版曾从 baseline 复原目录以消除 manifest/bench 错配，复核发现 baseline benches 本就 bit-rot（仍是 pre-#213 双泛型三参 `stage.execute(&provider, Box::new(factory), input)` 形态，与 baseline 单泛型两参 `Stage<Provider>` trait 不兼容、`--benches` 编不过，CI 从未检查），原文「gravity 仍有活跃 stage 基准，由 bench 分组确认」前提核实不成立。最终：benches/ 目录、`[[bench]]` 块、criterion dev-dep 三处一并删除，与 v2.3.0 对齐 |
+
+附：`crates/stages/types` 被自动合并的上游演进经审计**无害保留**——`MerkleChangeSets`
+变体为尾部追加（Compact 变体索引不变）、`StageId::MerkleChangeSets` 按名序列化、
+`MerkleCheckpoint` 结构与编码未动（merkle 磁盘 checkpoint 格式安全）、
+`ExecutionStageThresholds` 字段两侧一致（baseline 那段 max_changesets doc 本为过时文档）。
+
+### 逐文件落地一览
+
+| 文件 | 结果 |
+|---|---|
+| pipeline/builder.rs | 上游整文件（泛型名 `<Provider>` 对齐） |
+| pipeline/mod.rs | 机械合并（见 OQ6 注记） |
+| stage.rs | 丢上游 mod tests + 生产体保上游（见 OQ1 注记） |
+| Cargo.toml | baseline 为底 + 增量：去 `bincode`、`serde-bincode-compat` 降普通依赖、加 `alloy-rlp`（prod）、加 `reth-tasks`；上游加进公共区的 `reth-storage-api` prod dep 按「baseline 为底」去除（src 零引用实测）；⟲ criterion dev-dep + `[[bench]]` 块随 benches bit-rot 裁决一并删除（见侧翻表 #8，推翻原文「保留 criterion 与 [[bench]]」建议） |
+| sets.rs | 与上游 v2.3.0 **逐字节一致**；全部构造点核对吻合、无一回退 |
+| bodies.rs | 生产 keep-gravity（StorageLocation×3）；测试保 baseline；与 baseline 仅差 B256Map 机械簇 |
+| era.rs | 机械合并：import 上游路径、td 泵线全保、no-era-files fallback 采纳 |
+| headers.rs | 机械合并（见 OQ4 注记） |
+| hashing_account.rs / hashing_storage.rs | 机械合并：死 import/bound/`use_hashed_state` 早退块剔除；`BlockRangeOutput` 结构体解构（勘误后对齐）；`BlockNumberAddress::range` 保全；PR #241 断言保全；storage 侧测试一处 `count_entries`→baseline `table().len()`（TestStageDB 复原后无该方法） |
+| index_account_history.rs / index_storage_history.rs | keep-baseline（account 版与 baseline 零 diff；storage 版仅 3 处无害公共区机械演进）；各删上游 `mod rocksdb_tests`（~130/~170 行） |
+| merkle.rs | = baseline + 1 行 doc 笔误修复（见 OQ5 注记） |
+| stages/mod.rs | 机械合并 + 5 处公共区强制自洽修复（重复 `mod era;`、`head` 定义、`simulate_behind_checkpoint_corruption` 第 4 参、`test_consistency_no_commit_prune` 整体回 baseline、裸 `AccountsHistory` import）；`check_consistency` 双参×4、`insert_historical_block`×3 保全 |
+| prune.rs | bound 全按 baseline（见 OQ2/7/8 注记） |
+| sender_recovery.rs | 写路径保 baseline cursor；采纳 SyncSender / spawn_os_thread / prune-skip；计时 `std::time::Instant`；整删上游 static-file 测试一个 |
+| tx_lookup.rs | 保 baseline 手写 cursor（见 OQ3 注记） |
+| utils.rs / execution.rs / test_db.rs | 复原 baseline（execution.rs 含 5 行 consensus 单参适配，见 OQ9-11 注记） |
+
+### 遗留跟进
+
+1. **cargo 修复后回补编译证据**（上表 ⚠️ 项）。
+2. **era-utils `import` 提交路径**：保留了上游 `provider.commit()`（baseline 为
+   `UnifiedStorageWriter::commit`，先提交 static files）。import-era CLI 路径、非本组冲突文件；
+   若依赖 static-file 先行提交顺序需改回，待拍板。
+3. **headers.rs `HeaderTerminalDifficulties` unwind 恢复**为基于 provider 实测写入证据的
+   标记外扩展；若组内裁决 DB TD 表不需 stage 侧清理，可单独回退该 2 hunk。
+4. **错误形态降级**：`TotalDifficultyNotFound` 3 处（headers/era/era-utils）改字符串错误
+   （`StageError::Fatal`/`eyre!`），未发现按变体匹配的下游。
+5. 跨组：net-prune-misc-crates.md OQ2/OQ5 已随本组落地（该文档已同步翻勾）。
+
+### 复审实录（2026-07-06 第二轮，四维语义审计）
+
+> 触发：benches bit-rot 事件暴露「文档前提过时 + 静态验证盲区」两类风险，遂对全部解决产物
+> 做四维并行审计：①API 存在性/元数（~80 调用面逐一到定义处比对）；②上游修复遗失（19 文件
+> 逐一 vs v2.3.0 diff + `git log -S` 溯源动机）；③gravity 语义保全（8 项承重指纹 + 逐文件 vs
+> baseline 丢弃审计）；④测试面一致性（TestStageDB 16 种调用、宏、14 个测试模块 use 逐符号）。
+
+**审计结论**：8 项 gravity 承重指纹全过；丢弃的 baseline 内容全部有意可溯源；文档声称的采纳项
+全部在位；测试面零发现；merkle PR #24267 off-by-one 经循环结构分析确认不适用（gravity 推进量
+自洽导出、无重叠）。**发现并已修复 6 处缺陷**（各 OQ 注记内有 ⟲⟲ 详情）：
+
+| # | 位置 | 缺陷 | 修复 |
+|---|---|---|---|
+| 1 | execution.rs:347 | `validate_block_post_execution` 两参 vs 四参 trait | 补 `, None, None` |
+| 2 | utils.rs `load_history_indices` | 误丢上游正确性修复 PR #21222（`Address::ZERO` 哨兵 bug，增量同步可致地址 0x0 历史索引静默丢失） | 移植 `Option<P>` 哨兵（~15 行） |
+| 3 | pipeline/mod.rs `move_to_static_files` | 公共区渗入死方法早退 `cached_storage_settings().is_v2()` | 删早退 + v2 doc 段落 |
+| 4 | stage.rs 方法体 | `get_lowest_range_start`/`block_by_transaction_id` 全仓零定义 | 体内回 baseline 逻辑，保 `Option` 形态 |
+| 5 | execution.rs:896/:1032 | 测试 `PruneModes::none()` 已死 | 改 `PruneModes::default()` ×2 |
+| 6 | era-utils/history.rs 测试 | `process` 调用缺 `&mut total_difficulty` | 补第五参 |
+
+**方法论教训（供其他组参考）**：死符号扫描必须覆盖**方法名**（`cached_storage_settings`/
+`is_v2()` 类 trait-方法调用，trait 名 grep 抓不到）；「整文件复原 baseline」会埋掉打在
+baseline 本体上的上游修复（PR #21222 类），复原后应对该文件做一次 vs 上游的修复遗失扫描。
+
+**可选跟进（不修不构成缺陷）**：utils.rs `collect_history_indices` 的 `cache.drain()` 微优化、
+merkle.rs `final_root.unwrap()` 防御化（两侧均不可达）、merkle 三个 `#[ignore = "todo fix"]`
+测试为 baseline 既有测试债。**跨组顺带报备**：`PruneModes::none()` 同型死引用存在于 storage 组
+`providers/database/mod.rs:87/:129/:717`；`reth-primitives-traits`/`reth-codecs` 解析到
+crates.io 0.4.1（本地仅 0.3.1 缓存可核，已核符号均在），归 cargo/primitives-traits 组。

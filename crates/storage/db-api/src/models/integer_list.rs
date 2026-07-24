@@ -19,7 +19,7 @@ use roaring::RoaringTreemap;
 /// - Direct access: elements can be accessed or queried without needing to decode the entire list.
 /// - [`RoaringTreemap`] backing: internally backed by [`RoaringTreemap`], which supports 64-bit
 ///   integers.
-#[derive(Clone, PartialEq, Default, Deref)]
+#[derive(Clone, PartialEq, Eq, Default, Deref)]
 pub struct IntegerList(pub RoaringTreemap);
 
 impl fmt::Debug for IntegerList {
@@ -62,7 +62,7 @@ impl IntegerList {
 
     /// Pushes a new integer to the list.
     pub fn push(&mut self, value: u64) -> Result<(), IntegerListError> {
-        self.0.push(value).then_some(()).ok_or(IntegerListError::UnsortedInput)
+        self.0.try_push(value).map_err(|_| IntegerListError::UnsortedInput)
     }
 
     /// Clears the list.

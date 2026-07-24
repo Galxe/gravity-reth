@@ -5,8 +5,10 @@ use std::time::Duration;
 use clap::Args;
 use humantime::parse_duration;
 
+const DEFAULT_MNEMONIC: &str = "test test test test test test test test test test test junk";
+
 /// Parameters for Dev testnet configuration
-#[derive(Debug, Args, PartialEq, Eq, Default, Clone, Copy)]
+#[derive(Debug, Args, PartialEq, Eq, Clone)]
 #[command(next_help_heading = "Dev testnet")]
 pub struct DevArgs {
     /// Start the node in dev mode
@@ -39,6 +41,45 @@ pub struct DevArgs {
         verbatim_doc_comment
     )]
     pub block_time: Option<Duration>,
+
+    /// Time to wait after initiating payload building before resolving.
+    ///
+    /// Introduces a sleep between `fork_choice_updated` and `resolve_kind` in the
+    /// local miner, giving the payload job time for multiple rebuild attempts with
+    /// new transactions from the pool.
+    ///
+    /// Parses strings using [`humantime::parse_duration`]
+    /// --dev.payload-wait-time 450ms
+    #[arg(
+        long = "dev.payload-wait-time",
+        help_heading = "Dev testnet",
+        value_parser = parse_duration,
+        verbatim_doc_comment
+    )]
+    pub payload_wait_time: Option<Duration>,
+
+    /// Derive dev accounts from a fixed mnemonic instead of random ones.
+    #[arg(
+        long = "dev.mnemonic",
+        help_heading = "Dev testnet",
+        value_name = "MNEMONIC",
+        requires = "dev",
+        verbatim_doc_comment,
+        default_value = DEFAULT_MNEMONIC
+    )]
+    pub dev_mnemonic: String,
+}
+
+impl Default for DevArgs {
+    fn default() -> Self {
+        Self {
+            dev: false,
+            block_max_transactions: None,
+            block_time: None,
+            payload_wait_time: None,
+            dev_mnemonic: DEFAULT_MNEMONIC.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -56,13 +97,40 @@ mod tests {
     #[test]
     fn test_parse_dev_args() {
         let args = CommandParser::<DevArgs>::parse_from(["reth"]).args;
-        assert_eq!(args, DevArgs { dev: false, block_max_transactions: None, block_time: None });
+        assert_eq!(
+            args,
+            DevArgs {
+                dev: false,
+                block_max_transactions: None,
+                block_time: None,
+                payload_wait_time: None,
+                dev_mnemonic: DEFAULT_MNEMONIC.to_string(),
+            }
+        );
 
         let args = CommandParser::<DevArgs>::parse_from(["reth", "--dev"]).args;
-        assert_eq!(args, DevArgs { dev: true, block_max_transactions: None, block_time: None });
+        assert_eq!(
+            args,
+            DevArgs {
+                dev: true,
+                block_max_transactions: None,
+                block_time: None,
+                payload_wait_time: None,
+                dev_mnemonic: DEFAULT_MNEMONIC.to_string(),
+            }
+        );
 
         let args = CommandParser::<DevArgs>::parse_from(["reth", "--auto-mine"]).args;
-        assert_eq!(args, DevArgs { dev: true, block_max_transactions: None, block_time: None });
+        assert_eq!(
+            args,
+            DevArgs {
+                dev: true,
+                block_max_transactions: None,
+                block_time: None,
+                payload_wait_time: None,
+                dev_mnemonic: DEFAULT_MNEMONIC.to_string(),
+            }
+        );
 
         let args = CommandParser::<DevArgs>::parse_from([
             "reth",
@@ -71,7 +139,16 @@ mod tests {
             "2",
         ])
         .args;
-        assert_eq!(args, DevArgs { dev: true, block_max_transactions: Some(2), block_time: None });
+        assert_eq!(
+            args,
+            DevArgs {
+                dev: true,
+                block_max_transactions: Some(2),
+                block_time: None,
+                payload_wait_time: None,
+                dev_mnemonic: DEFAULT_MNEMONIC.to_string(),
+            }
+        );
 
         let args =
             CommandParser::<DevArgs>::parse_from(["reth", "--dev", "--dev.block-time", "1s"]).args;
@@ -80,7 +157,9 @@ mod tests {
             DevArgs {
                 dev: true,
                 block_max_transactions: None,
-                block_time: Some(std::time::Duration::from_secs(1))
+                block_time: Some(std::time::Duration::from_secs(1)),
+                payload_wait_time: None,
+                dev_mnemonic: DEFAULT_MNEMONIC.to_string(),
             }
         );
     }

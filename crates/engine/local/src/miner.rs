@@ -1,30 +1,28 @@
 //! Contains the implementation of the mining mode for the local engine.
 
-use alloy_consensus::BlockHeader;
 use alloy_primitives::{TxHash, B256};
 use alloy_rpc_types_engine::ForkchoiceState;
 use eyre::OptionExt;
-use futures_util::{stream::Fuse, StreamExt};
+use futures_util::{stream::Fuse, Stream, StreamExt};
 use reth_engine_primitives::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
-use reth_payload_primitives::{
-    BuiltPayload, EngineApiMessageVersion, PayloadAttributesBuilder, PayloadKind, PayloadTypes,
-};
-use reth_provider::BlockReader;
+use reth_payload_primitives::{BuiltPayload, PayloadAttributesBuilder, PayloadKind, PayloadTypes};
+use reth_primitives_traits::{HeaderTy, SealedHeaderFor};
+use reth_storage_api::BlockReader;
 use reth_transaction_pool::TransactionPool;
 use std::{
     collections::VecDeque,
+    fmt,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::time::Interval;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
 
 /// A mining mode for the local dev engine.
-#[derive(Debug)]
 pub enum MiningMode<Pool: TransactionPool + Unpin> {
     /// In this mode a block is built as soon as
     /// a valid transaction reaches the pool.
@@ -43,6 +41,25 @@ pub enum MiningMode<Pool: TransactionPool + Unpin> {
     },
     /// In this mode a block is built at a fixed interval.
     Interval(Interval),
+    /// In this mode a block is built when the trigger stream yields a value.
+    ///
+    /// This is a general-purpose trigger that can be fired on demand, for example via a channel
+    /// or any other [`Stream`] implementation.
+    Trigger(Pin<Box<dyn Stream<Item = ()> + Send + Sync>>),
+}
+
+impl<Pool: TransactionPool + Unpin> fmt::Debug for MiningMode<Pool> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Instant { max_transactions, accumulated, .. } => f
+                .debug_struct("Instant")
+                .field("max_transactions", max_transactions)
+                .field("accumulated", accumulated)
+                .finish(),
+            Self::Interval(interval) => f.debug_tuple("Interval").field(interval).finish(),
+            Self::Trigger(_) => f.debug_tuple("Trigger").finish(),
+        }
+    }
 }
 
 impl<Pool: TransactionPool + Unpin> MiningMode<Pool> {
@@ -56,6 +73,14 @@ impl<Pool: TransactionPool + Unpin> MiningMode<Pool> {
     pub fn interval(duration: Duration) -> Self {
         let start = tokio::time::Instant::now() + duration;
         Self::Interval(tokio::time::interval_at(start, duration))
+    }
+
+    /// Constructor for a [`MiningMode::Trigger`]
+    ///
+    /// Accepts any stream that yields `()` values, each of which triggers a new block to be
+    /// mined. This can be backed by a channel, a custom stream, or any other async source.
+    pub fn trigger(trigger: impl Stream<Item = ()> + Send + Sync + 'static) -> Self {
+        Self::Trigger(Box::pin(trigger))
     }
 }
 
@@ -91,6 +116,12 @@ impl<Pool: TransactionPool + Unpin> Future for MiningMode<Pool> {
                 }
                 Poll::Pending
             }
+            Self::Trigger(trigger) => {
+                if trigger.poll_next_unpin(cx).is_ready() {
+                    return Poll::Ready(())
+                }
+                Poll::Pending
+            }
         }
     }
 }
@@ -106,27 +137,35 @@ pub struct LocalMiner<T: PayloadTypes, B, Pool: TransactionPool + Unpin> {
     mode: MiningMode<Pool>,
     /// The payload builder for the engine
     payload_builder: PayloadBuilderHandle<T>,
-    /// Timestamp for the next block.
-    last_timestamp: u64,
+    /// Latest block in the chain so far.
+    last_header: SealedHeaderFor<<T::BuiltPayload as BuiltPayload>::Primitives>,
     /// Stores latest mined blocks.
     last_block_hashes: VecDeque<B256>,
+    /// Optional sleep duration between initiating payload building and resolving.
+    ///
+    /// When set, the miner sleeps after `fork_choice_updated` before calling
+    /// `resolve_kind`, giving the payload job time for multiple rebuild attempts.
+    payload_wait_time: Option<Duration>,
 }
 
 impl<T, B, Pool> LocalMiner<T, B, Pool>
 where
     T: PayloadTypes,
-    B: PayloadAttributesBuilder<<T as PayloadTypes>::PayloadAttributes>,
+    B: PayloadAttributesBuilder<
+        T::PayloadAttributes,
+        HeaderTy<<T::BuiltPayload as BuiltPayload>::Primitives>,
+    >,
     Pool: TransactionPool + Unpin,
 {
     /// Spawns a new [`LocalMiner`] with the given parameters.
     pub fn new(
-        provider: impl BlockReader,
+        provider: impl BlockReader<Header = HeaderTy<<T::BuiltPayload as BuiltPayload>::Primitives>>,
         payload_attributes_builder: B,
         to_engine: ConsensusEngineHandle<T>,
         mode: MiningMode<Pool>,
         payload_builder: PayloadBuilderHandle<T>,
     ) -> Self {
-        let latest_header =
+        let last_header =
             provider.sealed_header(provider.best_block_number().unwrap()).unwrap().unwrap();
 
         Self {
@@ -134,9 +173,16 @@ where
             to_engine,
             mode,
             payload_builder,
-            last_timestamp: latest_header.timestamp(),
-            last_block_hashes: VecDeque::from([latest_header.hash()]),
+            last_block_hashes: VecDeque::from([last_header.hash()]),
+            last_header,
+            payload_wait_time: None,
         }
+    }
+
+    /// Sets the payload wait time, if any.
+    pub const fn with_payload_wait_time_opt(mut self, wait_time: Option<Duration>) -> Self {
+        self.payload_wait_time = wait_time;
+        self
     }
 
     /// Runs the [`LocalMiner`] in a loop, polling the miner and building payloads.
@@ -178,10 +224,7 @@ where
     /// Sends a FCU to the engine.
     async fn update_forkchoice_state(&self) -> eyre::Result<()> {
         let state = self.forkchoice_state();
-        let res = self
-            .to_engine
-            .fork_choice_updated(state, None, EngineApiMessageVersion::default())
-            .await?;
+        let res = self.to_engine.fork_choice_updated(state, None).await?;
 
         if !res.is_valid() {
             eyre::bail!("Invalid fork choice update {state:?}: {res:?}")
@@ -193,20 +236,11 @@ where
     /// Generates payload attributes for a new block, passes them to FCU and inserts built payload
     /// through newPayload.
     async fn advance(&mut self) -> eyre::Result<()> {
-        let timestamp = std::cmp::max(
-            self.last_timestamp + 1,
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("cannot be earlier than UNIX_EPOCH")
-                .as_secs(),
-        );
-
         let res = self
             .to_engine
             .fork_choice_updated(
                 self.forkchoice_state(),
-                Some(self.payload_attributes_builder.build(timestamp)),
-                EngineApiMessageVersion::default(),
+                Some(self.payload_attributes_builder.build(&self.last_header)),
             )
             .await?;
 
@@ -216,23 +250,25 @@ where
 
         let payload_id = res.payload_id.ok_or_eyre("No payload id")?;
 
+        if let Some(wait_time) = self.payload_wait_time {
+            tokio::time::sleep(wait_time).await;
+        }
+
         let Some(Ok(payload)) =
             self.payload_builder.resolve_kind(payload_id, PayloadKind::WaitForPending).await
         else {
             eyre::bail!("No payload")
         };
 
-        let block = payload.block();
-
-        let payload = T::block_to_payload(payload.block().clone());
-        let res = self.to_engine.new_payload(payload).await?;
+        let header = payload.block().sealed_header().clone();
+        let res = self.to_engine.new_payload(payload.into()).await?;
 
         if !res.is_valid() {
             eyre::bail!("Invalid payload")
         }
 
-        self.last_timestamp = timestamp;
-        self.last_block_hashes.push_back(block.hash());
+        self.last_block_hashes.push_back(header.hash());
+        self.last_header = header;
         // ensure we keep at most 64 blocks
         if self.last_block_hashes.len() > 64 {
             self.last_block_hashes.pop_front();

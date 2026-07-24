@@ -1,11 +1,11 @@
 //! Parallel EVM executor using Grevm
 
 use crate::RethReceiptBuilder;
-use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::BlockHeader;
 use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
 use alloy_evm::{
-    block::{calc, StateChangePostBlockSource, StateChangeSource, SystemCaller},
+    block::{calc, SystemCaller},
     eth::{dao_fork, eip6110, spec::EthExecutorSpec, EthBlockExecutorFactory},
     precompiles::DynPrecompile,
     EvmEnv,
@@ -32,7 +32,7 @@ use revm::{
     database::{
         states::bundle_state::BundleRetention, BundleState, TransitionState, WrapDatabaseRef,
     },
-    state::{Account, AccountInfo, AccountStatus, EvmState},
+    state::{AccountInfo, EvmState},
     Database, DatabaseCommit,
 };
 
@@ -78,10 +78,10 @@ where
         &mut self,
         block: &RecoveredBlock<Block>,
     ) -> Result<(), BlockExecutionError> {
-        // Set state clear flag if the block is after the Spurious Dragon hardfork.
-        let state_clear_flag = self.chain_spec.is_spurious_dragon_active_at_block(block.number);
+        // revm v40+ dropped pre-EIP-161 support: both the DB layer and grevm's
+        // `ParallelState` always apply post-Spurious-Dragon commit semantics, so the
+        // caller-side `set_state_clear_flag` toggle has been removed.
         let state = self.state.as_mut().unwrap();
-        state.set_state_clear_flag(state_clear_flag);
         let mut evm =
             self.evm_config.evm_for_block(WrapDatabaseRef(state), block.header()).map_err(|e| {
                 BlockExecutionError::Internal(InternalBlockExecutionError::Other(Box::new(e)))
@@ -141,7 +141,7 @@ where
         for (result, tx_type) in
             results.into_iter().zip(block.body().transactions().map(|tx| tx.tx_type()))
         {
-            cumulative_gas_used += result.gas_used();
+            cumulative_gas_used += result.tx_gas_used();
             receipts.push(Receipt {
                 tx_type,
                 success: result.is_success(),
@@ -207,18 +207,14 @@ where
         }
         // increment balances
         state
-            .increment_balances(balance_increments.clone())
+            .increment_balances(balance_increments)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
-        // call state hook with changes due to balance increments.
-        self.system_caller.try_on_state_with(|| {
-            balance_increment_state(&balance_increments, state).map(|state| {
-                (
-                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
-                    Cow::Owned(state),
-                )
-            })
-        })?;
+        // Note: `SystemCaller::try_on_state_with` (source-aware `OnStateHook` notification)
+        // was removed from alloy-evm in 0.36 together with `StateChangeSource` /
+        // `StateChangePostBlockSource`. Follow upstream: skip the balance-increment state
+        // notification here; the engine-tree payload processor derives the resulting delta
+        // from the final bundle instead of relying on an in-executor hook.
 
         Ok(requests)
     }
@@ -248,7 +244,11 @@ where
             self.execute_transactions(block)?
         };
         let requests = self.apply_post_execution_changes(block, &receipts)?;
-        Ok(BlockExecutionResult { receipts, gas_used, requests })
+        // `blob_gas_used` was added to `BlockExecutionResult` in reth v2.3.0 to track
+        // per-block blob gas separately from execution gas. The Grevm parallel path does
+        // not track blob gas separately (the sum is derived from receipts by the caller),
+        // so we report 0 here and mirror upstream's `EthBlockExecutor::finish` shape.
+        Ok(BlockExecutionResult { receipts, gas_used, requests, blob_gas_used: 0 })
     }
 
     fn take_bundle(&mut self) -> BundleState {
@@ -403,37 +403,11 @@ fn insert_post_block_withdrawals_balance_increments(
     }
 }
 
-fn balance_increment_state<DB: ParallelDatabase>(
-    balance_increments: &HashMap<Address, u128>,
-    state: &ParallelState<DB>,
-) -> Result<EvmState, BlockExecutionError> {
-    let load_account = |address: &Address| -> Result<(Address, Account), BlockExecutionError> {
-        let info = state
-            .cache
-            .accounts
-            .get(address)
-            .and_then(|account| account.value().account.clone())
-            .ok_or_else(|| {
-                BlockExecutionError::msg("could not load account for balance increment")
-            })?;
-
-        Ok((
-            *address,
-            Account {
-                info,
-                storage: Default::default(),
-                status: AccountStatus::Touched,
-                transaction_id: 0,
-            },
-        ))
-    };
-
-    balance_increments
-        .iter()
-        .filter(|&(_, &balance)| balance != 0)
-        .map(|(addr, _)| load_account(addr))
-        .collect::<Result<EvmState, _>>()
-}
+// `balance_increment_state` was removed alongside the `SystemCaller::try_on_state_with`
+// hook call: the source-aware `OnStateHook` mechanism was dropped in alloy-evm 0.36, so
+// gravity no longer needs to synthesize an `EvmState` delta for balance increments here.
+// The engine-tree payload processor derives the resulting delta from the final bundle
+// after `finish` runs, matching upstream's approach.
 
 #[cfg(test)]
 mod tests {
@@ -473,7 +447,7 @@ mod tests {
         context::TxEnv,
         database::{CacheDB, EmptyDB},
         primitives::TxKind,
-        state::AccountInfo,
+        state::{Account, AccountInfo, AccountStatus},
     };
 
     fn prague_chainspec() -> Arc<ChainSpec> {
@@ -513,17 +487,13 @@ mod tests {
             balance: U256::ZERO,
             code_hash,
             code: Some(Bytecode::new_raw(code)),
+            ..Default::default()
         };
         let mut state_diff = EvmState::default();
-        state_diff.insert(
-            HISTORY_STORAGE_ADDRESS,
-            Account {
-                info,
-                storage: Default::default(),
-                status: AccountStatus::Created | AccountStatus::Touched,
-                transaction_id: 0,
-            },
-        );
+        let mut account = Account::default();
+        account.info = info;
+        account.status = AccountStatus::Created | AccountStatus::Touched;
+        state_diff.insert(HISTORY_STORAGE_ADDRESS, account);
         state_diff
     }
 
@@ -676,18 +646,18 @@ mod tests {
         // `code` field. revm's `state.commit` semantics preserve previously
         // committed code if the new diff doesn't supply one.
         let code_hash = keccak256(HISTORY_STORAGE_CODE.as_ref());
-        let bumped_info =
-            AccountInfo { nonce: 2, balance: U256::from(100u64), code_hash, code: None };
+        let bumped_info = AccountInfo {
+            nonce: 2,
+            balance: U256::from(100u64),
+            code_hash,
+            code: None,
+            ..Default::default()
+        };
         let mut second_diff = EvmState::default();
-        second_diff.insert(
-            HISTORY_STORAGE_ADDRESS,
-            Account {
-                info: bumped_info,
-                storage: Default::default(),
-                status: AccountStatus::Touched,
-                transaction_id: 0,
-            },
-        );
+        let mut bumped_account = Account::default();
+        bumped_account.info = bumped_info;
+        bumped_account.status = AccountStatus::Touched;
+        second_diff.insert(HISTORY_STORAGE_ADDRESS, bumped_account);
         executor.apply_state_change(second_diff).unwrap();
 
         let bundle = executor.take_bundle();
@@ -760,7 +730,7 @@ mod tests {
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(
             SYSTEM_CALLER,
-            AccountInfo { balance, nonce, code_hash: KECCAK_EMPTY, code: None },
+            AccountInfo { balance, nonce, code_hash: KECCAK_EMPTY, code: None, account_id: None },
         );
         db
     }
@@ -883,7 +853,7 @@ mod tests {
             "system tx execution must succeed (no insufficient-funds / GasPriceLessThanBasefee)"
         );
         assert!(
-            result.gas_used() > 0,
+            result.tx_gas_used() > 0,
             "gas_used must stay positive — gas metering is not bypassed"
         );
 
@@ -955,7 +925,7 @@ mod tests {
         let result_pre = pre_executor
             .transact_system_txn(evm_env_pre, Vec::new(), tx_pre)
             .expect("pre-Alpha system tx must succeed (production fallback path)");
-        let gas_used_pre = result_pre.gas_used();
+        let gas_used_pre = result_pre.tx_gas_used();
         assert!(result_pre.is_success(), "pre-Alpha system tx must succeed");
 
         // Post-Alpha chainspec: Alpha = Timestamp(1), block_ts = 1 ⇒ gate active.
@@ -976,7 +946,7 @@ mod tests {
         let result_post = post_executor
             .transact_system_txn(evm_env_post, Vec::new(), tx_post)
             .expect("post-Alpha system tx must succeed (gas-exempt path)");
-        let gas_used_post = result_post.gas_used();
+        let gas_used_post = result_post.tx_gas_used();
         assert!(result_post.is_success(), "post-Alpha system tx must succeed");
 
         // The core invariant: gas metering doesn't change across the fork.

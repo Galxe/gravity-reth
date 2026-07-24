@@ -9,7 +9,7 @@ use alloy_eips::{
     eip7685::EMPTY_REQUESTS_HASH,
 };
 use alloy_evm::block::{BlockValidationError, NoopHook};
-use alloy_primitives::{b256, fixed_bytes, keccak256, Address, Bytes, TxKind, B256, U256};
+use alloy_primitives::{address, b256, fixed_bytes, keccak256, Address, Bytes, TxKind, B256, U256};
 use reth_chainspec::{ChainSpecBuilder, EthereumHardfork, ForkCondition, MAINNET};
 use reth_ethereum_primitives::{Block, BlockBody, Transaction};
 use reth_evm::{
@@ -26,7 +26,6 @@ use reth_testing_utils::generators::{self, sign_tx_with_key_pair};
 use revm::{
     database::{CacheDB, EmptyDB, TransitionState},
     precompile::{PrecompileId, PrecompileOutput, PrecompileResult},
-    primitives::address,
     state::{AccountInfo, Bytecode, EvmState},
     Database,
 };
@@ -44,6 +43,7 @@ fn create_database_with_beacon_root_contract() -> CacheDB<EmptyDB> {
         code_hash: keccak256(BEACON_ROOTS_CODE.clone()),
         nonce: 1,
         code: Some(Bytecode::new_raw(BEACON_ROOTS_CODE.clone())),
+        account_id: None,
     };
 
     db.insert_account_info(BEACON_ROOTS_ADDRESS, beacon_root_contract_account);
@@ -59,6 +59,7 @@ fn create_database_with_withdrawal_requests_contract() -> CacheDB<EmptyDB> {
         balance: U256::ZERO,
         code_hash: keccak256(WITHDRAWAL_REQUEST_PREDEPLOY_CODE.clone()),
         code: Some(Bytecode::new_raw(WITHDRAWAL_REQUEST_PREDEPLOY_CODE.clone())),
+        account_id: None,
     };
 
     db.insert_account_info(
@@ -73,11 +74,7 @@ fn create_custom_precompile() -> DynPrecompile {
     (
         PrecompileId::custom("test_custom_precompile"),
         |_input: PrecompileInput<'_>| -> PrecompileResult {
-            Ok(PrecompileOutput {
-                gas_used: CUSTOM_PRECOMPILE_GAS,
-                bytes: Bytes::from(vec![0x42; 64]),
-                reverted: false,
-            })
+            Ok(PrecompileOutput::new(CUSTOM_PRECOMPILE_GAS, Bytes::from(vec![0x42; 64]), 0))
         },
     )
         .into()
@@ -433,6 +430,7 @@ fn create_database_with_block_hashes(latest_block: u64) -> CacheDB<EmptyDB> {
         code_hash: keccak256(HISTORY_STORAGE_CODE.clone()),
         code: Some(Bytecode::new_raw(HISTORY_STORAGE_CODE.clone())),
         nonce: 1,
+        account_id: None,
     };
 
     db.insert_account_info(HISTORY_STORAGE_ADDRESS, blockhashes_contract_account);
@@ -902,7 +900,7 @@ fn test_balance_increment_not_duplicated() {
     let tx_clone = tx.clone();
 
     let _output = executor
-        .execute_with_state_hook(block, move |_, state: &EvmState| {
+        .execute_with_state_hook(block, move |state: &EvmState| {
             if let Some(account) = state.get(&withdrawal_recipient) {
                 let _ = tx_clone.send(account.info.balance);
             }

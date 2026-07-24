@@ -88,8 +88,10 @@ use crate::{
     TransactionValidator,
 };
 
-use alloy_primitives::{Address, TxHash, B256};
-use best::BestTransactions;
+use alloy_primitives::{
+    map::{AddressSet, HashSet},
+    Address, TxHash, B256,
+};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
@@ -97,7 +99,14 @@ use reth_execution_types::ChangedAccount;
 use alloy_eips::{eip7594::BlobTransactionSidecarVariant, Typed2718};
 use reth_primitives_traits::Recovered;
 use rustc_hash::FxHashMap;
-use std::{collections::HashSet, fmt, sync::Arc, time::Instant};
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 mod events;
@@ -107,14 +116,15 @@ pub use events::{FullTransactionEvent, NewTransactionEvent, TransactionEvent};
 pub use listener::{AllTransactionsEvents, TransactionEvents, TransactionListenerKind};
 pub use parked::{BasefeeOrd, ParkedOrd, ParkedPool, QueuedOrd};
 pub use pending::PendingPool;
-use reth_primitives_traits::Block;
 
 mod best;
+pub use best::BestTransactions;
+
 mod blob;
-mod listener;
+pub mod listener;
 mod parked;
 pub mod pending;
-pub(crate) mod size;
+pub mod size;
 pub(crate) mod state;
 pub mod txpool;
 mod update;
@@ -143,10 +153,12 @@ where
     config: PoolConfig,
     /// Manages listeners for transaction state change events.
     event_listener: RwLock<PoolEventBroadcast<T::Transaction>>,
+    /// Tracks whether any event listeners have ever been installed.
+    has_event_listeners: AtomicBool,
     /// Listeners for new _full_ pending transactions.
-    pending_transaction_listener: Mutex<Vec<PendingTransactionHashListener>>,
+    pending_transaction_listener: RwLock<Vec<PendingTransactionHashListener>>,
     /// Listeners for new transactions added to the pool.
-    transaction_listener: Mutex<Vec<TransactionListener<T::Transaction>>>,
+    transaction_listener: RwLock<Vec<TransactionListener<T::Transaction>>>,
     /// Listener for new blob transaction sidecars added to the pool.
     blob_transaction_sidecar_listener: Mutex<Vec<BlobTransactionSidecarListener>>,
     /// Metrics for the blob store
@@ -167,6 +179,7 @@ where
             identifiers: Default::default(),
             validator,
             event_listener: Default::default(),
+            has_event_listeners: AtomicBool::new(false),
             pool: RwLock::new(TxPool::new(ordering, config.clone())),
             pending_transaction_listener: Default::default(),
             transaction_listener: Default::default(),
@@ -191,14 +204,33 @@ where
     pub fn block_info(&self) -> BlockInfo {
         self.get_pool_data().block_info()
     }
-    /// Sets the currently tracked block
+    /// Sets the currently tracked block.
+    ///
+    /// This will also notify subscribers about any transactions that were promoted to the pending
+    /// pool due to fee changes.
     pub fn set_block_info(&self, info: BlockInfo) {
-        self.pool.write().set_block_info(info)
+        let outcome = self.pool.write().set_block_info(info);
+
+        // Notify subscribers about promoted transactions due to fee changes
+        self.notify_on_transaction_updates(outcome.promoted, outcome.discarded);
     }
 
-    /// Returns the internal [`SenderId`] for this address
+    /// Returns the internal [`SenderId`] for this address, allocating a new mapping when the
+    /// address is first observed.
+    ///
+    /// This must only be used on paths that intentionally begin tracking a sender, such as
+    /// transaction insertion. Read-only lookups should prefer [`Self::sender_id`] to avoid
+    /// growing the sender-id map for unknown addresses.
     pub fn get_sender_id(&self, addr: Address) -> SenderId {
         self.identifiers.write().sender_id_or_create(addr)
+    }
+
+    /// Returns the internal [`SenderId`] for this address if it is already tracked.
+    ///
+    /// Unlike [`Self::get_sender_id`], this never allocates a new sender mapping and is therefore
+    /// suitable for read-only queries or best-effort cleanup on unknown addresses.
+    pub fn sender_id(&self, addr: &Address) -> Option<SenderId> {
+        self.identifiers.read().sender_id(addr)
     }
 
     /// Returns the internal [`SenderId`]s for the given addresses.
@@ -207,22 +239,22 @@ where
     }
 
     /// Returns all senders in the pool
-    pub fn unique_senders(&self) -> HashSet<Address> {
+    pub fn unique_senders(&self) -> AddressSet {
         self.get_pool_data().unique_senders()
     }
 
     /// Converts the changed accounts to a map of sender ids to sender info (internal identifier
-    /// used for accounts)
+    /// used for __tracked__ accounts)
     fn changed_senders(
         &self,
         accs: impl Iterator<Item = ChangedAccount>,
     ) -> FxHashMap<SenderId, SenderInfo> {
-        let mut identifiers = self.identifiers.write();
+        let identifiers = self.identifiers.read();
         accs.into_iter()
-            .map(|acc| {
+            .filter_map(|acc| {
                 let ChangedAccount { address, nonce, balance } = acc;
-                let sender_id = identifiers.sender_id_or_create(address);
-                (sender_id, SenderInfo { state_nonce: nonce, balance })
+                let sender_id = identifiers.sender_id(&address)?;
+                Some((sender_id, SenderInfo { state_nonce: nonce, balance }))
             })
             .collect()
     }
@@ -242,7 +274,12 @@ where
     pub fn add_pending_listener(&self, kind: TransactionListenerKind) -> mpsc::Receiver<TxHash> {
         let (sender, rx) = mpsc::channel(self.config.pending_tx_listener_buffer_size);
         let listener = PendingTransactionHashListener { sender, kind };
-        self.pending_transaction_listener.lock().push(listener);
+
+        let mut listeners = self.pending_transaction_listener.write();
+        // Clean up dead listeners before adding new one
+        listeners.retain(|l| !l.sender.is_closed());
+        listeners.push(listener);
+
         rx
     }
 
@@ -253,7 +290,12 @@ where
     ) -> mpsc::Receiver<NewTransactionEvent<T::Transaction>> {
         let (sender, rx) = mpsc::channel(self.config.new_tx_listener_buffer_size);
         let listener = TransactionListener { sender, kind };
-        self.transaction_listener.lock().push(listener);
+
+        let mut listeners = self.transaction_listener.write();
+        // Clean up dead listeners before adding new one
+        listeners.retain(|l| !l.sender.is_closed());
+        listeners.push(listener);
+
         rx
     }
     /// Adds a new blob sidecar listener to the pool that gets notified about every new
@@ -268,14 +310,53 @@ where
     /// If the pool contains the transaction, this adds a new listener that gets notified about
     /// transaction events.
     pub fn add_transaction_event_listener(&self, tx_hash: TxHash) -> Option<TransactionEvents> {
-        self.get_pool_data()
-            .contains(&tx_hash)
-            .then(|| self.event_listener.write().subscribe(tx_hash))
+        if !self.get_pool_data().contains(&tx_hash) {
+            return None
+        }
+        let mut listener = self.event_listener.write();
+        let events = listener.subscribe(tx_hash);
+        self.mark_event_listener_installed();
+        Some(events)
     }
 
     /// Adds a listener for all transaction events.
     pub fn add_all_transactions_event_listener(&self) -> AllTransactionsEvents<T::Transaction> {
-        self.event_listener.write().subscribe_all()
+        let mut listener = self.event_listener.write();
+        let events = listener.subscribe_all();
+        self.mark_event_listener_installed();
+        events
+    }
+
+    #[inline]
+    fn has_event_listeners(&self) -> bool {
+        self.has_event_listeners.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn mark_event_listener_installed(&self) {
+        self.has_event_listeners.store(true, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn update_event_listener_state(&self, listener: &PoolEventBroadcast<T::Transaction>) {
+        if listener.is_empty() {
+            self.has_event_listeners.store(false, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    fn with_event_listener<F>(&self, emit: F)
+    where
+        F: FnOnce(&mut PoolEventBroadcast<T::Transaction>),
+    {
+        if !self.has_event_listeners() {
+            return
+        }
+        let mut listener = self.event_listener.write();
+        if !listener.is_empty() {
+            emit(&mut listener);
+        }
+        self.update_event_listener_state(&listener);
     }
 
     /// Returns a read lock to the pool's data.
@@ -283,19 +364,18 @@ where
         self.pool.read()
     }
 
-    /// Returns hashes of transactions in the pool that can be propagated.
-    pub fn pooled_transactions_hashes(&self) -> Vec<TxHash> {
-        self.get_pool_data()
-            .all()
-            .transactions_iter()
-            .filter(|tx| tx.propagate)
-            .map(|tx| *tx.hash())
-            .collect()
-    }
-
     /// Returns transactions in the pool that can be propagated
     pub fn pooled_transactions(&self) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
-        self.get_pool_data().all().transactions_iter().filter(|tx| tx.propagate).cloned().collect()
+        let mut out = Vec::new();
+        self.append_pooled_transactions(&mut out);
+        out
+    }
+
+    /// Returns hashes of transactions in the pool that can be propagated.
+    pub fn pooled_transactions_hashes(&self) -> Vec<TxHash> {
+        let mut out = Vec::new();
+        self.append_pooled_transactions_hashes(&mut out);
+        out
     }
 
     /// Returns only the first `max` transactions in the pool that can be propagated.
@@ -303,13 +383,94 @@ where
         &self,
         max: usize,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
-        self.get_pool_data()
-            .all()
-            .transactions_iter()
-            .filter(|tx| tx.propagate)
-            .take(max)
-            .cloned()
-            .collect()
+        if max == 0 {
+            return Vec::new()
+        }
+
+        let pool = self.get_pool_data();
+        let mut out = Vec::with_capacity(max.min(pool.all().len()));
+        out.extend(pool.all().transactions_iter().filter(|tx| tx.propagate).take(max).cloned());
+        out
+    }
+
+    /// Extends the given vector with all transactions in the pool that can be propagated.
+    pub fn append_pooled_transactions(
+        &self,
+        out: &mut Vec<Arc<ValidPoolTransaction<T::Transaction>>>,
+    ) {
+        out.extend(
+            self.get_pool_data().all().transactions_iter().filter(|tx| tx.propagate).cloned(),
+        );
+    }
+
+    /// Extends the given vector with pooled transactions for the given hashes that are allowed to
+    /// be propagated.
+    pub fn append_pooled_transaction_elements(
+        &self,
+        tx_hashes: &[TxHash],
+        limit: GetPooledTransactionLimit,
+        out: &mut Vec<<<V as TransactionValidator>::Transaction as PoolTransaction>::Pooled>,
+    ) where
+        <V as TransactionValidator>::Transaction: EthPoolTransaction,
+    {
+        let transactions = self.get_all_propagatable(tx_hashes);
+        let mut size = 0;
+        for transaction in transactions {
+            let encoded_len = transaction.encoded_length();
+            let Some(pooled) = self.to_pooled_transaction(transaction) else {
+                continue;
+            };
+
+            size += encoded_len;
+            out.push(pooled.into_inner());
+
+            if limit.exceeds(size) {
+                break
+            }
+        }
+    }
+
+    /// Extends the given vector with the hashes of all transactions in the pool that can be
+    /// propagated.
+    pub fn append_pooled_transactions_hashes(&self, out: &mut Vec<TxHash>) {
+        out.extend(
+            self.get_pool_data()
+                .all()
+                .transactions_iter()
+                .filter(|tx| tx.propagate)
+                .map(|tx| *tx.hash()),
+        );
+    }
+
+    /// Extends the given vector with only the first `max` transactions in the pool that can be
+    /// propagated.
+    pub fn append_pooled_transactions_max(
+        &self,
+        max: usize,
+        out: &mut Vec<Arc<ValidPoolTransaction<T::Transaction>>>,
+    ) {
+        out.extend(
+            self.get_pool_data()
+                .all()
+                .transactions_iter()
+                .filter(|tx| tx.propagate)
+                .take(max)
+                .cloned(),
+        );
+    }
+
+    /// Returns only the first `max` hashes of transactions in the pool that can be propagated.
+    pub fn pooled_transactions_hashes_max(&self, max: usize) -> Vec<TxHash> {
+        if max == 0 {
+            return Vec::new();
+        }
+
+        let pool = self.get_pool_data();
+        let mut out = Vec::with_capacity(max.min(pool.all().len()));
+        out.extend(
+            pool.all().transactions_iter().filter(|tx| tx.propagate).take(max).map(|tx| *tx.hash()),
+        );
+        out
     }
 
     /// Converts the internally tracked transaction to the pooled format.
@@ -329,8 +490,7 @@ where
         } else {
             transaction
                 .transaction
-                .clone()
-                .try_into_pooled()
+                .clone_into_pooled()
                 .inspect_err(|err| {
                     debug!(
                         target: "txpool", %err,
@@ -351,23 +511,9 @@ where
     where
         <V as TransactionValidator>::Transaction: EthPoolTransaction,
     {
-        let transactions = self.get_all_propagatable(tx_hashes);
-        let mut elements = Vec::with_capacity(transactions.len());
-        let mut size = 0;
-        for transaction in transactions {
-            let encoded_len = transaction.encoded_length();
-            let Some(pooled) = self.to_pooled_transaction(transaction) else {
-                continue;
-            };
-
-            size += encoded_len;
-            elements.push(pooled.into_inner());
-
-            if limit.exceeds(size) {
-                break
-            }
-        }
-
+        let mut elements = Vec::new();
+        self.append_pooled_transaction_elements(&tx_hashes, limit, &mut elements);
+        elements.shrink_to_fit();
         elements
     }
 
@@ -383,10 +529,7 @@ where
     }
 
     /// Updates the entire pool after a new block was executed.
-    pub fn on_canonical_state_change<B>(&self, update: CanonicalStateUpdate<'_, B>)
-    where
-        B: Block,
-    {
+    pub fn on_canonical_state_change(&self, update: CanonicalStateUpdate<'_, V::Block>) {
         trace!(target: "txpool", ?update, "updating pool on canonical state change");
 
         let block_info = update.block_info();
@@ -422,50 +565,13 @@ where
         let UpdateOutcome { promoted, discarded } =
             self.pool.write().update_accounts(changed_senders);
 
-        // Notify about promoted pending transactions (similar to notify_on_new_state)
-        if !promoted.is_empty() {
-            self.pending_transaction_listener.lock().retain_mut(|listener| {
-                let promoted_hashes = promoted.iter().filter_map(|tx| {
-                    if listener.kind.is_propagate_only() && !tx.propagate {
-                        None
-                    } else {
-                        Some(*tx.hash())
-                    }
-                });
-                listener.send_all(promoted_hashes)
-            });
-
-            // in this case we should also emit promoted transactions in full
-            self.transaction_listener.lock().retain_mut(|listener| {
-                let promoted_txs = promoted.iter().filter_map(|tx| {
-                    if listener.kind.is_propagate_only() && !tx.propagate {
-                        None
-                    } else {
-                        Some(NewTransactionEvent::pending(tx.clone()))
-                    }
-                });
-                listener.send_all(promoted_txs)
-            });
-        }
-
-        {
-            let mut listener = self.event_listener.write();
-            if !listener.is_empty() {
-                for tx in &promoted {
-                    listener.pending(tx.hash(), None);
-                }
-                for tx in &discarded {
-                    listener.discarded(tx.hash());
-                }
-            }
-        }
-
-        // This deletes outdated blob txs from the blob store, based on the account's nonce. This is
-        // called during txpool maintenance when the pool drifted.
-        self.delete_discarded_blobs(discarded.iter());
+        self.notify_on_transaction_updates(promoted, discarded);
     }
 
     /// Add a single validated transaction into the pool.
+    ///
+    /// Returns the outcome and optionally metadata to be processed after the pool lock is
+    /// released.
     ///
     /// Note: this is only used internally by [`Self::add_transactions()`], all new transaction(s)
     /// come in through that function, either as a batch or `std::iter::once`.
@@ -474,7 +580,7 @@ where
         pool: &mut RwLockWriteGuard<'_, TxPool<T>>,
         origin: TransactionOrigin,
         tx: TransactionValidationOutcome<T::Transaction>,
-    ) -> PoolResult<AddedTransactionOutcome> {
+    ) -> (PoolResult<AddedTransactionOutcome>, Option<AddedTransactionMeta<T::Transaction>>) {
         match tx {
             TransactionValidationOutcome::Valid {
                 balance,
@@ -488,7 +594,7 @@ where
                 let transaction_id = TransactionId::new(sender_id, transaction.nonce());
 
                 // split the valid transaction and the blob sidecar if it has any
-                let (transaction, maybe_sidecar) = match transaction {
+                let (transaction, blob_sidecar) = match transaction {
                     ValidTransaction::Valid(tx) => (tx, None),
                     ValidTransaction::ValidWithSidecar { transaction, sidecar } => {
                         debug_assert!(
@@ -508,50 +614,24 @@ where
                     authority_ids: authorities.map(|auths| self.get_sender_ids(auths)),
                 };
 
-                let added = pool.add_transaction(tx, balance, state_nonce, bytecode_hash)?;
+                let added = match pool.add_transaction(tx, balance, state_nonce, bytecode_hash) {
+                    Ok(added) => added,
+                    Err(err) => return (Err(err), None),
+                };
                 let hash = *added.hash();
                 let state = added.transaction_state();
 
-                // transaction was successfully inserted into the pool
-                if let Some(sidecar) = maybe_sidecar {
-                    // notify blob sidecar listeners
-                    self.on_new_blob_sidecar(&hash, &sidecar);
-                    // store the sidecar in the blob store
-                    self.insert_blob(hash, sidecar);
-                }
+                let meta = AddedTransactionMeta { added, blob_sidecar };
 
-                if let Some(replaced) = added.replaced_blob_transaction() {
-                    debug!(target: "txpool", "[{:?}] delete replaced blob sidecar", replaced);
-                    // delete the replaced transaction from the blob store
-                    self.delete_blob(replaced);
-                }
-
-                // Notify about new pending transactions
-                if let Some(pending) = added.as_pending() {
-                    self.on_new_pending_transaction(pending);
-                }
-
-                // Notify tx event listeners
-                self.notify_event_listeners(&added);
-
-                if let Some(discarded) = added.discarded_transactions() {
-                    self.delete_discarded_blobs(discarded.iter());
-                }
-
-                // Notify listeners for _all_ transactions
-                self.on_new_transaction(added.into_new_transaction_event());
-
-                Ok(AddedTransactionOutcome { hash, state })
+                (Ok(AddedTransactionOutcome { hash, state }), Some(meta))
             }
             TransactionValidationOutcome::Invalid(tx, err) => {
-                let mut listener = self.event_listener.write();
-                listener.invalid(tx.hash());
-                Err(PoolError::new(*tx.hash(), err))
+                self.with_event_listener(|listener| listener.invalid(tx.hash()));
+                (Err(PoolError::new(*tx.hash(), err)), None)
             }
             TransactionValidationOutcome::Error(tx_hash, err) => {
-                let mut listener = self.event_listener.write();
-                listener.discarded(&tx_hash);
-                Err(PoolError::other(tx_hash, err))
+                self.with_event_listener(|listener| listener.discarded(&tx_hash));
+                (Err(PoolError::other(tx_hash, err)), None)
             }
         }
     }
@@ -564,70 +644,19 @@ where
     ) -> PoolResult<TransactionEvents> {
         let listener = {
             let mut listener = self.event_listener.write();
-            listener.subscribe(tx.tx_hash())
+            let events = listener.subscribe(tx.tx_hash());
+            self.mark_event_listener_installed();
+            events
         };
         let mut results = self.add_transactions(origin, std::iter::once(tx));
         results.pop().expect("result length is the same as the input")?;
         Ok(listener)
     }
 
-    /// Adds all transactions in the iterator to the pool, each with its individual origin,
-    /// returning a list of results.
-    ///
-    /// Note: A large batch may lock the pool for a long time that blocks important operations
-    /// like updating the pool on canonical state changes. The caller should consider having
-    /// a max batch size to balance transaction insertions with other updates.
-    pub fn add_transactions_with_origins(
-        &self,
-        transactions: impl IntoIterator<
-            Item = (TransactionOrigin, TransactionValidationOutcome<T::Transaction>),
-        >,
-    ) -> Vec<PoolResult<AddedTransactionOutcome>> {
-        // Process all transactions in one write lock, maintaining individual origins
-        let (mut added, discarded) = {
-            let mut pool = self.pool.write();
-            let added = transactions
-                .into_iter()
-                .map(|(origin, tx)| self.add_transaction(&mut pool, origin, tx))
-                .collect::<Vec<_>>();
-
-            // Enforce the pool size limits if at least one transaction was added successfully
-            let discarded = if added.iter().any(Result::is_ok) {
-                pool.discard_worst()
-            } else {
-                Default::default()
-            };
-
-            (added, discarded)
-        };
-
-        if !discarded.is_empty() {
-            // Delete any blobs associated with discarded blob transactions
-            self.delete_discarded_blobs(discarded.iter());
-            self.event_listener.write().discarded_many(&discarded);
-
-            let discarded_hashes =
-                discarded.into_iter().map(|tx| *tx.hash()).collect::<HashSet<_>>();
-
-            // A newly added transaction may be immediately discarded, so we need to
-            // adjust the result here
-            for res in &mut added {
-                if let Ok(AddedTransactionOutcome { hash, .. }) = res &&
-                    discarded_hashes.contains(hash)
-                {
-                    *res = Err(PoolError::new(*hash, PoolErrorKind::DiscardedOnInsert))
-                }
-            }
-        }
-
-        added
-    }
-
     /// Adds all transactions in the iterator to the pool, returning a list of results.
     ///
-    /// Note: A large batch may lock the pool for a long time that blocks important operations
-    /// like updating the pool on canonical state changes. The caller should consider having
-    /// a max batch size to balance transaction insertions with other updates.
+    /// Convenience method that assigns the same origin to all transactions. Delegates to
+    /// [`Self::add_transactions_with_origins`].
     pub fn add_transactions(
         &self,
         origin: TransactionOrigin,
@@ -636,35 +665,166 @@ where
         self.add_transactions_with_origins(transactions.into_iter().map(|tx| (origin, tx)))
     }
 
-    /// Notify all listeners about a new pending transaction.
-    fn on_new_pending_transaction(&self, pending: &AddedPendingTransaction<T::Transaction>) {
-        let propagate_allowed = pending.is_propagate_allowed();
+    /// Adds all transactions in the iterator to the pool, each with its own
+    /// [`TransactionOrigin`], returning a list of results.
+    pub fn add_transactions_with_origins(
+        &self,
+        transactions: impl IntoIterator<
+            Item = (TransactionOrigin, TransactionValidationOutcome<T::Transaction>),
+        >,
+    ) -> Vec<PoolResult<AddedTransactionOutcome>> {
+        // Collect results and metadata while holding the pool write lock
+        let (mut results, added_metas, discarded) = {
+            let mut pool = self.pool.write();
+            let mut added_metas = Vec::new();
 
-        let mut transaction_listeners = self.pending_transaction_listener.lock();
-        transaction_listeners.retain_mut(|listener| {
-            if listener.kind.is_propagate_only() && !propagate_allowed {
-                // only emit this hash to listeners that are only allowed to receive propagate only
-                // transactions, such as network
-                return !listener.sender.is_closed()
+            let results = transactions
+                .into_iter()
+                .map(|(origin, tx)| {
+                    let (result, meta) = self.add_transaction(&mut pool, origin, tx);
+
+                    // Only collect metadata for successful insertions
+                    if result.is_ok() &&
+                        let Some(meta) = meta
+                    {
+                        added_metas.push(meta);
+                    }
+
+                    result
+                })
+                .collect::<Vec<_>>();
+
+            // Enforce the pool size limits if at least one transaction was added successfully
+            let discarded = if results.iter().any(Result::is_ok) {
+                pool.discard_worst()
+            } else {
+                Default::default()
+            };
+
+            (results, added_metas, discarded)
+        };
+
+        for meta in added_metas {
+            self.on_added_transaction(meta);
+        }
+
+        if !discarded.is_empty() {
+            // Delete any blobs associated with discarded blob transactions
+            self.delete_discarded_blobs(discarded.iter());
+            self.with_event_listener(|listener| listener.discarded_many(&discarded));
+
+            let discarded_hashes =
+                discarded.into_iter().map(|tx| *tx.hash()).collect::<HashSet<_>>();
+
+            // A newly added transaction may be immediately discarded, so we need to
+            // adjust the result here
+            for res in &mut results {
+                if let Ok(AddedTransactionOutcome { hash, .. }) = res &&
+                    discarded_hashes.contains(hash)
+                {
+                    *res = Err(PoolError::new(*hash, PoolErrorKind::DiscardedOnInsert))
+                }
             }
+        };
 
-            // broadcast all pending transactions to the listener
-            listener.send_all(pending.pending_transactions(listener.kind))
-        });
+        results
+    }
+
+    /// Process a transaction that was added to the pool.
+    ///
+    /// Performs blob storage operations and sends all notifications. This should be called
+    /// after the pool write lock has been released to avoid blocking pool operations.
+    fn on_added_transaction(&self, meta: AddedTransactionMeta<T::Transaction>) {
+        // Handle blob sidecar storage and notifications for EIP-4844 transactions
+        if let Some(sidecar) = meta.blob_sidecar {
+            let hash = *meta.added.hash();
+            self.on_new_blob_sidecar(&hash, &sidecar);
+            self.insert_blob(hash, sidecar);
+        }
+
+        // Delete replaced blob sidecar if any
+        if let Some(replaced) = meta.added.replaced_blob_transaction() {
+            debug!(target: "txpool", "[{:?}] delete replaced blob sidecar", replaced);
+            self.delete_blob(replaced);
+        }
+
+        // Delete discarded blob sidecars if any, this doesnt do any IO.
+        if let Some(discarded) = meta.added.discarded_transactions() {
+            self.delete_discarded_blobs(discarded.iter());
+        }
+
+        // Notify pending transaction listeners
+        if let Some(pending) = meta.added.as_pending() {
+            self.on_new_pending_transaction(pending);
+        }
+
+        // Notify event listeners
+        self.notify_event_listeners(&meta.added);
+
+        // Notify new transaction listeners
+        self.on_new_transaction(meta.added.into_new_transaction_event());
+    }
+
+    /// Notify all listeners about a new pending transaction.
+    ///
+    /// See also [`Self::add_pending_listener`]
+    ///
+    /// CAUTION: This function is only intended to be used manually in order to use this type's
+    /// pending transaction receivers when manually implementing the
+    /// [`TransactionPool`](crate::TransactionPool) trait for a custom pool implementation
+    /// [`TransactionPool::pending_transactions_listener_for`](crate::TransactionPool).
+    pub fn on_new_pending_transaction(&self, pending: &AddedPendingTransaction<T::Transaction>) {
+        let mut needs_cleanup = false;
+
+        {
+            let listeners = self.pending_transaction_listener.read();
+            for listener in listeners.iter() {
+                if !listener.send_all(pending.pending_transactions(listener.kind)) {
+                    needs_cleanup = true;
+                }
+            }
+        }
+
+        // Clean up dead listeners if we detected any closed channels
+        if needs_cleanup {
+            self.pending_transaction_listener
+                .write()
+                .retain(|listener| !listener.sender.is_closed());
+        }
     }
 
     /// Notify all listeners about a newly inserted pending transaction.
-    fn on_new_transaction(&self, event: NewTransactionEvent<T::Transaction>) {
-        let mut transaction_listeners = self.transaction_listener.lock();
-        transaction_listeners.retain_mut(|listener| {
-            if listener.kind.is_propagate_only() && !event.transaction.propagate {
-                // only emit this hash to listeners that are only allowed to receive propagate only
-                // transactions, such as network
-                return !listener.sender.is_closed()
-            }
+    ///
+    /// See also [`Self::add_new_transaction_listener`]
+    ///
+    /// CAUTION: This function is only intended to be used manually in order to use this type's
+    /// transaction receivers when manually implementing the
+    /// [`TransactionPool`](crate::TransactionPool) trait for a custom pool implementation
+    /// [`TransactionPool::new_transactions_listener_for`](crate::TransactionPool).
+    pub fn on_new_transaction(&self, event: NewTransactionEvent<T::Transaction>) {
+        let mut needs_cleanup = false;
 
-            listener.send(event.clone())
-        });
+        {
+            let listeners = self.transaction_listener.read();
+            for listener in listeners.iter() {
+                if listener.kind.is_propagate_only() && !event.transaction.propagate {
+                    if listener.sender.is_closed() {
+                        needs_cleanup = true;
+                    }
+                    // Skip non-propagate transactions for propagate-only listeners
+                    continue
+                }
+
+                if !listener.send(event.clone()) {
+                    needs_cleanup = true;
+                }
+            }
+        }
+
+        // Clean up dead listeners if we detected any closed channels
+        if needs_cleanup {
+            self.transaction_listener.write().retain(|listener| !listener.sender.is_closed());
+        }
     }
 
     /// Notify all listeners about a blob sidecar for a newly inserted blob (eip4844) transaction.
@@ -698,23 +858,38 @@ where
     fn notify_on_new_state(&self, outcome: OnNewCanonicalStateOutcome<T::Transaction>) {
         trace!(target: "txpool", promoted=outcome.promoted.len(), discarded= outcome.discarded.len() ,"notifying listeners on state change");
 
-        // notify about promoted pending transactions
-        // emit hashes
-        self.pending_transaction_listener
-            .lock()
-            .retain_mut(|listener| listener.send_all(outcome.pending_transactions(listener.kind)));
+        // notify about promoted pending transactions - emit hashes
+        let mut needs_pending_cleanup = false;
+        {
+            let listeners = self.pending_transaction_listener.read();
+            for listener in listeners.iter() {
+                if !listener.send_all(outcome.pending_transactions(listener.kind)) {
+                    needs_pending_cleanup = true;
+                }
+            }
+        }
+        if needs_pending_cleanup {
+            self.pending_transaction_listener.write().retain(|l| !l.sender.is_closed());
+        }
 
         // emit full transactions
-        self.transaction_listener.lock().retain_mut(|listener| {
-            listener.send_all(outcome.full_pending_transactions(listener.kind))
-        });
+        let mut needs_tx_cleanup = false;
+        {
+            let listeners = self.transaction_listener.read();
+            for listener in listeners.iter() {
+                if !listener.send_all(outcome.full_pending_transactions(listener.kind)) {
+                    needs_tx_cleanup = true;
+                }
+            }
+        }
+        if needs_tx_cleanup {
+            self.transaction_listener.write().retain(|l| !l.sender.is_closed());
+        }
 
         let OnNewCanonicalStateOutcome { mined, promoted, discarded, block_hash } = outcome;
 
         // broadcast specific transaction events
-        let mut listener = self.event_listener.write();
-
-        if !listener.is_empty() {
+        self.with_event_listener(|listener| {
             for tx in &mined {
                 listener.mined(tx, block_hash);
             }
@@ -724,18 +899,92 @@ where
             for tx in &discarded {
                 listener.discarded(tx.hash());
             }
+        })
+    }
+
+    /// Notifies all listeners about the transaction movements.
+    ///
+    /// This will emit events according to the provided changes.
+    ///
+    /// CAUTION: This function is only intended to be used manually in order to use this type's
+    /// [`TransactionEvents`] receivers when manually implementing the
+    /// [`TransactionPool`](crate::TransactionPool) trait for a custom pool implementation
+    /// [`TransactionPool::transaction_event_listener`](crate::TransactionPool).
+    pub fn notify_on_transaction_updates(
+        &self,
+        promoted: Vec<Arc<ValidPoolTransaction<T::Transaction>>>,
+        discarded: Vec<Arc<ValidPoolTransaction<T::Transaction>>>,
+    ) {
+        // Notify about promoted pending transactions (similar to notify_on_new_state)
+        if !promoted.is_empty() {
+            let mut needs_pending_cleanup = false;
+            {
+                let listeners = self.pending_transaction_listener.read();
+                for listener in listeners.iter() {
+                    let promoted_hashes = promoted.iter().filter_map(|tx| {
+                        if listener.kind.is_propagate_only() && !tx.propagate {
+                            None
+                        } else {
+                            Some(*tx.hash())
+                        }
+                    });
+                    if !listener.send_all(promoted_hashes) {
+                        needs_pending_cleanup = true;
+                    }
+                }
+            }
+            if needs_pending_cleanup {
+                self.pending_transaction_listener.write().retain(|l| !l.sender.is_closed());
+            }
+
+            // in this case we should also emit promoted transactions in full
+            let mut needs_tx_cleanup = false;
+            {
+                let listeners = self.transaction_listener.read();
+                for listener in listeners.iter() {
+                    let promoted_txs = promoted.iter().filter_map(|tx| {
+                        if listener.kind.is_propagate_only() && !tx.propagate {
+                            None
+                        } else {
+                            Some(NewTransactionEvent::pending(tx.clone()))
+                        }
+                    });
+                    if !listener.send_all(promoted_txs) {
+                        needs_tx_cleanup = true;
+                    }
+                }
+            }
+            if needs_tx_cleanup {
+                self.transaction_listener.write().retain(|l| !l.sender.is_closed());
+            }
+        }
+
+        self.with_event_listener(|listener| {
+            for tx in &promoted {
+                listener.pending(tx.hash(), None);
+            }
+            for tx in &discarded {
+                listener.discarded(tx.hash());
+            }
+        });
+
+        if !discarded.is_empty() {
+            // This deletes outdated blob txs from the blob store, based on the account's nonce.
+            // This is called during txpool maintenance when the pool drifted.
+            self.delete_discarded_blobs(discarded.iter());
         }
     }
 
     /// Fire events for the newly added transaction if there are any.
-    fn notify_event_listeners(&self, tx: &AddedTransaction<T::Transaction>) {
-        let mut listener = self.event_listener.write();
-        if listener.is_empty() {
-            // nothing to notify
-            return
-        }
-
-        match tx {
+    ///
+    /// See also [`Self::add_transaction_event_listener`].
+    ///
+    /// CAUTION: This function is only intended to be used manually in order to use this type's
+    /// [`TransactionEvents`] receivers when manually implementing the
+    /// [`TransactionPool`](crate::TransactionPool) trait for a custom pool implementation
+    /// [`TransactionPool::transaction_event_listener`](crate::TransactionPool).
+    pub fn notify_event_listeners(&self, tx: &AddedTransaction<T::Transaction>) {
+        self.with_event_listener(|listener| match tx {
             AddedTransaction::Pending(tx) => {
                 let AddedPendingTransaction { transaction, promoted, discarded, replaced } = tx;
 
@@ -747,13 +996,13 @@ where
                     listener.discarded(tx.hash());
                 }
             }
-            AddedTransaction::Parked { transaction, replaced, .. } => {
-                listener.queued(transaction.hash());
+            AddedTransaction::Parked { transaction, replaced, queued_reason, .. } => {
+                listener.queued(transaction.hash(), queued_reason.clone());
                 if let Some(replaced) = replaced {
                     listener.replaced(replaced.clone(), *transaction.hash());
                 }
             }
-        }
+        });
     }
 
     /// Returns an iterator that yields transactions that are ready to be included in the block.
@@ -816,7 +1065,7 @@ where
         }
         let removed = self.pool.write().remove_transactions(hashes);
 
-        self.event_listener.write().discarded_many(&removed);
+        self.with_event_listener(|listener| listener.discarded_many(&removed));
 
         removed
     }
@@ -832,11 +1081,11 @@ where
         }
         let removed = self.pool.write().remove_transactions_and_descendants(hashes);
 
-        let mut listener = self.event_listener.write();
-
-        for tx in &removed {
-            listener.discarded(tx.hash());
-        }
+        self.with_event_listener(|listener| {
+            for tx in &removed {
+                listener.discarded(tx.hash());
+            }
+        });
 
         removed
     }
@@ -846,15 +1095,30 @@ where
         &self,
         sender: Address,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
-        let sender_id = self.get_sender_id(sender);
+        let Some(sender_id) = self.sender_id(&sender) else { return Vec::new() };
         let removed = self.pool.write().remove_transactions_by_sender(sender_id);
 
-        self.event_listener.write().discarded_many(&removed);
+        self.with_event_listener(|listener| listener.discarded_many(&removed));
 
         removed
     }
 
-    /// Removes and returns all transactions that are present in the pool.
+    /// Prunes and returns all matching transactions from the pool.
+    ///
+    /// This removes the transactions as if they were mined: descendant transactions are **not**
+    /// parked and remain eligible for inclusion.
+    pub fn prune_transactions(
+        &self,
+        hashes: Vec<TxHash>,
+    ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
+        if hashes.is_empty() {
+            return Vec::new()
+        }
+
+        self.pool.write().prune_transactions(hashes)
+    }
+
+    /// Retains only transactions that are not present in the pool.
     pub fn retain_unknown<A>(&self, announcement: &mut A)
     where
         A: HandleMempoolData,
@@ -864,6 +1128,18 @@ where
         }
         let pool = self.get_pool_data();
         announcement.retain_by_hash(|tx| !pool.contains(tx))
+    }
+
+    /// Retains only transactions that are present in the pool.
+    pub fn retain_contains<A>(&self, announcement: &mut A)
+    where
+        A: HandleMempoolData,
+    {
+        if announcement.is_empty() {
+            return
+        }
+        let pool = self.get_pool_data();
+        announcement.retain_by_hash(|tx| pool.contains(tx))
     }
 
     /// Returns the transaction by hash.
@@ -876,8 +1152,18 @@ where
         &self,
         sender: Address,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
-        let sender_id = self.get_sender_id(sender);
+        let Some(sender_id) = self.sender_id(&sender) else { return Vec::new() };
         self.get_pool_data().get_transactions_by_sender(sender_id)
+    }
+
+    /// Returns a pending transaction sent by the given sender with the given nonce.
+    pub fn get_pending_transaction_by_sender_and_nonce(
+        &self,
+        sender: Address,
+        nonce: u64,
+    ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
+        let sender_id = self.sender_id(&sender)?;
+        self.get_pool_data().get_pending_transaction_by_sender_and_nonce(sender_id, nonce)
     }
 
     /// Returns all queued transactions of the address by sender
@@ -885,7 +1171,7 @@ where
         &self,
         sender: Address,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
-        let sender_id = self.get_sender_id(sender);
+        let Some(sender_id) = self.sender_id(&sender) else { return Vec::new() };
         self.get_pool_data().queued_txs_by_sender(sender_id)
     }
 
@@ -902,7 +1188,7 @@ where
         &self,
         sender: Address,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
-        let sender_id = self.get_sender_id(sender);
+        let Some(sender_id) = self.sender_id(&sender) else { return Vec::new() };
         self.get_pool_data().pending_txs_by_sender(sender_id)
     }
 
@@ -911,7 +1197,7 @@ where
         &self,
         sender: Address,
     ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
-        let sender_id = self.get_sender_id(sender);
+        let sender_id = self.sender_id(&sender)?;
         self.get_pool_data().get_highest_transaction_by_sender(sender_id)
     }
 
@@ -921,7 +1207,7 @@ where
         sender: Address,
         on_chain_nonce: u64,
     ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
-        let sender_id = self.get_sender_id(sender);
+        let sender_id = self.sender_id(&sender)?;
         self.get_pool_data().get_highest_consecutive_transaction_by_sender(
             sender_id.into_transaction_id(on_chain_nonce),
         )
@@ -971,24 +1257,23 @@ where
     /// If no transaction exists, it is skipped.
     fn get_all_propagatable(
         &self,
-        txs: Vec<TxHash>,
+        txs: &[TxHash],
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
         if txs.is_empty() {
             return Vec::new()
         }
-        self.get_pool_data().get_all(txs).filter(|tx| tx.propagate).collect()
+        let pool = self.get_pool_data();
+        txs.iter().filter_map(|tx| pool.get(tx).filter(|tx| tx.propagate)).collect()
     }
 
     /// Notify about propagated transactions.
     pub fn on_propagated(&self, txs: PropagatedTransactions) {
-        if txs.0.is_empty() {
+        if txs.is_empty() {
             return
         }
-        let mut listener = self.event_listener.write();
-
-        if !listener.is_empty() {
-            txs.0.into_iter().for_each(|(hash, peers)| listener.propagated(&hash, peers));
-        }
+        self.with_event_listener(|listener| {
+            txs.into_iter().for_each(|(hash, peers)| listener.propagated(&hash, peers));
+        });
     }
 
     /// Number of transactions in the entire pool
@@ -1060,17 +1345,29 @@ impl<V, T: TransactionOrdering, S> fmt::Debug for PoolInner<V, T, S> {
     }
 }
 
+/// Metadata for a transaction that was added to the pool.
+///
+/// This holds all the data needed to complete post-insertion operations (notifications,
+/// blob storage).
+#[derive(Debug)]
+struct AddedTransactionMeta<T: PoolTransaction> {
+    /// The transaction that was added to the pool
+    added: AddedTransaction<T>,
+    /// Optional blob sidecar for EIP-4844 transactions
+    blob_sidecar: Option<BlobTransactionSidecarVariant>,
+}
+
 /// Tracks an added transaction and all graph changes caused by adding it.
 #[derive(Debug, Clone)]
 pub struct AddedPendingTransaction<T: PoolTransaction> {
     /// Inserted transaction.
-    transaction: Arc<ValidPoolTransaction<T>>,
+    pub transaction: Arc<ValidPoolTransaction<T>>,
     /// Replaced transaction.
-    replaced: Option<Arc<ValidPoolTransaction<T>>>,
+    pub replaced: Option<Arc<ValidPoolTransaction<T>>>,
     /// transactions promoted to the pending queue
-    promoted: Vec<Arc<ValidPoolTransaction<T>>>,
+    pub promoted: Vec<Arc<ValidPoolTransaction<T>>>,
     /// transactions that failed and became discarded
-    discarded: Vec<Arc<ValidPoolTransaction<T>>>,
+    pub discarded: Vec<Arc<ValidPoolTransaction<T>>>,
 }
 
 impl<T: PoolTransaction> AddedPendingTransaction<T> {
@@ -1085,11 +1382,6 @@ impl<T: PoolTransaction> AddedPendingTransaction<T> {
     ) -> impl Iterator<Item = B256> + '_ {
         let iter = std::iter::once(&self.transaction).chain(self.promoted.iter());
         PendingTransactionIter { kind, iter }
-    }
-
-    /// Returns if the transaction should be propagated.
-    pub(crate) fn is_propagate_allowed(&self) -> bool {
-        self.transaction.propagate
     }
 }
 
@@ -1164,7 +1456,7 @@ pub enum AddedTransaction<T: PoolTransaction> {
 
 impl<T: PoolTransaction> AddedTransaction<T> {
     /// Returns whether the transaction has been added to the pending pool.
-    pub(crate) const fn as_pending(&self) -> Option<&AddedPendingTransaction<T>> {
+    pub const fn as_pending(&self) -> Option<&AddedPendingTransaction<T>> {
         match self {
             Self::Pending(tx) => Some(tx),
             _ => None,
@@ -1172,7 +1464,7 @@ impl<T: PoolTransaction> AddedTransaction<T> {
     }
 
     /// Returns the replaced transaction if there was one
-    pub(crate) const fn replaced(&self) -> Option<&Arc<ValidPoolTransaction<T>>> {
+    pub const fn replaced(&self) -> Option<&Arc<ValidPoolTransaction<T>>> {
         match self {
             Self::Pending(tx) => tx.replaced.as_ref(),
             Self::Parked { replaced, .. } => replaced.as_ref(),
@@ -1193,7 +1485,7 @@ impl<T: PoolTransaction> AddedTransaction<T> {
     }
 
     /// Returns the hash of the transaction
-    pub(crate) fn hash(&self) -> &TxHash {
+    pub fn hash(&self) -> &TxHash {
         match self {
             Self::Pending(tx) => tx.transaction.hash(),
             Self::Parked { transaction, .. } => transaction.hash(),
@@ -1201,7 +1493,7 @@ impl<T: PoolTransaction> AddedTransaction<T> {
     }
 
     /// Converts this type into the event type for listeners
-    pub(crate) fn into_new_transaction_event(self) -> NewTransactionEvent<T> {
+    pub fn into_new_transaction_event(self) -> NewTransactionEvent<T> {
         match self {
             Self::Pending(tx) => {
                 NewTransactionEvent { subpool: SubPool::Pending, transaction: tx.transaction }
@@ -1230,7 +1522,7 @@ impl<T: PoolTransaction> AddedTransaction<T> {
     }
 
     /// Returns the queued reason if the transaction is parked with a queued reason.
-    pub(crate) const fn queued_reason(&self) -> Option<&QueuedReason> {
+    pub const fn queued_reason(&self) -> Option<&QueuedReason> {
         match self {
             Self::Pending(_) => None,
             Self::Parked { queued_reason, .. } => queued_reason.as_ref(),
@@ -1238,7 +1530,7 @@ impl<T: PoolTransaction> AddedTransaction<T> {
     }
 
     /// Returns the transaction state based on the subpool and queued reason.
-    pub(crate) fn transaction_state(&self) -> AddedTransactionState {
+    pub fn transaction_state(&self) -> AddedTransactionState {
         match self.subpool() {
             SubPool::Pending => AddedTransactionState::Pending,
             _ => {
@@ -1483,5 +1775,21 @@ mod tests {
 
         let identifiers = test_pool.identifiers.read();
         assert_eq!(identifiers.sender_id(&auth), Some(SenderId::from(1)));
+    }
+
+    #[test]
+    fn sender_queries_do_not_allocate_ids_for_unknown_addresses() {
+        let test_pool = &TestPoolBuilder::default().with_config(Default::default()).pool;
+        let sender = Address::new([9; 20]);
+
+        assert_eq!(test_pool.sender_id(&sender), None);
+        assert!(test_pool.get_transactions_by_sender(sender).is_empty());
+        assert!(test_pool.get_pending_transaction_by_sender_and_nonce(sender, 0).is_none());
+        assert!(test_pool.get_queued_transactions_by_sender(sender).is_empty());
+        assert!(test_pool.get_pending_transactions_by_sender(sender).is_empty());
+        assert!(test_pool.get_highest_transaction_by_sender(sender).is_none());
+        assert!(test_pool.get_highest_consecutive_transaction_by_sender(sender, 0).is_none());
+        assert!(test_pool.remove_transactions_by_sender(sender).is_empty());
+        assert_eq!(test_pool.sender_id(&sender), None);
     }
 }

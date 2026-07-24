@@ -1,6 +1,7 @@
 use crate::tree::metrics::BlockBufferMetrics;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{BlockHash, BlockNumber};
+use indexmap::IndexSet;
 use reth_primitives_traits::{Block, RecoveredBlock};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -14,7 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 /// * [`BlockBuffer::remove_old_blocks`] to remove old blocks that precede the finalized number.
 ///
 /// Note: Buffer is limited by number of blocks that it can contain and eviction of the block
-/// is done by last recently used block.
+/// is done in FIFO order (oldest inserted block is evicted first).
 #[derive(Debug)]
 pub struct BlockBuffer<B: Block> {
     /// All blocks in the buffer stored by their block hash.
@@ -22,7 +23,7 @@ pub struct BlockBuffer<B: Block> {
     /// Map of any parent block hash (even the ones not currently in the buffer)
     /// to the buffered children.
     /// Allows connecting buffered blocks by parent.
-    pub(crate) parent_to_child: HashMap<BlockHash, HashSet<BlockHash>>,
+    pub(crate) parent_to_child: HashMap<BlockHash, IndexSet<BlockHash>>,
     /// `BTreeMap` tracking the earliest blocks by block number.
     /// Used for removal of old blocks that precede finalization.
     pub(crate) earliest_blocks: BTreeMap<BlockNumber, HashSet<BlockHash>>,
@@ -66,17 +67,20 @@ impl<B: Block> BlockBuffer<B> {
     pub fn insert_block(&mut self, block: RecoveredBlock<B>) {
         let hash = block.hash();
 
-        self.parent_to_child.entry(block.parent_hash()).or_default().insert(hash);
-        self.earliest_blocks.entry(block.number()).or_default().insert(hash);
-        self.blocks.insert(hash, block);
+        match self.blocks.entry(hash) {
+            std::collections::hash_map::Entry::Occupied(_) => return,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                self.parent_to_child.entry(block.parent_hash()).or_default().insert(hash);
+                self.earliest_blocks.entry(block.number()).or_default().insert(hash);
+                entry.insert(block);
+            }
+        };
 
         // Add block to FIFO queue and handle eviction if needed
         if self.block_queue.len() >= self.max_blocks {
             // Evict oldest block if limit is hit
-            if let Some(evicted_hash) = self.block_queue.pop_front() &&
-                let Some(evicted_block) = self.remove_block(&evicted_hash)
-            {
-                self.remove_from_parent(evicted_block.parent_hash(), &evicted_hash);
+            if let Some(evicted_hash) = self.block_queue.pop_front() {
+                self.remove_block(&evicted_hash);
             }
         }
         self.block_queue.push_back(hash);
@@ -139,7 +143,7 @@ impl<B: Block> BlockBuffer<B> {
     fn remove_from_parent(&mut self, parent_hash: BlockHash, hash: &BlockHash) {
         // remove from parent to child connection, but only for this block parent.
         if let Some(entry) = self.parent_to_child.get_mut(&parent_hash) {
-            entry.remove(hash);
+            entry.swap_remove(hash);
             // if set is empty remove block entry.
             if entry.is_empty() {
                 self.parent_to_child.remove(&parent_hash);
@@ -494,5 +498,58 @@ mod tests {
         assert_block_removal(&buffer, &block1);
 
         assert_buffer_lengths(&buffer, 3);
+    }
+
+    #[test]
+    fn eviction_parent_child_cleanup() {
+        let mut rng = generators::rng();
+
+        let main_parent = BlockNumHash::new(9, rng.random());
+        let block1 = create_block(&mut rng, 10, main_parent.hash);
+        let block2 = create_block(&mut rng, 11, block1.hash());
+        // Unrelated block to trigger eviction
+        let unrelated_parent = rng.random();
+        let unrelated_block = create_block(&mut rng, 12, unrelated_parent);
+
+        // Capacity 2 so third insert evicts the oldest (block1)
+        let mut buffer = BlockBuffer::new(2);
+
+        buffer.insert_block(block1.clone());
+        buffer.insert_block(block2.clone());
+
+        // Pre-eviction: parent_to_child contains main_parent -> {block1}, block1 -> {block2}
+        assert!(buffer
+            .parent_to_child
+            .get(&main_parent.hash)
+            .and_then(|s| s.get(&block1.hash()))
+            .is_some());
+        assert!(buffer
+            .parent_to_child
+            .get(&block1.hash())
+            .and_then(|s| s.get(&block2.hash()))
+            .is_some());
+
+        // Insert unrelated block to evict block1
+        buffer.insert_block(unrelated_block);
+
+        // Evicted block1 should be fully removed from collections
+        assert_block_removal(&buffer, &block1);
+
+        // Cleanup: parent_to_child must no longer have (main_parent -> block1)
+        assert!(buffer
+            .parent_to_child
+            .get(&main_parent.hash)
+            .and_then(|s| s.get(&block1.hash()))
+            .is_none());
+
+        // But the mapping (block1 -> block2) must remain so descendants can still be tracked
+        assert!(buffer
+            .parent_to_child
+            .get(&block1.hash())
+            .and_then(|s| s.get(&block2.hash()))
+            .is_some());
+
+        // And lowest ancestor for block2 becomes itself after its parent is evicted
+        assert_eq!(buffer.lowest_ancestor(&block2.hash()), Some(&block2));
     }
 }

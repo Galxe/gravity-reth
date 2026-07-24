@@ -9,7 +9,10 @@ use interprocess::local_socket::{
     GenericFilePath, ListenerOptions, ToFsName,
 };
 use jsonrpsee::{
-    core::{middleware::layer::RpcLoggerLayer, JsonRawValue, TEN_MB_SIZE_BYTES},
+    core::{
+        middleware::layer::{Either as RpcEither, RpcLoggerLayer},
+        JsonRawValue, TEN_MB_SIZE_BYTES,
+    },
     server::{
         middleware::rpc::RpcServiceT, stop_channel, ConnectionGuard, ConnectionPermit, IdProvider,
         RandomIntegerIdProvider, ServerHandle, StopHandle,
@@ -248,7 +251,7 @@ where
     }
 }
 
-impl std::fmt::Debug for IpcServer {
+impl<HttpMiddleware, RpcMiddleware> std::fmt::Debug for IpcServer<HttpMiddleware, RpcMiddleware> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IpcServer")
             .field("endpoint", &self.endpoint)
@@ -316,11 +319,11 @@ impl<L> RpcServiceBuilder<L> {
     pub fn option_layer<T>(
         self,
         layer: Option<T>,
-    ) -> RpcServiceBuilder<Stack<Either<T, Identity>, L>> {
+    ) -> RpcServiceBuilder<Stack<RpcEither<T, Identity>, L>> {
         let layer = if let Some(layer) = layer {
-            Either::Left(layer)
+            RpcEither::Left(layer)
         } else {
-            Either::Right(Identity::new())
+            RpcEither::Right(Identity::new())
         };
         self.layer(layer)
     }
@@ -391,7 +394,7 @@ where
     fn call(&mut self, request: String) -> Self::Future {
         trace!("{:?}", request);
 
-        let cfg = RpcServiceCfg::CallsAndSubscriptions {
+        let cfg = RpcServiceCfg {
             bounded_subscriptions: BoundedSubscriptions::new(
                 self.inner.server_cfg.max_subscriptions_per_connection,
             ),
@@ -443,7 +446,7 @@ struct ProcessConnection<'a, HttpMiddleware, RpcMiddleware> {
 }
 
 /// Spawns the IPC connection onto a new task
-#[instrument(name = "connection", skip_all, fields(conn_id = %params.conn_id), level = "INFO")]
+#[instrument(name = "connection", skip_all, fields(conn_id = %params.conn_id))]
 fn process_connection<RpcMiddleware, HttpMiddleware>(
     params: ProcessConnection<'_, HttpMiddleware, RpcMiddleware>,
 ) where
@@ -532,9 +535,8 @@ async fn to_ipc_service<S, T>(
                break
             }
             item = rx_item.next() => {
-                if let Some(item) = item {
-                    conn.push_back(item.to_string());
-                }
+                let Some(item) = item else { break };
+                conn.push_back(item.to_string());
             }
             _ = &mut stopped => {
                 // shutdown
@@ -763,11 +765,7 @@ impl<HttpMiddleware, RpcMiddleware> Builder<HttpMiddleware, RpcMiddleware> {
 pub fn dummy_name() -> String {
     use rand::Rng;
     let num: u64 = rand::rng().random();
-    if cfg!(windows) {
-        format!(r"\\.\pipe\my-pipe-{num}")
-    } else {
-        format!(r"/tmp/my-uds-{num}")
-    }
+    format!(r"/tmp/my-uds-{num}")
 }
 
 #[cfg(test)]

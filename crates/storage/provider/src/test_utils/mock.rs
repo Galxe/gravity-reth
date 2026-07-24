@@ -28,12 +28,12 @@ use reth_primitives_traits::{
     Account, Block, BlockBody, Bytecode, GotExpected, NodePrimitives, RecoveredBlock, SealedHeader,
     SignerRecoverable,
 };
-use reth_prune_types::PruneModes;
+use reth_prune_types::{PruneCheckpoint, PruneModes, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
     BlockBodyIndicesProvider, BytecodeReader, DBProvider, DatabaseProviderFactory,
-    HashedPostStateProvider, NodePrimitivesProvider, StageCheckpointReader, StateProofProvider,
-    StorageRootProvider,
+    HashedPostStateProvider, NodePrimitivesProvider, PruneCheckpointReader, StageCheckpointReader,
+    StateProofProvider, StorageRootProvider,
 };
 use reth_storage_errors::provider::{ConsistentViewError, ProviderError, ProviderResult};
 use reth_trie::{
@@ -760,6 +760,21 @@ impl<T: NodePrimitives, ChainSpec: Send + Sync> StageCheckpointReader
     }
 
     fn get_all_checkpoints(&self) -> ProviderResult<Vec<(String, StageCheckpoint)>> {
+        Ok(vec![])
+    }
+}
+
+impl<T: NodePrimitives, ChainSpec: Send + Sync> PruneCheckpointReader
+    for MockEthProvider<T, ChainSpec>
+{
+    fn get_prune_checkpoint(
+        &self,
+        _segment: PruneSegment,
+    ) -> ProviderResult<Option<PruneCheckpoint>> {
+        Ok(None)
+    }
+
+    fn get_prune_checkpoints(&self) -> ProviderResult<Vec<(PruneSegment, PruneCheckpoint)>> {
         Ok(vec![])
     }
 }

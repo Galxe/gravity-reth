@@ -6,7 +6,10 @@ use std::{
     future::Future,
     net::SocketAddr,
     pin::Pin,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize},
+        Arc,
+    },
     task::{ready, Context, Poll},
     time::{Duration, Instant},
 };
@@ -19,15 +22,16 @@ use crate::{
         BlockRangeInfo, EthVersion, SessionId,
     },
 };
+use alloy_eips::merge::EPOCH_SLOTS;
 use alloy_primitives::Sealable;
 use futures::{stream::Fuse, SinkExt, StreamExt};
-use metrics::Gauge;
+use metrics::{Counter, Gauge};
 use reth_eth_wire::{
     errors::{EthHandshakeError, EthStreamError},
-    message::{EthBroadcastMessage, MessageError, RequestPair},
+    message::{EthBroadcastMessage, MessageError},
     Capabilities, DisconnectP2P, DisconnectReason, EthMessage, NetworkPrimitives, NewBlockPayload,
 };
-use reth_eth_wire_types::RawCapabilityMessage;
+use reth_eth_wire_types::{message::RequestPair, NewPooledTransactionHashes, RawCapabilityMessage};
 use reth_metrics::common::mpsc::MeteredPollSender;
 use reth_network_api::PeerRequest;
 use reth_network_p2p::error::RequestError;
@@ -36,17 +40,19 @@ use reth_network_types::session::config::INITIAL_REQUEST_TIMEOUT;
 use reth_primitives_traits::Block;
 use rustc_hash::FxHashMap;
 use tokio::{
-    sync::{mpsc::error::TrySendError, oneshot},
+    sync::{mpsc, mpsc::error::TrySendError, oneshot},
     time::Interval,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::PollSender;
 use tracing::{debug, trace};
 
-/// The recommended interval at which a new range update should be sent to the remote peer.
+/// The recommended interval at which to check if a new range update should be sent to the remote
+/// peer.
 ///
-/// This is set to 120 seconds (2 minutes) as per the Ethereum specification for eth69.
-pub(super) const RANGE_UPDATE_INTERVAL: Duration = Duration::from_secs(120);
+/// Updates are only sent when the block height has advanced by at least one epoch (32 blocks)
+/// since the last update. The interval is set to one epoch duration in seconds.
+pub(super) const RANGE_UPDATE_INTERVAL: Duration = Duration::from_secs(EPOCH_SLOTS * 12);
 
 // Constants for timeout updating.
 
@@ -73,6 +79,52 @@ const TIMEOUT_SCALING: u32 = 3;
 /// before reading any more messages from the remote peer, throttling the peer.
 const MAX_QUEUED_OUTGOING_RESPONSES: usize = 4;
 
+/// Minimum capacity to retain for buffered incoming requests from the remote peer.
+const MIN_RECEIVED_REQUESTS_CAPACITY: usize = 1;
+
+/// Soft limit for the total number of buffered outgoing broadcast items (e.g. transaction hashes).
+///
+/// Many small broadcast messages carrying a single tx hash each are equivalent in cost to one
+/// message carrying many hashes. This limit counts individual items (hashes, transactions, blocks)
+/// rather than messages, so that many small messages don't trigger aggressive drops unnecessarily.
+const MAX_QUEUED_BROADCAST_ITEMS: usize = 4096;
+
+/// Shared counter for in-flight broadcast items (tx hashes, transactions, blocks) across the
+/// bounded command channel, unbounded overflow channel, and session outgoing queue.
+///
+/// Wrapped in a newtype so the backing storage can be changed later (e.g. to track memory) without
+/// touching every call-site.
+#[derive(Debug, Clone)]
+pub(crate) struct BroadcastItemCounter(Arc<AtomicUsize>);
+
+impl BroadcastItemCounter {
+    /// Creates a new counter starting at zero.
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// Returns the current count.
+    pub(crate) fn get(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Attempts to add `n` items. Returns `true` if under the limit, `false` if over (no change).
+    pub(crate) fn try_add(&self, n: usize) -> bool {
+        let prev = self.0.fetch_add(n, Ordering::Relaxed);
+        if prev >= MAX_QUEUED_BROADCAST_ITEMS {
+            self.0.fetch_sub(n, Ordering::Relaxed);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Subtracts `n` items from the counter.
+    pub(crate) fn sub(&self, n: usize) {
+        self.0.fetch_sub(n, Ordering::Relaxed);
+    }
+}
+
 /// The type that advances an established session by listening for incoming messages (from local
 /// node or read from connection) and emitting events back to the
 /// [`SessionManager`](super::SessionManager).
@@ -98,6 +150,11 @@ pub(crate) struct ActiveSession<N: NetworkPrimitives> {
     pub(crate) session_id: SessionId,
     /// Incoming commands from the manager
     pub(crate) commands_rx: ReceiverStream<SessionCommand<N>>,
+    /// Unbounded channel for commands that couldn't fit in the bounded channel (broadcast
+    /// overflow) and for disconnect commands that must never be dropped.
+    pub(crate) unbounded_rx: mpsc::UnboundedReceiver<SessionCommand<N>>,
+    /// Counter for broadcast messages received via the unbounded overflow channel.
+    pub(crate) unbounded_broadcast_msgs: Counter,
     /// Sink to send messages to the [`SessionManager`](super::SessionManager).
     pub(crate) to_session_manager: MeteredPollSender<ActiveSessionMessage<N>>,
     /// A message that needs to be delivered to the session manager
@@ -121,13 +178,18 @@ pub(crate) struct ActiveSession<N: NetworkPrimitives> {
     pub(crate) terminate_message:
         Option<(PollSender<ActiveSessionMessage<N>>, ActiveSessionMessage<N>)>,
     /// The eth69 range info for the remote peer.
+    /// This is `None` for peers negotiating versions below `eth/69`.
     pub(crate) range_info: Option<BlockRangeInfo>,
     /// The eth69 range info for the local node (this node).
     /// This represents the range of blocks that this node can serve to other peers.
     pub(crate) local_range_info: BlockRangeInfo,
     /// Optional interval for sending periodic range updates to the remote peer (eth69+)
-    /// Recommended frequency is ~2 minutes per spec
+    /// The interval is set to one epoch duration (~6.4 minutes), but updates are only sent when
+    /// the block height has advanced by at least one epoch (32 blocks) since the last update
     pub(crate) range_update_interval: Option<Interval>,
+    /// The last latest block number we sent in a range update
+    /// Used to avoid sending unnecessary updates when block height hasn't changed significantly
+    pub(crate) last_sent_latest_block: Option<u64>,
 }
 
 impl<N: NetworkPrimitives> ActiveSession<N> {
@@ -145,8 +207,8 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
 
     /// Shrinks the capacity of the internal buffers.
     pub fn shrink_to_fit(&mut self) {
-        self.received_requests_from_remote.shrink_to_fit();
-        self.queued_outgoing.shrink_to_fit();
+        self.received_requests_from_remote.shrink_to(MIN_RECEIVED_REQUESTS_CAPACITY);
+        self.queued_outgoing.shrink_to(MAX_QUEUED_OUTGOING_RESPONSES);
     }
 
     /// Returns how many responses we've currently queued up.
@@ -230,16 +292,9 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
             }
             EthMessage::NewPooledTransactionHashes68(msg) => {
-                if msg.hashes.len() != msg.types.len() || msg.hashes.len() != msg.sizes.len() {
-                    return OnIncomingMessageOutcome::BadMessage {
-                        error: EthStreamError::TransactionHashesInvalidLenOfFields {
-                            hashes_len: msg.hashes.len(),
-                            types_len: msg.types.len(),
-                            sizes_len: msg.sizes.len(),
-                        },
-                        message: EthMessage::NewPooledTransactionHashes68(msg),
-                    }
-                }
+                self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
+            }
+            EthMessage::NewPooledTransactionHashes72(msg) => {
                 self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
             }
             EthMessage::GetBlockHeaders(req) => {
@@ -273,11 +328,26 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                     on_request!(req, Receipts, GetReceipts)
                 }
             }
+            EthMessage::GetReceipts70(req) => {
+                on_request!(req, Receipts70, GetReceipts70)
+            }
             EthMessage::Receipts(resp) => {
                 on_response!(resp, GetReceipts)
             }
             EthMessage::Receipts69(resp) => {
                 on_response!(resp, GetReceipts69)
+            }
+            EthMessage::Receipts70(resp) => {
+                on_response!(resp, GetReceipts70)
+            }
+            EthMessage::GetBlockAccessLists(req) => {
+                on_request!(req, BlockAccessLists, GetBlockAccessLists)
+            }
+            EthMessage::BlockAccessLists(resp) => {
+                on_response!(resp, GetBlockAccessLists)
+            }
+            EthMessage::Cells(resp) => {
+                on_response!(resp, GetCells)
             }
             EthMessage::BlockRangeUpdate(msg) => {
                 // Validate that earliest <= latest according to the spec
@@ -291,11 +361,24 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                     };
                 }
 
+                // Validate that the latest hash is not zero
+                if msg.latest_hash.is_zero() {
+                    return OnIncomingMessageOutcome::BadMessage {
+                        error: EthStreamError::InvalidMessage(MessageError::Other(
+                            "invalid block range: latest_hash cannot be zero".to_string(),
+                        )),
+                        message: EthMessage::BlockRangeUpdate(msg),
+                    };
+                }
+
                 if let Some(range_info) = self.range_info.as_ref() {
                     range_info.update(msg.earliest, msg.latest, msg.latest_hash);
                 }
 
                 OnIncomingMessageOutcome::Ok
+            }
+            EthMessage::GetCells(resp) => {
+                on_request!(resp, Cells, GetCells)
             }
             EthMessage::Other(bytes) => self.try_emit_broadcast(PeerMessage::Other(bytes)).into(),
         }
@@ -303,10 +386,23 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
 
     /// Handle an internal peer request that will be sent to the remote.
     fn on_internal_peer_request(&mut self, request: PeerRequest<N>, deadline: Instant) {
-        let request_id = self.next_id();
+        let version = self.conn.version();
+        if !Self::is_request_supported_for_version(&request, version) {
+            debug!(
+                target: "net",
+                ?request,
+                peer_id=?self.remote_peer_id,
+                ?version,
+                "Request not supported for negotiated eth version",
+            );
+            request.send_err_response(RequestError::UnsupportedCapability);
+            return;
+        }
 
+        let request_id = self.next_id();
         trace!(?request, peer_id=?self.remote_peer_id, ?request_id, "sending request to peer");
-        let msg = request.create_request_message(request_id);
+        let msg = request.create_request_message(request_id).map_versioned(version);
+
         self.queued_outgoing.push_back(msg.into());
         let req = InflightRequest {
             request: RequestState::Waiting(request),
@@ -314,6 +410,11 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             deadline,
         };
         self.inflight_requests.insert(request_id, req);
+    }
+
+    #[inline]
+    fn is_request_supported_for_version(request: &PeerRequest<N>, version: EthVersion) -> bool {
+        request.is_supported_by_eth_version(version)
     }
 
     /// Handle a message received from the internal network
@@ -327,8 +428,9 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             }
             PeerMessage::PooledTransactions(msg) => {
                 if msg.is_valid_for_version(self.conn.version()) {
-                    self.queued_outgoing.push_back(EthMessage::from(msg).into());
+                    self.queued_outgoing.push_pooled_hashes(msg);
                 } else {
+                    self.queued_outgoing.broadcast_items.sub(msg.len());
                     debug!(target: "net", ?msg,  version=?self.conn.version(), "Message is invalid for connection version, skipping");
                 }
             }
@@ -593,6 +695,21 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
                 }
             }
 
+            // Drain the unbounded channel (broadcast overflow + disconnect commands)
+            while let Poll::Ready(Some(cmd)) = this.unbounded_rx.poll_recv(cx) {
+                progress = true;
+                match cmd {
+                    SessionCommand::Message(msg) => {
+                        this.unbounded_broadcast_msgs.increment(1);
+                        this.on_internal_peer_message(msg);
+                    }
+                    SessionCommand::Disconnect { reason } => {
+                        let reason = reason.unwrap_or(DisconnectReason::DisconnectRequested);
+                        return this.try_disconnect(reason, cx)
+                    }
+                }
+            }
+
             let deadline = this.request_deadline();
 
             while let Poll::Ready(Some(req)) = this.internal_request_rx.poll_next_unpin(cx) {
@@ -705,7 +822,9 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
                                     }
                                     OnIncomingMessageOutcome::BadMessage { error, message } => {
                                         debug!(target: "net::session", %error, msg=?message, remote_peer_id=?this.remote_peer_id, "received invalid protocol message");
-                                        return this.close_on_error(error, cx)
+                                        this.on_bad_message();
+                                        return this
+                                            .try_disconnect(DisconnectReason::ProtocolBreach, cx)
                                     }
                                     OnIncomingMessageOutcome::NoCapacity(msg) => {
                                         // failed to send due to lack of capacity
@@ -715,6 +834,10 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
                             }
                             Err(err) => {
                                 debug!(target: "net::session", %err, remote_peer_id=?this.remote_peer_id, "failed to receive message");
+                                if err.is_protocol_breach() {
+                                    this.on_bad_message();
+                                    return this.try_disconnect(DisconnectReason::ProtocolBreach, cx)
+                                }
                                 return this.close_on_error(err, cx)
                             }
                         }
@@ -728,11 +851,22 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
         }
 
         if let Some(interval) = &mut this.range_update_interval {
-            // queue in new range updates if the interval is ready
+            // Check if we should send a range update based on block height changes
             while interval.poll_tick(cx).is_ready() {
-                this.queued_outgoing.push_back(
-                    EthMessage::BlockRangeUpdate(this.local_range_info.to_message()).into(),
-                );
+                let current_latest = this.local_range_info.latest();
+                let should_send = if let Some(last_sent) = this.last_sent_latest_block {
+                    // Only send if block height has advanced by at least one epoch (32 blocks)
+                    current_latest.saturating_sub(last_sent) >= EPOCH_SLOTS
+                } else {
+                    true // First update, always send
+                };
+
+                if should_send {
+                    this.queued_outgoing.push_back(
+                        EthMessage::BlockRangeUpdate(this.local_range_info.to_message()).into(),
+                    );
+                    this.last_sent_latest_block = Some(current_latest);
+                }
             }
         }
 
@@ -846,6 +980,65 @@ impl<N: NetworkPrimitives> OutgoingMessage<N> {
             _ => false,
         }
     }
+
+    /// Returns the number of broadcast items in this message.
+    ///
+    /// For transaction hash announcements this is the number of hashes, for full transaction
+    /// broadcasts it is the number of transactions, and for blocks it is 1.
+    /// Request/response messages return 0.
+    fn broadcast_item_count(&self) -> usize {
+        match self {
+            Self::Eth(msg) => match msg {
+                EthMessage::NewBlockHashes(h) => h.len(),
+                EthMessage::NewPooledTransactionHashes66(h) => h.len(),
+                EthMessage::NewPooledTransactionHashes68(h) => h.hashes.len(),
+                EthMessage::NewPooledTransactionHashes72(h) => h.hashes.len(),
+                _ => 0,
+            },
+            Self::Broadcast(msg) => match msg {
+                EthBroadcastMessage::NewBlock(_) => 1,
+                EthBroadcastMessage::Transactions(txs) => txs.len(),
+            },
+            Self::Raw(_) => 0,
+        }
+    }
+
+    /// Tries to merge pooled transaction hash announcements into this message, consuming the
+    /// incoming hashes. Returns `Some(incoming)` back if the variants don't match.
+    fn try_merge_hashes(
+        &mut self,
+        incoming: NewPooledTransactionHashes,
+    ) -> Option<NewPooledTransactionHashes> {
+        let Self::Eth(eth) = self else { return Some(incoming) };
+        match (eth, incoming) {
+            (
+                EthMessage::NewPooledTransactionHashes66(existing),
+                NewPooledTransactionHashes::Eth66(inc),
+            ) => {
+                existing.extend(inc);
+                None
+            }
+            (
+                EthMessage::NewPooledTransactionHashes68(existing),
+                NewPooledTransactionHashes::Eth68(inc),
+            ) => {
+                existing.hashes.extend(inc.hashes);
+                existing.sizes.extend(inc.sizes);
+                existing.types.extend(inc.types);
+                None
+            }
+            (
+                EthMessage::NewPooledTransactionHashes72(existing),
+                NewPooledTransactionHashes::Eth72(inc),
+            ) => {
+                existing.hashes.extend(inc.hashes);
+                existing.sizes.extend(inc.sizes);
+                existing.types.extend(inc.types);
+                None
+            }
+            (_, incoming) => Some(incoming),
+        }
+    }
 }
 
 impl<N: NetworkPrimitives> From<EthMessage<N>> for OutgoingMessage<N> {
@@ -871,15 +1064,22 @@ fn calculate_new_timeout(current_timeout: Duration, estimated_rtt: Duration) -> 
     smoothened_timeout.clamp(MINIMUM_TIMEOUT, MAXIMUM_TIMEOUT)
 }
 
-/// A helper struct that wraps the queue of outgoing messages and a metric to track their count
+/// A helper struct that wraps the queue of outgoing messages with broadcast-aware tracking.
+///
+/// Tracks both the total number of queued messages (via a metric gauge) and the total number of
+/// broadcast items (tx hashes, transactions, blocks) via a shared atomic counter. The atomic
+/// counter is shared with [`ActiveSessionHandle`](super::handle::ActiveSessionHandle) so the
+/// [`SessionManager`](super::SessionManager) can apply size-based backpressure.
 pub(crate) struct QueuedOutgoingMessages<N: NetworkPrimitives> {
     messages: VecDeque<OutgoingMessage<N>>,
     count: Gauge,
+    /// Shared counter of buffered broadcast items for size-based backpressure.
+    broadcast_items: BroadcastItemCounter,
 }
 
 impl<N: NetworkPrimitives> QueuedOutgoingMessages<N> {
-    pub(crate) const fn new(metric: Gauge) -> Self {
-        Self { messages: VecDeque::new(), count: metric }
+    pub(crate) const fn new(metric: Gauge, broadcast_items: BroadcastItemCounter) -> Self {
+        Self { messages: VecDeque::new(), count: metric, broadcast_items }
     }
 
     pub(crate) fn push_back(&mut self, message: OutgoingMessage<N>) {
@@ -888,11 +1088,42 @@ impl<N: NetworkPrimitives> QueuedOutgoingMessages<N> {
     }
 
     pub(crate) fn pop_front(&mut self) -> Option<OutgoingMessage<N>> {
-        self.messages.pop_front().inspect(|_| self.count.decrement(1))
+        self.messages.pop_front().inspect(|msg| {
+            self.count.decrement(1);
+            let items = msg.broadcast_item_count();
+            if items > 0 {
+                self.broadcast_items.sub(items);
+            }
+        })
     }
 
-    pub(crate) fn shrink_to_fit(&mut self) {
-        self.messages.shrink_to_fit();
+    /// Pushes a pooled transaction hash announcement, merging into the last queued message if
+    /// it is the same variant (eth66, eth68, or eth72).
+    pub(crate) fn push_pooled_hashes(&mut self, msg: NewPooledTransactionHashes) {
+        let msg = if let Some(last) = self.messages.back_mut() {
+            match last.try_merge_hashes(msg) {
+                None => return,
+                Some(msg) => msg,
+            }
+        } else {
+            msg
+        };
+        self.messages.push_back(EthMessage::from(msg).into());
+        self.count.increment(1);
+    }
+
+    pub(crate) fn shrink_to(&mut self, min_capacity: usize) {
+        self.messages.shrink_to(min_capacity);
+    }
+}
+
+impl<N: NetworkPrimitives> Drop for QueuedOutgoingMessages<N> {
+    fn drop(&mut self) {
+        // Ensure gauge is decremented for any remaining items to avoid metric leak on teardown.
+        let remaining = self.messages.len();
+        if remaining > 0 {
+            self.count.decrement(remaining as f64);
+        }
     }
 }
 
@@ -904,9 +1135,12 @@ mod tests {
     use reth_chainspec::MAINNET;
     use reth_ecies::stream::ECIESStream;
     use reth_eth_wire::{
-        handshake::EthHandshake, EthNetworkPrimitives, EthStream, GetBlockBodies,
-        HelloMessageWithProtocols, P2PStream, StatusBuilder, UnauthedEthStream, UnauthedP2PStream,
-        UnifiedStatus,
+        handshake::EthHandshake, EthNetworkPrimitives, EthStream, GetBlockAccessLists,
+        GetBlockBodies, HelloMessageWithProtocols, P2PStream, StatusBuilder, UnauthedEthStream,
+        UnauthedP2PStream, UnifiedStatus,
+    };
+    use reth_eth_wire_types::{
+        message::MAX_MESSAGE_SIZE, EthMessageID, NewPooledTransactionHashes72, RawCapabilityMessage,
     };
     use reth_ethereum_forks::EthereumHardfork;
     use reth_network_peers::pk2id;
@@ -983,6 +1217,7 @@ mod tests {
 
             tokio::task::spawn(start_pending_incoming_session(
                 Arc::new(EthHandshake::default()),
+                MAX_MESSAGE_SIZE,
                 disconnect_rx,
                 session_id,
                 stream,
@@ -1008,6 +1243,7 @@ mod tests {
                 } => {
                     let (_to_session_tx, messages_rx) = mpsc::channel(10);
                     let (commands_to_session, commands_rx) = mpsc::channel(10);
+                    let (_unbounded_tx, unbounded_rx) = mpsc::unbounded_channel();
                     let poll_sender = PollSender::new(self.active_session_tx.clone());
 
                     self.to_sessions.push(commands_to_session);
@@ -1019,6 +1255,8 @@ mod tests {
                         remote_capabilities: Arc::clone(&capabilities),
                         session_id,
                         commands_rx: ReceiverStream::new(commands_rx),
+                        unbounded_rx,
+                        unbounded_broadcast_msgs: Counter::noop(),
                         to_session_manager: MeteredPollSender::new(
                             poll_sender,
                             "network_active_session",
@@ -1027,7 +1265,10 @@ mod tests {
                         internal_request_rx: ReceiverStream::new(messages_rx).fuse(),
                         inflight_requests: Default::default(),
                         conn,
-                        queued_outgoing: QueuedOutgoingMessages::new(Gauge::noop()),
+                        queued_outgoing: QueuedOutgoingMessages::new(
+                            Gauge::noop(),
+                            BroadcastItemCounter::new(),
+                        ),
                         received_requests_from_remote: Default::default(),
                         internal_request_timeout_interval: tokio::time::interval(
                             INITIAL_REQUEST_TIMEOUT,
@@ -1044,6 +1285,7 @@ mod tests {
                             alloy_primitives::B256::ZERO,
                         ),
                         range_update_interval: None,
+                        last_sent_latest_block: None,
                     }
                 }
                 ev => {
@@ -1086,7 +1328,7 @@ mod tests {
 
         let expected_disconnect = DisconnectReason::UselessPeer;
 
-        let fut = builder.with_client_stream(local_addr, move |mut client_stream| async move {
+        let fut = builder.with_client_stream(local_addr, async move |mut client_stream| {
             let msg = client_stream.next().await.unwrap().unwrap_err();
             assert_eq!(msg.as_disconnected().unwrap(), expected_disconnect);
         });
@@ -1103,13 +1345,47 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_invalid_message_disconnects_with_protocol_breach() {
+        let mut builder = SessionBuilder::default();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        let fut = builder.with_client_stream(local_addr, async move |mut client_stream| {
+            client_stream
+                .start_send_raw(RawCapabilityMessage::eth(
+                    EthMessageID::PooledTransactions,
+                    vec![0xc0].into(),
+                ))
+                .unwrap();
+            client_stream.flush().await.unwrap();
+
+            let msg = client_stream.next().await.unwrap().unwrap_err();
+            assert_eq!(msg.as_disconnected(), Some(DisconnectReason::ProtocolBreach));
+        });
+
+        let (tx, rx) = oneshot::channel();
+
+        tokio::task::spawn(async move {
+            let (incoming, _) = listener.accept().await.unwrap();
+            let session = builder.connect_incoming(incoming).await;
+            session.await;
+
+            tx.send(()).unwrap();
+        });
+
+        fut.await;
+        rx.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn handle_dropped_stream() {
         let mut builder = SessionBuilder::default();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_addr = listener.local_addr().unwrap();
 
-        let fut = builder.with_client_stream(local_addr, move |client_stream| async move {
+        let fut = builder.with_client_stream(local_addr, async move |client_stream| {
             drop(client_stream);
             tokio::time::sleep(Duration::from_secs(1)).await
         });
@@ -1139,7 +1415,7 @@ mod tests {
 
         let num_messages = 100;
 
-        let fut = builder.with_client_stream(local_addr, move |mut client_stream| async move {
+        let fut = builder.with_client_stream(local_addr, async move |mut client_stream| {
             for _ in 0..num_messages {
                 client_stream
                     .send(EthMessage::NewPooledTransactionHashes66(Vec::new().into()))
@@ -1175,7 +1451,7 @@ mod tests {
         let request_timeout = Duration::from_millis(100);
         let drop_timeout = Duration::from_millis(1500);
 
-        let fut = builder.with_client_stream(local_addr, move |client_stream| async move {
+        let fut = builder.with_client_stream(local_addr, async move |client_stream| {
             let _client_stream = client_stream;
             tokio::time::sleep(drop_timeout * 60).await;
         });
@@ -1205,6 +1481,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn eth72_pooled_hashes_count_broadcast_items() {
+        let hashes =
+            vec![alloy_primitives::B256::repeat_byte(1), alloy_primitives::B256::repeat_byte(2)];
+        let msg: OutgoingMessage<EthNetworkPrimitives> =
+            EthMessage::NewPooledTransactionHashes72(NewPooledTransactionHashes72 {
+                types: vec![0; hashes.len()],
+                sizes: vec![1; hashes.len()],
+                hashes,
+                cell_mask: None,
+            })
+            .into();
+
+        assert_eq!(2, msg.broadcast_item_count());
+    }
+
+    #[test]
+    fn test_reject_bal_request_for_eth70() {
+        let (tx, _rx) = oneshot::channel();
+        let request: PeerRequest<EthNetworkPrimitives> =
+            PeerRequest::GetBlockAccessLists { request: GetBlockAccessLists(vec![]), response: tx };
+
+        assert!(!ActiveSession::<EthNetworkPrimitives>::is_request_supported_for_version(
+            &request,
+            EthVersion::Eth70
+        ));
+        assert!(ActiveSession::<EthNetworkPrimitives>::is_request_supported_for_version(
+            &request,
+            EthVersion::Eth71
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_keep_alive() {
         let mut builder = SessionBuilder::default();
@@ -1212,7 +1520,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_addr = listener.local_addr().unwrap();
 
-        let fut = builder.with_client_stream(local_addr, move |mut client_stream| async move {
+        let fut = builder.with_client_stream(local_addr, async move |mut client_stream| {
             let _ = tokio::time::timeout(Duration::from_secs(5), client_stream.next()).await;
             client_stream.into_inner().disconnect(DisconnectReason::UselessPeer).await.unwrap();
         });
@@ -1240,7 +1548,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_addr = listener.local_addr().unwrap();
 
-        let fut = builder.with_client_stream(local_addr, move |mut client_stream| async move {
+        let fut = builder.with_client_stream(local_addr, async move |mut client_stream| {
             client_stream
                 .send(EthMessage::NewPooledTransactionHashes68(Default::default()))
                 .await

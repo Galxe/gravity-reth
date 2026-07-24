@@ -3,10 +3,11 @@
 use crate::{ConfigureEvm, Database, OnStateHook, TxEnvFor};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header};
+use alloy_eip7928::{compute_block_access_list_hash, BlockAccessList};
 use alloy_eips::eip2718::WithEncoded;
-pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory};
+pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory, GasOutput};
 use alloy_evm::{
-    block::{CommitChanges, ExecutableTx},
+    block::{CommitChanges, ExecutableTxParts},
     precompiles::{DynPrecompile, PrecompilesMap},
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
 };
@@ -81,9 +82,11 @@ pub trait Executor<DB: Database>: Sized {
     where
         I: IntoIterator<Item = &'a RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>>,
     {
-        let mut results = Vec::new();
+        let blocks_iter = blocks.into_iter();
+        let capacity = blocks_iter.size_hint().0;
+        let mut results = Vec::with_capacity(capacity);
         let mut first_block = None;
-        for block in blocks {
+        for block in blocks_iter {
             if first_block.is_none() {
                 first_block = Some(block.header().number());
             }
@@ -111,6 +114,23 @@ pub trait Executor<DB: Database>: Sized {
         let mut state = self.into_state();
         f(&state);
         Ok(BlockExecutionOutput { state: state.take_bundle(), result })
+    }
+
+    /// Executes the EVM with the given input and accepts a state closure that is always invoked
+    /// with the EVM state after execution, even after failure.
+    fn execute_with_state_closure_always<F>(
+        mut self,
+        block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+        mut f: F,
+    ) -> Result<BlockExecutionOutput<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
+    where
+        F: FnMut(&State<DB>),
+    {
+        let result = self.execute_one(block);
+        let mut state = self.into_state();
+        f(&state);
+
+        Ok(BlockExecutionOutput { state: state.take_bundle(), result: result? })
     }
 
     /// Executes the EVM with the given input and accepts a state hook closure that is invoked with
@@ -170,6 +190,14 @@ pub trait Executor<DB: Database>: Sized {
 
     /// Registers custom precompiles for subsequent user transaction execution.
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>);
+
+    /// Takes built [`BlockAccessList`] from executor.
+    ///
+    /// Defaults to `None`: executors that never build a BAL (gravity has no Amsterdam
+    /// activation) rely on the default.
+    fn take_bal(&mut self) -> Option<BlockAccessList> {
+        None
+    }
 }
 
 /// Helper type for the output of executing a block.
@@ -196,6 +224,7 @@ pub struct ExecuteOutput<R> {
 /// - `bundle_state`: Accumulated state changes from all transactions
 /// - `state_provider`: Access to the current state for additional lookups
 /// - `state_root`: The calculated state root after all changes
+/// - `block_access_list_hash`: Block access list hash (EIP-7928, Amsterdam)
 ///
 /// # Usage
 ///
@@ -212,6 +241,7 @@ pub struct ExecuteOutput<R> {
 ///     bundle_state: &state_changes,
 ///     state_provider: &state,
 ///     state_root: calculated_root,
+///     block_access_list_hash: Some(calculated_bal_hash),
 /// };
 ///
 /// let block = assembler.assemble_block(input)?;
@@ -222,7 +252,8 @@ pub struct BlockAssemblerInput<'a, 'b, F: BlockExecutorFactory, H = Header> {
     /// Configuration of EVM used when executing the block.
     ///
     /// Contains context relevant to EVM such as [`revm::context::BlockEnv`].
-    pub evm_env: EvmEnv<<F::EvmFactory as EvmFactory>::Spec>,
+    pub evm_env:
+        EvmEnv<<F::EvmFactory as EvmFactory>::Spec, <F::EvmFactory as EvmFactory>::BlockEnv>,
     /// [`BlockExecutorFactory::ExecutionCtx`] used to execute the block.
     pub execution_ctx: F::ExecutionCtx<'a>,
     /// Parent block header.
@@ -238,13 +269,18 @@ pub struct BlockAssemblerInput<'a, 'b, F: BlockExecutorFactory, H = Header> {
     pub state_provider: &'b dyn StateProvider,
     /// State root for this block.
     pub state_root: B256,
+    /// Block access list hash (EIP-7928, Amsterdam).
+    pub block_access_list_hash: Option<B256>,
 }
 
 impl<'a, 'b, F: BlockExecutorFactory, H> BlockAssemblerInput<'a, 'b, F, H> {
     /// Creates a new [`BlockAssemblerInput`].
     #[expect(clippy::too_many_arguments)]
     pub fn new(
-        evm_env: EvmEnv<<F::EvmFactory as EvmFactory>::Spec>,
+        evm_env: EvmEnv<
+            <F::EvmFactory as EvmFactory>::Spec,
+            <F::EvmFactory as EvmFactory>::BlockEnv,
+        >,
         execution_ctx: F::ExecutionCtx<'a>,
         parent: &'a SealedHeader<H>,
         transactions: Vec<F::Transaction>,
@@ -252,6 +288,7 @@ impl<'a, 'b, F: BlockExecutorFactory, H> BlockAssemblerInput<'a, 'b, F, H> {
         bundle_state: &'a BundleState,
         state_provider: &'b dyn StateProvider,
         state_root: B256,
+        block_access_list_hash: Option<B256>,
     ) -> Self {
         Self {
             evm_env,
@@ -262,6 +299,7 @@ impl<'a, 'b, F: BlockExecutorFactory, H> BlockAssemblerInput<'a, 'b, F, H> {
             bundle_state,
             state_provider,
             state_root,
+            block_access_list_hash,
         }
     }
 }
@@ -331,6 +369,8 @@ pub struct BlockBuilderOutcome<N: NodePrimitives> {
     pub trie_updates: TrieUpdates,
     /// The built block.
     pub block: RecoveredBlock<N::Block>,
+    /// Block access list built during execution (EIP-7928, Amsterdam).
+    pub block_access_list: Option<BlockAccessList>,
 }
 
 /// A type that knows how to execute and build a block.
@@ -356,18 +396,16 @@ pub trait BlockBuilder {
     fn execute_transaction_with_commit_condition(
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
-        f: impl FnOnce(
-            &ExecutionResult<<<Self::Executor as BlockExecutor>::Evm as Evm>::HaltReason>,
-        ) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError>;
+        f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result) -> CommitChanges,
+    ) -> Result<Option<GasOutput>, BlockExecutionError>;
 
     /// Invokes [`BlockExecutor::execute_transaction_with_result_closure`] and saves the
     /// transaction in internal state.
     fn execute_transaction_with_result_closure(
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
-        f: impl FnOnce(&ExecutionResult<<<Self::Executor as BlockExecutor>::Evm as Evm>::HaltReason>),
-    ) -> Result<u64, BlockExecutionError> {
+        f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result),
+    ) -> Result<GasOutput, BlockExecutionError> {
         self.execute_transaction_with_commit_condition(tx, |res| {
             f(res);
             CommitChanges::Yes
@@ -380,14 +418,19 @@ pub trait BlockBuilder {
     fn execute_transaction(
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
-    ) -> Result<u64, BlockExecutionError> {
+    ) -> Result<GasOutput, BlockExecutionError> {
         self.execute_transaction_with_result_closure(tx, |_| ())
     }
 
     /// Completes the block building process and returns the [`BlockBuilderOutcome`].
+    ///
+    /// When `state_root_precomputed` is `None`, the state root is computed internally via
+    /// `state_root_with_updates()`. When `Some`, the provided root and trie updates are used
+    /// directly, skipping the expensive computation (e.g. when using the sparse trie pipeline).
     fn finish(
         self,
         state_provider: impl StateProvider,
+        state_root_precomputed: Option<(B256, TrieUpdates)>,
     ) -> Result<BlockBuilderOutcome<Self::Primitives>, BlockExecutionError>;
 
     /// Provides mutable access to the inner [`BlockExecutor`].
@@ -430,49 +473,39 @@ where
 
 /// Conversions for executable transactions.
 pub trait ExecutorTx<Executor: BlockExecutor> {
-    /// Converts the transaction into [`ExecutableTx`].
-    fn as_executable(&self) -> impl ExecutableTx<Executor>;
-
-    /// Converts the transaction into [`Recovered`].
-    fn into_recovered(self) -> Recovered<Executor::Transaction>;
+    /// Converts the transaction into a tuple of [`TxEnvFor`] and [`Recovered`].
+    fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>);
 }
 
 impl<Executor: BlockExecutor> ExecutorTx<Executor>
     for WithEncoded<Recovered<Executor::Transaction>>
 {
-    fn as_executable(&self) -> impl ExecutableTx<Executor> {
-        self
-    }
-
-    fn into_recovered(self) -> Recovered<Executor::Transaction> {
-        self.1
+    fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>) {
+        (self.to_tx_env(), self.1)
     }
 }
 
 impl<Executor: BlockExecutor> ExecutorTx<Executor> for Recovered<Executor::Transaction> {
-    fn as_executable(&self) -> impl ExecutableTx<Executor> {
-        self
+    fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Self) {
+        (self.to_tx_env(), self)
     }
+}
 
-    fn into_recovered(self) -> Self {
+impl<Executor: BlockExecutor> ExecutorTx<Executor>
+    for (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>)
+{
+    fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>) {
         self
     }
 }
 
-impl<T, Executor> ExecutorTx<Executor>
-    for WithTxEnv<<<Executor as BlockExecutor>::Evm as Evm>::Tx, T>
+impl<Executor> ExecutorTx<Executor>
+    for WithTxEnv<<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>>
 where
-    T: ExecutorTx<Executor>,
-    Executor: BlockExecutor,
-    <<Executor as BlockExecutor>::Evm as Evm>::Tx: Clone,
-    Self: RecoveredTx<Executor::Transaction>,
+    Executor: BlockExecutor<Transaction: Clone>,
 {
-    fn as_executable(&self) -> impl ExecutableTx<Executor> {
-        self
-    }
-
-    fn into_recovered(self) -> Recovered<Executor::Transaction> {
-        self.tx.into_recovered()
+    fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>) {
+        (self.tx_env, Arc::unwrap_or_clone(self.tx))
     }
 }
 
@@ -484,6 +517,7 @@ where
         Evm: Evm<
             Spec = <F::EvmFactory as EvmFactory>::Spec,
             HaltReason = <F::EvmFactory as EvmFactory>::HaltReason,
+            BlockEnv = <F::EvmFactory as EvmFactory>::BlockEnv,
             DB = &'a mut State<DB>,
         >,
         Transaction = N::SignedTx,
@@ -497,20 +531,23 @@ where
     type Executor = Executor;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
-        self.executor.apply_pre_execution_changes()
+        self.executor.apply_pre_execution_changes()?;
+        self.executor.evm_mut().db_mut().bump_bal_index();
+
+        Ok(())
     }
 
     fn execute_transaction_with_commit_condition(
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
-        f: impl FnOnce(
-            &ExecutionResult<<<Self::Executor as BlockExecutor>::Evm as Evm>::HaltReason>,
-        ) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError> {
+        f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result) -> CommitChanges,
+    ) -> Result<Option<GasOutput>, BlockExecutionError> {
+        let (tx_env, tx) = tx.into_parts();
         if let Some(gas_used) =
-            self.executor.execute_transaction_with_commit_condition(tx.as_executable(), f)?
+            self.executor.execute_transaction_with_commit_condition((tx_env, &tx), f)?
         {
-            self.transactions.push(tx.into_recovered());
+            self.transactions.push(tx);
+            self.executor.evm_mut().db_mut().bump_bal_index();
             Ok(Some(gas_used))
         } else {
             Ok(None)
@@ -520,6 +557,7 @@ where
     fn finish(
         self,
         state: impl StateProvider,
+        state_root_precomputed: Option<(B256, TrieUpdates)>,
     ) -> Result<BlockBuilderOutcome<N>, BlockExecutionError> {
         let (evm, result) = self.executor.finish()?;
         let (db, evm_env) = evm.finish();
@@ -527,11 +565,17 @@ where
         // merge all transitions into bundle state
         db.merge_transitions(BundleRetention::Reverts);
 
-        // calculate the state root
+        let block_access_list = db.take_built_alloy_bal();
+        let block_access_list_hash =
+            block_access_list.as_ref().map(|bal| compute_block_access_list_hash(bal.as_slice()));
+
         let hashed_state = state.hashed_post_state(&db.bundle_state);
-        let (state_root, trie_updates) = state
-            .state_root_with_updates(hashed_state.clone())
-            .map_err(BlockExecutionError::other)?;
+        let (state_root, trie_updates) = match state_root_precomputed {
+            Some(precomputed) => precomputed,
+            None => state
+                .state_root_with_updates(hashed_state.clone())
+                .map_err(BlockExecutionError::other)?,
+        };
 
         let (transactions, senders) =
             self.transactions.into_iter().map(|tx| tx.into_parts()).unzip();
@@ -545,11 +589,18 @@ where
             bundle_state: &db.bundle_state,
             state_provider: &state,
             state_root,
+            block_access_list_hash,
         })?;
 
         let block = RecoveredBlock::new_unhashed(block, senders);
 
-        Ok(BlockBuilderOutcome { execution_result: result, hashed_state, trie_updates, block })
+        Ok(BlockBuilderOutcome {
+            execution_result: result,
+            hashed_state,
+            trie_updates,
+            block,
+            block_access_list,
+        })
     }
 
     fn executor_mut(&mut self) -> &mut Self::Executor {
@@ -580,8 +631,7 @@ pub struct BasicBlockExecutor<F, DB> {
 impl<F, DB: Database> BasicBlockExecutor<F, DB> {
     /// Creates a new `BasicBlockExecutor` with the given strategy.
     pub fn new(strategy_factory: F, db: DB) -> Self {
-        let db =
-            State::builder().with_database(db).with_bundle_update().without_state_clear().build();
+        let db = State::builder().with_database(db).with_bundle_update().build();
         Self { strategy_factory, db, custom_precompiles: None }
     }
 }
@@ -631,13 +681,15 @@ where
         apply_custom_precompiles_to_evm(&mut evm, custom_precompiles.as_deref());
         let ctx =
             self.strategy_factory.context_for_block(block).map_err(BlockExecutionError::other)?;
-        let result = self
-            .strategy_factory
-            .create_executor(evm, ctx)
-            .with_state_hook(Some(Box::new(state_hook)))
-            .execute_block(block.transactions_recovered())?;
+        let mut executor = self.strategy_factory.create_executor(evm, ctx);
+        executor.evm_mut().db_mut().set_state_hook(Some(Box::new(state_hook)));
 
-        Ok(result)
+        let result = executor.execute_block(block.transactions_recovered());
+
+        self.db.set_state_hook(None);
+        self.db.merge_transitions(BundleRetention::Reverts);
+
+        result
     }
 
     fn into_state(self) -> State<DB> {
@@ -688,6 +740,10 @@ where
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
         self.custom_precompiles = Some(custom_precompiles);
     }
+
+    fn take_bal(&mut self) -> Option<BlockAccessList> {
+        self.db.take_built_alloy_bal()
+    }
 }
 
 fn apply_custom_precompiles_to_evm<Evm>(
@@ -703,25 +759,46 @@ fn apply_custom_precompiles_to_evm<Evm>(
     }
 }
 
-/// A helper trait marking a 'static type that can be converted into an [`ExecutableTx`] for block
-/// executor.
+/// A helper trait marking a 'static type that can be converted into an [`ExecutableTxParts`] for
+/// block executor.
 pub trait ExecutableTxFor<Evm: ConfigureEvm>:
-    ToTxEnv<TxEnvFor<Evm>> + RecoveredTx<TxTy<Evm::Primitives>>
+    ExecutableTxParts<TxEnvFor<Evm>, TxTy<Evm::Primitives>> + RecoveredTx<TxTy<Evm::Primitives>>
 {
 }
 
 impl<T, Evm: ConfigureEvm> ExecutableTxFor<Evm> for T where
-    T: ToTxEnv<TxEnvFor<Evm>> + RecoveredTx<TxTy<Evm::Primitives>>
+    T: ExecutableTxParts<TxEnvFor<Evm>, TxTy<Evm::Primitives>> + RecoveredTx<TxTy<Evm::Primitives>>
 {
 }
 
-/// A container for a transaction and a transaction environment.
-#[derive(Debug, Clone)]
+/// A transaction stored together with its `TxEnv`.
+///
+/// See also [`ExecutableTxParts`] for types that can be split into a transaction environment and
+/// recovered transaction.
+#[derive(Debug)]
 pub struct WithTxEnv<TxEnv, T> {
     /// The transaction environment for EVM.
     pub tx_env: TxEnv,
     /// The recovered transaction.
-    pub tx: T,
+    pub tx: Arc<T>,
+}
+
+impl<TxEnv, T> WithTxEnv<TxEnv, T> {
+    /// Creates a transaction/environment pair from a type that can be split with
+    /// [`ExecutableTxParts::into_parts`].
+    pub fn new<Tx, InnerTx>(tx: Tx) -> Self
+    where
+        Tx: ExecutableTxParts<TxEnv, InnerTx, Recovered = T>,
+    {
+        let (tx_env, tx) = tx.into_parts();
+        Self { tx_env, tx: Arc::new(tx) }
+    }
+}
+
+impl<TxEnv: Clone, T> Clone for WithTxEnv<TxEnv, T> {
+    fn clone(&self) -> Self {
+        Self { tx_env: self.tx_env.clone(), tx: self.tx.clone() }
+    }
 }
 
 impl<TxEnv, Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for WithTxEnv<TxEnv, T> {
@@ -734,9 +811,11 @@ impl<TxEnv, Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for WithTxEnv<TxEnv, T> {
     }
 }
 
-impl<TxEnv: Clone, T> ToTxEnv<TxEnv> for WithTxEnv<TxEnv, T> {
-    fn to_tx_env(&self) -> TxEnv {
-        self.tx_env.clone()
+impl<TxEnv, T: RecoveredTx<Tx>, Tx> ExecutableTxParts<TxEnv, Tx> for WithTxEnv<TxEnv, T> {
+    type Recovered = Arc<T>;
+
+    fn into_parts(self) -> (TxEnv, Self::Recovered) {
+        (self.tx_env, self.tx)
     }
 }
 
@@ -744,9 +823,6 @@ impl<TxEnv: Clone, T> ToTxEnv<TxEnv> for WithTxEnv<TxEnv, T> {
 mod tests {
     use super::*;
     use crate::Address;
-    use alloy_consensus::constants::KECCAK_EMPTY;
-    use alloy_evm::block::state_changes::balance_increment_state;
-    use alloy_primitives::{address, map::HashMap, U256};
     use core::marker::PhantomData;
     use reth_ethereum_primitives::EthPrimitives;
     use revm::{
@@ -833,91 +909,5 @@ mod tests {
         let db = CacheDB::<EmptyDB>::default();
         let executor = provider.executor(db);
         let _ = executor.execute(&Default::default());
-    }
-
-    fn setup_state_with_account(
-        addr: Address,
-        balance: u128,
-        nonce: u64,
-    ) -> State<CacheDB<EmptyDB>> {
-        let db = CacheDB::<EmptyDB>::default();
-        let mut state = State::builder().with_database(db).with_bundle_update().build();
-
-        let account_info = AccountInfo {
-            balance: U256::from(balance),
-            nonce,
-            code_hash: KECCAK_EMPTY,
-            code: None,
-        };
-        state.insert_account(addr, account_info);
-        state
-    }
-
-    #[test]
-    fn test_balance_increment_state_zero() {
-        let addr = address!("0x1000000000000000000000000000000000000000");
-        let mut state = setup_state_with_account(addr, 100, 1);
-
-        let mut increments = HashMap::default();
-        increments.insert(addr, 0);
-
-        let result = balance_increment_state(&increments, &mut state).unwrap();
-        assert!(result.is_empty(), "Zero increments should be ignored");
-    }
-
-    #[test]
-    fn test_balance_increment_state_empty_increments_map() {
-        let mut state = State::builder()
-            .with_database(CacheDB::<EmptyDB>::default())
-            .with_bundle_update()
-            .build();
-
-        let increments = HashMap::default();
-        let result = balance_increment_state(&increments, &mut state).unwrap();
-        assert!(result.is_empty(), "Empty increments map should return empty state");
-    }
-
-    #[test]
-    fn test_balance_increment_state_multiple_valid_increments() {
-        let addr1 = address!("0x1000000000000000000000000000000000000000");
-        let addr2 = address!("0x2000000000000000000000000000000000000000");
-
-        let mut state = setup_state_with_account(addr1, 100, 1);
-
-        let account2 =
-            AccountInfo { balance: U256::from(200), nonce: 1, code_hash: KECCAK_EMPTY, code: None };
-        state.insert_account(addr2, account2);
-
-        let mut increments = HashMap::default();
-        increments.insert(addr1, 50);
-        increments.insert(addr2, 100);
-
-        let result = balance_increment_state(&increments, &mut state).unwrap();
-
-        assert_eq!(result.len(), 2);
-        assert_eq!(result.get(&addr1).unwrap().info.balance, U256::from(100));
-        assert_eq!(result.get(&addr2).unwrap().info.balance, U256::from(200));
-    }
-
-    #[test]
-    fn test_balance_increment_state_mixed_zero_and_nonzero_increments() {
-        let addr1 = address!("0x1000000000000000000000000000000000000000");
-        let addr2 = address!("0x2000000000000000000000000000000000000000");
-
-        let mut state = setup_state_with_account(addr1, 100, 1);
-
-        let account2 =
-            AccountInfo { balance: U256::from(200), nonce: 1, code_hash: KECCAK_EMPTY, code: None };
-        state.insert_account(addr2, account2);
-
-        let mut increments = HashMap::default();
-        increments.insert(addr1, 0);
-        increments.insert(addr2, 100);
-
-        let result = balance_increment_state(&increments, &mut state).unwrap();
-
-        assert_eq!(result.len(), 1, "Only non-zero increments should be included");
-        assert!(!result.contains_key(&addr1), "Zero increment account should not be included");
-        assert_eq!(result.get(&addr2).unwrap().info.balance, U256::from(200));
     }
 }

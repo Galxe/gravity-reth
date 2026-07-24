@@ -1,4 +1,3 @@
-use alloy_consensus::Header;
 use alloy_primitives::{hex, BlockHash};
 use clap::Parser;
 use reth_db::{
@@ -8,11 +7,15 @@ use reth_db::{
     RawDupSort,
 };
 use reth_db_api::{
-    table::{Decompress, DupSort, Table},
-    tables, RawKey, RawTable, Receipts, TableViewer, Transactions,
+    cursor::DbCursorRO,
+    database::Database,
+    table::{Compress, Decompress, DupSort, Table},
+    tables,
+    transaction::DbTx,
+    RawKey, RawTable, TableViewer,
 };
 use reth_db_common::DbTool;
-use reth_node_api::{ReceiptTy, TxTy};
+use reth_node_api::{HeaderTy, ReceiptTy, TxTy};
 use reth_node_builder::NodeTypesWithDB;
 use reth_provider::{providers::ProviderNodeTypes, StaticFileProviderFactory};
 use reth_static_file_types::StaticFileSegment;
@@ -39,6 +42,14 @@ enum Subcommand {
         #[arg(value_parser = maybe_json_value_parser)]
         subkey: Option<String>,
 
+        /// Optional end key for range query (exclusive upper bound)
+        #[arg(value_parser = maybe_json_value_parser)]
+        end_key: Option<String>,
+
+        /// Optional end subkey for range query (exclusive upper bound)
+        #[arg(value_parser = maybe_json_value_parser)]
+        end_subkey: Option<String>,
+
         /// Output bytes instead of human-readable decoded value
         #[arg(long)]
         raw: bool,
@@ -51,6 +62,10 @@ enum Subcommand {
         #[arg(value_parser = maybe_json_value_parser)]
         key: String,
 
+        /// The subkey to get content for, for example address in changeset
+        #[arg(value_parser = maybe_json_value_parser)]
+        subkey: Option<String>,
+
         /// Output bytes instead of human-readable decoded value
         #[arg(long)]
         raw: bool,
@@ -61,19 +76,29 @@ impl Command {
     /// Execute `db get` command
     pub fn execute<N: ProviderNodeTypes>(self, tool: &DbTool<N>) -> eyre::Result<()> {
         match self.subcommand {
-            Subcommand::Mdbx { table, key, subkey, raw } => {
-                table.view(&GetValueViewer { tool, key, subkey, raw })?
+            Subcommand::Mdbx { table, key, subkey, end_key, end_subkey, raw } => {
+                table.view(&GetValueViewer { tool, key, subkey, end_key, end_subkey, raw })?
             }
-            Subcommand::StaticFile { segment, key, raw } => {
+            Subcommand::StaticFile { segment, key, subkey: _, raw } => {
                 let (key, mask): (u64, _) = match segment {
-                    StaticFileSegment::Headers => {
-                        (table_key::<tables::Headers>(&key)?, <HeaderWithHashMask<Header>>::MASK)
-                    }
+                    StaticFileSegment::Headers => (
+                        table_key::<tables::Headers>(&key)?,
+                        <HeaderWithHashMask<HeaderTy<N>>>::MASK,
+                    ),
                     StaticFileSegment::Transactions => {
                         (table_key::<tables::Transactions>(&key)?, <TransactionMask<TxTy<N>>>::MASK)
                     }
                     StaticFileSegment::Receipts => {
                         (table_key::<tables::Receipts>(&key)?, <ReceiptMask<ReceiptTy<N>>>::MASK)
+                    }
+                    // NOTE(gravity): this storage backend keeps transaction senders and
+                    // changesets in the database, not in static files.
+                    StaticFileSegment::TransactionSenders |
+                    StaticFileSegment::AccountChangeSets |
+                    StaticFileSegment::StorageChangeSets => {
+                        eyre::bail!(
+                            "{segment} static file segment is not supported by this storage backend"
+                        )
                     }
                 };
 
@@ -96,7 +121,7 @@ impl Command {
                         } else {
                             match segment {
                                 StaticFileSegment::Headers => {
-                                    let header = Header::decompress(content[0].as_slice())?;
+                                    let header = HeaderTy::<N>::decompress(content[0].as_slice())?;
                                     let block_hash = BlockHash::decompress(content[1].as_slice())?;
                                     println!(
                                         "Header\n{}\n\nBlockHash\n{}",
@@ -105,16 +130,20 @@ impl Command {
                                     );
                                 }
                                 StaticFileSegment::Transactions => {
-                                    let transaction = <<Transactions as Table>::Value>::decompress(
-                                        content[0].as_slice(),
-                                    )?;
+                                    let transaction = TxTy::<N>::decompress(content[0].as_slice())?;
                                     println!("{}", serde_json::to_string_pretty(&transaction)?);
                                 }
                                 StaticFileSegment::Receipts => {
-                                    let receipt = <<Receipts as Table>::Value>::decompress(
-                                        content[0].as_slice(),
-                                    )?;
+                                    let receipt =
+                                        ReceiptTy::<N>::decompress(content[0].as_slice())?;
                                     println!("{}", serde_json::to_string_pretty(&receipt)?);
+                                }
+                                StaticFileSegment::TransactionSenders |
+                                StaticFileSegment::AccountChangeSets |
+                                StaticFileSegment::StorageChangeSets => {
+                                    unreachable!(
+                                        "unsupported segments are special cased before this match"
+                                    )
                                 }
                             }
                         }
@@ -144,6 +173,8 @@ struct GetValueViewer<'a, N: NodeTypesWithDB> {
     tool: &'a DbTool<N>,
     key: String,
     subkey: Option<String>,
+    end_key: Option<String>,
+    end_subkey: Option<String>,
     raw: bool,
 }
 
@@ -153,29 +184,77 @@ impl<N: ProviderNodeTypes> TableViewer<()> for GetValueViewer<'_, N> {
     fn view<T: Table>(&self) -> Result<(), Self::Error> {
         let key = table_key::<T>(&self.key)?;
 
-        let content = if self.raw {
-            self.tool
-                .get::<RawTable<T>>(RawKey::from(key))?
-                .map(|content| hex::encode_prefixed(content.raw_value()))
-        } else {
-            self.tool.get::<T>(key)?.as_ref().map(serde_json::to_string_pretty).transpose()?
-        };
+        // A non-dupsort table cannot have subkeys. The `subkey` arg becomes the `end_key`. First we
+        // check that `end_key` and `end_subkey` weren't previously given, as that wouldn't be
+        // valid.
+        if self.end_key.is_some() || self.end_subkey.is_some() {
+            return Err(eyre::eyre!("Only END_KEY can be given for non-DUPSORT tables"));
+        }
 
-        match content {
-            Some(content) => {
-                println!("{content}");
-            }
-            None => {
-                error!(target: "reth::cli", "No content for the given table key.");
-            }
-        };
+        let end_key = self.subkey.clone();
+
+        // Check if we're doing a range query
+        if let Some(ref end_key_str) = end_key {
+            let end_key = table_key::<T>(end_key_str)?;
+
+            // Use walk_range to iterate over the range
+            self.tool.provider_factory.db_ref().view(|tx| {
+                let mut cursor = tx.cursor_read::<T>()?;
+                let walker = cursor.walk_range(key..end_key)?;
+
+                for result in walker {
+                    let (k, v) = result?;
+                    let json_val = if self.raw {
+                        let raw_key = RawKey::from(k);
+                        serde_json::json!({
+                            "key": hex::encode_prefixed(raw_key.raw_key()),
+                            "val": hex::encode_prefixed(v.compress().as_ref()),
+                        })
+                    } else {
+                        serde_json::json!({
+                            "key": &k,
+                            "val": &v,
+                        })
+                    };
+
+                    println!("{}", serde_json::to_string_pretty(&json_val)?);
+                }
+
+                Ok::<_, eyre::Report>(())
+            })??;
+        } else {
+            // Single key lookup
+            let content = if self.raw {
+                self.tool
+                    .get::<RawTable<T>>(RawKey::from(key))?
+                    .map(|content| hex::encode_prefixed(content.raw_value()))
+            } else {
+                self.tool.get::<T>(key)?.as_ref().map(serde_json::to_string_pretty).transpose()?
+            };
+
+            match content {
+                Some(content) => {
+                    println!("{content}");
+                }
+                None => {
+                    error!(target: "reth::cli", "No content for the given table key.");
+                }
+            };
+        }
 
         Ok(())
     }
 
+    // NOTE(gravity): the upstream range-query variant requires a `ValueWithSubKey` bound that
+    // this backend's `TableViewer::view_dupsort` does not carry; only single key/subkey lookups
+    // are supported for dupsort tables.
     fn view_dupsort<T: DupSort>(&self) -> Result<(), Self::Error> {
         // get a key for given table
         let key = table_key::<T>(&self.key)?;
+
+        if self.end_key.is_some() || self.end_subkey.is_some() {
+            return Err(eyre::eyre!("Range queries are not supported for DUPSORT tables"));
+        }
 
         // process dupsort table
         let subkey = table_subkey::<T>(self.subkey.as_deref())?;

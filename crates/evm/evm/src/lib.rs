@@ -12,23 +12,19 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
 use crate::execute::{BasicBlockBuilder, Executor};
 use alloc::{boxed::Box, vec::Vec};
-use alloy_eips::{
-    eip2718::{EIP2930_TX_TYPE_ID, LEGACY_TX_TYPE_ID},
-    eip2930::AccessList,
-    eip4895::Withdrawals,
-};
+use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
     block::{BlockExecutorFactory, BlockExecutorFor},
     precompiles::{DynPrecompile, PrecompilesMap},
 };
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use core::{error::Error, fmt::Debug};
 use execute::{BasicBlockExecutor, BlockAssembler, BlockBuilder};
 use reth_execution_errors::BlockExecutionError;
@@ -39,6 +35,7 @@ use revm::{
     context::{result::ExecutionResult, TxEnv},
     context_interface::result::HaltReason,
     database::State,
+    primitives::hardfork::SpecId,
 };
 
 pub mod either;
@@ -50,8 +47,10 @@ use parallel_execute::ParallelExecutor;
 mod aliases;
 pub use aliases::*;
 
+#[cfg(feature = "std")]
 mod engine;
-pub use engine::{ConfigureEngineEvm, ExecutableTxIterator};
+#[cfg(feature = "std")]
+pub use engine::{ConfigureEngineEvm, ConvertTx, ExecutableTxIterator, ExecutableTxTuple};
 
 #[cfg(feature = "metrics")]
 pub mod metrics;
@@ -137,6 +136,7 @@ impl<T> ParallelDatabase for T where
 ///     gas_limit: 30_000_000,
 ///     withdrawals: Some(withdrawals),
 ///     parent_beacon_block_root: Some(beacon_root),
+///     slot_number: None,
 /// };
 ///
 /// // Build a new block on top of parent
@@ -162,7 +162,7 @@ impl<T> ParallelDatabase for T where
 /// }
 ///
 /// // Finish block building and get the outcome (block)
-/// let outcome = builder.finish(state_provider)?;
+/// let outcome = builder.finish(state_provider, None)?;
 /// let block = outcome.block;
 /// ```
 ///
@@ -215,10 +215,11 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         Receipt = ReceiptTy<Self::Primitives>,
         ExecutionCtx<'a>: Debug + Send,
         EvmFactory: EvmFactory<
-            Tx: TransactionEnv
+            Tx: TransactionEnvMut
                     + FromRecoveredTx<TxTy<Self::Primitives>>
                     + FromTxWithEncoded<TxTy<Self::Primitives>>,
             Precompiles = PrecompilesMap,
+            Spec: Into<SpecId>,
         >,
     >;
 
@@ -272,7 +273,7 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         attributes: Self::NextBlockEnvCtx,
     ) -> Result<ExecutionCtxFor<'_, Self>, Self::Error>;
 
-    /// Returns a [`TxEnv`] from a transaction and [`Address`].
+    /// Returns a [`EvmFactory::Tx`] from a transaction.
     fn tx_env(&self, transaction: impl IntoTxEnv<TxEnvFor<Self>>) -> TxEnvFor<Self> {
         transaction.into_tx_env()
     }
@@ -330,10 +331,23 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         &'a self,
         evm: EvmFor<Self, &'a mut State<DB>, I>,
         ctx: <Self::BlockExecutorFactory as BlockExecutorFactory>::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self::BlockExecutorFactory, DB, I>
+    ) -> BlockExecutorForEvm<'a, Self, DB, I>
     where
         DB: Database,
         I: InspectorFor<Self, &'a mut State<DB>> + 'a,
+    {
+        self.block_executor_factory().create_executor(evm, ctx)
+    }
+
+    /// Creates a strategy with a DB state borrow that can be shorter than the execution context.
+    fn create_executor_with_state<'a, 'db, DB, I>(
+        &'a self,
+        evm: EvmFor<Self, &'db mut State<DB>, I>,
+        ctx: <Self::BlockExecutorFactory as BlockExecutorFactory>::ExecutionCtx<'a>,
+    ) -> BlockExecutorFor<'a, Self::BlockExecutorFactory, &'db mut State<DB>, I>
+    where
+        DB: Database,
+        I: InspectorFor<Self, &'db mut State<DB>>,
     {
         self.block_executor_factory().create_executor(evm, ctx)
     }
@@ -343,7 +357,7 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         &'a self,
         db: &'a mut State<DB>,
         block: &'a SealedBlock<<Self::Primitives as NodePrimitives>::Block>,
-    ) -> Result<impl BlockExecutorFor<'a, Self::BlockExecutorFactory, DB>, Self::Error> {
+    ) -> Result<BlockExecutorForEvm<'a, Self, DB>, Self::Error> {
         let evm = self.evm_for_block(db, block.header())?;
         let ctx = self.context_for_block(block)?;
         Ok(self.create_executor(evm, ctx))
@@ -369,10 +383,7 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         evm: EvmFor<Self, &'a mut State<DB>, I>,
         parent: &'a SealedHeader<HeaderTy<Self::Primitives>>,
         ctx: <Self::BlockExecutorFactory as BlockExecutorFactory>::ExecutionCtx<'a>,
-    ) -> impl BlockBuilder<
-        Primitives = Self::Primitives,
-        Executor: BlockExecutorFor<'a, Self::BlockExecutorFactory, DB, I>,
-    >
+    ) -> impl BlockBuilder<Primitives = Self::Primitives, Executor = BlockExecutorForEvm<'a, Self, DB, I>>
     where
         DB: Database,
         I: InspectorFor<Self, &'a mut State<DB>> + 'a,
@@ -413,14 +424,17 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     /// }
     ///
     /// // Complete block building
-    /// let outcome = builder.finish(state_provider)?;
+    /// let outcome = builder.finish(state_provider, None)?;
     /// ```
-    fn builder_for_next_block<'a, DB: Database>(
+    fn builder_for_next_block<'a, DB: Database + 'a>(
         &'a self,
         db: &'a mut State<DB>,
         parent: &'a SealedHeader<<Self::Primitives as NodePrimitives>::BlockHeader>,
         attributes: Self::NextBlockEnvCtx,
-    ) -> Result<impl BlockBuilder<Primitives = Self::Primitives>, Self::Error> {
+    ) -> Result<
+        impl BlockBuilder<Primitives = Self::Primitives, Executor = BlockExecutorForEvm<'a, Self, DB>>,
+        Self::Error,
+    > {
         let evm_env = self.next_evm_env(parent, &attributes)?;
         let evm = self.evm_with_env(db, evm_env);
         let ctx = self.context_for_next_block(parent, attributes)?;
@@ -532,82 +546,8 @@ pub struct NextBlockEnvAttributes {
     pub parent_beacon_block_root: Option<B256>,
     /// Withdrawals
     pub withdrawals: Option<Withdrawals>,
-}
-
-/// Abstraction over transaction environment.
-pub trait TransactionEnv:
-    revm::context_interface::Transaction + Debug + Clone + Send + Sync + 'static
-{
-    /// Set the gas limit.
-    fn set_gas_limit(&mut self, gas_limit: u64);
-
-    /// Set the gas limit.
-    fn with_gas_limit(mut self, gas_limit: u64) -> Self {
-        self.set_gas_limit(gas_limit);
-        self
-    }
-
-    /// Returns the configured nonce.
-    fn nonce(&self) -> u64;
-
-    /// Sets the nonce.
-    fn set_nonce(&mut self, nonce: u64);
-
-    /// Sets the nonce.
-    fn with_nonce(mut self, nonce: u64) -> Self {
-        self.set_nonce(nonce);
-        self
-    }
-
-    /// Set access list.
-    fn set_access_list(&mut self, access_list: AccessList);
-
-    /// Set access list.
-    fn with_access_list(mut self, access_list: AccessList) -> Self {
-        self.set_access_list(access_list);
-        self
-    }
-}
-
-impl TransactionEnv for TxEnv {
-    fn set_gas_limit(&mut self, gas_limit: u64) {
-        self.gas_limit = gas_limit;
-    }
-
-    fn nonce(&self) -> u64 {
-        self.nonce
-    }
-
-    fn set_nonce(&mut self, nonce: u64) {
-        self.nonce = nonce;
-    }
-
-    fn set_access_list(&mut self, access_list: AccessList) {
-        self.access_list = access_list;
-
-        if self.tx_type == LEGACY_TX_TYPE_ID {
-            // if this was previously marked as legacy tx, this must be upgraded to eip2930 with an
-            // accesslist
-            self.tx_type = EIP2930_TX_TYPE_ID;
-        }
-    }
-}
-
-#[cfg(feature = "op")]
-impl<T: TransactionEnv> TransactionEnv for op_revm::OpTransaction<T> {
-    fn set_gas_limit(&mut self, gas_limit: u64) {
-        self.base.set_gas_limit(gas_limit);
-    }
-
-    fn nonce(&self) -> u64 {
-        TransactionEnv::nonce(&self.base)
-    }
-
-    fn set_nonce(&mut self, nonce: u64) {
-        self.base.set_nonce(nonce);
-    }
-
-    fn set_access_list(&mut self, access_list: AccessList) {
-        self.base.set_access_list(access_list);
-    }
+    /// Optional extra data.
+    pub extra_data: Bytes,
+    /// Optional slot number for post-Amsterdam payloads.
+    pub slot_number: Option<u64>,
 }

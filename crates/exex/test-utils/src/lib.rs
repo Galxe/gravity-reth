@@ -5,7 +5,7 @@
     html_favicon_url = "https://avatars0.githubusercontent.com/u/97369466?s=256",
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 use std::{
@@ -53,7 +53,7 @@ use reth_provider::{
     providers::{BlockchainProvider, StaticFileProvider},
     BlockReader, EthStorage, ProviderFactory,
 };
-use reth_tasks::TaskManager;
+use reth_tasks::Runtime;
 use reth_transaction_pool::test_utils::{testing_pool, TestPool};
 use tempfile::TempDir;
 use thiserror::Error;
@@ -64,13 +64,17 @@ use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 #[non_exhaustive]
 pub struct TestPoolBuilder;
 
-impl<Node> PoolBuilder<Node> for TestPoolBuilder
+impl<Node, Evm: Send> PoolBuilder<Node, Evm> for TestPoolBuilder
 where
     Node: FullNodeTypes<Types: NodeTypes<Primitives: NodePrimitives<SignedTx = TransactionSigned>>>,
 {
     type Pool = TestPool;
 
-    async fn build_pool(self, _ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
+    async fn build_pool(
+        self,
+        _ctx: &BuilderContext<Node>,
+        _evm_config: Evm,
+    ) -> eyre::Result<Self::Pool> {
         Ok(testing_pool())
     }
 }
@@ -169,8 +173,8 @@ pub struct TestExExHandle {
     pub events_rx: UnboundedReceiver<ExExEvent>,
     /// Channel for sending notifications to the Execution Extension
     pub notifications_tx: Sender<ExExNotification>,
-    /// Node task manager
-    pub tasks: TaskManager,
+    /// Node task runtime
+    pub runtime: Runtime,
     /// WAL temp directory handle
     _wal_directory: TempDir,
 }
@@ -249,17 +253,17 @@ pub async fn test_exex_context_with_chain_spec(
     let genesis_hash = init_genesis(&provider_factory)?;
     let provider = BlockchainProvider::new(provider_factory.clone())?;
 
+    let runtime = Runtime::test();
     let network_manager = NetworkManager::new(
-        NetworkConfigBuilder::new(rng_secret_key())
+        NetworkConfigBuilder::new(rng_secret_key(), runtime.clone())
             .with_unused_discovery_port()
             .with_unused_listener_port()
             .build(provider_factory.clone()),
     )
     .await?;
     let network = network_manager.handle().clone();
-    let tasks = TaskManager::current();
-    let task_executor = tasks.executor();
-    tasks.executor().spawn(network_manager);
+    let task_executor = runtime.clone();
+    runtime.spawn_task(network_manager);
 
     let (_, payload_builder_handle) = NoopPayloadBuilderService::<EthEngineTypes>::new();
 
@@ -312,7 +316,7 @@ pub async fn test_exex_context_with_chain_spec(
             provider_factory,
             events_rx,
             notifications_tx,
-            tasks,
+            runtime,
             _wal_directory: wal_directory,
         },
     ))

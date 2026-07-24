@@ -496,8 +496,8 @@ impl SparseTrieInterface for ParallelSparseTrie {
 
             match Self::find_next_to_leaf(&curr_path, curr_node, full_path) {
                 FindNextToLeafOutcome::NotFound => return Ok(()), // leaf isn't in the trie
-                FindNextToLeafOutcome::BlindedNode(hash) => {
-                    return Err(SparseTrieErrorKind::BlindedNode { path: curr_path, hash }.into())
+                FindNextToLeafOutcome::BlindedNode(_hash) => {
+                    return Err(SparseTrieErrorKind::BlindedNode(curr_path).into())
                 }
                 FindNextToLeafOutcome::Found => {
                     // this node is the target leaf
@@ -1661,9 +1661,7 @@ impl SparseSubtrie {
                 *node = SparseNode::new_leaf(path);
                 Ok(LeafUpdateStep::complete_with_insertions(vec![current], None))
             }
-            SparseNode::Hash(hash) => {
-                Err(SparseTrieErrorKind::BlindedNode { path: current, hash: *hash }.into())
-            }
+            SparseNode::Hash(_hash) => Err(SparseTrieErrorKind::BlindedNode(current).into()),
             SparseNode::Leaf { key: current_key, .. } => {
                 current.extend(current_key);
 
@@ -4674,7 +4672,7 @@ mod tests {
         // Removing a blinded leaf should result in an error
         assert_matches!(
             sparse.remove_leaf(&Nibbles::from_nibbles([0x0]), &provider).map_err(|e| e.into_kind()),
-            Err(SparseTrieErrorKind::BlindedNode { path, hash }) if path == Nibbles::from_nibbles([0x0]) && hash == B256::repeat_byte(1)
+            Err(SparseTrieErrorKind::BlindedNode(path)) if path == Nibbles::from_nibbles([0x0])
         );
     }
 

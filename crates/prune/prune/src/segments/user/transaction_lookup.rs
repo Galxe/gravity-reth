@@ -38,6 +38,8 @@ where
         PrunePurpose::User
     }
 
+    // `PruneSegment::Transactions` is deprecated but index-stable; still read for the checkpoint.
+    #[allow(deprecated)]
     #[instrument(level = "trace", target = "pruner", skip(self, provider), ret)]
     fn prune(
         &self,

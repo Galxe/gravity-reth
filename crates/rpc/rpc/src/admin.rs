@@ -9,11 +9,12 @@ use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition};
 use reth_network_api::{NetworkInfo, Peers};
-use reth_network_peers::{id2pk, AnyNode, NodeRecord};
+use reth_network_peers::{AnyNode, NodeRecord};
 use reth_network_types::PeerKind;
 use reth_rpc_api::AdminApiServer;
 use reth_rpc_server_types::ToRpcResult;
 use reth_transaction_pool::TransactionPool;
+use revm_primitives::keccak256;
 
 /// `admin` API implementation.
 ///
@@ -55,10 +56,18 @@ where
 
     /// Handler for `admin_addTrustedPeer`
     fn add_trusted_peer(&self, record: AnyNode) -> RpcResult<bool> {
-        if let Some(record) = record.node_record() {
-            self.network.add_trusted_peer_with_udp(record.id, record.tcp_addr(), record.udp_addr())
+        if let Some(trusted) = record.trusted_peer().cloned() {
+            self.network.add_trusted_peer_node(trusted);
+        } else {
+            if let Some(record) = record.node_record() {
+                self.network.add_trusted_peer_with_udp(
+                    record.id,
+                    record.tcp_addr(),
+                    record.udp_addr(),
+                )
+            }
+            self.network.add_trusted_peer_id(record.peer_id());
         }
-        self.network.add_trusted_peer_id(record.peer_id());
         Ok(true)
     }
 
@@ -74,34 +83,25 @@ where
         let mut infos = Vec::with_capacity(peers.len());
 
         for peer in peers {
-            if let Ok(pk) = id2pk(peer.remote_id) {
-                infos.push(PeerInfo {
-                    id: pk.to_string(),
-                    name: peer.client_version.to_string(),
-                    enode: peer.enode,
-                    enr: peer.enr,
-                    caps: peer
-                        .capabilities
-                        .capabilities()
-                        .iter()
-                        .map(|cap| cap.to_string())
-                        .collect(),
-                    network: PeerNetworkInfo {
-                        remote_address: peer.remote_addr,
-                        local_address: peer.local_addr.unwrap_or_else(|| self.network.local_addr()),
-                        inbound: peer.direction.is_incoming(),
-                        trusted: peer.kind.is_trusted(),
-                        static_node: peer.kind.is_static(),
-                    },
-                    protocols: PeerProtocolInfo {
-                        eth: Some(EthPeerInfo::Info(EthInfo {
-                            version: peer.status.version as u64,
-                        })),
-                        snap: None,
-                        other: Default::default(),
-                    },
-                })
-            }
+            infos.push(PeerInfo {
+                id: alloy_primitives::hex::encode(keccak256(peer.remote_id.as_slice())),
+                name: peer.client_version.to_string(),
+                enode: peer.enode,
+                enr: peer.enr,
+                caps: peer.capabilities.capabilities().iter().map(|cap| cap.to_string()).collect(),
+                network: PeerNetworkInfo {
+                    remote_address: peer.remote_addr,
+                    local_address: peer.local_addr.unwrap_or_else(|| self.network.local_addr()),
+                    inbound: peer.direction.is_incoming(),
+                    trusted: peer.kind.is_trusted(),
+                    static_node: peer.kind.is_static(),
+                },
+                protocols: PeerProtocolInfo {
+                    eth: Some(EthPeerInfo::Info(EthInfo { version: peer.status.version as u64 })),
+                    snap: None,
+                    other: Default::default(),
+                },
+            })
         }
 
         Ok(infos)
@@ -163,9 +163,7 @@ where
         ]);
 
         Ok(NodeInfo {
-            id: id2pk(enode.id)
-                .map(|pk| pk.to_string())
-                .unwrap_or_else(|_| alloy_primitives::hex::encode(enode.id.as_slice())),
+            id: alloy_primitives::hex::encode(keccak256(enode.id.as_slice())),
             name: status.client_version,
             enode: enode.to_string(),
             enr: self.network.local_enr().to_string(),

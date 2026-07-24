@@ -64,13 +64,14 @@ impl TryFromChain for ChainKind {
 
 impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> ImportEraCommand<C> {
     /// Execute `import-era` command
-    pub async fn execute<N>(self) -> eyre::Result<()>
+    pub async fn execute<N>(self, runtime: reth_tasks::Runtime) -> eyre::Result<()>
     where
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
     {
         info!(target: "reth::cli", "reth {} starting", version_metadata().short_version);
 
-        let Environment { provider_factory, config, .. } = self.env.init::<N>(AccessRights::RW)?;
+        let Environment { provider_factory, config, .. } =
+            self.env.init::<N>(AccessRights::RW, runtime)?;
 
         let mut hash_collector = Collector::new(config.stages.etl.file_size, config.stages.etl.dir);
 
@@ -83,7 +84,11 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> ImportEraC
         if let Some(path) = self.import.path {
             let stream = read_dir(path, next_block)?;
 
-            era::import(stream, &provider_factory, &mut hash_collector)?;
+            era::import::<era::Era1, _, _, _, _, _, _>(
+                stream,
+                &provider_factory,
+                &mut hash_collector,
+            )?;
         } else {
             let url = match self.import.url {
                 Some(url) => url,
@@ -98,7 +103,11 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> ImportEraC
             let client = EraClient::new(Client::new(), url, folder);
             let stream = EraStream::new(client, config);
 
-            era::import(stream, &provider_factory, &mut hash_collector)?;
+            era::import::<era::Era1, _, _, _, _, _, _>(
+                stream,
+                &provider_factory,
+                &mut hash_collector,
+            )?;
         }
 
         Ok(())

@@ -15,6 +15,7 @@ use reth_e2e_test_utils::{
         setup::{NetworkSetup, Setup},
         Environment, TestBuilder,
     },
+    E2ETestSetupBuilder,
 };
 use reth_node_api::TreeConfig;
 use reth_node_ethereum::{EthEngineTypes, EthereumNode};
@@ -82,6 +83,7 @@ async fn test_apply_with_import() -> Result<()> {
             alloy_rpc_types_eth::Block,
             alloy_rpc_types_eth::Receipt,
             alloy_rpc_types_eth::Header,
+            reth_ethereum_primitives::TransactionSigned,
         >::block_by_number(
             &client.rpc,
             alloy_eips::BlockNumberOrTag::Number(10),
@@ -158,6 +160,7 @@ async fn test_testsuite_assert_mine_block() -> Result<()> {
                 suggested_fee_recipient: Address::random(),
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                slot_number: None,
             },
         ));
 
@@ -338,11 +341,48 @@ async fn test_testsuite_multinode_block_production() -> Result<()> {
         .with_action(MakeCanonical::new())
         .with_action(CaptureBlockOnNode::new("node0_tip", 0))
         .with_action(CompareNodeChainTips::expect_same(0, 1))
+        // node 0 already has the state and can continue producing blocks
+        .with_action(ProduceBlocks::<EthEngineTypes>::new(2))
+        .with_action(MakeCanonical::new())
         .with_action(CaptureBlockOnNode::new("node0_tip_2", 0))
         // verify both nodes remain in sync
         .with_action(CompareNodeChainTips::expect_same(0, 1));
 
     test.run::<EthereumNode>().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_setup_builder_with_custom_tree_config() -> Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(
+                serde_json::from_str(include_str!(
+                    "../../../../crates/e2e-test-utils/src/testsuite/assets/genesis.json"
+                ))
+                .unwrap(),
+            )
+            .cancun_activated()
+            .build(),
+    );
+
+    let (nodes, _wallet) = E2ETestSetupBuilder::<EthereumNode, _>::new(1, chain_spec, |_| {
+        PayloadAttributes::default()
+    })
+    .with_tree_config_modifier(|config| {
+        config.with_persistence_threshold(0).with_memory_block_buffer_target(5)
+    })
+    .build()
+    .await?;
+
+    assert_eq!(nodes.len(), 1);
+
+    let genesis_hash = nodes[0].block_hash(0);
+    assert_ne!(genesis_hash, B256::ZERO);
 
     Ok(())
 }

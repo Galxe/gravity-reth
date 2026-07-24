@@ -35,14 +35,14 @@ impl NodeFlag {
     }
 
     /// Mark current node as dirty, and wipe the cached hash
-    pub fn mark_dirty(&mut self) {
-        self.rlp.take();
+    pub const fn mark_dirty(&mut self) {
+        self.rlp = None;
         self.dirty = true;
     }
 
     /// Reset current node
-    pub fn reset(&mut self) {
-        self.rlp.take();
+    pub const fn reset(&mut self) {
+        self.rlp = None;
         self.dirty = false;
     }
 }
@@ -364,7 +364,7 @@ impl Node {
     }
 
     /// Set cached hash
-    pub fn set_rlp(&mut self, rlp: RlpNode) {
+    pub const fn set_rlp(&mut self, rlp: RlpNode) {
         match self {
             Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
                 flags.rlp = Some(rlp);
@@ -385,7 +385,7 @@ impl Node {
     }
 
     /// Reset current node
-    pub fn reset(mut self) -> Self {
+    pub const fn reset(mut self) -> Self {
         match &mut self {
             Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
                 flags.reset()
@@ -558,8 +558,8 @@ mod tests {
 
     #[test]
     fn test_storage_entry_compact() {
-        let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C, 0x0D, 0x00]);
-        let subkey = StoredNibblesSubKey(nibbles.clone());
+        let nibbles = Nibbles::from_nibbles([0x0A, 0x0B, 0x0C, 0x0D, 0x00]);
+        let subkey = StoredNibblesSubKey(nibbles);
         let node = Node::ShortNode {
             key: nibbles,
             value: Box::new(Node::ValueNode(vec![1u8, 3, 5])),

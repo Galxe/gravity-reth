@@ -16,7 +16,7 @@ workspace = true
 reth-primitives-traits.workspace = true
 reth-execution-errors.workspace = true
 reth-trie-common.workspace = true
-tracing.workspace = true
+tracing = { workspace = true, features = ["attributes"] }
 alloy-trie.workspace = true
 
 # alloy
@@ -26,7 +26,9 @@ alloy-rlp.workspace = true
 # misc
 auto_impl.workspace = true
 rayon = { workspace = true, optional = true }
-smallvec = { workspace = true, features = ["const_new"] }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+smallvec.workspace = true
 
 # metrics
 reth-metrics = { workspace = true, optional = true }
@@ -61,11 +63,16 @@ std = [
     "alloy-trie/std",
     "reth-execution-errors/std",
     "reth-primitives-traits/std",
+    "reth-primitives-traits/rayon",
     "reth-storage-api/std",
     "reth-trie-common/std",
     "tracing/std",
+    "serde?/std",
+    "serde_json?/std",
+    "reth-tracing/std",
 ]
 metrics = ["dep:reth-metrics", "dep:metrics", "std"]
+trie-debug = ["std", "dep:serde", "dep:serde_json", "alloy-primitives/serde", "alloy-trie/serde"]
 test-utils = [
     "std",
     "reth-primitives-traits/test-utils",

@@ -537,6 +537,12 @@ tables! {
         type Key = ChainStateKey;
         type Value = BlockNumber;
     }
+
+    /// Stores node-local metadata, like the persisted storage layout settings.
+    table Metadata {
+        type Key = String;
+        type Value = Vec<u8>;
+    }
 }
 
 /// Keys for the `ChainState` table.

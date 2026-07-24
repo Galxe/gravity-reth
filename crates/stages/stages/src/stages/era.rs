@@ -4,7 +4,7 @@ use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Url};
 use reth_config::config::EtlConfig;
 use reth_db_api::{table::Value, transaction::DbTxMut};
-use reth_era::{era1_file::Era1Reader, era_file_ops::StreamReader};
+use reth_era::{common::file_ops::StreamReader, era1::file::Era1Reader};
 use reth_era_downloader::{read_dir, EraClient, EraMeta, EraStream, EraStreamConfig};
 use reth_era_utils as era;
 use reth_etl::Collector;
@@ -15,7 +15,6 @@ use reth_provider::{
 };
 use reth_stages_api::{ExecInput, ExecOutput, Stage, StageError, UnwindInput, UnwindOutput};
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_errors::ProviderError;
 use std::{
     fmt::{Debug, Formatter},
     iter,
@@ -177,9 +176,12 @@ where
                 .unwrap_or_default();
 
             // Find the latest total difficulty
-            let mut td = static_file_provider
-                .header_td_by_number(last_header_number)?
-                .ok_or(ProviderError::TotalDifficultyNotFound(last_header_number))?;
+            let mut td =
+                static_file_provider.header_td_by_number(last_header_number)?.ok_or_else(|| {
+                    StageError::Fatal(
+                        format!("total difficulty not found for block {last_header_number}").into(),
+                    )
+                })?;
 
             // Although headers were downloaded in reverse order, the collector iterates it in
             // ascending order
@@ -202,7 +204,7 @@ where
             }
 
             era::save_stage_checkpoints(
-                &provider,
+                provider,
                 input.checkpoint().block_number,
                 height,
                 height,
@@ -211,10 +213,27 @@ where
 
             height
         } else {
-            input.target()
+            // No era files to process. Return the highest block we're aware of to avoid
+            // limiting subsequent stages with an outdated checkpoint.
+            //
+            // This can happen when:
+            // 1. Era import is complete (all pre-merge blocks imported)
+            // 2. No era import source was configured
+            //
+            // We return max(checkpoint, highest_header, target) to ensure we don't return
+            // a stale checkpoint that could limit subsequent stages like Headers.
+            let highest_header = provider
+                .static_file_provider()
+                .get_highest_static_file_block(StaticFileSegment::Headers)
+                .unwrap_or_default();
+
+            let checkpoint = input.checkpoint().block_number;
+            let from_target = input.target.unwrap_or(checkpoint);
+
+            checkpoint.max(highest_header).max(from_target)
         };
 
-        Ok(ExecOutput { checkpoint: StageCheckpoint::new(height), done: height == input.target() })
+        Ok(ExecOutput { checkpoint: StageCheckpoint::new(height), done: height >= input.target() })
     }
 
     fn unwind(
@@ -330,7 +349,7 @@ mod tests {
         };
         use reth_ethereum_primitives::TransactionSigned;
         use reth_primitives_traits::{SealedBlock, SealedHeader};
-        use reth_provider::{BlockNumReader, TransactionsProvider};
+        use reth_provider::{BlockNumReader, HeaderProvider, TransactionsProvider};
         use reth_testing_utils::generators::{
             random_block_range, random_signed_tx, BlockRangeParams,
         };

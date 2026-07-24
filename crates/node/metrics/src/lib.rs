@@ -5,14 +5,16 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod chain;
 /// The metrics hooks for prometheus.
 pub mod hooks;
+pub mod process;
 pub mod recorder;
 /// The metric server serving the metrics.
 pub mod server;
+pub mod storage;
 pub mod version;
 
 pub use metrics_exporter_prometheus::*;

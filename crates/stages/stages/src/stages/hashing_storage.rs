@@ -1,4 +1,4 @@
-use alloy_primitives::{bytes::BufMut, keccak256, B256};
+use alloy_primitives::{b256, bytes::BufMut, keccak256, Address, B256};
 use itertools::Itertools;
 use reth_config::config::{EtlConfig, HashingConfig};
 use reth_db_api::{
@@ -17,6 +17,7 @@ use reth_stages_api::{
 };
 use reth_storage_errors::provider::ProviderResult;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt::Debug,
     sync::mpsc::{self, Receiver},
 };
@@ -28,6 +29,10 @@ const MAXIMUM_CHANNELS: usize = 10_000;
 /// Maximum number of storage entries to hash per rayon worker job.
 const WORKER_CHUNK_SIZE: usize = 100;
 
+/// Keccak256 hash of the zero address.
+const HASHED_ZERO_ADDRESS: B256 =
+    b256!("0x5380c7b7ae81a58eb98d9c78de4a1fd7fd9535fc953ed2be602daaa41767312a");
+
 /// Storage hashing stage hashes plain storage.
 /// This is preparation before generating intermediate hashes and calculating Merkle tree root.
 #[derive(Debug)]
@@ -37,6 +42,9 @@ pub struct StorageHashingStage {
     pub clean_threshold: u64,
     /// The maximum number of slots to process before committing during unwind.
     pub commit_threshold: u64,
+    /// The maximum number of changeset entries to process before committing. The stage commits
+    /// after either `commit_threshold` blocks or `commit_entries` entries, whichever comes first.
+    pub commit_entries: u64,
     /// ETL configuration
     pub etl_config: EtlConfig,
 }
@@ -47,6 +55,7 @@ impl StorageHashingStage {
         Self {
             clean_threshold: config.clean_threshold,
             commit_threshold: config.commit_threshold,
+            commit_entries: config.commit_entries,
             etl_config,
         }
     }
@@ -57,6 +66,7 @@ impl Default for StorageHashingStage {
         Self {
             clean_threshold: 500_000,
             commit_threshold: 100_000,
+            commit_entries: 30_000_000,
             etl_config: EtlConfig::default(),
         }
     }
@@ -78,14 +88,18 @@ where
             return Ok(ExecOutput::done(input.checkpoint()))
         }
 
-        let (from_block, to_block) = input.next_block_range().into_inner();
+        // Use the total remaining range to decide clean vs incremental.
+        let total_range = input.target() - input.checkpoint().block_number;
+        let from_block = input.next_block();
 
-        // if there are more blocks then threshold it is faster to go over Plain state and hash all
-        // account otherwise take changesets aggregate the sets and apply hashing to
-        // AccountHashing table. Also, if we start from genesis, we need to hash from scratch, as
-        // genesis accounts are not in changeset, along with their storages.
-        if to_block - from_block > self.clean_threshold || from_block == 1 {
-            // clear table, load all accounts and hash it
+        if total_range > self.clean_threshold || from_block == 1 {
+            // if there are more blocks than threshold it is faster to go over Plain state and
+            // hash all storage otherwise take changesets aggregate the sets and apply
+            // hashing to HashedStorages table. Also, if we start from genesis, we need to
+            // hash from scratch, as genesis accounts are not in changeset, along with their
+            // storages.
+
+            // clear table, load all entries and hash them
             tx.clear::<tables::HashedStorages>()?;
 
             let mut storage_cursor = tx.cursor_read::<tables::PlainStorageState>()?;
@@ -95,15 +109,20 @@ where
 
             for chunk in &storage_cursor.walk(None)?.chunks(WORKER_CHUNK_SIZE) {
                 // An _unordered_ channel to receive results from a rayon job
-                let (tx, rx) = mpsc::channel();
-                channels.push(rx);
-
                 let chunk = chunk.collect::<Result<Vec<_>, _>>()?;
+                let (tx, rx) = mpsc::sync_channel(chunk.len());
+                channels.push(rx);
                 // Spawn the hashing task onto the global rayon pool
                 rayon::spawn(move || {
+                    // Cache hashed address since PlainStorageState is sorted by address
+                    let (mut last_addr, mut hashed_addr) = (Address::ZERO, HASHED_ZERO_ADDRESS);
                     for (address, slot) in chunk {
+                        if address != last_addr {
+                            last_addr = address;
+                            hashed_addr = keccak256(address);
+                        }
                         let mut addr_key = Vec::with_capacity(64);
-                        addr_key.put_slice(keccak256(address).as_slice());
+                        addr_key.put_slice(hashed_addr.as_slice());
                         addr_key.put_slice(keccak256(slot.key).as_slice());
                         let _ = tx.send((addr_key, CompactU256::from(slot.value)));
                     }
@@ -138,26 +157,58 @@ where
                     },
                 )?;
             }
+
+            let checkpoint = StageCheckpoint::new(input.target())
+                .with_storage_hashing_stage_checkpoint(StorageHashingCheckpoint {
+                    progress: stage_checkpoint_progress(provider)?,
+                    ..Default::default()
+                });
+
+            Ok(ExecOutput { checkpoint, done: true })
         } else {
-            // Aggregate all changesets and make list of storages that have been
-            // changed.
-            let lists = provider.changed_storages_with_range(from_block..=to_block)?;
-            // iterate over plain state and get newest storage value.
-            // Assumption we are okay with is that plain state represent
-            // `previous_stage_progress` state.
-            let storages = provider.plain_state_storages(lists)?;
+            // Stream changesets entry-by-entry, bounded by both block count
+            // (commit_threshold) and entry count (commit_entries), whichever comes first.
+            let (block_range, is_final_range) =
+                input.next_block_range_with_threshold(self.commit_threshold);
+            let (from_block, to_block) = block_range.into_inner();
+
+            let mut changeset_cursor = tx.cursor_read::<tables::StorageChangeSets>()?;
+            let mut changed: BTreeMap<Address, BTreeSet<B256>> = BTreeMap::new();
+            let mut total_entries = 0u64;
+            let mut last_block = from_block;
+
+            for entry in
+                changeset_cursor.walk_range(BlockNumberAddress::range(from_block..=to_block))?
+            {
+                let (BlockNumberAddress((block_number, address)), storage_entry) = entry?;
+
+                // Check the entry limit only at block boundaries so we never
+                // checkpoint mid-block (which would skip the remaining entries
+                // for that block on the next invocation).
+                if block_number != last_block && total_entries >= self.commit_entries {
+                    break;
+                }
+
+                last_block = block_number;
+                changed.entry(address).or_default().insert(storage_entry.key);
+                total_entries += 1;
+            }
+
+            let storages = provider.plain_state_storages(changed)?;
             provider.insert_storage_for_hashing(storages)?;
+
+            let exhausted = total_entries < self.commit_entries;
+            let done = exhausted && is_final_range;
+            let progress_block = if exhausted { to_block } else { last_block };
+
+            let checkpoint = StageCheckpoint::new(progress_block)
+                .with_storage_hashing_stage_checkpoint(StorageHashingCheckpoint {
+                    progress: stage_checkpoint_progress(provider)?,
+                    ..Default::default()
+                });
+
+            Ok(ExecOutput { checkpoint, done })
         }
-
-        // We finished the hashing stage, no future iterations is expected for the same block range,
-        // so no checkpoint is needed.
-        let checkpoint = StageCheckpoint::new(input.target())
-            .with_storage_hashing_stage_checkpoint(StorageHashingCheckpoint {
-                progress: stage_checkpoint_progress(provider)?,
-                ..Default::default()
-            });
-
-        Ok(ExecOutput { checkpoint, done: true })
     }
 
     /// Unwind the stage.
@@ -217,7 +268,7 @@ mod tests {
     use rand::Rng;
     use reth_db_api::{
         cursor::{DbCursorRW, DbDupCursorRO},
-        models::StoredBlockBodyIndices,
+        models::{BlockNumberAddress, StoredBlockBodyIndices},
     };
     use reth_ethereum_primitives::Block;
     use reth_primitives_traits::SealedBlock;
@@ -299,6 +350,7 @@ mod tests {
         db: TestStageDB,
         commit_threshold: u64,
         clean_threshold: u64,
+        commit_entries: u64,
         etl_config: EtlConfig,
     }
 
@@ -308,6 +360,7 @@ mod tests {
                 db: TestStageDB::default(),
                 commit_threshold: 1000,
                 clean_threshold: 1000,
+                commit_entries: u64::MAX,
                 etl_config: EtlConfig::default(),
             }
         }
@@ -324,6 +377,7 @@ mod tests {
             Self::S {
                 commit_threshold: self.commit_threshold,
                 clean_threshold: self.clean_threshold,
+                commit_entries: self.commit_entries,
                 etl_config: self.etl_config.clone(),
             }
         }
@@ -347,6 +401,7 @@ mod tests {
             );
 
             self.db.insert_headers(blocks.iter().map(|block| block.sealed_header()))?;
+            let mut tx_hash_numbers = Vec::new();
 
             let iter = blocks.iter();
             let mut next_tx_num = 0;
@@ -357,10 +412,7 @@ mod tests {
                 self.db.commit(|tx| {
                     progress.body().transactions.iter().try_for_each(
                         |transaction| -> Result<(), reth_db::DatabaseError> {
-                            tx.put::<tables::TransactionHashNumbers>(
-                                *transaction.tx_hash(),
-                                next_tx_num,
-                            )?;
+                            tx_hash_numbers.push((*transaction.tx_hash(), next_tx_num));
                             tx.put::<tables::Transactions>(next_tx_num, transaction.clone())?;
 
                             let (addr, _) = accounts
@@ -410,6 +462,7 @@ mod tests {
                     Ok(())
                 })?;
             }
+            self.db.insert_tx_hash_numbers(tx_hash_numbers)?;
 
             Ok(blocks)
         }
@@ -532,8 +585,7 @@ mod tests {
 
                     if storage_cursor
                         .seek_by_key_subkey(bn_address.address(), entry.key)?
-                        .filter(|e| e.key == entry.key)
-                        .is_some()
+                        .is_some_and(|e| e.key == entry.key)
                     {
                         storage_cursor.delete_current()?;
                     }

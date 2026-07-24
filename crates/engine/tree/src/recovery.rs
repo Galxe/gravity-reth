@@ -15,8 +15,9 @@ use reth_errors::ProviderError;
 use reth_primitives_traits::GotExpected;
 use reth_provider::{
     providers::ProviderNodeTypes, AccountExtReader, BlockHashReader, BlockNumReader,
-    DatabaseProviderFactory, HashingWriter, HeaderProvider, HistoryWriter, ProviderFactory,
-    ProviderResult, StageCheckpointWriter, StorageReader, TrieWriterV2,
+    ChangesetRangeReader, DatabaseProviderFactory, HashingWriter, HeaderProvider, HistoryWriter,
+    ProviderFactory, ProviderResult, StageCheckpointWriter, StorageReader, StorageSettingsCache,
+    TrieWriterV2,
 };
 use reth_stages_api::{StageCheckpoint, StageId};
 use reth_storage_errors::provider::RootMismatch;
@@ -186,8 +187,15 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         if ck.block_number < block_number {
             info!(target: "engine::recovery", checkpoint = ?ck.block_number, block_number = ?block_number, "Recovering merkle state");
             let nested_state_root = NestedStateRoot::new(provider_rw.tx_ref(), None);
-            let hashed_state =
-                nested_state_root.read_hashed_state(Some(ck.block_number + 1..=block_number))?;
+            let range = ck.block_number + 1..=block_number;
+            let hashed_state = if provider_rw.cached_storage_settings().changesets_in_static_files {
+                nested_state_root.read_hashed_state_from_changesets(
+                    provider_rw.account_changesets_range(range.clone())?,
+                    provider_rw.storage_changesets_range(range)?,
+                )?
+            } else {
+                nested_state_root.read_hashed_state(Some(range))?
+            };
             let (final_root, trie_updates_v2) = nested_state_root.calculate(&hashed_state)?;
 
             if let Some(header) = provider_rw.header_by_number(block_number)? {

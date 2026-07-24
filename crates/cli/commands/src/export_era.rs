@@ -4,7 +4,7 @@ use crate::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
 use clap::{Args, Parser};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
-use reth_era::execution_types::MAX_BLOCKS_PER_ERA1;
+use reth_era::era1::types::execution::MAX_BLOCKS_PER_ERA1;
 use reth_era_utils as era1;
 use reth_provider::DatabaseProviderFactory;
 use std::{path::PathBuf, sync::Arc};
@@ -44,11 +44,11 @@ pub struct ExportArgs {
 
 impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> ExportEraCommand<C> {
     /// Execute `export-era` command
-    pub async fn execute<N>(self) -> eyre::Result<()>
+    pub async fn execute<N>(self, runtime: reth_tasks::Runtime) -> eyre::Result<()>
     where
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
     {
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
+        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO, runtime)?;
 
         // Either specified path or default to `<data-dir>/<chain>/era1-export/`
         let data_dir = match &self.export.path {

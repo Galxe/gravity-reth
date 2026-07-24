@@ -29,7 +29,10 @@ use execution::dump_execution_stage;
 mod merkle;
 use merkle::dump_merkle_stage;
 
-/// `reth dump-stage` command
+/// `reth dump-stage` command.
+///
+/// Note: mutates the source datadir (unwinds hashing/merkle/execution before copying tables).
+/// Stop the node and back up the datadir first.
 #[derive(Debug, Parser)]
 pub struct Command<C: ChainSpecParser> {
     #[command(flatten)]
@@ -89,13 +92,19 @@ macro_rules! handle_stage {
 
 impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C> {
     /// Execute `dump-stage` command
-    pub async fn execute<N, Comp, F>(self, components: F) -> eyre::Result<()>
+    pub async fn execute<N, Comp, F>(
+        self,
+        components: F,
+        runtime: reth_tasks::Runtime,
+    ) -> eyre::Result<()>
     where
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
         Comp: CliNodeComponents<N>,
         F: FnOnce(Arc<C::ChainSpec>) -> Comp,
     {
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
+        // `unwind_and_copy` opens a RW provider on the source datadir, so open RW here.
+        let Environment { provider_factory, .. } =
+            self.env.init::<N>(AccessRights::RW, runtime.clone())?;
         let tool = DbTool::new(provider_factory)?;
         let components = components(tool.chain());
         let evm_config = components.evm_config().clone();

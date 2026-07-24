@@ -3,6 +3,7 @@ use super::{
     StaticFileJarProvider, StaticFileProviderRW, StaticFileProviderRWRefMut,
 };
 use crate::{
+    changeset_walker::{StaticFileAccountChangesetWalker, StaticFileStorageChangesetWalker},
     to_range, BlockHashReader, BlockNumReader, BlockReader, BlockSource, HeaderProvider,
     ReceiptProvider, StageCheckpointReader, StatsReader, TransactionVariant, TransactionsProvider,
     TransactionsProviderExt,
@@ -36,20 +37,22 @@ use reth_db_api::{
 };
 use reth_ethereum_primitives::{Receipt, TransactionSigned};
 use reth_nippy_jar::{NippyJar, NippyJarChecker, CONFIG_FILE_EXTENSION};
-use reth_node_types::{FullNodePrimitives, NodePrimitives};
-use reth_primitives_traits::{RecoveredBlock, SealedHeader, SignedTransaction};
+use reth_node_types::NodePrimitives;
+use reth_primitives_traits::{RecoveredBlock, SealedHeader, SignedTransaction, StorageEntry};
 use reth_stages_types::{PipelineTarget, StageId};
 use reth_static_file_types::{
     find_fixed_range, HighestStaticFiles, SegmentHeader, SegmentRangeInclusive, StaticFileSegment,
     DEFAULT_BLOCKS_PER_STATIC_FILE,
 };
-use reth_storage_api::{BlockBodyIndicesProvider, DBProvider};
+use reth_storage_api::{
+    BlockBodyIndicesProvider, ChangeSetReader, DBProvider, StorageChangeSetReader,
+};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap},
     fmt::Debug,
     marker::PhantomData,
-    ops::{Deref, Range, RangeBounds, RangeInclusive},
+    ops::{Bound, Deref, Range, RangeBounds, RangeInclusive},
     path::{Path, PathBuf},
     sync::{atomic::AtomicU64, mpsc, Arc},
 };
@@ -413,9 +416,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             Some(path) => StaticFileSegment::parse_filename(
                 &path
                     .file_name()
-                    .ok_or_else(|| {
-                        ProviderError::MissingStaticFilePath(segment, path.to_path_buf())
-                    })?
+                    .ok_or_else(|| ProviderError::MissingStaticFilePath(path.to_path_buf()))?
                     .to_string_lossy(),
             )
             .and_then(|(parsed_segment, block_range)| {
@@ -507,6 +508,18 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             );
             NippyJar::<SegmentHeader>::load(&file).map_err(ProviderError::other)?
         };
+
+        // Deleting the file invalidates any cached writer for this segment; drop it so a
+        // later `latest_writer` reopens fresh state instead of stale block/offset tracking.
+        self.writers.remove(segment);
+
+        // Delete the sidecar file for changeset segments before deleting the main jar
+        if segment.is_change_based() {
+            let csoff_path = jar.data_path().with_extension("csoff");
+            if csoff_path.exists() {
+                std::fs::remove_file(&csoff_path).map_err(ProviderError::other)?;
+            }
+        }
 
         jar.delete().map_err(ProviderError::other)?;
 
@@ -616,7 +629,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
 
                     // Current block range has the same block start as `fixed_range``, but block end
                     // might be different if we are still filling this static file.
-                    if let Some(current_block_range) = jar.user_header().block_range().copied() {
+                    if let Some(current_block_range) = jar.user_header().block_range() {
                         // Considering that `update_index` is called when we either append/truncate,
                         // we are sure that we are handling the latest data
                         // points.
@@ -779,9 +792,17 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             }
         };
 
-        for segment in StaticFileSegment::iter() {
+        for segment in StaticFileSegment::iter().filter(|s| {
+            // gravity keeps transaction senders in the database and never has this segment;
+            // changeset segments only exist under the changesets-in-static-files layout.
+            !matches!(s, StaticFileSegment::TransactionSenders)
+        }) {
             if has_receipt_pruning && segment.is_receipts() {
                 // Pruned nodes (including full node) do not store receipts as static files.
+                continue
+            }
+            if segment.is_change_based() && self.get_highest_static_file_block(segment).is_none() {
+                // Legacy layout: changesets live in the database.
                 continue
             }
 
@@ -886,6 +907,8 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
                         highest_tx,
                         highest_block,
                     )?,
+                // gravity does not maintain storage-v2 static file segments (filtered above)
+                _ => None,
             } {
                 update_unwind_target(unwind);
             }
@@ -971,6 +994,8 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
                 StaticFileSegment::Headers => StageId::Headers,
                 StaticFileSegment::Transactions => StageId::Bodies,
                 StaticFileSegment::Receipts => StageId::Execution,
+                // gravity does not maintain storage-v2 static file segments (filtered above)
+                _ => unreachable!("gravity static files only cover Headers/Transactions/Receipts"),
             })?
             .unwrap_or_default()
             .block_number;
@@ -1029,13 +1054,31 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         Provider: DBProvider + BlockReader + StageCheckpointReader,
     {
         if self.access.is_read_only() {
+            // Healing needs write access; still validate so a corrupted static file
+            // fails loudly here instead of surfacing later as truncated read data.
+            for segment in [
+                StaticFileSegment::Headers,
+                StaticFileSegment::Transactions,
+                StaticFileSegment::Receipts,
+            ] {
+                if has_receipt_pruning && segment.is_receipts() {
+                    continue;
+                }
+                self.check_segment_consistency(segment)?;
+            }
             return Ok(None);
         }
 
         info!(target: "reth::cli", "Verifying storage consistency (pipe execution mode).");
 
         // Phase 1: Heal NippyJar file-level inconsistencies.
-        for segment in StaticFileSegment::iter() {
+        //
+        // Changeset segments only exist under the changesets-in-static-files layout; the
+        // per-segment existence guard below skips them on legacy datadirs.
+        for segment in StaticFileSegment::iter().filter(|s| {
+            // gravity keeps transaction senders in the database and never has this segment
+            !matches!(s, StaticFileSegment::TransactionSenders)
+        }) {
             if has_receipt_pruning && segment.is_receipts() {
                 continue;
             }
@@ -1048,7 +1091,10 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         let checkpoint_block_number =
             provider.get_stage_checkpoint(StageId::Execution)?.unwrap_or_default().block_number;
 
-        for segment in StaticFileSegment::iter() {
+        for segment in StaticFileSegment::iter().filter(|s| {
+            // gravity keeps transaction senders in the database and never has this segment
+            !matches!(s, StaticFileSegment::TransactionSenders)
+        }) {
             if has_receipt_pruning && segment.is_receipts() {
                 continue;
             }
@@ -1091,6 +1137,16 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         let mut writer = self.latest_writer(segment)?;
         if segment.is_headers() {
             writer.prune_headers(highest_static_file_block - target_block)?;
+        } else if segment.is_change_based() {
+            match segment {
+                StaticFileSegment::AccountChangeSets => {
+                    writer.prune_account_changesets(target_block)?
+                }
+                StaticFileSegment::StorageChangeSets => {
+                    writer.prune_storage_changesets(target_block)?
+                }
+                _ => unreachable!("is_change_based covers exactly these segments"),
+            }
         } else if let Some(block) = provider.block_body_indices(target_block)? {
             let highest_tx = self.get_highest_static_file_tx(segment).unwrap_or_default();
             let to_delete = highest_tx - block.last_tx_num();
@@ -1153,9 +1209,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
     /// Gets the highest static file block for all segments.
     pub fn get_highest_static_files(&self) -> HighestStaticFiles {
         HighestStaticFiles {
-            headers: self.get_highest_static_file_block(StaticFileSegment::Headers),
             receipts: self.get_highest_static_file_block(StaticFileSegment::Receipts),
-            transactions: self.get_highest_static_file_block(StaticFileSegment::Transactions),
         }
     }
 
@@ -1618,8 +1672,8 @@ impl<N: NodePrimitives<SignedTx: Value + SignedTransaction, Receipt: Value>> Rec
     }
 }
 
-impl<N: FullNodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>>
-    TransactionsProviderExt for StaticFileProvider<N>
+impl<N: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>> TransactionsProviderExt
+    for StaticFileProvider<N>
 {
     fn transaction_hashes_by_range(
         &self,
@@ -1818,7 +1872,7 @@ impl<N: NodePrimitives> BlockNumReader for StaticFileProvider<N> {
     }
 }
 
-impl<N: FullNodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>> BlockReader
+impl<N: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>> BlockReader
     for StaticFileProvider<N>
 {
     type Block = N::Block;
@@ -1921,6 +1975,138 @@ impl<N: NodePrimitives> StatsReader for StaticFileProvider<N> {
                 as usize),
             _ => Err(ProviderError::UnsupportedProvider),
         }
+    }
+}
+
+impl<N: NodePrimitives> ChangeSetReader for StaticFileProvider<N> {
+    fn account_block_changeset(
+        &self,
+        block_number: BlockNumber,
+    ) -> ProviderResult<Vec<reth_db_api::models::AccountBeforeTx>> {
+        let provider = match self.get_segment_provider_from_block(
+            StaticFileSegment::AccountChangeSets,
+            block_number,
+            None,
+        ) {
+            Ok(provider) => provider,
+            Err(ProviderError::MissingStaticFileBlock(_, _)) => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+
+        if let Some(offset) = provider.read_changeset_offset(block_number)? {
+            let mut cursor = provider.cursor()?;
+            let mut changeset = Vec::with_capacity(offset.num_changes() as usize);
+
+            for i in offset.changeset_range() {
+                if let Some(change) =
+                    cursor.get_one::<reth_db::static_file::AccountChangesetMask>(i.into())?
+                {
+                    changeset.push(change)
+                }
+            }
+            Ok(changeset)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+}
+
+impl<N: NodePrimitives> StorageChangeSetReader for StaticFileProvider<N> {
+    fn storage_changeset(
+        &self,
+        block_number: BlockNumber,
+    ) -> ProviderResult<Vec<(reth_db_api::models::BlockNumberAddress, StorageEntry)>> {
+        let provider = match self.get_segment_provider_from_block(
+            StaticFileSegment::StorageChangeSets,
+            block_number,
+            None,
+        ) {
+            Ok(provider) => provider,
+            Err(ProviderError::MissingStaticFileBlock(_, _)) => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+
+        if let Some(offset) = provider.read_changeset_offset(block_number)? {
+            let mut cursor = provider.cursor()?;
+            let mut changeset = Vec::with_capacity(offset.num_changes() as usize);
+
+            for i in offset.changeset_range() {
+                if let Some(change) =
+                    cursor.get_one::<reth_db::static_file::StorageChangesetMask>(i.into())?
+                {
+                    let block_address =
+                        reth_db_api::models::BlockNumberAddress((block_number, change.address));
+                    let entry = StorageEntry { key: change.key, value: change.value };
+                    changeset.push((block_address, entry));
+                }
+            }
+            Ok(changeset)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+}
+
+impl<N: NodePrimitives> StaticFileProvider<N> {
+    /// Converts a range to a bounded `RangeInclusive` capped to the highest static file block.
+    ///
+    /// This is necessary because static file iteration beyond the tip would loop forever:
+    /// blocks beyond the static file tip return `Ok(empty)` which is indistinguishable from
+    /// blocks with no changes. We cap the end to the highest available block regardless of
+    /// whether the input was unbounded or an explicit large value like `BlockNumber::MAX`.
+    fn bound_range(
+        &self,
+        range: impl RangeBounds<BlockNumber>,
+        segment: StaticFileSegment,
+    ) -> RangeInclusive<BlockNumber> {
+        let highest_block = self.get_highest_static_file_block(segment).unwrap_or(0);
+
+        let start = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.saturating_add(1),
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n.min(highest_block),
+            Bound::Excluded(&n) => n.saturating_sub(1).min(highest_block),
+            Bound::Unbounded => highest_block,
+        };
+
+        start..=end
+    }
+
+    /// Creates an iterator for walking through account changesets in the specified block range.
+    pub fn walk_account_changeset_range(
+        &self,
+        range: impl RangeBounds<BlockNumber>,
+    ) -> StaticFileAccountChangesetWalker<Self> {
+        StaticFileAccountChangesetWalker::new(self.clone(), range)
+    }
+
+    /// Creates an iterator for walking through storage changesets in the specified block range.
+    pub fn walk_storage_changeset_range(
+        &self,
+        range: impl RangeBounds<BlockNumber>,
+    ) -> StaticFileStorageChangesetWalker<Self> {
+        StaticFileStorageChangesetWalker::new(self.clone(), range)
+    }
+
+    /// Collects account changesets over a block range, capped to the static file tip.
+    pub fn account_changesets_range(
+        &self,
+        range: impl RangeBounds<BlockNumber>,
+    ) -> ProviderResult<Vec<(BlockNumber, reth_db_api::models::AccountBeforeTx)>> {
+        let range = self.bound_range(range, StaticFileSegment::AccountChangeSets);
+        self.walk_account_changeset_range(range).collect()
+    }
+
+    /// Collects storage changesets over a block range, capped to the static file tip.
+    pub fn storage_changesets_range(
+        &self,
+        range: impl RangeBounds<BlockNumber>,
+    ) -> ProviderResult<Vec<(reth_db_api::models::BlockNumberAddress, StorageEntry)>> {
+        let range = self.bound_range(range, StaticFileSegment::StorageChangeSets);
+        self.walk_storage_changeset_range(range).collect()
     }
 }
 

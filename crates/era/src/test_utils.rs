@@ -1,8 +1,8 @@
 //! Utilities helpers to create era data structures for testing purposes.
 
 use crate::{
-    consensus_types::{CompressedBeaconState, CompressedSignedBeaconBlock},
-    execution_types::{
+    era::types::consensus::{CompressedBeaconState, CompressedSignedBeaconBlock},
+    era1::types::execution::{
         BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts, TotalDifficulty,
     },
 };
@@ -34,6 +34,8 @@ pub(crate) fn create_header() -> Header {
         excess_blob_gas: None,
         parent_beacon_block_root: None,
         requests_hash: None,
+        block_access_list_hash: None,
+        slot_number: None,
     }
 }
 
@@ -138,6 +140,8 @@ pub(crate) fn create_test_block_with_compressed_data(number: BlockNumber) -> Blo
         excess_blob_gas: None,
         parent_beacon_block_root: None,
         requests_hash: None,
+        block_access_list_hash: None,
+        slot_number: None,
     };
 
     // Create test body

@@ -6,10 +6,13 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::{BlockHash, BlockNumber, TxNumber, U256};
 use parking_lot::{lock_api::RwLockWriteGuard, RawRwLock, RwLock};
 use reth_codecs::Compact;
-use reth_db_api::models::CompactU256;
+use reth_db_api::models::{AccountBeforeTx, CompactU256, StorageBeforeTx};
 use reth_nippy_jar::{NippyJar, NippyJarError, NippyJarWriter};
 use reth_node_types::NodePrimitives;
-use reth_static_file_types::{SegmentHeader, SegmentRangeInclusive, StaticFileSegment};
+use reth_static_file_types::{
+    ChangesetOffset, ChangesetOffsetReader, ChangesetOffsetWriter, SegmentHeader,
+    SegmentRangeInclusive, StaticFileSegment,
+};
 use reth_storage_errors::provider::{ProviderError, ProviderResult, StaticFileWriterError};
 use std::{
     borrow::Borrow,
@@ -20,6 +23,40 @@ use std::{
 };
 use tracing::debug;
 
+/// Represents different pruning strategies for various static file segments.
+#[derive(Debug, Clone, Copy)]
+enum PruneStrategy {
+    /// Prune headers by number of blocks to delete.
+    Headers {
+        /// Number of blocks to delete.
+        num_blocks: u64,
+    },
+    /// Prune transactions by number of rows and last block.
+    Transactions {
+        /// Number of transaction rows to delete.
+        num_rows: u64,
+        /// The last block number after pruning.
+        last_block: BlockNumber,
+    },
+    /// Prune receipts by number of rows and last block.
+    Receipts {
+        /// Number of receipt rows to delete.
+        num_rows: u64,
+        /// The last block number after pruning.
+        last_block: BlockNumber,
+    },
+    /// Prune account changesets to a target block number.
+    AccountChangeSets {
+        /// The target block number to prune to.
+        last_block: BlockNumber,
+    },
+    /// Prune storage changesets to a target block number.
+    StorageChangeSets {
+        /// The target block number to prune to.
+        last_block: BlockNumber,
+    },
+}
+
 /// Static file writers for every known [`StaticFileSegment`].
 ///
 /// WARNING: Trying to use more than one writer for the same segment type **will result in a
@@ -29,6 +66,8 @@ pub(crate) struct StaticFileWriters<N> {
     headers: RwLock<Option<StaticFileProviderRW<N>>>,
     transactions: RwLock<Option<StaticFileProviderRW<N>>>,
     receipts: RwLock<Option<StaticFileProviderRW<N>>>,
+    account_change_sets: RwLock<Option<StaticFileProviderRW<N>>>,
+    storage_change_sets: RwLock<Option<StaticFileProviderRW<N>>>,
 }
 
 impl<N> Default for StaticFileWriters<N> {
@@ -37,6 +76,8 @@ impl<N> Default for StaticFileWriters<N> {
             headers: Default::default(),
             transactions: Default::default(),
             receipts: Default::default(),
+            account_change_sets: Default::default(),
+            storage_change_sets: Default::default(),
         }
     }
 }
@@ -51,6 +92,12 @@ impl<N: NodePrimitives> StaticFileWriters<N> {
             StaticFileSegment::Headers => self.headers.write(),
             StaticFileSegment::Transactions => self.transactions.write(),
             StaticFileSegment::Receipts => self.receipts.write(),
+            StaticFileSegment::AccountChangeSets => self.account_change_sets.write(),
+            StaticFileSegment::StorageChangeSets => self.storage_change_sets.write(),
+            // gravity keeps transaction senders in the database
+            StaticFileSegment::TransactionSenders => {
+                unreachable!("gravity static file writer does not cover TransactionSenders")
+            }
         };
 
         if write_guard.is_none() {
@@ -60,8 +107,32 @@ impl<N: NodePrimitives> StaticFileWriters<N> {
         Ok(StaticFileProviderRWRefMut(write_guard))
     }
 
+    /// Drops the cached writer for `segment` so the next `get_or_create` opens a fresh one.
+    ///
+    /// Used after the underlying segment files are deleted, since the cached writer would
+    /// otherwise keep stale block/offset state.
+    pub(crate) fn remove(&self, segment: StaticFileSegment) {
+        let mut write_guard = match segment {
+            StaticFileSegment::Headers => self.headers.write(),
+            StaticFileSegment::Transactions => self.transactions.write(),
+            StaticFileSegment::Receipts => self.receipts.write(),
+            StaticFileSegment::AccountChangeSets => self.account_change_sets.write(),
+            StaticFileSegment::StorageChangeSets => self.storage_change_sets.write(),
+            StaticFileSegment::TransactionSenders => {
+                unreachable!("gravity static file writer does not cover TransactionSenders")
+            }
+        };
+        *write_guard = None;
+    }
+
     pub(crate) fn commit(&self) -> ProviderResult<()> {
-        for writer_lock in [&self.headers, &self.transactions, &self.receipts] {
+        for writer_lock in [
+            &self.headers,
+            &self.transactions,
+            &self.receipts,
+            &self.account_change_sets,
+            &self.storage_change_sets,
+        ] {
             let mut writer = writer_lock.write();
             if let Some(writer) = writer.as_mut() {
                 writer.commit()?;
@@ -108,9 +179,12 @@ pub struct StaticFileProviderRW<N> {
     buf: Vec<u8>,
     /// Metrics.
     metrics: Option<Arc<StaticFileProviderMetrics>>,
-    /// On commit, does the instructed pruning: number of lines, and if it applies, the last block
-    /// it ends at.
-    prune_on_commit: Option<(u64, Option<BlockNumber>)>,
+    /// On commit, contains the pruning strategy to apply for the segment.
+    prune_on_commit: Option<PruneStrategy>,
+    /// Changeset offsets sidecar writer (only for changeset segments).
+    changeset_offsets: Option<ChangesetOffsetWriter>,
+    /// Current block's changeset offset being written.
+    current_changeset_offset: Option<ChangesetOffset>,
 }
 
 impl<N: NodePrimitives> StaticFileProviderRW<N> {
@@ -125,6 +199,8 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         metrics: Option<Arc<StaticFileProviderMetrics>>,
     ) -> ProviderResult<Self> {
         let (writer, data_path) = Self::open(segment, block, reader.clone(), metrics.clone())?;
+
+        // Create writer WITHOUT sidecar first - we'll add it after healing
         let mut writer = Self {
             writer,
             data_path,
@@ -132,9 +208,18 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
             reader,
             metrics,
             prune_on_commit: None,
+            changeset_offsets: None,
+            current_changeset_offset: None,
         };
 
+        // Run NippyJar healing BEFORE setting up changeset sidecar
+        // This may reduce rows, which affects valid sidecar offsets
         writer.ensure_end_range_consistency()?;
+
+        // Now set up changeset sidecar with post-heal header values
+        if segment.is_change_based() {
+            writer.heal_changeset_sidecar()?;
+        }
 
         Ok(writer)
     }
@@ -201,7 +286,7 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         } else {
             self.user_header().tx_len().unwrap_or_default()
         };
-        let pruned_rows = expected_rows - self.writer.rows() as u64;
+        let pruned_rows = expected_rows.saturating_sub(self.writer.rows() as u64);
         if pruned_rows > 0 {
             self.user_header_mut().prune(pruned_rows);
         }
@@ -213,20 +298,193 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         Ok(())
     }
 
+    /// Heals the changeset offset sidecar after `NippyJar` healing.
+    ///
+    /// This must be called AFTER `ensure_end_range_consistency()` which may reduce rows.
+    /// Performs three-way consistency check between header, `NippyJar` rows, and sidecar file:
+    /// - Validates sidecar offsets don't point past actual `NippyJar` rows
+    /// - Heals header if sidecar was truncated during interrupted prune
+    /// - Truncates sidecar if offsets point past healed `NippyJar` data
+    fn heal_changeset_sidecar(&mut self) -> ProviderResult<()> {
+        let csoff_path = self.data_path.with_extension("csoff");
+
+        // Step 1: Read all three sources of truth
+        let header_claims_blocks = self.writer.user_header().changeset_offsets_len();
+        let actual_nippy_rows = self.writer.rows() as u64;
+
+        // Get actual sidecar file size (may differ from header after crash)
+        let actual_sidecar_blocks = if csoff_path.exists() {
+            let file_len = reth_fs_util::metadata(&csoff_path).map_err(ProviderError::other)?.len();
+            // Remove partial records from crash mid-write
+            let aligned_len = file_len - (file_len % 16);
+            aligned_len / 16
+        } else {
+            0
+        };
+
+        // Fresh segment or no sidecar data - nothing to heal
+        if header_claims_blocks == 0 && actual_sidecar_blocks == 0 {
+            self.changeset_offsets =
+                Some(ChangesetOffsetWriter::new(&csoff_path, 0).map_err(ProviderError::other)?);
+            return Ok(());
+        }
+
+        // Step 2: Validate sidecar offsets against actual NippyJar state
+        let valid_blocks = if actual_sidecar_blocks > 0 {
+            let reader = ChangesetOffsetReader::new(&csoff_path, actual_sidecar_blocks)
+                .map_err(ProviderError::other)?;
+
+            // Find last block where offset + num_changes <= actual_nippy_rows
+            // This correctly handles rows=0 with offset=0, num_changes=0 (empty blocks)
+            let mut valid = 0u64;
+            for i in 0..actual_sidecar_blocks {
+                if let Some(offset) = reader.get(i).map_err(ProviderError::other)? {
+                    if offset.offset() + offset.num_changes() <= actual_nippy_rows {
+                        valid = i + 1;
+                    } else {
+                        // This block points past EOF - stop here
+                        break;
+                    }
+                }
+            }
+            valid
+        } else {
+            0
+        };
+
+        // Step 3: Determine correct state from synced files (source of truth)
+        // Header is the commit marker - never enlarge, only shrink
+        let correct_blocks = valid_blocks.min(header_claims_blocks);
+
+        // Step 4: Heal if header doesn't match validated truth
+        let mut needs_header_commit = false;
+
+        if correct_blocks != header_claims_blocks || actual_sidecar_blocks != correct_blocks {
+            tracing::warn!(
+                target: "reth::static_file",
+                path = %csoff_path.display(),
+                header_claims = header_claims_blocks,
+                sidecar_has = actual_sidecar_blocks,
+                valid_blocks = correct_blocks,
+                actual_rows = actual_nippy_rows,
+                "Three-way healing: syncing header, sidecar, and NippyJar state"
+            );
+
+            // Truncate sidecar file if it has invalid blocks
+            if actual_sidecar_blocks > correct_blocks {
+                use std::fs::OpenOptions;
+                let file = OpenOptions::new()
+                    .write(true)
+                    .open(&csoff_path)
+                    .map_err(ProviderError::other)?;
+                file.set_len(correct_blocks * 16).map_err(ProviderError::other)?;
+                file.sync_all().map_err(ProviderError::other)?;
+
+                tracing::debug!(
+                    target: "reth::static_file",
+                    "Truncated sidecar from {} to {} blocks",
+                    actual_sidecar_blocks,
+                    correct_blocks
+                );
+            }
+
+            // Update header to match validated truth (can only shrink, never enlarge)
+            if correct_blocks < header_claims_blocks {
+                // Blocks were removed - use prune() to update both block_range and
+                // changeset_offsets_len atomically
+                let blocks_removed = header_claims_blocks - correct_blocks;
+                self.writer.user_header_mut().prune(blocks_removed);
+
+                tracing::debug!(
+                    target: "reth::static_file",
+                    "Updated header: removed {} blocks (changeset_offsets_len: {} -> {})",
+                    blocks_removed,
+                    header_claims_blocks,
+                    correct_blocks
+                );
+
+                needs_header_commit = true;
+            }
+        } else {
+            tracing::debug!(
+                target: "reth::static_file",
+                path = %csoff_path.display(),
+                blocks = correct_blocks,
+                "Changeset sidecar consistent, no healing needed"
+            );
+        }
+
+        // Open sidecar writer with corrected count (won't error now that sizes match)
+        let csoff_writer = ChangesetOffsetWriter::new(&csoff_path, correct_blocks)
+            .map_err(ProviderError::other)?;
+
+        self.changeset_offsets = Some(csoff_writer);
+
+        // Commit healed header if needed (after sidecar writer is set up)
+        if needs_header_commit {
+            self.writer.commit().map_err(ProviderError::other)?;
+
+            tracing::info!(
+                target: "reth::static_file",
+                path = %csoff_path.display(),
+                blocks = correct_blocks,
+                "Committed healed changeset offset header"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Flushes the current changeset offset (if any) to the `.csoff` sidecar file.
+    ///
+    /// This is idempotent - safe to call multiple times. After flushing, the current offset
+    /// is cleared to prevent duplicate writes.
+    ///
+    /// This must be called before committing or syncing to ensure the last block's offset
+    /// is persisted, since `increment_block()` only writes the *previous* block's offset.
+    fn flush_current_changeset_offset(&mut self) -> ProviderResult<()> {
+        if !self.writer.user_header().segment().is_change_based() {
+            return Ok(());
+        }
+
+        if let Some(offset) = self.current_changeset_offset.take() &&
+            let Some(writer) = &mut self.changeset_offsets
+        {
+            writer.append(&offset).map_err(ProviderError::other)?;
+        }
+        Ok(())
+    }
+
     /// Commits configuration changes to disk and updates the reader index with the new changes.
     pub fn commit(&mut self) -> ProviderResult<()> {
         let start = Instant::now();
 
         // Truncates the data file if instructed to.
-        if let Some((to_delete, last_block_number)) = self.prune_on_commit.take() {
-            match self.writer.user_header().segment() {
-                StaticFileSegment::Headers => self.prune_header_data(to_delete)?,
-                StaticFileSegment::Transactions => self
-                    .prune_transaction_data(to_delete, last_block_number.expect("should exist"))?,
-                StaticFileSegment::Receipts => {
-                    self.prune_receipt_data(to_delete, last_block_number.expect("should exist"))?
+        if let Some(strategy) = self.prune_on_commit.take() {
+            match strategy {
+                PruneStrategy::Headers { num_blocks } => self.prune_header_data(num_blocks)?,
+                PruneStrategy::Transactions { num_rows, last_block } => {
+                    self.prune_transaction_data(num_rows, last_block)?
+                }
+                PruneStrategy::Receipts { num_rows, last_block } => {
+                    self.prune_receipt_data(num_rows, last_block)?
+                }
+                PruneStrategy::AccountChangeSets { last_block } => {
+                    self.prune_account_changeset_data(last_block)?
+                }
+                PruneStrategy::StorageChangeSets { last_block } => {
+                    self.prune_storage_changeset_data(last_block)?
                 }
             }
+        }
+
+        // For changeset segments, flush and sync the sidecar file before committing the main file.
+        // This ensures crash consistency: the sidecar is durable before the header references it.
+        self.flush_current_changeset_offset()?;
+        if let Some(writer) = &mut self.changeset_offsets {
+            writer.sync().map_err(ProviderError::other)?;
+            // Update the header with the actual number of offsets written
+            self.writer.user_header_mut().set_changeset_offsets_len(writer.len());
         }
 
         if self.writer.is_dirty() {
@@ -330,7 +588,15 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
                 let (writer, data_path) =
                     Self::open(segment, last_block + 1, self.reader.clone(), self.metrics.clone())?;
                 self.writer = writer;
-                self.data_path = data_path;
+                self.data_path = data_path.clone();
+
+                // Update changeset offsets writer for the new file (starts empty)
+                if segment.is_change_based() {
+                    let csoff_path = data_path.with_extension("csoff");
+                    self.changeset_offsets = Some(
+                        ChangesetOffsetWriter::new(&csoff_path, 0).map_err(ProviderError::other)?,
+                    );
+                }
 
                 *self.writer.user_header_mut() = SegmentHeader::new(
                     self.reader().find_fixed_range(last_block + 1),
@@ -342,6 +608,20 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         }
 
         self.writer.user_header_mut().increment_block();
+
+        // Handle changeset offset tracking for changeset segments
+        if segment.is_change_based() {
+            // Write previous block's offset if we have one
+            if let Some(offset) = self.current_changeset_offset.take() &&
+                let Some(writer) = &mut self.changeset_offsets
+            {
+                writer.append(&offset).map_err(ProviderError::other)?;
+            }
+            // Start tracking new block's offset
+            let new_offset = self.writer.rows() as u64;
+            self.current_changeset_offset = Some(ChangesetOffset::new(new_offset, 0));
+        }
+
         if let Some(metrics) = &self.metrics {
             metrics.record_segment_operation(
                 segment,
@@ -454,16 +734,36 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
     /// Delete the current static file, and replace this provider writer with the previous static
     /// file.
     fn delete_current_and_open_previous(&mut self) -> Result<(), ProviderError> {
+        let segment = self.user_header().segment();
         let current_path = self.data_path.clone();
         let (previous_writer, data_path) = Self::open(
-            self.user_header().segment(),
+            segment,
             self.writer.user_header().expected_block_start() - 1,
             self.reader.clone(),
             self.metrics.clone(),
         )?;
         self.writer = previous_writer;
         self.writer.set_dirty();
-        self.data_path = data_path;
+        self.data_path = data_path.clone();
+
+        // Delete the sidecar file for changeset segments before deleting the main jar
+        if segment.is_change_based() {
+            let csoff_path = current_path.with_extension("csoff");
+            if csoff_path.exists() {
+                std::fs::remove_file(&csoff_path).map_err(ProviderError::other)?;
+            }
+            // Re-initialize the changeset offsets writer for the previous file
+            let new_csoff_path = data_path.with_extension("csoff");
+            let committed_len = self.writer.user_header().changeset_offsets_len();
+            self.changeset_offsets = Some(
+                ChangesetOffsetWriter::new(&new_csoff_path, committed_len)
+                    .map_err(ProviderError::other)?,
+            );
+        }
+
+        // Clear current changeset offset tracking since we're switching files
+        self.current_changeset_offset = None;
+
         NippyJar::<SegmentHeader>::load(&current_path)
             .map_err(ProviderError::other)?
             .delete()
@@ -641,6 +941,143 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         Ok(Some(tx_number))
     }
 
+    /// Appends change to changeset static file.
+    fn append_change<V: Compact>(&mut self, change: &V) -> ProviderResult<()> {
+        if let Some(ref mut offset) = self.current_changeset_offset {
+            offset.increment_num_changes();
+        }
+        self.append_column(change)?;
+        Ok(())
+    }
+
+    /// Appends a block changeset to the static file.
+    ///
+    /// It **CALLS** `increment_block()`.
+    pub fn append_account_changeset(
+        &mut self,
+        mut changeset: Vec<AccountBeforeTx>,
+        block_number: u64,
+    ) -> ProviderResult<()> {
+        debug_assert!(self.writer.user_header().segment() == StaticFileSegment::AccountChangeSets);
+        let start = Instant::now();
+
+        self.increment_block(block_number)?;
+        self.ensure_no_queued_prune()?;
+
+        // first sort the changeset by address
+        changeset.sort_by_key(|change| change.address);
+
+        let mut count: u64 = 0;
+
+        for change in changeset {
+            self.append_change(&change)?;
+            count += 1;
+        }
+
+        if let Some(metrics) = &self.metrics {
+            metrics.record_segment_operations(
+                StaticFileSegment::AccountChangeSets,
+                StaticFileProviderOperation::Append,
+                count,
+                Some(start.elapsed()),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Starts a block account changeset that will be appended one entry at a time.
+    ///
+    /// Callers must append entries sorted by address and keep the writer open until the block is
+    /// complete so the changeset offset sidecar is finalized with the correct row count.
+    pub fn begin_account_changeset(&mut self, block_number: u64) -> ProviderResult<()> {
+        debug_assert!(self.writer.user_header().segment() == StaticFileSegment::AccountChangeSets);
+
+        self.increment_block(block_number)?;
+        self.ensure_no_queued_prune()
+    }
+
+    /// Appends one account changeset entry to the current block.
+    ///
+    /// [`Self::begin_account_changeset`] must be called first.
+    pub fn append_account_changeset_entry(
+        &mut self,
+        change: AccountBeforeTx,
+    ) -> ProviderResult<()> {
+        debug_assert!(self.writer.user_header().segment() == StaticFileSegment::AccountChangeSets);
+        if self.current_changeset_offset.is_none() {
+            return Err(ProviderError::other(StaticFileWriterError::new(
+                "account changeset stream must be started before appending entries",
+            )))
+        }
+
+        self.append_change(&change)
+    }
+
+    /// Appends a block storage changeset to the static file.
+    ///
+    /// It **CALLS** `increment_block()`.
+    pub fn append_storage_changeset(
+        &mut self,
+        mut changeset: Vec<StorageBeforeTx>,
+        block_number: u64,
+    ) -> ProviderResult<()> {
+        debug_assert!(self.writer.user_header().segment() == StaticFileSegment::StorageChangeSets);
+        let start = Instant::now();
+
+        self.increment_block(block_number)?;
+        self.ensure_no_queued_prune()?;
+
+        // sort by address + storage key
+        changeset.sort_by_key(|change| (change.address, change.key));
+
+        let mut count: u64 = 0;
+        for change in changeset {
+            self.append_change(&change)?;
+            count += 1;
+        }
+
+        if let Some(metrics) = &self.metrics {
+            metrics.record_segment_operations(
+                StaticFileSegment::StorageChangeSets,
+                StaticFileProviderOperation::Append,
+                count,
+                Some(start.elapsed()),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Starts a block storage changeset that will be appended one entry at a time.
+    ///
+    /// Callers must append entries sorted by address and storage key and keep the writer open until
+    /// the block is complete so the changeset offset sidecar is finalized with the correct row
+    /// count.
+    pub fn begin_storage_changeset(&mut self, block_number: u64) -> ProviderResult<()> {
+        debug_assert!(self.writer.user_header().segment() == StaticFileSegment::StorageChangeSets);
+
+        self.increment_block(block_number)?;
+        self.ensure_no_queued_prune()
+    }
+
+    /// Appends one storage changeset entry to the current block.
+    ///
+    /// [`Self::begin_storage_changeset`] must be called first.
+    pub fn append_storage_changeset_entry(
+        &mut self,
+        change: StorageBeforeTx,
+    ) -> ProviderResult<()> {
+        debug_assert!(self.writer.user_header().segment() == StaticFileSegment::StorageChangeSets);
+        if self.current_changeset_offset.is_none() {
+            return Err(ProviderError::other(StaticFileWriterError::new(
+                "storage changeset stream must be started before appending entries",
+            )))
+        }
+
+        self.append_change(&change)
+    }
+
     /// Adds an instruction to prune `to_delete` transactions during commit.
     ///
     /// Note: `last_block` refers to the block the unwinds ends at.
@@ -650,7 +1087,7 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         last_block: BlockNumber,
     ) -> ProviderResult<()> {
         debug_assert_eq!(self.writer.user_header().segment(), StaticFileSegment::Transactions);
-        self.queue_prune(to_delete, Some(last_block))
+        self.queue_prune(PruneStrategy::Transactions { num_rows: to_delete, last_block })
     }
 
     /// Adds an instruction to prune `to_delete` receipts during commit.
@@ -662,26 +1099,31 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         last_block: BlockNumber,
     ) -> ProviderResult<()> {
         debug_assert_eq!(self.writer.user_header().segment(), StaticFileSegment::Receipts);
-        self.queue_prune(to_delete, Some(last_block))
+        self.queue_prune(PruneStrategy::Receipts { num_rows: to_delete, last_block })
     }
 
     /// Adds an instruction to prune `to_delete` headers during commit.
     pub fn prune_headers(&mut self, to_delete: u64) -> ProviderResult<()> {
         debug_assert_eq!(self.writer.user_header().segment(), StaticFileSegment::Headers);
-        self.queue_prune(to_delete, None)
+        self.queue_prune(PruneStrategy::Headers { num_blocks: to_delete })
     }
 
-    /// Adds an instruction to prune `to_delete` elements during commit.
-    ///
-    /// Note: `last_block` refers to the block the unwinds ends at if dealing with transaction-based
-    /// data.
-    fn queue_prune(
-        &mut self,
-        to_delete: u64,
-        last_block: Option<BlockNumber>,
-    ) -> ProviderResult<()> {
+    /// Adds an instruction to prune changesets until the given block.
+    pub fn prune_account_changesets(&mut self, last_block: u64) -> ProviderResult<()> {
+        debug_assert_eq!(self.writer.user_header().segment(), StaticFileSegment::AccountChangeSets);
+        self.queue_prune(PruneStrategy::AccountChangeSets { last_block })
+    }
+
+    /// Adds an instruction to prune storage changesets until the given block.
+    pub fn prune_storage_changesets(&mut self, last_block: u64) -> ProviderResult<()> {
+        debug_assert_eq!(self.writer.user_header().segment(), StaticFileSegment::StorageChangeSets);
+        self.queue_prune(PruneStrategy::StorageChangeSets { last_block })
+    }
+
+    /// Adds an instruction to prune elements during commit using the specified strategy.
+    fn queue_prune(&mut self, strategy: PruneStrategy) -> ProviderResult<()> {
         self.ensure_no_queued_prune()?;
-        self.prune_on_commit = Some((to_delete, last_block));
+        self.prune_on_commit = Some(strategy);
         Ok(())
     }
 
@@ -756,6 +1198,144 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
                 Some(start.elapsed()),
             );
         }
+
+        Ok(())
+    }
+
+    /// Prunes account changesets above `last_block` from the data file.
+    fn prune_account_changeset_data(&mut self, last_block: BlockNumber) -> ProviderResult<()> {
+        let start = Instant::now();
+
+        debug_assert!(self.writer.user_header().segment() == StaticFileSegment::AccountChangeSets);
+
+        self.truncate_changesets(last_block)?;
+
+        if let Some(metrics) = &self.metrics {
+            metrics.record_segment_operation(
+                StaticFileSegment::AccountChangeSets,
+                StaticFileProviderOperation::Prune,
+                Some(start.elapsed()),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Prunes storage changesets above `last_block` from the data file.
+    fn prune_storage_changeset_data(&mut self, last_block: BlockNumber) -> ProviderResult<()> {
+        let start = Instant::now();
+
+        debug_assert!(self.writer.user_header().segment() == StaticFileSegment::StorageChangeSets);
+
+        self.truncate_changesets(last_block)?;
+
+        if let Some(metrics) = &self.metrics {
+            metrics.record_segment_operation(
+                StaticFileSegment::StorageChangeSets,
+                StaticFileProviderOperation::Prune,
+                Some(start.elapsed()),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Truncates changesets to the given block. It deletes and loads an older static file
+    /// if the block goes beyond the start of the current block range.
+    ///
+    /// # Note
+    /// Commits to the configuration file at the end
+    fn truncate_changesets(&mut self, last_block: u64) -> ProviderResult<()> {
+        let segment = self.writer.user_header().segment();
+        debug_assert!(segment.is_change_based());
+
+        // Get the current block range
+        let current_block_end = self
+            .writer
+            .user_header()
+            .block_end()
+            .ok_or(ProviderError::MissingStaticFileBlock(segment, 0))?;
+
+        // If we're already at or before the target block, nothing to do
+        if current_block_end <= last_block {
+            return Ok(())
+        }
+
+        // Navigate to the correct file if the target block is in a previous file
+        let mut expected_block_start = self.writer.user_header().expected_block_start();
+        while last_block < expected_block_start && expected_block_start > 0 {
+            self.delete_current_and_open_previous()?;
+            expected_block_start = self.writer.user_header().expected_block_start();
+        }
+
+        // Find the number of rows to keep (up to and including last_block)
+        let blocks_to_keep = if last_block >= expected_block_start {
+            last_block - expected_block_start + 1
+        } else {
+            0
+        };
+
+        // Read changeset offsets from sidecar file to find where to truncate
+        let csoff_path = self.data_path.with_extension("csoff");
+        let changeset_offsets_len = self.writer.user_header().changeset_offsets_len();
+
+        // Flush any pending changeset offset before reading the sidecar
+        self.flush_current_changeset_offset()?;
+
+        let rows_to_keep = if blocks_to_keep == 0 {
+            0
+        } else if blocks_to_keep >= changeset_offsets_len {
+            // Keep all rows in this file
+            self.writer.rows() as u64
+        } else {
+            // Read offset for the block after last_block from sidecar.
+            // Use committed length from header, ignoring any uncommitted records
+            // that may exist in the file after a crash.
+            let reader = ChangesetOffsetReader::new(&csoff_path, changeset_offsets_len)
+                .map_err(ProviderError::other)?;
+            if let Some(next_offset) = reader.get(blocks_to_keep).map_err(ProviderError::other)? {
+                next_offset.offset()
+            } else {
+                // If we can't read the offset, keep all rows
+                self.writer.rows() as u64
+            }
+        };
+
+        let total_rows = self.writer.rows() as u64;
+        let rows_to_delete = total_rows.saturating_sub(rows_to_keep);
+
+        if rows_to_delete > 0 {
+            // Calculate the number of blocks to prune
+            let current_block_end = self
+                .writer
+                .user_header()
+                .block_end()
+                .ok_or(ProviderError::MissingStaticFileBlock(segment, 0))?;
+            let blocks_to_remove = current_block_end - last_block;
+
+            // Update segment header - for changesets, prune expects number of blocks, not rows
+            self.writer.user_header_mut().prune(blocks_to_remove);
+
+            // Prune the actual rows
+            self.writer.prune_rows(rows_to_delete as usize).map_err(ProviderError::other)?;
+        }
+
+        // Update the block range
+        self.writer.user_header_mut().set_block_range(expected_block_start, last_block);
+
+        // Sync changeset offsets to match the new block range
+        self.writer.user_header_mut().sync_changeset_offsets();
+
+        // Truncate the sidecar file to match the new block count
+        if let Some(writer) = &mut self.changeset_offsets {
+            writer.truncate(blocks_to_keep).map_err(ProviderError::other)?;
+        }
+
+        // Clear current changeset offset tracking since we've pruned
+        self.current_changeset_offset = None;
+
+        // Commits new changes to disk
+        self.commit()?;
 
         Ok(())
     }

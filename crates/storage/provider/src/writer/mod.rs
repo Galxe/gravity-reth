@@ -10,7 +10,7 @@ use reth_errors::{ProviderError, ProviderResult};
 use reth_primitives_traits::{NodePrimitives, SignedTransaction};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{DBProvider, StageCheckpointWriter, TransactionsProviderExt};
-use reth_storage_errors::writer::UnifiedStorageWriterError;
+use reth_storage_errors::provider::StaticFileWriterError;
 use revm_database::OriginalValuesKnown;
 use std::sync::Arc;
 use tracing::debug;
@@ -70,11 +70,11 @@ impl<'a, ProviderDB, ProviderSF> UnifiedStorageWriter<'a, ProviderDB, ProviderSF
     ///
     /// # Returns
     /// - `Ok(())` if the static file instance is set.
-    /// - `Err(StorageWriterError::MissingStaticFileWriter)` if the static file instance is not set.
+    /// - `Err(StaticFileWriterError::Other)` if the static file instance is not set.
     #[expect(unused)]
-    const fn ensure_static_file(&self) -> Result<(), UnifiedStorageWriterError> {
+    fn ensure_static_file(&self) -> Result<(), StaticFileWriterError> {
         if self.static_file.is_none() {
-            return Err(UnifiedStorageWriterError::MissingStaticFileWriter)
+            return Err(StaticFileWriterError::new("static file writer not set"))
         }
         Ok(())
     }
@@ -262,7 +262,8 @@ mod tests {
     };
     use revm_database_interface::{DatabaseCommit, EmptyDB};
     use revm_state::{
-        Account as RevmAccount, AccountInfo as RevmAccountInfo, AccountStatus, EvmStorageSlot,
+        Account as RevmAccount, AccountInfo as RevmAccountInfo, AccountStatus, EvmStorage,
+        EvmStorageSlot, TransactionId,
     };
     use std::{collections::BTreeMap, str::FromStr};
 
@@ -307,16 +308,17 @@ mod tests {
 
         let provider = provider_factory.provider().unwrap();
         assert_eq!(
-            provider.tx_ref().get::<tables::HashedAccounts>(destroyed_address_hashed),
-            Ok(None)
+            provider.tx_ref().get::<tables::HashedAccounts>(destroyed_address_hashed).unwrap(),
+            None
         );
         assert_eq!(
             provider
                 .tx_ref()
                 .cursor_read::<tables::HashedStorages>()
                 .unwrap()
-                .seek_by_key_subkey(destroyed_address_hashed, hashed_slot),
-            Ok(None)
+                .seek_by_key_subkey(destroyed_address_hashed, hashed_slot)
+                .unwrap(),
+            None
         );
     }
 
@@ -340,23 +342,17 @@ mod tests {
         // 0x00.. is created
         state.commit(HashMap::from_iter([(
             address_a,
-            RevmAccount {
-                info: account_a.clone(),
-                status: AccountStatus::Touched | AccountStatus::Created,
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account_a.clone(),
+                AccountStatus::Touched | AccountStatus::Created,
+                HashMap::default(),
+            ),
         )]));
 
         // 0xff.. is changed (balance + 1, nonce + 1)
         state.commit(HashMap::from_iter([(
             address_b,
-            RevmAccount {
-                info: account_b_changed.clone(),
-                status: AccountStatus::Touched,
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(account_b_changed.clone(), AccountStatus::Touched, HashMap::default()),
         )]));
 
         state.merge_transitions(BundleRetention::Reverts);
@@ -412,12 +408,11 @@ mod tests {
         // 0xff.. is destroyed
         state.commit(HashMap::from_iter([(
             address_b,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::SelfDestructed,
-                info: account_b_changed,
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account_b_changed,
+                AccountStatus::Touched | AccountStatus::SelfDestructed,
+                HashMap::default(),
+            ),
         )]));
 
         state.merge_transitions(BundleRetention::Reverts);
@@ -484,12 +479,12 @@ mod tests {
         state.commit(HashMap::from_iter([
             (
                 address_a,
-                RevmAccount {
-                    status: AccountStatus::Touched | AccountStatus::Created,
-                    info: RevmAccountInfo::default(),
+                revm_account(
+                    RevmAccountInfo::default(),
+                    AccountStatus::Touched | AccountStatus::Created,
                     // 0x00 => 0 => 1
                     // 0x01 => 0 => 2
-                    storage: HashMap::from_iter([
+                    HashMap::from_iter([
                         (
                             U256::from(0),
                             EvmStorageSlot { present_value: U256::from(1), ..Default::default() },
@@ -499,16 +494,15 @@ mod tests {
                             EvmStorageSlot { present_value: U256::from(2), ..Default::default() },
                         ),
                     ]),
-                    transaction_id: 0,
-                },
+                ),
             ),
             (
                 address_b,
-                RevmAccount {
-                    status: AccountStatus::Touched,
-                    info: account_b,
+                revm_account(
+                    account_b,
+                    AccountStatus::Touched,
                     // 0x01 => 1 => 2
-                    storage: HashMap::from_iter([(
+                    HashMap::from_iter([(
                         U256::from(1),
                         EvmStorageSlot {
                             present_value: U256::from(2),
@@ -516,8 +510,7 @@ mod tests {
                             ..Default::default()
                         },
                     )]),
-                    transaction_id: 0,
-                },
+                ),
             ),
         ]));
 
@@ -615,12 +608,11 @@ mod tests {
 
         state.commit(HashMap::from_iter([(
             address_a,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::SelfDestructed,
-                info: RevmAccountInfo::default(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                RevmAccountInfo::default(),
+                AccountStatus::Touched | AccountStatus::SelfDestructed,
+                HashMap::default(),
+            ),
         )]));
 
         state.merge_transitions(BundleRetention::Reverts);
@@ -684,12 +676,12 @@ mod tests {
         init_state.insert_not_existing(address1);
         init_state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                info: account_info.clone(),
-                status: AccountStatus::Touched | AccountStatus::Created,
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched | AccountStatus::Created,
                 // 0x00 => 0 => 1
                 // 0x01 => 0 => 2
-                storage: HashMap::from_iter([
+                HashMap::from_iter([
                     (
                         U256::ZERO,
                         EvmStorageSlot { present_value: U256::from(1), ..Default::default() },
@@ -699,8 +691,7 @@ mod tests {
                         EvmStorageSlot { present_value: U256::from(2), ..Default::default() },
                     ),
                 ]),
-                transaction_id: 0,
-            },
+            ),
         )]));
         init_state.merge_transitions(BundleRetention::Reverts);
 
@@ -721,11 +712,11 @@ mod tests {
         // Block #1: change storage.
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched,
-                info: account_info.clone(),
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched,
                 // 0x00 => 1 => 2
-                storage: HashMap::from_iter([(
+                HashMap::from_iter([(
                     U256::ZERO,
                     EvmStorageSlot {
                         original_value: U256::from(1),
@@ -733,45 +724,42 @@ mod tests {
                         ..Default::default()
                     },
                 )]),
-                transaction_id: 0,
-            },
+            ),
         )]));
         state.merge_transitions(BundleRetention::Reverts);
 
         // Block #2: destroy account.
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::SelfDestructed,
-                info: account_info.clone(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched | AccountStatus::SelfDestructed,
+                HashMap::default(),
+            ),
         )]));
         state.merge_transitions(BundleRetention::Reverts);
 
         // Block #3: re-create account and change storage.
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::Created,
-                info: account_info.clone(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched | AccountStatus::Created,
+                HashMap::default(),
+            ),
         )]));
         state.merge_transitions(BundleRetention::Reverts);
 
         // Block #4: change storage.
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched,
-                info: account_info.clone(),
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched,
                 // 0x00 => 0 => 2
                 // 0x02 => 0 => 4
                 // 0x06 => 0 => 6
-                storage: HashMap::from_iter([
+                HashMap::from_iter([
                     (
                         U256::ZERO,
                         EvmStorageSlot { present_value: U256::from(2), ..Default::default() },
@@ -785,79 +773,72 @@ mod tests {
                         EvmStorageSlot { present_value: U256::from(6), ..Default::default() },
                     ),
                 ]),
-                transaction_id: 0,
-            },
+            ),
         )]));
         state.merge_transitions(BundleRetention::Reverts);
 
         // Block #5: Destroy account again.
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::SelfDestructed,
-                info: account_info.clone(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched | AccountStatus::SelfDestructed,
+                HashMap::default(),
+            ),
         )]));
         state.merge_transitions(BundleRetention::Reverts);
 
         // Block #6: Create, change, destroy and re-create in the same block.
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::Created,
-                info: account_info.clone(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched | AccountStatus::Created,
+                HashMap::default(),
+            ),
         )]));
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched,
-                info: account_info.clone(),
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched,
                 // 0x00 => 0 => 2
-                storage: HashMap::from_iter([(
+                HashMap::from_iter([(
                     U256::ZERO,
                     EvmStorageSlot { present_value: U256::from(2), ..Default::default() },
                 )]),
-                transaction_id: 0,
-            },
+            ),
         )]));
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::SelfDestructed,
-                info: account_info.clone(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched | AccountStatus::SelfDestructed,
+                HashMap::default(),
+            ),
         )]));
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::Created,
-                info: account_info.clone(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account_info.clone(),
+                AccountStatus::Touched | AccountStatus::Created,
+                HashMap::default(),
+            ),
         )]));
         state.merge_transitions(BundleRetention::Reverts);
 
         // Block #7: Change storage.
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched,
-                info: account_info,
+            revm_account(
+                account_info,
+                AccountStatus::Touched,
                 // 0x00 => 0 => 9
-                storage: HashMap::from_iter([(
+                HashMap::from_iter([(
                     U256::ZERO,
                     EvmStorageSlot { present_value: U256::from(9), ..Default::default() },
                 )]),
-                transaction_id: 0,
-            },
+            ),
         )]));
 
         state.merge_transitions(BundleRetention::Reverts);
@@ -887,46 +868,46 @@ mod tests {
         // 0x00: 0
         // 0x01: 0
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((0, address1)),
                 StorageEntry { key: B256::with_last_byte(0), value: U256::ZERO }
-            )))
+            ))
         );
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((0, address1)),
                 StorageEntry { key: B256::with_last_byte(1), value: U256::ZERO }
-            )))
+            ))
         );
 
         // Block #1
         // 0x00: 1
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((1, address1)),
                 StorageEntry { key: B256::with_last_byte(0), value: U256::from(1) }
-            )))
+            ))
         );
 
         // Block #2 (destroyed)
         // 0x00: 2
         // 0x01: 2
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((2, address1)),
                 StorageEntry { key: B256::with_last_byte(0), value: U256::from(2) }
-            )))
+            ))
         );
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((2, address1)),
                 StorageEntry { key: B256::with_last_byte(1), value: U256::from(2) }
-            )))
+            ))
         );
 
         // Block #3
@@ -937,25 +918,25 @@ mod tests {
         // 0x02: 0
         // 0x06: 0
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((4, address1)),
                 StorageEntry { key: B256::with_last_byte(0), value: U256::ZERO }
-            )))
+            ))
         );
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((4, address1)),
                 StorageEntry { key: B256::with_last_byte(2), value: U256::ZERO }
-            )))
+            ))
         );
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((4, address1)),
                 StorageEntry { key: B256::with_last_byte(6), value: U256::ZERO }
-            )))
+            ))
         );
 
         // Block #5 (destroyed)
@@ -963,25 +944,25 @@ mod tests {
         // 0x02: 4
         // 0x06: 6
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((5, address1)),
                 StorageEntry { key: B256::with_last_byte(0), value: U256::from(2) }
-            )))
+            ))
         );
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((5, address1)),
                 StorageEntry { key: B256::with_last_byte(2), value: U256::from(4) }
-            )))
+            ))
         );
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((5, address1)),
                 StorageEntry { key: B256::with_last_byte(6), value: U256::from(6) }
-            )))
+            ))
         );
 
         // Block #6
@@ -990,13 +971,13 @@ mod tests {
         // Block #7
         // 0x00: 0
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((7, address1)),
                 StorageEntry { key: B256::with_last_byte(0), value: U256::ZERO }
-            )))
+            ))
         );
-        assert_eq!(storage_changes.next(), None);
+        assert_eq!(storage_changes.next().transpose().unwrap(), None);
     }
 
     #[test]
@@ -1012,12 +993,12 @@ mod tests {
         init_state.insert_not_existing(address1);
         init_state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                info: account1.clone(),
-                status: AccountStatus::Touched | AccountStatus::Created,
+            revm_account(
+                account1.clone(),
+                AccountStatus::Touched | AccountStatus::Created,
                 // 0x00 => 0 => 1
                 // 0x01 => 0 => 2
-                storage: HashMap::from_iter([
+                HashMap::from_iter([
                     (
                         U256::ZERO,
                         EvmStorageSlot { present_value: U256::from(1), ..Default::default() },
@@ -1027,8 +1008,7 @@ mod tests {
                         EvmStorageSlot { present_value: U256::from(2), ..Default::default() },
                     ),
                 ]),
-                transaction_id: 0,
-            },
+            ),
         )]));
         init_state.merge_transitions(BundleRetention::Reverts);
         let outcome =
@@ -1048,36 +1028,33 @@ mod tests {
         // Block #1: Destroy, re-create, change storage.
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::SelfDestructed,
-                info: account1.clone(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account1.clone(),
+                AccountStatus::Touched | AccountStatus::SelfDestructed,
+                HashMap::default(),
+            ),
         )]));
 
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::Created,
-                info: account1.clone(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account1.clone(),
+                AccountStatus::Touched | AccountStatus::Created,
+                HashMap::default(),
+            ),
         )]));
 
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched,
-                info: account1,
+            revm_account(
+                account1,
+                AccountStatus::Touched,
                 // 0x01 => 0 => 5
-                storage: HashMap::from_iter([(
+                HashMap::from_iter([(
                     U256::from(1),
                     EvmStorageSlot { present_value: U256::from(5), ..Default::default() },
                 )]),
-                transaction_id: 0,
-            },
+            ),
         )]));
 
         // Commit block #1 changes to the database.
@@ -1096,20 +1073,20 @@ mod tests {
         let mut storage_changes = storage_changeset_cursor.walk_range(range).unwrap();
 
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((1, address1)),
                 StorageEntry { key: B256::with_last_byte(0), value: U256::from(1) }
-            )))
+            ))
         );
         assert_eq!(
-            storage_changes.next(),
-            Some(Ok((
+            storage_changes.next().transpose().unwrap(),
+            Some((
                 BlockNumberAddress((1, address1)),
                 StorageEntry { key: B256::with_last_byte(1), value: U256::from(2) }
-            )))
+            ))
         );
-        assert_eq!(storage_changes.next(), None);
+        assert_eq!(storage_changes.next().transpose().unwrap(), None);
     }
 
     #[test]
@@ -1201,12 +1178,11 @@ mod tests {
         state.insert_account(address1, account1_old.0.into());
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::SelfDestructed,
-                info: RevmAccountInfo::default(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                RevmAccountInfo::default(),
+                AccountStatus::Touched | AccountStatus::SelfDestructed,
+                HashMap::default(),
+            ),
         )]));
         state.merge_transitions(BundleRetention::PlainState);
         assert_state_root(&state, &prestate, "destroyed account");
@@ -1227,19 +1203,18 @@ mod tests {
         account2.1.insert(slot2_key, account2_slot2_new_value);
         state.commit(HashMap::from_iter([(
             address2,
-            RevmAccount {
-                status: AccountStatus::Touched,
-                info: account2.0.into(),
-                storage: HashMap::from_iter([(
+            revm_account(
+                account2.0.into(),
+                AccountStatus::Touched,
+                HashMap::from_iter([(
                     slot2,
                     EvmStorageSlot::new_changed(
                         account2_slot2_old_value,
                         account2_slot2_new_value,
-                        0,
+                        TransactionId::ZERO,
                     ),
                 )]),
-                transaction_id: 0,
-            },
+            ),
         )]));
         state.merge_transitions(BundleRetention::PlainState);
         assert_state_root(&state, &prestate, "changed storage");
@@ -1252,12 +1227,7 @@ mod tests {
         account3.0.balance = U256::from(24);
         state.commit(HashMap::from_iter([(
             address3,
-            RevmAccount {
-                status: AccountStatus::Touched,
-                info: account3.0.into(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(account3.0.into(), AccountStatus::Touched, HashMap::default()),
         )]));
         state.merge_transitions(BundleRetention::PlainState);
         assert_state_root(&state, &prestate, "changed balance");
@@ -1270,12 +1240,7 @@ mod tests {
         account4.0.nonce = 128;
         state.commit(HashMap::from_iter([(
             address4,
-            RevmAccount {
-                status: AccountStatus::Touched,
-                info: account4.0.into(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(account4.0.into(), AccountStatus::Touched, HashMap::default()),
         )]));
         state.merge_transitions(BundleRetention::PlainState);
         assert_state_root(&state, &prestate, "changed nonce");
@@ -1286,12 +1251,11 @@ mod tests {
         prestate.insert(address1, (account1_new, BTreeMap::default()));
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::Created,
-                info: account1_new.into(),
-                storage: HashMap::default(),
-                transaction_id: 0,
-            },
+            revm_account(
+                account1_new.into(),
+                AccountStatus::Touched | AccountStatus::Created,
+                HashMap::default(),
+            ),
         )]));
         state.merge_transitions(BundleRetention::PlainState);
         assert_state_root(&state, &prestate, "recreated");
@@ -1303,15 +1267,18 @@ mod tests {
         prestate.get_mut(&address1).unwrap().1.insert(slot20_key, account1_slot20_value);
         state.commit(HashMap::from_iter([(
             address1,
-            RevmAccount {
-                status: AccountStatus::Touched | AccountStatus::Created,
-                info: account1_new.into(),
-                storage: HashMap::from_iter([(
+            revm_account(
+                account1_new.into(),
+                AccountStatus::Touched | AccountStatus::Created,
+                HashMap::from_iter([(
                     slot20,
-                    EvmStorageSlot::new_changed(U256::ZERO, account1_slot20_value, 0),
+                    EvmStorageSlot::new_changed(
+                        U256::ZERO,
+                        account1_slot20_value,
+                        TransactionId::ZERO,
+                    ),
                 )]),
-                transaction_id: 0,
-            },
+            ),
         )]));
         state.merge_transitions(BundleRetention::PlainState);
         assert_state_root(&state, &prestate, "recreated changed storage");
@@ -1414,5 +1381,17 @@ mod tests {
         // re-calculate database storage root
         let storage_root = StorageRoot::overlay_root(tx, address, updated_storage.clone()).unwrap();
         assert_eq!(storage_root, storage_root_prehashed(updated_storage.storage));
+    }
+
+    /// Builds a [`RevmAccount`] with `transaction_id: TransactionId::ZERO`. revm's `Account`
+    /// has a private `original_info` field, so it cannot be built with struct literal syntax.
+    fn revm_account(
+        info: RevmAccountInfo,
+        status: AccountStatus,
+        storage: EvmStorage,
+    ) -> RevmAccount {
+        let mut account = RevmAccount::default().with_info(info).with_storage(storage.into_iter());
+        account.status = status;
+        account
     }
 }

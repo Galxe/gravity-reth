@@ -12,15 +12,20 @@ env:
   CARGO_TERM_COLOR: always
   SEED: rustethereumethereumrust
   CARGO_INCREMENTAL: 0
+  RUSTC_WRAPPER: "sccache"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   test:
     name: e2e-testsuite
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-4' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
     env:
       RUST_BACKTRACE: 1
     timeout-minutes: 90
@@ -35,15 +40,34 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: true
-      - uses: actions/checkout
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: taiki-e/install-action@1f2425cdb59f8fffb99ee16a5968edf6f57a2b93 # v2.75.24
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
       - name: Run e2e tests
+        # The upstream `e2e_testsuite` binaries self-drive block production through
+        # the standard engine loop (`run_inner`). Gravity's default (pipe execution
+        # enabled) reroutes the engine to consume from the consensus-driven
+        # PipeExecLayerEventBus, which these tests never initialize — every node they
+        # spawn would then block 120s and panic. None of these tests exercise the
+        # pipe-exec path, so run them with it disabled against the standard engine.
+        #
+        # The three excluded tests deliberately reorg on disk / diverge across nodes,
+        # which regresses the persisted block height. Gravity has immediate finality
+        # and never reorgs, so its storage cache asserts a strictly monotonic persist
+        # height (storage-api/src/cache.rs) — these scenarios are not applicable.
+        env:
+          GRETH_DISABLE_PIPE_EXECUTION: "1"
         run: |
           cargo nextest run \
+            --no-fail-fast \
             --locked --features "asm-keccak" \
             --workspace \
             --exclude 'example-*' \
@@ -55,5 +79,4 @@ jobs:
             --exclude "reth-optimism-*" \
             --exclude 'reth' \
             --exclude 'reth-pipe-exec-layer-*' \
-            -E 'binary(e2e_testsuite)'
-
+            -E 'binary(e2e_testsuite) and not test(test_engine_tree_disk_reorg_v1_e2e) and not test(test_engine_tree_disk_reorg_v2_e2e) and not test(test_testsuite_multinode_block_production)'

@@ -3,7 +3,7 @@
 /// Re-exported signature type
 pub use alloy_primitives::Signature;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use crate::crypto::secp256k1::recover_signer;
     use alloy_primitives::{address, b256, Signature, U256};

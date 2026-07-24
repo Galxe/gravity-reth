@@ -17,7 +17,7 @@ use reth_db_api::{
 };
 
 use parking_lot::Mutex;
-use reth_primitives_traits::Account;
+use reth_primitives_traits::{Account, StorageEntry};
 use reth_storage_api::PersistBlockCache;
 use reth_storage_errors::{db::DatabaseError, provider::ProviderResult};
 use reth_trie::{
@@ -136,6 +136,48 @@ where
     }
 
     /// Compatible with origin `BranchNodeCompact` trie
+    /// Like [`Self::read_hashed_state`] for a block range, but with the changesets supplied
+    /// by the caller — required when changesets live in static files rather than the database
+    /// tables this function walks.
+    pub fn read_hashed_state_from_changesets(
+        &self,
+        account_changesets: impl IntoIterator<Item = (BlockNumber, AccountBeforeTx)>,
+        storage_changesets: impl IntoIterator<Item = (BlockNumberAddress, StorageEntry)>,
+    ) -> ProviderResult<HashedPostState> {
+        let mut accounts = HashMap::default();
+        let mut storages: B256Map<HashedStorage> = HashMap::default();
+        let tx = self.tx;
+
+        let mut account_hashed_state_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
+        for (_, AccountBeforeTx { address, .. }) in account_changesets {
+            let hashed_address = keccak256(address);
+            if let hash_map::Entry::Vacant(e) = accounts.entry(hashed_address) {
+                let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
+                e.insert(account.map(|a| a.1));
+            }
+        }
+
+        let mut storage_cursor = tx.cursor_dup_read::<tables::HashedStorages>()?;
+        for (BlockNumberAddress((_, address)), entry) in storage_changesets {
+            let hashed_address = keccak256(address);
+            if let hash_map::Entry::Vacant(e) = accounts.entry(hashed_address) {
+                let account = account_hashed_state_cursor.seek_exact(hashed_address)?;
+                e.insert(account.map(|a| a.1));
+            }
+            let hashed_slot = keccak256(entry.key);
+            let slot_value = storage_cursor
+                .get_by_key_subkey(hashed_address, hashed_slot)?
+                .map(|s| s.value)
+                .unwrap_or(U256::ZERO);
+            storages.entry(hashed_address).or_default().storage.insert(hashed_slot, slot_value);
+        }
+
+        Ok(HashedPostState { accounts, storages })
+    }
+
+    /// Reads the hashed post-state for the given block range by walking the account and
+    /// storage changeset tables. When `range` is `None`, reads the full hashed state from
+    /// the `HashedAccounts`/`HashedStorages` tables instead.
     pub fn read_hashed_state(
         &self,
         range: Option<RangeInclusive<BlockNumber>>,

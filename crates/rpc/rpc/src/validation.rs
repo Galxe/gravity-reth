@@ -1,11 +1,12 @@
 use alloy_consensus::{
     BlobTransactionValidationError, BlockHeader, EnvKzgSettings, Transaction, TxReceipt,
 };
-use alloy_eips::{eip4844::kzg_to_versioned_hash, eip7685::RequestsOrHash};
+use alloy_eips::{eip7685::RequestsOrHash, eip7928::bal::DecodedBal};
+use alloy_primitives::map::AddressSet;
 use alloy_rpc_types_beacon::relay::{
     BidTrace, BuilderBlockValidationRequest, BuilderBlockValidationRequestV2,
     BuilderBlockValidationRequestV3, BuilderBlockValidationRequestV4,
-    BuilderBlockValidationRequestV5,
+    BuilderBlockValidationRequestV5, BuilderBlockValidationRequestV6,
 };
 use alloy_rpc_types_engine::{
     BlobsBundleV1, BlobsBundleV2, CancunPayloadFields, ExecutionData, ExecutionPayload,
@@ -36,11 +37,11 @@ use reth_revm::{cached::CachedReads, database::StateProviderDatabase};
 use reth_rpc_api::BlockSubmissionValidationApiServer;
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
-use reth_tasks::TaskSpawner;
+use reth_tasks::Runtime;
 use revm_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::warn;
 
@@ -59,10 +60,10 @@ where
     /// Create a new instance of the [`ValidationApi`]
     pub fn new(
         provider: Provider,
-        consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
+        consensus: Arc<dyn FullConsensus<E::Primitives>>,
         evm_config: E,
         config: ValidationApiConfig,
-        task_spawner: Box<dyn TaskSpawner>,
+        task_spawner: Runtime,
         payload_validator: Arc<
             dyn PayloadValidator<T, Block = <E::Primitives as NodePrimitives>::Block>,
         >,
@@ -126,6 +127,7 @@ where
         block: RecoveredBlock<<E::Primitives as NodePrimitives>::Block>,
         message: BidTrace,
         registered_gas_limit: u64,
+        _decoded_bal: Option<DecodedBal>,
     ) -> Result<(), ValidationApiError> {
         self.validate_message_against_header(block.sealed_header(), &message)?;
 
@@ -201,7 +203,7 @@ where
         // update the cached reads
         self.update_cached_reads(parent_header_hash, request_cache).await;
 
-        self.consensus.validate_block_post_execution(&block, &output)?;
+        self.consensus.validate_block_post_execution(&block, &output, None, None)?;
 
         self.ensure_payment(&block, &output, &message)?;
 
@@ -346,42 +348,26 @@ where
     /// Validates the given [`BlobsBundleV1`] and returns versioned hashes for blobs.
     pub fn validate_blobs_bundle(
         &self,
-        mut blobs_bundle: BlobsBundleV1,
+        blobs_bundle: BlobsBundleV1,
     ) -> Result<Vec<B256>, ValidationApiError> {
-        if blobs_bundle.commitments.len() != blobs_bundle.proofs.len() ||
-            blobs_bundle.commitments.len() != blobs_bundle.blobs.len()
-        {
-            return Err(ValidationApiError::InvalidBlobsBundle)
-        }
-
-        let versioned_hashes = blobs_bundle
-            .commitments
-            .iter()
-            .map(|c| kzg_to_versioned_hash(c.as_slice()))
-            .collect::<Vec<_>>();
-
-        let sidecar = blobs_bundle.pop_sidecar(blobs_bundle.blobs.len());
+        let versioned_hashes = blobs_bundle.versioned_hashes();
+        let sidecar =
+            blobs_bundle.try_into_sidecar().map_err(|_| ValidationApiError::InvalidBlobsBundle)?;
 
         sidecar.validate(&versioned_hashes, EnvKzgSettings::default().get())?;
-
         Ok(versioned_hashes)
     }
-    /// Validates the given [`BlobsBundleV1`] and returns versioned hashes for blobs.
+
+    /// Validates the given [`BlobsBundleV2`] and returns versioned hashes for blobs.
     pub fn validate_blobs_bundle_v2(
         &self,
         blobs_bundle: BlobsBundleV2,
     ) -> Result<Vec<B256>, ValidationApiError> {
-        let versioned_hashes = blobs_bundle
-            .commitments
-            .iter()
-            .map(|c| kzg_to_versioned_hash(c.as_slice()))
-            .collect::<Vec<_>>();
+        let versioned_hashes = blobs_bundle.versioned_hashes();
+        let sidecar =
+            blobs_bundle.try_into_sidecar().map_err(|_| ValidationApiError::InvalidBlobsBundle)?;
 
-        blobs_bundle
-            .try_into_sidecar()
-            .map_err(|_| ValidationApiError::InvalidBlobsBundle)?
-            .validate(&versioned_hashes, EnvKzgSettings::default().get())?;
-
+        sidecar.validate(&versioned_hashes, EnvKzgSettings::default().get())?;
         Ok(versioned_hashes)
     }
 
@@ -402,6 +388,7 @@ where
             block,
             request.request.message,
             request.registered_gas_limit,
+            None,
         )
         .await
     }
@@ -430,6 +417,7 @@ where
             block,
             request.request.message,
             request.registered_gas_limit,
+            None,
         )
         .await
     }
@@ -470,6 +458,51 @@ where
             block,
             request.request.message,
             request.registered_gas_limit,
+            None,
+        )
+        .await
+    }
+
+    /// Core logic for validating the builder submission v6
+    async fn validate_builder_submission_v6(
+        &self,
+        request: BuilderBlockValidationRequestV6,
+    ) -> Result<(), ValidationApiError> {
+        let decoded_bal =
+            DecodedBal::from_rlp_bytes(request.request.execution_payload.block_access_list.clone())
+                .map_err(ValidationApiError::InvalidBlockAccessList)?;
+
+        let block = self.payload_validator.ensure_well_formed_payload(ExecutionData {
+            payload: ExecutionPayload::V4(request.request.execution_payload),
+            sidecar: ExecutionPayloadSidecar::v4(
+                CancunPayloadFields {
+                    parent_beacon_block_root: request.parent_beacon_block_root,
+                    versioned_hashes: self
+                        .validate_blobs_bundle_v2(request.request.blobs_bundle)?,
+                },
+                PraguePayloadFields {
+                    requests: RequestsOrHash::Requests(
+                        request.request.execution_requests.to_requests(),
+                    ),
+                },
+            ),
+        })?;
+
+        let chain_spec = self.provider.chain_spec();
+        if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) &&
+            block.rlp_length() > MAX_RLP_BLOCK_SIZE
+        {
+            return Err(ValidationApiError::Consensus(ConsensusError::BlockTooLarge {
+                rlp_length: block.rlp_length(),
+                max_rlp_length: MAX_RLP_BLOCK_SIZE,
+            }));
+        }
+
+        self.validate_message_against_block(
+            block,
+            request.request.message,
+            request.registered_gas_limit,
+            Some(decoded_bal),
         )
         .await
     }
@@ -510,12 +543,12 @@ where
         let this = self.clone();
         let (tx, rx) = oneshot::channel();
 
-        self.task_spawner.spawn_blocking(Box::pin(async move {
+        self.task_spawner.spawn_blocking_task(async move {
             let result = Self::validate_builder_submission_v3(&this, request)
                 .await
                 .map_err(ErrorObject::from);
             let _ = tx.send(result);
-        }));
+        });
 
         rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
     }
@@ -528,12 +561,12 @@ where
         let this = self.clone();
         let (tx, rx) = oneshot::channel();
 
-        self.task_spawner.spawn_blocking(Box::pin(async move {
+        self.task_spawner.spawn_blocking_task(async move {
             let result = Self::validate_builder_submission_v4(&this, request)
                 .await
                 .map_err(ErrorObject::from);
             let _ = tx.send(result);
-        }));
+        });
 
         rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
     }
@@ -546,12 +579,30 @@ where
         let this = self.clone();
         let (tx, rx) = oneshot::channel();
 
-        self.task_spawner.spawn_blocking(Box::pin(async move {
+        self.task_spawner.spawn_blocking_task(async move {
             let result = Self::validate_builder_submission_v5(&this, request)
                 .await
                 .map_err(ErrorObject::from);
             let _ = tx.send(result);
-        }));
+        });
+
+        rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
+    }
+
+    /// Validates a block submitted to the relay
+    async fn validate_builder_submission_v6(
+        &self,
+        request: BuilderBlockValidationRequestV6,
+    ) -> RpcResult<()> {
+        let this = self.clone();
+        let (tx, rx) = oneshot::channel();
+
+        self.task_spawner.spawn_blocking_task(async move {
+            let result = Self::validate_builder_submission_v6(&this, request)
+                .await
+                .map_err(ErrorObject::from);
+            let _ = tx.send(result);
+        });
 
         rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
     }
@@ -561,14 +612,14 @@ pub struct ValidationApiInner<Provider, E: ConfigureEvm, T: PayloadTypes> {
     /// The provider that can interact with the chain.
     provider: Provider,
     /// Consensus implementation.
-    consensus: Arc<dyn FullConsensus<E::Primitives, Error = ConsensusError>>,
+    consensus: Arc<dyn FullConsensus<E::Primitives>>,
     /// Execution payload validator.
     payload_validator:
         Arc<dyn PayloadValidator<T, Block = <E::Primitives as NodePrimitives>::Block>>,
     /// Block executor factory.
     evm_config: E,
     /// Set of disallowed addresses
-    disallow: HashSet<Address>,
+    disallow: AddressSet,
     /// The maximum block distance - parent to latest - allowed for validation
     validation_window: u64,
     /// Cached state reads to avoid redundant disk I/O across multiple validation attempts
@@ -577,7 +628,7 @@ pub struct ValidationApiInner<Provider, E: ConfigureEvm, T: PayloadTypes> {
     /// requests.
     cached_state: RwLock<(B256, CachedReads)>,
     /// Task spawner for blocking operations
-    task_spawner: Box<dyn TaskSpawner>,
+    task_spawner: Runtime,
     /// Validation metrics
     metrics: ValidationMetrics,
 }
@@ -586,9 +637,9 @@ pub struct ValidationApiInner<Provider, E: ConfigureEvm, T: PayloadTypes> {
 ///
 /// This function sorts addresses to ensure deterministic output regardless of
 /// insertion order, then computes a SHA256 hash of the concatenated addresses.
-fn hash_disallow_list(disallow: &HashSet<Address>) -> String {
+fn hash_disallow_list(disallow: &AddressSet) -> String {
     let mut sorted: Vec<_> = disallow.iter().collect();
-    sorted.sort(); // sort for deterministic hashing
+    sorted.sort_unstable(); // sort for deterministic hashing
 
     let mut hasher = Sha256::new();
     for addr in sorted {
@@ -608,7 +659,7 @@ impl<Provider, E: ConfigureEvm, T: PayloadTypes> fmt::Debug for ValidationApiInn
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ValidationApiConfig {
     /// Disallowed addresses.
-    pub disallow: HashSet<Address>,
+    pub disallow: AddressSet,
     /// The maximum block distance - parent to latest - allowed for validation
     pub validation_window: u64,
 }
@@ -645,6 +696,8 @@ pub enum ValidationApiError {
     ProposerPayment,
     #[error("invalid blobs bundle")]
     InvalidBlobsBundle,
+    #[error("invalid block access list: {_0}")]
+    InvalidBlockAccessList(alloy_rlp::Error),
     #[error("block accesses blacklisted address: {_0}")]
     Blacklist(Address),
     #[error(transparent)]
@@ -669,6 +722,7 @@ impl From<ValidationApiError> for ErrorObject<'static> {
             ValidationApiError::Blacklist(_) |
             ValidationApiError::ProposerPayment |
             ValidationApiError::InvalidBlobsBundle |
+            ValidationApiError::InvalidBlockAccessList(_) |
             ValidationApiError::Blob(_) => invalid_params_rpc_err(error.to_string()),
 
             ValidationApiError::MissingLatestBlock |
@@ -700,13 +754,12 @@ pub(crate) struct ValidationMetrics {
 
 #[cfg(test)]
 mod tests {
-    use super::hash_disallow_list;
+    use super::{hash_disallow_list, AddressSet};
     use revm_primitives::Address;
-    use std::collections::HashSet;
 
     #[test]
     fn test_hash_disallow_list_deterministic() {
-        let mut addresses = HashSet::new();
+        let mut addresses = AddressSet::default();
         addresses.insert(Address::from([1u8; 20]));
         addresses.insert(Address::from([2u8; 20]));
 
@@ -718,10 +771,10 @@ mod tests {
 
     #[test]
     fn test_hash_disallow_list_different_content() {
-        let mut addresses1 = HashSet::new();
+        let mut addresses1 = AddressSet::default();
         addresses1.insert(Address::from([1u8; 20]));
 
-        let mut addresses2 = HashSet::new();
+        let mut addresses2 = AddressSet::default();
         addresses2.insert(Address::from([2u8; 20]));
 
         let hash1 = hash_disallow_list(&addresses1);
@@ -732,11 +785,11 @@ mod tests {
 
     #[test]
     fn test_hash_disallow_list_order_independent() {
-        let mut addresses1 = HashSet::new();
+        let mut addresses1 = AddressSet::default();
         addresses1.insert(Address::from([1u8; 20]));
         addresses1.insert(Address::from([2u8; 20]));
 
-        let mut addresses2 = HashSet::new();
+        let mut addresses2 = AddressSet::default();
         addresses2.insert(Address::from([2u8; 20])); // Different insertion order
         addresses2.insert(Address::from([1u8; 20]));
 
@@ -751,7 +804,7 @@ mod tests {
     fn test_disallow_list_hash_rbuilder_parity() {
         let json = r#"["0x05E0b5B40B7b66098C2161A5EE11C5740A3A7C45","0x01e2919679362dFBC9ee1644Ba9C6da6D6245BB1","0x03893a7c7463AE47D46bc7f091665f1893656003","0x04DBA1194ee10112fE6C3207C0687DEf0e78baCf"]"#;
         let blocklist: Vec<Address> = serde_json::from_str(json).unwrap();
-        let blocklist: HashSet<Address> = blocklist.into_iter().collect();
+        let blocklist: AddressSet = blocklist.into_iter().collect();
         let expected_hash = "ee14e9d115e182f61871a5a385ab2f32ecf434f3b17bdbacc71044810d89e608";
         let hash = hash_disallow_list(&blocklist);
         assert_eq!(expected_hash, hash);

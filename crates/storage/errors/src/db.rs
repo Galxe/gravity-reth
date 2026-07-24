@@ -2,15 +2,18 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 use core::{
+    error::Error,
     fmt::{Debug, Display},
     str::FromStr,
 };
+use reth_codecs::DecompressError;
 
 /// Database error type.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum DatabaseError {
     /// Failed to open the database.
     #[error("failed to open the database: {_0}")]
@@ -30,7 +33,7 @@ pub enum DatabaseError {
     /// Failed to commit transaction changes into the database.
     #[error("failed to commit transaction changes: {_0}")]
     Commit(DatabaseErrorInfo),
-    /// Failed to initiate a transaction.
+    /// Failed to initialize a transaction.
     #[error("failed to initialize a transaction: {_0}")]
     InitTx(DatabaseErrorInfo),
     /// Failed to initialize a cursor.
@@ -48,6 +51,9 @@ pub enum DatabaseError {
     /// Other unspecified error.
     #[error("{_0}")]
     Other(String),
+    /// Other unspecified error.
+    #[error(transparent)]
+    Custom(#[from] Arc<dyn Error + Send + Sync>),
 }
 
 /// Common error struct to propagate implementation-specific error information.
@@ -74,6 +80,13 @@ impl From<DatabaseWriteError> for DatabaseError {
     #[inline]
     fn from(error: DatabaseWriteError) -> Self {
         Self::Write(Box::new(error))
+    }
+}
+
+impl From<reth_codecs::DecompressError> for DatabaseError {
+    #[inline]
+    fn from(_: DecompressError) -> Self {
+        Self::Decode
     }
 }
 
@@ -106,8 +119,12 @@ pub enum DatabaseWriteOperation {
     CursorInsert,
     /// Append duplicate cursor.
     CursorAppendDup,
-    /// Put.
-    Put,
+    /// Put upsert.
+    PutUpsert,
+    /// Put append.
+    PutAppend,
+    /// Flush to disk.
+    Flush,
 }
 
 /// Database log level.

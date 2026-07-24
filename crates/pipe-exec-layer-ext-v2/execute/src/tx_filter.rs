@@ -242,12 +242,12 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                 .unwrap_or_default() as u64,
             tx.authorization_list().map(|l| l.len()).unwrap_or_default() as u64,
         );
-        if tx.gas_limit() < intrinsic.initial_gas || tx.gas_limit() < intrinsic.floor_gas {
+        if tx.gas_limit() < intrinsic.initial_total_gas() || tx.gas_limit() < intrinsic.floor_gas {
             info!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
                 sender=?sender,
                 gas_limit=?tx.gas_limit(),
-                initial_gas=?intrinsic.initial_gas,
+                initial_gas=?intrinsic.initial_total_gas(),
                 floor_gas=?intrinsic.floor_gas,
                 "intrinsic gas too low"
             );
@@ -587,6 +587,7 @@ mod tests {
             nonce: 5,                                          // 账户 nonce 是 5
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender, account);
 
@@ -622,6 +623,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender, account);
 
@@ -661,6 +663,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender, account);
 
@@ -701,6 +704,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -735,6 +739,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender, account);
 
@@ -771,6 +776,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender1, account1);
 
@@ -779,6 +785,7 @@ mod tests {
             nonce: 5,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender2, account2);
 
@@ -787,6 +794,7 @@ mod tests {
             nonce: 0,
             code_hash: KECCAK_EMPTY,
             code: None,
+            account_id: None,
         };
         db.insert_account(sender3, account3);
 
@@ -838,6 +846,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -875,6 +884,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -911,6 +921,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -939,6 +950,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -967,6 +979,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -997,6 +1010,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1065,6 +1079,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1094,6 +1109,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1127,6 +1143,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1225,6 +1242,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1260,6 +1278,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1297,6 +1316,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1326,6 +1346,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1369,6 +1390,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1408,6 +1430,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1434,6 +1457,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1460,6 +1484,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             },
         );
 
@@ -1494,6 +1519,7 @@ mod tests {
                 // actual bytecode via `account.code` first (no DB fetch needed).
                 code_hash: B256::repeat_byte(0xab),
                 code: Some(code),
+                account_id: None,
             },
         );
 
@@ -1525,6 +1551,7 @@ mod tests {
                 nonce: 0,
                 code_hash: B256::repeat_byte(0xcd),
                 code: Some(Bytecode::new_eip7702(target)),
+                account_id: None,
             },
         );
 

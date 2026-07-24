@@ -31,12 +31,46 @@ pub trait EthSigner<T, TxReq = TransactionRequest>: Send + Sync + DynClone {
     fn sign_typed_data(&self, address: Address, payload: &TypedData) -> Result<Signature>;
 }
 
-dyn_clone::clone_trait_object!(<T> EthSigner<T>);
+dyn_clone::clone_trait_object!(<T, TxReq> EthSigner<T, TxReq>);
 
-/// Adds 20 random dev signers for access via the API. Used in dev mode.
-#[auto_impl::auto_impl(&)]
-pub trait AddDevSigners {
-    /// Generates 20 random developer accounts.
-    /// Used in DEV mode.
-    fn with_dev_accounts(&self);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct MockSigner;
+
+    struct MockSignedTx;
+    struct MockTxReq;
+
+    #[async_trait::async_trait]
+    impl EthSigner<MockSignedTx, MockTxReq> for MockSigner {
+        fn accounts(&self) -> Vec<Address> {
+            Vec::new()
+        }
+
+        async fn sign(&self, _address: Address, _message: &[u8]) -> Result<Signature> {
+            Err(SignError::NoAccount)
+        }
+
+        async fn sign_transaction(
+            &self,
+            _request: MockTxReq,
+            _address: &Address,
+        ) -> Result<MockSignedTx> {
+            Err(SignError::NoAccount)
+        }
+
+        fn sign_typed_data(&self, _address: Address, _payload: &TypedData) -> Result<Signature> {
+            Err(SignError::NoAccount)
+        }
+    }
+
+    #[test]
+    fn clones_trait_object_with_custom_tx_request_type() {
+        let signer: Box<dyn EthSigner<MockSignedTx, MockTxReq>> = Box::new(MockSigner);
+        let cloned: Box<dyn EthSigner<MockSignedTx, MockTxReq>> = dyn_clone::clone_box(&*signer);
+
+        assert!(cloned.accounts().is_empty());
+    }
 }

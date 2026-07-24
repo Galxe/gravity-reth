@@ -1,5 +1,7 @@
 //! Contains common `reth` arguments
 
+pub use reth_primitives_traits::header::HeaderMut;
+
 use alloy_primitives::B256;
 use clap::Parser;
 use gravity_primitives::get_gravity_config;
@@ -50,7 +52,7 @@ pub struct EnvironmentArgs<C: ChainSpecParser> {
         long,
         value_name = "CHAIN_OR_PATH",
         long_help = C::help_message(),
-        default_value = C::SUPPORTED_CHAINS[0],
+        default_value = C::default_value(),
         value_parser = C::parser(),
         global = true
     )]
@@ -64,7 +66,14 @@ pub struct EnvironmentArgs<C: ChainSpecParser> {
 impl<C: ChainSpecParser> EnvironmentArgs<C> {
     /// Initializes environment according to [`AccessRights`] and returns an instance of
     /// [`Environment`].
-    pub fn init<N: CliNodeTypes>(&self, access: AccessRights) -> eyre::Result<Environment<N>>
+    ///
+    /// The provided `_runtime` is accepted for signature compatibility with upstream
+    /// callers; gravity's provider factory does not need it.
+    pub fn init<N: CliNodeTypes>(
+        &self,
+        access: AccessRights,
+        _runtime: reth_tasks::Runtime,
+    ) -> eyre::Result<Environment<N>>
     where
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
     {
@@ -99,13 +108,13 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
                 Arc::new(init_db(db_path, self.db.database_args())?),
                 StaticFileProvider::read_write(sf_path)?,
             ),
-            AccessRights::RO => (
+            AccessRights::RO | AccessRights::RoInconsistent => (
                 Arc::new(open_db_read_only(&db_path, self.db.database_args())?),
                 StaticFileProvider::read_only(sf_path, false)?,
             ),
         };
 
-        let provider_factory = self.create_provider_factory(&config, db, sfp)?;
+        let provider_factory = self.create_provider_factory(&config, db, sfp, access)?;
         if access.is_read_write() {
             // Skip init_genesis if the database already has an Execution checkpoint > 0,
             // indicating it has been used. In pipe execution mode, genesis headers
@@ -135,13 +144,13 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
         config: &Config,
         db: Arc<DatabaseEnv>,
         static_file_provider: StaticFileProvider<N::Primitives>,
+        access: AccessRights,
     ) -> eyre::Result<ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>>
     where
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
     {
-        let has_receipt_pruning = config.prune.as_ref().is_some_and(|a| a.has_receipts_pruning());
-        let prune_modes =
-            config.prune.as_ref().map(|prune| prune.segments.clone()).unwrap_or_default();
+        let has_receipt_pruning = config.prune.has_receipts_pruning();
+        let prune_modes = config.prune.segments.clone();
         let factory = ProviderFactory::<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>::new(
             db,
             self.chain.clone(),
@@ -150,9 +159,10 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
         .with_prune_modes(prune_modes.clone());
 
         // Check for consistency between database and static files.
-        if let Some(unwind_target) = factory
-            .static_file_provider()
-            .check_consistency(&factory.provider()?, has_receipt_pruning)?
+        if !access.is_read_only_inconsistent() &&
+            let Some(unwind_target) = factory
+                .static_file_provider()
+                .check_consistency(&factory.provider()?, has_receipt_pruning)?
         {
             // Check if database is read-only to avoid destructive operations
             if factory.db_ref().is_read_only() {
@@ -221,12 +231,20 @@ pub enum AccessRights {
     RW,
     /// Read-only access
     RO,
+    /// Read-only access with possibly inconsistent data
+    RoInconsistent,
 }
 
 impl AccessRights {
     /// Returns `true` if it requires read-write access to the environment.
     pub const fn is_read_write(&self) -> bool {
         matches!(self, Self::RW)
+    }
+
+    /// Returns `true` if it requires read-only access to the environment with possibly inconsistent
+    /// data.
+    pub const fn is_read_only_inconsistent(&self) -> bool {
+        matches!(self, Self::RoInconsistent)
     }
 }
 

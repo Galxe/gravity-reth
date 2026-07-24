@@ -12,20 +12,18 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
 use crate::parallel_execute::GrevmExecutor;
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
-use alloy_consensus::{BlockHeader, Header};
-use alloy_eips::Decodable2718;
-pub use alloy_evm::EthEvm;
+use alloy_consensus::Header;
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
     precompiles::DynPrecompile,
-    EthEvmFactory,
+    Database, EthEvmFactory, Evm,
 };
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_engine::ExecutionData;
@@ -34,31 +32,39 @@ use gravity_primitives::get_gravity_config;
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
+    eth::NextEvmEnvAttributes,
     execute::{BasicBlockExecutor, BlockExecutionError},
     parallel_execute::{ParallelExecutor, WrapExecutor},
-    ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
-    NextBlockEnvAttributes, ParallelDatabase,
+    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
 };
-use reth_primitives_traits::{
-    constants::MAX_TX_GAS_LIMIT_OSAKA, SealedBlock, SealedHeader, SignedTransaction, TxTy,
-};
-use reth_storage_errors::any::AnyError;
+use reth_primitives_traits::{constants::MAX_TX_GAS_LIMIT_OSAKA, SealedBlock, SealedHeader};
 use revm::{
     context::{
         result::{ExecutionResult, HaltReason},
-        BlockEnv, CfgEnv,
+        BlockEnv, CfgEnv, TxEnv,
     },
     context_interface::block::BlobExcessGasAndPrice,
     database::{State, WrapDatabaseRef},
     primitives::hardfork::SpecId,
+    DatabaseCommit,
 };
 
+#[cfg(feature = "std")]
+use reth_evm::{ConfigureEngineEvm, ExecutableTxIterator};
+#[cfg(feature = "std")]
+use {
+    alloy_eips::Decodable2718,
+    reth_evm::{EvmEnvFor, ExecutionCtxFor},
+    reth_primitives_traits::{SignedTransaction, TxTy},
+    reth_storage_errors::any::AnyError,
+};
+
+pub use alloy_evm::EthEvm;
+
 mod config;
-use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip7840::BlobParams};
-use alloy_evm::{eth::spec::EthExecutorSpec, Database, Evm};
+use alloy_evm::eth::spec::EthExecutorSpec;
 pub use config::{revm_spec, revm_spec_by_timestamp_and_block_number};
-use reth_ethereum_forks::{EthereumHardfork, Hardforks};
-use revm::{context::TxEnv, DatabaseCommit};
+use reth_ethereum_forks::Hardforks;
 
 /// Helper type with backwards compatible methods to obtain Ethereum executor
 /// providers.
@@ -148,12 +154,6 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
     pub const fn chain_spec(&self) -> &Arc<ChainSpec> {
         self.executor_factory.spec()
     }
-
-    /// Sets the extra data for the block assembler.
-    pub fn with_extra_data(mut self, extra_data: Bytes) -> Self {
-        self.block_assembler.extra_data = extra_data;
-        self
-    }
 }
 
 impl<ChainSpec> ConfigureEvm for EthEvmConfig<ChainSpec>
@@ -174,42 +174,13 @@ where
         &self.block_assembler
     }
 
-    fn evm_env(&self, header: &Header) -> Result<EvmEnv, Self::Error> {
-        let blob_params = self.chain_spec().blob_params_at_timestamp(header.timestamp);
-        let spec = config::revm_spec(self.chain_spec(), header);
-
-        // configure evm env based on parent block
-        let mut cfg_env =
-            CfgEnv::new().with_chain_id(self.chain_spec().chain().id()).with_spec(spec);
-
-        if let Some(blob_params) = &blob_params {
-            cfg_env.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
-        }
-
-        if self.chain_spec().is_osaka_active_at_timestamp(header.timestamp) {
-            cfg_env.tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA);
-        }
-
-        // derive the EIP-4844 blob fees from the header's `excess_blob_gas` and the current
-        // blobparams
-        let blob_excess_gas_and_price =
-            header.excess_blob_gas.zip(blob_params).map(|(excess_blob_gas, params)| {
-                let blob_gasprice = params.calc_blob_fee(excess_blob_gas);
-                BlobExcessGasAndPrice { excess_blob_gas, blob_gasprice }
-            });
-
-        let block_env = BlockEnv {
-            number: U256::from(header.number()),
-            beneficiary: header.beneficiary(),
-            timestamp: U256::from(header.timestamp()),
-            difficulty: if spec >= SpecId::MERGE { U256::ZERO } else { header.difficulty() },
-            prevrandao: if spec >= SpecId::MERGE { header.mix_hash() } else { None },
-            gas_limit: header.gas_limit(),
-            basefee: header.base_fee_per_gas().unwrap_or_default(),
-            blob_excess_gas_and_price,
-        };
-
-        Ok(EvmEnv { cfg_env, block_env })
+    fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
+        Ok(EvmEnv::for_eth_block(
+            header,
+            self.chain_spec(),
+            self.chain_spec().chain().id(),
+            self.chain_spec().blob_params_at_timestamp(header.timestamp),
+        ))
     }
 
     fn next_evm_env(
@@ -217,72 +188,20 @@ where
         parent: &Header,
         attributes: &NextBlockEnvAttributes,
     ) -> Result<EvmEnv, Self::Error> {
-        // ensure we're not missing any timestamp based hardforks
-        let chain_spec = self.chain_spec();
-        let blob_params = chain_spec.blob_params_at_timestamp(attributes.timestamp);
-        let spec_id = revm_spec_by_timestamp_and_block_number(
-            chain_spec,
-            attributes.timestamp,
-            parent.number() + 1,
-        );
-
-        // configure evm env based on parent block
-        let mut cfg =
-            CfgEnv::new().with_chain_id(self.chain_spec().chain().id()).with_spec(spec_id);
-
-        if let Some(blob_params) = &blob_params {
-            cfg.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
-        }
-
-        if self.chain_spec().is_osaka_active_at_timestamp(attributes.timestamp) {
-            cfg.tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA);
-        }
-
-        // if the parent block did not have excess blob gas (i.e. it was pre-cancun), but it is
-        // cancun now, we need to set the excess blob gas to the default value(0)
-        let blob_excess_gas_and_price = parent
-            .maybe_next_block_excess_blob_gas(blob_params)
-            .or_else(|| (spec_id == SpecId::CANCUN).then_some(0))
-            .map(|excess_blob_gas| {
-                let blob_gasprice =
-                    blob_params.unwrap_or_else(BlobParams::cancun).calc_blob_fee(excess_blob_gas);
-                BlobExcessGasAndPrice { excess_blob_gas, blob_gasprice }
-            });
-
-        let mut basefee = chain_spec.next_block_base_fee(parent, attributes.timestamp);
-
-        let mut gas_limit = attributes.gas_limit;
-
-        // If we are on the London fork boundary, we need to multiply the parent's gas limit by the
-        // elasticity multiplier to get the new gas limit.
-        if self.chain_spec().fork(EthereumHardfork::London).transitions_at_block(parent.number + 1)
-        {
-            let elasticity_multiplier = self
-                .chain_spec()
-                .base_fee_params_at_timestamp(attributes.timestamp)
-                .elasticity_multiplier;
-
-            // multiply the gas limit by the elasticity multiplier
-            gas_limit *= elasticity_multiplier as u64;
-
-            // set the base fee to the initial base fee from the EIP-1559 spec
-            basefee = Some(INITIAL_BASE_FEE)
-        }
-
-        let block_env = BlockEnv {
-            number: U256::from(parent.number + 1),
-            beneficiary: attributes.suggested_fee_recipient,
-            timestamp: U256::from(attributes.timestamp),
-            difficulty: U256::ZERO,
-            prevrandao: Some(attributes.prev_randao),
-            gas_limit,
-            // calculate basefee based on parent block's gas usage
-            basefee: basefee.unwrap_or_default(),
-            // calculate excess gas based on parent block's blob gas usage
-            blob_excess_gas_and_price,
-        };
-
-        Ok((cfg, block_env).into())
+        Ok(EvmEnv::for_eth_next_block(
+            parent,
+            NextEvmEnvAttributes {
+                timestamp: attributes.timestamp,
+                suggested_fee_recipient: attributes.suggested_fee_recipient,
+                prev_randao: attributes.prev_randao,
+                gas_limit: attributes.gas_limit,
+                slot_number: attributes.slot_number,
+            },
+            self.chain_spec().next_block_base_fee(parent, attributes.timestamp).unwrap_or_default(),
+            self.chain_spec(),
+            self.chain_spec().chain().id(),
+            self.chain_spec().blob_params_at_timestamp(attributes.timestamp),
+        ))
     }
 
     fn context_for_block<'a>(
@@ -290,10 +209,13 @@ where
         block: &'a SealedBlock<Block>,
     ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
         Ok(EthBlockExecutionCtx {
+            tx_count_hint: Some(block.transaction_count()),
             parent_hash: block.header().parent_hash,
             parent_beacon_block_root: block.header().parent_beacon_block_root,
             ommers: &block.body().ommers,
-            withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
+            withdrawals: block.body().withdrawals.as_ref().map(|w| Cow::Borrowed(w.as_slice())),
+            extra_data: block.header().extra_data.clone(),
+            slot_number: block.header().slot_number,
         })
     }
 
@@ -303,10 +225,13 @@ where
         attributes: Self::NextBlockEnvCtx,
     ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
         Ok(EthBlockExecutionCtx {
+            tx_count_hint: None,
             parent_hash: parent.hash(),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             ommers: &[],
-            withdrawals: attributes.withdrawals.map(Cow::Owned),
+            withdrawals: attributes.withdrawals.map(|w| Cow::Owned(w.into_inner())),
+            extra_data: attributes.extra_data,
+            slot_number: attributes.slot_number,
         })
     }
 
@@ -329,13 +254,11 @@ where
         precompiles: Vec<(Address, DynPrecompile)>,
         tx_env: TxEnv,
     ) -> Result<ExecutionResult<HaltReason>, BlockExecutionError> {
-        // System transactions execute before the per-block `apply_pre_execution_changes`
-        // sets the EIP-161 state-clear flag, so set it here to match the parallel
-        // (grevm `ParallelState`) backend — whose state-clear is enabled by default.
-        // Without this, the serial `disable-grevm` path retains empty-touched accounts
-        // (e.g. the zero-reward coinbase) that grevm prunes, forking the state root on
-        // system-tx blocks.
-        db.set_state_clear_flag(evm_env.cfg_env.spec >= SpecId::SPURIOUS_DRAGON);
+        // revm v40+ removed `set_state_clear_flag`: the database layer always applies
+        // post-EIP-161 commit semantics, and grevm's `ParallelState::set_state_clear_flag`
+        // is now a no-op stub. The PR #363 invariant (serial `disable-grevm` ↔ parallel
+        // grevm backend must agree on system-tx block state roots) is now upheld by
+        // default on both sides without a caller-side toggle.
 
         // Gravity Alpha hardfork: gas-exempt the `SYSTEM_CALLER`-sourced system
         // transactions on the L1 (cfg-side) lever. Combined with the L2
@@ -368,11 +291,12 @@ where
     }
 }
 
+#[cfg(feature = "std")]
 impl<ChainSpec> ConfigureEngineEvm<ExecutionData> for EthEvmConfig<ChainSpec>
 where
     ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
 {
-    fn evm_env_for_payload(&self, payload: &ExecutionData) -> EvmEnvFor<Self> {
+    fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
         let timestamp = payload.payload.timestamp();
         let block_number = payload.payload.block_number();
 
@@ -381,8 +305,9 @@ where
             revm_spec_by_timestamp_and_block_number(self.chain_spec(), timestamp, block_number);
 
         // configure evm env based on parent block
-        let mut cfg_env =
-            CfgEnv::new().with_chain_id(self.chain_spec().chain().id()).with_spec(spec);
+        let mut cfg_env = CfgEnv::new()
+            .with_chain_id(self.chain_spec().chain().id())
+            .with_spec_and_mainnet_gas_params(spec);
 
         if let Some(blob_params) = &blob_params {
             cfg_env.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
@@ -413,27 +338,40 @@ where
             gas_limit: payload.payload.gas_limit(),
             basefee: payload.payload.saturated_base_fee_per_gas(),
             blob_excess_gas_and_price,
+            slot_num: payload.payload.as_v4().map(|v4| v4.slot_number).unwrap_or_default(),
         };
 
-        EvmEnv { cfg_env, block_env }
+        Ok(EvmEnv { cfg_env, block_env })
     }
 
-    fn context_for_payload<'a>(&self, payload: &'a ExecutionData) -> ExecutionCtxFor<'a, Self> {
-        EthBlockExecutionCtx {
+    fn context_for_payload<'a>(
+        &self,
+        payload: &'a ExecutionData,
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
+        Ok(EthBlockExecutionCtx {
+            tx_count_hint: Some(payload.payload.transactions().len()),
             parent_hash: payload.parent_hash(),
             parent_beacon_block_root: payload.sidecar.parent_beacon_block_root(),
             ommers: &[],
-            withdrawals: payload.payload.withdrawals().map(|w| Cow::Owned(w.clone().into())),
-        }
+            withdrawals: payload.payload.withdrawals().map(|w| Cow::Borrowed(w.as_slice())),
+            extra_data: payload.payload.as_v1().extra_data.clone(),
+            slot_number: payload.payload.as_v4().map(|v4| v4.slot_number),
+        })
     }
 
-    fn tx_iterator_for_payload(&self, payload: &ExecutionData) -> impl ExecutableTxIterator<Self> {
-        payload.payload.transactions().clone().into_iter().map(|tx| {
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
+        let txs = payload.payload.transactions().clone();
+        let convert = |tx: Bytes| {
             let tx =
                 TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(AnyError::new)?;
             let signer = tx.try_recover().map_err(AnyError::new)?;
             Ok::<_, AnyError>(tx.with_signer(signer))
-        })
+        };
+
+        Ok((txs, convert))
     }
 }
 
@@ -540,14 +478,14 @@ mod tests {
         let db = CacheDB::<EmptyDBTyped<ProviderError>>::default();
 
         let evm_env = EvmEnv {
-            cfg_env: CfgEnv::new().with_spec(SpecId::CONSTANTINOPLE),
+            cfg_env: CfgEnv::new().with_spec_and_mainnet_gas_params(SpecId::PETERSBURG),
             ..Default::default()
         };
 
         let evm = evm_config.evm_with_env(db, evm_env);
 
         // Check that the spec ID is setup properly
-        assert_eq!(evm.cfg.spec, SpecId::CONSTANTINOPLE);
+        assert_eq!(evm.cfg.spec, SpecId::PETERSBURG);
     }
 
     #[test]
@@ -607,7 +545,7 @@ mod tests {
         let db = CacheDB::<EmptyDBTyped<ProviderError>>::default();
 
         let evm_env = EvmEnv {
-            cfg_env: CfgEnv::new().with_spec(SpecId::CONSTANTINOPLE),
+            cfg_env: CfgEnv::new().with_spec_and_mainnet_gas_params(SpecId::PETERSBURG),
             ..Default::default()
         };
 

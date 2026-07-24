@@ -16,12 +16,12 @@ use reth_ethereum_forks::Head;
 use reth_network_api::{
     events::{NetworkPeersEvents, PeerEvent, PeerEventStream},
     test_utils::{PeersHandle, PeersHandleProvider},
-    BlockDownloaderProvider, DiscoveryEvent, NetworkError, NetworkEvent,
+    BlockDownloaderProvider, CellCustody, DiscoveryEvent, NetworkError, NetworkEvent,
     NetworkEventListenerProvider, NetworkInfo, NetworkStatus, PeerInfo, PeerRequest, Peers,
     PeersInfo,
 };
 use reth_network_p2p::sync::{NetworkSyncUpdater, SyncState, SyncStateProvider};
-use reth_network_peers::{NodeRecord, PeerId};
+use reth_network_peers::{NodeRecord, PeerId, TrustedPeer};
 use reth_network_types::{PeerAddr, PeerKind, Reputation, ReputationChangeKind};
 use reth_tokio_util::{EventSender, EventStream};
 use secp256k1::SecretKey;
@@ -78,6 +78,7 @@ impl<N: NetworkPrimitives> NetworkHandle<N> {
             is_syncing: Arc::new(AtomicBool::new(false)),
             initial_sync_done: Arc::new(AtomicBool::new(false)),
             chain_id,
+            cell_custody: CellCustody::default(),
             tx_gossip_disabled,
             discv4,
             discv5,
@@ -190,6 +191,16 @@ impl<N: NetworkPrimitives> NetworkHandle<N> {
     pub fn secret_key(&self) -> &SecretKey {
         &self.inner.secret_key
     }
+
+    /// Returns the [`Discv4`] handle if discv4 is enabled.
+    pub fn discv4(&self) -> Option<&Discv4> {
+        self.inner.discv4.as_ref()
+    }
+
+    /// Returns the [`Discv5`] handle if discv5 is enabled.
+    pub fn discv5(&self) -> Option<&Discv5> {
+        self.inner.discv5.as_ref()
+    }
 }
 
 // === API Implementations ===
@@ -232,13 +243,33 @@ impl<N: NetworkPrimitives> PeersInfo for NetworkHandle<N> {
 
     fn local_node_record(&self) -> NodeRecord {
         if let Some(discv4) = &self.inner.discv4 {
+            // Note: the discv4 services uses the same `nat` so we can directly return the node
+            // record here
             discv4.node_record()
-        } else if let Some(record) = self.inner.discv5.as_ref().and_then(|d| d.node_record()) {
-            record
+        } else if let Some(discv5) = self.inner.discv5.as_ref() {
+            // for disv5 we must check if we have an external ip configured
+            if let Some(external) =
+                self.inner.nat.clone().and_then(|nat| nat.as_external_ip(discv5.local_port()))
+            {
+                NodeRecord::new((external, discv5.local_port()).into(), *self.peer_id())
+            } else {
+                // use the node record that discv5 tracks or use localhost
+                self.inner.discv5.as_ref().and_then(|d| d.node_record()).unwrap_or_else(|| {
+                    NodeRecord::new(
+                        (std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), discv5.local_port())
+                            .into(),
+                        *self.peer_id(),
+                    )
+                })
+            }
+            // also use the tcp port
+            .with_tcp_port(self.inner.listener_address.lock().port())
         } else {
-            let external_ip = self.inner.nat.and_then(|nat| nat.as_external_ip());
-
             let mut socket_addr = *self.inner.listener_address.lock();
+
+            let external_ip =
+                self.inner.nat.clone().and_then(|nat| nat.as_external_ip(socket_addr.port()));
+
             if let Some(ip) = external_ip {
                 // if able to resolve external ip, use it instead and also set the local address
                 socket_addr.set_ip(ip)
@@ -262,10 +293,25 @@ impl<N: NetworkPrimitives> PeersInfo for NetworkHandle<N> {
         if local_node_record.address.is_ipv4() {
             builder.udp4(local_node_record.udp_port);
             builder.tcp4(local_node_record.tcp_port);
+
+            // add IPv6 fields from discv5 for dual-stack support
+            if let Some(discv5) = self.inner.discv5.as_ref() {
+                let discv5_enr = discv5.local_enr();
+                if let Some(ip6) = discv5_enr.ip6() {
+                    builder.ip6(ip6);
+                }
+                if let Some(udp6) = discv5_enr.udp6() {
+                    builder.udp6(udp6);
+                }
+                if let Some(tcp6) = discv5_enr.tcp6() {
+                    builder.tcp6(tcp6);
+                }
+            }
         } else {
             builder.udp6(local_node_record.udp_port);
             builder.tcp6(local_node_record.tcp_port);
         }
+
         builder.build(&self.inner.secret_key).expect("valid enr")
     }
 }
@@ -275,12 +321,16 @@ impl<N: NetworkPrimitives> Peers for NetworkHandle<N> {
         self.send_message(NetworkHandleMessage::AddTrustedPeerId(peer));
     }
 
+    fn add_trusted_peer_node(&self, peer: TrustedPeer) {
+        self.send_message(NetworkHandleMessage::AddTrustedPeerNode(peer));
+    }
+
     /// Sends a message to the [`NetworkManager`](crate::NetworkManager) to add a peer to the known
     /// set, with the given kind.
     fn add_peer_kind(
         &self,
         peer: PeerId,
-        kind: PeerKind,
+        kind: Option<PeerKind>,
         tcp_addr: SocketAddr,
         udp_addr: Option<SocketAddr>,
     ) {
@@ -332,6 +382,9 @@ impl<N: NetworkPrimitives> Peers for NetworkHandle<N> {
 
     /// Sends a message to the [`NetworkManager`](crate::NetworkManager) to connect to the given
     /// peer.
+    ///
+    /// This will add a new entry for the given peer if it isn't tracked yet.
+    /// If it is tracked then the peer is updated with the given information.
     fn connect_peer_kind(
         &self,
         peer_id: PeerId,
@@ -377,6 +430,10 @@ impl<N: NetworkPrimitives> NetworkInfo for NetworkHandle<N> {
 
     fn chain_id(&self) -> u64 {
         self.inner.chain_id.load(Ordering::Relaxed)
+    }
+
+    fn cell_custody(&self) -> &CellCustody {
+        &self.inner.cell_custody
     }
 
     fn is_syncing(&self) -> bool {
@@ -454,6 +511,8 @@ struct NetworkInner<N: NetworkPrimitives = EthNetworkPrimitives> {
     initial_sync_done: Arc<AtomicBool>,
     /// The chain id
     chain_id: Arc<AtomicU64>,
+    /// Shared blob cell custody bitmap.
+    cell_custody: CellCustody,
     /// Whether to disable transaction gossip
     tx_gossip_disabled: bool,
     /// The instance of the discv4 service
@@ -477,8 +536,10 @@ pub trait NetworkProtocols: Send + Sync {
 pub(crate) enum NetworkHandleMessage<N: NetworkPrimitives = EthNetworkPrimitives> {
     /// Marks a peer as trusted.
     AddTrustedPeerId(PeerId),
+    /// Adds a trusted peer that may use a hostname, registering it for periodic DNS re-resolution.
+    AddTrustedPeerNode(TrustedPeer),
     /// Adds an address for a peer, including its ID, kind, and socket address.
-    AddPeerAddress(PeerId, PeerKind, PeerAddr),
+    AddPeerAddress(PeerId, Option<PeerKind>, PeerAddr),
     /// Removes a peer from the peerset corresponding to the given kind.
     RemovePeer(PeerId, PeerKind),
     /// Disconnects a connection to a peer if it exists, optionally providing a disconnect reason.

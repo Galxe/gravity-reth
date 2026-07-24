@@ -1,6 +1,7 @@
 use crate::metrics::PersistenceMetrics;
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
+use crossbeam_channel::Sender as CrossbeamSender;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
@@ -16,8 +17,9 @@ use reth_provider::{
     StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StaticFileWriter,
     StorageLocation, TrieWriter, TrieWriterV2, PERSIST_BLOCK_CACHE,
 };
-use reth_prune::{PrunerError, PrunerOutput, PrunerWithFactory};
+use reth_prune::{PrunerError, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender, StageCheckpoint, StageId};
+use reth_tasks::spawn_os_thread;
 use revm::database::OriginalValuesKnown;
 use std::{
     sync::{
@@ -25,11 +27,11 @@ use std::{
         Arc,
     },
     thread,
-    time::Instant,
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
-use tokio::sync::oneshot;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 
 /// When `persist_merge_blocks` is on, close the current merged group once its accumulated
 /// `gas_used` crosses this threshold (a cheap proxy for transaction/receipt write volume).
@@ -39,6 +41,15 @@ const MERGE_GROUP_MAX_GAS: u64 = 1_000_000_000;
 /// state churn rather than a raw block count (mostly-empty catch-up blocks coalesce freely; a
 /// burst of state-heavy blocks closes the group sooner).
 const MERGE_GROUP_MAX_STATE: usize = 10_000;
+
+/// Unified result of any persistence operation.
+#[derive(Debug)]
+pub struct PersistenceResult {
+    /// The last block that was persisted, if any.
+    pub last_block: Option<BlockNumHash>,
+    /// The commit duration, only available for save-blocks operations.
+    pub commit_duration: Option<Duration>,
+}
 
 /// Writes parts of reth's in memory tree state to the database and static files.
 ///
@@ -62,6 +73,12 @@ where
     metrics: PersistenceMetrics,
     /// Sender for sync metrics - we only submit sync metrics for persisted blocks
     sync_metrics_tx: MetricEventsSender,
+    /// Pending finalized block number to be committed with the next block save.
+    /// This avoids triggering a separate fsync for each finalized block update.
+    pending_finalized_block: Option<u64>,
+    /// Pending safe block number to be committed with the next block save.
+    /// This avoids triggering a separate fsync for each safe block update.
+    pending_safe_block: Option<u64>,
 }
 
 impl<N> PersistenceService<N>
@@ -75,18 +92,15 @@ where
         pruner: PrunerWithFactory<ProviderFactory<N>>,
         sync_metrics_tx: MetricEventsSender,
     ) -> Self {
-        Self { provider, incoming, pruner, metrics: PersistenceMetrics::default(), sync_metrics_tx }
-    }
-
-    /// Prunes block data before the given block hash according to the configured prune
-    /// configuration.
-    fn prune_before(&mut self, block_num: u64) -> Result<PrunerOutput, PrunerError> {
-        debug!(target: "engine::persistence", ?block_num, "Running pruner");
-        let start_time = Instant::now();
-        // TODO: doing this properly depends on pruner segment changes
-        let result = self.pruner.run(block_num);
-        self.metrics.prune_before_duration_seconds.record(start_time.elapsed());
-        result
+        Self {
+            provider,
+            incoming,
+            pruner,
+            metrics: PersistenceMetrics::default(),
+            sync_metrics_tx,
+            pending_finalized_block: None,
+            pending_safe_block: None,
+        }
     }
 }
 
@@ -101,18 +115,16 @@ where
         while let Ok(action) = self.incoming.recv() {
             match action {
                 PersistenceAction::RemoveBlocksAbove(new_tip_num, sender) => {
-                    let result = self.on_remove_blocks_above(new_tip_num)?;
+                    let last_block = self.on_remove_blocks_above(new_tip_num)?;
                     // send new sync metrics based on removed blocks
                     let _ =
                         self.sync_metrics_tx.send(MetricEvent::SyncHeight { height: new_tip_num });
-                    // we ignore the error because the caller may or may not care about the result
-                    let _ = sender.send(result);
+                    let _ = sender.send(PersistenceResult { last_block, commit_duration: None });
                 }
                 PersistenceAction::SaveBlocks(blocks, sender) => {
                     let result = self.on_save_blocks(blocks)?;
-                    let result_number = result.map(|r| r.number);
+                    let result_number = result.last_block.map(|b| b.number);
 
-                    // we ignore the error because the caller may or may not care about the result
                     let _ = sender.send(result);
 
                     if let Some(block_number) = result_number {
@@ -120,28 +132,21 @@ where
                         let _ = self
                             .sync_metrics_tx
                             .send(MetricEvent::SyncHeight { height: block_number });
-
-                        if self.pruner.is_pruning_needed(block_number) {
-                            // We log `PrunerOutput` inside the `Pruner`
-                            let _ = self.prune_before(block_number)?;
-                        }
+                        self.maybe_run_pruner(block_number)?;
                     }
                 }
                 PersistenceAction::SaveFinalizedBlock(finalized_block) => {
-                    let provider = self.provider.database_provider_rw()?;
-                    provider.save_finalized_block_number(finalized_block)?;
-                    provider.commit()?;
+                    self.pending_finalized_block = Some(finalized_block);
                 }
                 PersistenceAction::SaveSafeBlock(safe_block) => {
-                    let provider = self.provider.database_provider_rw()?;
-                    provider.save_safe_block_number(safe_block)?;
-                    provider.commit()?;
+                    self.pending_safe_block = Some(safe_block);
                 }
             }
         }
         Ok(())
     }
 
+    #[instrument(level = "debug", target = "engine::persistence", skip_all, fields(%new_tip_num))]
     fn on_remove_blocks_above(
         &self,
         new_tip_num: u64,
@@ -193,47 +198,71 @@ where
             .map_err(ProviderError::Database)
     }
 
+    #[instrument(level = "debug", target = "engine::persistence", skip_all, fields(block_count = blocks.len()))]
     fn on_save_blocks(
-        &self,
+        &mut self,
         blocks: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
-    ) -> Result<Option<BlockNumHash>, PersistenceError> {
-        debug!(target: "engine::persistence", first=?blocks.first().map(|b| b.recovered_block.num_hash()), last=?blocks.last().map(|b| b.recovered_block.num_hash()), "Saving range of blocks");
+    ) -> Result<PersistenceResult, PersistenceError> {
+        let first_block = blocks.first().map(|b| b.recovered_block.num_hash());
+        let last_block = blocks.last().map(|b| b.recovered_block.num_hash());
+        let block_count = blocks.len();
+
+        let pending_finalized = self.pending_finalized_block.take();
+        let pending_safe = self.pending_safe_block.take();
+
+        debug!(target: "engine::persistence", ?block_count, first=?first_block, last=?last_block, "Saving range of blocks");
+
         let start_time = Instant::now();
-        let last_block_hash_num = blocks.last().map(|block| BlockNumHash {
-            hash: block.recovered_block().hash(),
-            number: block.recovered_block().header().number(),
-        });
 
-        let num_blocks = blocks.len();
-        if last_block_hash_num.is_some() {
-            let first_block = blocks.first().unwrap().recovered_block();
-            let last_block = blocks.last().unwrap().recovered_block();
-            let first_number = first_block.number();
-            let last_block_number = last_block.number();
-            debug!(target: "provider::storage_writer", block_count = blocks.len(), "Writing blocks and execution data to storage");
-
+        if let Some(last) = last_block {
+            // gravity write path: staged per-block commits or merged-group commits
+            // (both write trie_updatesv2 internally).
             if get_gravity_config().persist_merge_blocks {
                 self.save_merged_blocks(blocks)?;
             } else {
                 self.save_blocks_per_block(blocks)?;
             }
 
-            // Update pipeline progress
-            let start_time = Instant::now();
+            // Pipeline progress and any deferred finalized/safe markers share one commit.
             let provider_rw = self.provider.database_provider_rw()?;
-            provider_rw.update_pipeline_stages(last_block_number, false)?;
+            provider_rw.update_pipeline_stages(last.number, false)?;
+            if let Some(finalized) = pending_finalized {
+                provider_rw.save_finalized_block_number(finalized.min(last.number))?;
+                if finalized > last.number {
+                    self.pending_finalized_block = Some(finalized);
+                }
+            }
+            if let Some(safe) = pending_safe {
+                provider_rw.save_safe_block_number(safe.min(last.number))?;
+                if safe > last.number {
+                    self.pending_safe_block = Some(safe);
+                }
+            }
             provider_rw.commit()?;
-            self.metrics
-                .persist_commit_duration_seconds
-                .record(start_time.elapsed().as_secs_f64() / num_blocks as f64);
-            debug!(target: "provider::storage_writer", range = ?first_number..=last_block_number, "Appended block data");
+            debug!(target: "engine::persistence", first=?first_block, last=?last_block, "Saved range of blocks");
         }
+
         let elapsed = start_time.elapsed();
+        self.metrics.save_blocks_batch_size.record(block_count as f64);
         self.metrics.save_blocks_duration_seconds.record(elapsed);
-        self.metrics
-            .save_duration_per_block_seconds
-            .record(elapsed.as_secs_f64() / num_blocks as f64);
-        Ok(last_block_hash_num)
+
+        Ok(PersistenceResult { last_block, commit_duration: Some(elapsed) })
+    }
+
+    fn maybe_run_pruner(&mut self, block_number: u64) -> Result<(), PersistenceError> {
+        // The durable save is already committed at this point, so pruning can happen after we
+        // acknowledge the save without extending the synchronous persistence wait.
+        if self.pruner.is_pruning_needed(block_number) {
+            debug!(target: "engine::persistence", block_num=?block_number, "Running pruner");
+            let prune_start = Instant::now();
+            let provider_rw = self.provider.database_provider_rw()?;
+            let _ = self.pruner.run_with_provider(&provider_rw, block_number)?;
+            provider_rw.commit()?;
+            debug!(target: "engine::persistence", tip=?block_number, "Finished pruning after saving blocks");
+            self.metrics.prune_before_duration_seconds.record(prune_start.elapsed());
+        }
+
+        Ok(())
     }
 
     /// Persist `blocks` one at a time, committing each block per stage (state / hashed / history /
@@ -526,13 +555,13 @@ pub enum PersistenceAction<N: NodePrimitives = EthPrimitives> {
     ///
     /// First, header, transaction, and receipt-related data should be written to static files.
     /// Then the execution history-related data will be written to the database.
-    SaveBlocks(Vec<ExecutedBlockWithTrieUpdates<N>>, oneshot::Sender<Option<BlockNumHash>>),
+    SaveBlocks(Vec<ExecutedBlockWithTrieUpdates<N>>, CrossbeamSender<PersistenceResult>),
 
     /// Removes block data above the given block number from the database.
     ///
     /// This will first update checkpoints from the database, then remove actual block data from
     /// static files.
-    RemoveBlocksAbove(u64, oneshot::Sender<Option<BlockNumHash>>),
+    RemoveBlocksAbove(u64, CrossbeamSender<PersistenceResult>),
 
     /// Update the persisted finalized block on disk
     SaveFinalizedBlock(u64),
@@ -546,15 +575,25 @@ pub enum PersistenceAction<N: NodePrimitives = EthPrimitives> {
 pub struct PersistenceHandle<N: NodePrimitives = EthPrimitives> {
     /// The channel used to communicate with the persistence service
     sender: Sender<PersistenceAction<N>>,
+    /// Guard that joins the service thread when all handles are dropped.
+    /// Uses `Arc` so the handle remains `Clone`.
+    _service_guard: Arc<ServiceGuard>,
 }
 
 impl<T: NodePrimitives> PersistenceHandle<T> {
     /// Create a new [`PersistenceHandle`] from a [`Sender<PersistenceAction>`].
-    pub const fn new(sender: Sender<PersistenceAction<T>>) -> Self {
-        Self { sender }
+    ///
+    /// This is intended for testing purposes where you want to mock the persistence service.
+    /// For production use, prefer [`spawn_service`](Self::spawn_service).
+    pub fn new(sender: Sender<PersistenceAction<T>>) -> Self {
+        Self { sender, _service_guard: Arc::new(ServiceGuard(None)) }
     }
 
     /// Create a new [`PersistenceHandle`], and spawn the persistence service.
+    ///
+    /// The returned handle can be cloned and shared. When all clones are dropped, the service
+    /// thread will be joined, ensuring graceful shutdown before resources (like `RocksDB`) are
+    /// released.
     pub fn spawn_service<N>(
         provider_factory: ProviderFactory<N>,
         pruner: PrunerWithFactory<ProviderFactory<N>>,
@@ -566,22 +605,19 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
         // create the initial channels
         let (db_service_tx, db_service_rx) = std::sync::mpsc::channel();
 
-        // construct persistence handle
-        let persistence_handle = PersistenceHandle::new(db_service_tx);
-
         // spawn the persistence service
         let db_service =
             PersistenceService::new(provider_factory, db_service_rx, pruner, sync_metrics_tx);
-        std::thread::Builder::new()
-            .name("Persistence Service".to_string())
-            .spawn(|| {
-                if let Err(err) = db_service.run() {
-                    error!(target: "engine::persistence", ?err, "Persistence service failed");
-                }
-            })
-            .unwrap();
+        let join_handle = spawn_os_thread("persistence", || {
+            if let Err(err) = db_service.run() {
+                error!(target: "engine::persistence", ?err, "Persistence service failed");
+            }
+        });
 
-        persistence_handle
+        PersistenceHandle {
+            sender: db_service_tx,
+            _service_guard: Arc::new(ServiceGuard(Some(join_handle))),
+        }
     }
 
     /// Sends a specific [`PersistenceAction`] in the contained channel. The caller is responsible
@@ -604,12 +640,15 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
     pub fn save_blocks(
         &self,
         blocks: Vec<ExecutedBlockWithTrieUpdates<T>>,
-        tx: oneshot::Sender<Option<BlockNumHash>>,
+        tx: CrossbeamSender<PersistenceResult>,
     ) -> Result<(), SendError<PersistenceAction<T>>> {
         self.send_action(PersistenceAction::SaveBlocks(blocks, tx))
     }
 
-    /// Persists the finalized block number on disk.
+    /// Queues the finalized block number to be persisted on disk.
+    ///
+    /// The update is deferred and will be committed together with the next [`Self::save_blocks`]
+    /// call to avoid triggering a separate fsync for each update.
     pub fn save_finalized_block_number(
         &self,
         finalized_block: u64,
@@ -617,7 +656,10 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
         self.send_action(PersistenceAction::SaveFinalizedBlock(finalized_block))
     }
 
-    /// Persists the finalized block number on disk.
+    /// Queues the safe block number to be persisted on disk.
+    ///
+    /// The update is deferred and will be committed together with the next [`Self::save_blocks`]
+    /// call to avoid triggering a separate fsync for each update.
     pub fn save_safe_block_number(
         &self,
         safe_block: u64,
@@ -633,9 +675,30 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
     pub fn remove_blocks_above(
         &self,
         block_num: u64,
-        tx: oneshot::Sender<Option<BlockNumHash>>,
+        tx: CrossbeamSender<PersistenceResult>,
     ) -> Result<(), SendError<PersistenceAction<T>>> {
         self.send_action(PersistenceAction::RemoveBlocksAbove(block_num, tx))
+    }
+}
+
+/// Guard that joins the persistence service thread when dropped.
+///
+/// This ensures graceful shutdown - the service thread completes before resources like
+/// `RocksDB` are released. Stored in an `Arc` inside [`PersistenceHandle`] so the handle
+/// can be cloned while sharing the same guard.
+struct ServiceGuard(Option<JoinHandle<()>>);
+
+impl std::fmt::Debug for ServiceGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ServiceGuard").field(&self.0.as_ref().map(|_| "...")).finish()
+    }
+}
+
+impl Drop for ServiceGuard {
+    fn drop(&mut self) {
+        if let Some(join_handle) = self.0.take() {
+            let _ = join_handle.join();
+        }
     }
 }
 
@@ -662,24 +725,24 @@ mod tests {
         PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
     }
 
-    #[tokio::test]
-    async fn test_save_blocks_empty() {
+    #[test]
+    fn test_save_blocks_empty() {
         reth_tracing::init_test_tracing();
-        let persistence_handle = default_persistence_handle();
+        let handle = default_persistence_handle();
 
         let blocks = vec![];
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = crossbeam_channel::bounded(1);
 
-        persistence_handle.save_blocks(blocks, tx).unwrap();
+        handle.save_blocks(blocks, tx).unwrap();
 
-        let hash = rx.await.unwrap();
-        assert_eq!(hash, None);
+        let result = rx.recv().unwrap();
+        assert!(result.last_block.is_none());
     }
 
-    #[tokio::test]
-    async fn test_save_blocks_single_block() {
+    #[test]
+    fn test_save_blocks_single_block() {
         reth_tracing::init_test_tracing();
-        let persistence_handle = default_persistence_handle();
+        let handle = default_persistence_handle();
         let block_number = 0;
         let mut test_block_builder = TestBlockBuilder::eth();
         let executed =
@@ -687,51 +750,46 @@ mod tests {
         let block_hash = executed.recovered_block().hash();
 
         let blocks = vec![executed];
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = crossbeam_channel::bounded(1);
 
-        persistence_handle.save_blocks(blocks, tx).unwrap();
+        handle.save_blocks(blocks, tx).unwrap();
 
-        let BlockNumHash { hash: actual_hash, number: _ } =
-            tokio::time::timeout(std::time::Duration::from_secs(10), rx)
-                .await
-                .expect("test timed out")
-                .expect("channel closed unexpectedly")
-                .expect("no hash returned");
+        let result = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("test timed out");
 
-        assert_eq!(block_hash, actual_hash);
+        assert_eq!(block_hash, result.last_block.unwrap().hash);
     }
 
-    #[tokio::test]
-    async fn test_save_blocks_multiple_blocks() {
+    #[test]
+    fn test_save_blocks_multiple_blocks() {
         reth_tracing::init_test_tracing();
-        let persistence_handle = default_persistence_handle();
+        let handle = default_persistence_handle();
 
         let mut test_block_builder = TestBlockBuilder::eth();
         let blocks = test_block_builder.get_executed_blocks(0..5).collect::<Vec<_>>();
         let last_hash = blocks.last().unwrap().recovered_block().hash();
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = crossbeam_channel::bounded(1);
 
-        persistence_handle.save_blocks(blocks, tx).unwrap();
-        let BlockNumHash { hash: actual_hash, number: _ } = rx.await.unwrap().unwrap();
-        assert_eq!(last_hash, actual_hash);
+        handle.save_blocks(blocks, tx).unwrap();
+        let result = rx.recv().unwrap();
+        assert_eq!(last_hash, result.last_block.unwrap().hash);
     }
 
-    #[tokio::test]
-    async fn test_save_blocks_multiple_calls() {
+    #[test]
+    fn test_save_blocks_multiple_calls() {
         reth_tracing::init_test_tracing();
-        let persistence_handle = default_persistence_handle();
+        let handle = default_persistence_handle();
 
         let ranges = [0..1, 1..2, 2..4, 4..5];
         let mut test_block_builder = TestBlockBuilder::eth();
         for range in ranges {
             let blocks = test_block_builder.get_executed_blocks(range).collect::<Vec<_>>();
             let last_hash = blocks.last().unwrap().recovered_block().hash();
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx) = crossbeam_channel::bounded(1);
 
-            persistence_handle.save_blocks(blocks, tx).unwrap();
+            handle.save_blocks(blocks, tx).unwrap();
 
-            let BlockNumHash { hash: actual_hash, number: _ } = rx.await.unwrap().unwrap();
-            assert_eq!(last_hash, actual_hash);
+            let result = rx.recv().unwrap();
+            assert_eq!(last_hash, result.last_block.unwrap().hash);
         }
     }
 }

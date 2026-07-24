@@ -196,6 +196,7 @@ pub(crate) fn system_txns_into_executed_ordered_block_result(
                 receipts,
                 requests: Default::default(),
                 gas_used: total_gas_used,
+                blob_gas_used: 0,
             },
         },
         txs_info: vec![],
@@ -269,8 +270,8 @@ mod tests {
         SystemTxnResult {
             result: ExecutionResult::Success {
                 reason: SuccessReason::Return,
-                gas_used,
-                gas_refunded: 0,
+                gas: revm::context_interface::result::ResultGas::default()
+                    .with_total_gas_spent(gas_used),
                 logs: vec![],
                 output: Output::Call(Bytes::new()),
             },
