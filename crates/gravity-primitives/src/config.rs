@@ -9,6 +9,21 @@ use std::sync::OnceLock;
 /// gravity-audit#712.
 pub const PIPE_BLOCK_GAS_LIMIT: u64 = 1_000_000_000;
 
+/// Emergency EIP-7702 lockdown (gravity-audit#838). When `true`, `filter_invalid_txs`
+/// additionally drops every type-4 (`SetCode`) tx (L1) and every tx from/to a currently-delegated
+/// account (L2/L3), neutralising the 7702 nonce-bump executor-halt class until the durable
+/// executor-skip fix ships.
+///
+/// This is a **compile-time constant on purpose**: like `PIPE_BLOCK_GAS_LIMIT` it is
+/// consensus-critical (it changes which txs execute), so every node MUST agree on it. Baking it
+/// into the binary makes that guarantee structural — a mixed value would fork the chain, and a
+/// hardcoded const cannot be misconfigured per-node the way a CLI/env flag could.
+///
+/// Currently `true` — this build ships the lockdown ACTIVE. To REVERT, once the durable
+/// executor-skip fix (gravity-reth #388 + grevm #110) is deployed and 7702 can be re-enabled,
+/// set this back to `false` and rebuild (a coordinated upgrade, same as any binary version).
+pub const EIP7702_LOCKDOWN: bool = true;
+
 /// Configuration options for the Gravity Reth.
 #[derive(Debug, Clone)]
 pub struct Config {
