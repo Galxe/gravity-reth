@@ -20,6 +20,19 @@ pub const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 /// Maximum transaction gas limit as defined by [EIP-7825](https://eips.ethereum.org/EIPS/eip-7825) activated in `Osaka` hardfork.
 pub const MAX_TX_GAS_LIMIT_OSAKA: u64 = 2u64.pow(24);
 
+/// Gravity's per-transaction gas limit cap, enforced once the `Osaka` hardfork is active.
+///
+/// Gravity replaces the EIP-7825 cap ([`MAX_TX_GAS_LIMIT_OSAKA`], `2^24`) with Monad's flat
+/// per-tx cap (`TFM_MAX_GAS_LIMIT` = 30M). The 30M system transactions built by
+/// `new_system_call_txn` are constructed at exactly this value and clear the cap because the
+/// check is a strict `gas_limit > cap`; the `2^24` cap would reject them.
+///
+/// Enforced in lockstep at three sites, all gated on `Osaka`: the executor cfg
+/// (`reth-evm-ethereum`, `tx_gas_limit_cap`), the consensus block check
+/// (`reth-consensus-common`), and the pipe `tx_filter` guard. Keep this equal to the
+/// system-transaction `gas_limit`: lowering it below 30M would reject system transactions.
+pub const GRAVITY_TX_GAS_LIMIT_CAP: u64 = 30_000_000;
+
 /// The number of blocks to unwind during a reorg that already became a part of canonical chain.
 ///
 /// In reality, the node can end up in this particular situation very rarely. It would happen only

@@ -37,7 +37,7 @@ use reth_evm::{
     parallel_execute::{ParallelExecutor, WrapExecutor},
     ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
 };
-use reth_primitives_traits::{constants::MAX_TX_GAS_LIMIT_OSAKA, SealedBlock, SealedHeader};
+use reth_primitives_traits::{constants::GRAVITY_TX_GAS_LIMIT_CAP, SealedBlock, SealedHeader};
 use revm::{
     context::{
         result::{ExecutionResult, HaltReason},
@@ -156,6 +156,19 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
     }
 }
 
+/// Pin the per-tx gas cap to Gravity's Monad-style value once `Osaka` is active.
+///
+/// alloy-evm's `for_eth_block` / `for_eth_next_block` and `evm_env_for_payload` set
+/// `tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA)` (EIP-7825, `2^24`) under OSAKA. Gravity
+/// overrides that with [`GRAVITY_TX_GAS_LIMIT_CAP`] (30M) so the 30M system transactions clear
+/// the cap. Must stay in lockstep with the consensus-side check (`reth-consensus-common`) and
+/// the pipe `tx_filter` guard.
+const fn apply_gravity_tx_gas_cap(cfg_env: &mut CfgEnv, osaka_active: bool) {
+    if osaka_active {
+        cfg_env.tx_gas_limit_cap = Some(GRAVITY_TX_GAS_LIMIT_CAP);
+    }
+}
+
 impl<ChainSpec> ConfigureEvm for EthEvmConfig<ChainSpec>
 where
     ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
@@ -175,12 +188,17 @@ where
     }
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
-        Ok(EvmEnv::for_eth_block(
+        let mut evm_env = EvmEnv::for_eth_block(
             header,
             self.chain_spec(),
             self.chain_spec().chain().id(),
             self.chain_spec().blob_params_at_timestamp(header.timestamp),
-        ))
+        );
+        apply_gravity_tx_gas_cap(
+            &mut evm_env.cfg_env,
+            self.chain_spec().is_osaka_active_at_timestamp(header.timestamp),
+        );
+        Ok(evm_env)
     }
 
     fn next_evm_env(
@@ -188,7 +206,7 @@ where
         parent: &Header,
         attributes: &NextBlockEnvAttributes,
     ) -> Result<EvmEnv, Self::Error> {
-        Ok(EvmEnv::for_eth_next_block(
+        let mut evm_env = EvmEnv::for_eth_next_block(
             parent,
             NextEvmEnvAttributes {
                 timestamp: attributes.timestamp,
@@ -201,7 +219,12 @@ where
             self.chain_spec(),
             self.chain_spec().chain().id(),
             self.chain_spec().blob_params_at_timestamp(attributes.timestamp),
-        ))
+        );
+        apply_gravity_tx_gas_cap(
+            &mut evm_env.cfg_env,
+            self.chain_spec().is_osaka_active_at_timestamp(attributes.timestamp),
+        );
+        Ok(evm_env)
     }
 
     fn context_for_block<'a>(
@@ -313,9 +336,10 @@ where
             cfg_env.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
         }
 
-        if self.chain_spec().is_osaka_active_at_timestamp(timestamp) {
-            cfg_env.tx_gas_limit_cap = Some(MAX_TX_GAS_LIMIT_OSAKA);
-        }
+        apply_gravity_tx_gas_cap(
+            &mut cfg_env,
+            self.chain_spec().is_osaka_active_at_timestamp(timestamp),
+        );
 
         // derive the EIP-4844 blob fees from the header's `excess_blob_gas` and the current
         // blobparams
