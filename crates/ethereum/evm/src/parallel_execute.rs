@@ -12,7 +12,7 @@ use alloy_evm::{
 };
 use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
-use grevm::{ParallelBundleState, ParallelState, Scheduler};
+use grevm::{ParallelBundleState, ParallelState, Scheduler, TxExecutionOutcome};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
@@ -107,14 +107,8 @@ where
 
         let (results, state) = {
             let EvmEnv { cfg_env, block_env } = evm_env;
-            let executor = Scheduler::new(
-                cfg_env,
-                block_env,
-                txs,
-                state,
-                false,
-                self.custom_precompiles.clone(),
-            );
+            let executor =
+                Scheduler::new(cfg_env, block_env, txs, state, self.custom_precompiles.clone());
             executor.parallel_execute(None).map_err(|e| {
                 // `e.txid` is grevm's per-tx index; for block-level errors it can be a
                 // sentinel or out-of-bounds value. Use a saturating lookup so the error
@@ -138,9 +132,31 @@ where
 
         let mut receipts = Vec::with_capacity(results.len());
         let mut cumulative_gas_used = 0;
-        for (result, tx_type) in
-            results.into_iter().zip(block.body().transactions().map(|tx| tx.tx_type()))
+        // grevm dcd1460 (#111) added a `Skipped(InvalidTransaction)` fallback outcome. The
+        // gravity D-1b design routes skipped txs out of the final block via the pipe layer
+        // (see `project-seq-skip-invalid-txn-design`), but that spans the gravity-sdk repo
+        // and has not landed yet. Until it does, keep the pre-v2.3.0 semantics: any grevm-
+        // reported invalid tx is surfaced as a `BlockValidationError::InvalidTx`, matching
+        // the existing pipe-layer error/panic path — no silent no-op receipts that would
+        // fork state root against the pre-v2.3.0 backends.
+        for (idx, (outcome, tx_type)) in
+            results.into_iter().zip(block.body().transactions().map(|tx| tx.tx_type())).enumerate()
         {
+            let result = match outcome {
+                TxExecutionOutcome::Executed(r) => r,
+                TxExecutionOutcome::Skipped(inv_tx) => {
+                    // Same saturating hash lookup as the block-level error mapping above.
+                    let hash = block
+                        .transactions_with_sender()
+                        .nth(idx)
+                        .map(|(_, tx)| tx.recalculate_hash())
+                        .unwrap_or_default();
+                    return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                        hash,
+                        error: Box::new(inv_tx),
+                    }));
+                }
+            };
             cumulative_gas_used += result.tx_gas_used();
             receipts.push(Receipt {
                 tx_type,
