@@ -193,7 +193,7 @@ This contract between `gravity-sdk` and `gravity-reth` is required for liveness.
 Do not change source cursor semantics without updating the cached-resend and
 restart-reconciliation tests together.
 
-## Test commands
+## Verification
 
 ```bash
 cargo test -p reth-pipe-exec-layer-relayer
@@ -202,3 +202,38 @@ cargo test -p reth-pipe-exec-layer-ext-v2 --lib jwk_oracle
 
 Tests requiring public Binance or Polygon traffic are ignored by default. The
 normal suite is deterministic and local.
+
+### Optional live Polymarket check
+
+After public-network access is explicitly approved, provide a Polygon RPC URL,
+CTF address, exact condition id, and an exclusive cursor shortly before its
+`ConditionResolution` event. Keep the scan range small enough for the provider.
+Do not put the RPC URL in the `gravity://` URI or commit it.
+
+```bash
+POLYGON_RPC_URL='<rpc>' \
+POLYMARKET_CTF_ADDRESS='<ctf>' \
+POLYMARKET_CONDITION_ID='<condition>' \
+POLYMARKET_FROM_BLOCK='<exclusive-cursor>' \
+POLYMARKET_MAX_BLOCKS_PER_POLL='100' \
+cargo test -p reth-pipe-exec-layer-relayer \
+  test_live_poll_polygon_polymarket_settlements --lib -- --ignored --nocapture
+```
+
+A successful check proves that the endpoint reports chain id `137`, finalized
+block lookup succeeds, and one matching resolution produces a canonical
+payload whose source block, transaction hash, log index, and non-zero payout
+vector match Polygon.
+
+Wrong-chain endpoints and malformed matching logs fail closed. An empty result
+usually means the condition, CTF address, exclusive cursor, or finalized height
+does not cover the event; the provider must support the `finalized` block tag.
+If a callback fails, the raw record remains available for
+`replaySettlement(mirrorId, nonce)`.
+
+The deterministic SDK suite covers the full consensus, execution, resolver,
+market-settlement, and claim path:
+
+```bash
+./gravity_e2e/run_test.sh polymarket_mock --force-init
+```
