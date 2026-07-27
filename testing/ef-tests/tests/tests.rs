@@ -93,7 +93,7 @@ macro_rules! blockchain_test {
                 .join("ethereum-tests")
                 .join("BlockchainTests");
 
-            BlockchainTests::new(suite_path).run_only(&format!("{}", stringify!($dir)));
+            BlockchainTests::new(suite_path).run_only(stringify!($dir));
         }
     };
 }
@@ -107,6 +107,10 @@ fn eest_fixtures() {
     let suite_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("execution-spec-tests")
         .join("blockchain_tests");
+
+    if !suite_path.exists() {
+        return;
+    }
 
     BlockchainTests::new(suite_path).run();
 }

@@ -1,5 +1,8 @@
 use crate::{
-    providers::{state::latest::LatestStateProvider, StaticFileProvider},
+    providers::{
+        state::latest::LatestStateProvider, static_file::StaticFileWriter, StaticFileProvider,
+        StaticFileProviderRWRefMut,
+    },
     to_range,
     traits::{BlockSource, ReceiptProvider},
     BlockHashReader, BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory,
@@ -11,9 +14,15 @@ use alloy_consensus::transaction::TransactionMeta;
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256};
 use core::fmt;
+use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_db::{init_db, DatabaseArguments, DatabaseEnv};
-use reth_db_api::{database::Database, models::StoredBlockBodyIndices};
+use reth_db_api::{
+    database::Database,
+    models::{GravityStorageSettings, StoredBlockBodyIndices},
+    tables,
+    transaction::DbTx,
+};
 use reth_errors::{RethError, RethResult};
 use reth_node_types::{
     BlockTy, HeaderTy, NodeTypes, NodeTypesWithDB, NodeTypesWithDBAdapter, ReceiptTy, TxTy,
@@ -23,7 +32,8 @@ use reth_prune_types::{PruneCheckpoint, PruneModes, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
-    BlockBodyIndicesProvider, NodePrimitivesProvider, TryIntoHistoricalStateProvider,
+    metadata_keys, BlockBodyIndicesProvider, NodePrimitivesProvider, StorageSettingsCache,
+    TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::HashedPostState;
@@ -64,6 +74,8 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     prune_modes: PruneModes,
     /// The node storage handler.
     storage: Arc<N::Storage>,
+    /// Cached storage layout settings, loaded from the metadata table at construction.
+    storage_settings: Arc<RwLock<GravityStorageSettings>>,
 }
 
 impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> {
@@ -73,6 +85,21 @@ impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> 
     }
 }
 
+/// Loads the persisted storage layout settings, falling back to the legacy layout when the
+/// metadata entry is missing, unreadable, or the database can't be opened yet (a fresh datadir
+/// is initialized by `init_genesis`, which also refreshes this cache).
+fn load_storage_settings<DB: Database>(db: &DB) -> GravityStorageSettings {
+    db.tx()
+        .ok()
+        .and_then(|tx| {
+            tx.get::<tables::Metadata>(metadata_keys::GRAVITY_STORAGE_SETTINGS.to_string())
+                .ok()
+                .flatten()
+        })
+        .and_then(|bytes| GravityStorageSettings::from_metadata_bytes(&bytes))
+        .unwrap_or_else(GravityStorageSettings::legacy)
+}
+
 impl<N: NodeTypesWithDB> ProviderFactory<N> {
     /// Create new database provider factory.
     pub fn new(
@@ -80,12 +107,14 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
         chain_spec: Arc<N::ChainSpec>,
         static_file_provider: StaticFileProvider<N::Primitives>,
     ) -> Self {
+        let storage_settings = Arc::new(RwLock::new(load_storage_settings(&db)));
         Self {
             db,
             chain_spec,
             static_file_provider,
             prune_modes: PruneModes::none(),
             storage: Default::default(),
+            storage_settings,
         }
     }
 
@@ -122,12 +151,15 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
         args: DatabaseArguments,
         static_file_provider: StaticFileProvider<N::Primitives>,
     ) -> RethResult<Self> {
+        let db = Arc::new(init_db(path, args).map_err(RethError::msg)?);
+        let storage_settings = Arc::new(RwLock::new(load_storage_settings(&db)));
         Ok(Self {
-            db: Arc::new(init_db(path, args).map_err(RethError::msg)?),
+            db,
             chain_spec,
             static_file_provider,
             prune_modes: PruneModes::none(),
             storage: Default::default(),
+            storage_settings,
         })
     }
 }
@@ -147,6 +179,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
             self.storage.clone(),
+            self.storage_settings.clone(),
         ))
     }
 
@@ -162,6 +195,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
             self.storage.clone(),
+            self.storage_settings.clone(),
         )))
     }
 
@@ -218,6 +252,14 @@ impl<N: NodeTypesWithDB> StaticFileProviderFactory for ProviderFactory<N> {
     /// Returns static file provider
     fn static_file_provider(&self) -> StaticFileProvider<Self::Primitives> {
         self.static_file_provider.clone()
+    }
+
+    fn get_static_file_writer(
+        &self,
+        block: BlockNumber,
+        segment: StaticFileSegment,
+    ) -> ProviderResult<StaticFileProviderRWRefMut<'_, Self::Primitives>> {
+        self.static_file_provider.get_writer(block, segment)
     }
 }
 
@@ -595,7 +637,14 @@ where
     N: NodeTypesWithDB<DB: fmt::Debug, ChainSpec: fmt::Debug, Storage: fmt::Debug>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { db, chain_spec, static_file_provider, prune_modes, storage } = self;
+        let Self {
+            db,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings: _,
+        } = self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
             .field("chain_spec", &chain_spec)
@@ -614,7 +663,18 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             static_file_provider: self.static_file_provider.clone(),
             prune_modes: self.prune_modes.clone(),
             storage: self.storage.clone(),
+            storage_settings: self.storage_settings.clone(),
         }
+    }
+}
+
+impl<N: NodeTypesWithDB> StorageSettingsCache for ProviderFactory<N> {
+    fn cached_storage_settings(&self) -> GravityStorageSettings {
+        *self.storage_settings.read()
+    }
+
+    fn set_storage_settings_cache(&self, settings: GravityStorageSettings) {
+        *self.storage_settings.write() = settings;
     }
 }
 
@@ -750,16 +810,16 @@ mod tests {
             );
             provider.commit_view().unwrap();
 
-            let senders = provider.take::<tables::TransactionSenders>(range.clone());
+            let senders = provider.take::<tables::TransactionSenders>(range.clone()).unwrap();
             assert_eq!(
                 senders,
-                Ok(range
+                range
                     .clone()
                     .map(|tx_number| (
                         tx_number,
                         block.body().transactions[tx_number as usize].recover_signer().unwrap()
                     ))
-                    .collect())
+                    .collect::<Vec<_>>()
             );
 
             // todo fix: Why is empty

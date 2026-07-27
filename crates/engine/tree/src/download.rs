@@ -4,7 +4,7 @@ use crate::{engine::DownloadRequest, metrics::BlockDownloaderMetrics};
 use alloy_consensus::BlockHeader;
 use alloy_primitives::B256;
 use futures::FutureExt;
-use reth_consensus::{Consensus, ConsensusError};
+use reth_consensus::Consensus;
 use reth_network_p2p::{
     full_block::{FetchFullBlockFuture, FetchFullBlockRangeFuture, FullBlockClient},
     BlockClient,
@@ -81,7 +81,7 @@ where
     B: Block,
 {
     /// Create a new instance
-    pub fn new(client: Client, consensus: Arc<dyn Consensus<B, Error = ConsensusError>>) -> Self {
+    pub fn new(client: Client, consensus: Arc<dyn Consensus<B>>) -> Self {
         Self {
             full_block_client: FullBlockClient::new(client, consensus),
             inflight_full_block_requests: Vec::new(),
@@ -406,7 +406,7 @@ mod tests {
 
         // send block set download request
         block_downloader.on_action(DownloadAction::Download(DownloadRequest::BlockSet(
-            HashSet::from([tip.hash(), tip.parent_hash]),
+            std::collections::HashSet::from([tip.hash(), tip.parent_hash]),
         )));
 
         // ensure we have TOTAL_BLOCKS in flight full block request
@@ -449,7 +449,7 @@ mod tests {
         )));
 
         // send block set download request
-        let download_set = HashSet::from([tip.hash(), tip.parent_hash]);
+        let download_set = std::collections::HashSet::from([tip.hash(), tip.parent_hash]);
         block_downloader
             .on_action(DownloadAction::Download(DownloadRequest::BlockSet(download_set.clone())));
 

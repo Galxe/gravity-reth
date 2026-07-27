@@ -11,4 +11,14 @@ impl<C: Send + Sync, N: NodePrimitives> StaticFileProviderFactory for NoopProvid
     fn static_file_provider(&self) -> StaticFileProvider<Self::Primitives> {
         StaticFileProvider::read_only(PathBuf::default(), false).unwrap()
     }
+
+    fn get_static_file_writer(
+        &self,
+        _block: alloy_primitives::BlockNumber,
+        _segment: reth_static_file_types::StaticFileSegment,
+    ) -> reth_errors::ProviderResult<
+        crate::providers::StaticFileProviderRWRefMut<'_, Self::Primitives>,
+    > {
+        Err(reth_errors::ProviderError::ReadOnlyStaticFileAccess)
+    }
 }

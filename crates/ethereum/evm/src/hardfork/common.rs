@@ -10,7 +10,7 @@ use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use reth_evm::{execute::BlockExecutionError, ParallelDatabase};
 use revm::{
     bytecode::Bytecode,
-    state::{Account, AccountStatus, EvmState, EvmStorageSlot},
+    state::{Account, AccountStatus, EvmState, EvmStorageSlot, TransactionId},
     DatabaseCommit, DatabaseRef,
 };
 
@@ -83,15 +83,10 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
             let mut new_info = info.clone();
             new_info.code_hash = code_hash;
             new_info.code = Some(new_bytecode.clone());
-            hardfork_changes.insert(
-                *addr,
-                Account {
-                    info: new_info,
-                    storage: Default::default(),
-                    status: AccountStatus::Touched,
-                    transaction_id: 0,
-                },
-            );
+            let mut acc = Account::default();
+            acc.info = new_info;
+            acc.status = AccountStatus::Touched;
+            hardfork_changes.insert(*addr, acc);
         }
 
         state.cache.contracts.insert(code_hash, new_bytecode);
@@ -117,15 +112,16 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
                 .get(addr)
                 .and_then(|a| a.value().account.clone())
                 .unwrap_or_default();
-            Account {
-                info,
-                storage: Default::default(),
-                status: AccountStatus::Touched,
-                transaction_id: 0,
-            }
+            let mut acc = Account::default();
+            acc.info = info;
+            acc.status = AccountStatus::Touched;
+            acc
         });
 
-        entry.storage.insert(slot_key, EvmStorageSlot::new_changed(original_value, *value, 0));
+        entry.storage.insert(
+            slot_key,
+            EvmStorageSlot::new_changed(original_value, *value, TransactionId::default()),
+        );
     }
 
     // 3. Apply batch storage patches (same slot+value to multiple addresses)
@@ -147,15 +143,16 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
                     .get(addr)
                     .and_then(|a| a.value().account.clone())
                     .unwrap_or_default();
-                Account {
-                    info,
-                    storage: Default::default(),
-                    status: AccountStatus::Touched,
-                    transaction_id: 0,
-                }
+                let mut acc = Account::default();
+                acc.info = info;
+                acc.status = AccountStatus::Touched;
+                acc
             });
 
-            entry.storage.insert(slot_key, EvmStorageSlot::new_changed(original_value, *value, 0));
+            entry.storage.insert(
+                slot_key,
+                EvmStorageSlot::new_changed(original_value, *value, TransactionId::default()),
+            );
         }
     }
 

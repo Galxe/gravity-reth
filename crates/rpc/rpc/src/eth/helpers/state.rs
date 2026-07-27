@@ -6,11 +6,12 @@ use reth_rpc_eth_api::{
     helpers::{EthState, LoadPendingBlock, LoadState},
     RpcNodeCore,
 };
+use reth_rpc_eth_types::EthApiError;
 
 impl<N, Rpc> EthState for EthApi<N, Rpc>
 where
     N: RpcNodeCore,
-    Rpc: RpcConvert<Primitives = N::Primitives>,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError>,
     Self: LoadPendingBlock,
 {
     fn max_proof_window(&self) -> u64 {
@@ -31,7 +32,10 @@ mod tests {
     use crate::eth::helpers::types::EthRpcConverter;
 
     use super::*;
-    use alloy_primitives::{Address, StorageKey, StorageValue, U256};
+    use alloy_primitives::{
+        map::{AddressMap, B256Map},
+        Address, StorageKey, StorageValue, U256,
+    };
     use reth_chainspec::ChainSpec;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
@@ -41,7 +45,6 @@ mod tests {
     };
     use reth_rpc_eth_api::{helpers::EthState, node::RpcNodeCoreAdapter};
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
-    use std::collections::HashMap;
 
     fn noop_eth_api() -> EthApi<
         RpcNodeCoreAdapter<NoopProvider, TestPool, NoopNetwork, EthEvmConfig>,
@@ -55,7 +58,7 @@ mod tests {
     }
 
     fn mock_eth_api(
-        accounts: HashMap<Address, ExtendedAccount>,
+        accounts: AddressMap<ExtendedAccount>,
     ) -> EthApi<
         RpcNodeCoreAdapter<MockEthProvider, TestPool, NoopNetwork, EthEvmConfig>,
         EthRpcConverter<ChainSpec>,
@@ -80,10 +83,12 @@ mod tests {
         // === Mock ===
         let storage_value = StorageValue::from(1337);
         let storage_key = StorageKey::random();
-        let storage = HashMap::from([(storage_key, storage_value)]);
+        let storage: B256Map<_> = core::iter::once((storage_key, storage_value)).collect();
 
-        let accounts =
-            HashMap::from([(address, ExtendedAccount::new(0, U256::ZERO).extend_storage(storage))]);
+        let accounts = AddressMap::from_iter([(
+            address,
+            ExtendedAccount::new(0, U256::ZERO).extend_storage(storage),
+        )]);
         let eth_api = mock_eth_api(accounts);
 
         let storage_key: U256 = storage_key.into();

@@ -6,7 +6,7 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use clap::{Error, Parser};
 use reth_cli_runner::CliRunner;
@@ -21,13 +21,13 @@ use crate::chainspec::ChainSpecParser;
 ///
 /// This trait is supposed to be implemented by the main struct of the CLI.
 ///
-/// It provides commonly used functionality for running commands and information about the CL, such
+/// It provides commonly used functionality for running commands and information about the CLI, such
 /// as the name and version.
 pub trait RethCli: Sized {
     /// The associated `ChainSpecParser` type
     type ChainSpecParser: ChainSpecParser;
 
-    /// The name of the implementation, eg. `reth`, `op-reth`, etc.
+    /// The name of the implementation, eg. `reth`.
     fn name(&self) -> Cow<'static, str>;
 
     /// The version of the node, such as `reth/v1.0.0`
@@ -66,7 +66,8 @@ pub trait RethCli: Sized {
         F: FnOnce(Self, CliRunner) -> R,
     {
         let cli = Self::parse_args()?;
-        let runner = CliRunner::try_default_runtime()?;
+        let runner = CliRunner::try_default_runtime()
+            .map_err(|e| Error::raw(clap::error::ErrorKind::Io, e))?;
         Ok(cli.with_runner(f, runner))
     }
 

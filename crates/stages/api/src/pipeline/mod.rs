@@ -122,7 +122,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     }
 
     /// Get a mutable reference to a stage by index.
-    pub fn stage(&mut self, idx: usize) -> &mut dyn Stage<DatabaseProviderRW<N>> {
+    pub fn stage(
+        &mut self,
+        idx: usize,
+    ) -> &mut dyn Stage<<ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW> {
         &mut self.stages[idx]
     }
 }
@@ -297,13 +300,14 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         bad_block: Option<BlockNumber>,
     ) -> Result<(), PipelineError> {
         // Add validation before starting unwind
-        let provider = self.provider_factory.provider()?;
-        let latest_block = provider.last_block_number()?;
-
-        // Get the actual pruning configuration
-        let prune_modes = provider.prune_modes_ref();
-
-        let checkpoints = provider.get_prune_checkpoints()?;
+        let (latest_block, prune_modes, checkpoints) = {
+            let provider = self.provider_factory.provider()?;
+            (
+                provider.last_block_number()?,
+                provider.prune_modes_ref().clone(),
+                provider.get_prune_checkpoints()?,
+            )
+        };
         prune_modes.ensure_unwind_target_unpruned(latest_block, to, &checkpoints)?;
 
         // Unwind stages in reverse order of execution
@@ -375,7 +379,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                             });
                         }
 
-                        // update finalized block if needed
+                        // update finalized and safe block if needed
                         let last_saved_finalized_block_number =
                             provider_rw.last_finalized_block_number()?;
 
@@ -385,6 +389,16 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                             Some(checkpoint.block_number) < last_saved_finalized_block_number
                         {
                             provider_rw.save_finalized_block_number(BlockNumber::from(
+                                checkpoint.block_number,
+                            ))?;
+                        }
+
+                        let last_saved_safe_block_number = provider_rw.last_safe_block_number()?;
+
+                        if last_saved_safe_block_number.is_none() ||
+                            Some(checkpoint.block_number) < last_saved_safe_block_number
+                        {
+                            provider_rw.save_safe_block_number(BlockNumber::from(
                                 checkpoint.block_number,
                             ))?;
                         }
@@ -624,7 +638,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 "Stage is missing static file data."
             );
 
-            Ok(Some(ControlFlow::Unwind { target: block.block.number - 1, bad_block: block }))
+            Ok(Some(ControlFlow::Unwind {
+                target: block.block.number.saturating_sub(1),
+                bad_block: block,
+            }))
         } else if err.is_fatal() {
             error!(target: "sync::pipeline", stage = %stage_id, "Stage encountered a fatal error: {err}");
             Err(err.into())

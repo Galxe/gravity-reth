@@ -17,6 +17,7 @@ reth-mdbx-sys.workspace = true
 bitflags.workspace = true
 byteorder.workspace = true
 derive_more.workspace = true
+crossbeam-queue.workspace = true
 parking_lot.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
@@ -33,14 +34,6 @@ read-tx-timeouts = ["dep:dashmap"]
 criterion.workspace = true
 rand.workspace = true
 tempfile.workspace = true
-
-[[bench]]
-name = "cursor"
-harness = false
-
-[[bench]]
-name = "transaction"
-harness = false
 
 [[bench]]
 name = "mdbx_bench_tool"

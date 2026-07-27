@@ -43,6 +43,23 @@ pub trait StorageChangeSetReader: Send + Sync {
     ) -> ProviderResult<Vec<(reth_db_api::models::BlockNumberAddress, StorageEntry)>>;
 }
 
+/// Reader for block-range changeset access, routed by the persisted storage layout.
+#[cfg(feature = "db-api")]
+#[auto_impl::auto_impl(&, Arc, Box)]
+pub trait ChangesetRangeReader: Send + Sync {
+    /// Collects account changesets in the block range.
+    fn account_changesets_range(
+        &self,
+        range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<(BlockNumber, reth_db_api::models::AccountBeforeTx)>>;
+
+    /// Collects storage changesets in the block range.
+    fn storage_changesets_range(
+        &self,
+        range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<(reth_db_api::models::BlockNumberAddress, StorageEntry)>>;
+}
+
 /// An enum that represents the storage location for a piece of data.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum StorageLocation {

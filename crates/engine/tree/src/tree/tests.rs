@@ -24,7 +24,7 @@ use reth_trie::HashedPostState;
 use std::{
     collections::BTreeMap,
     str::FromStr,
-    sync::mpsc::{channel, Sender},
+    sync::mpsc::{channel, Receiver, Sender},
 };
 use tokio::sync::oneshot;
 
@@ -35,19 +35,19 @@ struct MockEngineValidator;
 impl reth_engine_primitives::PayloadValidator<EthEngineTypes> for MockEngineValidator {
     type Block = Block;
 
-    fn ensure_well_formed_payload(
+    fn convert_payload_to_block(
         &self,
         payload: ExecutionData,
     ) -> Result<
-        reth_primitives_traits::RecoveredBlock<Self::Block>,
+        reth_primitives_traits::SealedBlock<Self::Block>,
         reth_payload_primitives::NewPayloadError,
     > {
-        // For tests, convert the execution payload to a block
+        // For tests, convert the execution payload to a sealed block. Signature recovery is
+        // handled by the default `ensure_well_formed_payload`.
         let block = reth_ethereum_primitives::Block::try_from(payload.payload).map_err(|e| {
             reth_payload_primitives::NewPayloadError::Other(format!("{e:?}").into())
         })?;
-        let sealed = block.seal_slow();
-        sealed.try_recover().map_err(|e| reth_payload_primitives::NewPayloadError::Other(e.into()))
+        Ok(block.seal_slow())
     }
 }
 
@@ -136,7 +136,9 @@ struct TestHarness {
         BasicEngineValidator<MockEthProvider, MockEvmConfig, MockEngineValidator>,
         MockEvmConfig,
     >,
-    to_tree_tx: Sender<FromEngine<EngineApiRequest<EthEngineTypes, EthPrimitives>, Block>>,
+    to_tree_tx: crossbeam_channel::Sender<
+        FromEngine<EngineApiRequest<EthEngineTypes, EthPrimitives>, Block>,
+    >,
     from_tree_rx: UnboundedReceiver<EngineApiEvent>,
     blocks: Vec<ExecutedBlockWithTrieUpdates>,
     action_rx: Receiver<PersistenceAction>,
@@ -173,8 +175,13 @@ impl TestHarness {
 
         let header = chain_spec.genesis_header().clone();
         let header = SealedHeader::seal_slow(header);
-        let engine_api_tree_state =
-            EngineApiTreeState::new(10, 10, header.num_hash(), EngineApiKind::Ethereum);
+        let engine_api_tree_state = EngineApiTreeState::new(
+            10,
+            10,
+            TreeConfig::default().invalid_header_hit_eviction_threshold(),
+            header.num_hash(),
+            EngineApiKind::Ethereum,
+        );
         let canonical_in_memory_state = CanonicalInMemoryState::with_head(header, None, None);
 
         let (to_payload_service, _payload_command_rx) = unbounded_channel();
@@ -198,7 +205,7 @@ impl TestHarness {
             engine_api_tree_state,
             canonical_in_memory_state,
             persistence_handle,
-            PersistenceState::default(),
+            PersistenceState { last_persisted_block: Default::default(), rx: None },
             payload_builder,
             // always assume enough parallelism for tests
             TreeConfig::default().with_legacy_state_root(false).with_has_enough_parallelism(true),
@@ -279,13 +286,13 @@ impl TestHarness {
         let fcu_state = self.fcu_state(block_hash);
 
         let (tx, rx) = oneshot::channel();
-        self.tree
+        let _ = self
+            .tree
             .on_engine_message(FromEngine::Request(
                 BeaconEngineMessage::ForkchoiceUpdated {
                     state: fcu_state,
                     payload_attrs: None,
                     tx,
-                    version: EngineApiMessageVersion::default(),
                 }
                 .into(),
             ))
@@ -359,11 +366,11 @@ fn test_tree_persist_block_batch() {
     test_harness.to_tree_tx.send(FromEngine::DownloadedBlocks(blocks)).unwrap();
 
     // process the message
-    let msg = test_harness.tree.try_recv_engine_message().unwrap().unwrap();
-    test_harness.tree.on_engine_message(msg).unwrap();
+    let msg = test_harness.tree.incoming.try_recv().unwrap();
+    let _ = test_harness.tree.on_engine_message(msg).unwrap();
 
     // we now should receive the other batch
-    let msg = test_harness.tree.try_recv_engine_message().unwrap().unwrap();
+    let msg = test_harness.tree.incoming.try_recv().unwrap();
     match msg {
         FromEngine::DownloadedBlocks(blocks) => {
             assert_eq!(blocks.len(), tree_config.max_execute_block_batch_size());
@@ -439,7 +446,7 @@ async fn test_engine_request_during_backfill() {
         .with_backfill_state(BackfillSyncState::Active);
 
     let (tx, rx) = oneshot::channel();
-    test_harness
+    let _ = test_harness
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::ForkchoiceUpdated {
@@ -450,7 +457,6 @@ async fn test_engine_request_during_backfill() {
                 },
                 payload_attrs: None,
                 tx,
-                version: EngineApiMessageVersion::default(),
             }
             .into(),
         ))
@@ -517,7 +523,7 @@ async fn test_holesky_payload() {
         TestHarness::new(HOLESKY.clone()).with_backfill_state(BackfillSyncState::Active);
 
     let (tx, rx) = oneshot::channel();
-    test_harness
+    let _ = test_harness
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::NewPayload {
@@ -600,7 +606,12 @@ async fn test_tree_state_on_new_head_reorg() {
     assert_eq!(saved_blocks, vec![blocks[0].clone(), blocks[1].clone()]);
 
     // send the response so we can advance again
-    sender.send(Some(blocks[1].recovered_block().num_hash())).unwrap();
+    sender
+        .send(PersistenceResult {
+            last_block: Some(blocks[1].recovered_block().num_hash()),
+            commit_duration: None,
+        })
+        .unwrap();
 
     // we should be persisting blocks[1] because we threw out the prev action
     let current_action = test_harness.tree.persistence_state.current_action().cloned();
@@ -611,8 +622,8 @@ async fn test_tree_state_on_new_head_reorg() {
         })
     );
 
-    // after advancing persistence, we should be at `None` for the next action
-    test_harness.tree.advance_persistence().unwrap();
+    // after polling persistence completion, we should be at `None` for the next action
+    test_harness.tree.try_poll_persistence().unwrap();
     let current_action = test_harness.tree.persistence_state.current_action().cloned();
     assert_eq!(current_action, None);
 
@@ -748,7 +759,8 @@ async fn test_get_canonical_blocks_to_persist() {
         .with_persistence_threshold(persistence_threshold)
         .with_memory_block_buffer_target(memory_block_buffer_target);
 
-    let blocks_to_persist = test_harness.tree.get_canonical_blocks_to_persist().unwrap();
+    let blocks_to_persist =
+        test_harness.tree.get_canonical_blocks_to_persist(PersistTarget::Threshold).unwrap();
 
     let expected_blocks_to_persist_length: usize =
         (canonical_head_number - memory_block_buffer_target - last_persisted_block_number)
@@ -767,7 +779,8 @@ async fn test_get_canonical_blocks_to_persist() {
 
     assert!(test_harness.tree.state.tree_state.sealed_header_by_hash(&fork_block_hash).is_some());
 
-    let blocks_to_persist = test_harness.tree.get_canonical_blocks_to_persist().unwrap();
+    let blocks_to_persist =
+        test_harness.tree.get_canonical_blocks_to_persist(PersistTarget::Threshold).unwrap();
     assert_eq!(blocks_to_persist.len(), expected_blocks_to_persist_length);
 
     // check that the fork block is not included in the blocks to persist
@@ -846,7 +859,7 @@ async fn test_engine_tree_live_sync_transition_required_blocks_requested() {
     let backfill_tip_block = main_chain[(backfill_finished_block_number - 1) as usize].clone();
     // add block to mock provider to enable persistence clean up.
     test_harness.provider.add_block(backfill_tip_block.hash(), backfill_tip_block.into_block());
-    test_harness.tree.on_engine_message(FromEngine::Event(backfill_finished)).unwrap();
+    let _ = test_harness.tree.on_engine_message(FromEngine::Event(backfill_finished)).unwrap();
 
     let event = test_harness.from_tree_rx.recv().await.unwrap();
     match event {
@@ -856,7 +869,16 @@ async fn test_engine_tree_live_sync_transition_required_blocks_requested() {
         _ => panic!("Unexpected event: {event:#?}"),
     }
 
-    test_harness
+    // After backfill completes with the head not buffered, we also request the head download
+    let event = test_harness.from_tree_rx.recv().await.unwrap();
+    match event {
+        EngineApiEvent::Download(DownloadRequest::BlockSet(hash_set)) => {
+            assert_eq!(hash_set, HashSet::from_iter([main_chain_last_hash]));
+        }
+        _ => panic!("Unexpected event: {event:#?}"),
+    }
+
+    let _ = test_harness
         .tree
         .on_engine_message(FromEngine::DownloadedBlocks(vec![main_chain.last().unwrap().clone()]))
         .unwrap();
@@ -909,7 +931,7 @@ async fn test_fcu_with_canonical_ancestor_updates_latest_block() {
 
     // Send FCU to the canonical ancestor
     let (tx, rx) = oneshot::channel();
-    test_harness
+    let _ = test_harness
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::ForkchoiceUpdated {
@@ -920,7 +942,6 @@ async fn test_fcu_with_canonical_ancestor_updates_latest_block() {
                 },
                 payload_attrs: None,
                 tx,
-                version: EngineApiMessageVersion::default(),
             }
             .into(),
         ))

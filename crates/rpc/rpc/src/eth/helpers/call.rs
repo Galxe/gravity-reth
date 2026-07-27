@@ -13,7 +13,7 @@ use gravity_precompiles::{
 };
 use reth_chainspec::{is_system_tx_gas_exempt, ChainSpecProvider};
 use reth_errors::ProviderError;
-use reth_evm::{precompiles::PrecompilesMap, Evm, SpecFor, TxEnvFor};
+use reth_evm::{precompiles::PrecompilesMap, Evm};
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_api::{
     helpers::{estimate::EstimateCall, Call, EthCall},
@@ -75,12 +75,7 @@ impl<N, Rpc> EthCall for EthApi<N, Rpc>
 where
     N: RpcNodeCore,
     EthApiError: FromEvmError<N::Evm>,
-    Rpc: RpcConvert<
-        Primitives = N::Primitives,
-        Error = EthApiError,
-        TxEnv = TxEnvFor<N::Evm>,
-        Spec = SpecFor<N::Evm>,
-    >,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
 }
 
@@ -88,12 +83,7 @@ impl<N, Rpc> Call for EthApi<N, Rpc>
 where
     N: RpcNodeCore,
     EthApiError: FromEvmError<N::Evm>,
-    Rpc: RpcConvert<
-        Primitives = N::Primitives,
-        Error = EthApiError,
-        TxEnv = TxEnvFor<N::Evm>,
-        Spec = SpecFor<N::Evm>,
-    >,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
     #[inline]
     fn call_gas_limit(&self) -> u64 {
@@ -103,6 +93,16 @@ where
     #[inline]
     fn max_simulate_blocks(&self) -> u64 {
         self.inner.max_simulate_blocks()
+    }
+
+    #[inline]
+    fn compute_state_root_for_eth_simulate(&self) -> bool {
+        self.inner.compute_state_root_for_eth_simulate()
+    }
+
+    #[inline]
+    fn evm_memory_limit(&self) -> u64 {
+        self.inner.evm_memory_limit()
     }
 
     fn register_custom_precompiles<EV>(
@@ -143,19 +143,6 @@ where
         evm.precompiles_mut()
             .apply_precompile(&RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, move |_| Some(precompile));
     }
-}
-
-impl<N, Rpc> EstimateCall for EthApi<N, Rpc>
-where
-    N: RpcNodeCore,
-    EthApiError: FromEvmError<N::Evm>,
-    Rpc: RpcConvert<
-        Primitives = N::Primitives,
-        Error = EthApiError,
-        TxEnv = TxEnvFor<N::Evm>,
-        Spec = SpecFor<N::Evm>,
-    >,
-{
 }
 
 #[cfg(test)]
@@ -480,4 +467,12 @@ mod tests {
             );
         }
     }
+}
+
+impl<N, Rpc> EstimateCall for EthApi<N, Rpc>
+where
+    N: RpcNodeCore,
+    EthApiError: FromEvmError<N::Evm>,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+{
 }

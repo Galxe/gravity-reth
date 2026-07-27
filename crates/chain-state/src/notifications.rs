@@ -1,6 +1,6 @@
 //! Canonical chain state notification trait and types.
 
-use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::BlockNumHash;
 use derive_more::{Deref, DerefMut};
 use reth_execution_types::{BlockReceipts, Chain};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedHeader};
@@ -157,10 +157,7 @@ impl<N: NodePrimitives> CanonStateNotification<N> {
     ///
     /// The boolean in the tuple (2nd element) denotes whether the receipt was from the reverted
     /// chain segment.
-    pub fn block_receipts(&self) -> Vec<(BlockReceipts<N::Receipt>, bool)>
-    where
-        N::SignedTx: Encodable2718,
-    {
+    pub fn block_receipts(&self) -> Vec<(BlockReceipts<N::Receipt>, bool)> {
         let mut receipts = Vec::new();
 
         // get old receipts
@@ -205,22 +202,22 @@ pub trait ForkChoiceSubscriptions: Send + Sync {
     }
 }
 
-/// A stream for fork choice watch channels (pending, safe or finalized watchers)
+/// A stream that yields values from a `watch::Receiver<Option<T>>`, filtering out `None` values.
 #[derive(Debug)]
 #[pin_project::pin_project]
-pub struct ForkChoiceStream<T> {
+pub struct WatchValueStream<T> {
     #[pin]
     st: WatchStream<Option<T>>,
 }
 
-impl<T: Clone + Sync + Send + 'static> ForkChoiceStream<T> {
-    /// Creates a new `ForkChoiceStream`
+impl<T: Clone + Sync + Send + 'static> WatchValueStream<T> {
+    /// Creates a new [`WatchValueStream`]
     pub fn new(rx: watch::Receiver<Option<T>>) -> Self {
         Self { st: WatchStream::from_changes(rx) }
     }
 }
 
-impl<T: Clone + Sync + Send + 'static> Stream for ForkChoiceStream<T> {
+impl<T: Clone + Sync + Send + 'static> Stream for WatchValueStream<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -231,6 +228,24 @@ impl<T: Clone + Sync + Send + 'static> Stream for ForkChoiceStream<T> {
                 None => return Poll::Ready(None),
             }
         }
+    }
+}
+
+/// Alias for [`WatchValueStream`] for fork choice watch channels.
+pub type ForkChoiceStream<T> = WatchValueStream<T>;
+
+/// Wrapper around a watch receiver that receives persisted block notifications.
+#[derive(Debug, Deref, DerefMut)]
+pub struct PersistedBlockNotifications(pub watch::Receiver<Option<BlockNumHash>>);
+
+/// A trait that allows subscribing to persisted block events.
+pub trait PersistedBlockSubscriptions: Send + Sync {
+    /// Get notified when a new block is persisted to disk.
+    fn subscribe_persisted_block(&self) -> PersistedBlockNotifications;
+
+    /// Convenience method to get a stream of the persisted blocks.
+    fn persisted_block_stream(&self) -> WatchValueStream<BlockNumHash> {
+        WatchValueStream::new(self.subscribe_persisted_block().0)
     }
 }
 

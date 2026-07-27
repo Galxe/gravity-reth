@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::BlockTy;
 use alloy_primitives::{BlockNumber, B256};
 use reth_config::{config::StageConfig, PruneConfig};
-use reth_consensus::{ConsensusError, FullConsensus};
+use reth_consensus::FullConsensus;
 use reth_downloaders::{
     bodies::bodies::BodiesDownloaderBuilder,
     headers::reverse_headers::ReverseHeadersDownloaderBuilder,
@@ -20,7 +20,7 @@ use reth_provider::{providers::ProviderNodeTypes, ProviderFactory};
 use reth_stages::{
     prelude::DefaultStages,
     stages::{EraImportSource, ExecutionStage},
-    Pipeline, StageSet,
+    Pipeline, StageId, StageSet,
 };
 use reth_static_file::StaticFileProducer;
 use reth_tasks::TaskExecutor;
@@ -32,16 +32,17 @@ use tokio::sync::watch;
 pub fn build_networked_pipeline<N, Client, Evm>(
     config: &StageConfig,
     client: Client,
-    consensus: Arc<dyn FullConsensus<N::Primitives, Error = ConsensusError>>,
+    consensus: Arc<dyn FullConsensus<N::Primitives>>,
     provider_factory: ProviderFactory<N>,
     task_executor: &TaskExecutor,
     metrics_tx: reth_stages::MetricEventsSender,
-    prune_config: Option<PruneConfig>,
+    prune_config: PruneConfig,
     max_block: Option<BlockNumber>,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
     evm_config: Evm,
     exex_manager_handle: ExExManagerHandle<N::Primitives>,
     era_import_source: Option<EraImportSource>,
+    disabled_stages: &[StageId],
 ) -> eyre::Result<Pipeline<N>>
 where
     N: ProviderNodeTypes,
@@ -70,6 +71,7 @@ where
         evm_config,
         exex_manager_handle,
         era_import_source,
+        disabled_stages,
     )?;
 
     Ok(pipeline)
@@ -82,14 +84,15 @@ pub fn build_pipeline<N, H, B, Evm>(
     stage_config: &StageConfig,
     header_downloader: H,
     body_downloader: B,
-    consensus: Arc<dyn FullConsensus<N::Primitives, Error = ConsensusError>>,
+    consensus: Arc<dyn FullConsensus<N::Primitives>>,
     max_block: Option<u64>,
     metrics_tx: reth_stages::MetricEventsSender,
-    prune_config: Option<PruneConfig>,
+    prune_config: PruneConfig,
     static_file_producer: StaticFileProducer<ProviderFactory<N>>,
     evm_config: Evm,
     exex_manager_handle: ExExManagerHandle<N::Primitives>,
     era_import_source: Option<EraImportSource>,
+    disabled_stages: &[StageId],
 ) -> eyre::Result<Pipeline<N>>
 where
     N: ProviderNodeTypes,
@@ -106,8 +109,6 @@ where
 
     let (tip_tx, tip_rx) = watch::channel(B256::ZERO);
 
-    let prune_modes = prune_config.map(|prune| prune.segments).unwrap_or_default();
-
     let pipeline = builder
         .with_tip_sender(tip_tx)
         .with_metrics_tx(metrics_tx)
@@ -120,7 +121,7 @@ where
                 body_downloader,
                 evm_config.clone(),
                 stage_config.clone(),
-                prune_modes,
+                prune_config.segments,
                 era_import_source,
             )
             .set(ExecutionStage::new(
@@ -129,7 +130,8 @@ where
                 stage_config.execution.into(),
                 stage_config.execution_external_clean_threshold(),
                 exex_manager_handle,
-            )),
+            ))
+            .disable_all(disabled_stages),
         )
         .build(provider_factory, static_file_producer);
 

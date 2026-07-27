@@ -5,7 +5,7 @@
 use alloy_evm::{
     eth::EthEvmContext,
     precompiles::{DynPrecompile, Precompile, PrecompileInput, PrecompilesMap},
-    revm::{handler::EthPrecompiles, precompile::PrecompileId},
+    revm::{context::DBErrorMarker, handler::EthPrecompiles, precompile::PrecompileId},
     Evm, EvmFactory,
 };
 use alloy_genesis::Genesis;
@@ -16,7 +16,7 @@ use reth_ethereum::{
     evm::{
         primitives::{Database, EvmEnv},
         revm::{
-            context::{Context, TxEnv},
+            context::{BlockEnv, Context, TxEnv},
             context_interface::result::{EVMError, HaltReason},
             inspector::{Inspector, NoOpInspector},
             interpreter::interpreter::EthInterpreter,
@@ -33,7 +33,7 @@ use reth_ethereum::{
         node::EthereumAddOns,
         EthEvmConfig, EthereumNode,
     },
-    tasks::TaskManager,
+    tasks::Runtime,
     EthPrimitives,
 };
 use reth_tracing::{RethTracer, Tracer};
@@ -65,21 +65,23 @@ impl EvmFactory for MyEvmFactory {
     type Evm<DB: Database, I: Inspector<EthEvmContext<DB>, EthInterpreter>> =
         EthEvm<DB, I, PrecompilesMap>;
     type Tx = TxEnv;
-    type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
+    type Error<DBError: DBErrorMarker> = EVMError<DBError>;
     type HaltReason = HaltReason;
     type Context<DB: Database> = EthEvmContext<DB>;
     type Spec = SpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
         let new_cache = self.precompile_cache.clone();
+        let spec = input.cfg_env.spec;
 
         let evm = Context::mainnet()
             .with_db(db)
             .with_cfg(input.cfg_env)
             .with_block(input.block_env)
             .build_mainnet_with_inspector(NoOpInspector {})
-            .with_precompiles(PrecompilesMap::from_static(EthPrecompiles::default().precompiles));
+            .with_precompiles(PrecompilesMap::from_static(EthPrecompiles::new(spec).precompiles));
 
         let mut evm = EthEvm::new(evm, false);
 
@@ -176,7 +178,7 @@ where
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let evm_config = EthEvmConfig::new_with_evm_factory(
             ctx.chain_spec(),
-            MyEvmFactory { precompile_cache: self.precompile_cache.clone() },
+            MyEvmFactory { precompile_cache: self.precompile_cache },
         );
         Ok(evm_config)
     }
@@ -186,7 +188,7 @@ where
 async fn main() -> eyre::Result<()> {
     let _guard = RethTracer::new().init()?;
 
-    let tasks = TaskManager::current();
+    let runtime = Runtime::test();
 
     // create a custom chain spec
     let spec = ChainSpec::builder()
@@ -202,7 +204,7 @@ async fn main() -> eyre::Result<()> {
         NodeConfig::test().with_rpc(RpcServerArgs::default().with_http()).with_chain(spec);
 
     let handle = NodeBuilder::new(node_config)
-        .testing_node(tasks.executor())
+        .testing_node(runtime)
         // configure the node with regular ethereum types
         .with_types::<EthereumNode>()
         // use default ethereum components but with our executor

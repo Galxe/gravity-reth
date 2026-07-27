@@ -1,6 +1,6 @@
 [profile.default]
 retries = { backoff = "exponential", count = 2, delay = "2s", jitter = true }
-slow-timeout = { period = "30s", terminate-after = 4 }
+slow-timeout = { period = "30s", terminate-after = 2 }
 
 [[profile.default.overrides]]
 filter = "test(general_state_tests)"
@@ -29,3 +29,12 @@ slow-timeout = { period = "2m", terminate-after = 3 }
 filter = "binary(gravity_pipe_test) + binary(gravity_eip2935_test) + binary(gravity_eip7702_test)"
 slow-timeout = { period = "5m", terminate-after = 6 }
 retries = 0
+
+[[profile.default.overrides]]
+filter = "package(reth-era) and binary(it)"
+slow-timeout = { period = "2m", terminate-after = 10 }
+
+# Allow slower ethereum node e2e tests (p2p + blobs) to run up to 5 minutes.
+[[profile.default.overrides]]
+filter = "package(reth-node-ethereum) and binary(e2e)"
+slow-timeout = { period = "1m", terminate-after = 5 }

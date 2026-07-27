@@ -129,4 +129,11 @@ where
             Self::Right(b) => b.apply_custom_precompiles(custom_precompiles),
         }
     }
+
+    fn take_bal(&mut self) -> Option<alloy_eip7928::BlockAccessList> {
+        match self {
+            Self::Left(a) => a.take_bal(),
+            Self::Right(b) => b.take_bal(),
+        }
+    }
 }

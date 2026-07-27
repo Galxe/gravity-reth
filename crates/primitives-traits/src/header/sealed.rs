@@ -20,7 +20,7 @@ pub type SealedHeaderFor<N> = SealedHeader<<N as NodePrimitives>::BlockHeader>;
 /// [`SealedHeader::hash`] computes the hash if it has not been computed yet.
 #[derive(Debug, Clone, AsRef, Deref)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(any(test, feature = "reth-codec"), reth_codecs::add_arbitrary_tests(rlp))]
+#[cfg_attr(feature = "reth-codec", reth_codecs::add_arbitrary_tests(rlp))]
 pub struct SealedHeader<H = Header> {
     /// Block hash
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -94,7 +94,7 @@ impl<H: Sealable> SealedHeader<H> {
         *self.hash_ref()
     }
 
-    /// This is the inverse of [`Header::seal_slow`] which returns the raw header and hash.
+    /// This is the inverse of [`Self::seal_slow`] which returns the raw header and hash.
     pub fn split(self) -> (H, BlockHash) {
         let hash = self.hash();
         (self.header, hash)
@@ -228,6 +228,11 @@ impl<H: crate::test_utils::TestHeader> SealedHeader<H> {
         self.header.set_block_number(number);
     }
 
+    /// Updates the block timestamp.
+    pub fn set_timestamp(&mut self, timestamp: u64) {
+        self.header.set_timestamp(timestamp);
+    }
+
     /// Updates the block state root.
     pub fn set_state_root(&mut self, state_root: alloy_primitives::B256) {
         self.header.set_state_root(state_root);
@@ -337,36 +342,6 @@ pub(super) mod serde_bincode_compat {
 
         fn from_repr(repr: Self::BincodeRepr<'_>) -> Self {
             repr.into()
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::super::{serde_bincode_compat, SealedHeader};
-        use arbitrary::Arbitrary;
-        use rand::Rng;
-        use serde::{Deserialize, Serialize};
-        use serde_with::serde_as;
-
-        #[test]
-        fn test_sealed_header_bincode_roundtrip() {
-            #[serde_as]
-            #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-            struct Data {
-                #[serde_as(as = "serde_bincode_compat::SealedHeader")]
-                transaction: SealedHeader,
-            }
-
-            let mut bytes = [0u8; 1024];
-            rand::rng().fill(&mut bytes[..]);
-            let data = Data {
-                transaction: SealedHeader::arbitrary(&mut arbitrary::Unstructured::new(&bytes))
-                    .unwrap(),
-            };
-
-            let encoded = bincode::serialize(&data).unwrap();
-            let decoded: Data = bincode::deserialize(&encoded).unwrap();
-            assert_eq!(decoded, data);
         }
     }
 }

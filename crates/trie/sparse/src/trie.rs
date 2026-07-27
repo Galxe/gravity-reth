@@ -595,8 +595,8 @@ impl SparseTrieInterface for SerialSparseTrie {
                     *node = SparseNode::new_leaf(full_path);
                     break
                 }
-                &mut SparseNode::Hash(hash) => {
-                    return Err(SparseTrieErrorKind::BlindedNode { path: current, hash }.into())
+                &mut SparseNode::Hash(_hash) => {
+                    return Err(SparseTrieErrorKind::BlindedNode(current).into())
                 }
                 SparseNode::Leaf { key: current_key, .. } => {
                     current.extend(current_key);
@@ -720,9 +720,9 @@ impl SparseTrieInterface for SerialSparseTrie {
         trace!(target: "trie::sparse", ?full_path, "remove_leaf called");
 
         if self.values.remove(full_path).is_none() {
-            if let Some(&SparseNode::Hash(hash)) = self.nodes.get(full_path) {
+            if let Some(&SparseNode::Hash(_hash)) = self.nodes.get(full_path) {
                 // Leaf is present in the trie, but it's blinded.
-                return Err(SparseTrieErrorKind::BlindedNode { path: *full_path, hash }.into())
+                return Err(SparseTrieErrorKind::BlindedNode(*full_path).into())
             }
 
             trace!(target: "trie::sparse", ?full_path, "Leaf node is not present in the trie");
@@ -761,8 +761,8 @@ impl SparseTrieInterface for SerialSparseTrie {
 
             let new_node = match &removed_node.node {
                 SparseNode::Empty => return Err(SparseTrieErrorKind::Blind.into()),
-                &SparseNode::Hash(hash) => {
-                    return Err(SparseTrieErrorKind::BlindedNode { path: removed_path, hash }.into())
+                &SparseNode::Hash(_hash) => {
+                    return Err(SparseTrieErrorKind::BlindedNode(removed_path).into())
                 }
                 SparseNode::Leaf { .. } => {
                     unreachable!("we already popped the leaf node")
@@ -772,10 +772,8 @@ impl SparseTrieInterface for SerialSparseTrie {
                     // need to merge them.
                     match &child.node {
                         SparseNode::Empty => return Err(SparseTrieErrorKind::Blind.into()),
-                        &SparseNode::Hash(hash) => {
-                            return Err(
-                                SparseTrieErrorKind::BlindedNode { path: child.path, hash }.into()
-                            )
+                        &SparseNode::Hash(_hash) => {
+                            return Err(SparseTrieErrorKind::BlindedNode(child.path).into())
                         }
                         // For a leaf node, we collapse the extension node into a leaf node,
                         // extending the key. While it's impossible to encounter an extension node
@@ -854,12 +852,8 @@ impl SparseTrieInterface for SerialSparseTrie {
                         let mut delete_child = false;
                         let new_node = match child {
                             SparseNode::Empty => return Err(SparseTrieErrorKind::Blind.into()),
-                            &SparseNode::Hash(hash) => {
-                                return Err(SparseTrieErrorKind::BlindedNode {
-                                    path: child_path,
-                                    hash,
-                                }
-                                .into())
+                            &SparseNode::Hash(_hash) => {
+                                return Err(SparseTrieErrorKind::BlindedNode(child_path).into())
                             }
                             // If the only child is a leaf node, we downgrade the branch node into a
                             // leaf node, prepending the nibble to the key, and delete the old
@@ -1183,8 +1177,8 @@ impl SerialSparseTrie {
         while let Some(node) = self.nodes.remove(&current) {
             match &node {
                 SparseNode::Empty => return Err(SparseTrieErrorKind::Blind.into()),
-                &SparseNode::Hash(hash) => {
-                    return Err(SparseTrieErrorKind::BlindedNode { path: current, hash }.into())
+                &SparseNode::Hash(_hash) => {
+                    return Err(SparseTrieErrorKind::BlindedNode(current).into())
                 }
                 SparseNode::Leaf { key: _key, .. } => {
                     // Leaf node is always the one that we're deleting, and no other leaf nodes can
@@ -2885,7 +2879,7 @@ mod tests {
         // Removing a blinded leaf should result in an error
         assert_matches!(
             sparse.remove_leaf(&Nibbles::from_nibbles([0x0]), &provider).map_err(|e| e.into_kind()),
-            Err(SparseTrieErrorKind::BlindedNode { path, hash }) if path == Nibbles::from_nibbles([0x0]) && hash == B256::repeat_byte(1)
+            Err(SparseTrieErrorKind::BlindedNode(path)) if path == Nibbles::from_nibbles([0x0])
         );
     }
 

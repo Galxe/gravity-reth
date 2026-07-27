@@ -14,8 +14,7 @@ use reth_db_api::{
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{providers::StaticFileProvider, DBProvider, StaticFileProviderFactory};
 use reth_prune_types::{
-    PruneMode, PrunePurpose, PruneSegment, SegmentOutput, SegmentOutputCheckpoint,
-    MINIMUM_PRUNING_DISTANCE,
+    PruneMode, PrunePurpose, PruneSegment, SegmentOutput, SegmentOutputCheckpoint, MINIMUM_DISTANCE,
 };
 use reth_static_file_types::StaticFileSegment;
 use std::num::NonZeroUsize;
@@ -40,6 +39,8 @@ where
     Provider: StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Value>>
         + DBProvider<Tx: DbTxMut>,
 {
+    // `PruneSegment::Headers` is deprecated but index-stable; this segment still prunes it.
+    #[allow(deprecated)]
     fn segment(&self) -> PruneSegment {
         PruneSegment::Headers
     }
@@ -58,10 +59,10 @@ where
         let (block_range_start, block_range_end) = match input.get_next_block_range() {
             Some(range) => {
                 let (range_start, range_end) = (*range.start(), *range.end());
-                if range_end <= range_start + MINIMUM_PRUNING_DISTANCE {
+                if range_end <= range_start + MINIMUM_DISTANCE {
                     return Ok(SegmentOutput::done())
                 }
-                (range_start, range_end - MINIMUM_PRUNING_DISTANCE)
+                (range_start, range_end - MINIMUM_DISTANCE)
             }
             None => {
                 trace!(target: "pruner", "No headers to prune");

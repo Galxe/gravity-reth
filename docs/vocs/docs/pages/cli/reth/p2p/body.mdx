@@ -27,14 +27,16 @@ Networking:
       --disable-discv4-discovery
           Disable Discv4 discovery
 
-      --enable-discv5-discovery
-          Enable Discv5 discovery
+      --disable-discv5-discovery
+          Disable Discv5 discovery
 
       --disable-nat
           Disable Nat discovery
 
       --discovery.addr <DISCOVERY_ADDR>
-          The UDP address to use for devp2p peer discovery version 4
+          The UDP address to use for devp2p peer discovery version 4.
+
+          If unset and `--net-if.experimental` is used, discv4 binds to the resolved interface address.
 
           [default: 0.0.0.0]
 
@@ -55,7 +57,9 @@ Networking:
           [default: 9200]
 
       --discovery.v5.port.ipv6 <DISCOVERY_V5_PORT_IPV6>
-          The UDP IPv6 port to use for devp2p peer discovery version 5. Not used unless `--addr` is IPv6, or `--discovery.addr.ipv6` is set
+          The UDP IPv6 port to use for devp2p peer discovery version 5. Not used unless `--addr` is IPv6, or `--discovery.addr.ipv6` is set.
+
+          If not provided, discovery V5 defaults to same port as discovery V4 (--discovery.port).
 
           [default: 9200]
 
@@ -106,6 +110,11 @@ Networking:
 
           This will also deterministically set the peer ID. If not specified, it will be set in the data dir for the chain being used.
 
+      --p2p-secret-key-hex <HEX>
+          Hex encoded secret key to use for this node.
+
+          This will also deterministically set the peer ID. Cannot be used together with `--p2p-secret-key`.
+
       --no-persist-peers
           Do not persist peers.
 
@@ -125,10 +134,15 @@ Networking:
           [default: 30303]
 
       --max-outbound-peers <MAX_OUTBOUND_PEERS>
-          Maximum number of outbound requests. default: 100
+          Maximum number of outbound peers. default: 100
 
       --max-inbound-peers <MAX_INBOUND_PEERS>
-          Maximum number of inbound requests. default: 30
+          Maximum number of inbound peers. default: 30
+
+      --max-peers <COUNT>
+          Maximum number of total peers (inbound + outbound).
+
+          Splits peers using approximately 2:1 inbound:outbound ratio. Cannot be used together with `--max-outbound-peers` or `--max-inbound-peers`.
 
       --max-tx-reqs <COUNT>
           Max concurrent `GetPooledTransactions` requests.
@@ -179,15 +193,32 @@ Networking:
 
           [default: 25600]
 
+      --tx-channel-memory-limit <BYTES>
+          Memory limit (in bytes) for the channel that buffers transaction events flowing
+          from the network manager to the transactions manager.
+
+          When the budget is exhausted, new events are dropped (see metric
+          `total_dropped_tx_events_at_full_capacity`). Acts as a backstop against unbounded
+          memory growth under sustained P2P transaction flooding.
+
+          [default: 1073741824]
+
       --net-if.experimental <IF_NAME>
           Name of network interface used to communicate with peers.
 
-          If flag is set, but no value is passed, the default interface for docker `eth0` is tried.
+          If flag is set, but no value is passed, the default interface for docker `eth0` is tried. If `--discovery.addr` is left at its default, discv4 will also bind to the resolved interface address.
 
       --tx-propagation-policy <TX_PROPAGATION_POLICY>
           Transaction Propagation Policy
 
           The policy determines which peers transactions are gossiped to.
+
+          [default: All]
+
+      --tx-ingress-policy <TX_INGRESS_POLICY>
+          Transaction ingress policy
+
+          Determines which peers' transactions are accepted over P2P.
 
           [default: All]
 
@@ -204,7 +235,25 @@ Networking:
           [default: sqrt]
 
       --required-block-hashes <REQUIRED_BLOCK_HASHES>
-          Comma separated list of required block hashes. Peers that don't have these blocks will be filtered out
+          Comma separated list of required block hashes or block number=hash pairs. Peers that don't have these blocks will be filtered out. Format: hash or `block_number=hash` (e.g., 23115201=0x1234...)
+
+      --network-id <NETWORK_ID>
+          Optional network ID to override the chain specification's network ID for P2P connections
+
+      --eth-max-message-size <BYTES>
+          Maximum allowed ETH message size in bytes. Default is 10 MiB
+
+      --netrestrict <NETRESTRICT>
+          Restrict network communication to the given IP networks (CIDR masks).
+
+          Comma separated list of CIDR network specifications. Only peers with IP addresses within these ranges will be allowed to connect.
+
+          Example: --netrestrict "192.168.0.0/16,10.0.0.0/8"
+
+      --enforce-enr-fork-id
+          Enforce EIP-868 ENR fork ID validation for discovered peers.
+
+          When enabled, peers discovered without a confirmed fork ID are not added to the peer set until their fork ID is verified via EIP-868 ENR request. This filters out peers from other networks that pollute the discovery table.
 
 Datadir:
       --datadir <DATA_DIR>
@@ -220,6 +269,12 @@ Datadir:
 
       --datadir.static-files <PATH>
           The absolute path to store static files in.
+
+      --datadir.rocksdb <PATH>
+          The absolute path to store `RocksDB` database in.
+
+      --datadir.pprof-dumps <PATH>
+          The absolute path to store pprof dumps in.
 
       --config <FILE>
           The path to the configuration file to use.
@@ -250,7 +305,7 @@ Logging:
       --log.stdout.filter <FILTER>
           The filter to use for logs written to stdout
 
-          [default: ]
+          [default: ""]
 
       --log.file.format <FORMAT>
           The format to use for logs written to the log file
@@ -283,9 +338,9 @@ Logging:
           [default: 200]
 
       --log.file.max-files <COUNT>
-          The maximum amount of log files that will be stored. If set to 0, background file logging is disabled
+          The maximum amount of log files that will be stored. If set to 0, background file logging is disabled.
 
-          [default: 5]
+          Default: 5 for `node` command, 0 for non-node utility subcommands.
 
       --log.journald
           Write logs to journald
@@ -300,10 +355,28 @@ Logging:
 
           Possible values:
           - always: Colors on
-          - auto:   Colors on
+          - auto:   Auto-detect
           - never:  Colors off
 
           [default: always]
+
+      --logs-otlp[=<URL>]
+          Enable `Opentelemetry` logs export to an OTLP endpoint.
+
+          If no value provided, defaults based on protocol: - HTTP: `http://localhost:4318/v1/logs` - gRPC: `http://localhost:4317`
+
+          Example: --logs-otlp=http://collector:4318/v1/logs
+
+          [env: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=]
+
+      --logs-otlp.filter <FILTER>
+          Set a filter directive for the OTLP logs exporter. This controls the verbosity of logs sent to the OTLP endpoint. It follows the same syntax as the `RUST_LOG` environment variable.
+
+          Example: --logs-otlp.filter=info,reth=debug
+
+          Defaults to INFO if not specified.
+
+          [default: info]
 
 Display:
   -v, --verbosity...
@@ -317,4 +390,46 @@ Display:
 
   -q, --quiet
           Silence all log output
+
+Tracing:
+      --tracing-otlp[=<URL>]
+          Enable `Opentelemetry` tracing export to an OTLP endpoint.
+
+          If no value provided, defaults based on protocol: - HTTP: `http://localhost:4318/v1/traces` - gRPC: `http://localhost:4317`
+
+          Example: --tracing-otlp=http://collector:4318/v1/traces
+
+          [env: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=]
+
+      --tracing-otlp-protocol <PROTOCOL>
+          OTLP transport protocol to use for exporting traces and logs.
+
+          - `http`: expects endpoint path to end with `/v1/traces` or `/v1/logs` - `grpc`: expects endpoint without a path
+
+          Defaults to HTTP if not specified.
+
+          Possible values:
+          - http: HTTP/Protobuf transport, port 4318, requires `/v1/traces` path
+          - grpc: gRPC transport, port 4317
+
+          [env: OTEL_EXPORTER_OTLP_PROTOCOL=]
+          [default: http]
+
+      --tracing-otlp.filter <FILTER>
+          Set a filter directive for the OTLP tracer. This controls the verbosity of spans and events sent to the OTLP endpoint. It follows the same syntax as the `RUST_LOG` environment variable.
+
+          Example: --tracing-otlp.filter=info,reth=debug,hyper_util=off
+
+          Defaults to TRACE if not specified.
+
+          [default: debug]
+
+      --tracing-otlp.sample-ratio <RATIO>
+          Trace sampling ratio to control the percentage of traces to export.
+
+          Valid range: 0.0 to 1.0 - 1.0, default: Sample all traces - 0.01: Sample 1% of traces - 0.0: Disable sampling
+
+          Example: --tracing-otlp.sample-ratio=0.0.
+
+          [env: OTEL_TRACES_SAMPLER_ARG=]
 ```

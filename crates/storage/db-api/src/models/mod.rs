@@ -18,15 +18,17 @@ use serde::{Deserialize, Serialize};
 pub mod accounts;
 pub mod blocks;
 pub mod integer_list;
+pub mod metadata;
 pub mod sharded_key;
 pub mod storage_sharded_key;
 
 pub use accounts::*;
 pub use blocks::*;
 pub use integer_list::IntegerList;
+pub use metadata::GravityStorageSettings;
 pub use reth_db_models::{
-    AccountBeforeTx, ClientVersion, StaticFileBlockWithdrawals, StoredBlockBodyIndices,
-    StoredBlockWithdrawals,
+    AccountBeforeTx, ClientVersion, StaticFileBlockWithdrawals, StorageBeforeTx,
+    StoredBlockBodyIndices, StoredBlockWithdrawals,
 };
 pub use sharded_key::ShardedKey;
 
@@ -256,6 +258,7 @@ impl_compression_for_compact!(
     StageCheckpoint,
     PruneCheckpoint,
     ClientVersion,
+    StorageBeforeTx,
     // Non-DB
     GenesisAccount
 );
@@ -266,14 +269,6 @@ impl_compression_for_value_with_subkey!(
     StorageTrieEntry,
     StorageNodeEntry
 );
-
-#[cfg(feature = "op")]
-mod op {
-    use super::*;
-    use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
-
-    impl_compression_for_compact!(OpTransactionSigned, OpReceipt);
-}
 
 macro_rules! impl_compression_fixed_compact {
     ($($name:tt),+) => {
@@ -373,7 +368,6 @@ mod tests {
         assert_eq!(PruneCheckpoint::bitflag_encoded_bytes(), 1);
         assert_eq!(PruneMode::bitflag_encoded_bytes(), 1);
         assert_eq!(PruneSegment::bitflag_encoded_bytes(), 1);
-        assert_eq!(Receipt::bitflag_encoded_bytes(), 1);
         assert_eq!(StageCheckpoint::bitflag_encoded_bytes(), 1);
         assert_eq!(StageUnitCheckpoint::bitflag_encoded_bytes(), 1);
         assert_eq!(StoredBlockBodyIndices::bitflag_encoded_bytes(), 1);
@@ -393,7 +387,6 @@ mod tests {
         validate_bitflag_backwards_compat!(PruneCheckpoint, UnusedBits::NotZero);
         validate_bitflag_backwards_compat!(PruneMode, UnusedBits::Zero);
         validate_bitflag_backwards_compat!(PruneSegment, UnusedBits::Zero);
-        validate_bitflag_backwards_compat!(Receipt, UnusedBits::Zero);
         validate_bitflag_backwards_compat!(StageCheckpoint, UnusedBits::NotZero);
         validate_bitflag_backwards_compat!(StageUnitCheckpoint, UnusedBits::Zero);
         validate_bitflag_backwards_compat!(StoredBlockBodyIndices, UnusedBits::Zero);

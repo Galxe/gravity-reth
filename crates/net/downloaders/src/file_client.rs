@@ -1,8 +1,9 @@
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{BlockHash, BlockNumber, Sealable, B256};
+use async_compression::tokio::bufread::GzipDecoder;
 use futures::Future;
-use itertools::Either;
+use itertools::{Either, Itertools};
 use reth_consensus::{Consensus, ConsensusError};
 use reth_network_p2p::{
     bodies::client::{BodiesClient, BodiesFut},
@@ -16,7 +17,10 @@ use reth_network_peers::PeerId;
 use reth_primitives_traits::{Block, BlockBody, FullBlock, SealedBlock, SealedHeader};
 use std::{collections::HashMap, io, ops::RangeInclusive, path::Path, sync::Arc};
 use thiserror::Error;
-use tokio::{fs::File, io::AsyncReadExt};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, BufReader},
+};
 use tokio_stream::StreamExt;
 use tokio_util::codec::FramedRead;
 use tracing::{debug, trace, warn};
@@ -79,10 +83,32 @@ impl From<&'static str> for FileClientError {
 }
 
 impl<B: FullBlock> FileClient<B> {
+    /// Create a new file client from a slice of sealed blocks.
+    pub fn from_blocks(blocks: impl IntoIterator<Item = SealedBlock<B>>) -> Self {
+        let blocks: Vec<_> = blocks.into_iter().collect();
+        let capacity = blocks.len();
+
+        let mut headers = HashMap::with_capacity(capacity);
+        let mut hash_to_number = HashMap::with_capacity(capacity);
+        let mut bodies = HashMap::with_capacity(capacity);
+
+        for block in blocks {
+            let number = block.number();
+            let hash = block.hash();
+            let (header, body) = block.split_sealed_header_body();
+
+            headers.insert(number, header.into_header());
+            hash_to_number.insert(hash, number);
+            bodies.insert(hash, body);
+        }
+
+        Self { headers, hash_to_number, bodies }
+    }
+
     /// Create a new file client from a file path.
     pub async fn new<P: AsRef<Path>>(
         path: P,
-        consensus: Arc<dyn Consensus<B, Error = ConsensusError>>,
+        consensus: Arc<dyn Consensus<B>>,
     ) -> Result<Self, FileClientError> {
         let file = File::open(path).await?;
         Self::from_file(file, consensus).await
@@ -91,7 +117,7 @@ impl<B: FullBlock> FileClient<B> {
     /// Initialize the [`FileClient`] with a file directly.
     pub(crate) async fn from_file(
         mut file: File,
-        consensus: Arc<dyn Consensus<B, Error = ConsensusError>>,
+        consensus: Arc<dyn Consensus<B>>,
     ) -> Result<Self, FileClientError> {
         // get file len from metadata before reading
         let metadata = file.metadata().await?;
@@ -100,7 +126,7 @@ impl<B: FullBlock> FileClient<B> {
         let mut reader = vec![];
         file.read_to_end(&mut reader).await?;
 
-        Ok(FileClientBuilder { consensus, parent_header: None }
+        Ok(FileClientBuilder { consensus, parent_header: None, skip_invalid_blocks: false }
             .build(&reader[..], file_len)
             .await?
             .file_client)
@@ -137,17 +163,9 @@ impl<B: FullBlock> FileClient<B> {
         if self.headers.is_empty() {
             return true
         }
-        let mut nums = self.headers.keys().copied().collect::<Vec<_>>();
-        nums.sort_unstable();
-        let mut iter = nums.into_iter();
-        let mut lowest = iter.next().expect("not empty");
-        for next in iter {
-            if next != lowest + 1 {
-                return false
-            }
-            lowest = next;
-        }
-        true
+        let (min, max) = self.headers.keys().minmax().into_option().expect("not empty");
+        // Contiguous range from min to max means no gaps
+        *max - *min + 1 == self.headers.len() as u64
     }
 
     /// Use the provided bodies as the file client's block body buffer.
@@ -196,8 +214,9 @@ impl<B: FullBlock> FileClient<B> {
 }
 
 struct FileClientBuilder<B: Block> {
-    pub consensus: Arc<dyn Consensus<B, Error = ConsensusError>>,
+    pub consensus: Arc<dyn Consensus<B>>,
     pub parent_header: Option<SealedHeader<B::Header>>,
+    pub skip_invalid_blocks: bool,
 }
 
 impl<B: FullBlock<Header: reth_primitives_traits::BlockHeader>> FromReader
@@ -254,15 +273,33 @@ impl<B: FullBlock<Header: reth_primitives_traits::BlockHeader>> FromReader
 
                 let block = SealedBlock::seal_slow(block);
 
-                // Validate standalone header
-                self.consensus.validate_header(block.sealed_header())?;
-                if let Some(parent) = &parent_header {
-                    self.consensus.validate_header_against_parent(block.sealed_header(), parent)?;
+                // Run consensus pre-checks. An invalid block here (e.g. mid-file in a
+                // BlockchainTest sequence that intentionally interleaves invalid block proposals
+                // with the valid chain) is not a hard failure: skip the block and keep decoding
+                // so the pipeline can still apply the valid prefix.
+                let validation =
+                    self.consensus.validate_header(block.sealed_header()).and_then(|_| {
+                        if let Some(parent) = &parent_header {
+                            self.consensus
+                                .validate_header_against_parent(block.sealed_header(), parent)?;
+                        }
+                        self.consensus.validate_block_pre_execution(&block)
+                    });
+                if let Err(err) = validation {
+                    if !self.skip_invalid_blocks {
+                        return Err(err.into())
+                    }
+                    warn!(target: "downloaders::file",
+                        block_number = block.number(),
+                        block_hash = %block.hash(),
+                        %err,
+                        "skipping invalid block while decoding file"
+                    );
+                    continue
+                }
+                if parent_header.is_some() {
                     parent_header = Some(block.sealed_header().clone());
                 }
-
-                // Validate block against header
-                self.consensus.validate_block_pre_execution(&block)?;
 
                 // add to the internal maps
                 let block_hash = block.hash();
@@ -392,13 +429,113 @@ impl<B: FullBlock> BlockClient for FileClient<B> {
     type Block = B;
 }
 
+/// File reader type for handling different compression formats.
+#[derive(Debug)]
+enum FileReader {
+    /// Regular uncompressed file with remaining byte tracking.
+    Plain { file: File, remaining_bytes: u64 },
+    /// Gzip compressed file.
+    Gzip(GzipDecoder<BufReader<File>>),
+}
+
+impl FileReader {
+    /// Read some data into the provided buffer, returning the number of bytes read.
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
+        match self {
+            Self::Plain { file, .. } => file.read(buf).await,
+            Self::Gzip(decoder) => decoder.read(buf).await,
+        }
+    }
+
+    /// Read next chunk from file. Returns the number of bytes read for plain files,
+    /// or a boolean indicating if data is available for gzip files.
+    async fn read_next_chunk(
+        &mut self,
+        chunk: &mut Vec<u8>,
+        chunk_byte_len: u64,
+    ) -> Result<Option<u64>, FileClientError> {
+        match self {
+            Self::Plain { .. } => self.read_plain_chunk(chunk, chunk_byte_len).await,
+            Self::Gzip(_) => {
+                Ok((self.read_gzip_chunk(chunk, chunk_byte_len).await?)
+                    .then_some(chunk.len() as u64))
+            }
+        }
+    }
+
+    async fn read_plain_chunk(
+        &mut self,
+        chunk: &mut Vec<u8>,
+        chunk_byte_len: u64,
+    ) -> Result<Option<u64>, FileClientError> {
+        let Self::Plain { file, remaining_bytes } = self else {
+            unreachable!("read_plain_chunk should only be called on Plain variant")
+        };
+
+        if *remaining_bytes == 0 && chunk.is_empty() {
+            // eof
+            return Ok(None)
+        }
+
+        let chunk_target_len = chunk_byte_len.min(*remaining_bytes + chunk.len() as u64);
+        let old_bytes_len = chunk.len() as u64;
+
+        // calculate reserved space in chunk
+        let new_read_bytes_target_len = chunk_target_len - old_bytes_len;
+
+        // read new bytes from file
+        let prev_read_bytes_len = chunk.len();
+        chunk.extend(std::iter::repeat_n(0, new_read_bytes_target_len as usize));
+        let reader = &mut chunk[prev_read_bytes_len..];
+
+        // actual bytes that have been read
+        let new_read_bytes_len = file.read_exact(reader).await? as u64;
+        let next_chunk_byte_len = chunk.len();
+
+        // update remaining file length
+        *remaining_bytes -= new_read_bytes_len;
+
+        debug!(target: "downloaders::file",
+            max_chunk_byte_len=chunk_byte_len,
+            prev_read_bytes_len,
+            new_read_bytes_target_len,
+            new_read_bytes_len,
+            next_chunk_byte_len,
+            remaining_file_byte_len=*remaining_bytes,
+            "new bytes were read from file"
+        );
+
+        Ok(Some(next_chunk_byte_len as u64))
+    }
+
+    /// Read next chunk from gzipped file.
+    async fn read_gzip_chunk(
+        &mut self,
+        chunk: &mut Vec<u8>,
+        chunk_byte_len: u64,
+    ) -> Result<bool, FileClientError> {
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            if chunk.len() >= chunk_byte_len as usize {
+                return Ok(true)
+            }
+
+            match self.read(&mut buffer).await {
+                Ok(0) => return Ok(!chunk.is_empty()),
+                Ok(n) => {
+                    chunk.extend_from_slice(&buffer[..n]);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
 /// Chunks file into several [`FileClient`]s.
 #[derive(Debug)]
 pub struct ChunkedFileReader {
-    /// File to read from.
-    file: File,
-    /// Current file byte length.
-    file_byte_len: u64,
+    /// File reader (either plain or gzip).
+    file: FileReader,
     /// Bytes that have been read.
     chunk: Vec<u8>,
     /// Max bytes per chunk.
@@ -409,97 +546,74 @@ pub struct ChunkedFileReader {
 }
 
 impl ChunkedFileReader {
-    /// Returns the remaining file length.
-    pub const fn file_len(&self) -> u64 {
-        self.file_byte_len
-    }
-
     /// Opens the file to import from given path. Returns a new instance. If no chunk byte length
     /// is passed, chunks have [`DEFAULT_BYTE_LEN_CHUNK_CHAIN_FILE`] (one static file).
+    /// Automatically detects gzip files by extension (.gz, .gzip).
     pub async fn new<P: AsRef<Path>>(
         path: P,
         chunk_byte_len: Option<u64>,
     ) -> Result<Self, FileClientError> {
+        let path = path.as_ref();
         let file = File::open(path).await?;
         let chunk_byte_len = chunk_byte_len.unwrap_or(DEFAULT_BYTE_LEN_CHUNK_CHAIN_FILE);
 
-        Self::from_file(file, chunk_byte_len).await
+        Self::from_file(
+            file,
+            chunk_byte_len,
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ["gz", "gzip"].contains(&ext)),
+        )
+        .await
     }
 
     /// Opens the file to import from given path. Returns a new instance.
-    pub async fn from_file(file: File, chunk_byte_len: u64) -> Result<Self, FileClientError> {
-        // get file len from metadata before reading
-        let metadata = file.metadata().await?;
-        let file_byte_len = metadata.len();
-
-        Ok(Self { file, file_byte_len, chunk: vec![], chunk_byte_len, highest_block: None })
-    }
-
-    /// Calculates the number of bytes to read from the chain file. Returns a tuple of the chunk
-    /// length and the remaining file length.
-    const fn chunk_len(&self) -> u64 {
-        let Self { chunk_byte_len, file_byte_len, .. } = *self;
-        let file_byte_len = file_byte_len + self.chunk.len() as u64;
-
-        if chunk_byte_len > file_byte_len {
-            // last chunk
-            file_byte_len
+    pub async fn from_file(
+        file: File,
+        chunk_byte_len: u64,
+        is_gzip: bool,
+    ) -> Result<Self, FileClientError> {
+        let file_reader = if is_gzip {
+            FileReader::Gzip(GzipDecoder::new(BufReader::new(file)))
         } else {
-            chunk_byte_len
-        }
+            let remaining_bytes = file.metadata().await?.len();
+            FileReader::Plain { file, remaining_bytes }
+        };
+
+        Ok(Self { file: file_reader, chunk: vec![], chunk_byte_len, highest_block: None })
     }
 
     /// Reads bytes from file and buffers as next chunk to decode. Returns byte length of next
     /// chunk to read.
-    async fn read_next_chunk(&mut self) -> Result<Option<u64>, io::Error> {
-        if self.file_byte_len == 0 && self.chunk.is_empty() {
-            // eof
-            return Ok(None)
-        }
-
-        let chunk_target_len = self.chunk_len();
-        let old_bytes_len = self.chunk.len() as u64;
-
-        // calculate reserved space in chunk
-        let new_read_bytes_target_len = chunk_target_len - old_bytes_len;
-
-        // read new bytes from file
-        let prev_read_bytes_len = self.chunk.len();
-        self.chunk.extend(std::iter::repeat_n(0, new_read_bytes_target_len as usize));
-        let reader = &mut self.chunk[prev_read_bytes_len..];
-
-        // actual bytes that have been read
-        let new_read_bytes_len = self.file.read_exact(reader).await? as u64;
-        let next_chunk_byte_len = self.chunk.len();
-
-        // update remaining file length
-        self.file_byte_len -= new_read_bytes_len;
-
-        debug!(target: "downloaders::file",
-            max_chunk_byte_len=self.chunk_byte_len,
-            prev_read_bytes_len,
-            new_read_bytes_target_len,
-            new_read_bytes_len,
-            next_chunk_byte_len,
-            remaining_file_byte_len=self.file_byte_len,
-            "new bytes were read from file"
-        );
-
-        Ok(Some(next_chunk_byte_len as u64))
+    async fn read_next_chunk(&mut self) -> Result<Option<u64>, FileClientError> {
+        self.file.read_next_chunk(&mut self.chunk, self.chunk_byte_len).await
     }
 
     /// Read next chunk from file. Returns [`FileClient`] containing decoded chunk.
+    ///
+    /// For gzipped files, this method accumulates data until at least `chunk_byte_len` bytes
+    /// are available before processing. For plain files, it uses the original chunking logic.
     pub async fn next_chunk<B: FullBlock>(
         &mut self,
-        consensus: Arc<dyn Consensus<B, Error = ConsensusError>>,
+        consensus: Arc<dyn Consensus<B>>,
         parent_header: Option<SealedHeader<B::Header>>,
     ) -> Result<Option<FileClient<B>>, FileClientError> {
-        let Some(next_chunk_byte_len) = self.read_next_chunk().await? else { return Ok(None) };
+        self.next_chunk_with_invalid_block_handling(consensus, parent_header, false).await
+    }
+
+    /// Read next chunk from file, optionally skipping blocks that fail consensus pre-checks.
+    pub async fn next_chunk_with_invalid_block_handling<B: FullBlock>(
+        &mut self,
+        consensus: Arc<dyn Consensus<B>>,
+        parent_header: Option<SealedHeader<B::Header>>,
+        skip_invalid_blocks: bool,
+    ) -> Result<Option<FileClient<B>>, FileClientError> {
+        let Some(chunk_len) = self.read_next_chunk().await? else { return Ok(None) };
 
         // make new file client from chunk
         let DecodedFileChunk { file_client, remaining_bytes, .. } =
-            FileClientBuilder { consensus, parent_header }
-                .build(&self.chunk[..], next_chunk_byte_len)
+            FileClientBuilder { consensus, parent_header, skip_invalid_blocks }
+                .build(&self.chunk[..], chunk_len)
                 .await?;
 
         // save left over bytes
@@ -513,7 +627,15 @@ impl ChunkedFileReader {
     where
         T: FromReceiptReader,
     {
-        let Some(next_chunk_byte_len) = self.read_next_chunk().await? else { return Ok(None) };
+        let Some(next_chunk_byte_len) = self.read_next_chunk().await.map_err(|e| {
+            T::Error::from(match e {
+                FileClientError::Io(io_err) => io_err,
+                _ => io::Error::other(e.to_string()),
+            })
+        })?
+        else {
+            return Ok(None)
+        };
 
         // make new file client from chunk
         let DecodedFileChunk { file_client, remaining_bytes, highest_block } =
@@ -572,9 +694,10 @@ mod tests {
         test_utils::{generate_bodies, generate_bodies_file},
     };
     use assert_matches::assert_matches;
+    use async_compression::tokio::write::GzipEncoder;
     use futures_util::stream::StreamExt;
     use rand::Rng;
-    use reth_consensus::{noop::NoopConsensus, test_utils::TestConsensus};
+    use reth_consensus::{noop::NoopConsensus, test_utils::TestConsensus, ConsensusError};
     use reth_ethereum_primitives::Block;
     use reth_network_p2p::{
         bodies::downloader::BodyDownloader,
@@ -582,6 +705,10 @@ mod tests {
     };
     use reth_provider::test_utils::create_test_provider_factory;
     use std::sync::Arc;
+    use tokio::{
+        fs::File,
+        io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
+    };
 
     #[tokio::test]
     async fn streams_bodies_from_buffer() {
@@ -589,7 +716,7 @@ mod tests {
         let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=19);
 
-        insert_headers(factory.db_ref().db(), &headers);
+        insert_headers(&factory, &headers);
 
         // create an empty file
         let file = tempfile::tempfile().unwrap();
@@ -598,7 +725,7 @@ mod tests {
             FileClient::from_file(file.into(), NoopConsensus::arc())
                 .await
                 .unwrap()
-                .with_bodies(bodies.clone()),
+                .with_bodies(bodies.clone().into_iter().collect()),
         );
         let mut downloader = BodiesDownloaderBuilder::default().build::<Block, _, _>(
             client.clone(),
@@ -642,7 +769,7 @@ mod tests {
         downloader.update_sync_target(SyncTarget::Tip(p0.hash()));
 
         let headers = downloader.next().await.unwrap();
-        assert_eq!(headers, Ok(vec![p0, p1, p2]));
+        assert_eq!(headers.unwrap(), vec![p0, p1, p2]);
         assert!(downloader.next().await.is_none());
         assert!(downloader.next().await.is_none());
     }
@@ -684,7 +811,7 @@ mod tests {
             Arc::new(FileClient::from_file(file, NoopConsensus::arc()).await.unwrap());
 
         // insert headers in db for the bodies downloader
-        insert_headers(factory.db_ref().db(), &headers);
+        insert_headers(&factory, &headers);
 
         let mut downloader = BodiesDownloaderBuilder::default().build::<Block, _, _>(
             client.clone(),
@@ -700,6 +827,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strict_chunk_decode_fails_on_invalid_block() {
+        let (file, _, _) = generate_bodies_file(0..=2).await;
+        let chunk_byte_len = file.metadata().await.unwrap().len();
+        let mut reader = ChunkedFileReader::from_file(file, chunk_byte_len, false).await.unwrap();
+        let consensus = Arc::new(TestConsensus::default());
+        consensus.set_fail_validation(true);
+
+        let err = reader.next_chunk::<Block>(consensus, None).await.unwrap_err();
+
+        assert_matches!(err, FileClientError::Consensus(ConsensusError::BaseFeeMissing));
+    }
+
+    #[tokio::test]
+    async fn lenient_chunk_decode_skips_invalid_blocks() {
+        let (file, _, _) = generate_bodies_file(0..=2).await;
+        let chunk_byte_len = file.metadata().await.unwrap().len();
+        let mut reader = ChunkedFileReader::from_file(file, chunk_byte_len, false).await.unwrap();
+        let consensus = Arc::new(TestConsensus::default());
+        consensus.set_fail_validation(true);
+
+        let client = reader
+            .next_chunk_with_invalid_block_handling::<Block>(consensus, None, true)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(client.headers_len(), 0);
+        assert!(client.tip().is_none());
+    }
+
+    #[tokio::test]
     async fn test_chunk_download_headers_from_file() {
         reth_tracing::init_test_tracing();
 
@@ -712,7 +870,8 @@ mod tests {
         trace!(target: "downloaders::file::test", chunk_byte_len);
 
         // init reader
-        let mut reader = ChunkedFileReader::from_file(file, chunk_byte_len as u64).await.unwrap();
+        let mut reader =
+            ChunkedFileReader::from_file(file, chunk_byte_len as u64, false).await.unwrap();
 
         let mut downloaded_headers: Vec<SealedHeader> = vec![];
 
@@ -728,7 +887,82 @@ mod tests {
 
             // construct headers downloader and use first header
             let mut header_downloader = ReverseHeadersDownloaderBuilder::default()
-                .build(Arc::clone(&Arc::new(client)), Arc::new(TestConsensus::default()));
+                .build(Arc::new(client), Arc::new(TestConsensus::default()));
+            header_downloader.update_local_head(local_header.clone());
+            header_downloader.update_sync_target(SyncTarget::Tip(sync_target_hash));
+
+            // get headers first
+            let mut downloaded_headers_chunk = header_downloader.next().await.unwrap().unwrap();
+
+            // export new local header to outer scope
+            local_header = sync_target;
+
+            // reverse to make sure it's in the right order before comparing
+            downloaded_headers_chunk.reverse();
+            downloaded_headers.extend_from_slice(&downloaded_headers_chunk);
+        }
+
+        // the first header is not included in the response
+        assert_eq!(headers[1..], downloaded_headers);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_download_headers_from_gzip_file() {
+        reth_tracing::init_test_tracing();
+
+        // Generate some random blocks
+        let (file, headers, _) = generate_bodies_file(0..=14).await;
+
+        // Create a gzipped version of the file
+        let gzip_temp_file = tempfile::NamedTempFile::new().unwrap();
+        let gzip_path = gzip_temp_file.path().to_owned();
+        drop(gzip_temp_file); // Close the file so we can write to it
+
+        // Read original file content first
+        let mut original_file = file;
+        original_file.seek(SeekFrom::Start(0)).await.unwrap();
+        let mut original_content = Vec::new();
+        original_file.read_to_end(&mut original_content).await.unwrap();
+
+        let mut gzip_file = File::create(&gzip_path).await.unwrap();
+        let mut encoder = GzipEncoder::new(&mut gzip_file);
+
+        // Write the original content through the gzip encoder
+        encoder.write_all(&original_content).await.unwrap();
+        encoder.shutdown().await.unwrap();
+        drop(gzip_file);
+
+        // Reopen the gzipped file for reading
+        let gzip_file = File::open(&gzip_path).await.unwrap();
+
+        // calculate min for chunk byte length range, pick a lower bound that guarantees at least
+        // one block will be read
+        let chunk_byte_len = rand::rng().random_range(2000..=10_000);
+        trace!(target: "downloaders::file::test", chunk_byte_len);
+
+        // init reader with gzip=true
+        let mut reader =
+            ChunkedFileReader::from_file(gzip_file, chunk_byte_len as u64, true).await.unwrap();
+
+        let mut downloaded_headers: Vec<SealedHeader> = vec![];
+
+        let mut local_header = headers.first().unwrap().clone();
+
+        // test
+        while let Some(client) =
+            reader.next_chunk::<Block>(NoopConsensus::arc(), None).await.unwrap()
+        {
+            if client.headers_len() == 0 {
+                continue;
+            }
+
+            let sync_target = client.tip_header().expect("tip_header should not be None");
+
+            let sync_target_hash = sync_target.hash();
+
+            // construct headers downloader and use first header
+            let mut header_downloader = ReverseHeadersDownloaderBuilder::default()
+                .build(Arc::new(client), Arc::new(TestConsensus::default()));
             header_downloader.update_local_head(local_header.clone());
             header_downloader.update_sync_target(SyncTarget::Tip(sync_target_hash));
 

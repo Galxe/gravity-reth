@@ -1,14 +1,19 @@
 //! Listeners for the transaction-pool
 
 use crate::{
-    pool::events::{FullTransactionEvent, NewTransactionEvent, TransactionEvent},
+    pool::{
+        events::{FullTransactionEvent, NewTransactionEvent, TransactionEvent},
+        QueuedReason,
+    },
     traits::{NewBlobSidecar, PropagateKind},
     PoolTransaction, ValidPoolTransaction,
 };
-use alloy_primitives::{TxHash, B256};
+use alloy_primitives::{
+    map::{hash_map::Entry, B256Map},
+    TxHash, B256,
+};
 use futures_util::Stream;
 use std::{
-    collections::{hash_map::Entry, HashMap},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -17,6 +22,7 @@ use tokio::sync::mpsc::{
     self as mpsc, error::TrySendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
 use tracing::debug;
+
 /// The size of the event channel used to propagate transaction events.
 const TX_POOL_EVENT_CHANNEL_SIZE: usize = 1024;
 
@@ -29,6 +35,11 @@ pub struct TransactionEvents {
 }
 
 impl TransactionEvents {
+    /// Create a new instance of this stream.
+    pub const fn new(hash: TxHash, events: UnboundedReceiver<TransactionEvent>) -> Self {
+        Self { hash, events }
+    }
+
     /// The hash for this transaction
     pub const fn hash(&self) -> TxHash {
         self.hash
@@ -73,18 +84,18 @@ impl<T: PoolTransaction> Stream for AllTransactionsEvents<T> {
 /// This is essentially a multi-producer, multi-consumer channel where each event is broadcast to
 /// all active receivers.
 #[derive(Debug)]
-pub(crate) struct PoolEventBroadcast<T: PoolTransaction> {
+pub struct PoolEventBroadcast<T: PoolTransaction> {
     /// All listeners for all transaction events.
     all_events_broadcaster: AllPoolEventsBroadcaster<T>,
     /// All listeners for events for a certain transaction hash.
-    broadcasters_by_hash: HashMap<TxHash, PoolEventBroadcaster>,
+    broadcasters_by_hash: B256Map<PoolEventBroadcaster>,
 }
 
 impl<T: PoolTransaction> Default for PoolEventBroadcast<T> {
     fn default() -> Self {
         Self {
             all_events_broadcaster: AllPoolEventsBroadcaster::default(),
-            broadcasters_by_hash: HashMap::default(),
+            broadcasters_by_hash: B256Map::default(),
         }
     }
 }
@@ -112,12 +123,12 @@ impl<T: PoolTransaction> PoolEventBroadcast<T> {
 
     /// Returns true if no listeners are installed
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.all_events_broadcaster.is_empty() && self.broadcasters_by_hash.is_empty()
     }
 
     /// Create a new subscription for the given transaction hash.
-    pub(crate) fn subscribe(&mut self, tx_hash: TxHash) -> TransactionEvents {
+    pub fn subscribe(&mut self, tx_hash: TxHash) -> TransactionEvents {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         match self.broadcasters_by_hash.entry(tx_hash) {
@@ -132,14 +143,14 @@ impl<T: PoolTransaction> PoolEventBroadcast<T> {
     }
 
     /// Create a new subscription for all transactions.
-    pub(crate) fn subscribe_all(&mut self) -> AllTransactionsEvents<T> {
+    pub fn subscribe_all(&mut self) -> AllTransactionsEvents<T> {
         let (tx, rx) = tokio::sync::mpsc::channel(TX_POOL_EVENT_CHANNEL_SIZE);
         self.all_events_broadcaster.senders.push(tx);
         AllTransactionsEvents::new(rx)
     }
 
     /// Notify listeners about a transaction that was added to the pending queue.
-    pub(crate) fn pending(&mut self, tx: &TxHash, replaced: Option<Arc<ValidPoolTransaction<T>>>) {
+    pub fn pending(&mut self, tx: &TxHash, replaced: Option<Arc<ValidPoolTransaction<T>>>) {
         self.broadcast_event(tx, TransactionEvent::Pending, FullTransactionEvent::Pending(*tx));
 
         if let Some(replaced) = replaced {
@@ -149,7 +160,7 @@ impl<T: PoolTransaction> PoolEventBroadcast<T> {
     }
 
     /// Notify listeners about a transaction that was replaced.
-    pub(crate) fn replaced(&mut self, tx: Arc<ValidPoolTransaction<T>>, replaced_by: TxHash) {
+    pub fn replaced(&mut self, tx: Arc<ValidPoolTransaction<T>>, replaced_by: TxHash) {
         let transaction = Arc::clone(&tx);
         self.broadcast_event(
             tx.hash(),
@@ -159,12 +170,16 @@ impl<T: PoolTransaction> PoolEventBroadcast<T> {
     }
 
     /// Notify listeners about a transaction that was added to the queued pool.
-    pub(crate) fn queued(&mut self, tx: &TxHash) {
-        self.broadcast_event(tx, TransactionEvent::Queued, FullTransactionEvent::Queued(*tx));
+    pub fn queued(&mut self, tx: &TxHash, reason: Option<QueuedReason>) {
+        self.broadcast_event(
+            tx,
+            TransactionEvent::Queued,
+            FullTransactionEvent::Queued(*tx, reason),
+        );
     }
 
     /// Notify listeners about a transaction that was propagated.
-    pub(crate) fn propagated(&mut self, tx: &TxHash, peers: Vec<PropagateKind>) {
+    pub fn propagated(&mut self, tx: &TxHash, peers: Vec<PropagateKind>) {
         let peers = Arc::new(peers);
         self.broadcast_event(
             tx,
@@ -175,7 +190,7 @@ impl<T: PoolTransaction> PoolEventBroadcast<T> {
 
     /// Notify listeners about all discarded transactions.
     #[inline]
-    pub(crate) fn discarded_many(&mut self, discarded: &[Arc<ValidPoolTransaction<T>>]) {
+    pub fn discarded_many(&mut self, discarded: &[Arc<ValidPoolTransaction<T>>]) {
         if self.is_empty() {
             return
         }
@@ -185,17 +200,17 @@ impl<T: PoolTransaction> PoolEventBroadcast<T> {
     }
 
     /// Notify listeners about a transaction that was discarded.
-    pub(crate) fn discarded(&mut self, tx: &TxHash) {
+    pub fn discarded(&mut self, tx: &TxHash) {
         self.broadcast_event(tx, TransactionEvent::Discarded, FullTransactionEvent::Discarded(*tx));
     }
 
     /// Notify listeners about a transaction that was invalid.
-    pub(crate) fn invalid(&mut self, tx: &TxHash) {
+    pub fn invalid(&mut self, tx: &TxHash) {
         self.broadcast_event(tx, TransactionEvent::Invalid, FullTransactionEvent::Invalid(*tx));
     }
 
     /// Notify listeners that the transaction was mined
-    pub(crate) fn mined(&mut self, tx: &TxHash, block_hash: B256) {
+    pub fn mined(&mut self, tx: &TxHash, block_hash: B256) {
         self.broadcast_event(
             tx,
             TransactionEvent::Mined(block_hash),
@@ -258,17 +273,18 @@ impl PoolEventBroadcaster {
 
 /// An active listener for new pending transactions.
 #[derive(Debug)]
-pub(crate) struct PendingTransactionHashListener {
-    pub(crate) sender: mpsc::Sender<TxHash>,
+pub struct PendingTransactionHashListener {
+    /// The sender of the channel to send transaction hashes to.
+    pub sender: mpsc::Sender<TxHash>,
     /// Whether to include transactions that should not be propagated over the network.
-    pub(crate) kind: TransactionListenerKind,
+    pub kind: TransactionListenerKind,
 }
 
 impl PendingTransactionHashListener {
     /// Attempts to send all hashes to the listener.
     ///
     /// Returns false if the channel is closed (receiver dropped)
-    pub(crate) fn send_all(&self, hashes: impl IntoIterator<Item = TxHash>) -> bool {
+    pub fn send_all(&self, hashes: impl IntoIterator<Item = TxHash>) -> bool {
         for tx_hash in hashes {
             match self.sender.try_send(tx_hash) {
                 Ok(()) => {}
@@ -292,27 +308,25 @@ impl PendingTransactionHashListener {
 
 /// An active listener for new pending transactions.
 #[derive(Debug)]
-pub(crate) struct TransactionListener<T: PoolTransaction> {
-    pub(crate) sender: mpsc::Sender<NewTransactionEvent<T>>,
+pub struct TransactionListener<T: PoolTransaction> {
+    /// The sender of the channel to send new transaction events to.
+    pub sender: mpsc::Sender<NewTransactionEvent<T>>,
     /// Whether to include transactions that should not be propagated over the network.
-    pub(crate) kind: TransactionListenerKind,
+    pub kind: TransactionListenerKind,
 }
 
 impl<T: PoolTransaction> TransactionListener<T> {
     /// Attempts to send the event to the listener.
     ///
     /// Returns false if the channel is closed (receiver dropped)
-    pub(crate) fn send(&self, event: NewTransactionEvent<T>) -> bool {
+    pub fn send(&self, event: NewTransactionEvent<T>) -> bool {
         self.send_all(std::iter::once(event))
     }
 
     /// Attempts to send all events to the listener.
     ///
     /// Returns false if the channel is closed (receiver dropped)
-    pub(crate) fn send_all(
-        &self,
-        events: impl IntoIterator<Item = NewTransactionEvent<T>>,
-    ) -> bool {
+    pub fn send_all(&self, events: impl IntoIterator<Item = NewTransactionEvent<T>>) -> bool {
         for event in events {
             match self.sender.try_send(event) {
                 Ok(()) => {}

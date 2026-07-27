@@ -235,6 +235,27 @@ where
     }
 
     /// Modifies the addons with the given closure.
+    ///
+    /// This method provides access to methods on the addons type that don't have
+    /// direct builder methods. It's useful for advanced configuration scenarios
+    /// where you need to call addon-specific methods.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use tower::layer::util::Identity;
+    ///
+    /// let builder = NodeBuilder::new(config)
+    ///     .with_types::<EthereumNode>()
+    ///     .with_components(EthereumNode::components())
+    ///     .with_add_ons(EthereumAddOns::default())
+    ///     .map_add_ons(|addons| addons.with_rpc_middleware(Identity::default()));
+    /// ```
+    ///
+    /// # See also
+    ///
+    /// - [`NodeAddOns`] trait for available addon types
+    /// - [`crate::NodeBuilderWithComponents::extend_rpc_modules`] for RPC module configuration
     pub fn map_add_ons<F>(mut self, f: F) -> Self
     where
         F: FnOnce(AO) -> AO,
@@ -303,7 +324,7 @@ mod test {
     use reth_node_ethereum::EthereumNode;
     use reth_payload_builder::PayloadBuilderHandle;
     use reth_provider::noop::NoopProvider;
-    use reth_tasks::TaskManager;
+    use reth_tasks::Runtime;
     use reth_transaction_pool::noop::NoopTransactionPool;
 
     #[test]
@@ -322,12 +343,7 @@ mod test {
             payload_builder_handle: PayloadBuilderHandle::<EthEngineTypes>::noop(),
         };
 
-        let task_executor = {
-            let runtime = tokio::runtime::Runtime::new().unwrap();
-            let handle = runtime.handle().clone();
-            let manager = TaskManager::new(handle);
-            manager.executor()
-        };
+        let task_executor = Runtime::test();
 
         let node = NodeAdapter { components, task_executor, provider: NoopProvider::default() };
 

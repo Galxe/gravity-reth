@@ -11,6 +11,7 @@
 //! The most common types you'll use are:
 //! - [`Block`] - A basic block with header and body
 //! - [`SealedBlock`] - A block with its hash cached
+//! - [`SealedBlockWith`] - A sealed block paired with associated data
 //! - [`SealedHeader`] - A header with its hash cached
 //! - [`RecoveredBlock`] - A sealed block with sender addresses recovered
 //!
@@ -96,14 +97,6 @@
 //! - **Hashing**: Block hashing is expensive. Use [`SealedBlock`] to cache hashes.
 //! - **Recovery**: Sender recovery is CPU-intensive. Use [`RecoveredBlock`] to cache results.
 //! - **Parallel Recovery**: Enable the `rayon` feature for parallel transaction recovery.
-//!
-//! ## Bincode serde compatibility
-//!
-//! The [bincode-crate](https://github.com/bincode-org/bincode) is often used by additional tools when sending data over the network.
-//! `bincode` crate doesn't work well with optionally serializable serde fields, but some of the consensus types require optional serialization for RPC compatibility. Read more: <https://github.com/bincode-org/bincode/issues/326>
-//!
-//! As a workaround this crate introduces the `SerdeBincodeCompat` trait (available with the
-//! `serde-bincode-compat` feature) used to provide a bincode compatible serde representation.
 
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/paradigmxyz/reth/main/assets/reth-docs.png",
@@ -111,11 +104,23 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[macro_use]
 extern crate alloc;
+
+/// Re-export of [`quanta::Instant`] for high-resolution timing with minimal overhead.
+#[cfg(feature = "quanta")]
+pub use quanta::Instant as FastInstant;
+
+/// Fallback to [`std::time::Instant`] when the `quanta` feature is disabled.
+///
+/// This keeps `FastInstant` available for `std` consumers that opt out of
+/// `quanta` or build for targets where `quanta`'s platform timing backend is
+/// unavailable.
+#[cfg(all(feature = "std", not(feature = "quanta")))]
+pub use std::time::Instant as FastInstant;
 
 /// Common constants.
 pub mod constants;
@@ -145,32 +150,14 @@ pub use block::{
     body::{BlockBody, FullBlockBody},
     header::{AlloyBlockHeader, BlockHeader, FullBlockHeader},
     recovered::IndexedTx,
-    Block, FullBlock, RecoveredBlock, SealedBlock,
+    Block, FullBlock, RecoveredBlock, SealedBlock, SealedBlockWith,
 };
 
+#[cfg(all(test, feature = "std", feature = "reth-codec"))]
 mod withdrawal;
 pub use alloy_eips::eip2718::WithEncoded;
 
 pub mod crypto;
-
-mod error;
-pub use error::{GotExpected, GotExpectedBoxed};
-
-mod log;
-pub use alloy_primitives::{logs_bloom, Log, LogData};
-
-pub mod proofs;
-
-mod storage;
-pub use storage::StorageEntry;
-
-pub mod sync;
-
-mod extended;
-pub use extended::Extended;
-/// Common header types
-pub mod header;
-pub use header::{Header, SealedHeader, SealedHeaderFor};
 
 /// Bincode-compatible serde implementations for common abstracted types in Reth.
 ///
@@ -182,13 +169,36 @@ pub use header::{Header, SealedHeader, SealedHeaderFor};
 #[cfg(feature = "serde-bincode-compat")]
 pub mod serde_bincode_compat;
 
+mod error;
+pub use error::{GotExpected, GotExpectedBoxed};
+
+#[cfg(all(test, feature = "std", feature = "reth-codec"))]
+mod log;
+pub use alloy_primitives::{logs_bloom, Log, LogData};
+
+pub mod proofs;
+
+mod storage;
+pub use storage::{StorageEntry, ValueWithSubKey};
+
+pub mod sync;
+
+/// Common header types
+pub mod header;
+pub use header::{Header, SealedHeader, SealedHeaderFor};
+
 /// Heuristic size trait
-pub mod size;
-pub use size::InMemorySize;
+pub use alloy_consensus::InMemorySize;
+
+/// Rayon utilities
+#[cfg(feature = "rayon")]
+pub mod rayon;
+#[cfg(feature = "rayon")]
+pub use rayon::ParallelBridgeBuffered;
 
 /// Node traits
 pub mod node;
-pub use node::{BlockTy, BodyTy, FullNodePrimitives, HeaderTy, NodePrimitives, ReceiptTy, TxTy};
+pub use node::{BlockTy, BodyTy, HeaderTy, NodePrimitives, ReceiptTy, TxTy};
 
 /// Helper trait that requires de-/serialize implementation since `serde` feature is enabled.
 #[cfg(feature = "serde")]
@@ -217,25 +227,21 @@ impl<T> MaybeCompact for T where T: reth_codecs::Compact {}
 #[cfg(not(feature = "reth-codec"))]
 impl<T> MaybeCompact for T {}
 
-/// Helper trait that requires serde bincode compatibility implementation.
-#[cfg(feature = "serde-bincode-compat")]
-pub trait MaybeSerdeBincodeCompat: crate::serde_bincode_compat::SerdeBincodeCompat {}
-/// Noop. Helper trait that would require serde bincode compatibility implementation if
-/// `serde-bincode-compat` feature were enabled.
-#[cfg(not(feature = "serde-bincode-compat"))]
-pub trait MaybeSerdeBincodeCompat {}
-
-#[cfg(feature = "serde-bincode-compat")]
-impl<T> MaybeSerdeBincodeCompat for T where T: crate::serde_bincode_compat::SerdeBincodeCompat {}
-#[cfg(not(feature = "serde-bincode-compat"))]
-impl<T> MaybeSerdeBincodeCompat for T {}
-
 /// Utilities for testing.
 #[cfg(any(test, feature = "arbitrary", feature = "test-utils"))]
 pub mod test_utils {
     pub use crate::header::test_utils::{generate_valid_header, valid_header_strategy};
     #[cfg(any(test, feature = "test-utils"))]
     pub use crate::{block::TestBlock, header::test_utils::TestHeader};
+}
+
+/// Re-exports of `dashmap` types with [`alloy_primitives::map::DefaultHashBuilder`] as the hasher.
+#[cfg(feature = "dashmap")]
+pub mod dashmap {
+    pub use ::dashmap::{mapref, DashSet, Entry};
+    /// Re-export of `DashMap` with [`alloy_primitives::map::DefaultHashBuilder`] as the hasher.
+    pub type DashMap<K, V, S = alloy_primitives::map::DefaultHashBuilder> =
+        ::dashmap::DashMap<K, V, S>;
 }
 
 /// Value that contains subkey

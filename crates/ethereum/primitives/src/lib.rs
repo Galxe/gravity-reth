@@ -5,18 +5,16 @@
     html_favicon_url = "https://avatars0.githubusercontent.com/u/97369466?s=256",
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-extern crate alloc;
+// Feature-only dep: activated by `reth-codec` feature for downstream consumers.
+#[cfg(feature = "reth-codec")]
+use reth_codecs as _;
 
 mod receipt;
 pub use receipt::*;
-
-/// Kept for consistency tests
-#[cfg(test)]
-mod transaction;
 
 pub use alloy_consensus::{transaction::PooledTransaction, TxType};
 use alloy_consensus::{TxEip4844, TxEip4844WithSidecar};
@@ -31,13 +29,6 @@ pub type TransactionSigned = alloy_consensus::EthereumTxEnvelope<TxEip4844>;
 /// A type alias for [`PooledTransaction`] that's also generic over blob sidecar.
 pub type PooledTransactionVariant =
     alloy_consensus::EthereumTxEnvelope<TxEip4844WithSidecar<BlobTransactionSidecarVariant>>;
-
-/// Bincode-compatible serde implementations.
-#[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
-pub mod serde_bincode_compat {
-    pub use super::receipt::serde_bincode_compat::*;
-    pub use alloy_consensus::serde_bincode_compat::transaction::*;
-}
 
 /// Type alias for the ethereum block
 pub type Block = alloy_consensus::Block<TransactionSigned>;

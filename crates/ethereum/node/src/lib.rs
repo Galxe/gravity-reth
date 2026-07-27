@@ -9,12 +9,12 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use reth_revm as _;
 use revm as _;
 
-pub use reth_ethereum_engine_primitives::EthEngineTypes;
+pub use reth_ethereum_engine_primitives::{EthEngineTypes, EthPayloadTypes};
 
 pub mod evm;
 pub use evm::EthEvmConfig;
@@ -30,3 +30,5 @@ pub mod payload;
 
 pub mod engine;
 pub use engine::EthereumEngineValidator;
+
+pub mod engine_ssz_proxy;

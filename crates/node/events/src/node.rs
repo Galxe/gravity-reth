@@ -37,14 +37,14 @@ struct NodeState {
     current_stage: Option<CurrentStage>,
     /// The latest block reached by either pipeline or consensus engine.
     latest_block: Option<BlockNumber>,
-    /// The time of the latest block seen by the pipeline
-    latest_block_time: Option<u64>,
     /// Hash of the head block last set by fork choice update
     head_block_hash: Option<B256>,
     /// Hash of the safe block last set by fork choice update
     safe_block_hash: Option<B256>,
     /// Hash of finalized block last set by fork choice update
     finalized_block_hash: Option<B256>,
+    /// The time when we last logged a status message
+    last_status_log_time: Option<u64>,
 }
 
 impl NodeState {
@@ -56,10 +56,10 @@ impl NodeState {
             peers_info,
             current_stage: None,
             latest_block,
-            latest_block_time: None,
             head_block_hash: None,
             safe_block_hash: None,
             finalized_block_hash: None,
+            last_status_log_time: None,
         }
     }
 
@@ -208,6 +208,10 @@ impl NodeState {
 
                 self.current_stage = Some(current_stage);
             }
+            PipelineEvent::Unwound { stage_id, result } => {
+                info!(stage = %stage_id, checkpoint = %result.checkpoint.block_number, "Unwound stage");
+                self.current_stage = None;
+            }
             _ => (),
         }
     }
@@ -233,20 +237,6 @@ impl NodeState {
                 self.safe_block_hash = Some(safe_block_hash);
                 self.finalized_block_hash = Some(finalized_block_hash);
             }
-            ConsensusEngineEvent::LiveSyncProgress(live_sync_progress) => {
-                match live_sync_progress {
-                    ConsensusEngineLiveSyncProgress::DownloadingBlocks {
-                        remaining_blocks,
-                        target,
-                    } => {
-                        info!(
-                            remaining_blocks,
-                            target_block_hash=?target,
-                            "Live sync in progress, downloading blocks"
-                        );
-                    }
-                }
-            }
             ConsensusEngineEvent::CanonicalBlockAdded(executed, elapsed) => {
                 let block = executed.sealed_block();
                 let mut full = block.gas_used() as f64 * 100.0 / block.gas_limit() as f64;
@@ -271,8 +261,6 @@ impl NodeState {
             }
             ConsensusEngineEvent::CanonicalChainCommitted(head, elapsed) => {
                 self.latest_block = Some(head.number());
-                self.latest_block_time = Some(head.timestamp());
-
                 info!(number=head.number(), hash=?head.hash(), ?elapsed, "Canonical chain committed");
             }
             ConsensusEngineEvent::ForkBlockAdded(executed, elapsed) => {
@@ -283,7 +271,21 @@ impl NodeState {
                 warn!(number=block.number(), hash=?block.hash(), "Encountered invalid block");
             }
             ConsensusEngineEvent::BlockReceived(num_hash) => {
-                info!(number=num_hash.number, hash=?num_hash.hash, "Received block from consensus engine");
+                info!(number=num_hash.number, hash=?num_hash.hash, "Received new payload from consensus engine");
+            }
+            ConsensusEngineEvent::LiveSyncProgress(live_sync_progress) => {
+                match live_sync_progress {
+                    ConsensusEngineLiveSyncProgress::DownloadingBlocks {
+                        remaining_blocks,
+                        target,
+                    } => {
+                        info!(
+                            remaining_blocks,
+                            target_block_hash=?target,
+                            "Live sync in progress, downloading blocks"
+                        );
+                    }
+                }
             }
         }
     }
@@ -296,17 +298,6 @@ impl NodeState {
                 ConsensusLayerHealthEvent::NeverSeen => {
                     warn!(
                         "Post-merge network, but never seen beacon client. Please launch one to follow the chain!"
-                    )
-                }
-                ConsensusLayerHealthEvent::HasNotBeenSeenForAWhile(period) => {
-                    warn!(
-                        ?period,
-                        "Post-merge network, but no beacon client seen for a while. Please launch one to follow the chain!"
-                    )
-                }
-                ConsensusLayerHealthEvent::NeverReceivedUpdates => {
-                    warn!(
-                        "Beacon client online, but never received consensus updates. Please ensure your beacon client is operational to follow the chain!"
                     )
                 }
                 ConsensusLayerHealthEvent::HaveNotReceivedUpdatesForAWhile(period) => {
@@ -483,25 +474,28 @@ where
                         )
                     }
                 }
-            } else if let Some(latest_block) = this.state.latest_block {
+            } else {
                 let now =
                     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                if now.saturating_sub(this.state.latest_block_time.unwrap_or(0)) > 60 {
-                    // Once we start receiving consensus nodes, don't emit status unless stalled for
-                    // 1 minute
-                    info!(
-                        target: "reth::cli",
-                        connected_peers = this.state.num_connected_peers(),
-                        %latest_block,
-                        "Status"
-                    );
+
+                // Only log status if we haven't logged recently
+                if now.saturating_sub(this.state.last_status_log_time.unwrap_or(0)) > 60 {
+                    if let Some(latest_block) = this.state.latest_block {
+                        info!(
+                            target: "reth::cli",
+                            connected_peers = this.state.num_connected_peers(),
+                            %latest_block,
+                            "Status"
+                        );
+                    } else {
+                        info!(
+                            target: "reth::cli",
+                            connected_peers = this.state.num_connected_peers(),
+                            "Status"
+                        );
+                    }
+                    this.state.last_status_log_time = Some(now);
                 }
-            } else {
-                info!(
-                    target: "reth::cli",
-                    connected_peers = this.state.num_connected_peers(),
-                    "Status"
-                );
             }
         }
 
@@ -606,6 +600,8 @@ impl Display for Eta {
                     f,
                     "{}",
                     humantime::format_duration(Duration::from_secs(remaining.as_secs()))
+                        .to_string()
+                        .replace(' ', "")
                 )
             }
         }
@@ -631,6 +627,6 @@ mod tests {
         }
         .to_string();
 
-        assert_eq!(eta, "13m 37s");
+        assert_eq!(eta, "13m37s");
     }
 }

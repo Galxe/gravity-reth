@@ -10,7 +10,7 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod bundle;
 pub mod core;
@@ -21,10 +21,15 @@ pub mod node;
 pub mod pubsub;
 pub mod types;
 
+// `helpers/bal.rs` (EIP-7928 Block Access List support) is not yet wired into the module tree;
+// park its dependency so it stays available without tripping `unused_crate_dependencies`.
+use alloy_eip7928 as _;
+
 pub use bundle::{EthBundleApiServer, EthCallBundleApiServer};
 pub use core::{EthApiServer, FullEthApiServer};
 pub use ext::L2EthApiExtServer;
 pub use filter::{EngineEthFilter, EthFilterApiServer, QueryLimits};
+pub use helpers::config::EthConfigApiServer;
 pub use node::{RpcNodeCore, RpcNodeCoreExt};
 pub use pubsub::EthPubSubApiServer;
 pub use reth_rpc_convert::*;
@@ -41,5 +46,7 @@ pub use core::EthApiClient;
 pub use ext::L2EthApiExtClient;
 #[cfg(feature = "client")]
 pub use filter::EthFilterApiClient;
+#[cfg(feature = "client")]
+pub use helpers::config::EthConfigApiClient;
 
 use reth_trie_common as _;

@@ -1,7 +1,6 @@
 //! Multiproof task related functionality.
 
 use crate::tree::payload_processor::executor::WorkloadExecutor;
-use alloy_evm::block::StateChangeSource;
 use alloy_primitives::{
     keccak256,
     map::{B256Set, HashSet},
@@ -32,6 +31,44 @@ use tracing::{debug, error, trace};
 
 /// The size of proof targets chunk to spawn in one calculation.
 const MULTIPROOF_TARGETS_CHUNK_SIZE: usize = 10;
+
+/// Source of a state change reported to the multiproof pipeline.
+///
+/// Vendored from alloy-evm 0.21 `block::StateChangeSource`, which was removed upstream in 0.36
+/// together with the source-aware `OnStateHook`. The multiproof plumbing carries it for tracing
+/// labels only; `PayloadProcessor::state_hook` now synthesizes `Transaction` indices at the
+/// boundary.
+#[derive(Debug, Clone, Copy)]
+pub enum StateChangeSource {
+    /// Transaction with its index
+    Transaction(usize),
+    /// Pre-block state transition
+    PreBlock(StateChangePreBlockSource),
+    /// Post-block state transition
+    PostBlock(StateChangePostBlockSource),
+}
+
+/// Source of the pre-block state change
+#[derive(Debug, Clone, Copy)]
+pub enum StateChangePreBlockSource {
+    /// EIP-2935 blockhashes contract
+    BlockHashesContract,
+    /// EIP-4788 beacon root contract
+    BeaconRootContract,
+    /// EIP-7002 withdrawal requests contract
+    WithdrawalRequestsContract,
+}
+
+/// Source of the post-block state change
+#[derive(Debug, Clone, Copy)]
+pub enum StateChangePostBlockSource {
+    /// Balance increments from block rewards and withdrawals
+    BalanceIncrements,
+    /// EIP-7002 withdrawal requests contract
+    WithdrawalRequestsContract,
+    /// EIP-7251 consolidation requests contract
+    ConsolidationRequestsContract,
+}
 
 /// A trie update that can be applied to sparse trie alongside the proofs for touched parts of the
 /// state.

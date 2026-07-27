@@ -67,17 +67,12 @@ fn deploy_contract(
         balance: U256::ZERO,
         code_hash,
         code: Some(Bytecode::new_raw(code)),
+        ..Default::default()
     };
 
     let mut state_diff = EvmState::default();
-    state_diff.insert(
-        address,
-        Account {
-            info,
-            storage: Default::default(),
-            status: AccountStatus::Created | AccountStatus::Touched,
-            transaction_id: 0,
-        },
-    );
+    let mut account = Account::from(info);
+    account.status = AccountStatus::Created | AccountStatus::Touched;
+    state_diff.insert(address, account);
     executor.apply_state_change(state_diff)
 }

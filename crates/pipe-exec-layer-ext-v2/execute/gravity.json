@@ -26,7 +26,8 @@
     "mergeNetsplitBlock": 0,
     "shanghaiTime": 0,
     "cancunTime": 0,
-    "terminalTotalDifficultyPassed": false,
+    "terminalTotalDifficulty": "0x0",
+    "terminalTotalDifficultyPassed": true,
     "extraFields": {},
     "depositContractAddress": null
   },

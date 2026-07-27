@@ -39,10 +39,22 @@ Options:
           Print help (see a summary with '-h')
 
 Metrics:
-      --metrics <SOCKET>
+      --metrics <PROMETHEUS>
           Enable Prometheus metrics.
 
           The metrics will be served at the given interface and port.
+
+      --metrics.prometheus.push.url <PUSH_GATEWAY_URL>
+          URL for pushing Prometheus metrics to a push gateway.
+
+          If set, the node will periodically push metrics to the specified push gateway URL.
+
+      --metrics.prometheus.push.interval <SECONDS>
+          Interval in seconds for pushing metrics to push gateway.
+
+          Default: 5 seconds
+
+          [default: 5]
 
 Datadir:
       --datadir <DATA_DIR>
@@ -59,6 +71,12 @@ Datadir:
       --datadir.static-files <PATH>
           The absolute path to store static files in.
 
+      --datadir.rocksdb <PATH>
+          The absolute path to store `RocksDB` database in.
+
+      --datadir.pprof-dumps <PATH>
+          The absolute path to store pprof dumps in.
+
 Networking:
   -d, --disable-discovery
           Disable the discovery service
@@ -69,14 +87,16 @@ Networking:
       --disable-discv4-discovery
           Disable Discv4 discovery
 
-      --enable-discv5-discovery
-          Enable Discv5 discovery
+      --disable-discv5-discovery
+          Disable Discv5 discovery
 
       --disable-nat
           Disable Nat discovery
 
       --discovery.addr <DISCOVERY_ADDR>
-          The UDP address to use for devp2p peer discovery version 4
+          The UDP address to use for devp2p peer discovery version 4.
+
+          If unset and `--net-if.experimental` is used, discv4 binds to the resolved interface address.
 
           [default: 0.0.0.0]
 
@@ -97,7 +117,9 @@ Networking:
           [default: 9200]
 
       --discovery.v5.port.ipv6 <DISCOVERY_V5_PORT_IPV6>
-          The UDP IPv6 port to use for devp2p peer discovery version 5. Not used unless `--addr` is IPv6, or `--discovery.addr.ipv6` is set
+          The UDP IPv6 port to use for devp2p peer discovery version 5. Not used unless `--addr` is IPv6, or `--discovery.addr.ipv6` is set.
+
+          If not provided, discovery V5 defaults to same port as discovery V4 (--discovery.port).
 
           [default: 9200]
 
@@ -148,6 +170,11 @@ Networking:
 
           This will also deterministically set the peer ID. If not specified, it will be set in the data dir for the chain being used.
 
+      --p2p-secret-key-hex <HEX>
+          Hex encoded secret key to use for this node.
+
+          This will also deterministically set the peer ID. Cannot be used together with `--p2p-secret-key`.
+
       --no-persist-peers
           Do not persist peers.
 
@@ -167,10 +194,15 @@ Networking:
           [default: 30303]
 
       --max-outbound-peers <MAX_OUTBOUND_PEERS>
-          Maximum number of outbound requests. default: 100
+          Maximum number of outbound peers. default: 100
 
       --max-inbound-peers <MAX_INBOUND_PEERS>
-          Maximum number of inbound requests. default: 30
+          Maximum number of inbound peers. default: 30
+
+      --max-peers <COUNT>
+          Maximum number of total peers (inbound + outbound).
+
+          Splits peers using approximately 2:1 inbound:outbound ratio. Cannot be used together with `--max-outbound-peers` or `--max-inbound-peers`.
 
       --max-tx-reqs <COUNT>
           Max concurrent `GetPooledTransactions` requests.
@@ -221,15 +253,32 @@ Networking:
 
           [default: 25600]
 
+      --tx-channel-memory-limit <BYTES>
+          Memory limit (in bytes) for the channel that buffers transaction events flowing
+          from the network manager to the transactions manager.
+
+          When the budget is exhausted, new events are dropped (see metric
+          `total_dropped_tx_events_at_full_capacity`). Acts as a backstop against unbounded
+          memory growth under sustained P2P transaction flooding.
+
+          [default: 1073741824]
+
       --net-if.experimental <IF_NAME>
           Name of network interface used to communicate with peers.
 
-          If flag is set, but no value is passed, the default interface for docker `eth0` is tried.
+          If flag is set, but no value is passed, the default interface for docker `eth0` is tried. If `--discovery.addr` is left at its default, discv4 will also bind to the resolved interface address.
 
       --tx-propagation-policy <TX_PROPAGATION_POLICY>
           Transaction Propagation Policy
 
           The policy determines which peers transactions are gossiped to.
+
+          [default: All]
+
+      --tx-ingress-policy <TX_INGRESS_POLICY>
+          Transaction ingress policy
+
+          Determines which peers' transactions are accepted over P2P.
 
           [default: All]
 
@@ -246,7 +295,25 @@ Networking:
           [default: sqrt]
 
       --required-block-hashes <REQUIRED_BLOCK_HASHES>
-          Comma separated list of required block hashes. Peers that don't have these blocks will be filtered out
+          Comma separated list of required block hashes or block number=hash pairs. Peers that don't have these blocks will be filtered out. Format: hash or `block_number=hash` (e.g., 23115201=0x1234...)
+
+      --network-id <NETWORK_ID>
+          Optional network ID to override the chain specification's network ID for P2P connections
+
+      --eth-max-message-size <BYTES>
+          Maximum allowed ETH message size in bytes. Default is 10 MiB
+
+      --netrestrict <NETRESTRICT>
+          Restrict network communication to the given IP networks (CIDR masks).
+
+          Comma separated list of CIDR network specifications. Only peers with IP addresses within these ranges will be allowed to connect.
+
+          Example: --netrestrict "192.168.0.0/16,10.0.0.0/8"
+
+      --enforce-enr-fork-id
+          Enforce EIP-868 ENR fork ID validation for discovered peers.
+
+          When enabled, peers discovered without a confirmed fork ID are not added to the peer set until their fork ID is verified via EIP-868 ENR request. This filters out peers from other networks that pollute the discovery table.
 
 RPC:
       --http
@@ -268,7 +335,7 @@ RPC:
       --http.api <HTTP_API>
           Rpc Modules to be configured for the HTTP server
 
-          [possible values: admin, debug, eth, net, trace, txpool, web3, rpc, reth, ots, flashbots, miner, mev]
+          [possible values: admin, debug, eth, net, trace, txpool, web3, rpc, reth, ots, flashbots, miner, mev, testing]
 
       --http.corsdomain <HTTP_CORSDOMAIN>
           Http Corsdomain to allow request from
@@ -292,7 +359,7 @@ RPC:
       --ws.api <WS_API>
           Rpc Modules to be configured for the WS server
 
-          [possible values: admin, debug, eth, net, trace, txpool, web3, rpc, reth, ots, flashbots, miner, mev]
+          [possible values: admin, debug, eth, net, trace, txpool, web3, rpc, reth, ots, flashbots, miner, mev, testing]
 
       --ipcdisable
           Disable the IPC-RPC server
@@ -322,7 +389,7 @@ RPC:
 
           This will enforce JWT authentication for all requests coming from the consensus layer.
 
-          If no path is provided, a secret will be generated and stored in the datadir under `<DIR>/<CHAIN_ID>/jwt.hex`. For mainnet this would be `~/.reth/mainnet/jwt.hex` by default.
+          If no path is provided, a secret will be generated and stored in the datadir under `<DIR>/<CHAIN_ID>/jwt.hex`. For mainnet this would be `~/.local/share/reth/mainnet/jwt.hex` by default.
 
       --auth-ipc
           Enable auth engine API over IPC
@@ -341,6 +408,9 @@ RPC:
           Hex encoded JWT secret to authenticate the regular RPC server(s), see `--http.api` and `--ws.api`.
 
           This is __not__ used for the authenticated engine-API RPC server, see `--authrpc.jwtsecret`.
+
+      --rpc.disable-metrics
+          Disable built-in RPC request metrics
 
       --rpc.max-request-size <RPC_MAX_REQUEST_SIZE>
           Set the maximum RPC request payload size for both HTTP and WS in megabytes
@@ -370,6 +440,13 @@ RPC:
 
           [default: <NUM CPU CORES-2>]
 
+      --rpc.max-blocking-io-requests <COUNT>
+          Maximum number of concurrent blocking IO requests.
+
+          Blocking IO requests include `eth_call`, `eth_estimateGas`, and similar methods that require EVM execution. These are spawned as blocking tasks to avoid blocking the async runtime.
+
+          [default: 256]
+
       --rpc.max-trace-filter-blocks <COUNT>
           Maximum number of blocks for `trace_filter` requests
 
@@ -390,6 +467,11 @@ RPC:
 
           [default: 50000000]
 
+      --rpc.evm-memory-limit <MEMORY_LIMIT>
+          Maximum memory the EVM can allocate per RPC request
+
+          [default: 4294967295]
+
       --rpc.txfeecap <TX_FEE_CAP>
           Maximum eth transaction fee (in ether) that can be sent via the RPC APIs (0 = no cap)
 
@@ -399,6 +481,11 @@ RPC:
           Maximum number of blocks for `eth_simulateV1` call
 
           [default: 256]
+
+      --rpc.compute-state-root-for-eth-simulate
+          Compute state roots for `eth_simulateV1` responses
+
+          [env: RETH_RPC_COMPUTE_STATE_ROOT_FOR_ETH_SIMULATE=]
 
       --rpc.eth-proof-window <RPC_ETH_PROOF_WINDOW>
           The maximum proof window for historical proof generation. This value allows for generating historical proofs up to configured number of blocks from current tip (up to `tip - window`)
@@ -439,10 +526,20 @@ RPC State Cache:
 
           [default: 1000]
 
+      --rpc-cache.max-bals <MAX_BALS>
+          Max number of revm block access lists in cache
+
+          [default: 1000]
+
       --rpc-cache.max-concurrent-db-requests <MAX_CONCURRENT_DB_REQUESTS>
           Max number of concurrent database requests
 
           [default: 512]
+
+      --rpc-cache.max-cached-tx-hashes <MAX_CACHED_TX_HASHES>
+          Maximum number of transaction hashes to cache for transaction lookups
+
+          [default: 30000]
 
 Gas Price Oracle:
       --gpo.blocks <BLOCKS>
@@ -453,7 +550,7 @@ Gas Price Oracle:
       --gpo.ignoreprice <IGNORE_PRICE>
           Gas Price below which gpo will ignore transactions
 
-          [default: 2]
+          [default: 0]
 
       --gpo.maxprice <MAX_PRICE>
           Maximum transaction priority fee(or gasprice before London Fork) to be recommended by gpo
@@ -473,9 +570,19 @@ Gas Price Oracle:
 
           [default: 30s]
 
+      --testing.skip-invalid-transactions
+          Skip invalid transactions in `testing_buildBlockV1` instead of failing.
+
+          When enabled, transactions that fail execution will be skipped, and all subsequent transactions from the same sender will also be skipped.
+
+      --rpc.force-blob-sidecar-upcasting
+          Force upcasting EIP-4844 blob sidecars to EIP-7594 format when Osaka is active.
+
+          When enabled, blob transactions submitted via `eth_sendRawTransaction` with EIP-4844 sidecars will be automatically converted to EIP-7594 format if the next block is Osaka. By default this is disabled, meaning transactions are submitted as-is.
+
 TxPool:
       --txpool.pending-max-count <PENDING_MAX_COUNT>
-          Max number of transaction in the pending sub-pool
+          Max number of transactions in the pending sub-pool
 
           [default: 10000]
 
@@ -485,7 +592,7 @@ TxPool:
           [default: 20]
 
       --txpool.basefee-max-count <BASEFEE_MAX_COUNT>
-          Max number of transaction in the basefee sub-pool
+          Max number of transactions in the basefee sub-pool
 
           [default: 10000]
 
@@ -495,7 +602,7 @@ TxPool:
           [default: 20]
 
       --txpool.queued-max-count <QUEUED_MAX_COUNT>
-          Max number of transaction in the queued sub-pool
+          Max number of transactions in the queued sub-pool
 
           [default: 10000]
 
@@ -505,7 +612,7 @@ TxPool:
           [default: 20]
 
       --txpool.blobpool-max-count <BLOBPOOL_MAX_COUNT>
-          Max number of transaction in the blobpool
+          Max number of transactions in the blobpool
 
           [default: 10000]
 
@@ -516,6 +623,9 @@ TxPool:
 
       --txpool.blob-cache-size <BLOB_CACHE_SIZE>
           Max number of entries for the in memory cache of the blob store
+
+      --txpool.disable-blobs-support
+          Disable EIP-4844 blob transaction support
 
       --txpool.max-account-slots <MAX_ACCOUNT_SLOTS>
           Max number of executable transaction slots guaranteed per account
@@ -605,7 +715,9 @@ TxPool:
 
 Builder:
       --builder.extradata <EXTRA_DATA>
-          Block extra data set by the payload builder
+          Block extra data set by the payload builder.
+
+          If the value is a `0x`-prefixed hex string, it is decoded into raw bytes. Otherwise, the raw UTF-8 bytes of the string are used.
 
           [default: reth/<VERSION>/<OS>]
 
@@ -628,6 +740,9 @@ Builder:
           Maximum number of tasks to spawn for building a payload
 
           [default: 3]
+
+      --builder.max-blobs <COUNT>
+          Maximum number of blobs to include per block
 
 Debug:
       --debug.terminate
@@ -652,6 +767,9 @@ Debug:
 
       --debug.skip-new-payload <SKIP_NEW_PAYLOAD>
           If provided, the engine will skip `n` consecutive new payloads
+
+      --debug.skip-genesis-validation
+          If set, bypasses genesis hash validation during init. Intended for tools that direct-write the database (e.g. snapshot importers, state-actor) and want reth to trust the DB-resident genesis state instead of recomputing it from the chainspec's alloc. When the bypass fires, a structured `tracing::warn!` is emitted so the divergence stays observable in operator logs
 
       --debug.reorg-frequency <REORG_FREQUENCY>
           If provided, the chain will be reorged at specified frequency
@@ -681,6 +799,11 @@ Debug:
       --ethstats <ETHSTATS>
           The URL of the ethstats server to connect to. Example: `nodename:secret@host:port`
 
+      --debug.startup-sync-state-idle
+          Set the node to idle state when the backfill is not running.
+
+          This makes the `eth_syncing` RPC return "Idle" when the node has just started or finished the backfill, but did not yet receive any new blocks.
+
 Database:
       --db.log-level <LOG_LEVEL>
           Database logging level. Levels higher than "notice" require a debug build
@@ -695,22 +818,35 @@ Database:
           - trace:   Enables logging for trace debug-level messages
           - extra:   Enables logging for extra debug-level messages
 
-      --db.exclusive <EXCLUSIVE>
-          Open environment in exclusive/monopolistic mode. Makes it possible to open a database on an NFS volume
+      --db.block-cache-size <BLOCK_CACHE_SIZE>
+          Block cache size in bytes (e.g., 8GB, 4096MB). This is the LRU cache for uncompressed blocks. Higher values improve read performance. Default: 8GB
 
-          [possible values: true, false]
+      --db.write-buffer-size <WRITE_BUFFER_SIZE>
+          Write buffer size in bytes (e.g., 256MB, 512MB). Larger values improve write performance but use more memory. Default: 256MB
 
-      --db.max-size <MAX_SIZE>
-          Maximum database size (e.g., 4TB, 8MB)
+      --db.max-background-jobs <MAX_BACKGROUND_JOBS>
+          Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
-      --db.growth-step <GROWTH_STEP>
-          Database growth step (e.g., 4GB, 4KB)
+      --db.max-open-files <MAX_OPEN_FILES>
+          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
 
-      --db.read-transaction-timeout <READ_TRANSACTION_TIMEOUT>
-          Read transaction timeout in seconds, 0 means no timeout
+      --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
+          Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6
 
-      --db.max-readers <MAX_READERS>
-          Maximum number of readers allowed to access the database concurrently
+      --db.compaction-readahead-size <COMPACTION_READAHEAD_SIZE>
+          Compaction readahead size in bytes (e.g., 4MB, 8MB). Larger values improve compaction performance with sequential I/O. Default: 4MB
+
+      --db.level0-file-num-compaction-trigger <LEVEL0_FILE_NUM_COMPACTION_TRIGGER>
+          Number of L0 files to trigger compaction. Lower values reduce read amplification but increase write amplification. Default: 4
+
+      --db.max-bytes-for-level-base <MAX_BYTES_FOR_LEVEL_BASE>
+          Maximum bytes for level 1 (e.g., 512MB, 1GB). This controls the target size for L1, affecting LSM tree structure. Default: 512MB
+
+      --db.bytes-per-sync <BYTES_PER_SYNC>
+          Bytes to write before background sync (e.g., 4MB, 8MB). Larger values reduce I/O overhead but may affect durability. Default: 4MB
+
+      --db.sharding-directories <SHARDING_DIRECTORIES>
+          Semicolon separated `RocksDB` sharding directories. Accepts 2 or 3 paths. Always creates 3 databases (state, `account_trie`, `storage_trie`). - 0 paths (default): Creates subdirs under --datadir: state/, `account_trie`/, `storage_trie`/ - 2 paths: First dir contains state + `account_trie`; second dir contains `storage_trie` - 3 paths: First dir is state, second is `account_trie`, third is `storage_trie`
 
 Dev testnet:
       --dev
@@ -731,29 +867,49 @@ Dev testnet:
           Parses strings using [`humantime::parse_duration`]
           --dev.block-time 12s
 
+      --dev.payload-wait-time <PAYLOAD_WAIT_TIME>
+          Time to wait after initiating payload building before resolving.
+
+          Introduces a sleep between `fork_choice_updated` and `resolve_kind` in the
+          local miner, giving the payload job time for multiple rebuild attempts with
+          new transactions from the pool.
+
+          Parses strings using [`humantime::parse_duration`]
+          --dev.payload-wait-time 450ms
+
+      --dev.mnemonic <MNEMONIC>
+          Derive dev accounts from a fixed mnemonic instead of random ones.
+
+          [default: "test test test test test test test test test test test junk"]
+
 Pruning:
       --full
-          Run full node. Only the most recent [`MINIMUM_PRUNING_DISTANCE`] block states are stored
+          Run full node. Only the most recent [`MINIMUM_UNWIND_SAFE_DISTANCE`] block states are stored
 
-      --block-interval <BLOCK_INTERVAL>
+      --minimal
+          Run minimal storage mode with maximum pruning and smaller static files.
+
+          This mode configures the node to use minimal disk space by: - Fully pruning sender recovery, transaction lookup, receipts - Leaving 10,064 blocks for account, storage history and block bodies - Using 10,000 blocks per static file segment
+
+      --prune.block-interval <BLOCK_INTERVAL>
           Minimum pruning interval measured in blocks
 
-      --prune.senderrecovery.full
+      --prune.sender-recovery.full
           Prunes all sender recovery data
 
-      --prune.senderrecovery.distance <BLOCKS>
+      --prune.sender-recovery.distance <BLOCKS>
           Prune sender recovery data before the `head-N` block number. In other words, keep last N + 1 blocks
 
-      --prune.senderrecovery.before <BLOCK_NUMBER>
+      --prune.sender-recovery.before <BLOCK_NUMBER>
           Prune sender recovery data before the specified block number. The specified block number is not pruned
 
-      --prune.transactionlookup.full
+      --prune.transaction-lookup.full
           Prunes all transaction lookup data
 
-      --prune.transactionlookup.distance <BLOCKS>
+      --prune.transaction-lookup.distance <BLOCKS>
           Prune transaction lookup data before the `head-N` block number. In other words, keep last N + 1 blocks
 
-      --prune.transactionlookup.before <BLOCK_NUMBER>
+      --prune.transaction-lookup.before <BLOCK_NUMBER>
           Prune transaction lookup data before the specified block number. The specified block number is not pruned
 
       --prune.receipts.full
@@ -771,22 +927,22 @@ Pruning:
       --prune.receiptslogfilter <FILTER_CONFIG>
           Configure receipts log filter. Format: <`address`>:<`prune_mode`>... where <`prune_mode`> can be 'full', 'distance:<`blocks`>', or 'before:<`block_number`>'
 
-      --prune.accounthistory.full
+      --prune.account-history.full
           Prunes all account history
 
-      --prune.accounthistory.distance <BLOCKS>
+      --prune.account-history.distance <BLOCKS>
           Prune account before the `head-N` block number. In other words, keep last N + 1 blocks
 
-      --prune.accounthistory.before <BLOCK_NUMBER>
+      --prune.account-history.before <BLOCK_NUMBER>
           Prune account history before the specified block number. The specified block number is not pruned
 
-      --prune.storagehistory.full
+      --prune.storage-history.full
           Prunes all storage history data
 
-      --prune.storagehistory.distance <BLOCKS>
+      --prune.storage-history.distance <BLOCKS>
           Prune storage history before the `head-N` block number. In other words, keep last N + 1 blocks
 
-      --prune.storagehistory.before <BLOCK_NUMBER>
+      --prune.storage-history.before <BLOCK_NUMBER>
           Prune storage history before the specified block number. The specified block number is not pruned
 
       --prune.bodies.pre-merge
@@ -798,22 +954,72 @@ Pruning:
       --prune.bodies.before <BLOCK_NUMBER>
           Prune storage history before the specified block number. The specified block number is not pruned
 
+      --prune.minimum-distance <BLOCKS>
+          Minimum pruning distance from the tip. This controls the safety margin for reorgs and manual unwinds
+
+Gravity:
+      --gravity.disable-pipe-execution
+          Disable pipe execution. default false
+
+      --gravity.disable-grevm
+          Disable the Grevm executor. default false
+
+      --gravity.cache.max-persist-gap <CACHE_MAX_PERSIST_GAP>
+          The max block height between merged and pesist block height
+
+          [default: 128]
+
+      --gravity.persist.merge-blocks
+          Persist consecutive blocks as one merged commit per group to amortize the per-commit fsync (much faster from-genesis catch-up). default false
+
+      --gravity.cache.capacity <CACHE_CAPACITY>
+          The max size of cached items
+
+          [default: 2000000]
+
+      --gravity.report-db-metrics
+          Report db metrics. default false
+
+      --gravity.trie.parallel-level <TRIE_PARALLEL_LEVELS>
+          Max parallel level in nested hash
+
+          [default: 1]
+
 Engine:
       --engine.persistence-threshold <PERSISTENCE_THRESHOLD>
-          Configure persistence threshold for engine experimental
+          Configure persistence threshold for the engine. This determines how many canonical blocks must be in-memory, ahead of the last persisted block, before flushing canonical blocks to disk again.
+
+          To persist blocks as fast as the node receives them, set this value to zero. This will cause more frequent DB writes.
 
           [default: 2]
+
+      --engine.persistence-backpressure-threshold <PERSISTENCE_BACKPRESSURE_THRESHOLD>
+          Configure the maximum canonical-minus-persisted gap before engine API processing stalls.
+
+          If omitted, this defaults to the larger of the default backpressure threshold and twice `--engine.persistence-threshold`.
+
+          This value must be greater than `--engine.persistence-threshold`.
 
       --engine.memory-block-buffer-target <MEMORY_BLOCK_BUFFER_TARGET>
           Configure the target number of blocks to keep in memory
 
           [default: 0]
 
+      --engine.invalid-header-cache-hit-eviction-threshold <INVALID_HEADER_HIT_EVICTION_THRESHOLD>
+          Configure how many cache hits an invalid header can accumulate before it is evicted and reprocessed.
+
+          Set to `0` to effectively disable the cache because entries are evicted on the first lookup.
+
+          [default: 128]
+
       --engine.legacy-state-root
           Enable legacy state root
 
-      --engine.disable-caching-and-prewarming
-          Disable cross-block caching and parallel prewarming
+      --engine.disable-state-cache
+          Disable state cache
+
+      --engine.disable-prewarming
+          Disable parallel prewarming
 
       --engine.disable-parallel-sparse-trie
           Disable the parallel sparse trie in the engine
@@ -832,10 +1038,10 @@ Engine:
       --engine.accept-execution-requests-hash
           Enables accepting requests hash instead of an array of requests in `engine_newPayloadV4`
 
-      --engine.max-proof-task-concurrency <MAX_PROOF_TASK_CONCURRENCY>
-          Configure the maximum number of concurrent proof tasks
+      --engine.multiproof-chunk-size <MULTIPROOF_CHUNK_SIZE>
+          Multiproof task chunk size for proof targets
 
-          [default: 256]
+          [default: 5]
 
       --engine.reserved-cpu-cores <RESERVED_CPU_CORES>
           Configure the number of reserved CPU cores for non-reth processes
@@ -856,6 +1062,66 @@ Engine:
       --engine.allow-unwind-canonical-header
           Allow unwinding canonical header to ancestor during forkchoice updates. See `TreeConfig::unwind_canonical_header` for more details
 
+      --engine.storage-worker-count <STORAGE_WORKER_COUNT>
+          Configure the number of storage proof workers in the Tokio blocking pool. If not specified, defaults to 2x available parallelism
+
+      --engine.account-worker-count <ACCOUNT_WORKER_COUNT>
+          Configure the number of account proof workers in the Tokio blocking pool. If not specified, defaults to the same count as storage workers
+
+      --engine.prewarming-threads <PREWARMING_THREADS>
+          Configure the number of prewarming threads. If not specified, defaults to available parallelism
+
+      --engine.disable-cache-metrics
+          Disable cache metrics recording, which can take up to 50ms with large cached state
+
+      --engine.sparse-trie-max-hot-slots <SPARSE_TRIE_MAX_HOT_SLOTS>
+          LFU hot-slot capacity: max storage slots retained across sparse trie prune cycles
+
+          [default: 1500]
+
+      --engine.sparse-trie-max-hot-accounts <SPARSE_TRIE_MAX_HOT_ACCOUNTS>
+          LFU hot-account capacity: max account addresses retained across sparse trie prune cycles
+
+          [default: 1000]
+
+      --engine.max-proof-task-concurrency <MAX_PROOF_TASK_CONCURRENCY>
+          Configure the maximum number of concurrent proof tasks
+
+          [default: 256]
+
+      --engine.disable-sparse-trie-cache-pruning
+          Fully disable sparse trie cache pruning. When set, the cached sparse trie is preserved without any node pruning or storage trie eviction between blocks. Useful for benchmarking the effects of retaining the full trie cache
+
+      --engine.state-root-task-timeout <STATE_ROOT_TASK_TIMEOUT>
+          Configure the timeout for the state root task before spawning a sequential fallback. If the state root task takes longer than this, a sequential computation starts in parallel and whichever finishes first is used.
+
+          --engine.state-root-task-timeout 4s --engine.state-root-task-timeout 400ms
+
+          Set to 0s to disable.
+
+          [default: 4s]
+
+      --engine.share-execution-cache-with-payload-builder
+          Whether to share execution cache with the payload builder.
+
+          When enabled, each payload job will get an instance of cross-block execution cache from the engine.
+
+          Note: this should only be enabled if node would not be requested to process any payloads in parallel with payload building.
+
+      --engine.suppress-persistence-during-build
+          Suppress persistence while building a payload.
+
+          When enabled, persistence cycles are deferred from the moment an FCU with payload attributes arrives until the next FCU clears the build. Useful on chains with short block times where persistence I/O can interfere with block building latency.
+
+      --engine.disable-bal-parallel-execution
+          Disable BAL (Block Access List, EIP-7928) based parallel execution
+
+      --engine.disable-bal-parallel-state-root
+          Disable BAL-driven parallel state root computation. This is only valid together with `--engine.disable-bal-parallel-execution`
+
+      --engine.disable-bal-batch-io
+          Disable BAL (Block Access List) storage prefetch IO during prewarming. When set, BAL storage slots are not read into the execution cache
+
 ERA:
       --era.enable
           Enable import from ERA1 files
@@ -870,6 +1136,34 @@ ERA:
 
           The ERA1 files are read from the remote host using HTTP GET requests parsing headers
           and bodies.
+
+Static Files:
+      --static-files.blocks-per-file.headers <BLOCKS_PER_FILE_HEADERS>
+          Number of blocks per file for the headers segment
+
+      --static-files.blocks-per-file.transactions <BLOCKS_PER_FILE_TRANSACTIONS>
+          Number of blocks per file for the transactions segment
+
+      --static-files.blocks-per-file.receipts <BLOCKS_PER_FILE_RECEIPTS>
+          Number of blocks per file for the receipts segment
+
+      --static-files.blocks-per-file.transaction-senders <BLOCKS_PER_FILE_TRANSACTION_SENDERS>
+          Number of blocks per file for the transaction senders segment
+
+      --static-files.blocks-per-file.account-change-sets <BLOCKS_PER_FILE_ACCOUNT_CHANGE_SETS>
+          Number of blocks per file for the account changesets segment
+
+      --static-files.blocks-per-file.storage-change-sets <BLOCKS_PER_FILE_STORAGE_CHANGE_SETS>
+          Number of blocks per file for the storage changesets segment
+
+Storage:
+      --storage.v2 [<V2>]
+          Enable V2 (hot/cold) storage layout for new databases.
+
+          When set, new databases will be initialized with the V2 storage layout that separates hot and cold data. Existing databases always use the settings persisted in their metadata regardless of this flag.
+
+          [default: true]
+          [possible values: true, false]
 
 Ress:
       --ress.enable
@@ -909,7 +1203,7 @@ Logging:
       --log.stdout.filter <FILTER>
           The filter to use for logs written to stdout
 
-          [default: ]
+          [default: ""]
 
       --log.file.format <FORMAT>
           The format to use for logs written to the log file
@@ -942,9 +1236,9 @@ Logging:
           [default: 200]
 
       --log.file.max-files <COUNT>
-          The maximum amount of log files that will be stored. If set to 0, background file logging is disabled
+          The maximum amount of log files that will be stored. If set to 0, background file logging is disabled.
 
-          [default: 5]
+          Default: 5 for `node` command, 0 for non-node utility subcommands.
 
       --log.journald
           Write logs to journald
@@ -959,10 +1253,28 @@ Logging:
 
           Possible values:
           - always: Colors on
-          - auto:   Colors on
+          - auto:   Auto-detect
           - never:  Colors off
 
           [default: always]
+
+      --logs-otlp[=<URL>]
+          Enable `Opentelemetry` logs export to an OTLP endpoint.
+
+          If no value provided, defaults based on protocol: - HTTP: `http://localhost:4318/v1/logs` - gRPC: `http://localhost:4317`
+
+          Example: --logs-otlp=http://collector:4318/v1/logs
+
+          [env: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=]
+
+      --logs-otlp.filter <FILTER>
+          Set a filter directive for the OTLP logs exporter. This controls the verbosity of logs sent to the OTLP endpoint. It follows the same syntax as the `RUST_LOG` environment variable.
+
+          Example: --logs-otlp.filter=info,reth=debug
+
+          Defaults to INFO if not specified.
+
+          [default: info]
 
 Display:
   -v, --verbosity...
@@ -976,4 +1288,46 @@ Display:
 
   -q, --quiet
           Silence all log output
+
+Tracing:
+      --tracing-otlp[=<URL>]
+          Enable `Opentelemetry` tracing export to an OTLP endpoint.
+
+          If no value provided, defaults based on protocol: - HTTP: `http://localhost:4318/v1/traces` - gRPC: `http://localhost:4317`
+
+          Example: --tracing-otlp=http://collector:4318/v1/traces
+
+          [env: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=]
+
+      --tracing-otlp-protocol <PROTOCOL>
+          OTLP transport protocol to use for exporting traces and logs.
+
+          - `http`: expects endpoint path to end with `/v1/traces` or `/v1/logs` - `grpc`: expects endpoint without a path
+
+          Defaults to HTTP if not specified.
+
+          Possible values:
+          - http: HTTP/Protobuf transport, port 4318, requires `/v1/traces` path
+          - grpc: gRPC transport, port 4317
+
+          [env: OTEL_EXPORTER_OTLP_PROTOCOL=]
+          [default: http]
+
+      --tracing-otlp.filter <FILTER>
+          Set a filter directive for the OTLP tracer. This controls the verbosity of spans and events sent to the OTLP endpoint. It follows the same syntax as the `RUST_LOG` environment variable.
+
+          Example: --tracing-otlp.filter=info,reth=debug,hyper_util=off
+
+          Defaults to TRACE if not specified.
+
+          [default: debug]
+
+      --tracing-otlp.sample-ratio <RATIO>
+          Trace sampling ratio to control the percentage of traces to export.
+
+          Valid range: 0.0 to 1.0 - 1.0, default: Sample all traces - 0.01: Sample 1% of traces - 0.0: Disable sampling
+
+          Example: --tracing-otlp.sample-ratio=0.0.
+
+          [env: OTEL_TRACES_SAMPLER_ARG=]
 ```

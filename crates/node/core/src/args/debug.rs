@@ -58,6 +58,15 @@ pub struct DebugArgs {
     #[arg(long = "debug.skip-new-payload", help_heading = "Debug")]
     pub skip_new_payload: Option<usize>,
 
+    /// If set, bypasses genesis hash validation during init.
+    /// Intended for tools that direct-write the database (e.g. snapshot
+    /// importers, state-actor) and want reth to trust the DB-resident
+    /// genesis state instead of recomputing it from the chainspec's alloc.
+    /// When the bypass fires, a structured `tracing::warn!` is emitted so
+    /// the divergence stays observable in operator logs.
+    #[arg(long = "debug.skip-genesis-validation", help_heading = "Debug")]
+    pub skip_genesis_validation: bool,
+
     /// If provided, the chain will be reorged at specified frequency.
     #[arg(long = "debug.reorg-frequency", help_heading = "Debug")]
     pub reorg_frequency: Option<usize>,
@@ -101,6 +110,13 @@ pub struct DebugArgs {
     /// Example: `nodename:secret@host:port`
     #[arg(long = "ethstats", help_heading = "Debug")]
     pub ethstats: Option<String>,
+
+    /// Set the node to idle state when the backfill is not running.
+    ///
+    /// This makes the `eth_syncing` RPC return "Idle" when the node has just started or finished
+    /// the backfill, but did not yet receive any new blocks.
+    #[arg(long = "debug.startup-sync-state-idle", help_heading = "Debug")]
+    pub startup_sync_state_idle: bool,
 }
 
 impl Default for DebugArgs {
@@ -113,12 +129,14 @@ impl Default for DebugArgs {
             rpc_consensus_url: None,
             skip_fcu: None,
             skip_new_payload: None,
+            skip_genesis_validation: false,
             reorg_frequency: None,
             reorg_depth: None,
             engine_api_store: None,
             invalid_block_hook: Some(InvalidBlockSelection::default()),
             healthy_node_rpc_url: None,
             ethstats: None,
+            startup_sync_state_idle: false,
         }
     }
 }
@@ -347,6 +365,17 @@ mod tests {
         let default_args = DebugArgs::default();
         let args = CommandParser::<DebugArgs>::parse_from(["reth"]).args;
         assert_eq!(args, default_args);
+    }
+
+    #[test]
+    fn test_parse_invalid_block_args_none() {
+        let expected_args = DebugArgs {
+            invalid_block_hook: Some(InvalidBlockSelection::from(vec![])),
+            ..Default::default()
+        };
+        let args =
+            CommandParser::<DebugArgs>::parse_from(["reth", "--debug.invalid-block-hook", ""]).args;
+        assert_eq!(args, expected_args);
     }
 
     #[test]

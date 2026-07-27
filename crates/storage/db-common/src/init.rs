@@ -2,11 +2,15 @@
 
 use alloy_consensus::BlockHeader;
 use alloy_genesis::GenesisAccount;
-use alloy_primitives::{keccak256, map::HashMap, Address, B256, U256};
+use alloy_primitives::{
+    keccak256,
+    map::{B256Map, HashMap},
+    Address, B256, U256,
+};
 use reth_chainspec::EthChainSpec;
 use reth_codecs::Compact;
 use reth_config::config::EtlConfig;
-use reth_db_api::{tables, transaction::DbTxMut, DatabaseError};
+use reth_db_api::{models::GravityStorageSettings, tables, transaction::DbTxMut, DatabaseError};
 use reth_etl::Collector;
 use reth_execution_errors::StateRootError;
 use reth_primitives_traits::{Account, Bytecode, GotExpected, NodePrimitives, StorageEntry};
@@ -14,8 +18,9 @@ use reth_provider::{
     errors::provider::ProviderResult, providers::StaticFileWriter, writer::UnifiedStorageWriter,
     BlockHashReader, BlockNumReader, BundleStateInit, ChainSpecProvider, DBProvider,
     DatabaseProviderFactory, ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter,
-    OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader, StageCheckpointWriter,
-    StateWriter, StaticFileProviderFactory, StorageLocation, TrieWriter, TrieWriterV2,
+    MetadataWriter, OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader,
+    StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StorageLocation,
+    StorageSettingsCache, TrieWriter, TrieWriterV2,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
@@ -83,12 +88,17 @@ impl From<DatabaseError> for InitStorageError {
     }
 }
 
-/// Write the genesis block if it has not already been written
+/// Write the genesis block if it has not already been written.
+///
+/// Fresh databases are initialized with [`GravityStorageSettings::current`] (the legacy
+/// layout). Use [`init_genesis_with_settings`] to opt a fresh database into another layout,
+/// e.g. changesets in static files via `--storage.v2`.
 pub fn init_genesis<PF>(factory: &PF) -> Result<B256, InitStorageError>
 where
     PF: DatabaseProviderFactory
         + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
         + ChainSpecProvider
+        + StorageSettingsCache
         + StageCheckpointReader
         + BlockHashReader,
     PF::ProviderRW: StaticFileProviderFactory<Primitives = PF::Primitives>
@@ -99,6 +109,44 @@ where
         + StateWriter
         + TrieWriterV2
         + TrieWriter
+        + MetadataWriter
+        + AsRef<PF::ProviderRW>,
+    PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
+{
+    init_genesis_with_settings(factory, GravityStorageSettings::current())
+}
+
+/// Write the genesis block if it has not already been written, initializing a fresh database
+/// with the given storage layout settings.
+///
+/// The settings only apply to a fresh database: an already initialized database keeps the
+/// settings persisted in its metadata, and this function never overrides them (CLI flags must
+/// never reinterpret data written under another layout).
+///
+/// Under `changesets_in_static_files` the genesis-alloc reverts are written to the changeset
+/// static file segments as regular block-0 entries — the same representation
+/// `db migrate-changesets` produces for stock datadirs — so the block-0 history indices
+/// written by [`insert_genesis_history`] always resolve to changeset rows on reads.
+pub fn init_genesis_with_settings<PF>(
+    factory: &PF,
+    settings: GravityStorageSettings,
+) -> Result<B256, InitStorageError>
+where
+    PF: DatabaseProviderFactory
+        + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
+        + ChainSpecProvider
+        + StorageSettingsCache
+        + StageCheckpointReader
+        + BlockHashReader,
+    PF::ProviderRW: StaticFileProviderFactory<Primitives = PF::Primitives>
+        + StageCheckpointWriter
+        + HistoryWriter
+        + HeaderProvider
+        + HashingWriter
+        + StateWriter
+        + TrieWriterV2
+        + TrieWriter
+        + MetadataWriter
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
 {
@@ -141,6 +189,21 @@ where
 
     // use transaction to insert genesis header
     let provider_rw = factory.database_provider_rw()?;
+
+    // Persist the storage layout before any data is written. Only a fresh datadir reaches
+    // this point: existing databases keep the settings already stored in their metadata.
+    //
+    // The in-memory cache must reflect the new settings as well, *before* any state is
+    // inserted: `write_state_reverts` (and every other routing decision below) reads the
+    // cache, and the factory loaded it from a then-empty database (legacy fallback). Should
+    // init fail after this point the process aborts with the error anyway, so the optimistic
+    // cache update can not leak into a running node.
+    if settings.changesets_in_static_files {
+        info!("Initializing fresh database with static-file changesets (storage.v2)");
+    }
+    provider_rw.write_storage_settings(settings)?;
+    factory.set_storage_settings_cache(settings);
+
     insert_world_trie(&provider_rw, alloc.iter())?;
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
     insert_genesis_history(&provider_rw, alloc.iter())?;
@@ -165,6 +228,12 @@ where
 
     let segment = StaticFileSegment::Transactions;
     static_file_provider.latest_writer(segment)?.increment_block(0)?;
+
+    // Changeset segments only exist under the changesets-in-static-files layout. They need no
+    // explicit genesis anchor here: with the settings cache set above, `insert_genesis_state`
+    // routed the genesis-alloc reverts through `write_state_reverts_to_static_files`, which
+    // appended them (or an empty changeset for an empty alloc) at block 0 — anchoring the
+    // append chain with the same entity representation `db migrate-changesets` produces.
 
     // `commit_unwind`` will first commit the DB and then the static file provider, which is
     // necessary on `init_genesis`.
@@ -235,7 +304,7 @@ where
                         let value = U256::from_be_bytes(value.0);
                         (*key, (U256::ZERO, value))
                     })
-                    .collect::<HashMap<_, _>>()
+                    .collect::<B256Map<_>>()
             })
             .unwrap_or_default();
 
@@ -751,6 +820,35 @@ mod tests {
     }
 
     #[test]
+    fn init_genesis_persists_storage_settings() {
+        use reth_provider::MetadataProvider;
+
+        let factory = create_test_provider_factory_with_chain_spec(MAINNET.clone());
+
+        // A fresh database has no persisted settings: readers fall back to the legacy layout.
+        assert_eq!(factory.database_provider_ro().unwrap().storage_settings().unwrap(), None);
+
+        init_genesis(&factory).unwrap();
+        assert_eq!(
+            factory.database_provider_ro().unwrap().storage_settings().unwrap(),
+            Some(GravityStorageSettings::current())
+        );
+
+        // Re-running against an initialized database must keep the persisted settings.
+        let marker = GravityStorageSettings { changesets_in_static_files: true };
+        {
+            let provider_rw = factory.database_provider_rw().unwrap();
+            provider_rw.write_storage_settings(marker).unwrap();
+            provider_rw.commit().unwrap();
+        }
+        init_genesis(&factory).unwrap();
+        assert_eq!(
+            factory.database_provider_ro().unwrap().storage_settings().unwrap(),
+            Some(marker)
+        );
+    }
+
+    #[test]
     fn success_init_genesis_holesky() {
         let genesis_hash =
             init_genesis(&create_test_provider_factory_with_chain_spec(HOLESKY.clone())).unwrap();
@@ -833,6 +931,216 @@ mod tests {
                 StorageShardedKey::new(address_with_storage, storage_key, u64::MAX),
                 IntegerList::new([0]).unwrap()
             )],
+        );
+    }
+
+    /// Chain spec with a small genesis alloc: one account with a balance, one with storage.
+    fn alloc_chain_spec() -> (Address, Address, B256, Arc<ChainSpec>) {
+        let address_with_balance = Address::with_last_byte(1);
+        let address_with_storage = Address::with_last_byte(2);
+        let storage_key = B256::with_last_byte(1);
+        let chain_spec = Arc::new(ChainSpec {
+            chain: Chain::from_id(1),
+            genesis: Genesis {
+                alloc: BTreeMap::from([
+                    (
+                        address_with_balance,
+                        GenesisAccount { balance: U256::from(1), ..Default::default() },
+                    ),
+                    (
+                        address_with_storage,
+                        GenesisAccount {
+                            storage: Some(BTreeMap::from([(storage_key, B256::with_last_byte(7))])),
+                            ..Default::default()
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            },
+            hardforks: Default::default(),
+            paris_block_and_final_difficulty: None,
+            deposit_contract: None,
+            ..Default::default()
+        });
+        (address_with_balance, address_with_storage, storage_key, chain_spec)
+    }
+
+    const SF_SETTINGS: GravityStorageSettings =
+        GravityStorageSettings { changesets_in_static_files: true };
+
+    #[test]
+    fn init_genesis_sf_writes_entity_block0_changesets() {
+        use reth_provider::MetadataProvider;
+
+        let (address_with_balance, address_with_storage, storage_key, chain_spec) =
+            alloc_chain_spec();
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis_with_settings(&factory, SF_SETTINGS).unwrap();
+
+        // Settings are persisted and the factory cache reflects them.
+        assert_eq!(
+            factory.database_provider_ro().unwrap().storage_settings().unwrap(),
+            Some(SF_SETTINGS)
+        );
+        assert_eq!(factory.cached_storage_settings(), SF_SETTINGS);
+
+        // The database changeset tables stay empty: the genesis-alloc reverts live in the
+        // static file segments as regular block-0 entries (entity representation, matching
+        // what `db migrate-changesets` produces).
+        let provider = factory.database_provider_ro().unwrap();
+        assert!(collect_table_entries::<Arc<DatabaseEnv>, tables::AccountChangeSets>(
+            provider.tx_ref()
+        )
+        .unwrap()
+        .is_empty());
+        assert!(collect_table_entries::<Arc<DatabaseEnv>, tables::StorageChangeSets>(
+            provider.tx_ref()
+        )
+        .unwrap()
+        .is_empty());
+
+        let sf = factory.static_file_provider();
+        let account_rows = sf.account_changesets_range(0..=0).unwrap();
+        assert_eq!(
+            account_rows
+                .iter()
+                .map(|(block, row)| (*block, row.address, row.info))
+                .collect::<Vec<_>>(),
+            vec![(0, address_with_balance, None), (0, address_with_storage, None)],
+        );
+        let storage_rows = sf.storage_changesets_range(0..=0).unwrap();
+        assert_eq!(storage_rows.len(), 1);
+        assert_eq!(storage_rows[0].0.block_number(), 0);
+        assert_eq!(storage_rows[0].0.address(), address_with_storage);
+        assert_eq!(storage_rows[0].1.key, storage_key);
+        assert_eq!(storage_rows[0].1.value, U256::ZERO);
+
+        // Q6 regression: the block-0 history indices written by `insert_genesis_history`
+        // resolve through the static-file changeset path without
+        // `AccountChangesetNotFound`/`StorageChangesetNotFound`.
+        use reth_provider::{AccountReader, HistoricalStateProviderRef, StateProvider};
+        let state = HistoricalStateProviderRef::new(&provider, 0);
+        assert_eq!(state.basic_account(&address_with_balance).unwrap(), None);
+        assert_eq!(state.basic_account(&address_with_storage).unwrap(), None);
+        assert_eq!(state.storage(address_with_storage, storage_key).unwrap(), Some(U256::ZERO));
+    }
+
+    #[test]
+    fn sf_and_legacy_fresh_init_historical_read_parity() {
+        use reth_provider::{AccountReader, HistoricalStateProviderRef, StateProvider};
+
+        let (address_with_balance, address_with_storage, storage_key, chain_spec) =
+            alloc_chain_spec();
+
+        let legacy = create_test_provider_factory_with_chain_spec(chain_spec.clone());
+        init_genesis(&legacy).unwrap();
+        let sf = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis_with_settings(&sf, SF_SETTINGS).unwrap();
+
+        let legacy_provider = legacy.database_provider_ro().unwrap();
+        let sf_provider = sf.database_provider_ro().unwrap();
+
+        for block in [0u64, 1] {
+            let legacy_state = HistoricalStateProviderRef::new(&legacy_provider, block);
+            let sf_state = HistoricalStateProviderRef::new(&sf_provider, block);
+            for address in [address_with_balance, address_with_storage] {
+                assert_eq!(
+                    legacy_state.basic_account(&address).unwrap(),
+                    sf_state.basic_account(&address).unwrap(),
+                    "account parity diverged at block {block} for {address}",
+                );
+            }
+            assert_eq!(
+                legacy_state.storage(address_with_storage, storage_key).unwrap(),
+                sf_state.storage(address_with_storage, storage_key).unwrap(),
+                "storage parity diverged at block {block}",
+            );
+        }
+    }
+
+    #[test]
+    fn init_genesis_sf_empty_alloc_writes_empty_block0_anchor() {
+        let chain_spec = Arc::new(ChainSpec {
+            chain: Chain::from_id(1),
+            genesis: Genesis::default(),
+            hardforks: Default::default(),
+            paris_block_and_final_difficulty: None,
+            deposit_contract: None,
+            ..Default::default()
+        });
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis_with_settings(&factory, SF_SETTINGS).unwrap();
+
+        // Both changeset segments are anchored at block 0 with no rows: the degenerate
+        // (empty-alloc) case reduces to the empty anchor.
+        let sf = factory.static_file_provider();
+        for segment in [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+        {
+            assert_eq!(sf.get_highest_static_file_block(segment), Some(0));
+        }
+        assert!(sf.account_changesets_range(0..=0).unwrap().is_empty());
+        assert!(sf.storage_changesets_range(0..=0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn init_genesis_with_settings_never_overrides_existing_datadir() {
+        use reth_provider::MetadataProvider;
+
+        let (_, _, _, chain_spec) = alloc_chain_spec();
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis(&factory).unwrap();
+
+        // Re-running with different settings on an initialized datadir is a no-op: the
+        // persisted settings, the cache, and the (absent) changeset segments all stay as
+        // the first init left them.
+        init_genesis_with_settings(&factory, SF_SETTINGS).unwrap();
+        assert_eq!(
+            factory.database_provider_ro().unwrap().storage_settings().unwrap(),
+            Some(GravityStorageSettings::current())
+        );
+        assert_eq!(factory.cached_storage_settings(), GravityStorageSettings::current());
+        let sf = factory.static_file_provider();
+        for segment in [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+        {
+            assert_eq!(sf.get_highest_static_file_block(segment), None);
+        }
+    }
+
+    #[test]
+    fn sf_fresh_init_matches_legacy_rows() {
+        // `db migrate-changesets` copies the legacy tables verbatim into the segments, so
+        // asserting "SF-fresh segment rows == legacy-fresh table rows" pins both birth paths
+        // to the same block-0 representation.
+        let (_, _, _, chain_spec) = alloc_chain_spec();
+
+        let legacy = create_test_provider_factory_with_chain_spec(chain_spec.clone());
+        init_genesis(&legacy).unwrap();
+        let sf = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis_with_settings(&sf, SF_SETTINGS).unwrap();
+
+        let legacy_provider = legacy.database_provider_ro().unwrap();
+        let legacy_accounts = collect_table_entries::<Arc<DatabaseEnv>, tables::AccountChangeSets>(
+            legacy_provider.tx_ref(),
+        )
+        .unwrap();
+        let legacy_storages = collect_table_entries::<Arc<DatabaseEnv>, tables::StorageChangeSets>(
+            legacy_provider.tx_ref(),
+        )
+        .unwrap();
+
+        let sf_provider = sf.static_file_provider();
+        assert_eq!(sf_provider.account_changesets_range(0..=0).unwrap(), legacy_accounts);
+        assert_eq!(
+            sf_provider
+                .storage_changesets_range(0..=0)
+                .unwrap()
+                .into_iter()
+                .map(|(key, entry)| (key, (entry.key, entry.value)))
+                .collect::<Vec<_>>(),
+            legacy_storages
+                .into_iter()
+                .map(|(key, entry)| (key, (entry.key, entry.value)))
+                .collect::<Vec<_>>(),
         );
     }
 }

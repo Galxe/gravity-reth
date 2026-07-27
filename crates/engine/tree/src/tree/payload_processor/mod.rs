@@ -13,7 +13,7 @@ use crate::tree::{
     sparse_trie::SparseTrieTask,
     StateProviderBuilder, TreeConfig,
 };
-use alloy_evm::{block::StateChangeSource, ToTxEnv};
+
 use alloy_primitives::B256;
 use executor::WorkloadExecutor;
 use multiproof::{SparseTrieUpdate, *};
@@ -22,7 +22,7 @@ use prewarm::PrewarmMetrics;
 use reth_engine_primitives::ExecutableTxIterator;
 use reth_evm::{
     execute::{ExecutableTxFor, WithTxEnv},
-    ConfigureEvm, EvmEnvFor, OnStateHook, SpecFor, TxEnvFor,
+    ConfigureEvm, ConvertTx, EvmEnvFor, OnStateHook, SpecFor, TxEnvFor,
 };
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
@@ -114,8 +114,8 @@ where
             executor,
             execution_cache: Default::default(),
             trie_metrics: Default::default(),
-            cross_block_cache_size: config.cross_block_cache_size(),
-            disable_transaction_prewarming: config.disable_caching_and_prewarming(),
+            cross_block_cache_size: config.cross_block_cache_size() as u64,
+            disable_transaction_prewarming: config.disable_prewarming(),
             evm_config,
             precompile_cache_disabled: config.precompile_cache_disabled(),
             precompile_cache_map,
@@ -171,7 +171,7 @@ where
         consistent_view: ConsistentDbView<P>,
         trie_input: TrieInput,
         config: &TreeConfig,
-    ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Tx>, I::Error>
+    ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Recovered>, I::Error>
     where
         P: DatabaseProviderFactory<Provider: BlockReader>
             + BlockReader
@@ -258,7 +258,7 @@ where
         env: ExecutionEnv<Evm>,
         transactions: I,
         provider_builder: StateProviderBuilder<N, P>,
-    ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Tx>, I::Error>
+    ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Recovered>, I::Error>
     where
         P: BlockReader + StateProviderFactory + StateReader + Clone + 'static,
     {
@@ -278,14 +278,15 @@ where
         &self,
         transactions: I,
     ) -> (
-        mpsc::Receiver<WithTxEnv<TxEnvFor<Evm>, I::Tx>>,
-        mpsc::Receiver<Result<WithTxEnv<TxEnvFor<Evm>, I::Tx>, I::Error>>,
+        mpsc::Receiver<WithTxEnv<TxEnvFor<Evm>, I::Recovered>>,
+        mpsc::Receiver<Result<WithTxEnv<TxEnvFor<Evm>, I::Recovered>, I::Error>>,
     ) {
         let (prewarm_tx, prewarm_rx) = mpsc::channel();
         let (execute_tx, execute_rx) = mpsc::channel();
         self.executor.spawn_blocking(move || {
-            for tx in transactions {
-                let tx = tx.map(|tx| WithTxEnv { tx_env: tx.to_tx_env(), tx });
+            let (transactions, convert) = transactions.into_parts();
+            for raw in transactions {
+                let tx = convert.convert(raw).map(WithTxEnv::new);
                 // only send Ok(_) variants to prewarming task
                 if let Ok(tx) = &tx {
                     let _ = prewarm_tx.send(tx.clone());
@@ -453,8 +454,13 @@ impl<Tx, Err> PayloadHandle<Tx, Err> {
         // convert the channel into a `StateHookSender` that emits an event on drop
         let to_multi_proof = self.to_multi_proof.clone().map(StateHookSender::new);
 
-        move |source: StateChangeSource, state: &EvmState| {
+        // The revm-level `OnStateHook` no longer carries a change source; synthesize
+        // per-invocation `Transaction` indices for the multiproof tracing labels.
+        let mut next_source_idx = 0usize;
+        move |state: &EvmState| {
             if let Some(sender) = &to_multi_proof {
+                let source = StateChangeSource::Transaction(next_source_idx);
+                next_source_idx += 1;
                 let _ = sender.send(MultiProofMessage::StateUpdate(source, state.clone()));
             }
         }
@@ -638,7 +644,6 @@ mod tests {
         precompile_cache::PrecompileCacheMap,
         StateProviderBuilder, TreeConfig,
     };
-    use alloy_evm::block::StateChangeSource;
     use rand::Rng;
     use reth_chainspec::ChainSpec;
     use reth_db_common::init::init_genesis;
@@ -654,7 +659,7 @@ mod tests {
     use reth_testing_utils::generators;
     use reth_trie::{test_utils::state_root, HashedPostState, TrieInput};
     use revm_primitives::{Address, HashMap, B256, KECCAK_EMPTY, U256};
-    use revm_state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot};
+    use revm_state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId};
     use std::sync::Arc;
 
     fn make_saved_cache(hash: B256) -> SavedCache {
@@ -749,23 +754,22 @@ mod tests {
                             EvmStorageSlot::new_changed(
                                 U256::ZERO,
                                 U256::from(rng.random::<u64>()),
-                                0,
+                                TransactionId::default(),
                             ),
                         );
                     }
                 }
 
-                let account = revm_state::Account {
-                    info: AccountInfo {
-                        balance: U256::from(rng.random::<u64>()),
-                        nonce: rng.random::<u64>(),
-                        code_hash: KECCAK_EMPTY,
-                        code: Some(Default::default()),
-                    },
-                    storage,
-                    status: AccountStatus::Touched,
-                    transaction_id: 0,
+                let mut account = revm_state::Account::default();
+                account.info = AccountInfo {
+                    balance: U256::from(rng.random::<u64>()),
+                    nonce: rng.random::<u64>(),
+                    code_hash: KECCAK_EMPTY,
+                    code: Some(Default::default()),
+                    account_id: None,
                 };
+                account.storage = storage;
+                account.status = AccountStatus::Touched;
 
                 state_update.insert(address, account);
             }
@@ -837,7 +841,9 @@ mod tests {
         let provider = BlockchainProvider::new(factory).unwrap();
         let mut handle = payload_processor.spawn(
             Default::default(),
-            core::iter::empty::<Result<Recovered<TransactionSigned>, core::convert::Infallible>>(),
+            (Vec::<Recovered<TransactionSigned>>::new(), |tx: Recovered<TransactionSigned>| {
+                Ok::<_, core::convert::Infallible>(tx)
+            }),
             StateProviderBuilder::new(provider.clone(), genesis_hash, None),
             ConsistentDbView::new_with_latest_tip(provider).unwrap(),
             TrieInput::from_state(hashed_state),
@@ -846,8 +852,8 @@ mod tests {
 
         let mut state_hook = handle.state_hook();
 
-        for (i, update) in state_updates.into_iter().enumerate() {
-            state_hook.on_state(StateChangeSource::Transaction(i), &update);
+        for update in state_updates {
+            state_hook.on_state(&update);
         }
         drop(state_hook);
 

@@ -15,6 +15,11 @@ cfg_if::cfg_if! {
     }
 }
 
+// Re-export jemalloc-sys so that binaries can `use` it in main.rs to make it
+// visible to the linker, which is required for `override_allocator_on_supported_platforms`.
+#[cfg(all(feature = "jemalloc", unix))]
+pub use tikv_jemalloc_sys;
+
 // This is to prevent clippy unused warnings when we do `--all-features`
 cfg_if::cfg_if! {
     if #[cfg(all(feature = "snmalloc", feature = "jemalloc", unix))] {
@@ -25,7 +30,6 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(feature = "tracy-allocator")] {
         type AllocatorWrapper = tracy_client::ProfiledAllocator<AllocatorInner>;
-        tracy_client::register_demangler!();
         const fn new_allocator_wrapper() -> AllocatorWrapper {
             AllocatorWrapper::new(AllocatorInner {}, 100)
         }

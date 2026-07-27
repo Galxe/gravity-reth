@@ -4,7 +4,6 @@
 #![allow(missing_docs)]
 
 use alloy_consensus::constants::KECCAK_EMPTY;
-use alloy_evm::block::StateChangeSource;
 use alloy_primitives::{Address, B256};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use proptest::test_runner::TestRunner;
@@ -26,7 +25,9 @@ use reth_provider::{
 };
 use reth_trie::TrieInput;
 use revm_primitives::{HashMap, U256};
-use revm_state::{Account as RevmAccount, AccountInfo, AccountStatus, EvmState, EvmStorageSlot};
+use revm_state::{
+    Account as RevmAccount, AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId,
+};
 use std::{hint::black_box, sync::Arc};
 
 #[derive(Debug, Clone)]
@@ -58,35 +59,34 @@ fn create_bench_state_updates(params: &BenchParams) -> Vec<EvmState> {
                 .random_bool(params.selfdestructs_per_update as f64 / params.num_accounts as f64);
 
             let account = if is_selfdestruct {
-                RevmAccount {
-                    info: AccountInfo::default(),
-                    storage: HashMap::default(),
-                    status: AccountStatus::SelfDestructed,
-                    transaction_id: 0,
-                }
+                let mut account = RevmAccount::default();
+                account.info = AccountInfo::default();
+                account.storage = HashMap::default();
+                account.status = AccountStatus::SelfDestructed;
+                account
             } else {
-                RevmAccount {
-                    info: AccountInfo {
-                        balance: U256::from(rng.random::<u64>()),
-                        nonce: rng.random::<u64>(),
-                        code_hash: KECCAK_EMPTY,
-                        code: Some(Default::default()),
-                    },
-                    storage: (0..rng.random_range(0..=params.storage_slots_per_account))
-                        .map(|_| {
-                            (
+                let mut account = RevmAccount::default();
+                account.info = AccountInfo {
+                    balance: U256::from(rng.random::<u64>()),
+                    nonce: rng.random::<u64>(),
+                    code_hash: KECCAK_EMPTY,
+                    code: Some(Default::default()),
+                    account_id: None,
+                };
+                account.storage = (0..rng.random_range(0..=params.storage_slots_per_account))
+                    .map(|_| {
+                        (
+                            U256::from(rng.random::<u64>()),
+                            EvmStorageSlot::new_changed(
+                                U256::ZERO,
                                 U256::from(rng.random::<u64>()),
-                                EvmStorageSlot::new_changed(
-                                    U256::ZERO,
-                                    U256::from(rng.random::<u64>()),
-                                    0,
-                                ),
-                            )
-                        })
-                        .collect(),
-                    status: AccountStatus::Touched,
-                    transaction_id: 0,
-                }
+                                TransactionId::default(),
+                            ),
+                        )
+                    })
+                    .collect();
+                account.status = AccountStatus::Touched;
+                account
             };
 
             state_update.insert(address, account);
@@ -230,9 +230,12 @@ fn bench_state_root(c: &mut Criterion) {
                         black_box({
                             let mut handle = payload_processor.spawn(
                                 Default::default(),
-                                core::iter::empty::<
-                                    Result<Recovered<TransactionSigned>, core::convert::Infallible>,
-                                >(),
+                                (
+                                    Vec::<Recovered<TransactionSigned>>::new(),
+                                    |tx: Recovered<TransactionSigned>| {
+                                        Ok::<_, core::convert::Infallible>(tx)
+                                    },
+                                ),
                                 StateProviderBuilder::new(provider.clone(), genesis_hash, None),
                                 ConsistentDbView::new_with_latest_tip(provider).unwrap(),
                                 TrieInput::default(),
@@ -241,8 +244,8 @@ fn bench_state_root(c: &mut Criterion) {
 
                             let mut state_hook = handle.state_hook();
 
-                            for (i, update) in state_updates.into_iter().enumerate() {
-                                state_hook.on_state(StateChangeSource::Transaction(i), &update);
+                            for update in state_updates {
+                                state_hook.on_state(&update);
                             }
                             drop(state_hook);
 

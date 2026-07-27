@@ -7,7 +7,7 @@ use reth_db_api::{
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
 use reth_tracing::tracing::info;
-use rocksdb::{BlockBasedOptions, Cache, Options, DB};
+use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -270,16 +270,13 @@ impl DatabaseEnv {
             Self::resolve_shard_paths(path, args.sharding_directories())?;
         info!(target: "database::open", state_path = ?state_path, account_path = ?account_path, storage_path = ?storage_path , "Generate RocksDB instance path");
 
-        // Configure RocksDB options (shared across the 3-db architecture)
-        let opts = Self::create_db_options(&args);
-
         // Assign tables to their target databases
         let tables_by_path =
             Self::assign_tables_to_shards(&state_path, &account_path, &storage_path);
         info!(target: "database::open", tables_by_path = ?tables_by_path, "Assign tables into RocksDB instance");
 
         // Open one RocksDB per unique path
-        let dbs = Self::open_rocksdb_instances(&opts, tables_by_path)?;
+        let dbs = Self::open_rocksdb_instances(&args, tables_by_path)?;
 
         let state_db = dbs.get(&state_path).cloned().expect("state DB handle missing");
         let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
@@ -333,7 +330,12 @@ impl DatabaseEnv {
         }
     }
 
-    /// Create optimized `RocksDB` options for 3-db architecture.
+    /// Create database-wide `RocksDB` options shared by the 3-db architecture.
+    ///
+    /// Only `DBOptions`-level settings belong here. Column-family-level tuning
+    /// (memtables, compaction, compression, block cache) must go through
+    /// [`Self::create_cf_options`]: `RocksDB` silently ignores CF-level fields on the
+    /// database `Options` for named column families.
     fn create_db_options(args: &DatabaseArguments) -> Options {
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -345,23 +347,46 @@ impl DatabaseEnv {
         opts.increase_parallelism(parallelism);
         opts.set_max_open_files(args.max_open_files());
 
-        // === Memory Configuration ===
-        let write_buffer_size = args.write_buffer_size();
-        opts.set_write_buffer_size(write_buffer_size);
-        opts.set_max_write_buffer_number(args.max_write_buffer_number());
-        opts.set_min_write_buffer_number_to_merge(2);
+        // === Memory Configuration (DB-wide cap) ===
+        // Hard ceiling across all column families of one instance: forces memtable
+        // flush when the sum exceeds it. This bounds worst-case memory now that every
+        // CF carries its own `write_buffer_size` (see `create_cf_options`).
         opts.set_db_write_buffer_size(3 * 1024 * 1024 * 1024);
 
-        // === Block Cache Configuration (per DB) ===
-        let block_cache_size = args.block_cache_size();
-        let cache = Cache::new_lru_cache(block_cache_size);
+        // === Write Configuration ===
+        // Pipelined write disabled: every commit() now uses WriteOptions::set_sync(true)
+        // in tx.rs::commit_view(), so fsync per write makes pipelining pointless.
+        opts.set_enable_pipelined_write(false);
+        opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1GB max WAL per DB
+
+        // === I/O Optimization ===
+        opts.set_bytes_per_sync(args.bytes_per_sync());
+        opts.set_compaction_readahead_size(args.compaction_readahead_size());
+
+        opts
+    }
+
+    /// Create column-family options for `table_name`.
+    ///
+    /// CF-level settings only take effect when passed through a
+    /// [`ColumnFamilyDescriptor`] — `DB::open_cf` would open every named CF with
+    /// `Options::default()`, leaving the tuning below inert on the data tables.
+    fn create_cf_options(args: &DatabaseArguments, cache: &Cache, table_name: &str) -> Options {
+        let mut opts = Options::default();
+
+        // === Memory Configuration ===
+        opts.set_write_buffer_size(args.write_buffer_size());
+        opts.set_max_write_buffer_number(args.max_write_buffer_number());
+        opts.set_min_write_buffer_number_to_merge(2);
+
+        // === Block Cache Configuration ===
+        // Every column family across all 3 instances shares this cache, so
+        // `--db.block-cache-size` is a total budget rather than a per-CF value.
         let mut block_opts = BlockBasedOptions::default();
-        block_opts.set_block_cache(&cache);
+        block_opts.set_block_cache(cache);
         block_opts.set_block_size(32 * 1024);
         block_opts.set_cache_index_and_filter_blocks(true);
         block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-        block_opts.set_bloom_filter(10.0, false);
-        opts.set_block_based_table_factory(&block_opts);
 
         // === Compaction Configuration ===
         opts.set_level_compaction_dynamic_level_bytes(true);
@@ -377,26 +402,26 @@ impl DatabaseEnv {
         opts.set_max_bytes_for_level_multiplier(10.0);
         opts.set_max_compaction_bytes(2 * 1024 * 1024 * 1024);
 
-        // === Write Configuration ===
-        // Pipelined write disabled: every commit() now uses WriteOptions::set_sync(true)
-        // in tx.rs::commit_view(), so fsync per write makes pipelining pointless.
-        opts.set_enable_pipelined_write(false);
-        opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1GB max WAL per DB
-
-        // === Compression Configuration ===
-        opts.set_compression_per_level(&[
-            rocksdb::DBCompressionType::Lz4,
-            rocksdb::DBCompressionType::Lz4,
-            rocksdb::DBCompressionType::Zstd,
-            rocksdb::DBCompressionType::Zstd,
-            rocksdb::DBCompressionType::Zstd,
-            rocksdb::DBCompressionType::Zstd,
-            rocksdb::DBCompressionType::Zstd,
-        ]);
-
-        // === I/O Optimization ===
-        opts.set_bytes_per_sync(args.bytes_per_sync());
-        opts.set_compaction_readahead_size(args.compaction_readahead_size());
+        if table_name == tables::TransactionHashNumbers::NAME {
+            // Keys are random tx hashes with small integer values: compression burns
+            // CPU on incompressible data, and lookups are dominated by hashes that do
+            // exist in blocks, so a bloom filter only costs memory (misses are rare).
+            opts.set_compression_type(rocksdb::DBCompressionType::None);
+            opts.set_bottommost_compression_type(rocksdb::DBCompressionType::None);
+        } else {
+            block_opts.set_bloom_filter(10.0, false);
+            // === Compression Configuration ===
+            opts.set_compression_per_level(&[
+                rocksdb::DBCompressionType::Lz4,
+                rocksdb::DBCompressionType::Lz4,
+                rocksdb::DBCompressionType::Zstd,
+                rocksdb::DBCompressionType::Zstd,
+                rocksdb::DBCompressionType::Zstd,
+                rocksdb::DBCompressionType::Zstd,
+                rocksdb::DBCompressionType::Zstd,
+            ]);
+        }
+        opts.set_block_based_table_factory(&block_opts);
 
         opts
     }
@@ -422,12 +447,19 @@ impl DatabaseEnv {
 
     /// Open `RocksDB` instances for all unique shard paths.
     fn open_rocksdb_instances(
-        opts: &Options,
+        args: &DatabaseArguments,
         tables_by_path: HashMap<PathBuf, Vec<String>>,
     ) -> Result<HashMap<PathBuf, Arc<DB>>, DatabaseError> {
+        let opts = Self::create_db_options(args);
+        // One cache for every CF of every instance: `--db.block-cache-size` is the
+        // total budget (see `create_cf_options`).
+        let cache = Cache::new_lru_cache(args.block_cache_size());
         let mut dbs: HashMap<PathBuf, Arc<DB>> = HashMap::new();
         for (db_path, cf_names) in &tables_by_path {
-            let db = DB::open_cf(opts, db_path, cf_names).map_err(|e| {
+            let descriptors = cf_names.iter().map(|name| {
+                ColumnFamilyDescriptor::new(name, Self::create_cf_options(args, &cache, name))
+            });
+            let db = DB::open_cf_descriptors(&opts, db_path, descriptors).map_err(|e| {
                 DatabaseError::Other(format!(
                     "Failed to open RocksDB at {}: {}",
                     db_path.display(),
@@ -685,4 +717,71 @@ fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseEr
             code: -1,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns the newest `OPTIONS-*` file RocksDB wrote for the instance at `db_dir`.
+    /// It records the options each column family was actually opened with.
+    fn options_file_content(db_dir: &Path) -> String {
+        let newest = std::fs::read_dir(db_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("OPTIONS-"))
+            .max_by_key(|e| e.file_name())
+            .expect("rocksdb OPTIONS file present");
+        std::fs::read_to_string(newest.path()).unwrap()
+    }
+
+    /// Slice of the OPTIONS file covering one column family's `CFOptions` section.
+    fn cf_options_section<'a>(content: &'a str, cf_name: &str) -> &'a str {
+        let header = format!("[CFOptions \"{cf_name}\"]");
+        let start = content.find(&header).unwrap_or_else(|| panic!("missing {header}"));
+        let rest = &content[start + header.len()..];
+        let end = rest.find("\n[").map(|i| i + 1).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The tuned CF options must reach the data column families. `DB::open_cf` opens
+    /// named CFs with `Options::default()`, which silently discards all of them.
+    #[test]
+    fn cf_options_apply_to_data_column_families() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = DatabaseArguments::new(ClientVersion::default());
+        let env = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args.clone()).unwrap();
+
+        // The shared block cache budget is visible on a data CF (a default-options CF
+        // would report its own tiny per-CF default cache instead).
+        let cf = env.state_db.cf_handle(tables::PlainAccountState::NAME).unwrap();
+        let cache_capacity = env
+            .state_db
+            .property_int_value_cf(&cf, "rocksdb.block-cache-capacity")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cache_capacity, args.block_cache_size() as u64);
+
+        drop(env);
+        let content = options_file_content(&dir.path().join("state"));
+
+        // Regular data tables carry the tuned memtable size and tiered compression.
+        let plain = cf_options_section(&content, tables::PlainAccountState::NAME);
+        assert!(
+            plain.contains(&format!("write_buffer_size={}", args.write_buffer_size())),
+            "tuned write buffer missing on data CF:\n{plain}"
+        );
+        assert!(plain.contains("kZSTD"), "tiered compression missing on data CF:\n{plain}");
+
+        // TransactionHashNumbers is specialized: incompressible random keys.
+        let tx_hash = cf_options_section(&content, tables::TransactionHashNumbers::NAME);
+        assert!(
+            tx_hash.contains("compression=kNoCompression"),
+            "tx-hash CF should disable compression:\n{tx_hash}"
+        );
+        assert!(
+            !tx_hash.contains("kZSTD"),
+            "tx-hash CF should not use tiered compression:\n{tx_hash}"
+        );
+    }
 }

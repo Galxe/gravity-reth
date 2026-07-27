@@ -1,4 +1,23 @@
 //! Consensus protocol functions
+//!
+//! # Trait hierarchy
+//!
+//! Consensus validation is split across three traits, each adding a layer:
+//!
+//! - [`HeaderValidator`] — validates a header in isolation and against its parent. Used early in
+//!   the validation pipeline before block execution.
+//!
+//! - [`Consensus`] — extends `HeaderValidator` with block body validation. Checks that the body
+//!   matches the header (tx root, ommer hash, withdrawals) and runs pre-execution checks. Used
+//!   before a block is executed.
+//!
+//! - [`FullConsensus`] — extends `Consensus` with post-execution validation. Checks execution
+//!   results against the header (gas used, receipt root, logs bloom). Used after block execution to
+//!   verify the outcome.
+//!
+//! In the engine, these are applied in order during payload validation (`engine_newPayload`).
+//! Payload attribute validation for block building (`engine_forkchoiceUpdated`) is handled
+//! separately at the engine API layer and does not use these traits.
 
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/paradigmxyz/reth/main/assets/reth-docs.png",
@@ -6,17 +25,37 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
-use alloc::{boxed::Box, fmt::Debug, string::String, vec::Vec};
+use alloc::{
+    boxed::Box,
+    fmt::Debug,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use alloy_consensus::Header;
+use alloy_eip7928::BlockAccessListGasError;
 use alloy_primitives::{BlockHash, BlockNumber, Bloom, B256};
+use core::{error::Error, fmt::Display};
+
+/// Pre-computed receipt root and logs bloom.
+///
+/// When provided to [`FullConsensus::validate_block_post_execution`], this allows skipping
+/// the receipt root computation and using the pre-computed values instead.
+pub type ReceiptRootBloom = (B256, Bloom);
+
+/// Pre-computed transaction root.
+///
+/// When provided to [`Consensus::validate_block_pre_execution_with_tx_root`], this allows
+/// skipping transaction trie reconstruction from the block body.
+pub type TransactionRoot = B256;
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{
-    constants::{MAXIMUM_GAS_LIMIT_BLOCK, MINIMUM_GAS_LIMIT},
+    constants::{GAS_LIMIT_BOUND_DIVISOR, MAXIMUM_GAS_LIMIT_BLOCK, MINIMUM_GAS_LIMIT},
     transaction::error::InvalidTransactionError,
     Block, GotExpected, GotExpectedBoxed, NodePrimitives, RecoveredBlock, SealedBlock,
     SealedHeader,
@@ -38,37 +77,68 @@ pub trait FullConsensus<N: NodePrimitives>: Consensus<N::Block> {
     ///
     /// See the Yellow Paper sections 4.3.2 "Holistic Validity".
     ///
+    /// If `receipt_root_bloom` is provided, the implementation should use the pre-computed
+    /// receipt root and logs bloom instead of computing them from the receipts.
+    ///
     /// Note: validating blocks does not include other validations of the Consensus
     fn validate_block_post_execution(
         &self,
         block: &RecoveredBlock<N::Block>,
         result: &BlockExecutionResult<N::Receipt>,
+        receipt_root_bloom: Option<ReceiptRootBloom>,
+        block_access_list_hash: Option<B256>,
     ) -> Result<(), ConsensusError>;
 }
 
 /// Consensus is a protocol that chooses canonical chain.
 #[auto_impl::auto_impl(&, Arc)]
 pub trait Consensus<B: Block>: HeaderValidator<B::Header> {
-    /// The error type related to consensus.
-    type Error;
-
     /// Ensures that body field values match the header.
     fn validate_body_against_header(
         &self,
         body: &B::Body,
         header: &SealedHeader<B::Header>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<(), ConsensusError>;
 
     /// Validate a block disregarding world state, i.e. things that can be checked before sender
     /// recovery and execution.
     ///
-    /// See the Yellow Paper sections 4.3.2 "Holistic Validity", 4.3.4 "Block Header Validity", and
-    /// 11.1 "Ommer Validation".
+    /// See the Yellow Paper sections 4.4.2 "Holistic Validity", 4.4.4 "Block Header Validity".
+    /// Note: Ommer Validation (previously section 11.1) has been deprecated since the Paris hard
+    /// fork transition to proof of stake.
     ///
     /// **This should not be called for the genesis block**.
     ///
     /// Note: validating blocks does not include other validations of the Consensus
-    fn validate_block_pre_execution(&self, block: &SealedBlock<B>) -> Result<(), Self::Error>;
+    fn validate_block_pre_execution(&self, block: &SealedBlock<B>) -> Result<(), ConsensusError>;
+
+    /// Returns `true` if the given consensus error is transient and may resolve on its own.
+    ///
+    /// On fast chains, clock skew between nodes can cause a valid block's timestamp to
+    /// appear briefly in the future. Caching such blocks as permanently invalid would
+    /// prevent them from being re-validated once the local clock catches up.
+    ///
+    /// Transient errors will not cause the block hash to be cached as permanently invalid,
+    /// allowing the block to be re-validated later.
+    fn is_transient_error(&self, _error: &ConsensusError) -> bool {
+        false
+    }
+
+    /// Validate a block disregarding world state using an optional pre-computed transaction root.
+    ///
+    /// If `transaction_root` is provided, the implementation should use the pre-computed
+    /// transaction root instead of recomputing it from the block body. The value must have been
+    /// derived from `block.body().calculate_tx_root()`.
+    ///
+    /// By default this falls back to [`Self::validate_block_pre_execution`].
+    fn validate_block_pre_execution_with_tx_root(
+        &self,
+        block: &SealedBlock<B>,
+        transaction_root: Option<TransactionRoot>,
+    ) -> Result<(), ConsensusError> {
+        let _ = transaction_root;
+        self.validate_block_pre_execution(block)
+    }
 }
 
 /// `HeaderValidator` is a protocol that validates headers and their relationships.
@@ -124,7 +194,7 @@ pub trait HeaderValidator<H = Header>: Debug + Send + Sync {
 }
 
 /// Consensus Errors
-#[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ConsensusError {
     /// Error when the gas used in the header exceeds the gas limit.
     #[error("block used gas ({gas_used}) is greater than gas limit ({gas_limit})")]
@@ -134,7 +204,7 @@ pub enum ConsensusError {
         /// The gas limit in the block header.
         gas_limit: u64,
     },
-    /// Error when the gas the gas limit is more than the maximum allowed.
+    /// Error when the gas limit is more than the maximum allowed.
     #[error(
         "header gas limit ({gas_limit}) exceed the maximum allowed gas limit ({MAXIMUM_GAS_LIMIT_BLOCK})"
     )]
@@ -260,6 +330,14 @@ pub enum ConsensusError {
     #[error("missing requests hash")]
     RequestsHashMissing,
 
+    /// Error when the block access list hash is missing.
+    #[error("missing block access list hash")]
+    BlockAccessListHashMissing,
+
+    /// Error when the slot number is missing.
+    #[error("missing slot number")]
+    SlotNumberMissing,
+
     /// Error when an unexpected withdrawals root is encountered.
     #[error("unexpected withdrawals root")]
     WithdrawalsRootUnexpected,
@@ -267,6 +345,14 @@ pub enum ConsensusError {
     /// Error when an unexpected requests hash is encountered.
     #[error("unexpected requests hash")]
     RequestsHashUnexpected,
+
+    /// Error when an unexpected block access list hash is encountered.
+    #[error("unexpected block access list hash")]
+    BlockAccessListHashUnexpected,
+
+    /// Error when an unexpected slot number is encountered.
+    #[error("unexpected slot number")]
+    SlotNumberUnexpected,
 
     /// Error when withdrawals are missing.
     #[error("missing withdrawals")]
@@ -348,7 +434,7 @@ pub enum ConsensusError {
     },
 
     /// Error when the child gas limit exceeds the maximum allowed increase.
-    #[error("child gas_limit {child_gas_limit} max increase is {parent_gas_limit}/1024")]
+    #[error("child gas_limit {child_gas_limit} exceeds the max allowed increase ({parent_gas_limit}/{GAS_LIMIT_BOUND_DIVISOR})")]
     GasLimitInvalidIncrease {
         /// The parent gas limit.
         parent_gas_limit: u64,
@@ -377,7 +463,7 @@ pub enum ConsensusError {
     },
 
     /// Error when the child gas limit exceeds the maximum allowed decrease.
-    #[error("child gas_limit {child_gas_limit} max decrease is {parent_gas_limit}/1024")]
+    #[error("child gas_limit {child_gas_limit} is below the max allowed decrease ({parent_gas_limit}/{GAS_LIMIT_BOUND_DIVISOR})")]
     GasLimitInvalidDecrease {
         /// The parent gas limit.
         parent_gas_limit: u64,
@@ -406,15 +492,57 @@ pub enum ConsensusError {
     /// EIP-7825: Transaction gas limit exceeds maximum allowed
     #[error(transparent)]
     TransactionGasLimitTooHigh(Box<TxGasLimitTooHighErr>),
-    /// Other, likely an injected L2 error.
-    #[error("{0}")]
-    Other(String),
+    /// EIP-7928: Error when an unexpected block access list cost is encountered.
+    #[error(transparent)]
+    BlockAccessListCostMoreThanGasLimit(Box<BlockAccessListGasError>),
+    /// EIP-7928: Error when the block access list hash doesn't match the expected value.
+    #[error("block access list hash mismatch: {0}")]
+    BlockAccessListHashMismatch(GotExpectedBoxed<B256>),
+    /// EIP-7928: Error when the block access list cannot be decoded or converted.
+    #[error("invalid block access list: {0}")]
+    BlockAccessListInvalid(String),
+    /// Any additional consensus error, for example L2-specific errors.
+    #[error(transparent)]
+    Other(#[from] Arc<dyn Error + Send + Sync>),
 }
 
 impl ConsensusError {
+    /// Returns a new [`ConsensusError::Other`] instance with the given error.
+    pub fn other<E>(error: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self::Other(Arc::new(error))
+    }
+
+    /// Returns a new [`ConsensusError::Other`] instance with the given message.
+    pub fn msg(msg: impl Display) -> Self {
+        Self::other(MessageError(msg.to_string()))
+    }
+
     /// Returns `true` if the error is a state root error.
     pub const fn is_state_root_error(&self) -> bool {
         matches!(self, Self::BodyStateRootDiff(_))
+    }
+
+    /// Returns the arbitrary error if it is [`ConsensusError::Other`].
+    pub fn as_other(&self) -> Option<&(dyn Error + Send + Sync + 'static)> {
+        match self {
+            Self::Other(err) => Some(err.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Returns a reference to the [`ConsensusError::Other`] value if it is of that type.
+    /// Returns `None` otherwise.
+    pub fn downcast_other_ref<T: Error + 'static>(&self) -> Option<&T> {
+        let other = self.as_other()?;
+        other.downcast_ref()
+    }
+
+    /// Returns `true` if this type is a [`ConsensusError::Other`] of that error type.
+    pub fn is_other<T: Error + 'static>(&self) -> bool {
+        self.as_other().map(|err| err.is::<T>()).unwrap_or(false)
     }
 }
 
@@ -427,6 +555,12 @@ impl From<InvalidTransactionError> for ConsensusError {
 impl From<TxGasLimitTooHighErr> for ConsensusError {
     fn from(value: TxGasLimitTooHighErr) -> Self {
         Self::TransactionGasLimitTooHigh(Box::new(value))
+    }
+}
+
+impl From<BlockAccessListGasError> for ConsensusError {
+    fn from(value: BlockAccessListGasError) -> Self {
+        Self::BlockAccessListCostMoreThanGasLimit(Box::new(value))
     }
 }
 
@@ -445,4 +579,46 @@ pub struct TxGasLimitTooHighErr {
     pub gas_limit: u64,
     /// The maximum allowed gas limit
     pub max_allowed: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct MessageError(String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(thiserror::Error, Debug)]
+    #[error("Custom L2 consensus error")]
+    struct CustomL2Error;
+
+    #[test]
+    fn test_other_error_conversion() {
+        let consensus_err = ConsensusError::other(CustomL2Error);
+        assert!(matches!(consensus_err, ConsensusError::Other(_)));
+    }
+
+    #[test]
+    fn test_other_error_display() {
+        let consensus_err = ConsensusError::other(CustomL2Error);
+        let error_message = format!("{}", consensus_err);
+        assert_eq!(error_message, "Custom L2 consensus error");
+    }
+
+    #[test]
+    fn test_other_error_downcast() {
+        let consensus_err = ConsensusError::other(CustomL2Error);
+
+        assert!(consensus_err.is_other::<CustomL2Error>());
+        assert!(consensus_err.downcast_other_ref::<CustomL2Error>().is_some());
+    }
+
+    #[test]
+    fn test_other_msg() {
+        let consensus_err = ConsensusError::msg("consensus message");
+
+        assert_eq!(consensus_err.to_string(), "consensus message");
+        assert!(consensus_err.downcast_other_ref::<MessageError>().is_some());
+    }
 }

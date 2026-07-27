@@ -6,7 +6,7 @@
 
 use alloy_primitives::{address, Address, Bytes};
 use reth_evm::precompiles::{DynPrecompile, PrecompileInput};
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::warn;
 
 /// Address of Gravity's BLS12-381 `PoP` verification precompile.
@@ -77,7 +77,7 @@ fn bls_pop_verify_handler(input: PrecompileInput<'_>) -> PrecompileResult {
     // early so the dispatcher takes the normal PrecompileOOG branch instead of
     // panicking.
     if POP_VERIFY_GAS > input.gas {
-        return Err(PrecompileError::OutOfGas);
+        return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
     }
     bls_pop_verify_handler_raw(input.data)
 }
@@ -94,11 +94,14 @@ pub fn bls_pop_verify_handler_raw(data: &[u8]) -> PrecompileResult {
             expected = EXPECTED_INPUT_LEN,
             "Invalid input length"
         );
-        return Err(PrecompileError::Other(format!(
-            "expected exactly {} bytes, got {}",
-            EXPECTED_INPUT_LEN,
-            data.len()
-        )));
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other(format!(
+                "expected exactly {} bytes, got {}",
+                EXPECTED_INPUT_LEN,
+                data.len()
+            )),
+            0,
+        ));
     }
 
     // 2. Parse pubkey (bytes 0..48) and PoP (bytes 48..144)
@@ -114,11 +117,7 @@ pub fn bls_pop_verify_handler_raw(data: &[u8]) -> PrecompileResult {
         output[31] = 1;
     }
 
-    Ok(PrecompileOutput {
-        gas_used: POP_VERIFY_GAS,
-        bytes: Bytes::copy_from_slice(&output),
-        reverted: false,
-    })
+    Ok(PrecompileOutput::new(POP_VERIFY_GAS, Bytes::copy_from_slice(&output), 0))
 }
 
 /// Verify BLS12-381 proof-of-possession using the `blst` crate.
@@ -226,8 +225,8 @@ mod tests {
     #[test]
     fn test_precompile_invalid_input_length() {
         let input_data = vec![0u8; 10]; // Too short
-        let result = bls_pop_verify_handler_raw(&input_data);
-        assert!(result.is_err(), "Short input should return error");
+        let output = bls_pop_verify_handler_raw(&input_data).expect("halt is not fatal");
+        assert!(output.is_halt(), "Short input should halt");
     }
 
     #[test]

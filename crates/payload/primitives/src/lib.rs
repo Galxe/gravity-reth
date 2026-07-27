@@ -8,12 +8,11 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
-use crate::alloc::string::ToString;
 use alloy_primitives::Bytes;
 use reth_chainspec::EthereumHardforks;
 use reth_primitives_traits::{NodePrimitives, SealedBlock};
@@ -26,8 +25,8 @@ pub use error::{
 
 mod traits;
 pub use traits::{
-    BuildNextEnv, BuiltPayload, PayloadAttributes, PayloadAttributesBuilder,
-    PayloadBuilderAttributes,
+    payload_id, BuildNextEnv, BuiltPayload, BuiltPayloadExecutedBlock, PayloadAttributes,
+    PayloadAttributesBuilder,
 };
 
 mod payload;
@@ -39,7 +38,7 @@ pub trait PayloadTypes: Send + Sync + Unpin + core::fmt::Debug + Clone + 'static
     ///
     /// This type represents the canonical format for block data that includes
     /// all necessary information for execution and validation.
-    type ExecutionData: ExecutionPayload;
+    type ExecutionData: ExecutionPayload + From<Self::BuiltPayload>;
     /// The type representing a successfully built payload/block.
     type BuiltPayload: BuiltPayload + Clone + Unpin;
 
@@ -49,20 +48,12 @@ pub trait PayloadTypes: Send + Sync + Unpin + core::fmt::Debug + Clone + 'static
     /// as the Engine API) and contain parameters like timestamp, fee recipient, and randomness.
     type PayloadAttributes: PayloadAttributes + Unpin;
 
-    /// Extended attributes used internally during payload building.
-    ///
-    /// This type augments the basic payload attributes with additional information
-    /// needed during the building process, such as unique identifiers and parent
-    /// block references.
-    type PayloadBuilderAttributes: PayloadBuilderAttributes<RpcPayloadAttributes = Self::PayloadAttributes>
-        + Clone
-        + Unpin;
-
     /// Converts a sealed block into the execution payload format.
     fn block_to_payload(
         block: SealedBlock<
             <<Self::BuiltPayload as BuiltPayload>::Primitives as NodePrimitives>::Block,
         >,
+        bal: Option<Bytes>,
     ) -> Self::ExecutionData;
 }
 
@@ -71,12 +62,18 @@ pub trait PayloadTypes: Send + Sync + Unpin + core::fmt::Debug + Clone + 'static
 /// * If V2, this ensures that the payload timestamp is pre-Cancun.
 /// * If V3, this ensures that the payload timestamp is within the Cancun timestamp.
 /// * If V4, this ensures that the payload timestamp is within the Prague timestamp.
+/// * If V5, this ensures that the payload timestamp is within the Osaka timestamp.
+/// * If V6, this ensures that the payload timestamp is within the Amsterdam timestamp.
+///
+/// Additionally, it ensures that `engine_getPayloadV4` is not used for an Osaka payload and that
+/// staggered endpoint upgrades reject the next fork once a newer method version is required.
 ///
 /// Otherwise, this will return [`EngineObjectValidationError::UnsupportedFork`].
 pub fn validate_payload_timestamp(
     chain_spec: impl EthereumHardforks,
     version: EngineApiMessageVersion,
     timestamp: u64,
+    kind: MessageValidationKind,
 ) -> Result<(), EngineObjectValidationError> {
     let is_cancun = chain_spec.is_cancun_active_at_timestamp(timestamp);
     if version.is_v2() && is_cancun {
@@ -157,6 +154,158 @@ pub fn validate_payload_timestamp(
         return Err(EngineObjectValidationError::UnsupportedFork)
     }
 
+    let is_amsterdam = chain_spec.is_amsterdam_active_at_timestamp(timestamp);
+
+    // Staggered endpoint upgrades must reject Amsterdam payloads until the Amsterdam-specific
+    // method version is used.
+    if is_amsterdam &&
+        matches!(
+            (version, kind),
+            (EngineApiMessageVersion::V3, MessageValidationKind::PayloadAttributes) |
+                (EngineApiMessageVersion::V4, MessageValidationKind::Payload) |
+                (EngineApiMessageVersion::V5, MessageValidationKind::GetPayload)
+        )
+    {
+        return Err(EngineObjectValidationError::UnsupportedFork)
+    }
+
+    // `engine_getPayloadV4` MUST reject payloads with a timestamp >= Osaka.
+    if version.is_v4() && kind == MessageValidationKind::GetPayload && is_osaka {
+        return Err(EngineObjectValidationError::UnsupportedFork)
+    }
+
+    if version.is_v6() && !is_amsterdam {
+        // From the Engine API spec:
+        // <https://github.com/ethereum/execution-apis/blob/15399c2e2f16a5f800bf3f285640357e2c245ad9/src/engine/osaka.md#specification>
+        //
+        // For `engine_getPayloadV6`
+        //
+        // 1. Client software MUST return -38005: Unsupported fork error if the timestamp of the
+        //    built payload does not fall within the time frame of the Amsterdam fork.
+
+        return Err(EngineObjectValidationError::UnsupportedFork)
+    }
+
+    Ok(())
+}
+
+/// Validates the presence of the `block access lists` field according to the payload timestamp.
+/// After Amsterdam, block access list field must be [Some].
+/// Before Amsterdam, block access list field must be [None];
+pub fn validate_block_access_list_presence<T: EthereumHardforks>(
+    chain_spec: &T,
+    version: EngineApiMessageVersion,
+    message_validation_kind: MessageValidationKind,
+    timestamp: u64,
+    has_block_access_list: bool,
+) -> Result<(), EngineObjectValidationError> {
+    let is_amsterdam_active = chain_spec.is_amsterdam_active_at_timestamp(timestamp);
+    match version {
+        EngineApiMessageVersion::V1 |
+        EngineApiMessageVersion::V2 |
+        EngineApiMessageVersion::V3 |
+        EngineApiMessageVersion::V4 => {
+            if has_block_access_list {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::BlockAccessListNotSupported))
+            }
+        }
+
+        EngineApiMessageVersion::V5 => {
+            if message_validation_kind == MessageValidationKind::Payload {
+                if is_amsterdam_active && !has_block_access_list {
+                    return Err(message_validation_kind
+                        .to_error(VersionSpecificValidationError::NoBlockAccessListPostAmsterdam))
+                }
+                if !is_amsterdam_active && has_block_access_list {
+                    return Err(message_validation_kind
+                        .to_error(VersionSpecificValidationError::HasBlockAccessListPreAmsterdam))
+                }
+            } else if has_block_access_list {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::BlockAccessListNotSupported))
+            }
+        }
+
+        EngineApiMessageVersion::V6 => {
+            if is_amsterdam_active && !has_block_access_list {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::NoBlockAccessListPostAmsterdam))
+            }
+            if !is_amsterdam_active && has_block_access_list {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::HasBlockAccessListPreAmsterdam))
+            }
+        }
+    };
+
+    Ok(())
+}
+
+/// Validates the presence of the `slot number` field according to the payload timestamp.
+/// After Amsterdam, slot number field must be [Some].
+/// Before Amsterdam, slot number field must be [None];
+pub fn validate_slot_number_presence<T: EthereumHardforks>(
+    chain_spec: &T,
+    version: EngineApiMessageVersion,
+    message_validation_kind: MessageValidationKind,
+    timestamp: u64,
+    has_slot_number: bool,
+) -> Result<(), EngineObjectValidationError> {
+    let is_amsterdam_active = chain_spec.is_amsterdam_active_at_timestamp(timestamp);
+
+    match version {
+        EngineApiMessageVersion::V1 | EngineApiMessageVersion::V2 | EngineApiMessageVersion::V3 => {
+            if has_slot_number {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::SlotNumberNotSupported))
+            }
+        }
+
+        EngineApiMessageVersion::V4 => {
+            if message_validation_kind == MessageValidationKind::PayloadAttributes {
+                if is_amsterdam_active && !has_slot_number {
+                    return Err(message_validation_kind
+                        .to_error(VersionSpecificValidationError::NoSlotNumberPostAmsterdam))
+                }
+                if !is_amsterdam_active && has_slot_number {
+                    return Err(message_validation_kind
+                        .to_error(VersionSpecificValidationError::HasSlotNumberPreAmsterdam))
+                }
+            } else if has_slot_number {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::SlotNumberNotSupported))
+            }
+        }
+
+        EngineApiMessageVersion::V5 => {
+            if message_validation_kind == MessageValidationKind::Payload {
+                if is_amsterdam_active && !has_slot_number {
+                    return Err(message_validation_kind
+                        .to_error(VersionSpecificValidationError::NoSlotNumberPostAmsterdam))
+                }
+                if !is_amsterdam_active && has_slot_number {
+                    return Err(message_validation_kind
+                        .to_error(VersionSpecificValidationError::HasSlotNumberPreAmsterdam))
+                }
+            } else if has_slot_number {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::SlotNumberNotSupported))
+            }
+        }
+
+        EngineApiMessageVersion::V6 => {
+            if is_amsterdam_active && !has_slot_number {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::NoSlotNumberPostAmsterdam))
+            }
+            if !is_amsterdam_active && has_slot_number {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::HasSlotNumberPreAmsterdam))
+            }
+        }
+    };
+
     Ok(())
 }
 
@@ -182,7 +331,8 @@ pub fn validate_withdrawals_presence<T: EthereumHardforks>(
         EngineApiMessageVersion::V2 |
         EngineApiMessageVersion::V3 |
         EngineApiMessageVersion::V4 |
-        EngineApiMessageVersion::V5 => {
+        EngineApiMessageVersion::V5 |
+        EngineApiMessageVersion::V6 => {
             if is_shanghai_active && !has_withdrawals {
                 return Err(message_validation_kind
                     .to_error(VersionSpecificValidationError::NoWithdrawalsPostShanghai))
@@ -283,7 +433,10 @@ pub fn validate_parent_beacon_block_root_presence<T: EthereumHardforks>(
                 ))
             }
         }
-        EngineApiMessageVersion::V3 | EngineApiMessageVersion::V4 | EngineApiMessageVersion::V5 => {
+        EngineApiMessageVersion::V3 |
+        EngineApiMessageVersion::V4 |
+        EngineApiMessageVersion::V5 |
+        EngineApiMessageVersion::V6 => {
             if !has_parent_beacon_block_root {
                 return Err(validation_kind
                     .to_error(VersionSpecificValidationError::NoParentBeaconBlockRootPostCancun))
@@ -301,7 +454,7 @@ pub fn validate_parent_beacon_block_root_presence<T: EthereumHardforks>(
     //
     // 2. Client software **MUST** return `-38005: Unsupported fork` error if the `timestamp` of the
     //    payload does not fall within the time frame of the Cancun fork.
-    validate_payload_timestamp(chain_spec, version, timestamp)?;
+    validate_payload_timestamp(chain_spec, version, timestamp, validation_kind)?;
 
     Ok(())
 }
@@ -313,9 +466,14 @@ pub fn validate_parent_beacon_block_root_presence<T: EthereumHardforks>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageValidationKind {
     /// We are validating fields of a payload attributes.
+    /// This corresponds to `engine_forkchoiceUpdated`.
     PayloadAttributes,
     /// We are validating fields of a payload.
+    /// This corresponds to `engine_newPayload`.
     Payload,
+    /// We are validating a built payload.
+    /// This corresponds to `engine_getPayload`.
+    GetPayload,
 }
 
 impl MessageValidationKind {
@@ -326,7 +484,9 @@ impl MessageValidationKind {
         error: VersionSpecificValidationError,
     ) -> EngineObjectValidationError {
         match self {
-            Self::Payload => EngineObjectValidationError::Payload(error),
+            // Both NewPayload and GetPayload errors are treated as generic Payload validation
+            // errors
+            Self::Payload | Self::GetPayload => EngineObjectValidationError::Payload(error),
             Self::PayloadAttributes => EngineObjectValidationError::PayloadAttributes(error),
         }
     }
@@ -349,6 +509,25 @@ where
     Type: PayloadAttributes,
     T: EthereumHardforks,
 {
+    // BAL only exists in ExecutionPayload, not PayloadAttributes (EIP-7928)
+    if let PayloadOrAttributes::ExecutionPayload(_) = payload_or_attrs {
+        validate_block_access_list_presence(
+            chain_spec,
+            version,
+            payload_or_attrs.message_validation_kind(),
+            payload_or_attrs.timestamp(),
+            payload_or_attrs.block_access_list().is_some(),
+        )?;
+    }
+
+    validate_slot_number_presence(
+        chain_spec,
+        version,
+        payload_or_attrs.message_validation_kind(),
+        payload_or_attrs.timestamp(),
+        payload_or_attrs.slot_number().is_some(),
+    )?;
+
     validate_withdrawals_presence(
         chain_spec,
         version,
@@ -387,6 +566,10 @@ pub enum EngineApiMessageVersion {
     ///
     /// Added in the Osaka hardfork.
     V5 = 5,
+    /// Version 6
+    ///
+    /// Added in the Amsterdam hardfork.
+    V6 = 6,
 }
 
 impl EngineApiMessageVersion {
@@ -415,6 +598,11 @@ impl EngineApiMessageVersion {
         matches!(self, Self::V5)
     }
 
+    /// Returns true if the version is V6.
+    pub const fn is_v6(&self) -> bool {
+        matches!(self, Self::V6)
+    }
+
     /// Returns the method name for the given version.
     pub const fn method_name(&self) -> &'static str {
         match self {
@@ -422,7 +610,7 @@ impl EngineApiMessageVersion {
             Self::V2 => "engine_newPayloadV2",
             Self::V3 => "engine_newPayloadV3",
             Self::V4 => "engine_newPayloadV4",
-            Self::V5 => "engine_newPayloadV5",
+            Self::V5 | Self::V6 => "engine_newPayloadV5",
         }
     }
 }
@@ -462,21 +650,19 @@ pub fn validate_execution_requests(requests: &[Bytes]) -> Result<(), EngineObjec
     let mut last_request_type = None;
     for request in requests {
         if request.len() <= 1 {
-            return Err(EngineObjectValidationError::InvalidParams(
-                "EmptyExecutionRequest".to_string().into(),
-            ))
+            return Err(EngineObjectValidationError::InvalidParams("EmptyExecutionRequest".into()))
         }
 
         let request_type = request[0];
         if Some(request_type) < last_request_type {
             return Err(EngineObjectValidationError::InvalidParams(
-                "OutOfOrderExecutionRequest".to_string().into(),
+                "OutOfOrderExecutionRequest".into(),
             ))
         }
 
         if Some(request_type) == last_request_type {
             return Err(EngineObjectValidationError::InvalidParams(
-                "DuplicatedExecutionRequestType".to_string().into(),
+                "DuplicatedExecutionRequestType".into(),
             ))
         }
 
@@ -489,10 +675,108 @@ pub fn validate_execution_requests(requests: &[Bytes]) -> Result<(), EngineObjec
 mod tests {
     use super::*;
     use assert_matches::assert_matches;
+    use reth_chainspec::{ChainSpecBuilder, EthereumHardfork, ForkCondition};
 
     #[test]
     fn version_ord() {
         assert!(EngineApiMessageVersion::V4 > EngineApiMessageVersion::V3);
+    }
+
+    #[test]
+    fn validate_osaka_get_payload_restrictions() {
+        // Osaka activates at timestamp 1000
+        let osaka_activation = 1000;
+        let chain_spec = ChainSpecBuilder::mainnet()
+            .with_fork(EthereumHardfork::Prague, ForkCondition::Timestamp(0))
+            .with_fork(EthereumHardfork::Osaka, ForkCondition::Timestamp(osaka_activation))
+            .build();
+
+        // Osaka is Active + V4 + GetPayload
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V4,
+            osaka_activation,
+            MessageValidationKind::GetPayload,
+        );
+        assert_matches!(res, Err(EngineObjectValidationError::UnsupportedFork));
+
+        // Osaka is Active + V4 + Payload (NewPayload)
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V4,
+            osaka_activation,
+            MessageValidationKind::Payload,
+        );
+        assert_matches!(res, Ok(()));
+    }
+
+    #[test]
+    fn validate_amsterdam_staggered_version_restrictions() {
+        let chain_spec = ChainSpecBuilder::mainnet().amsterdam_activated().build();
+
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V3,
+            0,
+            MessageValidationKind::PayloadAttributes,
+        );
+        assert_matches!(res, Err(EngineObjectValidationError::UnsupportedFork));
+
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V4,
+            0,
+            MessageValidationKind::Payload,
+        );
+        assert_matches!(res, Err(EngineObjectValidationError::UnsupportedFork));
+
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V5,
+            0,
+            MessageValidationKind::GetPayload,
+        );
+        assert_matches!(res, Err(EngineObjectValidationError::UnsupportedFork));
+
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V6,
+            0,
+            MessageValidationKind::GetPayload,
+        );
+        assert_matches!(res, Ok(()));
+    }
+
+    #[test]
+    fn validate_amsterdam_slot_and_bal_presence() {
+        let chain_spec = ChainSpecBuilder::mainnet().amsterdam_activated().build();
+
+        let res = validate_slot_number_presence(
+            &chain_spec,
+            EngineApiMessageVersion::V4,
+            MessageValidationKind::PayloadAttributes,
+            0,
+            true,
+        );
+        assert_matches!(res, Ok(()));
+
+        let res = validate_slot_number_presence(
+            &chain_spec,
+            EngineApiMessageVersion::V5,
+            MessageValidationKind::Payload,
+            0,
+            true,
+        );
+        assert_matches!(res, Ok(()));
+
+        let res = validate_block_access_list_presence(
+            &chain_spec,
+            EngineApiMessageVersion::V5,
+            MessageValidationKind::Payload,
+            0,
+            true,
+        );
+        assert_matches!(res, Ok(()));
     }
 
     #[test]
@@ -521,7 +805,7 @@ mod tests {
         let mut requests_valid_reversed = valid_requests;
         requests_valid_reversed.reverse();
         assert_matches!(
-            validate_execution_requests(&requests_with_empty),
+            validate_execution_requests(&requests_valid_reversed),
             Err(EngineObjectValidationError::InvalidParams(_))
         );
 

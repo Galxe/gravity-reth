@@ -343,10 +343,19 @@ async fn run_simulation_anti_spoof(
     // -----------------------------------------------------------------
     // 2. eth_estimateGas
     // -----------------------------------------------------------------
-    let est_sys =
-        eth_api.estimate_gas_at(spoof_call_request(SYSTEM_CALLER), block_id.unwrap(), None).await;
+    let est_sys = eth_api
+        .estimate_gas_at(
+            spoof_call_request(SYSTEM_CALLER),
+            block_id.unwrap(),
+            EvmOverrides::default(),
+        )
+        .await;
     let est_probe = eth_api
-        .estimate_gas_at(spoof_call_request(SPOOF_PROBE_ADDR), block_id.unwrap(), None)
+        .estimate_gas_at(
+            spoof_call_request(SPOOF_PROBE_ADDR),
+            block_id.unwrap(),
+            EvmOverrides::default(),
+        )
         .await;
     assert_results_equivalent(label, "eth_estimateGas", &est_sys, &est_probe);
 

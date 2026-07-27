@@ -5,8 +5,8 @@ use crate::{
 };
 use alloy_consensus::constants::EIP4844_TX_TYPE_ID;
 use alloy_eips::eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE};
-use alloy_primitives::Address;
-use std::{collections::HashSet, ops::Mul, time::Duration};
+use alloy_primitives::{map::AddressSet, Address};
+use std::{ops::Mul, time::Duration};
 
 /// Guarantees max transactions for one sender, compatible with geth/erigon
 pub const TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER: usize = 16;
@@ -37,11 +37,11 @@ pub const DEFAULT_MAX_INFLIGHT_DELEGATED_SLOTS: usize = 1;
 /// Configuration options for the Transaction pool.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
-    /// Max number of transaction in the pending sub-pool
+    /// Max number of transactions in the pending sub-pool
     pub pending_limit: SubPoolLimit,
-    /// Max number of transaction in the basefee sub-pool
+    /// Max number of transactions in the basefee sub-pool
     pub basefee_limit: SubPoolLimit,
-    /// Max number of transaction in the queued sub-pool
+    /// Max number of transactions in the queued sub-pool
     pub queued_limit: SubPoolLimit,
     /// Max number of transactions in the blob sub-pool
     pub blob_limit: SubPoolLimit,
@@ -158,6 +158,11 @@ impl SubPoolLimit {
     pub const fn is_exceeded(&self, txs: usize, size: usize) -> bool {
         self.max_txs < txs || self.max_size < size
     }
+
+    /// Returns how many transactions exceed the configured limit.
+    pub const fn tx_excess(&self, txs: usize) -> Option<usize> {
+        txs.checked_sub(self.max_txs)
+    }
 }
 
 impl Mul<usize> for SubPoolLimit {
@@ -220,7 +225,7 @@ pub struct LocalTransactionConfig {
     ///   - no eviction exemptions
     pub no_exemptions: bool,
     /// Addresses that will be considered as local. Above exemptions apply.
-    pub local_addresses: HashSet<Address>,
+    pub local_addresses: AddressSet,
     /// Flag indicating whether local transactions should be propagated.
     pub propagate_local_transactions: bool,
 }
@@ -229,7 +234,7 @@ impl Default for LocalTransactionConfig {
     fn default() -> Self {
         Self {
             no_exemptions: false,
-            local_addresses: HashSet::default(),
+            local_addresses: AddressSet::default(),
             propagate_local_transactions: true,
         }
     }
@@ -328,7 +333,7 @@ mod tests {
     #[test]
     fn test_contains_local_address() {
         let address = Address::new([1; 20]);
-        let mut local_addresses = HashSet::default();
+        let mut local_addresses = AddressSet::default();
         local_addresses.insert(address);
 
         let config = LocalTransactionConfig { local_addresses, ..Default::default() };
@@ -345,7 +350,7 @@ mod tests {
         let address = Address::new([1; 20]);
         let config = LocalTransactionConfig {
             no_exemptions: true,
-            local_addresses: HashSet::default(),
+            local_addresses: AddressSet::default(),
             ..Default::default()
         };
 
@@ -356,7 +361,7 @@ mod tests {
     #[test]
     fn test_is_local_without_no_exemptions() {
         let address = Address::new([1; 20]);
-        let mut local_addresses = HashSet::default();
+        let mut local_addresses = AddressSet::default();
         local_addresses.insert(address);
 
         let config =

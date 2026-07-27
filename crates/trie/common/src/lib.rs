@@ -72,5 +72,9 @@ pub mod serde_bincode_compat {
 pub use alloy_trie::{nodes::*, proof, BranchNodeCompact, HashBuilder, TrieMask, EMPTY_ROOT_HASH};
 pub use updates::{StorageTrieUpdatesV2, TrieUpdatesV2};
 
+/// EIP-7864 v2 multiproof target types.
+pub mod target_v2;
+pub use target_v2::{ChunkedMultiProofTargetsV2, MultiProofTargetsV2, ProofV2Target};
+
 /// Nested trie for merklization
 pub mod nested_trie;

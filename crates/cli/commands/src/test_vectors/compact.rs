@@ -194,7 +194,7 @@ where
     T: for<'a> Arbitrary<'a> + reth_codecs::Compact,
 {
     let type_name = type_name::<T>();
-    print!("{}", &type_name);
+    print!("{}", type_name);
 
     let mut bytes = std::iter::repeat_n(0u8, 256).collect::<Vec<u8>>();
     let mut compact_buffer = vec![];
@@ -230,7 +230,7 @@ where
 
     serde_json::to_writer(
         std::io::BufWriter::new(
-            std::fs::File::create(format!("{VECTORS_FOLDER}/{}.json", &type_name)).unwrap(),
+            std::fs::File::create(format!("{VECTORS_FOLDER}/{}.json", type_name)).unwrap(),
         ),
         &values,
     )?;
@@ -247,10 +247,10 @@ where
     T: reth_codecs::Compact,
 {
     let type_name = type_name::<T>();
-    print!("{}", &type_name);
+    print!("{}", type_name);
 
     // Read the file where the vectors are stored
-    let file_path = format!("{VECTORS_FOLDER}/{}.json", &type_name);
+    let file_path = format!("{VECTORS_FOLDER}/{}.json", type_name);
     let file =
         File::open(&file_path).wrap_err_with(|| format!("Failed to open vector {type_name}."))?;
     let reader = BufReader::new(file);
@@ -283,7 +283,7 @@ pub fn type_name<T>() -> String {
     // With alloy type transition <https://github.com/paradigmxyz/reth/pull/15768> the types are renamed, we map them here to the original name so that test vector files remain consistent
     let name = std::any::type_name::<T>();
     match name {
-        "alloy_consensus::transaction::typed::EthereumTypedTransaction<alloy_consensus::transaction::eip4844::TxEip4844>" => "Transaction".to_string(),
+        "alloy_consensus::transaction::envelope::EthereumTypedTransaction<alloy_consensus::transaction::eip4844::TxEip4844>" => "Transaction".to_string(),
         "alloy_consensus::transaction::envelope::EthereumTxEnvelope<alloy_consensus::transaction::eip4844::TxEip4844>" => "TransactionSigned".to_string(),
         name => {
             name.split("::").last().unwrap_or(std::any::type_name::<T>()).to_string()

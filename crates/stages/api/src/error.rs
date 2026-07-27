@@ -1,5 +1,6 @@
 use crate::PipelineEvent;
 use alloy_eips::eip1898::BlockWithParent;
+use reth_codecs::DecompressError;
 use reth_consensus::ConsensusError;
 use reth_errors::{BlockExecutionError, DatabaseError, RethError};
 use reth_network_p2p::error::DownloadError;
@@ -91,7 +92,7 @@ pub enum StageError {
     /// Database is ahead of static file data.
     #[error("missing static file data for block number: {number}", number = block.block.number)]
     MissingStaticFileData {
-        /// Starting block with  missing data.
+        /// Starting block with missing data.
         block: Box<BlockWithParent>,
         /// Static File segment
         segment: StaticFileSegment,
@@ -139,6 +140,12 @@ impl StageError {
 impl From<std::io::Error> for StageError {
     fn from(source: std::io::Error) -> Self {
         Self::Fatal(Box::new(source))
+    }
+}
+
+impl From<DecompressError> for StageError {
+    fn from(error: DecompressError) -> Self {
+        Self::Database(DatabaseError::from(error))
     }
 }
 

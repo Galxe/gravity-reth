@@ -5,7 +5,7 @@
 
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use reth_evm::precompiles::{DynPrecompile, PrecompileInput};
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use std::{fmt, sync::Arc};
 use tracing::warn;
 
@@ -137,7 +137,7 @@ where
         // computing the (data-dependent) gas tier is fine.
         let output = randomness_by_height_handler_raw(input.data, provider.as_ref())?;
         if output.gas_used > input.gas {
-            return Err(PrecompileError::OutOfGas);
+            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
         }
         Ok(output)
     })
@@ -159,32 +159,38 @@ where
             expected = RANDOMNESS_BY_HEIGHT_INPUT_LEN,
             "invalid input length"
         );
-        return Err(PrecompileError::Other(format!(
-            "expected exactly {RANDOMNESS_BY_HEIGHT_INPUT_LEN} bytes, got {}",
-            data.len()
-        )));
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other(format!(
+                "expected exactly {RANDOMNESS_BY_HEIGHT_INPUT_LEN} bytes, got {}",
+                data.len()
+            )),
+            0,
+        ));
     }
 
     let height = U256::from_be_slice(data);
     if height > U256::from(u64::MAX) {
-        return Ok(PrecompileOutput {
-            gas_used: RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
-            bytes: encode_randomness_by_height_result(false, B256::ZERO),
-            reverted: false,
-        });
+        return Ok(PrecompileOutput::new(
+            RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
+            encode_randomness_by_height_result(false, B256::ZERO),
+            0,
+        ));
     }
 
-    let lookup = provider
-        .randomness_by_height(height.to::<u64>())
-        .map_err(|err| PrecompileError::Other(format!("randomness lookup failed: {err}")))?;
-    Ok(PrecompileOutput {
-        gas_used: lookup.gas_used,
-        bytes: match lookup.value {
-            Some(value) => encode_randomness_by_height_result(true, value),
-            None => encode_randomness_by_height_result(false, B256::ZERO),
-        },
-        reverted: false,
-    })
+    let lookup = match provider.randomness_by_height(height.to::<u64>()) {
+        Ok(lookup) => lookup,
+        Err(err) => {
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::other(format!("randomness lookup failed: {err}")),
+                0,
+            ));
+        }
+    };
+    let bytes = match lookup.value {
+        Some(value) => encode_randomness_by_height_result(true, value),
+        None => encode_randomness_by_height_result(false, B256::ZERO),
+    };
+    Ok(PrecompileOutput::new(lookup.gas_used, bytes, 0))
 }
 
 /// Encodes `(uint256 found, bytes32 randomness)`.
@@ -251,7 +257,7 @@ mod tests {
         let result = randomness_by_height_handler_raw(&encode_height(U256::from(10)), &provider)
             .expect("lookup succeeds");
 
-        assert!(!result.reverted);
+        assert!(result.is_success());
         assert_eq!(result.gas_used, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS);
         assert_eq!(result.bytes[31], 1);
         assert_eq!(&result.bytes[32..64], randomness.as_slice());
@@ -264,7 +270,7 @@ mod tests {
         let result = randomness_by_height_handler_raw(&encode_height(U256::from(10)), &provider)
             .expect("lookup succeeds");
 
-        assert!(!result.reverted);
+        assert!(result.is_success());
         assert_eq!(result.bytes[31], 0);
         assert_eq!(&result.bytes[32..64], B256::ZERO.as_slice());
     }
@@ -277,7 +283,7 @@ mod tests {
         let result = randomness_by_height_handler_raw(&encode_height(U256::from(10)), &provider)
             .expect("lookup succeeds");
 
-        assert!(!result.reverted);
+        assert!(result.is_success());
         assert_eq!(result.gas_used, RANDOMNESS_BY_HEIGHT_RECENT_GAS);
         assert_eq!(result.bytes[31], 1);
         assert_eq!(&result.bytes[32..64], randomness.as_slice());
@@ -303,7 +309,7 @@ mod tests {
         )
         .expect("lookup succeeds");
 
-        assert!(!result.reverted);
+        assert!(result.is_success());
         assert_eq!(result.bytes[31], 0);
         assert_eq!(&result.bytes[32..64], B256::ZERO.as_slice());
     }
@@ -311,6 +317,8 @@ mod tests {
     #[test]
     fn invalid_input_length_errors() {
         let provider = MockRandomnessProvider::default();
-        assert!(randomness_by_height_handler_raw(&[1, 2, 3], &provider).is_err());
+        let output =
+            randomness_by_height_handler_raw(&[1, 2, 3], &provider).expect("halt is not fatal");
+        assert!(output.is_halt());
     }
 }

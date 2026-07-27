@@ -1,39 +1,19 @@
 //! An abstraction over ethereum signers.
 
-use std::collections::HashMap;
-
-use crate::EthApi;
 use alloy_dyn_abi::TypedData;
 use alloy_eips::eip2718::Decodable2718;
-use alloy_primitives::{eip191_hash_message, Address, Signature, B256};
+use alloy_primitives::{eip191_hash_message, map::AddressMap, Address, Signature, B256};
 use alloy_signer::SignerSync;
-use alloy_signer_local::PrivateKeySigner;
-use reth_rpc_convert::{RpcConvert, RpcTypes, SignableTxRequest};
-use reth_rpc_eth_api::{
-    helpers::{signer::Result, AddDevSigners, EthSigner},
-    FromEvmError, RpcNodeCore,
-};
-use reth_rpc_eth_types::{EthApiError, SignError};
-use reth_storage_api::ProviderTx;
-
-impl<N, Rpc> AddDevSigners for EthApi<N, Rpc>
-where
-    N: RpcNodeCore,
-    EthApiError: FromEvmError<N::Evm>,
-    Rpc: RpcConvert<
-        Network: RpcTypes<TransactionRequest: SignableTxRequest<ProviderTx<N::Provider>>>,
-    >,
-{
-    fn with_dev_accounts(&self) {
-        *self.inner.signers().write() = DevSigner::random_signers(20)
-    }
-}
+use alloy_signer_local::{coins_bip39::English, MnemonicBuilder, PrivateKeySigner};
+use reth_rpc_convert::SignableTxRequest;
+use reth_rpc_eth_api::helpers::{signer::Result, EthSigner};
+use reth_rpc_eth_types::SignError;
 
 /// Holds developer keys
 #[derive(Debug, Clone)]
 pub struct DevSigner {
     addresses: Vec<Address>,
-    accounts: HashMap<Address, PrivateKeySigner>,
+    accounts: AddressMap<PrivateKeySigner>,
 }
 
 impl DevSigner {
@@ -49,9 +29,35 @@ impl DevSigner {
             let address = sk.address();
             let addresses = vec![address];
 
-            let accounts = HashMap::from([(address, sk)]);
+            let accounts = AddressMap::from_iter([(address, sk)]);
             signers.push(Box::new(Self { addresses, accounts }) as Box<dyn EthSigner<T, TxReq>>);
         }
+        signers
+    }
+
+    /// Generates dev signers deterministically from a fixed mnemonic.
+    /// Uses the Ethereum derivation path: `m/44'/60'/0'/0/{index}`
+    pub fn from_mnemonic<T: Decodable2718, TxReq: SignableTxRequest<T>>(
+        mnemonic: &str,
+        num: u32,
+    ) -> Vec<Box<dyn EthSigner<T, TxReq> + 'static>> {
+        let mut signers = Vec::with_capacity(num as usize);
+
+        for i in 0..num {
+            let sk = MnemonicBuilder::<English>::default()
+                .phrase(mnemonic)
+                .index(i)
+                .expect("invalid derivation path")
+                .build()
+                .expect("failed to build signer from mnemonic");
+
+            let address = sk.address();
+            let addresses = vec![address];
+            let accounts = AddressMap::from_iter([(address, sk)]);
+
+            signers.push(Box::new(Self { addresses, accounts }) as Box<dyn EthSigner<T, TxReq>>);
+        }
+
         signers
     }
 
@@ -114,7 +120,7 @@ mod tests {
         let signer: PrivateKeySigner =
             "4646464646464646464646464646464646464646464646464646464646464646".parse().unwrap();
         let address = signer.address();
-        let accounts = HashMap::from([(address, signer)]);
+        let accounts = AddressMap::from_iter([(address, signer)]);
         let addresses = vec![address];
         DevSigner { addresses, accounts }
     }

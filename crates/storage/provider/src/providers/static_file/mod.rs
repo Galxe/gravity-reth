@@ -9,9 +9,9 @@ pub use writer::{StaticFileProviderRW, StaticFileProviderRWRefMut};
 
 mod metrics;
 use reth_nippy_jar::NippyJar;
-use reth_static_file_types::{SegmentHeader, StaticFileSegment};
+use reth_static_file_types::{ChangesetOffsetReader, SegmentHeader, StaticFileSegment};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
-use std::{ops::Deref, sync::Arc};
+use std::{io, ops::Deref, sync::Arc};
 
 /// Alias type for each specific `NippyJar`.
 type LoadedJarRef<'a> = dashmap::mapref::one::Ref<'a, (u64, StaticFileSegment), LoadedJar>;
@@ -21,6 +21,7 @@ type LoadedJarRef<'a> = dashmap::mapref::one::Ref<'a, (u64, StaticFileSegment), 
 pub struct LoadedJar {
     jar: NippyJar<SegmentHeader>,
     mmap_handle: Arc<reth_nippy_jar::DataReader>,
+    csoff_reader: Option<ChangesetOffsetReader>,
 }
 
 impl LoadedJar {
@@ -28,7 +29,22 @@ impl LoadedJar {
         match jar.open_data_reader() {
             Ok(data_reader) => {
                 let mmap_handle = Arc::new(data_reader);
-                Ok(Self { jar, mmap_handle })
+
+                // The sidecar length comes from the committed header, never the file size, so
+                // only committed records are readable.
+                let csoff_reader = if jar.user_header().segment().is_change_based() {
+                    let csoff_path = jar.data_path().with_extension("csoff");
+                    let len = jar.user_header().changeset_offsets_len();
+                    match ChangesetOffsetReader::new(&csoff_path, len) {
+                        Ok(reader) => Some(reader),
+                        Err(err) if err.kind() == io::ErrorKind::NotFound && len == 0 => None,
+                        Err(err) => return Err(ProviderError::other(err)),
+                    }
+                } else {
+                    None
+                };
+
+                Ok(Self { jar, mmap_handle, csoff_reader })
             }
             Err(e) => Err(ProviderError::other(e)),
         }
@@ -41,6 +57,11 @@ impl LoadedJar {
 
     const fn segment(&self) -> StaticFileSegment {
         self.jar.user_header().segment()
+    }
+
+    /// Returns a reference to the cached changeset offset reader.
+    const fn csoff_reader(&self) -> Option<&ChangesetOffsetReader> {
+        self.csoff_reader.as_ref()
     }
 }
 
@@ -390,7 +411,7 @@ mod tests {
                     .unwrap()
                     .user_header()
                     .tx_range(),
-                expected_tx_range.as_ref()
+                expected_tx_range
             );
         });
 
@@ -561,5 +582,115 @@ mod tests {
             .count();
 
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod changeset_tests {
+    use super::*;
+    use crate::{test_utils::create_test_provider_factory, StaticFileProviderFactory};
+    use alloy_primitives::{Address, B256, U256};
+    use reth_db_api::models::{AccountBeforeTx, StorageBeforeTx};
+    use reth_primitives_traits::Account;
+    use reth_storage_api::{ChangeSetReader, StorageChangeSetReader};
+
+    #[test]
+    fn changeset_segments_roundtrip() -> eyre::Result<()> {
+        let factory = create_test_provider_factory();
+        let sf = factory.static_file_provider();
+
+        let addr1 = Address::with_last_byte(1);
+        let addr2 = Address::with_last_byte(2);
+
+        // Genesis: initialize both segments with an empty block 0, as init_genesis does.
+        for segment in [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+        {
+            let mut writer = sf.latest_writer(segment)?;
+            writer.increment_block(0)?;
+            writer.commit()?;
+        }
+
+        // Blocks 1..=3: two changed accounts, an empty block, one changed account. Entries are
+        // passed unsorted on purpose: the writer must sort by address (and storage key).
+        {
+            let mut writer = sf.latest_writer(StaticFileSegment::AccountChangeSets)?;
+            writer.append_account_changeset(
+                vec![
+                    AccountBeforeTx { address: addr2, info: Some(Account::default()) },
+                    AccountBeforeTx { address: addr1, info: None },
+                ],
+                1,
+            )?;
+            writer.append_account_changeset(Vec::new(), 2)?;
+            writer.append_account_changeset(
+                vec![AccountBeforeTx { address: addr1, info: None }],
+                3,
+            )?;
+            writer.commit()?;
+        }
+        {
+            let mut writer = sf.latest_writer(StaticFileSegment::StorageChangeSets)?;
+            writer.append_storage_changeset(
+                vec![
+                    StorageBeforeTx {
+                        address: addr1,
+                        key: B256::with_last_byte(9),
+                        value: U256::from(7),
+                    },
+                    StorageBeforeTx {
+                        address: addr1,
+                        key: B256::with_last_byte(3),
+                        value: U256::ZERO,
+                    },
+                ],
+                1,
+            )?;
+            writer.append_storage_changeset(Vec::new(), 2)?;
+            writer.append_storage_changeset(
+                vec![StorageBeforeTx {
+                    address: addr2,
+                    key: B256::with_last_byte(1),
+                    value: U256::from(42),
+                }],
+                3,
+            )?;
+            writer.commit()?;
+        }
+
+        // Rows come back per block, sorted by address (and storage key).
+        assert_eq!(
+            sf.account_block_changeset(1)?,
+            vec![
+                AccountBeforeTx { address: addr1, info: None },
+                AccountBeforeTx { address: addr2, info: Some(Account::default()) },
+            ]
+        );
+        assert!(sf.account_block_changeset(2)?.is_empty());
+        assert_eq!(sf.account_block_changeset(3)?.len(), 1);
+
+        let storage1 = sf.storage_changeset(1)?;
+        assert_eq!(storage1.len(), 2);
+        assert_eq!(storage1[0].0 .0, (1, addr1));
+        assert_eq!(storage1[0].1.key, B256::with_last_byte(3));
+        assert_eq!(storage1[1].1.key, B256::with_last_byte(9));
+        assert!(sf.storage_changeset(2)?.is_empty());
+        assert_eq!(sf.storage_changeset(3)?.len(), 1);
+
+        let all = sf.account_changesets_range(0..=3)?;
+        assert_eq!(all.iter().map(|(block, _)| *block).collect::<Vec<_>>(), vec![1, 1, 3]);
+        assert_eq!(sf.storage_changesets_range(..)?.len(), 3);
+
+        // Truncate back to block 1: blocks 2..=3 disappear, block 1 stays intact.
+        {
+            let mut writer = sf.latest_writer(StaticFileSegment::AccountChangeSets)?;
+            writer.prune_account_changesets(1)?;
+            writer.commit()?;
+        }
+        assert_eq!(sf.get_highest_static_file_block(StaticFileSegment::AccountChangeSets), Some(1));
+        assert_eq!(sf.account_block_changeset(1)?.len(), 2);
+        assert!(sf.account_block_changeset(3)?.is_empty());
+        assert_eq!(sf.account_changesets_range(0..=3)?.len(), 2);
+
+        Ok(())
     }
 }

@@ -8,9 +8,10 @@ use crate::{
 };
 use reqwest::Url;
 use reth_rpc_server_types::constants::{
-    default_max_tracing_requests, DEFAULT_ETH_PROOF_WINDOW, DEFAULT_MAX_BLOCKS_PER_FILTER,
-    DEFAULT_MAX_LOGS_PER_RESPONSE, DEFAULT_MAX_SIMULATE_BLOCKS, DEFAULT_MAX_TRACE_FILTER_BLOCKS,
-    DEFAULT_PROOF_PERMITS, RPC_DEFAULT_SEND_RAW_TX_SYNC_TIMEOUT_SECS,
+    default_max_tracing_requests, DEFAULT_ETH_PROOF_WINDOW, DEFAULT_MAX_BLOCKING_IO_REQUEST,
+    DEFAULT_MAX_BLOCKS_PER_FILTER, DEFAULT_MAX_LOGS_PER_RESPONSE, DEFAULT_MAX_SIMULATE_BLOCKS,
+    DEFAULT_MAX_TRACE_FILTER_BLOCKS, DEFAULT_PROOF_PERMITS,
+    RPC_DEFAULT_SEND_RAW_TX_SYNC_TIMEOUT_SECS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,15 @@ pub struct EthConfig {
     pub eth_proof_window: u64,
     /// The maximum number of tracing calls that can be executed in concurrently.
     pub max_tracing_requests: usize,
+    /// The maximum number of blocking IO calls that can be executed in concurrently.
+    ///
+    /// Requests such as `eth_call`, `eth_estimateGas` and alike require evm execution, which is
+    /// considered blocking since it's usually more heavy on the IO side but also CPU constrained.
+    /// It is expected that these are spawned as short lived blocking tokio tasks. This config
+    /// determines how many can be spawned concurrently, to avoid a build up in the tokio's
+    /// blocking pool queue since there's only a limited number of threads available. This setting
+    /// restricts how many tasks are spawned concurrently.
+    pub max_blocking_io_requests: usize,
     /// Maximum number of blocks for `trace_filter` requests.
     pub max_trace_filter_blocks: u64,
     /// Maximum number of blocks that could be scanned per filter request in `eth_getLogs` calls.
@@ -80,6 +90,8 @@ pub struct EthConfig {
     pub rpc_gas_cap: u64,
     /// Max number of blocks for `eth_simulateV1`.
     pub rpc_max_simulate_blocks: u64,
+    /// Whether to compute state roots for `eth_simulateV1` responses.
+    pub compute_state_root_for_eth_simulate: bool,
     ///
     /// Sets TTL for stale filters
     pub stale_filter_ttl: Duration,
@@ -95,6 +107,13 @@ pub struct EthConfig {
     pub raw_tx_forwarder: ForwardConfig,
     /// Timeout duration for `send_raw_transaction_sync` RPC method.
     pub send_raw_transaction_sync_timeout: Duration,
+    /// Maximum memory the EVM can allocate per RPC request.
+    pub rpc_evm_memory_limit: u64,
+    /// Whether to force upcasting EIP-4844 blob sidecars to EIP-7594 format when Osaka is active.
+    ///
+    /// This is disabled by default, allowing blob transactions with EIP-4844 sidecars to be
+    /// submitted without automatic conversion.
+    pub force_blob_sidecar_upcasting: bool,
 }
 
 impl EthConfig {
@@ -114,11 +133,13 @@ impl Default for EthConfig {
             gas_oracle: GasPriceOracleConfig::default(),
             eth_proof_window: DEFAULT_ETH_PROOF_WINDOW,
             max_tracing_requests: default_max_tracing_requests(),
+            max_blocking_io_requests: DEFAULT_MAX_BLOCKING_IO_REQUEST,
             max_trace_filter_blocks: DEFAULT_MAX_TRACE_FILTER_BLOCKS,
             max_blocks_per_filter: DEFAULT_MAX_BLOCKS_PER_FILTER,
             max_logs_per_response: DEFAULT_MAX_LOGS_PER_RESPONSE,
             rpc_gas_cap: RPC_DEFAULT_GAS_CAP.into(),
             rpc_max_simulate_blocks: DEFAULT_MAX_SIMULATE_BLOCKS,
+            compute_state_root_for_eth_simulate: false,
             stale_filter_ttl: DEFAULT_STALE_FILTER_TTL,
             fee_history_cache: FeeHistoryCacheConfig::default(),
             proof_permits: DEFAULT_PROOF_PERMITS,
@@ -126,6 +147,8 @@ impl Default for EthConfig {
             pending_block_kind: PendingBlockKind::Full,
             raw_tx_forwarder: ForwardConfig::default(),
             send_raw_transaction_sync_timeout: RPC_DEFAULT_SEND_RAW_TX_SYNC_TIMEOUT_SECS,
+            rpc_evm_memory_limit: (1 << 32) - 1,
+            force_blob_sidecar_upcasting: false,
         }
     }
 }
@@ -146,6 +169,12 @@ impl EthConfig {
     /// Configures the maximum number of tracing requests
     pub const fn max_tracing_requests(mut self, max_requests: usize) -> Self {
         self.max_tracing_requests = max_requests;
+        self
+    }
+
+    /// Configures the maximum number of blocking IO requests
+    pub const fn max_blocking_io_requests(mut self, max_requests: usize) -> Self {
+        self.max_blocking_io_requests = max_requests;
         self
     }
 
@@ -176,6 +205,12 @@ impl EthConfig {
     /// Configures the maximum gas limit for `eth_call` and call tracing RPC methods
     pub const fn rpc_max_simulate_blocks(mut self, max_blocks: u64) -> Self {
         self.rpc_max_simulate_blocks = max_blocks;
+        self
+    }
+
+    /// Configures whether to compute state roots for `eth_simulateV1` responses.
+    pub const fn compute_state_root_for_eth_simulate(mut self, enabled: bool) -> Self {
+        self.compute_state_root_for_eth_simulate = enabled;
         self
     }
 
@@ -214,6 +249,18 @@ impl EthConfig {
     /// Configures the timeout duration for `send_raw_transaction_sync` RPC method.
     pub const fn send_raw_transaction_sync_timeout(mut self, timeout: Duration) -> Self {
         self.send_raw_transaction_sync_timeout = timeout;
+        self
+    }
+
+    /// Configures the maximum memory the EVM can allocate per RPC request.
+    pub const fn rpc_evm_memory_limit(mut self, memory_limit: u64) -> Self {
+        self.rpc_evm_memory_limit = memory_limit;
+        self
+    }
+
+    /// Configures whether to force upcasting EIP-4844 blob sidecars to EIP-7594 format.
+    pub const fn force_blob_sidecar_upcasting(mut self, force: bool) -> Self {
+        self.force_blob_sidecar_upcasting = force;
         self
     }
 }
@@ -263,7 +310,7 @@ impl Default for EthFilterConfig {
             max_blocks_per_filter: None,
             max_logs_per_response: None,
             // 5min
-            stale_filter_ttl: Duration::from_secs(5 * 60),
+            stale_filter_ttl: DEFAULT_STALE_FILTER_TTL,
         }
     }
 }

@@ -51,6 +51,7 @@
 //! };
 //! use reth_network_peers::mainnet_nodes;
 //! use reth_storage_api::noop::NoopProvider;
+//! use reth_tasks::Runtime;
 //!
 //! // This block provider implementation is used for testing purposes.
 //! let client = NoopProvider::default();
@@ -58,7 +59,7 @@
 //! // The key that's used for encrypting sessions and to identify our node.
 //! let local_key = rng_secret_key();
 //!
-//! let config = NetworkConfig::<_, EthNetworkPrimitives>::builder(local_key)
+//! let config = NetworkConfig::<_, EthNetworkPrimitives>::builder(local_key, Runtime::test())
 //!     .boot_nodes(mainnet_nodes())
 //!     .build(client);
 //!
@@ -80,6 +81,7 @@
 //! };
 //! use reth_network_peers::mainnet_nodes;
 //! use reth_storage_api::noop::NoopProvider;
+//! use reth_tasks::Runtime;
 //! use reth_transaction_pool::TransactionPool;
 //! async fn launch<Pool: TransactionPool>(pool: Pool) {
 //!     // This block provider implementation is used for testing purposes.
@@ -88,7 +90,7 @@
 //!     // The key that's used for encrypting sessions and to identify our node.
 //!     let local_key = rng_secret_key();
 //!
-//!     let config = NetworkConfig::<_, EthNetworkPrimitives>::builder(local_key)
+//!     let config = NetworkConfig::<_, EthNetworkPrimitives>::builder(local_key, Runtime::test())
 //!         .boot_nodes(mainnet_nodes())
 //!         .build(client.clone());
 //!     let transactions_manager_config = config.transactions_manager_config.clone();
@@ -115,7 +117,7 @@
 )]
 #![allow(unreachable_pub)]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(any(test, feature = "test-utils"))]
 /// Common helpers for network testing.
@@ -175,6 +177,7 @@ pub use reth_network_p2p as p2p;
 
 /// re-export types crates
 pub mod types {
+    pub use reth_discv4::NatResolver;
     pub use reth_eth_wire_types::*;
     pub use reth_network_types::*;
 }

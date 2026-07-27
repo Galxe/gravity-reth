@@ -9,13 +9,18 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Shared abstractions for downloader implementations.
 pub mod download;
 
 /// Traits for implementing P2P block body clients.
 pub mod bodies;
+
+/// Traits for implementing P2P block access lists clients.
+pub mod block_access_lists;
+/// Traits for implementing P2P receipt clients.
+pub mod receipts;
 
 /// A downloader that combines two different downloaders/client implementations.
 pub mod either;
@@ -49,8 +54,11 @@ pub mod snap;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+pub use block_access_lists::client::{BalRequirement, BlockAccessListsClient};
 pub use bodies::client::BodiesClient;
 pub use headers::client::HeadersClient;
+pub use receipts::client::ReceiptsClient;
+pub use reth_eth_wire_types::BlockAccessLists;
 use reth_primitives_traits::Block;
 
 /// Helper trait that unifies network behaviour needed for fetching entire blocks.

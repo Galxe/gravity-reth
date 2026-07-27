@@ -54,13 +54,15 @@ impl StorageShardedKey {
 }
 
 impl Encode for StorageShardedKey {
-    type Encoded = Vec<u8>;
+    type Encoded = [u8; STORAGE_SHARD_KEY_BYTES_SIZE];
 
     fn encode(self) -> Self::Encoded {
-        let mut buf: Vec<u8> = Vec::with_capacity(STORAGE_SHARD_KEY_BYTES_SIZE);
-        buf.extend_from_slice(&Encode::encode(self.address));
-        buf.extend_from_slice(&Encode::encode(self.sharded_key.key));
-        buf.extend_from_slice(&self.sharded_key.highest_block_number.to_be_bytes());
+        // Stack-allocated (#21200); bytes identical to the previous `Vec<u8>` encoding:
+        // `[20-byte address][32-byte storage key][8-byte big-endian block]`.
+        let mut buf = [0u8; STORAGE_SHARD_KEY_BYTES_SIZE];
+        buf[..20].copy_from_slice(self.address.as_slice());
+        buf[20..52].copy_from_slice(self.sharded_key.key.as_slice());
+        buf[52..].copy_from_slice(&self.sharded_key.highest_block_number.to_be_bytes());
         buf
     }
 }

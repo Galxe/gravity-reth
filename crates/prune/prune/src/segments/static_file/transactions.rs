@@ -34,6 +34,8 @@ where
         + BlockReader
         + StaticFileProviderFactory<Primitives: NodePrimitives<SignedTx: Value>>,
 {
+    // `PruneSegment::Transactions` is deprecated but index-stable; this segment still prunes it.
+    #[allow(deprecated)]
     fn segment(&self) -> PruneSegment {
         PruneSegment::Transactions
     }
