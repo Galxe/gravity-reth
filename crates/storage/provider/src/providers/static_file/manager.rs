@@ -487,6 +487,51 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         }
     }
 
+    /// Deletes every static file jar for `segment` that lies entirely below `block`.
+    ///
+    /// A jar is removed only when its highest block is still below `block`, so a jar that
+    /// straddles `block` — i.e. still holds live blocks at or above the prune horizon — is kept
+    /// (files can only be removed whole). The highest jar is never deleted, so at least one jar
+    /// always remains if any exist, even when `block` is past the segment tip.
+    ///
+    /// History pruning uses this to reclaim account/storage changeset jars once all of their
+    /// blocks fall below the prune horizon.
+    pub fn delete_segment_below_block(
+        &self,
+        segment: StaticFileSegment,
+        block: BlockNumber,
+    ) -> ProviderResult<()> {
+        // Nothing to delete if block is 0.
+        if block == 0 {
+            return Ok(())
+        }
+
+        let highest_block = self.get_highest_static_file_block(segment);
+
+        loop {
+            // `get_lowest_static_file_block` returns the *end* of the lowest jar's block range, so
+            // the jar is fully below the horizon only while that end is still `< block`.
+            let Some(range_end) = self.get_lowest_static_file_block(segment) else { return Ok(()) };
+
+            // Stop once the lowest jar reaches the horizon, and never delete the highest jar.
+            if range_end >= block || Some(range_end) == highest_block {
+                return Ok(())
+            }
+
+            debug!(
+                target: "provider::static_file",
+                ?segment,
+                ?range_end,
+                "Deleting static file below block"
+            );
+
+            // Wipe the jar; this updates the index and advances the lowest tracked block height.
+            self.delete_jar(segment, range_end).inspect_err(|err| {
+                warn!(target: "provider::static_file", ?segment, %range_end, ?err, "Failed to delete static file below block")
+            })?;
+        }
+    }
+
     /// Given a segment and block, it deletes the jar and all files from the respective block range.
     ///
     /// CAUTION: destructive. Deletes files on disk.

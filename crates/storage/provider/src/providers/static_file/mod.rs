@@ -590,7 +590,9 @@ mod changeset_tests {
     use super::*;
     use crate::{test_utils::create_test_provider_factory, StaticFileProviderFactory};
     use alloy_primitives::{Address, B256, U256};
+    use reth_db::test_utils::create_test_static_files_dir;
     use reth_db_api::models::{AccountBeforeTx, StorageBeforeTx};
+    use reth_ethereum_primitives::EthPrimitives;
     use reth_primitives_traits::Account;
     use reth_storage_api::{ChangeSetReader, StorageChangeSetReader};
 
@@ -690,6 +692,63 @@ mod changeset_tests {
         assert_eq!(sf.account_block_changeset(1)?.len(), 2);
         assert!(sf.account_block_changeset(3)?.is_empty());
         assert_eq!(sf.account_changesets_range(0..=3)?.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_segment_below_block_reclaims_whole_jars() -> eyre::Result<()> {
+        // Small jars so blocks span multiple files: jars are [0..=4], [5..=9], [10..=14], ...
+        let (static_dir, _) = create_test_static_files_dir();
+        let sf = StaticFileProvider::<EthPrimitives>::read_write(&static_dir)?
+            .with_custom_blocks_per_file(5);
+
+        let addr = Address::with_last_byte(1);
+
+        // Account changesets for blocks 0..=12 → jars [0..=4], [5..=9], and a partial [10..=12].
+        {
+            let mut writer = sf.latest_writer(StaticFileSegment::AccountChangeSets)?;
+            for block in 0..=12u64 {
+                writer.append_account_changeset(
+                    vec![AccountBeforeTx { address: addr, info: None }],
+                    block,
+                )?;
+            }
+            writer.commit()?;
+        }
+        // The `min_block` index (which `get_lowest_static_file_block` reads) is only rebuilt by
+        // `initialize_index`, which a production provider runs at startup. Refresh it here so it
+        // reflects the jars we just wrote, mirroring a fresh provider over existing files.
+        sf.initialize_index()?;
+
+        // `get_lowest_static_file_block` returns the *end* of the lowest jar's range.
+        assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(4));
+        assert_eq!(
+            sf.get_highest_static_file_block(StaticFileSegment::AccountChangeSets),
+            Some(12)
+        );
+
+        // Horizon at block 10: jars [0..=4] and [5..=9] end below it and are reclaimed, while the
+        // straddling jar [10..=12] still holds live blocks (>= 10) and must be kept whole.
+        sf.delete_segment_below_block(StaticFileSegment::AccountChangeSets, 10)?;
+
+        assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(12));
+        assert_eq!(
+            sf.get_highest_static_file_block(StaticFileSegment::AccountChangeSets),
+            Some(12)
+        );
+        // Live changesets at/above the horizon are intact.
+        assert_eq!(sf.account_block_changeset(10)?.len(), 1);
+        assert_eq!(sf.account_block_changeset(12)?.len(), 1);
+
+        // The highest jar is never deleted, even when the horizon is far past the tip.
+        sf.delete_segment_below_block(StaticFileSegment::AccountChangeSets, 1_000)?;
+        assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(12));
+        assert_eq!(
+            sf.get_highest_static_file_block(StaticFileSegment::AccountChangeSets),
+            Some(12)
+        );
+        assert_eq!(sf.account_block_changeset(12)?.len(), 1);
 
         Ok(())
     }
