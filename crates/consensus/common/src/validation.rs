@@ -7,7 +7,8 @@ use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks};
 use reth_consensus::{ConsensusError, TxGasLimitTooHighErr};
 use reth_primitives_traits::{
     constants::{
-        GAS_LIMIT_BOUND_DIVISOR, MAXIMUM_GAS_LIMIT_BLOCK, MAX_TX_GAS_LIMIT_OSAKA, MINIMUM_GAS_LIMIT,
+        GAS_LIMIT_BOUND_DIVISOR, GRAVITY_TX_GAS_LIMIT_CAP, MAXIMUM_GAS_LIMIT_BLOCK,
+        MINIMUM_GAS_LIMIT,
     },
     transaction::TxHashRef,
     Block, BlockBody, BlockHeader, GotExpected, SealedBlock, SealedHeader,
@@ -193,7 +194,8 @@ where
 ///   information about the specific checks in [`validate_shanghai_withdrawals`].
 /// * EIP-4844 blob gas validation, if cancun is active based on the given chainspec. See more
 ///   information about the specific checks in [`validate_cancun_gas`].
-/// * EIP-7825 per-tx gas limit validation, if osaka is active based on the given chainspec.
+/// * Per-tx gas cap validation (Gravity's Monad-style [`GRAVITY_TX_GAS_LIMIT_CAP`] in place of
+///   EIP-7825's `2^24`), if osaka is active based on the given chainspec.
 /// * EIP-7934 block size limit validation, if osaka is active based on the given chainspec.
 pub fn post_merge_hardfork_fields<B, ChainSpec>(
     block: &SealedBlock<B>,
@@ -225,13 +227,16 @@ where
     }
 
     if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) {
-        // EIP-7825: per-tx gas limit
+        // Per-tx gas cap. Gravity uses a Monad-style flat cap (`GRAVITY_TX_GAS_LIMIT_CAP` = 30M)
+        // in place of the EIP-7825 `2^24`, so the 30M system transactions clear it. Must match
+        // the executor cfg (`reth-evm-ethereum`) and the pipe `tx_filter` guard, or a
+        // self-produced block admitted by one path is rejected on another (sync brick).
         for tx in block.body().transactions() {
-            if tx.gas_limit() > MAX_TX_GAS_LIMIT_OSAKA {
+            if tx.gas_limit() > GRAVITY_TX_GAS_LIMIT_CAP {
                 return Err(TxGasLimitTooHighErr {
                     tx_hash: *tx.tx_hash(),
                     gas_limit: tx.gas_limit(),
-                    max_allowed: MAX_TX_GAS_LIMIT_OSAKA,
+                    max_allowed: GRAVITY_TX_GAS_LIMIT_CAP,
                 }
                 .into());
             }

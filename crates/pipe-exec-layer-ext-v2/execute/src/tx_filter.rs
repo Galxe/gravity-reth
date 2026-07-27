@@ -42,11 +42,12 @@
 //!   `account.nonce += 1`.
 //! - `Eip7873NotSupported` / `Eip7873MissingTarget` — activates on OSAKA. Adding Osaka requires an
 //!   init-code-tx type gate.
-//! - `TxGasLimitGreaterThanCap` — EIP-7825 tx gas-limit cap. `validate_tx_env`
-//!   (`validation.rs:116-123`) rejects `tx.gas_limit() > cfg.tx_gas_limit_cap()`; that cap is
-//!   `u64::MAX` pre-OSAKA and `eip7825::TX_GAS_LIMIT_CAP` (2^24) from OSAKA on (`revm-context
-//!   cfg.rs:272-278`), so it cannot fire on Gravity's Prague spec. Adding Osaka requires a
-//!   `tx.gas_limit() <= 2^24` gate here.
+//! - `TxGasLimitGreaterThanCap` — per-tx gas cap. `validate_tx_env` rejects `tx.gas_limit() >
+//!   cfg.tx_gas_limit_cap()`; that cap is `u64::MAX` pre-OSAKA. Under OSAKA Gravity pins it to a
+//!   Monad-style `GRAVITY_TX_GAS_LIMIT_CAP` (30M) rather than EIP-7825's `2^24` — see the
+//!   OSAKA-gated guard in `is_tx_valid` below. The executor cfg
+//!   (`reth-evm-ethereum::apply_gravity_tx_gas_cap`) and the consensus block check
+//!   (`reth-consensus-common`) are pinned to the same 30M value.
 //!
 //! Procedure on upgrade: `grep 'return Err(InvalidTransaction::'` in
 //! `revm-handler/src/` for the new pin, diff against the "unreachable" list above,
@@ -64,6 +65,7 @@ use reth_chainspec::{ChainSpec, EthChainSpec};
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm::ParallelDatabase;
 use reth_evm_ethereum::revm_spec_by_timestamp_and_block_number;
+use reth_primitives_traits::constants::GRAVITY_TX_GAS_LIMIT_CAP;
 use revm::state::AccountInfo;
 use revm_primitives::{eip3860::MAX_INITCODE_SIZE, hardfork::SpecId};
 use tracing::info;
@@ -150,6 +152,26 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                 return false;
             }
             _ => {}
+        }
+        // Per-tx gas cap. Gravity uses a Monad-style flat cap (`GRAVITY_TX_GAS_LIMIT_CAP` = 30M,
+        // matching Monad's `TFM_MAX_GAS_LIMIT`) in place of Ethereum's EIP-7825 `2^24`. Under
+        // OSAKA revm rejects `tx.gas_limit() > cfg.tx_gas_limit_cap()` with
+        // `TxGasLimitGreaterThanCap`; the executor cfg is pinned to the same 30M under OSAKA
+        // (`reth-evm-ethereum::apply_gravity_tx_gas_cap`) and the consensus block check mirrors it
+        // (`reth-consensus-common`). Placed after the chain-id gate and before the fee gates to
+        // mirror revm's `validate_tx_env` rule order. revm's Amsterdam `is_amsterdam_eip8037`
+        // wrapper is not mirrored — Gravity does not activate Amsterdam, so the omission is
+        // over-filter (the safe direction). The boundary is inclusive (`>`): a 30M system tx
+        // passes.
+        if spec_id.is_enabled_in(SpecId::OSAKA) && tx.gas_limit() > GRAVITY_TX_GAS_LIMIT_CAP {
+            info!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                gas_limit=?tx.gas_limit(),
+                cap=?GRAVITY_TX_GAS_LIMIT_CAP,
+                "tx gas limit exceeds Gravity per-tx cap"
+            );
+            return false;
         }
         // Fee gates. revm rejects with `GasPriceLessThanBasefee` when the tx's max fee
         // cap is below the prevailing base fee (this is the unified `max_fee_per_gas` —
@@ -420,6 +442,12 @@ mod tests {
     /// `Eip7702NotSupported` and panic the executor).
     fn shanghai_chain_spec() -> Arc<ChainSpec> {
         Arc::new(ChainSpecBuilder::from(&*MAINNET).shanghai_activated().build())
+    }
+
+    /// Chainspec with Osaka active from genesis — the fixture for the Gravity per-tx gas cap
+    /// gate. The gate is OSAKA-gated, so it only fires under this fixture (not the Prague one).
+    fn osaka_chain_spec() -> Arc<ChainSpec> {
+        Arc::new(ChainSpecBuilder::from(&*MAINNET).osaka_activated().build())
     }
 
     // Mock database for testing
@@ -1565,5 +1593,132 @@ mod tests {
             invalid_idxs.is_empty(),
             "tx from EIP-7702-delegated sender must pass: {invalid_idxs:?}"
         );
+    }
+
+    // ===== Gravity per-tx gas cap (Monad-style 30M, OSAKA-gated) ================
+
+    /// Pins the cap value and the boundary is inclusive, so a system tx built at exactly this
+    /// value (`new_system_call_txn`, 30M) clears the gate. Lowering the cap below 30M — or
+    /// raising the system-tx `gas_limit` above it — would start rejecting system transactions.
+    #[test]
+    fn test_gravity_tx_gas_cap_constant() {
+        assert_eq!(GRAVITY_TX_GAS_LIMIT_CAP, 30_000_000);
+    }
+
+    /// A tx with `gas_limit == cap` (30M) passes under Osaka — the gate is a strict `>`, so the
+    /// boundary is admitted (this is what lets the 30M system transactions through).
+    #[test]
+    fn test_filter_invalid_txs_osaka_gas_cap_boundary_passes() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64), // 1 ETH
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            },
+        );
+
+        // gas_price 1 / base_fee 0 keeps the fee + balance gates out of the way; block budget
+        // (60M) is above the tx so the cumulative pre-pass doesn't truncate first.
+        let tx = create_test_transaction(0, GRAVITY_TX_GAS_LIMIT_CAP, 1);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 60_000_000, &osaka_chain_spec(), 0, 0);
+        assert!(
+            invalid_idxs.is_empty(),
+            "30M tx at the cap boundary must pass under Osaka: {invalid_idxs:?}"
+        );
+    }
+
+    /// A tx one gas over the cap (30M + 1) is rejected under Osaka.
+    #[test]
+    fn test_filter_invalid_txs_osaka_gas_cap_over_rejected() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            },
+        );
+
+        let tx = create_test_transaction(0, GRAVITY_TX_GAS_LIMIT_CAP + 1, 1);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 60_000_000, &osaka_chain_spec(), 0, 0);
+        assert_eq!(invalid_idxs.len(), 1, "tx above the 30M cap must be discarded under Osaka");
+        assert!(invalid_idxs.contains(&0));
+    }
+
+    /// The gate is OSAKA-gated: the same over-cap tx passes under Prague (no per-tx cap exists
+    /// pre-Osaka, matching revm's `cfg.tx_gas_limit_cap()` = `u64::MAX` there).
+    #[test]
+    fn test_filter_invalid_txs_pre_osaka_no_gas_cap() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            },
+        );
+
+        let tx = create_test_transaction(0, GRAVITY_TX_GAS_LIMIT_CAP + 1, 1);
+        let txs = vec![tx];
+        let senders = vec![sender];
+
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 60_000_000, &prague_chain_spec(), 0, 0);
+        assert!(
+            invalid_idxs.is_empty(),
+            "pre-Osaka has no per-tx gas cap, over-cap tx must pass: {invalid_idxs:?}"
+        );
+    }
+
+    /// The cap is per-tx and does not pollute across senders: an over-cap tx from sender A is
+    /// dropped while a normal tx from sender B in the same batch passes, under Osaka.
+    #[test]
+    fn test_filter_invalid_txs_osaka_gas_cap_per_sender() {
+        let mut db = MockDatabase::new();
+        let sender_a = Address::random();
+        let sender_b = Address::random();
+        for s in [sender_a, sender_b] {
+            db.insert_account(
+                s,
+                AccountInfo {
+                    balance: U256::from(1_000_000_000_000_000_000u64),
+                    nonce: 0,
+                    code_hash: KECCAK_EMPTY,
+                    code: None,
+                    account_id: None,
+                },
+            );
+        }
+
+        let tx_a = create_test_transaction(0, GRAVITY_TX_GAS_LIMIT_CAP + 1, 1); // over cap
+        let tx_b = create_test_transaction(0, 21_000, 1); // fine
+        let txs = vec![tx_a, tx_b];
+        let senders = vec![sender_a, sender_b];
+
+        let invalid_idxs =
+            filter_invalid_txs(&db, &txs, &senders, 0, 60_000_000, &osaka_chain_spec(), 0, 0);
+        assert_eq!(invalid_idxs.len(), 1, "only sender A's over-cap tx must be dropped");
+        assert!(invalid_idxs.contains(&0));
     }
 }
