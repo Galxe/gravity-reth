@@ -20,7 +20,7 @@ use reth_evm::{
 };
 use reth_evm_ethereum::{
     parallel_execute::{
-        GravityTxSkippedEvent, GrevmExecutor, GRAVITY_TX_SKIPPED_LOG_ADDRESS,
+        GravityTxSkipReason, GravityTxSkippedEvent, GrevmExecutor, GRAVITY_TX_SKIPPED_LOG_ADDRESS,
         GRAVITY_TX_SKIPPED_LOG_TOPIC0,
     },
     EthEvmConfig,
@@ -198,7 +198,7 @@ fn grevm_executor_keeps_invalid_tx_in_block_with_skipped_receipt() {
         assert_eq!(skipped_log.data.topics()[0], GRAVITY_TX_SKIPPED_LOG_TOPIC0);
         assert_eq!(
             GravityTxSkippedEvent::decode(skipped_log),
-            Some(grevm::InvalidTransaction::NonceTooLow { tx: 0, state: 1 })
+            Some(GravityTxSkipReason::NonceTooLow)
         );
     }
 }
