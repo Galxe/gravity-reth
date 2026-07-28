@@ -195,17 +195,14 @@ where
                         tx_index,
                         ?tx_hash,
                         ?reason,
+                        ?error,
                         "included transaction skipped during final execution",
                     );
-                    let receipt =
-                        GravityTxSkippedEvent::receipt(tx_type, cumulative_gas_used, &error);
-                    let receipt = receipt.map_err(|encode_error| {
-                        let message = alloc::format!(
-                            "failed to encode skipped transaction {tx_index}: {encode_error}"
-                        );
-                        BlockExecutionError::msg(message)
-                    })?;
-                    receipts.push(receipt);
+                    receipts.push(GravityTxSkippedEvent::receipt(
+                        tx_type,
+                        cumulative_gas_used,
+                        reason,
+                    ));
                 }
             }
         }

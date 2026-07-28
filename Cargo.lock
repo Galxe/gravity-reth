@@ -8914,7 +8914,6 @@ dependencies = [
  "gravity-primitives",
  "grevm",
  "parking_lot",
- "postcard",
  "reth-chainspec",
  "reth-ethereum-forks",
  "reth-ethereum-primitives",
