@@ -95,6 +95,8 @@ pub const ORACLE_REQUEST_QUEUE_ADDR: Address = address!("00000000000000000000000
 pub const NATIVE_MINT_PRECOMPILE_ADDR: Address =
     address!("00000000000000000000000000000001625f5000");
 pub use gravity_precompiles::randomness_by_height::RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR;
+// Reserved synthetic protocol-log emitter; not an executable precompile.
+pub use reth_chainspec::GRAVITY_TX_SKIPPED_LOG_ADDRESS;
 
 // Legacy aliases (for backward compatibility)
 pub const SYSTEM_CONTRACT_ADDRESS: Address = SYSTEM_CALLER;

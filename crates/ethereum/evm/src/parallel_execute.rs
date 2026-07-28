@@ -12,7 +12,7 @@ use alloy_evm::{
 };
 use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
-use grevm::{ParallelBundleState, ParallelState, Scheduler};
+use grevm::{GrevmConfig, ParallelBundleState, ParallelState, Scheduler, TxExecutionOutcome};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
@@ -36,6 +36,12 @@ use revm::{
     Database, DatabaseCommit,
 };
 
+pub use crate::skipped_transaction::{
+    GravityTxSkipReason, GravityTxSkippedEvent, GRAVITY_TX_SKIPPED_LOG_TOPIC0,
+    GRAVITY_TX_SKIPPED_LOG_VERSION,
+};
+pub use reth_chainspec::GRAVITY_TX_SKIPPED_LOG_ADDRESS;
+
 /// EVM executor using Grevm that executes blocks in parallel.
 #[derive(Debug)]
 pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
@@ -49,6 +55,8 @@ pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
     system_caller: SystemCaller<Arc<ChainSpec>>,
     /// Custom precompiled contracts to inject into the EVM.
     custom_precompiles: Option<Arc<Vec<(Address, DynPrecompile)>>>,
+    /// Block-scoped grevm execution policy.
+    grevm_config: GrevmConfig,
 }
 
 impl<DB, EvmConfig, ChainSpec> GrevmExecutor<DB, EvmConfig, ChainSpec>
@@ -63,6 +71,23 @@ where
 {
     /// Creates a new [`GrevmExecutor`]
     pub fn new(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
+        Self::new_with_runtime_config(chain_spec, evm_config, db, GrevmConfig::from_env())
+    }
+
+    /// Creates a [`GrevmExecutor`] that executes user transactions sequentially.
+    pub fn new_sequential(chain_spec: Arc<ChainSpec>, evm_config: &EvmConfig, db: DB) -> Self {
+        let mut config = GrevmConfig::from_env();
+        config.force_sequential = true;
+        Self::new_with_runtime_config(chain_spec, evm_config, db, config)
+    }
+
+    /// Creates a [`GrevmExecutor`] with an explicit block execution policy.
+    pub fn new_with_runtime_config(
+        chain_spec: Arc<ChainSpec>,
+        evm_config: &EvmConfig,
+        db: DB,
+        grevm_config: GrevmConfig,
+    ) -> Self {
         let system_caller = SystemCaller::new(chain_spec.clone());
         let report_db_metrics = get_gravity_config().report_db_metrics;
         Self {
@@ -71,6 +96,7 @@ where
             evm_config: evm_config.clone(),
             system_caller,
             custom_precompiles: None,
+            grevm_config,
         }
     }
 
@@ -107,15 +133,15 @@ where
 
         let (results, state) = {
             let EvmEnv { cfg_env, block_env } = evm_env;
-            let executor = Scheduler::new(
+            let executor = Scheduler::new_with_runtime_config(
                 cfg_env,
                 block_env,
                 txs,
                 state,
-                false,
                 self.custom_precompiles.clone(),
+                self.grevm_config.clone(),
             );
-            executor.parallel_execute(None).map_err(|e| {
+            executor.execute().map_err(|e| {
                 // `e.txid` is grevm's per-tx index; for block-level errors it can be a
                 // sentinel or out-of-bounds value. Use a saturating lookup so the error
                 // path itself cannot panic (closes gravity-audit#696 trigger 4 fallout —
@@ -136,18 +162,52 @@ where
 
         self.state = Some(state);
 
+        if results.len() != block.transaction_count() {
+            return Err(BlockExecutionError::msg(alloc::format!(
+                "grevm outcome count mismatch: got {}, expected {}",
+                results.len(),
+                block.transaction_count()
+            )))
+        }
+
         let mut receipts = Vec::with_capacity(results.len());
         let mut cumulative_gas_used = 0;
-        for (result, tx_type) in
-            results.into_iter().zip(block.body().transactions().map(|tx| tx.tx_type()))
+        for (tx_index, (outcome, transaction)) in
+            results.into_iter().zip(block.body().transactions()).enumerate()
         {
-            cumulative_gas_used += result.tx_gas_used();
-            receipts.push(Receipt {
-                tx_type,
-                success: result.is_success(),
-                cumulative_gas_used,
-                logs: result.into_logs(),
-            });
+            let tx_type = transaction.tx_type();
+            match outcome {
+                TxExecutionOutcome::Executed(result) => {
+                    cumulative_gas_used += result.tx_gas_used();
+                    receipts.push(Receipt {
+                        tx_type,
+                        success: result.is_success(),
+                        cumulative_gas_used,
+                        logs: result.into_logs(),
+                    });
+                }
+                TxExecutionOutcome::Skipped(error) => {
+                    let tx_hash = transaction.recalculate_hash();
+                    let reason = GravityTxSkipReason::from_invalid_transaction(&error);
+                    tracing::error!(
+                        target: "reth::evm::skipped_transaction",
+                        block_number = block.number,
+                        tx_index,
+                        ?tx_hash,
+                        ?reason,
+                        "included transaction skipped during final execution",
+                    );
+                    let receipt =
+                        GravityTxSkippedEvent::receipt(tx_type, cumulative_gas_used, &error);
+                    let receipt = receipt.map_err(|encode_error| {
+                        let message = alloc::format!(
+                            "failed to encode skipped transaction {tx_index}: {encode_error}"
+                        );
+                        BlockExecutionError::msg(message)
+                    })?;
+                    receipts.push(receipt);
+                }
+            }
         }
         Ok(ExecuteOutput { receipts, gas_used: cumulative_gas_used })
     }

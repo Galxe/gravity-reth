@@ -27,6 +27,14 @@ hardfork!(
 /// design §2.5 ("地址字面量收口").
 pub const SYSTEM_CALLER: Address = address!("00000000000000000000000000000001625f0000");
 
+/// Protocol-reserved synthetic emitter for `GravityTxSkipped` receipt logs.
+///
+/// This is not an EVM account or precompile. It is reserved in the Gravity system-address
+/// namespace so indexers can query skipped transactions through a single stable emitter without
+/// risking a future system contract reusing the same address.
+pub const GRAVITY_TX_SKIPPED_LOG_ADDRESS: Address =
+    address!("00000000000000000000000000000001625f50ff");
+
 /// Returns `true` iff `addr` is the canonical Gravity [`SYSTEM_CALLER`].
 ///
 /// Prefer this helper over direct comparison so future address-shape changes have a

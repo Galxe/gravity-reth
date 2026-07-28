@@ -20,7 +20,7 @@ reth-chainspec.workspace = true
 reth-ethereum-forks.workspace = true
 reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
-revm = { workspace = true, features = ["optional_balance_check", "optional_no_base_fee"] }
+revm = { workspace = true, features = ["optional_balance_check", "optional_no_base_fee", "serde"] }
 reth-evm.workspace = true
 grevm.workspace = true
 gravity-primitives.workspace = true
@@ -32,10 +32,13 @@ alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-consensus.workspace = true
 alloy-rpc-types-engine.workspace = true
+alloy-sol-types.workspace = true
 
 # Misc
 parking_lot = { workspace = true, optional = true }
 derive_more = { workspace = true, optional = true }
+postcard.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 reth-testing-utils.workspace = true
@@ -62,7 +65,10 @@ std = [
     "reth-ethereum-primitives/std",
     "derive_more?/std",
     "alloy-rpc-types-engine/std",
+    "alloy-sol-types/std",
+    "postcard/use-std",
     "reth-storage-errors/std",
+    "tracing/std",
 ]
 test-utils = [
     "std",
