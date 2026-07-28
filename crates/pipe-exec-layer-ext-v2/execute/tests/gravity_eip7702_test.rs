@@ -19,15 +19,15 @@
 //!   gravity-audit#668 fix at the integration boundary.
 //! - **P-13** positive control: a sufficient-gas 7702 tx with one valid authorization is included;
 //!   the authority's account code becomes the 23-byte EIP-7702 designator `0xef0100 || target`.
-//! - **P-14** executor variant smoke: P-13 is run twice — once with `disable_grevm = true`
-//!   (`WrapExecutor<BasicBlockExecutor>`) and once with `false` (`GrevmExecutor`). Both paths must
-//!   apply the authorization so the authority ends up holding the 23-byte designator. The spec's
+//! - **P-14** executor variant smoke: P-13 is run twice — once with `disable_grevm = true` (grevm's
+//!   forced-sequential path) and once with `false` (grevm's parallel path). Both paths must apply
+//!   the authorization so the authority ends up holding the 23-byte designator. The spec's
 //!   *stronger* claim ("byte-identical state roots") is not asserted here because this codebase is
 //!   known to produce different block-level accumulators across executor variants — see
-//!   `crates/ethereum/evm/src/parallel_execute.rs:446-449`, which delegates cross-executor
-//!   equivalence to unit-level diff tests rather than e2e state-root comparison. Both state roots
-//!   are printed for forensic inspection, but the test passes as long as the user-observable
-//!   designator state is identical.
+//!   `crates/ethereum/evm/src/parallel_execute.rs`, which delegates cross-executor equivalence to
+//!   unit-level diff tests rather than e2e state-root comparison. Both state roots are printed for
+//!   forensic inspection, but the test passes as long as the user-observable designator state is
+//!   identical.
 //!
 //! Cases that primarily exercise upstream pool, revm, or grevm semantics
 //! (P-1/P-3 pool fork-gate, P-5/P-6 multi-auth + chain_id==0, P-7 re-delegation,
@@ -59,8 +59,8 @@ use reth_pipe_exec_layer_ext_v2::{
     new_pipe_exec_layer_api, ExecutionArgs, OrderedBlock, PipeExecLayerApi,
 };
 use reth_provider::{
-    providers::BlockchainProvider, BlockHashReader, BlockNumReader, DatabaseProviderFactory,
-    HeaderProvider, StateProviderFactory,
+    providers::BlockchainProvider, AccountReader, BlockHashReader, BlockNumReader,
+    DatabaseProviderFactory, HeaderProvider, StateProviderFactory,
 };
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
@@ -120,6 +120,21 @@ const FUNDED_ADDR: Address = address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb9226
 /// 7702 designator is `0xef0100 || target`; the target's code (or lack
 /// thereof) only matters if the authority is subsequently CALLed.
 const TARGET_ADDR: Address = address!("0x0000000000000000000000000000000000001234");
+const CREATE_DELEGATE_ADDR: Address = address!("0x0000000000000000000000000000000000007702");
+
+/// Runtime: `CREATE(0, 0, 0); POP; STOP`.
+const DELEGATED_CREATE_CODE: &str = "0x600060006000f05000";
+
+fn gravity_delegated_create_chainspec() -> String {
+    let mut json: serde_json::Value =
+        serde_json::from_str(&gravity_prague_chainspec(Some(PRAGUE_TS_BLOCK_100))).unwrap();
+    let alloc = json["alloc"].as_object_mut().expect("genesis alloc must be an object");
+    alloc.insert(
+        format!("{CREATE_DELEGATE_ADDR:#x}"),
+        serde_json::json!({ "balance": "0x0", "code": DELEGATED_CREATE_CODE }),
+    );
+    json.to_string()
+}
 
 fn funded_signer() -> PrivateKeySigner {
     PrivateKeySigner::from_bytes(&B256::from(*FUNDED_PRIVKEY_HEX))
@@ -373,6 +388,22 @@ fn assert_no_authority_code<P: StateProviderFactory>(
     );
 }
 
+fn assert_authority_nonce<P: StateProviderFactory>(
+    provider: &P,
+    block_number: u64,
+    authority: Address,
+    expected_nonce: u64,
+) {
+    let state = provider
+        .state_by_block_number_or_tag(alloy_eips::BlockNumberOrTag::Number(block_number))
+        .expect("state provider for authority nonce check");
+    let account = state
+        .basic_account(&authority)
+        .expect("read authority account")
+        .expect("authority account must exist after 7702 authorization");
+    assert_eq!(account.nonce, expected_nonce, "authority nonce mismatch");
+}
+
 fn read_state_root<P: HeaderProvider>(provider: &P, block_number: u64) -> B256 {
     use alloy_consensus::BlockHeader;
     provider
@@ -523,6 +554,63 @@ fn test_p13_happy_path_disable_grevm() {
         run_p13_happy_path,
     );
     println!("[eip7702_test] disable_grevm state root = {state_root:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Delegated safety — CREATE is disabled in live pipeline execution.
+// ---------------------------------------------------------------------------
+
+async fn run_delegated_create_guard(
+    builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>,
+) -> eyre::Result<()> {
+    let (_chain_spec, provider, pipeline_api, latest_block_number) = boot_pipeline(builder).await?;
+    let mut epoch: u64 = pipeline_api
+        .fetch_config_bytes(OnChainConfig::Epoch, BlockNumber::Latest)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let consensus = MockConsensus::new(pipeline_api, Box::new(p3_ts_us));
+    consensus.push_empty_range(&mut epoch, latest_block_number + 1, P3_ACTIVATION_BLOCK - 1).await;
+
+    let relayer = funded_signer();
+    let authority = authority_signer(0x73);
+    let authorization = sign_authorization(&authority, CHAIN_ID, CREATE_DELEGATE_ADDR, 0);
+    let (tx, sender) = build_signed_eip7702_tx(
+        &relayer,
+        0,
+        300_000,
+        authority.address(),
+        Bytes::new(),
+        vec![authorization],
+    );
+    let block = ordered_block_with_txs(
+        epoch,
+        P3_ACTIVATION_BLOCK,
+        mock_block_id(P3_ACTIVATION_BLOCK),
+        mock_block_id(P3_ACTIVATION_BLOCK - 1),
+        p3_ts_us(P3_ACTIVATION_BLOCK),
+        vec![tx],
+        vec![sender],
+    );
+    consensus.push_one(&mut epoch, block).await;
+    let pipeline_api = consensus.into_inner();
+    pipeline_api.wait_for_block_persistence(P3_ACTIVATION_BLOCK).await.unwrap();
+
+    assert_designator(&provider, P3_ACTIVATION_BLOCK, authority.address(), CREATE_DELEGATE_ADDR);
+    // The authorization increments the authority from nonce 0 to 1. A successful delegated
+    // CREATE would increment it again; the pipe safety policy halts CREATE before that mutation.
+    assert_authority_nonce(&provider, P3_ACTIVATION_BLOCK, authority.address(), 1);
+    Ok(())
+}
+
+#[test]
+fn test_delegated_create_forbidden_in_pipe() {
+    run_pipe_e2e_test(
+        &gravity_delegated_create_chainspec(),
+        "data/gravity_eip7702_delegated_create_guard_test",
+        false,
+        run_delegated_create_guard,
+    );
 }
 
 // ---------------------------------------------------------------------------

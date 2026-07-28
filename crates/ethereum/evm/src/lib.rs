@@ -29,12 +29,11 @@ use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_engine::ExecutionData;
 use core::{convert::Infallible, fmt::Debug};
 use gravity_primitives::get_gravity_config;
+use grevm::{DelegatedSafetyConfig, GrevmConfig};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
-    eth::NextEvmEnvAttributes,
-    execute::{BasicBlockExecutor, BlockExecutionError},
-    parallel_execute::{ParallelExecutor, WrapExecutor},
+    eth::NextEvmEnvAttributes, execute::BlockExecutionError, parallel_execute::ParallelExecutor,
     ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
 };
 use reth_primitives_traits::{constants::GRAVITY_TX_GAS_LIMIT_CAP, SealedBlock, SealedHeader};
@@ -44,7 +43,7 @@ use revm::{
         BlockEnv, CfgEnv, TxEnv,
     },
     context_interface::block::BlobExcessGasAndPrice,
-    database::{State, WrapDatabaseRef},
+    database::State,
     primitives::hardfork::SpecId,
     DatabaseCommit,
 };
@@ -78,6 +77,7 @@ pub mod execute {
 
 pub mod hardfork;
 pub mod parallel_execute;
+pub mod skipped_transaction;
 
 // ============================================================================
 // Gravity system-tx gas-exempt gating
@@ -166,6 +166,34 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
 const fn apply_gravity_tx_gas_cap(cfg_env: &mut CfgEnv, osaka_active: bool) {
     if osaka_active {
         cfg_env.tx_gas_limit_cap = Some(GRAVITY_TX_GAS_LIMIT_CAP);
+    }
+}
+
+impl<ChainSpec> EthEvmConfig<ChainSpec>
+where
+    ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,
+{
+    /// Creates a grevm executor with the delegated-account policy required by the caller.
+    ///
+    /// The regular history-sync path passes [`DelegatedSafetyConfig::disabled`]. Gravity's live
+    /// pipeline passes [`DelegatedSafetyConfig::enabled`]; grevm makes that policy inert for
+    /// pre-Prague specs on a per-block basis.
+    pub fn parallel_executor_with_delegated_safety<'a, DB: ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+        delegated_safety: DelegatedSafetyConfig,
+    ) -> Box<dyn ParallelExecutor<Primitives = EthPrimitives, Error = BlockExecutionError> + 'a>
+    {
+        let mut config = GrevmConfig::from_env().with_delegated_safety(delegated_safety);
+        if get_gravity_config().disable_grevm {
+            config.force_sequential = true;
+        }
+        Box::new(GrevmExecutor::new_with_runtime_config(
+            self.chain_spec().clone(),
+            self,
+            db,
+            config,
+        ))
     }
 }
 
@@ -263,11 +291,7 @@ where
         db: DB,
     ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>
     {
-        if get_gravity_config().disable_grevm {
-            Box::new(WrapExecutor::new(BasicBlockExecutor::new(self.clone(), WrapDatabaseRef(db))))
-        } else {
-            Box::new(GrevmExecutor::new(self.chain_spec().clone(), self, db))
-        }
+        self.parallel_executor_with_delegated_safety(db, DelegatedSafetyConfig::disabled())
     }
 
     fn transact_system_txn<DB: Database>(

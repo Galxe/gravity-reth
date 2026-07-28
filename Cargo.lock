@@ -1497,15 +1497,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89cbf775b137e9b968e67227ef7f775587cde3fd31b0d8599dbd0f598a48340"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "atomic-polyfill"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4489,11 +4480,10 @@ dependencies = [
 [[package]]
 name = "grevm"
 version = "2.2.2"
-source = "git+https://github.com/Galxe/grevm?rev=eecc6fc8bfcc07916517ac15f41a70c8036381bb#eecc6fc8bfcc07916517ac15f41a70c8036381bb"
+source = "git+https://github.com/Galxe/grevm?rev=dcd1460b20d9f3d793c8309c28b0b7401be91523#dcd1460b20d9f3d793c8309c28b0b7401be91523"
 dependencies = [
  "ahash",
  "alloy-evm",
- "atomic",
  "auto_impl",
  "dashmap 6.2.1",
  "futures",
@@ -8919,10 +8909,12 @@ dependencies = [
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
+ "alloy-sol-types",
  "derive_more",
  "gravity-primitives",
  "grevm",
  "parking_lot",
+ "postcard",
  "reth-chainspec",
  "reth-ethereum-forks",
  "reth-ethereum-primitives",
@@ -8933,6 +8925,7 @@ dependencies = [
  "reth-testing-utils",
  "revm",
  "secp256k1 0.30.0",
+ "tracing",
 ]
 
 [[package]]

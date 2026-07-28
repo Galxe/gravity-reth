@@ -29,6 +29,7 @@ use gravity_precompiles::{
     randomness_by_height::randomness_by_height_gas_policy_at_block,
 };
 use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
+use grevm::DelegatedSafetyConfig;
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
@@ -1228,7 +1229,9 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Create executor with state. System transactions will commit directly to its
         // ParallelState, so there is a single source of truth for both system and user txns.
-        let mut executor = self.evm_config.parallel_executor(state);
+        let mut executor = self
+            .evm_config
+            .parallel_executor_with_delegated_safety(state, DelegatedSafetyConfig::enabled());
         executor.apply_custom_precompiles(
             self.custom_precompiles_for_ordered_block(&ordered_block, parent_header),
         );

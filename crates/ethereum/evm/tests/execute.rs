@@ -14,10 +14,17 @@ use reth_chainspec::{ChainSpecBuilder, EthereumHardfork, ForkCondition, MAINNET}
 use reth_ethereum_primitives::{Block, BlockBody, Transaction};
 use reth_evm::{
     execute::{BasicBlockExecutor, Executor},
+    parallel_execute::ParallelExecutor,
     precompiles::{DynPrecompile, PrecompileInput},
     ConfigureEvm,
 };
-use reth_evm_ethereum::EthEvmConfig;
+use reth_evm_ethereum::{
+    parallel_execute::{
+        GravityTxSkippedEvent, GrevmExecutor, GRAVITY_TX_SKIPPED_LOG_ADDRESS,
+        GRAVITY_TX_SKIPPED_LOG_TOPIC0,
+    },
+    EthEvmConfig,
+};
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{
     crypto::secp256k1::public_key_to_address, Block as _, RecoveredBlock,
@@ -129,6 +136,71 @@ fn create_custom_precompile_executor_and_block(
     )]));
 
     (executor, block)
+}
+
+#[test]
+fn grevm_executor_keeps_invalid_tx_in_block_with_skipped_receipt() {
+    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).shanghai_activated().build());
+    let sender_key_pair = generators::generate_key(&mut generators::rng());
+    let sender = public_key_to_address(sender_key_pair.public_key());
+
+    let make_tx = |nonce| {
+        sign_tx_with_key_pair(
+            sender_key_pair,
+            Transaction::Legacy(TxLegacy {
+                chain_id: Some(chain_spec.chain.id()),
+                nonce,
+                gas_price: 1,
+                gas_limit: 21_000,
+                to: TxKind::Call(sender),
+                value: U256::ZERO,
+                input: Bytes::new(),
+            }),
+        )
+    };
+
+    // tx1 repeats tx0's nonce and is skipped. tx2 proves the skipped transaction did not bump the
+    // sender nonce and execution continued with the next valid transaction.
+    let mut transactions = vec![make_tx(0), make_tx(0)];
+    transactions.extend((1..=62).map(make_tx));
+    let header =
+        Header { number: 1, gas_limit: 2_000_000, base_fee_per_gas: Some(1), ..Header::default() };
+    let block = Block { header, body: BlockBody { transactions, ..Default::default() } }
+        .try_into_recovered()
+        .unwrap();
+
+    let evm_config = EthEvmConfig::new(chain_spec.clone());
+
+    for force_sequential in [false, true] {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            sender,
+            AccountInfo { balance: U256::from(ETH_TO_WEI), ..Default::default() },
+        );
+        let mut executor = if force_sequential {
+            GrevmExecutor::new_sequential(chain_spec.clone(), &evm_config, db)
+        } else {
+            GrevmExecutor::new(chain_spec.clone(), &evm_config, db)
+        };
+
+        let result = executor.execute_one(&block).expect("invalid tx should be skipped");
+        assert_eq!(result.receipts.len(), 64);
+        assert!(result.receipts[0].success);
+        assert!(!result.receipts[1].success);
+        assert!(result.receipts[2..].iter().all(|receipt| receipt.success));
+        assert_eq!(result.receipts[0].cumulative_gas_used, 21_000);
+        assert_eq!(result.receipts[1].cumulative_gas_used, 21_000);
+        assert_eq!(result.receipts[2].cumulative_gas_used, 42_000);
+        assert_eq!(result.gas_used, 63 * 21_000);
+
+        let skipped_log = &result.receipts[1].logs[0];
+        assert_eq!(skipped_log.address, GRAVITY_TX_SKIPPED_LOG_ADDRESS);
+        assert_eq!(skipped_log.data.topics()[0], GRAVITY_TX_SKIPPED_LOG_TOPIC0);
+        assert_eq!(
+            GravityTxSkippedEvent::decode(skipped_log),
+            Some(grevm::InvalidTransaction::NonceTooLow { tx: 0, state: 1 })
+        );
+    }
 }
 
 #[test]
