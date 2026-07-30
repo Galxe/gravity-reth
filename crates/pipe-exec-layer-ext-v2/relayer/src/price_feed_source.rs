@@ -327,7 +327,11 @@ impl OracleDataSource for PriceFeedSource {
         state.block = round.block_number;
         self.cursor.store(round.block_number, Ordering::Relaxed);
 
-        Ok(vec![OracleData { nonce: round.delivery_nonce, payload: Bytes::from(wrapped_payload) }])
+        Ok(vec![OracleData {
+            nonce: round.delivery_nonce,
+            source_position: round.block_number,
+            payload: Bytes::from(wrapped_payload),
+        }])
     }
 }
 

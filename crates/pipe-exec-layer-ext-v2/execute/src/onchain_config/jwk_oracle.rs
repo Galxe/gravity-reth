@@ -4,8 +4,9 @@
 //! - RSA JWKs: rejected here because the active execution path uses UnsupportedJWK payloads
 //! - UnsupportedJWK: NativeOracle.recordBatch() for oracle payloads
 //!
-//! For blockchain events, the payload from relayer is ABI-encoded and passed through unchanged.
-//! This ensures byte-exact match between relayer, on-chain storage, and read-back for comparison.
+//! Relayer wrappers carry `(nonce, source_position, resolver_payload)`. The
+//! `blockNumber(s)` ABI names are retained for compatibility, but the value is
+//! source-defined and NativeOracle stores only the latest progress checkpoint.
 
 use super::{new_system_call_txn, NATIVE_ORACLE_ADDR};
 use alloy_primitives::{Bytes, U256};
@@ -190,12 +191,12 @@ fn construct_unsupported_oracle_batch_transaction(
 
     // Build batch arrays
     let mut nonces: Vec<u128> = Vec::with_capacity(jwks.len());
-    let mut block_numbers: Vec<U256> = Vec::with_capacity(jwks.len());
+    let mut source_positions: Vec<U256> = Vec::with_capacity(jwks.len());
     let mut payloads: Vec<Bytes> = Vec::with_capacity(jwks.len());
     let mut gas_limits: Vec<U256> = Vec::with_capacity(jwks.len());
 
     for (idx, jwk) in jwks.iter().enumerate() {
-        let (event_nonce, block_number, inner_payload) =
+        let (event_nonce, source_position, inner_payload) =
             match extract_nonce_block_and_payload(&jwk.data) {
                 Some((nonce, block_num, payload)) => (nonce, block_num, payload),
                 None => {
@@ -204,17 +205,17 @@ fn construct_unsupported_oracle_batch_transaction(
                         idx = idx,
                         payload_len = jwk.data.len(),
                         payload_hex = %hex::encode(&jwk.data),
-                        "Failed to extract nonce, block_number, and payload"
+                        "Failed to extract nonce, source position, and payload"
                     );
                     return Err(format!(
-                        "Failed to extract nonce, block_number, and payload at index {}",
+                        "Failed to extract nonce, source position, and payload at index {}",
                         idx
                     ));
                 }
             };
 
         nonces.push(event_nonce);
-        block_numbers.push(block_number);
+        source_positions.push(source_position);
         // Use the inner payload (the original resolver payload)
         // This is what the user put in and what gets passed to the callback
         payloads.push(inner_payload.into());
@@ -223,7 +224,7 @@ fn construct_unsupported_oracle_batch_transaction(
         debug!(
             idx = idx,
             event_nonce = event_nonce,
-            ?block_number,
+            ?source_position,
             inner_payload_len = payloads.last().map(|p: &Bytes| p.len()).unwrap_or(0),
             "Added event to batch"
         );
@@ -242,7 +243,7 @@ fn construct_unsupported_oracle_batch_transaction(
         sourceType: source_type,
         sourceId: U256::from(source_id),
         nonces,
-        blockNumbers: block_numbers,
+        blockNumbers: source_positions,
         payloads,
         callbackGasLimits: gas_limits,
     };

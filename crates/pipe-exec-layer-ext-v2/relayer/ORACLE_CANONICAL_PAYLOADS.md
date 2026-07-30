@@ -228,8 +228,10 @@ vector match Polygon.
 Wrong-chain endpoints and malformed matching logs fail closed. An empty result
 usually means the condition, CTF address, exclusive cursor, or finalized height
 does not cover the event; the provider must support the `finalized` block tag.
-If a callback fails, the raw record remains available for
-`replaySettlement(mirrorId, nonce)`.
+Callback execution and NativeOracle progress advancement are atomic. If a
+callback fails, the delivery reverts without advancing its nonce; validators
+retry the same consensus payload after the callback or configuration problem is
+fixed. NativeOracle does not append raw payload history.
 
 The deterministic SDK suite covers the full consensus, execution, resolver,
 market-settlement, and claim path:

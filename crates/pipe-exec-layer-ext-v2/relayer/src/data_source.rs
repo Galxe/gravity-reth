@@ -21,7 +21,10 @@ pub struct OracleData {
     /// - For Blockchain: MessageSent.nonce
     pub nonce: u128,
 
-    /// ABI-encoded payload to be stored in NativeOracle
+    /// Source-defined restart position committed with this delivery
+    pub source_position: u64,
+
+    /// ABI-encoded consensus payload delivered to NativeOracle
     pub payload: Bytes,
 }
 
@@ -83,7 +86,7 @@ impl DataSourceKind {
         }
     }
 
-    pub(crate) async fn last_nonce_block(&self) -> Option<u64> {
+    pub(crate) async fn last_nonce_position(&self) -> Option<u64> {
         match self {
             Self::Blockchain(source) => source.last_nonce_block().await,
             Self::PriceFeed(source) => source.last_nonce_block().await,

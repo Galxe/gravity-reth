@@ -26,7 +26,9 @@ pub struct SourceState {
     pub source_id: u64,
     /// Last nonce we fetched and returned
     pub last_nonce: u128,
-    /// Block number where last_nonce was emitted
+    /// Source-defined position committed with last_nonce.
+    ///
+    /// The field name is retained for backward-compatible JSON persistence.
     pub last_nonce_block: u64,
     /// Current polling cursor (block number)
     pub cursor_block: u64,

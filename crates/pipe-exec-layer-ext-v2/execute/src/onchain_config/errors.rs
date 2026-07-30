@@ -59,7 +59,7 @@ sol! {
     /// @notice Batch arrays have mismatched lengths
     error OracleBatchArrayLengthMismatch(uint256 noncesLength, uint256 payloadsLength, uint256 gasLimitsLength);
 
-    // -------------------- JWKManager Errors (for reference, callback failures don't revert main tx) --------------------
+    // -------------------- JWKManager Errors (for reference) --------------------
     /// @notice JWK version must be strictly increasing
     error JWKVersionNotIncreasing(bytes issuer, uint64 currentVersion, uint64 providedVersion);
 }

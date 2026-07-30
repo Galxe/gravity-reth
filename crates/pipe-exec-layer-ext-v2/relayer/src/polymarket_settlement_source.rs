@@ -143,6 +143,18 @@ impl PolymarketSettlementSource {
         latest_onchain_nonce: u128,
         cursor: u64,
     ) -> Result<Self> {
+        let latest_position = (latest_onchain_nonce > 0).then_some(cursor).unwrap_or(0);
+        Self::from_task_with_progress(task, rpc_url, latest_onchain_nonce, cursor, latest_position)
+            .await
+    }
+
+    pub(crate) async fn from_task_with_progress(
+        task: &ParsedOracleTask,
+        rpc_url: &str,
+        latest_onchain_nonce: u128,
+        cursor: u64,
+        latest_position: u64,
+    ) -> Result<Self> {
         if task.source_type != source_types::POLYMARKET_SETTLEMENT {
             return Err(anyhow!(
                 "PolymarketSettlementSource requires sourceType={}",
@@ -180,6 +192,7 @@ impl PolymarketSettlementSource {
             max_blocks_per_poll,
             cursor,
             latest_onchain_nonce,
+            latest_position,
             "Created PolymarketSettlementSource"
         );
 
@@ -194,7 +207,7 @@ impl PolymarketSettlementSource {
             cursor: AtomicU64::new(cursor),
             last_settlement: Mutex::new(LastSettlement {
                 nonce: latest_onchain_nonce,
-                block: cursor,
+                block: latest_position,
             }),
         })
     }
@@ -369,7 +382,11 @@ fn observations_to_oracle_data(
             let nonce = starting_nonce
                 .checked_add(offset)
                 .ok_or_else(|| anyhow!("Polymarket settlement nonce overflow"))?;
-            Ok(OracleData { nonce, payload: obs.wrapped_payload(nonce) })
+            Ok(OracleData {
+                nonce,
+                source_position: obs.block_number,
+                payload: obs.wrapped_payload(nonce),
+            })
         })
         .collect()
 }
