@@ -1,10 +1,9 @@
 //! Common types and traits for Gravity hardfork state changes.
 //!
-//! Each hardfork module (alpha, beta, gamma, ...) defines a set of
-//! system contract bytecode upgrades. This module provides a trait
-//! that standardizes how upgrade tables are exposed, enabling generic
-//! verification logic in tests and a single `apply_hardfork_upgrades`
-//! entry point for the executor.
+//! Each hardfork module defines a set of system contract bytecode
+//! upgrades. This module provides a trait that standardizes how upgrade
+//! tables are exposed, enabling generic verification logic in tests and
+//! a single `apply_hardfork_upgrades` entry point for the executor.
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use reth_evm::{execute::BlockExecutionError, ParallelDatabase};
@@ -21,7 +20,7 @@ pub type BytecodeUpgrade = (Address, &'static [u8]);
 pub type StoragePatch = (Address, B256, U256);
 
 /// A batch storage patch: same (slot, value) applied to multiple addresses.
-/// Used for Gamma's `ReentrancyGuard` initialization across all `StakePool` instances.
+/// Used for multi-address storage initialization across StakePool instances.
 pub type BatchStoragePatch = (&'static [Address], B256, U256);
 
 /// Trait implemented by each hardfork module to describe its upgrades.
@@ -31,7 +30,7 @@ pub type BatchStoragePatch = (&'static [Address], B256, U256);
 /// fn verify_hardfork_applied<H: HardforkUpgrades>(provider: &P, block: u64) { ... }
 /// ```
 pub trait HardforkUpgrades {
-    /// The human-readable name of this hardfork (e.g. "Gamma").
+    /// The human-readable name of this hardfork (e.g. "Alpha").
     fn name(&self) -> &'static str;
 
     /// System contract bytecode upgrades: `(address, new_bytecode)` pairs.
@@ -50,7 +49,7 @@ pub trait HardforkUpgrades {
     }
 
     /// Batch storage patches: apply the same (slot, value) to multiple addresses.
-    /// Used for Gamma's `ReentrancyGuard` initialization across all `StakePool` instances.
+    /// Used for multi-address storage initialization across StakePool instances.
     fn batch_storage_patches(&self) -> &'static [BatchStoragePatch] {
         &[]
     }

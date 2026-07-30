@@ -9,12 +9,13 @@ hardfork!(
     GravityHardfork {
         /// Alpha hardfork: upgrade Staking/StakePool contracts and disable PoW rewards
         Alpha,
-        /// Beta hardfork: upgrade StakePool contracts with correct FACTORY immutable
+        /// Beta hardfork: EIP-7702 lockdown release gate (audit#838).
+        ///
+        /// Until Beta activates, the pre-execution filter rejects all type-4 txs and
+        /// txs from/to currently-delegated accounts. Activation is via genesis
+        /// `betaTime` (timestamp). Missing/unknown key → Beta never active → lockdown
+        /// stays on (fail-closed).
         Beta,
-        /// Gamma hardfork: audit fixes, precompile changes, 12 contract bytecode upgrades
-        Gamma,
-        /// Delta hardfork: activate Governance contract by setting Ownable._owner
-        Delta,
     }
 );
 
@@ -62,6 +63,20 @@ pub fn is_gravity_system_caller(addr: Address) -> bool {
 #[inline]
 pub fn is_system_tx_gas_exempt<S: EthChainSpec>(chain_spec: &S, block_ts: u64) -> bool {
     chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Alpha, block_ts)
+}
+
+/// EIP-7702 emergency lockdown (audit#838). Active until Beta.
+///
+/// Returns `true` when the pre-execution filter must still reject all type-4
+/// (`SetCode`) txs and txs from/to currently-delegated accounts. Once
+/// [`GravityHardfork::Beta`] is active at `block_ts` (genesis `betaTime`), the
+/// lockdown is off and 7702 traffic is admitted under the normal Prague rules.
+///
+/// Fail-closed: if `betaTime` is missing or misspelled in genesis, Beta is never
+/// scheduled and this returns `true` forever.
+#[inline]
+pub fn is_eip7702_lockdown_active<S: EthChainSpec>(chain_spec: &S, block_ts: u64) -> bool {
+    !chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Beta, block_ts)
 }
 
 /// Verifies the protocol invariant that every [`SYSTEM_CALLER`]-signed

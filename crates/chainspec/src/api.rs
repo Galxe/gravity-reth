@@ -69,7 +69,7 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
     /// ```ignore
     /// use reth_chainspec::GravityHardfork;
     /// chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Alpha, ts);
-    /// chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma).transitions_at_block(n);
+    /// chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Beta, ts);
     /// ```
     fn gravity_hardforks(&self) -> &reth_ethereum_forks::ChainHardforks;
 
