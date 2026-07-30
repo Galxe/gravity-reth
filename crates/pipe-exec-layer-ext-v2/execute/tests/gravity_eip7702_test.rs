@@ -96,6 +96,10 @@ const PRAGUE_TS_BLOCK_100: u64 = P3_TS_BASE + P3_ACTIVATION_BLOCK;
 /// - `Some(ts)` ⇒ Prague fires at `ts` (`ForkCondition::Timestamp(ts)`).
 /// - `None` ⇒ field omitted ⇒ Prague never fires (`ForkCondition::Never`).
 ///
+/// Always sets `betaTime = 0` so Gravity's EIP-7702 lockdown (active until
+/// Beta) is released from genesis. Without that, L1 wholesale-rejects every
+/// type-4 tx and the P-12/P-13 paths would silently test the wrong gate.
+///
 /// `chain_value_parser` (`crates/ethereum/cli/src/chainspec.rs`) accepts
 /// in-memory JSON for `--chain`, so no tempfile / no IO overhead.
 fn gravity_prague_chainspec(prague_time: Option<u64>) -> String {
@@ -105,6 +109,8 @@ fn gravity_prague_chainspec(prague_time: Option<u64>) -> String {
     if let Some(ts) = prague_time {
         json["config"]["pragueTime"] = serde_json::json!(ts);
     }
+    // Release EIP-7702 lockdown so these tests exercise Prague 7702 behavior.
+    json["config"]["betaTime"] = serde_json::json!(0);
     json.to_string()
 }
 
