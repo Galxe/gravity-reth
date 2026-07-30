@@ -7,7 +7,11 @@ use reth_ethereum_forks::hardfork;
 hardfork!(
     /// Gravity hardforks.
     GravityHardfork {
-        /// Alpha hardfork: upgrade Staking/StakePool contracts and disable PoW rewards
+        /// Alpha hardfork: system-tx gas exemption, randomness precompile, and
+        /// one-shot [`SYSTEM_CALLER`] balance migration to zero.
+        ///
+        /// Activation is via genesis `alphaTime` (timestamp). See
+        /// [`is_system_tx_gas_exempt`].
         Alpha,
         /// Beta hardfork: EIP-7702 lockdown release gate (audit#838).
         ///
