@@ -30,10 +30,8 @@
     "terminalTotalDifficultyPassed": true,
     "extraFields": {},
     "depositContractAddress": null,
-    "gammaBlock": 20,
     "alphaTime": 5,
-    "betaBlock": 10,
-    "deltaBlock": 25
+    "betaTime": 9999999999
   },
   "alloc": {
     "0x00000000000000000000000000000001625f3000": {

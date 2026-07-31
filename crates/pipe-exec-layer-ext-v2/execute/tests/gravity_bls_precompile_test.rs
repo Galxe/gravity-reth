@@ -83,6 +83,10 @@ const BLS_INPUT_LEN: usize = 144;
 /// POP_VERIFY_GAS=110_000 → triggers the pre-fix panic.
 const POISON_GAS_LIMIT: u64 = 100_000;
 
+/// Build a Gravity chainspec JSON by loading `gravity_hardfork.json` and
+/// patching `pragueTime`. Always sets `betaTime = 0` so Gravity's EIP-7702
+/// lockdown (active until Beta) is off — this test needs a type-4 poison tx
+/// to reach the BLS precompile OOG path without being filter-dropped.
 fn gravity_prague_chainspec(prague_time: Option<u64>) -> String {
     let mut json: serde_json::Value =
         serde_json::from_str(include_str!("../gravity_hardfork.json"))
@@ -90,6 +94,9 @@ fn gravity_prague_chainspec(prague_time: Option<u64>) -> String {
     if let Some(ts) = prague_time {
         json["config"]["pragueTime"] = serde_json::json!(ts);
     }
+    // Default gravity_hardfork.json uses a far-future betaTime (lockdown ON).
+    // Mirror gravity_eip7702_test: Beta at genesis so type-4 txs can execute.
+    json["config"]["betaTime"] = serde_json::json!(0);
     json.to_string()
 }
 

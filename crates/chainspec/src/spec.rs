@@ -469,11 +469,11 @@ pub struct ChainSpec<H: BlockHeader = Header> {
     /// Block number at which [`Self::gravity_min_base_fee`] activates on this branch.
     /// On main this is hardcoded to `0` in `From<Genesis>` (floor enforced from
     /// genesis). Released testnet branches read it from genesis JSON
-    /// `config.extra_fields` (the same mechanism used by Alpha/Beta/Gamma/Delta), so
-    /// the rolling-upgrade activation height can be set per-network without code
-    /// changes. Historical-segment values from prior schedule steps still live in
-    /// branch-specific code, ensuring nodes restarted across multiple hardforks
-    /// validate older blocks correctly from the binary's full schedule.
+    /// `config.extra_fields` (the same mechanism used by Alpha/Beta timestamp
+    /// hardforks), so the rolling-upgrade activation height can be set per-network
+    /// without code changes. Historical-segment values from prior schedule steps
+    /// still live in branch-specific code, ensuring nodes restarted across multiple
+    /// hardforks validate older blocks correctly from the binary's full schedule.
     pub gravity_min_base_fee_activation_block: u64,
 }
 
@@ -977,7 +977,9 @@ impl From<Genesis> for ChainSpec {
 
         let hardforks = ChainHardforks::new(ordered_hardforks);
 
-        // Gravity-specific hardforks from genesis extra_fields
+        // Gravity-specific hardforks from genesis extra_fields (timestamp-gated only).
+        // Fail-closed: missing / misspelled keys (e.g. legacy `betaBlock`) mean the
+        // fork is never scheduled — Alpha gas-exempt stays off, Beta lockdown stays on.
         let mut gravity_hardforks = Vec::new();
         if let Some(alpha_time) =
             genesis.config.extra_fields.get("alphaTime").and_then(|v| v.as_u64())
@@ -985,26 +987,12 @@ impl From<Genesis> for ChainSpec {
             gravity_hardforks
                 .push((GravityHardfork::Alpha.boxed(), ForkCondition::Timestamp(alpha_time)));
         }
-
-        let gravity_hardfork_opts = [
-            (
-                GravityHardfork::Beta.boxed(),
-                genesis.config.extra_fields.get("betaBlock").and_then(|v| v.as_u64()),
-            ),
-            (
-                GravityHardfork::Gamma.boxed(),
-                genesis.config.extra_fields.get("gammaBlock").and_then(|v| v.as_u64()),
-            ),
-            (
-                GravityHardfork::Delta.boxed(),
-                genesis.config.extra_fields.get("deltaBlock").and_then(|v| v.as_u64()),
-            ),
-        ];
-        gravity_hardforks.extend(
-            gravity_hardfork_opts
-                .into_iter()
-                .filter_map(|(fork, opt)| opt.map(|block| (fork, ForkCondition::Block(block)))),
-        );
+        if let Some(beta_time) =
+            genesis.config.extra_fields.get("betaTime").and_then(|v| v.as_u64())
+        {
+            gravity_hardforks
+                .push((GravityHardfork::Beta.boxed(), ForkCondition::Timestamp(beta_time)));
+        }
         let gravity_hardforks = ChainHardforks::new(gravity_hardforks);
 
         // Gravity protocol minimum base fee floor (wei). Presence marks the chainspec
@@ -1013,9 +1001,9 @@ impl From<Genesis> for ChainSpec {
         let gravity_min_base_fee =
             genesis.config.extra_fields.get("gravityMinBaseFee").and_then(|v| v.as_u64());
         // main: floor activates at genesis (block 0). Released testnet branches override
-        // this to read the rolling-upgrade activation height from genesis (e.g.
-        // `epsilonBlock`), keeping the value configurable per-network without code
-        // changes — same mechanism as Alpha/Beta/Gamma/Delta above.
+        // this to read the rolling-upgrade activation height from genesis, keeping the
+        // value configurable per-network without code changes — same mechanism as
+        // Alpha/Beta timestamp hardforks above.
         let gravity_min_base_fee_activation_block = 0u64;
 
         Self {
