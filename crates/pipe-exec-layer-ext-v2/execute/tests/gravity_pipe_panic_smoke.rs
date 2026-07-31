@@ -81,6 +81,8 @@ const FUNDED_PRIVKEY_HEX: &[u8; 32] = &[
 ];
 const TARGET_ADDR: Address = address!("0x0000000000000000000000000000000000001234");
 
+/// Patch `pragueTime` on the embedded chainspec. Always sets `betaTime = 0`
+/// so EIP-7702 lockdown is released (this smoke test includes type-4 txs).
 fn gravity_prague_chainspec(prague_time: Option<u64>) -> String {
     let mut json: serde_json::Value =
         serde_json::from_str(include_str!("../gravity_hardfork.json"))
@@ -88,6 +90,7 @@ fn gravity_prague_chainspec(prague_time: Option<u64>) -> String {
     if let Some(ts) = prague_time {
         json["config"]["pragueTime"] = serde_json::json!(ts);
     }
+    json["config"]["betaTime"] = serde_json::json!(0);
     json.to_string()
 }
 

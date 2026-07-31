@@ -30,8 +30,8 @@ pub use reth_ethereum_forks::*;
 pub use alloy_evm::EvmLimitParams;
 pub use api::EthChainSpec;
 pub use gravity::{
-    is_gravity_system_caller, is_system_tx_gas_exempt, system_txs_form_head_prefix,
-    GravityHardfork, GRAVITY_TX_SKIPPED_LOG_ADDRESS, SYSTEM_CALLER,
+    is_eip7702_lockdown_active, is_gravity_system_caller, is_system_tx_gas_exempt,
+    system_txs_form_head_prefix, GravityHardfork, GRAVITY_TX_SKIPPED_LOG_ADDRESS, SYSTEM_CALLER,
 };
 pub use info::ChainInfo;
 #[cfg(any(test, feature = "test-utils"))]

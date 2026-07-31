@@ -1,12 +1,11 @@
 #![allow(missing_docs)]
 
-//! Integration test for Gravity hardfork framework activation.
+//! Integration smoke for Gravity hardfork genesis parsing + pipe boot.
 //!
-//! This test boots a single reth node using a genesis generated from
-//! `gravity-testnet-v1.0.0` contracts (via `generate_genesis_single.sh`).
-//! It pushes blocks through the MockConsensus/PipeExecLayerApi pipeline
-//! and verifies that the hardfork dispatch infrastructure correctly parses
-//! and activates hardforks at the configured block numbers.
+//! Boots a single reth node from `gravity_hardfork.json`, verifies that
+//! `betaTime` is parsed as a timestamp fork condition (the EIP-7702 lockdown
+//! release gate), and pushes empty blocks through the MockConsensus /
+//! PipeExecLayerApi pipeline.
 
 use alloy_primitives::{address, Address, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
@@ -40,11 +39,12 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// Block number at which Gamma hardfork activates (must match gravity_hardfork.json).
-const GAMMA_BLOCK: u64 = 20;
+/// `betaTime` in `gravity_hardfork.json` — far-future so lockdown stays on during the
+/// empty-block push; this test only verifies parse, not the Beta transition itself.
+const BETA_TIME: u64 = 9_999_999_999;
 
-/// Block number at which Delta hardfork activates (must match gravity_hardfork.json).
-const DELTA_BLOCK: u64 = 25;
+/// How many blocks past genesis to push (smoke that the pipe still works).
+const TARGET_BLOCKS_PAST_GENESIS: u64 = 30;
 
 fn mock_block_id(block_number: u64) -> B256 {
     B256::left_padding_from(&block_number.to_be_bytes())
@@ -97,13 +97,13 @@ where
             .try_into()
             .unwrap();
         println!(
-            "[hardfork_test] latest_block_number={latest_block_number}, epoch={epoch}, gammaBlock={GAMMA_BLOCK}"
+            "[hardfork_test] latest_block_number={latest_block_number}, epoch={epoch}, betaTime={BETA_TIME}"
         );
 
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        // Push blocks past the hardfork boundary
-        let target_block = GAMMA_BLOCK + 30;
+        // Push a short empty-block run to exercise the pipe under the current hardfork schedule.
+        let target_block = latest_block_number + TARGET_BLOCKS_PAST_GENESIS;
         for block_number in latest_block_number + 1..=target_block {
             let block_id = mock_block_id(block_number);
             let parent_block_id = mock_block_id(block_number - 1);
@@ -153,7 +153,7 @@ where
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        println!("[hardfork_test] ✅ Pushed {target_block} blocks past gammaBlock.");
+        println!("[hardfork_test] ✅ Pushed through block {target_block}.");
     }
 }
 
@@ -176,40 +176,25 @@ async fn run_pipe(
 
     let chain_spec = handle.node.chain_spec();
 
-    // Verify gammaBlock is parsed correctly
+    // Verify betaTime is parsed as a timestamp fork condition (lockdown release gate).
     assert!(
         chain_spec
             .gravity_hardforks()
-            .fork(GravityHardfork::Gamma)
-            .transitions_at_block(GAMMA_BLOCK),
-        "gamma transitions_at_block({GAMMA_BLOCK}) should be true"
+            .is_fork_active_at_timestamp(GravityHardfork::Beta, BETA_TIME),
+        "Beta must be active at betaTime={BETA_TIME}"
     );
     assert!(
         !chain_spec
             .gravity_hardforks()
-            .fork(GravityHardfork::Gamma)
-            .transitions_at_block(GAMMA_BLOCK - 1),
-        "gamma transitions_at_block({}) should be false",
-        GAMMA_BLOCK - 1
+            .is_fork_active_at_timestamp(GravityHardfork::Beta, BETA_TIME - 1),
+        "Beta must be inactive at betaTime-1"
     );
-    println!("[hardfork_test] ✅ ChainSpec correctly parsed gammaBlock={GAMMA_BLOCK}");
-
+    // Fail-closed check: with far-future betaTime, lockdown is still active at "now".
     assert!(
-        chain_spec
-            .gravity_hardforks()
-            .fork(GravityHardfork::Delta)
-            .transitions_at_block(DELTA_BLOCK),
-        "delta transitions_at_block({DELTA_BLOCK}) should be true"
+        reth_chainspec::is_eip7702_lockdown_active(chain_spec.as_ref(), 0),
+        "lockdown must stay on before betaTime"
     );
-    assert!(
-        !chain_spec
-            .gravity_hardforks()
-            .fork(GravityHardfork::Delta)
-            .transitions_at_block(DELTA_BLOCK - 1),
-        "delta transitions_at_block({}) should be false",
-        DELTA_BLOCK - 1
-    );
-    println!("[hardfork_test] ✅ ChainSpec correctly parsed deltaBlock={DELTA_BLOCK}");
+    println!("[hardfork_test] ✅ ChainSpec correctly parsed betaTime={BETA_TIME}");
 
     let eth_api = handle.node.rpc_registry.eth_api().clone();
     let provider = handle.node.provider;
@@ -245,7 +230,7 @@ async fn run_pipe(
 }
 
 #[test]
-fn test_gamma_hardfork() {
+fn test_beta_hardfork_parse_smoke() {
     std::panic::set_hook(Box::new({
         |panic_info| {
             let backtrace = std::backtrace::Backtrace::capture();

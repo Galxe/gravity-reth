@@ -871,7 +871,7 @@ async fn run_pipe_p6_transient_parent_hash(
 
     // (c) The real hash must differ from the transient mock_block_id(99) —
     //     otherwise the test below would not actually prove anything. Block 99
-    //     contains gravity hardfork bytecode (gammaBlock=20, deltaBlock=25) so
+    //     contains gravity hardfork genesis config (betaTime timestamp gate) so
     //     its real keccak hash cannot collide with a left-padded block number.
     let transient_99 = mock_block_id(P3_ACTIVATION_BLOCK - 1);
     assert_ne!(
