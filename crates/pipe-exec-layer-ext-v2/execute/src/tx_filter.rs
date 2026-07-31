@@ -70,7 +70,29 @@ use revm::state::AccountInfo;
 use revm_primitives::{eip3860::MAX_INITCODE_SIZE, hardfork::SpecId};
 use tracing::info;
 
-/// Return the invalid transaction indexes.
+/// Outcome of pre-execution filtering for one ordered block.
+///
+/// - [`Self::discard`]: validation failures — remove from the local pool and report `is_discarded`
+///   to consensus.
+/// - [`Self::defer`]: otherwise-valid txs that do not fit the remaining block gas budget (or depend
+///   on a same-sender gas-deferred predecessor). Excluded from this block body but **kept** in the
+///   pool for a later block (audit#646).
+/// - Neither set: include in the block in original relative order.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TxFilterResult {
+    /// Indices of txs that failed validation and must be discarded from the pool.
+    pub discard: HashSet<usize>,
+    /// Indices of valid txs skipped only for block-gas packing.
+    pub defer: HashSet<usize>,
+}
+
+/// Filter ordered txs before grevm execution.
+///
+/// Walks the ordered list **serially** (required for EIP-7702 cross-account auth
+/// nonce simulation). Per-tx order is: admission guards + in-block state sim first,
+/// then block gas budget as the **last** gate. Invalid txs never consume gas budget,
+/// so a junk high-`gas_limit` tx cannot prefix-cut later valid txs that still fit
+/// (gravity-audit#646). Gas-deferred txs are not discarded from the pool.
 ///
 /// `chain_spec`, `block_timestamp`, `block_number` are taken instead of a
 /// pre-computed `SpecId` because the only consumer of `spec_id` here is the
@@ -96,31 +118,10 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     chain_spec: &ChainSpec,
     block_timestamp: u64,
     block_number: u64,
-) -> HashSet<usize> {
+) -> TxFilterResult {
     let eip7702_lockdown = is_eip7702_lockdown_active(chain_spec, block_timestamp);
     let spec_id =
         revm_spec_by_timestamp_and_block_number(chain_spec, block_timestamp, block_number);
-    let mut gas_limit_exceeded_tx_idx = txs.len();
-    let mut tx_gas_limit_sum: u64 = 0;
-    for (idx, tx) in txs.iter().enumerate() {
-        let tx_gas_limit = tx.gas_limit();
-        match tx_gas_limit_sum.checked_add(tx_gas_limit) {
-            Some(new_sum) if new_sum <= gas_limit => {
-                tx_gas_limit_sum = new_sum;
-            }
-            _ => {
-                info!(target: "filter_invalid_txs",
-                    tx_hash=?txs[idx].hash(),
-                    sender=?senders[idx],
-                    block_gas_limit=?gas_limit,
-                    "gas limit exceeded, truncated to {}",
-                    idx,
-                );
-                gas_limit_exceeded_tx_idx = idx;
-                break;
-            }
-        }
-    }
 
     let cfg_chain_id = chain_spec.chain_id();
     let is_tx_valid = |tx: &TransactionSigned, sender: &Address, account: &mut AccountInfo| {
@@ -375,11 +376,27 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     // nonce effects cross sender groups, so the simulation must advance in a single global
     // block order. The per-tx guards are cheap; the extra `recover_authority()` ECDSA
     // recovery runs only for type-4 txs.
+    //
+    // Block gas is applied as the **last** gate after a tx has passed admission + sim:
+    // invalid txs do not consume budget, and a tx that does not fit is deferred (kept in
+    // pool) while later smaller txs from other senders may still pack (audit#646).
     let mut sim: HashMap<Address, Option<AccountInfo>> = HashMap::default();
-    let mut invalid_tx_idxs: HashSet<usize> = HashSet::default();
-    for idx in 0..gas_limit_exceeded_tx_idx {
-        let tx = &txs[idx];
-        let sender = senders[idx];
+    let mut result = TxFilterResult::default();
+    // Senders whose next in-block nonce was gas-deferred: later same-sender txs cannot
+    // execute without a nonce gap, so they are deferred too (not discarded).
+    let mut gas_blocked_senders: HashSet<Address> = HashSet::default();
+    let mut remaining_gas = gas_limit;
+
+    for (idx, (tx, &sender)) in txs.iter().zip(senders.iter()).enumerate() {
+        if gas_blocked_senders.contains(&sender) {
+            info!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                "deferred: same-sender predecessor excluded by block gas budget"
+            );
+            result.defer.insert(idx);
+            continue;
+        }
 
         // EMERGENCY EIP-7702 LOCKDOWN — L3 (pre-Beta): drop any tx whose recipient is a
         // currently-delegated account, so no inbound CALL can trigger the callee's
@@ -399,7 +416,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                     to=?to,
                     "7702-lockdown: tx to delegated account rejected (audit#838)"
                 );
-                invalid_tx_idxs.insert(idx);
+                result.discard.insert(idx);
                 continue;
             }
         }
@@ -407,6 +424,9 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         // Validate the tx against the simulated sender account and apply the caller nonce
         // bump + balance deduction. Scoped so the `sim[sender]` borrow is released before
         // the authorization loop re-borrows `sim` (an authority may be any account).
+        // On success the sim account is mutated; if we later defer for gas we must roll
+        // that mutation back so a same-sender follow-up still sees the pre-tx account.
+        let sender_snapshot = sim.get(&sender).cloned();
         let valid = {
             let sender_acct = sim.entry(sender).or_insert_with(|| db.basic_ref(sender).unwrap());
             match sender_acct.as_mut() {
@@ -439,9 +459,35 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
             }
         };
         if !valid {
-            invalid_tx_idxs.insert(idx);
+            result.discard.insert(idx);
             continue;
         }
+
+        // Last gate: block gas budget (worst-case `tx.gas_limit()`). Does not discard.
+        let tx_gas = tx.gas_limit();
+        if tx_gas > remaining_gas {
+            info!(target: "filter_invalid_txs",
+                tx_hash=?tx.hash(),
+                sender=?sender,
+                tx_gas_limit=?tx_gas,
+                remaining_gas=?remaining_gas,
+                block_gas_limit=?gas_limit,
+                "deferred: tx does not fit remaining block gas budget"
+            );
+            // Roll back the optimistic sim mutation from `is_tx_valid`.
+            match sender_snapshot {
+                Some(prev) => {
+                    sim.insert(sender, prev);
+                }
+                None => {
+                    sim.remove(&sender);
+                }
+            }
+            result.defer.insert(idx);
+            gas_blocked_senders.insert(sender);
+            continue;
+        }
+        remaining_gas -= tx_gas;
 
         // Mirror revm `apply_auth_list`: for a type-4 tx every valid authorization bumps
         // ITS authority's nonce once — self (authority == sender) AND cross-account. The
@@ -479,8 +525,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
             }
         }
     }
-    invalid_tx_idxs.extend(gas_limit_exceeded_tx_idx..txs.len());
-    invalid_tx_idxs
+    result
 }
 
 #[cfg(test)]
@@ -686,7 +731,7 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64; // 20 gwei
         let gas_limit = 30_000_000u64; // 30M gas
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -696,7 +741,7 @@ mod tests {
             0,
             0,
         );
-        assert!(invalid_idxs.is_empty());
+        assert!(result.discard.is_empty());
     }
 
     #[test]
@@ -711,7 +756,7 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -721,8 +766,8 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 1);
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1);
+        assert!(result.discard.contains(&0));
     }
 
     #[test]
@@ -747,7 +792,7 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -757,8 +802,8 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 1);
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1);
+        assert!(result.discard.contains(&0));
     }
 
     #[test]
@@ -786,7 +831,7 @@ mod tests {
         let base_fee_per_gas = 1_000;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -796,11 +841,13 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 2);
-        assert!(invalid_idxs.contains(&0));
-        assert!(invalid_idxs.contains(&2));
+        assert_eq!(result.discard.len(), 2);
+        assert!(result.discard.contains(&0));
+        assert!(result.discard.contains(&2));
     }
 
+    /// audit#646: a valid tx that does not fit remaining block gas is deferred (kept in
+    /// pool), not discarded. Same-sender follow-ups are deferred too (nonce gap).
     #[test]
     fn test_filter_invalid_txs_gas_limit_exceeded() {
         let mut db = MockDatabase::new();
@@ -824,7 +871,7 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64; // 30M gas limit
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -834,14 +881,16 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 1);
-        assert!(invalid_idxs.contains(&1));
+        assert!(result.discard.is_empty(), "gas overflow must not discard: {result:?}");
+        assert_eq!(result.defer.len(), 1);
+        assert!(result.defer.contains(&1));
     }
 
     // Models the `create_block_for_executor` byzantine path from gravity-audit#621 Fix A:
     // when `sum_system_gas ≥ block.gas_limit`, the call site's `saturating_sub` collapses
-    // the user-tx budget to 0, and the filter must reject *every* user tx — otherwise
+    // the user-tx budget to 0, and the filter must exclude *every* user tx — otherwise
     // `header.gas_used > header.gas_limit` once system-txn receipts are appended.
+    // Under audit#646 those exclusions are deferred (pool-safe), not discarded.
     #[test]
     fn test_filter_invalid_txs_zero_budget_drops_all() {
         let mut db = MockDatabase::new();
@@ -862,7 +911,7 @@ mod tests {
         let txs = vec![tx1, tx2];
         let senders = vec![sender, sender];
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -872,9 +921,10 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 2);
-        assert!(invalid_idxs.contains(&0));
-        assert!(invalid_idxs.contains(&1));
+        assert!(result.discard.is_empty(), "zero budget must not wipe the pool: {result:?}");
+        assert_eq!(result.defer.len(), 2);
+        assert!(result.defer.contains(&0));
+        assert!(result.defer.contains(&1));
     }
 
     #[test]
@@ -900,7 +950,7 @@ mod tests {
         let base_fee_per_gas = 20_000_000_000u64;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -910,7 +960,7 @@ mod tests {
             0,
             0,
         );
-        assert!(invalid_idxs.is_empty());
+        assert!(result.discard.is_empty());
     }
 
     #[test]
@@ -963,7 +1013,7 @@ mod tests {
         let base_fee_per_gas = 0u64;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -973,12 +1023,17 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 5, "invalid_idxs: {invalid_idxs:?}");
-        assert!(invalid_idxs.contains(&1));
-        assert!(invalid_idxs.contains(&2));
-        assert!(invalid_idxs.contains(&4));
-        assert!(invalid_idxs.contains(&5));
-        assert!(invalid_idxs.contains(&6));
+        // Validation failures only — gas packing uses defer (audit#646).
+        // idx1/2/4: nonce/balance failures; idx5 (30M) deferred for gas; idx6 still packs.
+        assert_eq!(result.discard.len(), 3, "discard: {result:?}");
+        assert!(result.discard.contains(&1));
+        assert!(result.discard.contains(&2));
+        assert!(result.discard.contains(&4));
+        assert!(result.defer.contains(&5), "30M tx deferred for gas: {result:?}");
+        assert!(
+            !result.discard.contains(&6) && !result.defer.contains(&6),
+            "later small valid tx must still pack: {result:?}"
+        );
     }
 
     /// Regression: a type-0x04 tx whose `gas_limit` is below `21000 + PER_EMPTY_ACCOUNT_COST * N`
@@ -1007,7 +1062,7 @@ mod tests {
         let base_fee_per_gas = 0;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -1017,8 +1072,8 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 1, "intrinsic-gas-too-low 7702 tx should be discarded");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "intrinsic-gas-too-low 7702 tx should be discarded");
+        assert!(result.discard.contains(&0));
     }
 
     /// Sanity check (lockdown OFF / Beta active): same 7702 tx with a `gas_limit` at or
@@ -1046,7 +1101,7 @@ mod tests {
         let base_fee_per_gas = 0;
         let gas_limit = 30_000_000u64;
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -1056,7 +1111,7 @@ mod tests {
             0,
             0,
         );
-        assert!(invalid_idxs.is_empty(), "got: {invalid_idxs:?}");
+        assert!(result.discard.is_empty(), "got: {result:?}");
     }
 
     /// U-1 (acceptance design §3.1, lockdown OFF / Beta active): a 7702 tx with
@@ -1080,7 +1135,7 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -1091,8 +1146,8 @@ mod tests {
             0,
         );
         assert!(
-            invalid_idxs.is_empty(),
-            "two-auth 7702 tx with 72k gas must pass post-Beta: {invalid_idxs:?}"
+            result.discard.is_empty(),
+            "two-auth 7702 tx with 72k gas must pass post-Beta: {result:?}"
         );
     }
 
@@ -1117,10 +1172,10 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 1, "three-auth 7702 tx at 21k gas must be discarded");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "three-auth 7702 tx at 21k gas must be discarded");
+        assert!(result.discard.contains(&0));
     }
 
     /// Pre-Prague boundary (acceptance design P-2): a TxEip7702 with otherwise-fine intrinsic
@@ -1149,10 +1204,10 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &shanghai_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 1, "7702 tx must be discarded when spec_id < PRAGUE");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "7702 tx must be discarded when spec_id < PRAGUE");
+        assert!(result.discard.contains(&0));
     }
 
     /// U-3 (acceptance design §3.1): the #668 fix must not regress legacy/1559 filtering.
@@ -1177,11 +1232,11 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert!(
-            invalid_idxs.is_empty(),
-            "legacy 21k-gas tx must not be regressed by the 7702 intrinsic fix: {invalid_idxs:?}"
+            result.discard.is_empty(),
+            "legacy 21k-gas tx must not be regressed by the 7702 intrinsic fix: {result:?}"
         );
     }
 
@@ -1248,10 +1303,10 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 1, "type-3 (blob) tx must be discarded on Gravity");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "type-3 (blob) tx must be discarded on Gravity");
+        assert!(result.discard.contains(&0));
     }
 
     /// gravity-audit#696 trigger 4: a Create tx with init code larger than
@@ -1278,14 +1333,14 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert_eq!(
-            invalid_idxs.len(),
+            result.discard.len(),
             1,
             "Create tx with init_code.len() > MAX_INITCODE_SIZE must be discarded"
         );
-        assert!(invalid_idxs.contains(&0));
+        assert!(result.discard.contains(&0));
     }
 
     /// Boundary: a Create tx with `input.len() == MAX_INITCODE_SIZE` is within EIP-3860
@@ -1313,11 +1368,11 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 10_000_000, &prague_chain_spec(), 0, 0);
         assert!(
-            invalid_idxs.is_empty(),
-            "Create tx at exactly MAX_INITCODE_SIZE must pass the size gate: {invalid_idxs:?}"
+            result.discard.is_empty(),
+            "Create tx at exactly MAX_INITCODE_SIZE must pass the size gate: {result:?}"
         );
     }
 
@@ -1410,7 +1465,7 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -1420,8 +1475,12 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 1, "legacy tx with gas_price < base_fee must be discarded");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(
+            result.discard.len(),
+            1,
+            "legacy tx with gas_price < base_fee must be discarded"
+        );
+        assert!(result.discard.contains(&0));
     }
 
     /// 1559 tx whose `max_fee_per_gas` is below the prevailing base fee must be
@@ -1446,7 +1505,7 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -1456,8 +1515,8 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(invalid_idxs.len(), 1, "1559 tx with max_fee < base_fee must be discarded");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "1559 tx with max_fee < base_fee must be discarded");
+        assert!(result.discard.contains(&0));
     }
 
     // ===== audit#710 gap 2: priority > max =====================================
@@ -1484,10 +1543,10 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 1, "1559 tx with prio > max must be discarded");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "1559 tx with prio > max must be discarded");
+        assert!(result.discard.contains(&0));
     }
 
     // ===== audit#710 gap 3: 7702 empty authorization_list ======================
@@ -1515,14 +1574,14 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert_eq!(
-            invalid_idxs.len(),
+            result.discard.len(),
             1,
             "7702 tx with empty authorization_list must be discarded"
         );
-        assert!(invalid_idxs.contains(&0));
+        assert!(result.discard.contains(&0));
     }
 
     // ===== audit#710 gap 4: balance must use max_fee, not effective ============
@@ -1557,7 +1616,7 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -1568,11 +1627,11 @@ mod tests {
             0,
         );
         assert_eq!(
-            invalid_idxs.len(),
+            result.discard.len(),
             1,
             "balance covers effective but not max — must be discarded by max-fee gate"
         );
-        assert!(invalid_idxs.contains(&0));
+        assert!(result.discard.contains(&0));
     }
 
     // ===== audit#710 gap 5: chain_id =========================================
@@ -1598,10 +1657,10 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 1, "1559 tx with wrong chain_id must be discarded");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "1559 tx with wrong chain_id must be discarded");
+        assert!(result.discard.contains(&0));
     }
 
     /// Legacy tx with explicit `chain_id` that doesn't match config is rejected.
@@ -1624,10 +1683,10 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 1, "legacy tx with chain_id=Some(2) must be discarded");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "legacy tx with chain_id=Some(2) must be discarded");
+        assert!(result.discard.contains(&0));
     }
 
     /// Boundary: legacy pre-EIP-155 tx (`chain_id = None`) is accepted — matches
@@ -1651,11 +1710,11 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert!(
-            invalid_idxs.is_empty(),
-            "pre-EIP-155 legacy tx must pass the chain-id gate: {invalid_idxs:?}"
+            result.discard.is_empty(),
+            "pre-EIP-155 legacy tx must pass the chain-id gate: {result:?}"
         );
     }
 
@@ -1688,11 +1747,11 @@ mod tests {
         let txs = vec![tx1, tx2];
         let senders = vec![sender, sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 2, "all txs from coded sender must be discarded");
-        assert!(invalid_idxs.contains(&0));
-        assert!(invalid_idxs.contains(&1));
+        assert_eq!(result.discard.len(), 2, "all txs from coded sender must be discarded");
+        assert!(result.discard.contains(&0));
+        assert!(result.discard.contains(&1));
     }
 
     /// EIP-3607 delegation exception (lockdown OFF / Beta active): sender whose code
@@ -1709,7 +1768,7 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -1720,8 +1779,8 @@ mod tests {
             0,
         );
         assert!(
-            invalid_idxs.is_empty(),
-            "tx from EIP-7702-delegated sender must pass post-Beta: {invalid_idxs:?}"
+            result.discard.is_empty(),
+            "tx from EIP-7702-delegated sender must pass post-Beta: {result:?}"
         );
     }
 
@@ -1749,14 +1808,10 @@ mod tests {
         let senders = vec![sender];
 
         // Default prague_chain_spec has no betaTime → lockdown ON.
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
-        assert_eq!(
-            invalid_idxs.len(),
-            1,
-            "L1 must wholesale-reject type-4 pre-Beta: {invalid_idxs:?}"
-        );
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "L1 must wholesale-reject type-4 pre-Beta: {result:?}");
+        assert!(result.discard.contains(&0));
     }
 
     /// L1 post-Beta: same type-4 with sufficient gas is admitted once Beta is active.
@@ -1779,7 +1834,7 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs = filter_invalid_txs(
+        let result = filter_invalid_txs(
             &db,
             &txs,
             &senders,
@@ -1789,7 +1844,7 @@ mod tests {
             0,
             0,
         );
-        assert!(invalid_idxs.is_empty(), "type-4 at floor must pass post-Beta: {invalid_idxs:?}");
+        assert!(result.discard.is_empty(), "type-4 at floor must pass post-Beta: {result:?}");
     }
 
     /// Fork boundary: betaTime = T; block_timestamp T-1 rejects type-4, T accepts.
@@ -1816,11 +1871,11 @@ mod tests {
 
         let pre =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &chain_spec, BETA_TIME - 1, 0);
-        assert_eq!(pre.len(), 1, "T-1 must still be under lockdown: {pre:?}");
-        assert!(pre.contains(&0));
+        assert_eq!(pre.discard.len(), 1, "T-1 must still be under lockdown: {pre:?}");
+        assert!(pre.discard.contains(&0));
 
         let at = filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &chain_spec, BETA_TIME, 0);
-        assert!(at.is_empty(), "T must release lockdown: {at:?}");
+        assert!(at.discard.is_empty(), "T must release lockdown: {at:?}");
     }
 
     /// L2: under lockdown a tx FROM a delegated account is dropped.
@@ -1835,14 +1890,14 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert_eq!(
-            invalid_idxs.len(),
+            result.discard.len(),
             1,
-            "7702-lockdown L2 must drop a tx from a delegated sender: {invalid_idxs:?}"
+            "7702-lockdown L2 must drop a tx from a delegated sender: {result:?}"
         );
-        assert!(invalid_idxs.contains(&0));
+        assert!(result.discard.contains(&0));
     }
 
     /// L3: under lockdown a tx TO a delegated account is dropped.
@@ -1867,14 +1922,14 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![caller];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert_eq!(
-            invalid_idxs.len(),
+            result.discard.len(),
             1,
-            "7702-lockdown L3 must drop a tx to a delegated recipient: {invalid_idxs:?}"
+            "7702-lockdown L3 must drop a tx to a delegated recipient: {result:?}"
         );
-        assert!(invalid_idxs.contains(&0));
+        assert!(result.discard.contains(&0));
     }
 
     /// audit#838 attack shape: [funder→A, A@nonce] — both dropped under lockdown
@@ -1901,14 +1956,14 @@ mod tests {
         let txs = vec![x, a_at_m];
         let senders = vec![funder, a];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert_eq!(
-            invalid_idxs.len(),
+            result.discard.len(),
             2,
-            "both legs of the audit#838 attack shape must be dropped: {invalid_idxs:?}"
+            "both legs of the audit#838 attack shape must be dropped: {result:?}"
         );
-        assert!(invalid_idxs.contains(&0) && invalid_idxs.contains(&1));
+        assert!(result.discard.contains(&0) && result.discard.contains(&1));
     }
 
     /// Lockdown precision: non-delegated traffic (ordinary contract recipient) is
@@ -1943,11 +1998,11 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 30_000_000, &prague_chain_spec(), 0, 0);
         assert!(
-            invalid_idxs.is_empty(),
-            "non-delegated traffic must be unaffected by the 7702 lockdown: {invalid_idxs:?}"
+            result.discard.is_empty(),
+            "non-delegated traffic must be unaffected by the 7702 lockdown: {result:?}"
         );
     }
 
@@ -1984,11 +2039,11 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 60_000_000, &osaka_chain_spec(), 0, 0);
         assert!(
-            invalid_idxs.is_empty(),
-            "30M tx at the cap boundary must pass under Osaka: {invalid_idxs:?}"
+            result.discard.is_empty(),
+            "30M tx at the cap boundary must pass under Osaka: {result:?}"
         );
     }
 
@@ -2012,10 +2067,10 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 60_000_000, &osaka_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 1, "tx above the 30M cap must be discarded under Osaka");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "tx above the 30M cap must be discarded under Osaka");
+        assert!(result.discard.contains(&0));
     }
 
     /// The gate is OSAKA-gated: the same over-cap tx passes under Prague (no per-tx cap exists
@@ -2039,11 +2094,11 @@ mod tests {
         let txs = vec![tx];
         let senders = vec![sender];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 60_000_000, &prague_chain_spec(), 0, 0);
         assert!(
-            invalid_idxs.is_empty(),
-            "pre-Osaka has no per-tx gas cap, over-cap tx must pass: {invalid_idxs:?}"
+            result.discard.is_empty(),
+            "pre-Osaka has no per-tx gas cap, over-cap tx must pass: {result:?}"
         );
     }
 
@@ -2072,9 +2127,96 @@ mod tests {
         let txs = vec![tx_a, tx_b];
         let senders = vec![sender_a, sender_b];
 
-        let invalid_idxs =
+        let result =
             filter_invalid_txs(&db, &txs, &senders, 0, 60_000_000, &osaka_chain_spec(), 0, 0);
-        assert_eq!(invalid_idxs.len(), 1, "only sender A's over-cap tx must be dropped");
-        assert!(invalid_idxs.contains(&0));
+        assert_eq!(result.discard.len(), 1, "only sender A's over-cap tx must be dropped");
+        assert!(result.discard.contains(&0));
+    }
+
+    /// audit#646: gas is the last gate. An invalid early tx must not consume block gas
+    /// budget, so a later valid tx that still fits is included (not prefix-cut / discarded).
+    #[test]
+    fn test_filter_invalid_txs_invalid_does_not_steal_gas_budget() {
+        let mut db = MockDatabase::new();
+        let sender_a = Address::random();
+        let sender_b = Address::random();
+        for s in [sender_a, sender_b] {
+            db.insert_account(
+                s,
+                AccountInfo {
+                    balance: U256::from(1_000_000_000_000_000_000u64),
+                    nonce: 0,
+                    code_hash: KECCAK_EMPTY,
+                    code: None,
+                    account_id: None,
+                },
+            );
+        }
+
+        // Order: valid 10M, invalid (wrong nonce) claiming 25M, valid 5M from another sender.
+        // Budget 30M. Old prefix-cut would stop at idx1 (10+25>30) and discard idx1+idx2.
+        // New: idx1 discarded for nonce, does not consume gas; idx2 packs (10+5 <= 30).
+        let tx0 = create_test_transaction(0, 10_000_000, 25_000_000_000);
+        let tx1 = create_test_transaction(9, 25_000_000, 25_000_000_000); // bad nonce
+        let tx2 = create_test_transaction(0, 5_000_000, 25_000_000_000);
+        let txs = vec![tx0, tx1, tx2];
+        let senders = vec![sender_a, sender_a, sender_b];
+
+        let result = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            20_000_000_000u64,
+            30_000_000u64,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
+        assert_eq!(result.discard.len(), 1);
+        assert!(result.discard.contains(&1));
+        assert!(result.defer.is_empty(), "later valid tx must pack, not defer: {result:?}");
+    }
+
+    /// audit#646: continue packing smaller txs after a large one does not fit remaining gas.
+    #[test]
+    fn test_filter_invalid_txs_continues_packing_after_gas_skip() {
+        let mut db = MockDatabase::new();
+        let sender_big = Address::random();
+        let sender_small = Address::random();
+        for s in [sender_big, sender_small] {
+            db.insert_account(
+                s,
+                AccountInfo {
+                    balance: U256::from(1_000_000_000_000_000_000u64),
+                    nonce: 0,
+                    code_hash: KECCAK_EMPTY,
+                    code: None,
+                    account_id: None,
+                },
+            );
+        }
+
+        // Budget 30M: pack 20M, skip next same-sender 20M (defer), still pack 5M from
+        // another sender under the remaining 10M.
+        let tx0 = create_test_transaction(0, 20_000_000, 25_000_000_000);
+        let tx1 = create_test_transaction(1, 20_000_000, 25_000_000_000);
+        let tx2 = create_test_transaction(0, 5_000_000, 25_000_000_000);
+        let txs = vec![tx0, tx1, tx2];
+        let senders = vec![sender_big, sender_big, sender_small];
+
+        let result = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            20_000_000_000u64,
+            30_000_000u64,
+            &prague_chain_spec(),
+            0,
+            0,
+        );
+        assert!(result.discard.is_empty(), "{result:?}");
+        assert_eq!(result.defer.len(), 1);
+        assert!(result.defer.contains(&1));
+        assert!(!result.defer.contains(&2), "small later tx must pack: {result:?}");
     }
 }
