@@ -20,7 +20,7 @@ pub type BytecodeUpgrade = (Address, &'static [u8]);
 pub type StoragePatch = (Address, B256, U256);
 
 /// A batch storage patch: same (slot, value) applied to multiple addresses.
-/// Used for multi-address storage initialization across StakePool instances.
+/// Used for multi-address storage initialization across `StakePool` instances.
 pub type BatchStoragePatch = (&'static [Address], B256, U256);
 
 /// Trait implemented by each hardfork module to describe its upgrades.
@@ -49,7 +49,7 @@ pub trait HardforkUpgrades {
     }
 
     /// Batch storage patches: apply the same (slot, value) to multiple addresses.
-    /// Used for multi-address storage initialization across StakePool instances.
+    /// Used for multi-address storage initialization across `StakePool` instances.
     fn batch_storage_patches(&self) -> &'static [BatchStoragePatch] {
         &[]
     }
