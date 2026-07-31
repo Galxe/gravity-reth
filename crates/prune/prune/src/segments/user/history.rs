@@ -29,7 +29,10 @@ pub(crate) struct PrunedIndices {
 pub(crate) struct HistoryPruneResult<K> {
     /// Map of the highest deleted changeset keys to their block numbers.
     pub(crate) highest_deleted: FxHashMap<K, BlockNumber>,
-    /// The last block number that had changesets pruned.
+    /// The highest block number whose changesets are fully pruned, becoming the checkpoint.
+    ///
+    /// Checkpoints have block granularity, so a caller that can stop in the middle of a block
+    /// must report the block before it, and prune the interrupted block again on the next run.
     pub(crate) last_pruned_block: Option<BlockNumber>,
     /// Number of changesets pruned.
     pub(crate) pruned_count: usize,
@@ -42,6 +45,10 @@ pub(crate) struct HistoryPruneResult<K> {
 /// Shared between the static-file and database changeset paths for both account and storage
 /// history: the changeset source differs, but computing the checkpoint block, pruning the history
 /// index shards, and assembling [`SegmentOutput`] is identical.
+///
+/// Callers that can leave a block half-pruned (database table walks) must apply the block-level
+/// rewind themselves before calling this. Static-file walks delete nothing and must report the last
+/// fully walked block so the checkpoint does not stall.
 pub(crate) fn finalize_history_prune<Provider, T, K, SK>(
     provider: &Provider,
     result: HistoryPruneResult<K>,
@@ -58,11 +65,8 @@ where
 {
     let HistoryPruneResult { highest_deleted, last_pruned_block, pruned_count, done } = result;
 
-    // If there's more changesets to prune, set the checkpoint block number to the previous one, so
-    // we can finish pruning its changesets on the next run.
-    let last_changeset_pruned_block = last_pruned_block
-        .map(|block_number| if done { block_number } else { block_number.saturating_sub(1) })
-        .unwrap_or(range_end);
+    // Nothing was pruned only when the range held no changesets at all, so the whole range is done.
+    let last_changeset_pruned_block = last_pruned_block.unwrap_or(range_end);
 
     // Sort highest deleted block numbers and turn them into sharded keys.
     // `sorted_unstable` is fine because no equal keys exist in the map.
