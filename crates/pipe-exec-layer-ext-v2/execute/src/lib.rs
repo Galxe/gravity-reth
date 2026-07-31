@@ -1481,8 +1481,9 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// the transactions.
     ///
     /// Validation failures are discarded from the pool (`is_discarded` + `discard_txs_tx`).
-    /// Gas-deferred txs are excluded from this block body but kept in the pool
-    /// (`is_discarded = false`, not sent on the discard channel) — audit#646.
+    /// From Beta (`is_block_gas_last_gate_active`), gas-only exclusions are deferred — excluded
+    /// from this block body but kept in the pool (`is_discarded = false`, not sent on the discard
+    /// channel) — audit#646. Pre-Beta gas prefix-cut still discards the suffix (legacy STF).
     fn filter_invalid_txs(
         &self,
         db: &Storage::StateView,

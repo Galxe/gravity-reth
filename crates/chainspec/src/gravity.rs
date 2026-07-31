@@ -13,12 +13,18 @@ hardfork!(
         /// Activation is via genesis `alphaTime` (timestamp). See
         /// [`is_system_tx_gas_exempt`].
         Alpha,
-        /// Beta hardfork: EIP-7702 lockdown release gate (audit#838).
+        /// Beta hardfork: consensus-critical filter policy changes.
         ///
-        /// Until Beta activates, the pre-execution filter rejects all type-4 txs and
-        /// txs from/to currently-delegated accounts. Activation is via genesis
-        /// `betaTime` (timestamp). Missing/unknown key → Beta never active → lockdown
-        /// stays on (fail-closed).
+        /// Until Beta activates:
+        /// - EIP-7702 lockdown (audit#838): reject type-4 txs and txs from/to
+        ///   currently-delegated accounts.
+        /// - Block-gas packing (audit#646): prefix-cut on cumulative `tx.gas_limit()`
+        ///   and treat the suffix as discarded (pre-Beta STF).
+        ///
+        /// From Beta onward, lockdown is released and gas packing becomes last-gate
+        /// with pool-safe deferral (see [`is_block_gas_last_gate_active`]). Activation
+        /// is via genesis `betaTime` (timestamp). Missing/unknown key → Beta never
+        /// active → pre-Beta policy stays on (fail-closed).
         Beta,
     }
 );
@@ -81,6 +87,23 @@ pub fn is_system_tx_gas_exempt<S: EthChainSpec>(chain_spec: &S, block_ts: u64) -
 #[inline]
 pub fn is_eip7702_lockdown_active<S: EthChainSpec>(chain_spec: &S, block_ts: u64) -> bool {
     !chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Beta, block_ts)
+}
+
+/// Block-gas packing policy for `filter_invalid_txs` (audit#646). Active from Beta.
+///
+/// Returns `true` when the pre-execution filter must apply **gas as the last gate**:
+/// invalid txs do not consume block budget, packing continues after a non-fitting
+/// tx, and gas-only exclusions are **deferred** (kept in the pool) rather than
+/// discarded.
+///
+/// Pre-Beta (`false`): legacy prefix-cut on cumulative `tx.gas_limit()` — the first
+/// overflow index and every later index are discarded. That behaviour is consensus-
+/// critical and must not change on already-running chains without a hardfork.
+///
+/// Fail-closed: missing `betaTime` keeps the legacy prefix-cut forever.
+#[inline]
+pub fn is_block_gas_last_gate_active<S: EthChainSpec>(chain_spec: &S, block_ts: u64) -> bool {
+    chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Beta, block_ts)
 }
 
 /// Verifies the protocol invariant that every [`SYSTEM_CALLER`]-signed
