@@ -1480,10 +1480,9 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// Return the filtered valid transactions with sender without changing the relative order of
     /// the transactions.
     ///
-    /// Validation failures are discarded from the pool (`is_discarded` + `discard_txs_tx`).
-    /// From Beta (`is_block_gas_last_gate_active`), gas-only exclusions are deferred — excluded
-    /// from this block body but kept in the pool (`is_discarded = false`, not sent on the discard
-    /// channel) — audit#646. Pre-Beta gas prefix-cut still discards the suffix (legacy STF).
+    /// All excluded txs are discarded from the pool (`is_discarded` + `discard_txs_tx`), including
+    /// Beta+ gas-budget exclusions. Pre-Beta uses legacy gas prefix-cut; Beta+ packs with gas as
+    /// last gate but still discards non-fitting txs (audit#646 packing fix, no keep-in-pool defer).
     fn filter_invalid_txs(
         &self,
         db: &Storage::StateView,
@@ -1494,7 +1493,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         block_timestamp: u64,
         block_number: u64,
     ) -> (Vec<TransactionSigned>, Vec<Address>, Vec<TxInfo>) {
-        let filtered = tx_filter::filter_invalid_txs(
+        let invalid_idxs = tx_filter::filter_invalid_txs(
             db,
             &txs,
             &senders,
@@ -1504,7 +1503,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_timestamp,
             block_number,
         );
-        if filtered.discard.is_empty() && filtered.defer.is_empty() {
+        if invalid_idxs.is_empty() {
             let mut txs_info = Vec::with_capacity(txs.len());
             for (tx, sender) in txs.iter().zip(senders.iter()) {
                 txs_info.push(TxInfo {
@@ -1516,38 +1515,20 @@ impl<Storage: GravityStorage> Core<Storage> {
             }
             (txs, senders, txs_info)
         } else {
-            if !filtered.discard.is_empty() {
-                let _ = self.discard_txs_tx.send(
-                    filtered
-                        .discard
-                        .iter()
-                        .map(|&idx| txs[idx].hash())
-                        .copied()
-                        .collect::<Vec<_>>(),
-                );
-            }
+            let _ = self
+                .discard_txs_tx
+                .send(invalid_idxs.iter().map(|&idx| txs[idx].hash()).copied().collect::<Vec<_>>());
 
-            let excluded = filtered.discard.len() + filtered.defer.len();
-            let mut filtered_txs = Vec::with_capacity(txs.len().saturating_sub(excluded));
+            let mut filtered_txs = Vec::with_capacity(txs.len() - invalid_idxs.len());
             let mut filtered_senders = Vec::with_capacity(filtered_txs.capacity());
             let mut txs_info = Vec::with_capacity(txs.len());
             for (i, (tx, sender)) in txs.into_iter().zip(senders.into_iter()).enumerate() {
-                if filtered.discard.contains(&i) {
+                if invalid_idxs.contains(&i) {
                     txs_info.push(TxInfo {
                         tx_hash: *tx.hash(),
                         sender,
                         nonce: tx.nonce(),
                         is_discarded: true,
-                    });
-                    continue;
-                }
-                if filtered.defer.contains(&i) {
-                    // Valid but not packed this block — leave pool alone.
-                    txs_info.push(TxInfo {
-                        tx_hash: *tx.hash(),
-                        sender,
-                        nonce: tx.nonce(),
-                        is_discarded: false,
                     });
                     continue;
                 }

@@ -22,9 +22,11 @@ hardfork!(
         ///   and treat the suffix as discarded (pre-Beta STF).
         ///
         /// From Beta onward, lockdown is released and gas packing becomes last-gate
-        /// with pool-safe deferral (see [`is_block_gas_last_gate_active`]). Activation
-        /// is via genesis `betaTime` (timestamp). Missing/unknown key → Beta never
-        /// active → pre-Beta policy stays on (fail-closed).
+        /// (invalid txs do not steal budget; packing continues after a non-fit). Gas
+        /// exclusions still **discard** (pool remove + `is_discarded`) — no new defer
+        /// state — see [`is_block_gas_last_gate_active`]. Activation is via genesis
+        /// `betaTime` (timestamp). Missing/unknown key → Beta never active → pre-Beta
+        /// policy stays on (fail-closed).
         Beta,
     }
 );
@@ -92,9 +94,10 @@ pub fn is_eip7702_lockdown_active<S: EthChainSpec>(chain_spec: &S, block_ts: u64
 /// Block-gas packing policy for `filter_invalid_txs` (audit#646). Active from Beta.
 ///
 /// Returns `true` when the pre-execution filter must apply **gas as the last gate**:
-/// invalid txs do not consume block budget, packing continues after a non-fitting
-/// tx, and gas-only exclusions are **deferred** (kept in the pool) rather than
-/// discarded.
+/// invalid txs do not consume block budget, and packing continues after a non-fitting
+/// tx (later smaller txs may still enter the body). Non-fitting / same-sender blocked
+/// txs are still **discarded** from the pool (`is_discarded`) — this release does not
+/// introduce a keep-in-pool "defer" outcome (SDK only understands the discard bit).
 ///
 /// Pre-Beta (`false`): legacy prefix-cut on cumulative `tx.gas_limit()` — the first
 /// overflow index and every later index are discarded. That behaviour is consensus-
