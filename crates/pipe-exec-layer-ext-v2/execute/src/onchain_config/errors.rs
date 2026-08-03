@@ -56,10 +56,21 @@ sol! {
     /// @notice Nonce must be strictly increasing for each source
     error NonceNotIncreasing(uint32 sourceType, uint256 sourceId, uint128 currentNonce, uint128 providedNonce);
 
-    /// @notice Batch arrays have mismatched lengths
-    error OracleBatchArrayLengthMismatch(uint256 noncesLength, uint256 payloadsLength, uint256 gasLimitsLength);
+    /// @notice Nonce must be exactly the next value for each source
+    error NonceNotSequential(uint32 sourceType, uint256 sourceId, uint128 expectedNonce, uint128 providedNonce);
 
-    // -------------------- JWKManager Errors (for reference, callback failures don't revert main tx) --------------------
+    /// @notice Batch arrays have mismatched lengths
+    error OracleBatchArrayLengthMismatch(
+        uint256 noncesLength,
+        uint256 blockNumbersLength,
+        uint256 payloadsLength,
+        uint256 gasLimitsLength
+    );
+
+    /// @notice Oracle source position exceeds the contract's uint128 range
+    error OracleSourcePositionOverflow(uint256 sourcePosition);
+
+    // -------------------- JWKManager Errors (for reference) --------------------
     /// @notice JWK version must be strictly increasing
     error JWKVersionNotIncreasing(bytes issuer, uint64 currentVersion, uint64 providedVersion);
 }
@@ -182,9 +193,21 @@ pub fn decode_revert_error(output: &Bytes) -> Option<SystemTxnError> {
             Some(SystemTxnError {
                 name: "OracleBatchArrayLengthMismatch".into(),
                 details: format!(
-                    "Array length mismatch: nonces={}, payloads={}, gasLimits={}",
-                    err.noncesLength, err.payloadsLength, err.gasLimitsLength
+                    "Array length mismatch: nonces={}, positions={}, payloads={}, gasLimits={}",
+                    err.noncesLength,
+                    err.blockNumbersLength,
+                    err.payloadsLength,
+                    err.gasLimitsLength
                 ),
+                severity: ErrorSeverity::Fatal,
+            })
+        }
+
+        s if s == OracleSourcePositionOverflow::SELECTOR => {
+            let err = OracleSourcePositionOverflow::abi_decode(output).ok()?;
+            Some(SystemTxnError {
+                name: "OracleSourcePositionOverflow".into(),
+                details: format!("Oracle source position exceeds uint128: {}", err.sourcePosition),
                 severity: ErrorSeverity::Fatal,
             })
         }
@@ -221,6 +244,18 @@ pub fn decode_revert_error(output: &Bytes) -> Option<SystemTxnError> {
                 details: format!(
                     "Oracle nonce not increasing: sourceType={}, sourceId={}, current={}, provided={}",
                     err.sourceType, err.sourceId, err.currentNonce, err.providedNonce
+                ),
+                severity: ErrorSeverity::Recoverable,
+            })
+        }
+
+        s if s == NonceNotSequential::SELECTOR => {
+            let err = NonceNotSequential::abi_decode(output).ok()?;
+            Some(SystemTxnError {
+                name: "NonceNotSequential".into(),
+                details: format!(
+                    "Oracle nonce not sequential: sourceType={}, sourceId={}, expected={}, provided={}",
+                    err.sourceType, err.sourceId, err.expectedNonce, err.providedNonce
                 ),
                 severity: ErrorSeverity::Recoverable,
             })
@@ -332,6 +367,37 @@ mod tests {
         let err = result.unwrap();
         assert_eq!(err.name, "NonceNotIncreasing");
         assert_eq!(err.severity, ErrorSeverity::Recoverable);
+    }
+
+    #[test]
+    fn test_decode_nonce_not_sequential() {
+        let error = NonceNotSequential {
+            sourceType: 3,
+            sourceId: alloy_primitives::U256::from(42),
+            expectedNonce: 11,
+            providedNonce: 13,
+        };
+        let result = decode_revert_error(&error.abi_encode().into()).unwrap();
+
+        assert_eq!(result.name, "NonceNotSequential");
+        assert_eq!(result.severity, ErrorSeverity::Recoverable);
+        assert!(result.details.contains("expected=11"));
+        assert!(result.details.contains("provided=13"));
+    }
+
+    #[test]
+    fn test_decode_current_batch_length_mismatch() {
+        let error = OracleBatchArrayLengthMismatch {
+            noncesLength: alloy_primitives::U256::from(1),
+            blockNumbersLength: alloy_primitives::U256::from(2),
+            payloadsLength: alloy_primitives::U256::from(3),
+            gasLimitsLength: alloy_primitives::U256::from(4),
+        };
+        let result = decode_revert_error(&error.abi_encode().into()).unwrap();
+
+        assert_eq!(result.name, "OracleBatchArrayLengthMismatch");
+        assert_eq!(result.severity, ErrorSeverity::Fatal);
+        assert!(result.details.contains("positions=2"));
     }
 
     #[test]

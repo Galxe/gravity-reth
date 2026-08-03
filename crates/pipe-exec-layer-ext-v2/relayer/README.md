@@ -1,335 +1,98 @@
-# Gravity Protocol Relayer
+# Gravity Oracle Relayer Core
 
-A URI parser and blockchain event relayer for the Gravity protocol.
+This crate converts finalized external-source observations into the
+UnsupportedJWK payloads used by Gravity validator consensus. This core slice
+implements source type `0` (`GravityPortal.MessageSent`). Provider-specific
+source types are added in separate modules and PRs.
 
-## Features
+## Task Identity
 
-### URI Parser (UriParser)
-Supports parsing Gravity URIs in the following formats:
-- `gravity://mainnet/block?strategy=head` - Monitor latest block
-- `gravity://mainnet/event?address=0x...&topic0=0x...` - Monitor contract events
-- `gravity://mainnet/storage?account=0x...&slot=0x...` - Monitor storage slot changes
-- `gravity://mainnet/account/0x.../activity?type=erc20_transfer` - Monitor account activity
+Tasks use the following URI shape:
 
-### Relayer (GravityRelayer)
-- Periodically polls Ethereum nodes
-- Maintains processing cursor state
-- Detects data changes and generates update events
-- Supports finalized block filtering
-- Configurable polling intervals and block ranges
-
-### Relayer Manager (RelayerManager)
-- Manages multiple relayers for different URIs
-- Centralized lifecycle management
-- Supports multiple RPC endpoints
-- Provides unified interface for adding and polling URIs
-
-## Basic Usage
-
-```rust
-use reth_pipe_exec_layer_relayer::{
-    RelayerManager, UriParser
-};
-use reth_tracing::{LayerInfo, LogFormat, RethTracer, Tracer};
-use tracing::level_filters::LevelFilter;
-use tracing::info;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
-    let tracer = RethTracer::new().with_stdout(LayerInfo::new(
-        LogFormat::Terminal,
-        LevelFilter::INFO.to_string(),
-        "trace".to_string(),
-        None,
-    ));
-    tracer.init().unwrap();
-
-    // 1. Create URI parser
-    let parser = UriParser::new();
-    
-    // 2. Parse task URI
-    let task = parser.parse("gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")?;
-    
-    // 3. Create RelayerManager
-    let manager = RelayerManager::new();
-    
-    // 4. Add URI to manager (no initial state required)
-    manager.add_uri(&task.original_uri, "https://rpc.ankr.com/eth").await?;
-    
-    // 5. Poll for updates
-    let current_state = manager.poll_uri(&task.original_uri).await?;
-    info!("Current state: {:?}", current_state);
-    
-    Ok(())
-}
+```text
+gravity://<source_type>/<source_id>/<task_type>?<parameters>
 ```
 
-## Data Structures
+The source type and source ID in the URI must match the coordinates under
+which `OracleTaskConfig` registered the task. A relayer-backed
+`(sourceType, sourceId)` has exactly one task because `NativeOracle` has one
+nonce stream for that pair.
 
-### ParsedTask
-```rust
-pub struct ParsedTask {
-    /// The parsed gravity task to be executed
-    pub task: GravityTask,
-    /// The original URI string that was parsed
-    pub original_uri: String,
-    /// The chain identifier (e.g., "mainnet", "testnet")
-    pub chain_specifier: String,
-}
+Source type `0` example:
+
+```text
+gravity://0/1/events?portal=0x0000000000000000000000000000000000000001&fromBlock=19000000
 ```
 
-### GravityTask
-```rust
-pub enum GravityTask {
-    /// Monitor event task, contains a Filter object that can be directly used with Alloy
-    MonitorEvent(Filter),
-    /// Monitor block head task
-    MonitorBlockHead,
-    /// Monitor storage slot task
-    MonitorStorage { account: Address, slot: B256 },
-    /// Monitor account activity task (abstract layer)
-    MonitorAccount { address: Address, activity_type: AccountActivityType },
-}
+RPC URLs are local validator configuration. They are not stored in the task
+URI or committed on-chain.
+
+## Canonical Delivery
+
+Each source observation becomes an `OracleData` value:
+
+```text
+nonce            strictly sequential source nonce
+source_position  source-defined restart position
+payload          callback payload
 ```
 
-### ObserveState
-```rust
-pub struct ObserveState {
-    /// The block number at which the observation was made
-    pub block_number: u64,
-    /// The actual observed value (block, events, storage slot, or none)
-    pub observed_value: ObservedValue,
-    /// Chain timestamp to ensure consistency
-    pub timestamp: u64,
-    /// OnChain version for tracking changes
-    pub version: u64,
-}
+The relayer submits the canonical ABI wrapper:
+
+```solidity
+abi.encode(uint128 nonce, uint256 sourcePosition, bytes callbackPayload)
 ```
 
-### ObservedValue
-```rust
-pub enum ObservedValue {
-    /// Observed block information
-    Block { block_hash: B256, block_number: u64 },
-    /// Observed event logs
-    Events { logs: Vec<EventLog> },
-    /// Observed storage slot value
-    StorageSlot { slot: B256, value: B256 },
-    /// No observation made
-    None,
-}
-```
+After quorum, the execution layer decodes the wrapper and calls the unchanged
+`NativeOracle.recordBatch` ABI. Its `blockNumbers` argument carries source
+positions. NativeOracle invokes the configured callback atomically and stores
+only the latest `(nonce, sourcePosition)` progress checkpoint.
 
-### EventLog
-```rust
-pub struct EventLog {
-    /// Contract address that emitted the event
-    pub address: Address,
-    /// Event topics (indexed parameters)
-    pub topics: Vec<B256>,
-    /// Event data (non-indexed parameters)
-    pub data: Vec<u8>,
-    /// Block number where the event occurred
-    pub block_number: u64,
-    /// Transaction hash that triggered the event
-    pub transaction_hash: B256,
-    /// Log index within the transaction
-    pub log_index: u64,
-}
-```
+The execution adapter rejects:
 
-## URI Format Examples
+- non-canonical ABI wrappers;
+- mixed JWK variants;
+- non-sequential batch nonces;
+- source positions outside the NativeOracle `uint128` range;
+- source types whose runtime provider is not compiled into the current core.
 
-### Block Monitoring
-```rust
-// Monitor latest block
-"gravity://mainnet/block?strategy=head"
-```
+## Restart And Replay
 
-### Event Monitoring
-```rust
-// Monitor specific contract events
-"gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+The relayer persists three independent values per full task URI:
 
-// Monitor events with multiple topics
-"gravity://mainnet/event?address=0x...&topic0=0x...&topic1=0x..."
+- the last locally returned nonce;
+- the source position associated with that nonce;
+- the latest scan cursor, including empty finalized scans.
 
-// Monitor events with OR conditions
-"gravity://mainnet/event?topic0=0x...,0x..."
+Startup reconciles that local checkpoint with authoritative NativeOracle
+progress. Local state ahead of the chain is rolled back. Local state behind a
+known on-chain position is fast-forwarded.
 
-// Monitor events from a specific block number
-"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=1500"
+Legacy NativeOracle state can contain `latestNonce > 0` with
+`latestPosition == 0`. Zero means the old source position is unknown, not that
+the source starts at block zero. Recovery uses the following watermarks:
 
-// Monitor events from block tags
-"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=latest"
-"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=finalized"
-"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=earliest"
-```
+| Local checkpoint | Recovery cursor |
+|---|---|
+| Same nonce | Persisted scan cursor |
+| Behind with a known local event position | That local event position |
+| Missing, empty, or ahead | Task `fromBlock` |
 
-### Storage Monitoring
-```rust
-// Monitor storage slot changes
-"gravity://mainnet/storage?account=0x123456789abcdef123456789abcdef1234567890&slot=0x0000000000000000000000000000000000000000000000000000000000000001"
-```
+In every unknown-position case, the source starts with the authoritative
+on-chain nonce and filters historical observations at or below it. The first
+successful post-upgrade delivery establishes a known position.
 
-### Account Activity Monitoring
-```rust
-// Monitor ERC20 transfers for specific address
-"gravity://mainnet/account/0x123456789abcdef123456789abcdef1234567890/activity?type=erc20_transfer"
+Polls for the same URI are serialized. Different URIs can still poll in
+parallel. This prevents concurrent observers from emitting the same local
+scan range twice.
 
-// Monitor all transactions for specific address
-"gravity://mainnet/account/0x123456789abcdef123456789abcdef1234567890/activity?type=all_transactions"
-```
-
-## Event Filter Parameters
-
-### fromBlock Parameter
-The `fromBlock` parameter allows you to specify the starting block for event monitoring:
-
-```rust
-// Start from a specific block number
-"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=1500"
-
-// Start from block tags
-"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=latest"     // Latest block
-"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=finalized" // Finalized block
-"gravity://mainnet/event?address=0x...&topic0=0x...&fromBlock=earliest"  // Genesis block
-```
-
-**Supported fromBlock values:**
-- **Block number**: Any positive integer (e.g., `1500`, `1000000`)
-- **latest**: Start from the latest block
-- **finalized**: Start from the latest finalized block (recommended for production)
-- **earliest**: Start from the genesis block (block 0)
-
-**Note**: If `fromBlock` is not specified, the relayer will start monitoring from the current finalized block by default.
-
-## Advanced Usage
-
-### Multiple URI Management
-```rust
-use reth_pipe_exec_layer_relayer::RelayerManager;
-use reth_tracing::{LayerInfo, LogFormat, RethTracer, Tracer};
-use tracing::level_filters::LevelFilter;
-use tracing::info;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
-    let tracer = RethTracer::new().with_stdout(LayerInfo::new(
-        LogFormat::Terminal,
-        LevelFilter::INFO.to_string(),
-        "trace".to_string(),
-        None,
-    ));
-    tracer.init().unwrap();
-
-    let manager = RelayerManager::new();
-    
-    let uris = vec![
-        "gravity://mainnet/block?strategy=head",
-        "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-        "gravity://mainnet/storage?account=0x123456789abcdef123456789abcdef1234567890&slot=0x0",
-    ];
-    
-    // Add multiple URIs (no initial state required)
-    for uri in &uris {
-        match manager.add_uri(uri, "https://rpc.ankr.com/eth").await {
-            Ok(()) => info!("Successfully added URI: {}", uri),
-            Err(e) => info!("Failed to add URI {}: {}", uri, e),
-        }
-    }
-    
-    // Poll all URIs
-    for uri in &uris {
-        match manager.poll_uri(uri).await {
-            Ok(state) => info!("URI {}: {:?}", uri, state),
-            Err(e) => info!("Error polling {}: {}", uri, e),
-        }
-    }
-    
-    Ok(())
-}
-```
-
-### Batch URI Parsing
-```rust
-use reth_pipe_exec_layer_relayer::UriParser;
-use tracing::info;
-
-let parser = UriParser::new();
-let uris = vec![
-    "gravity://mainnet/block?strategy=head".to_string(),
-    "gravity://mainnet/event?address=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
-];
-
-for uri in uris {
-    match parser.parse(&uri) {
-        Ok(task) => {
-            info!("Parsed URI: {} -> Chain: {}, Task: {:?}", 
-                uri, task.chain_specifier, task.task);
-        }
-        Err(e) => {
-            info!("Failed to parse URI {}: {}", uri, e);
-        }
-    }
-}
-```
-
-## Error Handling
-
-The library uses `anyhow::Result` for error handling. Common error scenarios include:
-
-- Invalid URI format
-- Unsupported chain specifiers
-- Missing required parameters
-- Invalid Ethereum addresses or topics
-- RPC connection failures
-- Network timeouts
-
-## Performance Considerations
-
-1. **RPC Rate Limiting**: The library includes built-in retry logic with exponential backoff
-2. **Finalized Blocks**: By default, only finalized blocks are processed to ensure consistency
-3. **Cursor Management**: Efficient cursor tracking prevents reprocessing of already seen data
-4. **Batch Operations**: Support for batch URI parsing and management
-
-## Dependencies
-
-- `alloy-primitives`: Ethereum primitives and types
-- `alloy-rpc-types`: RPC types and filters
-- `tokio`: Async runtime
-- `anyhow`: Error handling
-- `tracing`: Logging and debugging
-- `serde`: Serialization/deserialization
-- `reth-tracing`: Reth tracing utilities
-
-## Running Examples
+## Validation
 
 ```bash
-# Run the basic usage example
-cargo run --example new_usage
-
-# Run tests
-cargo test
-
-# Generate documentation
-cargo doc --open
+cargo test -p reth-pipe-exec-layer-relayer
+cargo test -p reth-pipe-exec-layer-ext-v2 onchain_config
+cargo clippy -p reth-pipe-exec-layer-relayer -p reth-pipe-exec-layer-ext-v2 --all-targets
 ```
 
-## Notes
-
-1. Ensure you provide valid Ethereum RPC endpoints
-2. Storage slot monitoring requires RPC support for `eth_getStorageAt` method
-3. Consider using longer polling intervals in production to avoid excessive RPC calls
-4. The library automatically handles retries and backoff for failed requests
-5. All operations are async and should be run in a Tokio runtime
-6. Tracing initialization is required for proper logging
-
-## TODO
-
-- [ ] Add WebSocket support for real-time updates
-- [ ] Support for more event filtering options
-- [ ] Add metrics and monitoring capabilities
-- [ ] Implement connection pooling for multiple RPC endpoints
+The ignored blockchain-source test requires an explicitly configured external
+RPC and seeded events; it is not part of the offline unit suite.

@@ -23,8 +23,35 @@ use tracing::{info, warn};
 /// Source type for blockchain events in NativeOracle
 pub const SOURCE_TYPE_BLOCKCHAIN: u32 = 0;
 
+/// Source types implemented by this relayer build.
+///
+/// Provider PRs extend this list together with their runtime dispatch. Keeping
+/// discovery and execution support in one list prevents publishing tasks that
+/// the local relayer cannot execute.
+pub const RELAYER_BACKED_SOURCE_TYPES: &[u32] = &[SOURCE_TYPE_BLOCKCHAIN];
+
+fn has_valid_task_cardinality(source_type: u32, task_count: usize) -> bool {
+    !RELAYER_BACKED_SOURCE_TYPES.contains(&source_type) || task_count == 1
+}
+
 // Re-export SOURCE_TYPE_JWK from types for consistency
 pub use super::types::SOURCE_TYPE_JWK;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relayer_backed_sources_require_exactly_one_task() {
+        for source_type in RELAYER_BACKED_SOURCE_TYPES {
+            assert!(!has_valid_task_cardinality(*source_type, 0));
+            assert!(has_valid_task_cardinality(*source_type, 1));
+            assert!(!has_valid_task_cardinality(*source_type, 2));
+        }
+
+        assert!(has_valid_task_cardinality(SOURCE_TYPE_JWK, 2));
+    }
+}
 
 // =============================================================================
 // Shared ABI Definitions
@@ -161,20 +188,33 @@ where
     /// Returns a vector of (URI, nonce) tuples for all configured blockchain tasks.
     /// Returns tasks even when nonce is 0 (no data recorded yet) to enable discovery.
     pub fn fetch_blockchain_task_uris(&self, block_id: BlockId) -> Vec<(String, u128)> {
+        self.fetch_task_uris(SOURCE_TYPE_BLOCKCHAIN, block_id)
+    }
+
+    /// Fetch all task URIs currently implemented by the relayer.
+    pub fn fetch_relayer_task_uris(&self, block_id: BlockId) -> Vec<(String, u128)> {
+        RELAYER_BACKED_SOURCE_TYPES
+            .iter()
+            .flat_map(|source_type| self.fetch_task_uris(*source_type, block_id))
+            .collect()
+    }
+
+    /// Fetch task URIs for a source type with their latest NativeOracle nonce.
+    pub fn fetch_task_uris(&self, source_type: u32, block_id: BlockId) -> Vec<(String, u128)> {
         let mut results = Vec::new();
 
-        // Get all registered blockchain source IDs
         let source_ids =
-            self.fetch_registered_source_ids(SOURCE_TYPE_BLOCKCHAIN, block_id).unwrap_or_default();
+            self.fetch_registered_source_ids(source_type, block_id).unwrap_or_default();
 
         info!(
             target: "oracle_task_helper",
+            source_type,
             length = source_ids.len(),
             "oracle task source ids length"
         );
 
         for source_id in source_ids {
-            self.process_source_tasks(source_id, block_id, &mut results);
+            self.process_source_tasks(source_type, source_id, block_id, &mut results);
         }
 
         results
@@ -183,24 +223,23 @@ where
     /// Process all tasks for a single source ID
     fn process_source_tasks(
         &self,
+        source_type: u32,
         source_id: U256,
         block_id: BlockId,
         results: &mut Vec<(String, u128)>,
     ) {
         // Fetch the latest nonce for this source (0 if no data recorded yet)
-        let nonce =
-            self.call_get_latest_nonce(SOURCE_TYPE_BLOCKCHAIN, source_id, block_id).unwrap_or(0);
+        let nonce = self.call_get_latest_nonce(source_type, source_id, block_id).unwrap_or(0);
 
         info!(
             target: "oracle_task_helper",
+            source_type,
             source_id = source_id.to_string(),
             nonce,
             "oracle task source id and nonce"
         );
 
-        let Some(task_names) =
-            self.call_get_task_names(SOURCE_TYPE_BLOCKCHAIN, source_id, block_id)
-        else {
+        let Some(task_names) = self.call_get_task_names(source_type, source_id, block_id) else {
             return;
         };
 
@@ -210,14 +249,26 @@ where
             "oracle task task names length"
         );
 
+        if !has_valid_task_cardinality(source_type, task_names.len()) {
+            warn!(
+                target: "oracle_task_helper",
+                source_type,
+                source_id = source_id.to_string(),
+                task_count = task_names.len(),
+                "Relayer-backed oracle source must have exactly one task; skipping source"
+            );
+            return;
+        }
+
         for task_name in task_names {
-            self.process_single_task(source_id, task_name, nonce, block_id, results);
+            self.process_single_task(source_type, source_id, task_name, nonce, block_id, results);
         }
     }
 
     /// Process a single task and add valid URI to results
     fn process_single_task(
         &self,
+        source_type: u32,
         source_id: U256,
         task_name: B256,
         nonce: u128,
@@ -230,8 +281,7 @@ where
             "oracle task task name"
         );
 
-        let Some(task) = self.call_get_task(SOURCE_TYPE_BLOCKCHAIN, source_id, task_name, block_id)
-        else {
+        let Some(task) = self.call_get_task(source_type, source_id, task_name, block_id) else {
             return;
         };
 
@@ -252,15 +302,29 @@ where
             "oracle task uri string"
         );
 
-        // Validate URI
+        // Validate both URI syntax and its on-chain task identity.
         match reth_pipe_exec_layer_relayer::uri_parser::parse_oracle_uri(&uri_string) {
-            Ok(_) => {
+            Ok(parsed)
+                if parsed.source_type == source_type &&
+                    U256::from(parsed.source_id) == source_id =>
+            {
                 results.push((uri_string, nonce));
+            }
+            Ok(parsed) => {
+                warn!(
+                    target: "oracle_task_helper",
+                    uri_string,
+                    expected_source_type = source_type,
+                    expected_source_id = source_id.to_string(),
+                    parsed_source_type = parsed.source_type,
+                    parsed_source_id = parsed.source_id,
+                    "Oracle task URI coordinates do not match registered source"
+                );
             }
             Err(e) => {
                 warn!(
                     target: "oracle_task_helper",
-                    uri_string = uri_string,
+                    uri_string,
                     error = %e,
                     "Failed to parse oracle URI"
                 );

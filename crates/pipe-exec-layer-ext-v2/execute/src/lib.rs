@@ -77,7 +77,7 @@ use crate::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
         system_txns_into_executed_ordered_block_result,
-        types::DataRecorded,
+        types::{DataRecorded, OracleDelivered},
         SystemTxnResult, DKG_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, NATIVE_ORACLE_ADDR,
         RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
@@ -105,26 +105,33 @@ fn extract_gravity_events_from_system_receipts(
             "extract gravity events from receipt"
         );
         for log in &receipt.logs {
-            // Parse DataRecorded events only from NativeOracle.
+            // Parse both historical and current delivery events only from NativeOracle.
             if log.address == NATIVE_ORACLE_ADDR {
-                if let Ok(event) = DataRecorded::decode_log(&log) {
+                let delivery = DataRecorded::decode_log(&log)
+                    .map(|event| (event.sourceType, event.sourceId, event.nonce))
+                    .or_else(|_| {
+                        OracleDelivered::decode_log(&log)
+                            .map(|event| (event.sourceType, event.sourceId, event.nonce))
+                    });
+
+                if let Ok((source_type, source_id, nonce)) = delivery {
                     info!(target: "execute_ordered_block",
                         number=?block_number,
-                        source_type=?event.sourceType,
-                        source_id=?event.sourceId,
-                        nonce=?event.nonce,
-                        "data recorded event"
+                        source_type=?source_type,
+                        source_id=?source_id,
+                        nonce=?nonce,
+                        "oracle delivery event"
                     );
                     // Keep only the latest nonce for each (sourceType, sourceId)
-                    let key = (event.sourceType, event.sourceId);
+                    let key = (source_type, source_id);
                     data_records
                         .entry(key)
                         .and_modify(|existing_nonce| {
-                            if event.nonce > *existing_nonce {
-                                *existing_nonce = event.nonce;
+                            if nonce > *existing_nonce {
+                                *existing_nonce = nonce;
                             }
                         })
-                        .or_insert(event.nonce);
+                        .or_insert(nonce);
                 }
             }
 
@@ -142,7 +149,7 @@ fn extract_gravity_events_from_system_receipts(
         }
     }
 
-    // Convert collected DataRecorded events to ProviderJWKs
+    // Convert collected delivery events to ProviderJWKs.
     if !data_records.is_empty() {
         let api_jwks: Vec<ProviderJWKs> = data_records
             .into_iter()
@@ -168,7 +175,7 @@ fn extract_gravity_events_from_system_receipts(
             number=?block_number,
             epoch=?epoch,
             provider_count=?api_jwks.len(),
-            "constructed ProviderJWKs from DataRecorded events"
+            "constructed ProviderJWKs from oracle delivery events"
         );
 
         gravity_events.push(GravityEvent::ObservedJWKsUpdated(epoch, api_jwks));
@@ -217,6 +224,34 @@ mod tests {
                 assert_eq!(*epoch, 7);
                 assert_eq!(jwks.len(), 1);
                 assert_eq!(jwks[0].version, 3);
+            }
+            other => panic!("expected ObservedJWKsUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_gravity_events_accepts_oracle_delivered_from_native_oracle_only() {
+        let event = OracleDelivered {
+            sourceType: 3,
+            sourceId: U256::from(4),
+            nonce: 5,
+            sourcePosition: 6,
+            payloadHash: B256::from([0x77; 32]),
+        };
+        let forged_receipts =
+            vec![receipt_with_log(Address::from([0x42; 20]), event.encode_log_data())];
+
+        let events = extract_gravity_events_from_system_receipts(&forged_receipts, 10, 7);
+        assert!(events.is_empty(), "forged OracleDelivered emitter must not produce GravityEvent");
+
+        let valid_receipts = vec![receipt_with_log(NATIVE_ORACLE_ADDR, event.encode_log_data())];
+        let events = extract_gravity_events_from_system_receipts(&valid_receipts, 10, 7);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            GravityEvent::ObservedJWKsUpdated(epoch, jwks) => {
+                assert_eq!(*epoch, 7);
+                assert_eq!(jwks.len(), 1);
+                assert_eq!(jwks[0].version, 5);
             }
             other => panic!("expected ObservedJWKsUpdated, got {other:?}"),
         }
