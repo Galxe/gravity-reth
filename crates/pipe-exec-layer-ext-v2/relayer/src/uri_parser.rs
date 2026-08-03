@@ -13,6 +13,9 @@
 //! - Binance index kline price feed:
 //!   `gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&
 //!   bucketStartMs=1710000000000&decimals=8`
+//! - Polygon CTF settlement:
+//!   `gravity://6/9001/polymarket_settlement?ctf=0x4D97...&condition=0x2afe...&
+//!   fromBlock=89000000&chainId=137`
 
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
@@ -25,7 +28,7 @@ pub struct ParsedOracleTask {
     /// Original URI string
     pub uri: String,
 
-    /// Source type (`0=BLOCKCHAIN`, `3=PRICE_FEED`)
+    /// Source type (`0=BLOCKCHAIN`, `3=PRICE_FEED`, `6=POLYMARKET_SETTLEMENT`)
     pub source_type: u32,
 
     /// Source identifier (chain ID, etc.)
@@ -64,6 +67,11 @@ impl ParsedOracleTask {
     /// Check if this is a price feed source
     pub const fn is_price_feed(&self) -> bool {
         self.source_type == 3
+    }
+
+    /// Check if this is a Polygon Polymarket settlement source.
+    pub const fn is_polymarket_settlement(&self) -> bool {
+        self.source_type == 6
     }
 }
 
@@ -146,6 +154,18 @@ mod tests {
         assert_eq!(task.task_type, "price_feed");
         assert!(task.is_price_feed());
         assert_eq!(task.params.get("decimals").map(String::as_str), Some("8"));
+    }
+
+    #[test]
+    fn test_parse_polymarket_settlement_uri() {
+        let uri = "gravity://6/9001/polymarket_settlement?ctf=0x4D97DCd97eC945f40cF65F87097ACe5EA0476045&condition=0x2afe86f96be81a0d89ed776bedbd52d1c75bc47b49e6f0f791ddd009f52faf23&fromBlock=89000000&chainId=137";
+        let task = parse_oracle_uri(uri).unwrap();
+
+        assert_eq!(task.source_type, 6);
+        assert_eq!(task.source_id, 9001);
+        assert_eq!(task.task_type, "polymarket_settlement");
+        assert_eq!(task.from_block(), 89_000_000);
+        assert!(task.is_polymarket_settlement());
     }
 
     #[test]

@@ -2,8 +2,9 @@
 
 This crate converts finalized external-source observations into the
 UnsupportedJWK payloads used by Gravity validator consensus. This core slice
-implements source type `0` (`GravityPortal.MessageSent`) and source type `3`
-(Binance USD-M index-price klines). Other providers remain separate slices.
+implements source type `0` (`GravityPortal.MessageSent`), source type `3`
+(Binance USD-M index-price klines), and source type `6` (finalized Polygon CTF
+settlements).
 
 ## Task Identity
 
@@ -29,6 +30,16 @@ Source type `3` example:
 ```text
 gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8&graceMs=120000
 ```
+
+Source type `6` example:
+
+```text
+gravity://6/9001/polymarket_settlement?ctf=0x4D97DCd97eC945f40cF65F87097ACe5EA0476045&condition=0x...&fromBlock=89000000&chainId=137&maxBlocksPerPoll=1000
+```
+
+See [POLYMARKET_SETTLEMENT_SOURCE.md](POLYMARKET_SETTLEMENT_SOURCE.md) for the
+market-discovery boundary, finalized scan semantics, cursor/idempotency rules,
+and exact resolver ABI.
 
 RPC URLs are local validator configuration. They are not stored in the task
 URI or committed on-chain.
