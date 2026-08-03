@@ -23,12 +23,15 @@ use tracing::{info, warn};
 /// Source type for blockchain events in NativeOracle
 pub const SOURCE_TYPE_BLOCKCHAIN: u32 = 0;
 
+/// Source type for deterministic price-feed rounds.
+pub const SOURCE_TYPE_PRICE_FEED: u32 = 3;
+
 /// Source types implemented by this relayer build.
 ///
 /// Provider PRs extend this list together with their runtime dispatch. Keeping
 /// discovery and execution support in one list prevents publishing tasks that
 /// the local relayer cannot execute.
-pub const RELAYER_BACKED_SOURCE_TYPES: &[u32] = &[SOURCE_TYPE_BLOCKCHAIN];
+pub const RELAYER_BACKED_SOURCE_TYPES: &[u32] = &[SOURCE_TYPE_BLOCKCHAIN, SOURCE_TYPE_PRICE_FEED];
 
 fn has_valid_task_cardinality(source_type: u32, task_count: usize) -> bool {
     !RELAYER_BACKED_SOURCE_TYPES.contains(&source_type) || task_count == 1
@@ -43,6 +46,8 @@ mod tests {
 
     #[test]
     fn relayer_backed_sources_require_exactly_one_task() {
+        assert_eq!(RELAYER_BACKED_SOURCE_TYPES, &[SOURCE_TYPE_BLOCKCHAIN, SOURCE_TYPE_PRICE_FEED]);
+
         for source_type in RELAYER_BACKED_SOURCE_TYPES {
             assert!(!has_valid_task_cardinality(*source_type, 0));
             assert!(has_valid_task_cardinality(*source_type, 1));
