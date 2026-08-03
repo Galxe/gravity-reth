@@ -35,13 +35,13 @@ impl NodeFlag {
     }
 
     /// Mark current node as dirty, and wipe the cached hash
-    pub const fn mark_dirty(&mut self) {
+    pub fn mark_dirty(&mut self) {
         self.rlp = None;
         self.dirty = true;
     }
 
     /// Reset current node
-    pub const fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.rlp = None;
         self.dirty = false;
     }
@@ -364,7 +364,7 @@ impl Node {
     }
 
     /// Set cached hash
-    pub const fn set_rlp(&mut self, rlp: RlpNode) {
+    pub fn set_rlp(&mut self, rlp: RlpNode) {
         match self {
             Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
                 flags.rlp = Some(rlp);
@@ -385,7 +385,7 @@ impl Node {
     }
 
     /// Reset current node
-    pub const fn reset(mut self) -> Self {
+    pub fn reset(mut self) -> Self {
         match &mut self {
             Self::FullNode { children: _, flags } | Self::ShortNode { key: _, value: _, flags } => {
                 flags.reset()

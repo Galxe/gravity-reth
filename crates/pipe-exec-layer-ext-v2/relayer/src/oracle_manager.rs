@@ -6,6 +6,8 @@ use crate::{
     blockchain_source::BlockchainEventSource,
     data_source::{source_types, DataSourceKind, OracleDataSource},
     persistence::{load_state_if_exists, state_file_path, RelayerState, SourceState},
+    polymarket_settlement_source::PolymarketSettlementSource,
+    price_feed_source::PriceFeedSource,
     uri_parser::{parse_oracle_uri, ParsedOracleTask},
 };
 use anyhow::{anyhow, Result};
@@ -19,15 +21,25 @@ pub use gravity_api_types::{on_chain_config::jwks::JWKStruct, relayer::PollResul
 /// Startup scenario for determining initial source state
 ///
 /// When a data source is added, we need to determine where to start scanning.
-/// This enum captures the 4 possible scenarios based on persisted and on-chain state.
+/// This enum captures the possible scenarios based on persisted and on-chain state.
 #[derive(Debug)]
 enum StartupScenario {
     /// Persisted state exists but is stale - fast-forward to on-chain state
-    FastForward { onchain_nonce: u128, onchain_block: u64, persisted_nonce: u128 },
+    FastForward { onchain_nonce: u128, onchain_position: u64, persisted_nonce: u128 },
+    /// Persisted state is ahead of NativeOracle, so it may only represent data
+    /// fetched locally and not yet accepted on-chain. Rewind to the last
+    /// confirmed on-chain record.
+    RollbackToOnChain {
+        onchain_nonce: u128,
+        onchain_position: u64,
+        persisted_nonce: u128,
+        persisted_cursor: u64,
+        restart_cursor: u64,
+    },
     /// Persisted state is valid - use it for fast restart
-    Restore { cursor: u64, nonce: u128 },
+    Restore { cursor: u64, nonce: u128, position: u64 },
     /// No persisted state, but on-chain has data - sync from on-chain
-    ColdStartWithSync { onchain_nonce: u128, onchain_block: u64 },
+    ColdStartWithSync { onchain_nonce: u128, onchain_position: u64 },
     /// No persisted state, no on-chain data - start from config default
     ColdStart { from_block: u64 },
 }
@@ -37,65 +49,102 @@ impl StartupScenario {
     fn determine(
         persisted: Option<&SourceState>,
         onchain_nonce: u128,
-        onchain_block: u64,
+        onchain_position: u64,
         default_from_block: u64,
     ) -> Self {
         match persisted {
             Some(state) if onchain_nonce > state.last_nonce as u128 => Self::FastForward {
                 onchain_nonce,
-                onchain_block,
+                onchain_position,
                 persisted_nonce: state.last_nonce as u128,
             },
-            Some(state) => {
-                Self::Restore { cursor: state.cursor_block, nonce: state.last_nonce as u128 }
+            Some(state) if state.last_nonce as u128 > onchain_nonce => Self::RollbackToOnChain {
+                onchain_nonce,
+                onchain_position,
+                persisted_nonce: state.last_nonce as u128,
+                persisted_cursor: state.cursor_block,
+                restart_cursor: if onchain_nonce > 0 {
+                    onchain_position
+                } else {
+                    default_from_block
+                },
+            },
+            Some(state) => Self::Restore {
+                cursor: state.cursor_block,
+                nonce: state.last_nonce as u128,
+                position: onchain_position,
+            },
+            None if onchain_nonce > 0 => {
+                Self::ColdStartWithSync { onchain_nonce, onchain_position }
             }
-            None if onchain_nonce > 0 => Self::ColdStartWithSync { onchain_nonce, onchain_block },
             None => Self::ColdStart { from_block: default_from_block },
         }
     }
 
-    /// Get (cursor, nonce) for source initialization
-    fn into_init_params(self) -> (u64, u128) {
+    /// Get (scan cursor, nonce, confirmed source position) for initialization.
+    fn into_init_params(self) -> (u64, u128, u64) {
         match self {
-            Self::FastForward { onchain_nonce, onchain_block, .. } => {
-                (onchain_block, onchain_nonce)
+            Self::FastForward { onchain_nonce, onchain_position, .. } => {
+                (onchain_position, onchain_nonce, onchain_position)
             }
-            Self::Restore { cursor, nonce } => (cursor, nonce),
-            Self::ColdStartWithSync { onchain_nonce, onchain_block } => {
-                (onchain_block, onchain_nonce)
+            Self::RollbackToOnChain { onchain_nonce, onchain_position, restart_cursor, .. } => {
+                (restart_cursor, onchain_nonce, onchain_position)
             }
-            Self::ColdStart { from_block } => (from_block, 0),
+            Self::Restore { cursor, nonce, position } => (cursor, nonce, position),
+            Self::ColdStartWithSync { onchain_nonce, onchain_position } => {
+                (onchain_position, onchain_nonce, onchain_position)
+            }
+            Self::ColdStart { from_block } => (from_block, 0, 0),
         }
     }
 
     /// Log the startup scenario
     fn log(&self, uri: &str) {
         match self {
-            Self::FastForward { onchain_nonce, onchain_block, persisted_nonce } => {
+            Self::FastForward { onchain_nonce, onchain_position, persisted_nonce } => {
                 warn!(
                     target: "oracle_manager",
                     uri,
                     persisted_nonce,
                     onchain_nonce,
-                    onchain_block,
+                    onchain_position,
                     "Persisted state is stale, fast-forwarding to on-chain state"
                 );
             }
-            Self::Restore { cursor, nonce } => {
+            Self::RollbackToOnChain {
+                onchain_nonce,
+                onchain_position,
+                persisted_nonce,
+                persisted_cursor,
+                restart_cursor,
+            } => {
+                warn!(
+                    target: "oracle_manager",
+                    uri,
+                    persisted_nonce,
+                    persisted_cursor,
+                    onchain_nonce,
+                    onchain_position,
+                    restart_cursor,
+                    "Persisted state is ahead of NativeOracle; rolling back to confirmed on-chain progress"
+                );
+            }
+            Self::Restore { cursor, nonce, position } => {
                 info!(
                     target: "oracle_manager",
                     uri,
                     persisted_nonce = nonce,
                     cursor_block = cursor,
+                    source_position = position,
                     "Using persisted state for fast restart"
                 );
             }
-            Self::ColdStartWithSync { onchain_nonce, onchain_block } => {
+            Self::ColdStartWithSync { onchain_nonce, onchain_position } => {
                 info!(
                     target: "oracle_manager",
                     uri,
                     onchain_nonce,
-                    onchain_block,
+                    onchain_position,
                     "Cold start with on-chain state"
                 );
             }
@@ -140,13 +189,13 @@ impl OracleRelayerManager {
     /// * `uri` - The oracle task URI
     /// * `rpc_url` - RPC endpoint URL
     /// * `onchain_nonce` - Latest nonce from NativeOracle
-    /// * `onchain_block_number` - Block number where onchain_nonce was recorded
+    /// * `onchain_position` - Source-defined position committed with onchain_nonce
     pub async fn add_uri(
         &self,
         uri: &str,
         rpc_url: &str,
         onchain_nonce: u128,
-        onchain_block_number: u64,
+        onchain_position: u64,
     ) -> Result<()> {
         {
             let sources = self.sources.read().await;
@@ -164,16 +213,23 @@ impl OracleRelayerManager {
             StartupScenario::determine(
                 state.get(uri),
                 onchain_nonce,
-                onchain_block_number,
+                onchain_position,
                 task.from_block(),
             )
         };
         scenario.log(uri);
-        let (start_cursor, start_nonce) = scenario.into_init_params();
+        let (start_cursor, start_nonce, start_position) = scenario.into_init_params();
 
         // Create source with reconciled state
-        let source =
-            self.create_source_from_task(&task, rpc_url, start_nonce, Some(start_cursor)).await?;
+        let source = self
+            .create_source_from_task(
+                &task,
+                rpc_url,
+                start_nonce,
+                start_position,
+                Some(start_cursor),
+            )
+            .await?;
 
         info!(
             target: "oracle_manager",
@@ -182,6 +238,7 @@ impl OracleRelayerManager {
             source_id = task.source_id,
             start_nonce = start_nonce,
             start_cursor = start_cursor,
+            start_position = start_position,
             "Added data source"
         );
 
@@ -195,22 +252,44 @@ impl OracleRelayerManager {
         task: &ParsedOracleTask,
         rpc_url: &str,
         latest_onchain_nonce: u128,
+        latest_onchain_position: u64,
         persisted_cursor: Option<u64>,
     ) -> Result<DataSourceKind> {
         match task.source_type {
             source_types::BLOCKCHAIN => {
                 let portal_address = task.portal_address()?;
                 let config_start_block = task.from_block();
-                let source = BlockchainEventSource::new_with_cursor(
+                let source = BlockchainEventSource::new_with_progress(
                     task.source_id,
                     rpc_url,
                     portal_address,
                     persisted_cursor.unwrap_or(config_start_block),
                     latest_onchain_nonce,
+                    latest_onchain_position,
                 )
                 .await?;
 
                 Ok(DataSourceKind::Blockchain(source))
+            }
+            source_types::PRICE_FEED => {
+                let source = PriceFeedSource::from_task_with_reconciled_cursor(
+                    task,
+                    latest_onchain_nonce,
+                    Some(rpc_url),
+                    (latest_onchain_nonce > 0).then_some(latest_onchain_position),
+                )?;
+                Ok(DataSourceKind::PriceFeed(source))
+            }
+            source_types::POLYMARKET_SETTLEMENT => {
+                let source = PolymarketSettlementSource::from_task_with_progress(
+                    task,
+                    rpc_url,
+                    latest_onchain_nonce,
+                    persisted_cursor.unwrap_or(task.from_block()),
+                    latest_onchain_position,
+                )
+                .await?;
+                Ok(DataSourceKind::PolymarketSettlement(source))
             }
             _ => Err(anyhow!("Unknown source type: {}", task.source_type)),
         }
@@ -224,49 +303,40 @@ impl OracleRelayerManager {
     /// # Arguments
     /// * `uri` - The oracle task URI to poll
     /// * `onchain_nonce` - Optional current on-chain nonce for reconciliation
-    /// * `onchain_block_number` - Optional on-chain block for reconciliation
+    /// * `onchain_position` - Optional confirmed source-defined position
     pub async fn poll_uri(
         &self,
         uri: &str,
         onchain_nonce: Option<u128>,
-        onchain_block_number: Option<u64>,
+        onchain_position: Option<u64>,
     ) -> Result<PollResult> {
         let sources = self.sources.read().await;
         let source = sources.get(uri).ok_or_else(|| anyhow!("Source not found: {}", uri))?;
 
-        // Reconcile with on-chain state before polling
-        if let (Some(onchain_nonce), Some(onchain_block)) = (onchain_nonce, onchain_block_number) {
-            match source.as_ref() {
-                DataSourceKind::Blockchain(s) => {
-                    let current_nonce = s.last_nonce().await.unwrap_or(0);
-                    if onchain_nonce > current_nonce {
-                        info!(
-                            target: "oracle_manager",
-                            uri = uri,
-                            local_nonce = current_nonce,
-                            onchain_nonce = onchain_nonce,
-                            onchain_block = onchain_block,
-                            "On-chain ahead of local, fast-forwarding"
-                        );
-                        s.fast_forward(onchain_nonce, onchain_block).await;
-                    }
-                }
+        // Reconcile with on-chain state before polling.
+        if let (Some(onchain_nonce), Some(onchain_position)) = (onchain_nonce, onchain_position) {
+            let current_nonce = source.last_nonce().await.unwrap_or(0);
+            if onchain_nonce > current_nonce {
+                info!(
+                    target: "oracle_manager",
+                    uri,
+                    local_nonce = current_nonce,
+                    onchain_nonce,
+                    onchain_position,
+                    "On-chain state is ahead of local source; fast-forwarding"
+                );
+                source.fast_forward(onchain_nonce, onchain_position).await;
             }
         }
 
         let data = source.poll().await?;
 
         // Get nonce, cursor, and source info
-        let (nonce, last_nonce_block, max_block_number, source_type, source_id) =
-            match source.as_ref() {
-                DataSourceKind::Blockchain(s) => (
-                    s.last_nonce().await,
-                    s.last_nonce_block().await,
-                    s.cursor(),
-                    source_types::BLOCKCHAIN,
-                    s.chain_id(),
-                ),
-            };
+        let nonce = source.last_nonce().await;
+        let last_nonce_position = source.last_nonce_position().await;
+        let max_block_number = source.cursor();
+        let source_type = source.source_type();
+        let source_id = source.source_id_u64();
 
         let jwk_structs: Vec<JWKStruct> = data
             .iter()
@@ -294,7 +364,7 @@ impl OracleRelayerManager {
                 source_type,
                 source_id,
                 n,
-                last_nonce_block.unwrap_or(0),
+                last_nonce_position.unwrap_or(0),
                 max_block_number,
             )
             .await;
@@ -306,10 +376,11 @@ impl OracleRelayerManager {
     /// Update in-memory state and persist to disk.
     ///
     /// Writes to disk first (via a temporary clone) so that on the success
-    /// path the on-disk state is never behind in-memory state.  If the disk
-    /// write fails, in-memory state is still advanced to avoid duplicate
-    /// delivery in the running process — only a subsequent crash would
-    /// replay events from the stale checkpoint.
+    /// path the on-disk state is never behind in-memory state. This state
+    /// tracks data returned to consensus, not data accepted by `NativeOracle`;
+    /// startup reconciliation rolls back any checkpoint that is ahead of the
+    /// confirmed on-chain nonce. If the disk write fails, in-memory state is
+    /// still advanced to avoid duplicate delivery in the running process.
     async fn update_and_save_state(
         &self,
         uri: &str,
@@ -331,7 +402,6 @@ impl OracleRelayerManager {
             warn!(
                 target: "oracle_manager",
                 error = ?e,
-                path = ?path,
                 "Failed to persist relayer state; a crash may replay events from the last checkpoint"
             );
         }
@@ -358,5 +428,98 @@ impl OracleRelayerManager {
     /// List all registered URIs
     pub async fn list_uris(&self) -> Vec<String> {
         self.sources.read().await.keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn price_uri() -> &'static str {
+        "gravity://3/1/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8"
+    }
+
+    fn polymarket_uri() -> &'static str {
+        "gravity://6/42/polymarket_settlement?ctf=0x4D97DCd97eC945f40cF65F87097ACe5EA0476045&fromBlock=50000000&condition=0x1111111111111111111111111111111111111111111111111111111111111111"
+    }
+
+    #[tokio::test]
+    async fn test_add_binance_price_feed_uri() {
+        let datadir = tempfile::tempdir().unwrap();
+        let manager = OracleRelayerManager::new(datadir.path().to_path_buf());
+
+        manager.add_uri(price_uri(), "http://localhost:18547", 0, 0).await.unwrap();
+        assert!(manager.has_uri(price_uri()).await);
+    }
+
+    #[tokio::test]
+    async fn test_add_polymarket_settlement_uri() {
+        let datadir = tempfile::tempdir().unwrap();
+        let manager = OracleRelayerManager::new(datadir.path().to_path_buf());
+
+        manager.add_uri(polymarket_uri(), "http://localhost:8545", 0, 0).await.unwrap();
+        assert!(manager.has_uri(polymarket_uri()).await);
+    }
+
+    #[test]
+    fn test_startup_rolls_back_persisted_state_ahead_of_onchain() {
+        let mut state = RelayerState::new();
+        state.update(
+            polymarket_uri(),
+            source_types::POLYMARKET_SETTLEMENT,
+            42,
+            5,
+            50_000_010,
+            50_000_020,
+        );
+
+        let scenario =
+            StartupScenario::determine(state.get(polymarket_uri()), 3, 50_000_007, 50_000_000);
+        let (cursor, nonce, position) = scenario.into_init_params();
+
+        assert_eq!(cursor, 50_000_007);
+        assert_eq!(nonce, 3);
+        assert_eq!(position, 50_000_007);
+    }
+
+    #[test]
+    fn test_startup_rolls_back_to_config_when_onchain_empty() {
+        let mut state = RelayerState::new();
+        state.update(
+            polymarket_uri(),
+            source_types::POLYMARKET_SETTLEMENT,
+            42,
+            2,
+            50_000_010,
+            50_000_020,
+        );
+
+        let scenario = StartupScenario::determine(state.get(polymarket_uri()), 0, 0, 50_000_000);
+        let (cursor, nonce, position) = scenario.into_init_params();
+
+        assert_eq!(cursor, 50_000_000);
+        assert_eq!(nonce, 0);
+        assert_eq!(position, 0);
+    }
+
+    #[test]
+    fn test_startup_restores_local_watermark_with_onchain_position() {
+        let mut state = RelayerState::new();
+        state.update(
+            polymarket_uri(),
+            source_types::POLYMARKET_SETTLEMENT,
+            42,
+            3,
+            50_000_010,
+            50_000_020,
+        );
+
+        let scenario =
+            StartupScenario::determine(state.get(polymarket_uri()), 3, 50_000_007, 50_000_000);
+        let (cursor, nonce, position) = scenario.into_init_params();
+
+        assert_eq!(cursor, 50_000_020);
+        assert_eq!(nonce, 3);
+        assert_eq!(position, 50_000_007);
     }
 }

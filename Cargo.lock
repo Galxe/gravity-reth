@@ -965,13 +965,14 @@ dependencies = [
 
 [[package]]
 name = "alloy-trie"
-version = "0.9.5"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f14b5d9b2c2173980202c6ff470d96e7c5e202c65a9f67884ad565226df7fbb"
+checksum = "4d7fd448ab0a017de542de1dcca7a58e7019fe0e7a34ed3f9543ebddf6aceffa"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "arbitrary",
+ "arrayvec",
  "derive_arbitrary",
  "derive_more",
  "nybbles",
@@ -1069,7 +1070,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/Galxe/gravity-aptos?rev=b1f68dc85781ef0d28a568d9d64604b153be9d9e#b1f68dc85781ef0d28a568d9d64604b153be9d9e"
+source = "git+https://github.com/Galxe/gravity-aptos?rev=d163fa649970c7c8446dbc41a367c2d0b960cca6#d163fa649970c7c8446dbc41a367c2d0b960cca6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1427,6 +1428,9 @@ name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "asn1_der"

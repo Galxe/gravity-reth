@@ -50,12 +50,15 @@ impl EthHttpCli {
     /// # Errors
     /// * Returns an error if the URL cannot be parsed or client cannot be built
     pub fn new(rpc_url: &str) -> Result<Self> {
-        debug!("Creating EthHttpCli for URL: {}", rpc_url);
+        debug!("Creating Ethereum HTTP client");
 
-        let url =
-            Url::parse(rpc_url).with_context(|| format!("Failed to parse RPC URL: {}", rpc_url))?;
+        let url = Url::parse(rpc_url).with_context(|| "Failed to parse RPC URL")?;
 
-        let client_builder = ClientBuilder::new().no_proxy().use_rustls_tls();
+        let client_builder = ClientBuilder::new()
+            .no_proxy()
+            .use_rustls_tls()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30));
         let client = client_builder.build().with_context(|| "Failed to build HTTP client")?;
 
         let provider: RootProvider<Ethereum> =
@@ -69,6 +72,13 @@ impl EthHttpCli {
         self.retry_with_backoff(|| async { self.provider.get_logs(filter).await })
             .await
             .with_context(|| "Failed to get logs with filter")
+    }
+
+    /// Returns the chain id reported by the configured RPC endpoint.
+    pub async fn get_chain_id(&self) -> Result<u64> {
+        self.retry_with_backoff(|| async { self.provider.get_chain_id().await })
+            .await
+            .with_context(|| "Failed to get chain id")
     }
 
     /// Gets the latest finalized block number

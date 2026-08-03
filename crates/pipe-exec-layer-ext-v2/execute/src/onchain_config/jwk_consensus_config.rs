@@ -92,18 +92,18 @@ where
         providers
     }
 
-    /// Fetch and parse blockchain providers (sourceType=0)
+    /// Fetch and parse relayer-backed providers (sourceType=0, sourceType=6, ...)
     /// Uses shared OracleTaskClient for task enumeration
-    fn fetch_blockchain_providers(
+    fn fetch_relayer_providers(
         &self,
         block_id: BlockId,
     ) -> Vec<gravity_api_types::on_chain_config::jwks::OIDCProvider> {
-        let task_uris = self.oracle_client().fetch_blockchain_task_uris(block_id);
+        let task_uris = self.oracle_client().fetch_relayer_task_uris(block_id);
 
         task_uris
             .into_iter()
             .map(|(uri, nonce)| {
-                info!(uri = %uri, nonce = nonce, "Found blockchain monitoring task");
+                info!(uri = %uri, nonce = nonce, "Found relayer-backed oracle task");
                 gravity_api_types::on_chain_config::jwks::OIDCProvider {
                     name: uri.clone(),
                     config_url: uri,
@@ -125,8 +125,8 @@ where
         // 1. Fetch JWK providers (sourceType=1)
         all_providers.extend(self.fetch_jwk_providers(block_id));
 
-        // 2. Fetch blockchain providers (sourceType=0)
-        all_providers.extend(self.fetch_blockchain_providers(block_id));
+        // 2. Fetch relayer-backed providers (sourceType=0, sourceType=6, ...)
+        all_providers.extend(self.fetch_relayer_providers(block_id));
 
         info!(provider_count = all_providers.len(), "Fetched oracle task providers");
 

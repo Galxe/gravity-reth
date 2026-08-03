@@ -125,6 +125,27 @@ impl BlockchainEventSource {
         cursor: u64,
         latest_onchain_nonce: u128,
     ) -> Result<Self> {
+        let latest_position = (latest_onchain_nonce > 0).then_some(cursor).unwrap_or(0);
+        Self::new_with_progress(
+            chain_id,
+            rpc_url,
+            portal_address,
+            cursor,
+            latest_onchain_nonce,
+            latest_position,
+        )
+        .await
+    }
+
+    /// Create with separate local scan and confirmed source positions.
+    pub async fn new_with_progress(
+        chain_id: u64,
+        rpc_url: &str,
+        portal_address: Address,
+        cursor: u64,
+        latest_onchain_nonce: u128,
+        latest_position: u64,
+    ) -> Result<Self> {
         let rpc_client = Arc::new(EthHttpCli::new(rpc_url)?);
 
         info!(
@@ -133,6 +154,7 @@ impl BlockchainEventSource {
             portal_address = ?portal_address,
             cursor = cursor,
             latest_onchain_nonce = latest_onchain_nonce,
+            latest_position,
             "Created BlockchainEventSource with persisted cursor (fast restart)"
         );
 
@@ -141,7 +163,10 @@ impl BlockchainEventSource {
             rpc_client,
             portal_address,
             cursor: AtomicU64::new(cursor),
-            last_processed: Mutex::new(LastProcessedEvent::new(latest_onchain_nonce, cursor)),
+            last_processed: Mutex::new(LastProcessedEvent::new(
+                latest_onchain_nonce,
+                latest_position,
+            )),
         })
     }
 
@@ -265,6 +290,9 @@ impl OracleDataSource for BlockchainEventSource {
             } else {
                 continue;
             };
+            let source_position: u64 = block_number
+                .try_into()
+                .map_err(|_| anyhow!("MessageSent block number exceeds u64"))?;
 
             // Strictly monotonic check: ignore events we've already processed
             if nonce <= last_nonce {
@@ -310,16 +338,20 @@ impl OracleDataSource for BlockchainEventSource {
                 "Found new MessageSent event - decoded and re-encoded"
             );
 
-            results.push(OracleData { nonce, payload: Bytes::from(encoded_payload) });
+            results.push(OracleData {
+                nonce,
+                source_position,
+                payload: Bytes::from(encoded_payload),
+            });
         }
 
         // Update cursor
         self.cursor.store(to_block, Ordering::Relaxed);
 
         // Track max nonce for exactly-once semantics (atomic update of nonce + block)
-        if !results.is_empty() {
-            let max_nonce = results.iter().map(|d| d.nonce).max().unwrap();
-            *self.last_processed.lock().await = LastProcessedEvent::new(max_nonce, to_block);
+        if let Some(last) = results.iter().max_by_key(|data| data.nonce) {
+            *self.last_processed.lock().await =
+                LastProcessedEvent::new(last.nonce, last.source_position);
         }
 
         let current_last_nonce = self.last_nonce().await;
@@ -363,7 +395,7 @@ mod tests {
     const ANVIL_PORTAL_ADDRESS: &str = "0x0f761B1B3c1aC9232C9015A7276692560aD6a05F";
 
     /// GBridgeSender address on local Anvil (deterministic, nonce 2)
-    const ANVIL_SENDER_ADDRESS: &str = "0x3fc870008B1cc26f3614F14a726F8077227CA2c3";
+    const _ANVIL_SENDER_ADDRESS: &str = "0x3fc870008B1cc26f3614F14a726F8077227CA2c3";
 
     /// Anvil RPC URL
     const ANVIL_RPC_URL: &str = "https://sepolia.drpc.org";
@@ -425,6 +457,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a configured external RPC endpoint and seeded events"]
     async fn test_poll_anvil_events() {
         use crate::eth_client::EthHttpCli;
 

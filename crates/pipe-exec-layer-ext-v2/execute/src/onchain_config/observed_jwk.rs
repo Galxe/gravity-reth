@@ -82,9 +82,9 @@ where
         Some(oracle_jwks.entries.into_iter().map(convert_oracle_provider_jwks).collect())
     }
 
-    /// Fetch blockchain event providers using shared OracleTaskClient
-    fn fetch_blockchain_providers(&self, block_id: BlockId) -> Vec<ProviderJWKs> {
-        let task_uris = self.oracle_client().fetch_blockchain_task_uris(block_id);
+    /// Fetch relayer-backed event providers using shared OracleTaskClient.
+    fn fetch_relayer_providers(&self, block_id: BlockId) -> Vec<ProviderJWKs> {
+        let task_uris = self.oracle_client().fetch_relayer_task_uris(block_id);
 
         task_uris
             .into_iter()
@@ -114,10 +114,10 @@ where
             all_entries.extend(jwk_entries);
         }
 
-        // 2. Fetch blockchain events from NativeOracle (for configured chains from
-        //    OracleTaskConfig)
-        let blockchain_entries = self.fetch_blockchain_providers(block_id);
-        all_entries.extend(blockchain_entries);
+        // 2. Fetch relayer-backed entries from NativeOracle (for configured gravity:// tasks from
+        //    OracleTaskConfig).
+        let relayer_entries = self.fetch_relayer_providers(block_id);
+        all_entries.extend(relayer_entries);
 
         info!(
             jwk_count = all_entries.iter().filter(|e| e.issuer.starts_with(b"https://")).count(),
