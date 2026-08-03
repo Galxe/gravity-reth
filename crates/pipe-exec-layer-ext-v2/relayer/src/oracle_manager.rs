@@ -1,6 +1,6 @@
 //! Oracle Relayer Manager
 //!
-//! Manages oracle data sources keyed by URI, matching gaptos JWKObserver interface.
+//! Manages oracle data sources keyed by their full task URI.
 
 use crate::{
     blockchain_source::BlockchainEventSource,
@@ -10,183 +10,281 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-// Re-export types from gravity-api-types for external use
 pub use gravity_api_types::{on_chain_config::jwks::JWKStruct, relayer::PollResult};
 
-/// Startup scenario for determining initial source state
-///
-/// When a data source is added, we need to determine where to start scanning.
-/// This enum captures the 4 possible scenarios based on persisted and on-chain state.
 #[derive(Debug)]
 enum StartupScenario {
-    /// Persisted state exists but is stale - fast-forward to on-chain state
-    FastForward { onchain_nonce: u128, onchain_block: u64, persisted_nonce: u128 },
-    /// Persisted state is valid - use it for fast restart
-    Restore { cursor: u64, nonce: u128 },
-    /// No persisted state, but on-chain has data - sync from on-chain
-    ColdStartWithSync { onchain_nonce: u128, onchain_block: u64 },
-    /// No persisted state, no on-chain data - start from config default
-    ColdStart { from_block: u64 },
+    FastForward {
+        onchain_nonce: u128,
+        onchain_position: u64,
+        persisted_nonce: u128,
+    },
+    RollbackToOnChain {
+        onchain_nonce: u128,
+        onchain_position: u64,
+        persisted_nonce: u128,
+        persisted_cursor: u64,
+        restart_cursor: u64,
+    },
+    Restore {
+        cursor: u64,
+        nonce: u128,
+        position: u64,
+    },
+    /// A legacy callback may have advanced `NativeOracle` nonce without storing
+    /// the source position. Rescan from a safe watermark while filtering all
+    /// observations at or below the authoritative on-chain nonce.
+    RecoverUnknownPosition {
+        cursor: u64,
+        onchain_nonce: u128,
+        persisted_nonce: Option<u128>,
+    },
+    ColdStartWithSync {
+        onchain_nonce: u128,
+        onchain_position: u64,
+    },
+    ColdStart {
+        from_block: u64,
+    },
 }
 
 impl StartupScenario {
-    /// Determine which startup scenario applies based on persisted and on-chain state
     fn determine(
         persisted: Option<&SourceState>,
         onchain_nonce: u128,
-        onchain_block: u64,
+        onchain_position: u64,
         default_from_block: u64,
-    ) -> Self {
-        match persisted {
-            Some(state) if onchain_nonce > state.last_nonce as u128 => Self::FastForward {
+    ) -> Result<Self> {
+        if onchain_nonce == 0 && onchain_position != 0 {
+            return Err(anyhow!(
+                "Invalid NativeOracle progress: zero nonce has nonzero source position"
+            ));
+        }
+
+        if onchain_nonce == 0 {
+            return Ok(match persisted {
+                Some(state) if state.last_nonce > 0 => Self::RollbackToOnChain {
+                    onchain_nonce,
+                    onchain_position,
+                    persisted_nonce: state.last_nonce,
+                    persisted_cursor: state.cursor_block,
+                    restart_cursor: default_from_block,
+                },
+                Some(state) => Self::Restore { cursor: state.cursor_block, nonce: 0, position: 0 },
+                None => Self::ColdStart { from_block: default_from_block },
+            });
+        }
+
+        if onchain_position == 0 {
+            return Ok(match persisted {
+                Some(state) if state.last_nonce == onchain_nonce => Self::Restore {
+                    cursor: state.cursor_block,
+                    nonce: onchain_nonce,
+                    position: state.last_nonce_block,
+                },
+                Some(state) if state.last_nonce < onchain_nonce => {
+                    let cursor = if state.last_nonce > 0 && state.last_nonce_block > 0 {
+                        state.last_nonce_block
+                    } else {
+                        default_from_block
+                    };
+                    Self::RecoverUnknownPosition {
+                        cursor,
+                        onchain_nonce,
+                        persisted_nonce: Some(state.last_nonce),
+                    }
+                }
+                Some(state) => Self::RecoverUnknownPosition {
+                    cursor: default_from_block,
+                    onchain_nonce,
+                    persisted_nonce: Some(state.last_nonce),
+                },
+                None => Self::RecoverUnknownPosition {
+                    cursor: default_from_block,
+                    onchain_nonce,
+                    persisted_nonce: None,
+                },
+            });
+        }
+
+        Ok(match persisted {
+            Some(state) if onchain_nonce > state.last_nonce => Self::FastForward {
                 onchain_nonce,
-                onchain_block,
-                persisted_nonce: state.last_nonce as u128,
+                onchain_position,
+                persisted_nonce: state.last_nonce,
             },
-            Some(state) => {
-                Self::Restore { cursor: state.cursor_block, nonce: state.last_nonce as u128 }
-            }
-            None if onchain_nonce > 0 => Self::ColdStartWithSync { onchain_nonce, onchain_block },
-            None => Self::ColdStart { from_block: default_from_block },
-        }
+            Some(state) if state.last_nonce > onchain_nonce => Self::RollbackToOnChain {
+                onchain_nonce,
+                onchain_position,
+                persisted_nonce: state.last_nonce,
+                persisted_cursor: state.cursor_block,
+                restart_cursor: onchain_position,
+            },
+            Some(state) => Self::Restore {
+                cursor: state.cursor_block,
+                nonce: state.last_nonce,
+                position: onchain_position,
+            },
+            None => Self::ColdStartWithSync { onchain_nonce, onchain_position },
+        })
     }
 
-    /// Get (cursor, nonce) for source initialization
-    fn into_init_params(self) -> (u64, u128) {
+    const fn into_init_params(self) -> (u64, u128, u64) {
         match self {
-            Self::FastForward { onchain_nonce, onchain_block, .. } => {
-                (onchain_block, onchain_nonce)
+            Self::FastForward { onchain_nonce, onchain_position, .. } |
+            Self::ColdStartWithSync { onchain_nonce, onchain_position } => {
+                (onchain_position, onchain_nonce, onchain_position)
             }
-            Self::Restore { cursor, nonce } => (cursor, nonce),
-            Self::ColdStartWithSync { onchain_nonce, onchain_block } => {
-                (onchain_block, onchain_nonce)
+            Self::RollbackToOnChain { onchain_nonce, onchain_position, restart_cursor, .. } => {
+                (restart_cursor, onchain_nonce, onchain_position)
             }
-            Self::ColdStart { from_block } => (from_block, 0),
+            Self::Restore { cursor, nonce, position } => (cursor, nonce, position),
+            Self::RecoverUnknownPosition { cursor, onchain_nonce, .. } => {
+                (cursor, onchain_nonce, 0)
+            }
+            Self::ColdStart { from_block } => (from_block, 0, 0),
         }
     }
 
-    /// Log the startup scenario
     fn log(&self, uri: &str) {
         match self {
-            Self::FastForward { onchain_nonce, onchain_block, persisted_nonce } => {
-                warn!(
-                    target: "oracle_manager",
-                    uri,
-                    persisted_nonce,
-                    onchain_nonce,
-                    onchain_block,
-                    "Persisted state is stale, fast-forwarding to on-chain state"
-                );
-            }
-            Self::Restore { cursor, nonce } => {
-                info!(
-                    target: "oracle_manager",
-                    uri,
-                    persisted_nonce = nonce,
-                    cursor_block = cursor,
-                    "Using persisted state for fast restart"
-                );
-            }
-            Self::ColdStartWithSync { onchain_nonce, onchain_block } => {
-                info!(
-                    target: "oracle_manager",
-                    uri,
-                    onchain_nonce,
-                    onchain_block,
-                    "Cold start with on-chain state"
-                );
-            }
-            Self::ColdStart { .. } => {
-                info!(target: "oracle_manager", uri, "Cold start from config (nonce=0)");
-            }
+            Self::FastForward { onchain_nonce, onchain_position, persisted_nonce } => warn!(
+                target: "oracle_manager",
+                uri,
+                persisted_nonce,
+                onchain_nonce,
+                onchain_position,
+                "Persisted state is stale; fast-forwarding to confirmed on-chain progress"
+            ),
+            Self::RollbackToOnChain {
+                onchain_nonce,
+                onchain_position,
+                persisted_nonce,
+                persisted_cursor,
+                restart_cursor,
+            } => warn!(
+                target: "oracle_manager",
+                uri,
+                persisted_nonce,
+                persisted_cursor,
+                onchain_nonce,
+                onchain_position,
+                restart_cursor,
+                "Persisted state is ahead of NativeOracle; rolling back to confirmed progress"
+            ),
+            Self::Restore { cursor, nonce, position } => info!(
+                target: "oracle_manager",
+                uri,
+                persisted_nonce = nonce,
+                cursor_block = cursor,
+                source_position = position,
+                "Using persisted state for restart"
+            ),
+            Self::RecoverUnknownPosition { cursor, onchain_nonce, persisted_nonce } => warn!(
+                target: "oracle_manager",
+                uri,
+                cursor,
+                onchain_nonce,
+                ?persisted_nonce,
+                "NativeOracle source position is unknown; replaying from a safe watermark"
+            ),
+            Self::ColdStartWithSync { onchain_nonce, onchain_position } => info!(
+                target: "oracle_manager",
+                uri,
+                onchain_nonce,
+                onchain_position,
+                "Cold start from confirmed on-chain progress"
+            ),
+            Self::ColdStart { from_block } => info!(
+                target: "oracle_manager",
+                uri,
+                from_block,
+                "Cold start from task configuration"
+            ),
         }
     }
 }
 
-/// Oracle Relayer Manager
-///
-/// Manages data sources keyed by URI for per-observer polling.
-/// Supports optional persistence for fast restart.
 #[derive(Debug)]
+struct SourceEntry {
+    source: Arc<DataSourceKind>,
+    /// JWK observers may call one provider concurrently. Serialize a URI's
+    /// cursor mutation so a scan range can only be emitted once locally.
+    poll_lock: Mutex<()>,
+}
+
+#[derive(Debug)]
+/// Owns configured relayer sources and their durable polling checkpoints.
 pub struct OracleRelayerManager {
-    /// Data sources keyed by URI
-    sources: RwLock<HashMap<String, Arc<DataSourceKind>>>,
+    sources: RwLock<HashMap<String, Arc<SourceEntry>>>,
     datadir: PathBuf,
-    /// In-memory state for persistence
     state: RwLock<RelayerState>,
 }
 
 impl OracleRelayerManager {
-    /// Create a new OracleRelayerManager with optional persistence
-    ///
-    /// # Arguments
-    /// * `datadir` - Optional path to data directory for state persistence
+    /// Opens a manager rooted at `datadir`, restoring persisted source checkpoints when present.
     pub fn new(datadir: PathBuf) -> Self {
-        let state = load_state_if_exists(&datadir).unwrap_or_else(RelayerState::new);
-
+        let state = match load_state_if_exists(&datadir) {
+            Some(state) => state,
+            None => RelayerState::new(),
+        };
         Self { sources: RwLock::new(HashMap::new()), datadir, state: RwLock::new(state) }
     }
 
-    /// Add a source by URI with on-chain state for warm-start
-    ///
-    /// If persistence is enabled and state exists for this URI, validates
-    /// the persisted state against on-chain state. If on-chain is ahead,
-    /// fast-forwards to on-chain state. Otherwise uses persisted state.
-    ///
-    /// # Arguments
-    /// * `uri` - The oracle task URI
-    /// * `rpc_url` - RPC endpoint URL
-    /// * `onchain_nonce` - Latest nonce from NativeOracle
-    /// * `onchain_block_number` - Block number where onchain_nonce was recorded
+    /// Registers a task URI and reconciles its local cursor with `NativeOracle` progress.
     pub async fn add_uri(
         &self,
         uri: &str,
         rpc_url: &str,
         onchain_nonce: u128,
-        onchain_block_number: u64,
+        onchain_position: u128,
     ) -> Result<()> {
-        {
-            let sources = self.sources.read().await;
-            if sources.contains_key(uri) {
-                info!(target: "oracle_manager", uri = uri, "Source already exists, skipping");
-                return Ok(());
-            }
+        if self.sources.read().await.contains_key(uri) {
+            info!(target: "oracle_manager", uri, "Source already exists; skipping");
+            return Ok(());
         }
 
         let task = parse_oracle_uri(uri)?;
+        let onchain_position = u64::try_from(onchain_position)
+            .map_err(|_| anyhow!("On-chain source position exceeds relayer u64 range"))?;
 
-        // Determine startup scenario based on persisted and on-chain state
         let scenario = {
             let state = self.state.read().await;
+            let persisted = matching_persisted_state(&state, uri, &task)?;
             StartupScenario::determine(
-                state.get(uri),
+                persisted,
                 onchain_nonce,
-                onchain_block_number,
+                onchain_position,
                 task.from_block(),
-            )
+            )?
         };
         scenario.log(uri);
-        let (start_cursor, start_nonce) = scenario.into_init_params();
+        let (start_cursor, start_nonce, start_position) = scenario.into_init_params();
 
-        // Create source with reconciled state
-        let source =
-            self.create_source_from_task(&task, rpc_url, start_nonce, Some(start_cursor)).await?;
+        let source = self
+            .create_source_from_task(&task, rpc_url, start_nonce, start_position, start_cursor)
+            .await?;
+        let entry = Arc::new(SourceEntry { source: Arc::new(source), poll_lock: Mutex::new(()) });
+
+        let mut sources = self.sources.write().await;
+        if sources.contains_key(uri) {
+            return Ok(());
+        }
+        sources.insert(uri.to_string(), entry);
 
         info!(
             target: "oracle_manager",
-            uri = uri,
+            uri,
             source_type = task.source_type,
             source_id = task.source_id,
-            start_nonce = start_nonce,
-            start_cursor = start_cursor,
+            start_nonce,
+            start_cursor,
+            start_position,
             "Added data source"
         );
-
-        let mut sources = self.sources.write().await;
-        sources.insert(uri.to_string(), Arc::new(source));
         Ok(())
     }
 
@@ -195,168 +293,253 @@ impl OracleRelayerManager {
         task: &ParsedOracleTask,
         rpc_url: &str,
         latest_onchain_nonce: u128,
-        persisted_cursor: Option<u64>,
+        latest_onchain_position: u64,
+        cursor: u64,
     ) -> Result<DataSourceKind> {
         match task.source_type {
             source_types::BLOCKCHAIN => {
-                let portal_address = task.portal_address()?;
-                let config_start_block = task.from_block();
-                let source = BlockchainEventSource::new_with_cursor(
+                let source = BlockchainEventSource::new_with_progress(
                     task.source_id,
                     rpc_url,
-                    portal_address,
-                    persisted_cursor.unwrap_or(config_start_block),
+                    task.portal_address()?,
+                    cursor,
                     latest_onchain_nonce,
+                    latest_onchain_position,
                 )
                 .await?;
-
                 Ok(DataSourceKind::Blockchain(source))
             }
             _ => Err(anyhow!("Unknown source type: {}", task.source_type)),
         }
     }
 
-    /// Poll a source by URI with optional on-chain state for reconciliation
-    ///
-    /// If on-chain state is provided and is ahead of local state, fast-forwards
-    /// local state before polling. After polling, persists the updated state.
-    ///
-    /// # Arguments
-    /// * `uri` - The oracle task URI to poll
-    /// * `onchain_nonce` - Optional current on-chain nonce for reconciliation
-    /// * `onchain_block_number` - Optional on-chain block for reconciliation
+    /// Polls one task URI and returns canonical payloads for JWK observation.
     pub async fn poll_uri(
         &self,
         uri: &str,
         onchain_nonce: Option<u128>,
-        onchain_block_number: Option<u64>,
+        onchain_position: Option<u128>,
     ) -> Result<PollResult> {
-        let sources = self.sources.read().await;
-        let source = sources.get(uri).ok_or_else(|| anyhow!("Source not found: {}", uri))?;
+        let entry = self
+            .sources
+            .read()
+            .await
+            .get(uri)
+            .cloned()
+            .ok_or_else(|| anyhow!("Source not found: {uri}"))?;
+        let _poll_guard = entry.poll_lock.lock().await;
+        let source = &entry.source;
 
-        // Reconcile with on-chain state before polling
-        if let (Some(onchain_nonce), Some(onchain_block)) = (onchain_nonce, onchain_block_number) {
-            match source.as_ref() {
-                DataSourceKind::Blockchain(s) => {
-                    let current_nonce = s.last_nonce().await.unwrap_or(0);
-                    if onchain_nonce > current_nonce {
-                        info!(
-                            target: "oracle_manager",
-                            uri = uri,
-                            local_nonce = current_nonce,
-                            onchain_nonce = onchain_nonce,
-                            onchain_block = onchain_block,
-                            "On-chain ahead of local, fast-forwarding"
-                        );
-                        s.fast_forward(onchain_nonce, onchain_block).await;
-                    }
-                }
+        if let (Some(onchain_nonce), Some(onchain_position)) = (onchain_nonce, onchain_position) {
+            let onchain_position = u64::try_from(onchain_position)
+                .map_err(|_| anyhow!("On-chain source position exceeds relayer u64 range"))?;
+            let current_nonce = source.last_nonce().await.unwrap_or(0);
+            let current_position = source.last_nonce_position().await.unwrap_or(0);
+            if onchain_nonce > current_nonce ||
+                (onchain_nonce == current_nonce && onchain_position > 0 && current_position == 0)
+            {
+                info!(
+                    target: "oracle_manager",
+                    uri,
+                    current_nonce,
+                    onchain_nonce,
+                    onchain_position,
+                    "Reconciling local source with confirmed on-chain progress"
+                );
+                source.reconcile_progress(onchain_nonce, onchain_position).await;
             }
         }
 
         let data = source.poll().await?;
+        let nonce = source.last_nonce().await;
+        let last_nonce_position = source.last_nonce_position().await;
+        let cursor = source.cursor();
+        let source_type = source.source_type();
+        let source_id = source.source_id_u64();
 
-        // Get nonce, cursor, and source info
-        let (nonce, last_nonce_block, max_block_number, source_type, source_id) =
-            match source.as_ref() {
-                DataSourceKind::Blockchain(s) => (
-                    s.last_nonce().await,
-                    s.last_nonce_block().await,
-                    s.cursor(),
-                    source_types::BLOCKCHAIN,
-                    s.chain_id(),
-                ),
-            };
-
-        let jwk_structs: Vec<JWKStruct> = data
+        let jwk_structs = data
             .iter()
-            .map(|d| JWKStruct {
+            .map(|data| JWKStruct {
+                // This becomes UnsupportedJWK.id during observation. The SDK
+                // execution adapter later restores the canonical Move type name.
                 type_name: source.source_type().to_string(),
-                data: d.payload.to_vec(),
+                data: data.payload.to_vec(),
             })
-            .collect();
-
+            .collect::<Vec<_>>();
         let updated = !data.is_empty();
 
         debug!(
             target: "oracle_manager",
-            uri = uri,
+            uri,
             num_items = data.len(),
-            max_block = max_block_number,
-            nonce = ?nonce,
-            updated = updated,
+            cursor,
+            ?nonce,
+            updated,
             "Poll completed"
         );
 
-        if let Some(n) = nonce {
-            self.update_and_save_state(
-                uri,
-                source_type,
-                source_id,
-                n,
-                last_nonce_block.unwrap_or(0),
-                max_block_number,
-            )
-            .await;
-        }
+        // Persist empty scans too. Otherwise a source with no events repeats the
+        // same finalized range after every restart.
+        self.update_and_save_state(
+            uri,
+            source_type,
+            source_id,
+            nonce.unwrap_or(0),
+            last_nonce_position.unwrap_or(0),
+            cursor,
+        )
+        .await;
 
-        Ok(PollResult { jwk_structs, max_block_number, nonce, updated })
+        Ok(PollResult { jwk_structs, max_block_number: cursor, nonce, updated })
     }
 
-    /// Update in-memory state and persist to disk.
-    ///
-    /// Writes to disk first (via a temporary clone) so that on the success
-    /// path the on-disk state is never behind in-memory state.  If the disk
-    /// write fails, in-memory state is still advanced to avoid duplicate
-    /// delivery in the running process — only a subsequent crash would
-    /// replay events from the stale checkpoint.
     async fn update_and_save_state(
         &self,
         uri: &str,
         source_type: u32,
         source_id: u64,
         last_nonce: u128,
-        last_nonce_block: u64,
-        cursor_block: u64,
+        last_nonce_position: u64,
+        cursor: u64,
     ) {
         let mut state = self.state.write().await;
-
-        // Build a candidate state with the update applied, without mutating
-        // the live state yet.
         let mut candidate = state.clone();
-        candidate.update(uri, source_type, source_id, last_nonce, last_nonce_block, cursor_block);
+        candidate.update(uri, source_type, source_id, last_nonce, last_nonce_position, cursor);
 
-        let path = state_file_path(&self.datadir);
-        if let Err(e) = candidate.save(&path) {
+        if let Err(error) = candidate.save(&state_file_path(&self.datadir)) {
             warn!(
                 target: "oracle_manager",
-                error = ?e,
-                path = ?path,
-                "Failed to persist relayer state; a crash may replay events from the last checkpoint"
+                ?error,
+                "Failed to persist relayer state; a crash may replay the last checkpoint"
             );
         }
 
-        // Always commit to memory so the running process does not re-deliver.
+        // Keep the running process monotonic even if disk persistence failed.
+        // Startup reconciliation treats this checkpoint as unconfirmed until
+        // NativeOracle reports the same or a later nonce.
         *state = candidate;
     }
 
-    /// Remove a source by URI
+    /// Removes a configured task URI.
     pub async fn remove_uri(&self, uri: &str) -> Option<Arc<DataSourceKind>> {
-        self.sources.write().await.remove(uri)
+        self.sources.write().await.remove(uri).map(|entry| entry.source.clone())
     }
 
-    /// Get the number of registered sources
+    /// Returns the number of configured source URIs.
     pub async fn source_count(&self) -> usize {
         self.sources.read().await.len()
     }
 
-    /// Check if a source exists by URI
+    /// Returns whether a source URI is configured.
     pub async fn has_uri(&self, uri: &str) -> bool {
         self.sources.read().await.contains_key(uri)
     }
 
-    /// List all registered URIs
+    /// Lists configured source URIs.
     pub async fn list_uris(&self) -> Vec<String> {
         self.sources.read().await.keys().cloned().collect()
+    }
+}
+
+fn matching_persisted_state<'a>(
+    state: &'a RelayerState,
+    uri: &str,
+    task: &ParsedOracleTask,
+) -> Result<Option<&'a SourceState>> {
+    let Some(persisted) = state.get(uri) else {
+        return Ok(None);
+    };
+    if persisted.source_type != task.source_type || persisted.source_id != task.source_id {
+        return Err(anyhow!("Persisted oracle source identity does not match configured URI"));
+    }
+    Ok(Some(persisted))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URI: &str =
+        "gravity://0/1/events?portal=0x0000000000000000000000000000000000000001&fromBlock=100";
+
+    fn state(last_nonce: u128, last_position: u64, cursor: u64) -> RelayerState {
+        let mut state = RelayerState::new();
+        state.update(URI, source_types::BLOCKCHAIN, 1, last_nonce, last_position, cursor);
+        state
+    }
+
+    fn params(state: Option<&SourceState>, nonce: u128, position: u64) -> (u64, u128, u64) {
+        StartupScenario::determine(state, nonce, position, 100).unwrap().into_init_params()
+    }
+
+    #[test]
+    fn known_position_fast_forwards_stale_persistence() {
+        let state = state(3, 130, 140);
+        assert_eq!(params(state.get(URI), 5, 160), (160, 5, 160));
+    }
+
+    #[test]
+    fn known_position_rolls_back_unconfirmed_local_data() {
+        let state = state(7, 180, 200);
+        assert_eq!(params(state.get(URI), 5, 160), (160, 5, 160));
+    }
+
+    #[test]
+    fn empty_onchain_state_rolls_back_to_task_start() {
+        let state = state(2, 120, 150);
+        assert_eq!(params(state.get(URI), 0, 0), (100, 0, 0));
+    }
+
+    #[test]
+    fn matching_checkpoint_preserves_scan_watermark() {
+        let state = state(5, 160, 220);
+        assert_eq!(params(state.get(URI), 5, 160), (220, 5, 160));
+    }
+
+    #[test]
+    fn unknown_position_without_persistence_replays_from_task_start() {
+        assert_eq!(params(None, 5, 0), (100, 5, 0));
+    }
+
+    #[test]
+    fn unknown_position_uses_matching_local_checkpoint() {
+        let state = state(5, 160, 220);
+        assert_eq!(params(state.get(URI), 5, 0), (220, 5, 160));
+    }
+
+    #[test]
+    fn unknown_position_rescans_from_last_locally_known_event_when_behind() {
+        let state = state(3, 130, 220);
+        assert_eq!(params(state.get(URI), 5, 0), (130, 5, 0));
+    }
+
+    #[test]
+    fn unknown_position_with_empty_or_ahead_state_uses_task_start() {
+        let empty = state(0, 0, 220);
+        assert_eq!(params(empty.get(URI), 5, 0), (100, 5, 0));
+
+        let ahead = state(7, 180, 220);
+        assert_eq!(params(ahead.get(URI), 5, 0), (100, 5, 0));
+    }
+
+    #[test]
+    fn rejects_inconsistent_zero_nonce_progress() {
+        let error = StartupScenario::determine(None, 0, 1, 100).unwrap_err();
+        assert!(error.to_string().contains("zero nonce"));
+    }
+
+    #[test]
+    fn rejects_persisted_identity_mismatch() {
+        let mut state = state(1, 110, 120);
+        state.sources.get_mut(URI).unwrap().source_id = 2;
+        let task = parse_oracle_uri(URI).unwrap();
+        let error = matching_persisted_state(&state, URI, &task).unwrap_err();
+        assert!(error.to_string().contains("identity"));
+    }
+
+    #[test]
+    fn rejects_source_position_outside_runtime_range() {
+        let position = u128::from(u64::MAX) + 1;
+        assert!(u64::try_from(position).is_err());
     }
 }

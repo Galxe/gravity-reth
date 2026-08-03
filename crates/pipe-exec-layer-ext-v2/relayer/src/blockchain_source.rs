@@ -7,7 +7,7 @@ use crate::{
     eth_client::EthHttpCli,
 };
 use alloy_primitives::{Address, Bytes, U256};
-use alloy_rpc_types::Filter;
+use alloy_rpc_types::{Filter, Log as RpcLog};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolEvent;
 use anyhow::{anyhow, Result};
@@ -17,7 +17,7 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // GravityPortal.MessageSent event signature
 sol! {
@@ -25,38 +25,11 @@ sol! {
     event MessageSent(uint128 indexed nonce, uint256 indexed blockNumber, bytes payload);
 }
 
-/// Decode ABI-encoded `bytes` from Solidity event log data
-///
-/// Solidity encodes `bytes` in events as:
-/// - bytes 0-31:  offset to data (typically 0x20 = 32)
-/// - bytes 32-63: length of data
-/// - bytes 64+:   actual data
-///
-/// Returns the raw bytes without the ABI encoding wrapper.
-fn decode_abi_bytes(data: &[u8]) -> Option<Vec<u8>> {
-    // Minimum: offset (32) + length (32) = 64 bytes
-    if data.len() < 64 {
-        return None;
-    }
-
-    // Read offset (last 8 bytes of first 32-byte word, as it's right-aligned)
-    let offset = u64::from_be_bytes(data[24..32].try_into().ok()?) as usize;
-
-    // Offset should point to the length word
-    if offset + 32 > data.len() {
-        return None;
-    }
-
-    // Read length (last 8 bytes of the length word)
-    let length = u64::from_be_bytes(data[offset + 24..offset + 32].try_into().ok()?) as usize;
-
-    // Data starts after the length word
-    let data_start = offset + 32;
-    if data_start + length > data.len() {
-        return None;
-    }
-
-    Some(data[data_start..data_start + length].to_vec())
+fn decode_message_sent(log: &RpcLog) -> Result<(u128, U256, Bytes)> {
+    let event = MessageSent::decode_log(&log.inner)
+        .map_err(|error| anyhow!("Failed to decode MessageSent event: {error}"))?;
+    let event = event.data;
+    Ok((event.nonce, event.blockNumber, event.payload))
 }
 
 /// Represents the state of the last successfully processed event
@@ -72,15 +45,34 @@ pub struct LastProcessedEvent {
 }
 
 impl LastProcessedEvent {
-    /// Create a new LastProcessedEvent
-    pub fn new(nonce: u128, block: u64) -> Self {
+    /// Create a new `LastProcessedEvent`.
+    pub const fn new(nonce: u128, block: u64) -> Self {
         Self { nonce, block }
     }
 
     /// Check if any event has been processed
-    pub fn is_initialized(&self) -> bool {
+    pub const fn is_initialized(&self) -> bool {
         self.nonce > 0
     }
+}
+
+fn canonicalize_events(mut events: Vec<OracleData>, last_nonce: u128) -> Result<Vec<OracleData>> {
+    events.sort_by_key(|event| event.nonce);
+
+    let mut expected = last_nonce;
+    for event in &events {
+        expected =
+            expected.checked_add(1).ok_or_else(|| anyhow!("Blockchain event nonce overflow"))?;
+        if event.nonce != expected {
+            return Err(anyhow!(
+                "Non-sequential MessageSent events: expected nonce {}, got {}",
+                expected,
+                event.nonce
+            ));
+        }
+    }
+
+    Ok(events)
 }
 
 /// Blockchain event source for monitoring GravityPortal.MessageSent events
@@ -101,7 +93,7 @@ pub struct BlockchainEventSource {
     /// Ethereum RPC client
     rpc_client: Arc<EthHttpCli>,
 
-    /// GravityPortal contract address
+    /// `GravityPortal` contract address
     portal_address: Address,
 
     /// Current block cursor for polling
@@ -125,6 +117,27 @@ impl BlockchainEventSource {
         cursor: u64,
         latest_onchain_nonce: u128,
     ) -> Result<Self> {
+        let latest_position = if latest_onchain_nonce > 0 { cursor } else { 0 };
+        Self::new_with_progress(
+            chain_id,
+            rpc_url,
+            portal_address,
+            cursor,
+            latest_onchain_nonce,
+            latest_position,
+        )
+        .await
+    }
+
+    /// Create with separate local scan and confirmed source positions.
+    pub async fn new_with_progress(
+        chain_id: u64,
+        rpc_url: &str,
+        portal_address: Address,
+        cursor: u64,
+        latest_onchain_nonce: u128,
+        latest_position: u64,
+    ) -> Result<Self> {
         let rpc_client = Arc::new(EthHttpCli::new(rpc_url)?);
 
         info!(
@@ -133,6 +146,7 @@ impl BlockchainEventSource {
             portal_address = ?portal_address,
             cursor = cursor,
             latest_onchain_nonce = latest_onchain_nonce,
+            latest_position,
             "Created BlockchainEventSource with persisted cursor (fast restart)"
         );
 
@@ -141,7 +155,10 @@ impl BlockchainEventSource {
             rpc_client,
             portal_address,
             cursor: AtomicU64::new(cursor),
-            last_processed: Mutex::new(LastProcessedEvent::new(latest_onchain_nonce, cursor)),
+            last_processed: Mutex::new(LastProcessedEvent::new(
+                latest_onchain_nonce,
+                latest_position,
+            )),
         })
     }
 
@@ -171,11 +188,7 @@ impl BlockchainEventSource {
     /// Get the last nonce we returned (for exactly-once tracking)
     pub async fn last_nonce(&self) -> Option<u128> {
         let state = self.last_processed.lock().await;
-        if state.is_initialized() {
-            Some(state.nonce)
-        } else {
-            None
-        }
+        state.is_initialized().then_some(state.nonce)
     }
 
     /// Set the last processed event (used when initializing from on-chain state)
@@ -183,7 +196,7 @@ impl BlockchainEventSource {
         *self.last_processed.lock().await = LastProcessedEvent::new(nonce, block);
     }
 
-    /// Fast-forward both cursor and last_processed state
+    /// Fast-forward both cursor and `last_processed` state
     ///
     /// Use this when reconciling with on-chain state that is ahead of local state.
     /// Sets both the scanning cursor and the last processed event atomically.
@@ -192,18 +205,22 @@ impl BlockchainEventSource {
         self.set_cursor(block);
     }
 
-    /// Get the block number where last event was emitted
-    pub async fn last_nonce_block(&self) -> Option<u64> {
-        let state = self.last_processed.lock().await;
-        if state.is_initialized() {
-            Some(state.block)
-        } else {
-            None
+    /// Reconcile confirmed progress without rewinding an already advanced scan cursor.
+    pub async fn reconcile_progress(&self, nonce: u128, position: u64) {
+        self.set_last_processed(nonce, position).await;
+        if position > 0 {
+            self.cursor.fetch_max(position, Ordering::Relaxed);
         }
     }
 
+    /// Get the block number where last event was emitted
+    pub async fn last_nonce_block(&self) -> Option<u64> {
+        let state = self.last_processed.lock().await;
+        state.is_initialized().then_some(state.block)
+    }
+
     /// Get the chain ID
-    pub fn chain_id(&self) -> u64 {
+    pub const fn chain_id(&self) -> u64 {
         self.chain_id
     }
 
@@ -226,7 +243,8 @@ impl OracleDataSource for BlockchainEventSource {
     async fn poll(&self) -> Result<Vec<OracleData>> {
         let cursor = self.cursor.load(Ordering::Relaxed);
         let finalized_block = self.rpc_client.get_finalized_block_number().await?;
-        let to_block = std::cmp::min(cursor + Self::MAX_BLOCKS_PER_POLL, finalized_block);
+        let to_block =
+            std::cmp::min(cursor.saturating_add(Self::MAX_BLOCKS_PER_POLL), finalized_block);
 
         if to_block <= cursor {
             return Ok(vec![]);
@@ -253,73 +271,50 @@ impl OracleDataSource for BlockchainEventSource {
         let last_nonce = self.last_processed.lock().await.nonce;
 
         for log in logs {
-            let nonce = if let Some(nonce_topic) = log.topics().get(1) {
-                let nonce_bytes = &nonce_topic.as_slice()[16..32];
-                u128::from_be_bytes(nonce_bytes.try_into().unwrap_or_default())
-            } else {
-                continue;
-            };
-
-            let block_number = if let Some(block_number_topic) = log.topics().get(2) {
-                U256::from_be_slice(block_number_topic.as_slice())
-            } else {
-                continue;
-            };
+            // The RPC filter already selects this event signature. Treat a malformed
+            // matching log as an error so the scan cursor cannot advance past it.
+            let (nonce, block_number, raw_payload) = decode_message_sent(&log)?;
+            let source_position: u64 = block_number
+                .try_into()
+                .map_err(|_| anyhow!("MessageSent block number exceeds u64"))?;
 
             // Strictly monotonic check: ignore events we've already processed
             if nonce <= last_nonce {
                 continue;
             }
 
-            let log_data = log.data().data.clone();
-
-            // log.data is ABI-encoded `bytes payload` from Solidity event
-            // Format: offset (32 bytes) || length (32 bytes) || data (variable)
-            // We need to extract the raw PortalMessage bytes before re-encoding
-            let raw_payload = match decode_abi_bytes(&log_data) {
-                Some(payload) => payload,
-                None => {
-                    warn!(
-                        target: "blockchain_source",
-                        chain_id = self.chain_id,
-                        nonce = nonce,
-                        log_data_len = log_data.len(),
-                        "Failed to decode ABI bytes from log.data, skipping"
-                    );
-                    continue;
-                }
-            };
-
             // ABI encode (nonce, raw_payload) together
             // This preserves the nonce when passing through JWKStruct
             // Format: abi.encode(uint128 nonce, bytes payload)
             // Now raw_payload is the actual PortalMessage (sender || messageNonce || message)
-            let encoded_payload = alloy_sol_types::SolValue::abi_encode(&(
-                nonce,
-                block_number,
-                raw_payload.as_slice(),
-            ));
+            let encoded_payload =
+                alloy_sol_types::SolValue::abi_encode(&(nonce, block_number, raw_payload.as_ref()));
 
             debug!(
                 target: "blockchain_source",
                 chain_id = self.chain_id,
                 nonce = nonce,
-                log_data_len = log_data.len(),
                 raw_payload_len = raw_payload.len(),
                 encoded_payload_len = encoded_payload.len(),
                 "Found new MessageSent event - decoded and re-encoded"
             );
 
-            results.push(OracleData { nonce, payload: Bytes::from(encoded_payload) });
+            results.push(OracleData {
+                nonce,
+                source_position,
+                payload: Bytes::from(encoded_payload),
+            });
         }
+
+        let results = canonicalize_events(results, last_nonce)?;
 
         // Update cursor
         self.cursor.store(to_block, Ordering::Relaxed);
 
         // Track max nonce for exactly-once semantics (atomic update of nonce + block)
-        if !results.is_empty() {
-            let max_nonce = results.iter().map(|d| d.nonce).max().unwrap();
-            *self.last_processed.lock().await = LastProcessedEvent::new(max_nonce, to_block);
+        if let Some(last) = results.last() {
+            *self.last_processed.lock().await =
+                LastProcessedEvent::new(last.nonce, last.source_position);
         }
 
         let current_last_nonce = self.last_nonce().await;
@@ -359,11 +354,11 @@ mod tests {
     //      --nocapture
     // =========================================================================
 
-    /// GravityPortal address on local Anvil (deterministic, nonce 1)
+    /// `GravityPortal` address on local Anvil (deterministic, nonce 1)
     const ANVIL_PORTAL_ADDRESS: &str = "0x0f761B1B3c1aC9232C9015A7276692560aD6a05F";
 
-    /// GBridgeSender address on local Anvil (deterministic, nonce 2)
-    const ANVIL_SENDER_ADDRESS: &str = "0x3fc870008B1cc26f3614F14a726F8077227CA2c3";
+    /// `GBridgeSender` address on local Anvil (deterministic, nonce 2)
+    const _ANVIL_SENDER_ADDRESS: &str = "0x3fc870008B1cc26f3614F14a726F8077227CA2c3";
 
     /// Anvil RPC URL
     const ANVIL_RPC_URL: &str = "https://sepolia.drpc.org";
@@ -371,17 +366,18 @@ mod tests {
     /// Local Anvil chain ID
     const ANVIL_CHAIN_ID: u64 = 10201262;
 
-    /// PortalMessage format decoder for relayer output
+    /// `PortalMessage` format decoder for relayer output
     ///
-    /// Relayer output format: abi.encode((uint128 nonce, bytes raw_portal_message))
-    /// Where raw_portal_message is: sender (20 bytes) || messageNonce (16 bytes) || message
+    /// Relayer output format:
+    /// abi.encode(uint128 nonce, uint256 sourcePosition, bytes `raw_portal_message`)
+    /// Where `raw_portal_message` is: sender (20 bytes) || messageNonce (16 bytes) || message
     ///
     /// ABI encoding structure:
-    /// - bytes 0-31:   tuple offset (0x20)
-    /// - bytes 32-63:  nonce (uint128, right-aligned, actual value at bytes 48-63)
-    /// - bytes 64-95:  offset to bytes data (relative to tuple start)
+    /// - bytes 0-31:   nonce (uint128, right-aligned)
+    /// - bytes 32-63:  source position
+    /// - bytes 64-95:  offset to bytes data
     /// - bytes 96-127: length of bytes data
-    /// - bytes 128+:   raw PortalMessage data
+    /// - bytes 128+:   raw `PortalMessage` data
     fn decode_portal_message(payload: &[u8]) -> Option<(Address, u128, Vec<u8>)> {
         // Minimum: tuple offset (32) + nonce (32) + bytes offset (32) + length (32) + min data (36)
         // = 164
@@ -389,7 +385,7 @@ mod tests {
             return None;
         }
 
-        // Extract the raw PortalMessage from ABI-encoded (nonce, bytes) tuple
+        // Extract the raw PortalMessage from the canonical relayer wrapper.
         // Length is at bytes 96-127 (right-aligned)
         let length = u64::from_be_bytes(payload[120..128].try_into().ok()?) as usize;
 
@@ -424,7 +420,39 @@ mod tests {
         Some((amount, recipient))
     }
 
+    fn oracle_data(nonce: u128, source_position: u64) -> OracleData {
+        OracleData { nonce, source_position, payload: Bytes::new() }
+    }
+
+    #[test]
+    fn canonicalize_events_sorts_by_nonce() {
+        let events = vec![oracle_data(8, 102), oracle_data(7, 101)];
+        let canonical = canonicalize_events(events, 6).unwrap();
+        assert_eq!(canonical.iter().map(|event| event.nonce).collect::<Vec<_>>(), vec![7, 8]);
+        assert_eq!(canonical.last().unwrap().source_position, 102);
+    }
+
+    #[test]
+    fn canonicalize_events_rejects_gaps_without_advancing() {
+        let error = canonicalize_events(vec![oracle_data(8, 102)], 6).unwrap_err();
+        assert!(error.to_string().contains("expected nonce 7, got 8"));
+    }
+
+    #[test]
+    fn canonicalize_events_rejects_duplicates() {
+        let error =
+            canonicalize_events(vec![oracle_data(7, 101), oracle_data(7, 101)], 6).unwrap_err();
+        assert!(error.to_string().contains("expected nonce 8, got 7"));
+    }
+
+    #[test]
+    fn malformed_matching_log_is_rejected() {
+        let error = decode_message_sent(&RpcLog::default()).unwrap_err();
+        assert!(error.to_string().contains("Failed to decode MessageSent event"));
+    }
+
     #[tokio::test]
+    #[ignore = "requires a configured external RPC endpoint and seeded events"]
     async fn test_poll_anvil_events() {
         use crate::eth_client::EthHttpCli;
 
@@ -501,15 +529,15 @@ mod tests {
         }
 
         // Verify we got at least one event if bridge_test.sh was run
-        if !events.is_empty() {
+        if events.is_empty() {
+            println!("No events found. Make sure to run:");
+            println!("  1. ./scripts/start_anvil.sh");
+            println!("  2. ./scripts/bridge_test.sh");
+        } else {
             println!("✓ Successfully polled and decoded events!");
 
             let first_event = &events[0];
             assert!(!first_event.payload.is_empty(), "Payload should not be empty");
-        } else {
-            println!("No events found. Make sure to run:");
-            println!("  1. ./scripts/start_anvil.sh");
-            println!("  2. ./scripts/bridge_test.sh");
         }
     }
 }

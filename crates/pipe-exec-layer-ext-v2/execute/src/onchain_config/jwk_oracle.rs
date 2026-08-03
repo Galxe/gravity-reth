@@ -1,29 +1,22 @@
-//! JWK Oracle module for writing oracle updates via NativeOracle.record()
+//! JWK Oracle write path for consensus-approved relayer payloads.
 //!
-//! This module handles the WRITE path for ALL oracle updates in the new Oracle architecture:
-//! - RSA JWKs: NativeOracle.record(sourceType=1, sourceId=keccak256(issuer))
-//! - UnsupportedJWK (blockchain events): NativeOracle.recordBatch() for multiple logs
-//!
-//! For blockchain events, the payload from relayer is ABI-encoded and passed through unchanged.
-//! This ensures byte-exact match between relayer, on-chain storage, and read-back for comparison.
+//! UnsupportedJWK entries carry a canonical ABI wrapper containing
+//! `(nonce, source_position, callback_payload)`. The NativeOracle ABI retains
+//! the legacy `blockNumber` name, but the value is a source-defined restart
+//! position and payload history is no longer stored by NativeOracle.
 
 use super::{new_system_call_txn, NATIVE_ORACLE_ADDR};
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_macro::sol;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolValue};
 use gravity_api_types::on_chain_config::jwks::{JWKStruct, ProviderJWKs};
 use reth_ethereum_primitives::TransactionSigned;
+use reth_pipe_exec_layer_relayer::{parse_oracle_uri, source_types};
 use tracing::{debug, info, warn};
 
-/// Default callback gas limit for oracle updates
 const CALLBACK_GAS_LIMIT: u64 = 500_000;
 
-// =============================================================================
-// Solidity Types (NativeOracle function signatures)
-// =============================================================================
-
 sol! {
-    /// NativeOracle.record() function signature
     function record(
         uint32 sourceType,
         uint256 sourceId,
@@ -33,7 +26,6 @@ sol! {
         uint256 callbackGasLimit
     ) external;
 
-    /// NativeOracle.recordBatch() function signature for multiple events
     function recordBatch(
         uint32 sourceType,
         uint256 sourceId,
@@ -44,98 +36,40 @@ sol! {
     ) external;
 }
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-/// Check if a JWKStruct is an RSA JWK
 fn is_rsa_jwk(jwk: &JWKStruct) -> bool {
     jwk.type_name == "0x1::jwks::RSA_JWK"
 }
 
-/// Check if a JWKStruct is an UnsupportedJWK (blockchain/other oracle data)
 fn is_unsupported_jwk(jwk: &JWKStruct) -> bool {
     jwk.type_name == "0x1::jwks::Unsupported_JWK"
 }
 
-/// Parse chain_id from issuer URI
-/// Format: gravity://{source_type}/{chain_id}/{task_type}?...
-fn parse_chain_id_from_issuer(issuer: &[u8]) -> Option<u64> {
-    let issuer_str = String::from_utf8_lossy(issuer);
-    if issuer_str.starts_with("gravity://") {
-        let after_protocol = &issuer_str[10..];
-        // Skip source_type (first segment), get chain_id (second segment)
-        // Format: {source_type}/{chain_id}/{task_type}?...
-        let mut parts = after_protocol.split('/');
-        let _source_type = parts.next()?; // Skip source_type
-        let chain_id_str = parts.next()?;
-        return chain_id_str.parse().ok();
-    }
-    None
+fn parse_source_from_issuer(issuer: &[u8]) -> Option<(u32, u64)> {
+    let issuer = std::str::from_utf8(issuer).ok()?;
+    let task = parse_oracle_uri(issuer).ok()?;
+    Some((task.source_type, task.source_id))
 }
 
-/// Extract nonce, block_number, and inner payload from ABI-encoded event data
-/// Payload format: alloy's abi_encode(&(u128, U256, &[u8]))
-///
-/// alloy encodes (u128, U256, &[u8]) as a dynamic tuple with structure:
-/// - bytes 0-31:   offset to tuple data (always 32 = 0x20)
-/// - bytes 32-63:  nonce (uint128, right-aligned, so nonce is at bytes 48-63)
-/// - bytes 64-95:  block_number (uint256)
-/// - bytes 96-127: offset to bytes data (relative to tuple start at byte 32)
-/// - bytes 128-159: payload length
-/// - bytes 160+:   payload data
-///
-/// Returns (nonce, block_number, inner_payload)
-fn extract_nonce_block_and_payload(data: &[u8]) -> Option<(u128, U256, Vec<u8>)> {
-    if data.len() < 160 {
-        warn!(
-            target: "gravity::onchain_config::jwk_oracle",
-            data_len = data.len(),
-            "Data too short for ABI decoding"
-        );
-        return None;
+fn callback_gas_limit(source_type: u32) -> Result<u64, String> {
+    match source_type {
+        source_types::BLOCKCHAIN => Ok(CALLBACK_GAS_LIMIT),
+        _ => Err(format!("Unsupported oracle source type: {source_type}")),
     }
-
-    // nonce is at bytes 32-63, right-aligned u128 so actual value is at bytes 48-63
-    let nonce_bytes = &data[48..64];
-    let nonce = u128::from_be_bytes(nonce_bytes.try_into().ok()?);
-
-    // block_number is at bytes 64-95 (full U256)
-    let block_number = U256::from_be_slice(&data[64..96]);
-
-    // Payload length is at bytes 128-159 (right-aligned u256)
-    let length_bytes = &data[128..160];
-    let payload_len = u64::from_be_bytes(length_bytes[24..32].try_into().ok()?) as usize;
-
-    // Check we have enough data for the payload
-    if data.len() < 160 + payload_len {
-        warn!(
-            target: "gravity::onchain_config::jwk_oracle",
-            data_len = data.len(),
-            payload_len = payload_len,
-            "Not enough data for payload"
-        );
-        return None;
-    }
-
-    // Extract the inner payload starting at byte 160
-    let inner_payload = data[160..160 + payload_len].to_vec();
-
-    Some((nonce, block_number, inner_payload))
 }
 
-// =============================================================================
-// Public API
-// =============================================================================
+fn extract_canonical_wrapper(data: &[u8]) -> Result<(u128, U256, Vec<u8>), String> {
+    let decoded = <(u128, U256, Bytes)>::abi_decode(data)
+        .map_err(|error| format!("Failed to decode oracle payload wrapper: {error}"))?;
+    if decoded.abi_encode() != data {
+        return Err("Oracle payload wrapper is not canonically encoded".to_string());
+    }
+    if decoded.1 > U256::from(u128::MAX) {
+        return Err("Oracle source position exceeds NativeOracle uint128 range".to_string());
+    }
 
-/// Construct transaction for oracle update via NativeOracle.record()
-///
-/// This is the unified entry point for ALL oracle updates. It routes based on JWK type:
-/// - RSA_JWK → sourceType=1 (JWK), payload=ABI(issuer, version, jwks[])
-/// - UnsupportedJWK → Uses recordBatch for ALL logs (payload passed through unchanged)
-///
-/// Note: All JWKs in provider_jwks.jwks are guaranteed to be of the same type
-/// (either all RSA or all unsupported), so we only check the first element.
+    Ok((decoded.0, decoded.1, decoded.2.to_vec()))
+}
+
 pub fn construct_oracle_record_transaction(
     provider_jwks: ProviderJWKs,
     nonce: u64,
@@ -144,46 +78,30 @@ pub fn construct_oracle_record_transaction(
     let issuer = &provider_jwks.issuer;
     let issuer_str = String::from_utf8_lossy(issuer);
 
-    // All JWKs are homogeneous, check the first one to determine the type
     let first_jwk = provider_jwks
         .jwks
         .first()
-        .ok_or_else(|| format!("No JWKs found for issuer: {}", issuer_str))?;
+        .ok_or_else(|| format!("No JWKs found for issuer: {issuer_str}"))?;
 
     if is_rsa_jwk(first_jwk) {
-        // RSA JWK path is not exercised in production today — all JWK data flows through the
-        // UnsupportedJWK (blockchain event) path, and the RSA record construction has never
-        // been audited/exercised. Fail CLOSED: return a recoverable `Err` rather than run
-        // unverified construction logic. It must NEVER panic — this runs on the deterministic
-        // execute_ordered_block system-tx path (over consensus `extra_data`), whose `Err` the
-        // caller logs + skips (lib.rs), so a panic here would deterministically halt every
-        // validator on this ordered block (gravity-audit#822 class).
         warn!(
             target: "gravity::onchain_config::jwk_oracle",
             issuer = %issuer_str,
             jwk_count = provider_jwks.jwks.len(),
-            "RSA JWK path entered unexpectedly — rejecting (unsupported in production)"
+            "RSA JWK path entered unexpectedly; rejecting unsupported execution path"
         );
         Err(format!(
-            "RSA JWK oracle record path is not supported: issuer={}, jwk_count={}",
-            issuer_str,
+            "RSA JWK oracle record path is not supported: issuer={issuer_str}, jwk_count={}",
             provider_jwks.jwks.len()
         ))
     } else if is_unsupported_jwk(first_jwk) {
-        // Blockchain/oracle events - use recordBatch for ALL logs
-        construct_blockchain_batch_transaction(provider_jwks, nonce, gas_price)
+        construct_unsupported_oracle_batch_transaction(provider_jwks, nonce, gas_price)
     } else {
-        warn!(target: "gravity::onchain_config::jwk_oracle", "Unknown JWK type '{}' for issuer: {}", first_jwk.type_name, issuer_str);
-        Err(format!("Unknown JWK type '{}' for issuer: {}", first_jwk.type_name, issuer_str))
+        Err(format!("Unknown JWK type '{}' for issuer: {issuer_str}", first_jwk.type_name))
     }
 }
 
-/// Construct transaction for blockchain events using recordBatch()
-///
-/// This handles ALL UnsupportedJWK entries (each represents one event).
-/// The payload is passed through UNCHANGED from relayer - this ensures
-/// byte-exact match between what relayer sends and what gets stored on-chain.
-fn construct_blockchain_batch_transaction(
+fn construct_unsupported_oracle_batch_transaction(
     provider_jwks: ProviderJWKs,
     nonce: u64,
     gas_price: u128,
@@ -191,80 +109,180 @@ fn construct_blockchain_batch_transaction(
     let issuer = &provider_jwks.issuer;
     let jwks = &provider_jwks.jwks;
 
-    // Parse chain_id from issuer
-    let chain_id = parse_chain_id_from_issuer(issuer)
-        .ok_or_else(|| format!("Failed to parse chain_id from issuer: {:?}", issuer))?;
-    info!(target: "gravity::onchain_config::jwk_oracle", "jwk chain_id: {}, len {:?}", chain_id, jwks.len());
+    let (source_type, source_id) = parse_source_from_issuer(issuer)
+        .ok_or_else(|| format!("Failed to parse source coordinates from issuer: {issuer:?}"))?;
+    let callback_gas_limit = callback_gas_limit(source_type)?;
 
-    // All JWKs are guaranteed to be unsupported type when entering this function
     if jwks.is_empty() {
-        return Err("No blockchain event JWKs found".to_string());
+        return Err("No oracle entries found".to_string());
     }
 
-    // Parse sourceType from first JWK's type_name (all have same type)
-    let source_type: u32 = 0;
+    let mut nonces = Vec::with_capacity(jwks.len());
+    let mut source_positions = Vec::with_capacity(jwks.len());
+    let mut payloads = Vec::with_capacity(jwks.len());
+    let mut gas_limits = Vec::with_capacity(jwks.len());
+    let mut previous_nonce: Option<u128> = None;
 
-    // Build batch arrays
-    let mut nonces: Vec<u128> = Vec::with_capacity(jwks.len());
-    let mut block_numbers: Vec<U256> = Vec::with_capacity(jwks.len());
-    let mut payloads: Vec<Bytes> = Vec::with_capacity(jwks.len());
-    let mut gas_limits: Vec<U256> = Vec::with_capacity(jwks.len());
+    for (index, jwk) in jwks.iter().enumerate() {
+        if !is_unsupported_jwk(jwk) {
+            return Err(format!("Mixed JWK types in unsupported oracle batch at index {index}"));
+        }
 
-    for (idx, jwk) in jwks.iter().enumerate() {
-        let (event_nonce, block_number, inner_payload) =
-            match extract_nonce_block_and_payload(&jwk.data) {
-                Some((nonce, block_num, payload)) => (nonce, block_num, payload),
-                None => {
-                    warn!(
-                        target: "gravity::onchain_config::jwk_oracle",
-                        idx = idx,
-                        payload_len = jwk.data.len(),
-                        payload_hex = %hex::encode(&jwk.data),
-                        "Failed to extract nonce, block_number, and payload"
-                    );
-                    return Err(format!(
-                        "Failed to extract nonce, block_number, and payload at index {}",
-                        idx
-                    ));
-                }
-            };
+        let (event_nonce, source_position, callback_payload) = extract_canonical_wrapper(&jwk.data)
+            .map_err(|error| {
+                warn!(
+                    target: "gravity::onchain_config::jwk_oracle",
+                    index,
+                    payload_len = jwk.data.len(),
+                    %error,
+                    "Rejected oracle payload wrapper"
+                );
+                format!("Invalid oracle payload wrapper at index {index}: {error}")
+            })?;
+
+        if let Some(previous) = previous_nonce {
+            let expected =
+                previous.checked_add(1).ok_or_else(|| "Oracle batch nonce overflow".to_string())?;
+            if event_nonce != expected {
+                return Err(format!(
+                    "Oracle batch nonces are not sequential at index {index}: expected {expected}, got {event_nonce}"
+                ));
+            }
+        }
+        previous_nonce = Some(event_nonce);
 
         nonces.push(event_nonce);
-        block_numbers.push(block_number);
-        // Use the inner payload (the original MessageSent.payload)
-        // This is what the user put in and what gets passed to the callback
-        payloads.push(inner_payload.into());
-        gas_limits.push(U256::from(CALLBACK_GAS_LIMIT));
+        source_positions.push(source_position);
+        payloads.push(Bytes::from(callback_payload));
+        gas_limits.push(U256::from(callback_gas_limit));
 
         debug!(
-            idx = idx,
-            event_nonce = event_nonce,
-            ?block_number,
-            inner_payload_len = payloads.last().map(|p: &Bytes| p.len()).unwrap_or(0),
-            "Added event to batch"
+            target: "gravity::onchain_config::jwk_oracle",
+            index,
+            event_nonce,
+            ?source_position,
+            "Added canonical oracle entry to batch"
         );
     }
 
     info!(
+        target: "gravity::onchain_config::jwk_oracle",
         issuer = %String::from_utf8_lossy(issuer),
-        chain_id = chain_id,
-        source_type = source_type,
-        event_count = nonces.len(),
-        "Constructing blockchain recordBatch transaction (pass-through payload)"
+        source_type,
+        source_id,
+        item_count = nonces.len(),
+        "Constructing NativeOracle recordBatch transaction"
     );
 
-    // Use recordBatch for multiple events
     let call = recordBatchCall {
         sourceType: source_type,
-        sourceId: U256::from(chain_id),
+        sourceId: U256::from(source_id),
         nonces,
-        blockNumbers: block_numbers,
+        blockNumbers: source_positions,
         payloads,
         callbackGasLimits: gas_limits,
     };
 
-    let input: Bytes = call.abi_encode().into();
-    Ok(new_system_call_txn(NATIVE_ORACLE_ADDR, nonce, gas_price, input))
+    Ok(new_system_call_txn(NATIVE_ORACLE_ADDR, nonce, gas_price, call.abi_encode().into()))
 }
 
-// convert_oracle_rsa_to_api_jwk is now provided by super::types
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Transaction;
+
+    fn wrapped_jwk(nonce: u128, position: U256, payload: &[u8]) -> JWKStruct {
+        JWKStruct {
+            type_name: "0x1::jwks::Unsupported_JWK".to_string(),
+            data: (nonce, position, payload).abi_encode(),
+        }
+    }
+
+    fn provider(uri: &[u8], jwks: Vec<JWKStruct>) -> ProviderJWKs {
+        ProviderJWKs { issuer: uri.to_vec(), version: 1, jwks }
+    }
+
+    #[test]
+    fn parses_source_coordinates_from_issuer() {
+        let issuer = b"gravity://0/1/events?fromBlock=22000000";
+        assert_eq!(parse_source_from_issuer(issuer), Some((0, 1)));
+    }
+
+    #[test]
+    fn extracts_canonical_wrapper() {
+        let encoded = (7u128, U256::from(3020), b"oracle-payload".as_slice()).abi_encode();
+        let (nonce, position, payload) = extract_canonical_wrapper(&encoded).unwrap();
+        assert_eq!(nonce, 7);
+        assert_eq!(position, U256::from(3020));
+        assert_eq!(payload, b"oracle-payload");
+    }
+
+    #[test]
+    fn rejects_noncanonical_wrapper() {
+        let mut encoded = (7u128, U256::from(3020), b"oracle-payload".as_slice()).abi_encode();
+        encoded.push(0);
+        assert!(extract_canonical_wrapper(&encoded).is_err());
+    }
+
+    #[test]
+    fn preserves_source_zero_coordinates_and_callback_gas() {
+        let payload = b"bridge-event-payload";
+        let provider = provider(
+            b"gravity://0/1/events?fromBlock=22000000",
+            vec![wrapped_jwk(7, U256::from(22_000_123u64), payload)],
+        );
+
+        let tx = construct_oracle_record_transaction(provider, 0, 0).unwrap();
+        let call = recordBatchCall::abi_decode(tx.input()).unwrap();
+        assert_eq!(call.sourceType, source_types::BLOCKCHAIN);
+        assert_eq!(call.sourceId, U256::from(1));
+        assert_eq!(call.nonces, vec![7]);
+        assert_eq!(call.blockNumbers, vec![U256::from(22_000_123u64)]);
+        assert_eq!(call.payloads, vec![Bytes::copy_from_slice(payload)]);
+        assert_eq!(call.callbackGasLimits, vec![U256::from(CALLBACK_GAS_LIMIT)]);
+    }
+
+    #[test]
+    fn rejects_provider_source_types_not_implemented_by_core() {
+        let provider = provider(
+            b"gravity://3/1001/price_feed",
+            vec![wrapped_jwk(1, U256::from(60_000), b"price")],
+        );
+        let error = construct_oracle_record_transaction(provider, 0, 0).unwrap_err();
+        assert_eq!(error, "Unsupported oracle source type: 3");
+    }
+
+    #[test]
+    fn rejects_nonsequential_batch_before_execution() {
+        let provider = provider(
+            b"gravity://0/1/events",
+            vec![
+                wrapped_jwk(7, U256::from(100), b"first"),
+                wrapped_jwk(9, U256::from(101), b"gap"),
+            ],
+        );
+        let error = construct_oracle_record_transaction(provider, 0, 0).unwrap_err();
+        assert!(error.contains("expected 8, got 9"));
+    }
+
+    #[test]
+    fn rejects_mixed_jwk_types() {
+        let mut mixed = wrapped_jwk(8, U256::from(101), b"mixed");
+        mixed.type_name = "0x1::jwks::RSA_JWK".to_string();
+        let provider = provider(
+            b"gravity://0/1/events",
+            vec![wrapped_jwk(7, U256::from(100), b"first"), mixed],
+        );
+        let error = construct_oracle_record_transaction(provider, 0, 0).unwrap_err();
+        assert!(error.contains("Mixed JWK types"));
+    }
+
+    #[test]
+    fn rejects_source_position_outside_contract_range() {
+        let position = U256::from(u128::MAX) + U256::from(1);
+        let provider =
+            provider(b"gravity://0/1/events", vec![wrapped_jwk(1, position, b"payload")]);
+        let error = construct_oracle_record_transaction(provider, 0, 0).unwrap_err();
+        assert!(error.contains("uint128 range"));
+    }
+}

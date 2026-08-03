@@ -222,8 +222,7 @@ sol! {
 }
 
 sol! {
-    /// DataRecorded event from NativeOracle contract
-    /// Emitted when data is recorded by the consensus engine via SYSTEM_CALLER
+    /// Legacy DataRecorded event from NativeOracle contract.
     /// @param sourceType The source type (0 = BLOCKCHAIN, 1 = JWK, etc.)
     /// @param sourceId The source identifier (e.g., chain ID for blockchains)
     /// @param nonce The nonce (block height, timestamp, etc.)
@@ -233,6 +232,15 @@ sol! {
         uint256 indexed sourceId,
         uint128 nonce,
         uint256 dataLength
+    );
+
+    /// OracleDelivered event emitted by the current NativeOracle contract.
+    event OracleDelivered(
+        uint32 indexed sourceType,
+        uint256 indexed sourceId,
+        uint128 nonce,
+        uint128 sourcePosition,
+        bytes32 payloadHash
     );
 }
 
