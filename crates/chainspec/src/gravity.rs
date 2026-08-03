@@ -95,9 +95,9 @@ pub fn is_eip7702_lockdown_active<S: EthChainSpec>(chain_spec: &S, block_ts: u64
 ///
 /// Returns `true` when the pre-execution filter must apply **gas as the last gate**:
 /// invalid txs do not consume block budget, and packing continues after a non-fitting
-/// tx (later smaller txs may still enter the body). Non-fitting / same-sender blocked
-/// txs are still **discarded** from the pool (`is_discarded`) — this release does not
-/// introduce a keep-in-pool "defer" outcome (SDK only understands the discard bit).
+/// tx (later smaller txs may still enter the body). Non-fitting txs are still
+/// **discarded** from the pool (`is_discarded`) — this release does not introduce a
+/// keep-in-pool "defer" outcome (SDK only understands the discard bit).
 ///
 /// Pre-Beta (`false`): legacy prefix-cut on cumulative `tx.gas_limit()` — the first
 /// overflow index and every later index are discarded. That behaviour is consensus-

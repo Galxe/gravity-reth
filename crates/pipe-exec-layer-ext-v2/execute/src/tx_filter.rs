@@ -87,7 +87,9 @@ use tracing::info;
 ///   from the first overflow through the end is discarded.
 /// - **Beta+:** admission + in-block state sim first, then gas as the **last** gate. Invalid txs
 ///   never consume budget; packing continues after a non-fit (later smaller txs may still enter the
-///   body). Non-fitting / same-sender-blocked txs are still **discarded**.
+///   body). Non-fitting txs are still **discarded**. Same-sender higher nonces then fail the
+///   simulated nonce check (`sim` is only advanced after gas admits the tx) and discard the same
+///   way — no separate sender-block set.
 ///
 /// `chain_spec`, `block_timestamp`, `block_number` are taken instead of a
 /// pre-computed `SpecId` because the only consumer of `spec_id` here is the
@@ -146,7 +148,10 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     }
 
     let cfg_chain_id = chain_spec.chain_id();
-    let is_tx_valid = |tx: &TransactionSigned, sender: &Address, account: &mut AccountInfo| {
+    // Read-only admission checks against the current simulated account. Does **not** mutate
+    // `sim` — caller sim (nonce/balance) and 7702 auth bumps are applied only after every
+    // gate including Beta+ block-gas has passed, so gas non-fits never need rollback.
+    let is_tx_valid = |tx: &TransactionSigned, sender: &Address, account: &AccountInfo| -> bool {
         if account.nonce != tx.nonce() {
             info!(target: "filter_invalid_txs",
                 tx_hash=?tx.hash(),
@@ -323,8 +328,8 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         // refunded post-execution). The filter must check against the same worst-case
         // bound, otherwise a tx where `effective < max_fee` and `balance < max * limit`
         // would pass here and panic in revm with `LackOfFundForMaxFee`. Closes audit#710
-        // gap 4. The per-sender simulated balance is then reduced by the *effective*
-        // cost so subsequent txs from the same sender see what revm sees post-refund.
+        // gap 4. Sim balance is reduced by *effective* cost only in `apply_caller_to_sim`
+        // after this tx is fully admitted (including gas).
         //
         // The `saturating_*` arithmetic below is also load-bearing for a second revm variant:
         // `validate_against_state_and_deduct_caller` calls `tx.max_balance_spending()`
@@ -347,12 +352,17 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
             );
             return false;
         }
+        true
+    };
+
+    // Commit caller nonce/balance into `sim` after admission + gas gates. Uses effective
+    // gas price so subsequent same-sender txs see what revm sees post-refund.
+    let apply_caller_to_sim = |tx: &TransactionSigned, account: &mut AccountInfo| {
         let gas_spent = U256::from(tx.effective_gas_price(Some(base_fee_per_gas)))
             .saturating_mul(U256::from(tx.gas_limit()));
         let total_spent = gas_spent.saturating_add(tx.value());
         account.balance -= total_spent;
         account.nonce += 1;
-        true
     };
 
     // `true` if the account's code is empty or a valid EIP-7702 delegation designator —
@@ -399,31 +409,23 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
     // block order. The per-tx guards are cheap; the extra `recover_authority()` ECDSA
     // recovery runs only for type-4 txs.
     //
-    // Beta+ (`gas_last_gate`): block gas is the **last** gate after admission + sim —
+    // Beta+ (`gas_last_gate`): block gas is the **last** gate after admission —
     // invalid txs do not consume budget; packing continues after a non-fit (audit#646).
     // Non-fitting txs are still discarded (pool remove). Pre-Beta: only the gas prefix is
     // walked; suffix indices are discarded below.
+    //
+    // `sim` is written only after admission + gas both pass (see `apply_caller_to_sim`
+    // below). Gas non-fits therefore leave sender nonce/balance unchanged; higher nonces
+    // fail the exact-nonce check and discard, while a same-nonce smaller replacement that
+    // fits may still pack.
     let mut sim: HashMap<Address, Option<AccountInfo>> = HashMap::default();
     let mut invalid_tx_idxs: HashSet<usize> = HashSet::default();
-    // Senders whose next in-block nonce was gas-excluded (Beta+ only): later same-sender
-    // txs cannot execute without a nonce gap — discard them too (not keep-in-pool).
-    let mut gas_blocked_senders: HashSet<Address> = HashSet::default();
     let mut remaining_gas = gas_limit;
 
     let walk_end = if gas_last_gate { txs.len() } else { gas_limit_exceeded_tx_idx };
     for idx in 0..walk_end {
         let tx = &txs[idx];
         let sender = senders[idx];
-
-        if gas_last_gate && gas_blocked_senders.contains(&sender) {
-            info!(target: "filter_invalid_txs",
-                tx_hash=?tx.hash(),
-                sender=?sender,
-                "discarded: same-sender predecessor excluded by block gas budget"
-            );
-            invalid_tx_idxs.insert(idx);
-            continue;
-        }
 
         // EMERGENCY EIP-7702 LOCKDOWN — L3 (pre-Beta): drop any tx whose recipient is a
         // currently-delegated account, so no inbound CALL can trigger the callee's
@@ -448,16 +450,11 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
             }
         }
 
-        // Validate the tx against the simulated sender account and apply the caller nonce
-        // bump + balance deduction. Scoped so the `sim[sender]` borrow is released before
-        // the authorization loop re-borrows `sim` (an authority may be any account).
-        // On success the sim account is mutated; if we later exclude for gas (Beta+) we
-        // must roll that mutation back so a same-sender follow-up still sees the pre-tx
-        // account before we discard it too.
-        let sender_snapshot = sim.get(&sender).cloned();
+        // Read-only admission against simulated sender. Seeding `sim` from DB is fine
+        // (cache only); nonce/balance are not advanced until every gate passes.
         let valid = {
             let sender_acct = sim.entry(sender).or_insert_with(|| db.basic_ref(sender).unwrap());
-            match sender_acct.as_mut() {
+            match sender_acct.as_ref() {
                 // Sender absent from state -> cannot pay for / originate the tx.
                 None => false,
                 Some(account) => {
@@ -480,7 +477,6 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                         );
                         false
                     } else {
-                        // Mutates `account` (caller nonce bump + balance deduct) on success.
                         is_tx_valid(tx, &sender, account)
                     }
                 }
@@ -493,6 +489,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
 
         // Beta+: last gate is block gas (worst-case `tx.gas_limit()`). Still discards.
         // Pre-Beta: prefix already guaranteed to fit; no re-check.
+        // Checked before any sim write so a non-fit never touches sender state.
         if gas_last_gate {
             let tx_gas = tx.gas_limit();
             if tx_gas > remaining_gas {
@@ -504,20 +501,19 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
                     block_gas_limit=?gas_limit,
                     "discarded: tx does not fit remaining block gas budget"
                 );
-                // Roll back the optimistic sim mutation from `is_tx_valid`.
-                match sender_snapshot {
-                    Some(prev) => {
-                        sim.insert(sender, prev);
-                    }
-                    None => {
-                        sim.remove(&sender);
-                    }
-                }
                 invalid_tx_idxs.insert(idx);
-                gas_blocked_senders.insert(sender);
                 continue;
             }
             remaining_gas -= tx_gas;
+        }
+
+        // Fully admitted: advance caller sim, then 7702 authority nonces.
+        // Scoped so `sim[sender]` is released before the auth loop re-borrows `sim`.
+        {
+            let sender_acct = sim.get_mut(&sender).expect("sender seeded during admission");
+            if let Some(account) = sender_acct.as_mut() {
+                apply_caller_to_sim(tx, account);
+            }
         }
 
         // Mirror revm `apply_auth_list`: for a type-4 tx every valid authorization bumps
@@ -2308,8 +2304,8 @@ mod tests {
             );
         }
 
-        // Budget 30M: pack 20M, discard next same-sender 20M, still pack 5M from
-        // another sender under the remaining 10M.
+        // Budget 30M: pack 20M, discard same-sender nonce-1 20M (gas), still pack 5M
+        // from another sender under remaining 10M.
         let tx0 = create_test_transaction(0, 20_000_000, 25_000_000_000);
         let tx1 = create_test_transaction(1, 20_000_000, 25_000_000_000);
         let tx2 = create_test_transaction(0, 5_000_000, 25_000_000_000);
@@ -2329,6 +2325,84 @@ mod tests {
         assert_eq!(result.len(), 1, "{result:?}");
         assert!(result.contains(&1));
         assert!(!result.contains(&2), "small later tx must pack: {result:?}");
+    }
+
+    /// After a gas non-fit, sim was never advanced: a later same-nonce smaller replacement
+    /// that fits must pack (no sender-wide gas block list).
+    #[test]
+    fn test_filter_invalid_txs_same_nonce_smaller_replacement_packs_after_gas_skip() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            },
+        );
+
+        // Budget 30M: pack 20M (nonce 0); 20M nonce-1 does not fit; smaller 5M nonce-1 packs.
+        let tx0 = create_test_transaction(0, 20_000_000, 25_000_000_000);
+        let tx1 = create_test_transaction(1, 20_000_000, 25_000_000_000);
+        let tx2 = create_test_transaction(1, 5_000_000, 25_000_000_000);
+        let txs = vec![tx0, tx1, tx2];
+        let senders = vec![sender, sender, sender];
+
+        let result = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            20_000_000_000u64,
+            30_000_000u64,
+            &prague_chain_spec_with_beta(),
+            0,
+            0,
+        );
+        assert_eq!(result.len(), 1, "{result:?}");
+        assert!(result.contains(&1), "large nonce-1 discarded for gas: {result:?}");
+        assert!(!result.contains(&2), "smaller same-nonce replacement must pack: {result:?}");
+    }
+
+    /// Higher nonces after a gas non-fit still discard via simulated nonce mismatch
+    /// (`apply_caller_to_sim` never ran for the skipped nonce).
+    #[test]
+    fn test_filter_invalid_txs_higher_nonce_discards_after_gas_skip() {
+        let mut db = MockDatabase::new();
+        let sender = Address::random();
+        db.insert_account(
+            sender,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            },
+        );
+
+        // Budget 30M: pack 20M; nonce-1 20M gas-skip (sim unchanged); nonce-2 fails nonce check.
+        let tx0 = create_test_transaction(0, 20_000_000, 25_000_000_000);
+        let tx1 = create_test_transaction(1, 20_000_000, 25_000_000_000);
+        let tx2 = create_test_transaction(2, 5_000_000, 25_000_000_000);
+        let txs = vec![tx0, tx1, tx2];
+        let senders = vec![sender, sender, sender];
+
+        let result = filter_invalid_txs(
+            &db,
+            &txs,
+            &senders,
+            20_000_000_000u64,
+            30_000_000u64,
+            &prague_chain_spec_with_beta(),
+            0,
+            0,
+        );
+        assert_eq!(result.len(), 2, "{result:?}");
+        assert!(result.contains(&1), "nonce-1 gas non-fit: {result:?}");
+        assert!(result.contains(&2), "nonce-2 discarded via nonce gap: {result:?}");
     }
 
     /// Fork boundary: betaTime = T; both sides discard non-fit, but packing differs
