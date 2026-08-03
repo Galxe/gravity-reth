@@ -52,7 +52,7 @@ fn parse_source_from_issuer(issuer: &[u8]) -> Option<(u32, u64)> {
 
 fn callback_gas_limit(source_type: u32) -> Result<u64, String> {
     match source_type {
-        source_types::BLOCKCHAIN => Ok(CALLBACK_GAS_LIMIT),
+        source_types::BLOCKCHAIN | source_types::PRICE_FEED => Ok(CALLBACK_GAS_LIMIT),
         _ => Err(format!("Unsupported oracle source type: {source_type}")),
     }
 }
@@ -190,6 +190,17 @@ fn construct_unsupported_oracle_batch_transaction(
 mod tests {
     use super::*;
     use alloy_consensus::Transaction;
+    use alloy_primitives::I256;
+
+    sol! {
+        struct PricePayloadForTest {
+            uint256 feedId;
+            uint64 roundId;
+            uint64 resolvedAt;
+            uint8 decimals;
+            int256 price;
+        }
+    }
 
     fn wrapped_jwk(nonce: u128, position: U256, payload: &[u8]) -> JWKStruct {
         JWKStruct {
@@ -243,13 +254,38 @@ mod tests {
     }
 
     #[test]
+    fn preserves_price_feed_coordinates_payload_and_callback_gas() {
+        let payload = PricePayloadForTest {
+            feedId: U256::from(2001),
+            roundId: 28_500_000,
+            resolvedAt: 1_710_000_059_999,
+            decimals: 8,
+            price: "40067545000".parse::<I256>().unwrap(),
+        }
+        .abi_encode();
+        let provider = provider(
+            b"gravity://3/2001/price_feed?provider=binance_index_kline_v1",
+            vec![wrapped_jwk(1, U256::from(1_710_000_059_999u64), &payload)],
+        );
+
+        let tx = construct_oracle_record_transaction(provider, 0, 0).unwrap();
+        let call = recordBatchCall::abi_decode(tx.input()).unwrap();
+        assert_eq!(call.sourceType, source_types::PRICE_FEED);
+        assert_eq!(call.sourceId, U256::from(2001));
+        assert_eq!(call.nonces, vec![1]);
+        assert_eq!(call.blockNumbers, vec![U256::from(1_710_000_059_999u64)]);
+        assert_eq!(call.payloads, vec![Bytes::from(payload)]);
+        assert_eq!(call.callbackGasLimits, vec![U256::from(CALLBACK_GAS_LIMIT)]);
+    }
+
+    #[test]
     fn rejects_provider_source_types_not_implemented_by_core() {
         let provider = provider(
-            b"gravity://3/1001/price_feed",
-            vec![wrapped_jwk(1, U256::from(60_000), b"price")],
+            b"gravity://6/1001/settlement",
+            vec![wrapped_jwk(1, U256::from(60_000), b"settlement")],
         );
         let error = construct_oracle_record_transaction(provider, 0, 0).unwrap_err();
-        assert_eq!(error, "Unsupported oracle source type: 3");
+        assert_eq!(error, "Unsupported oracle source type: 6");
     }
 
     #[test]

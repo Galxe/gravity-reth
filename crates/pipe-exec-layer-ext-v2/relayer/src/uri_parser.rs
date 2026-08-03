@@ -10,6 +10,9 @@
 //!
 //! ### Examples
 //! - Blockchain events: `gravity://0/1/events?portal=0x283fC6...&fromBlock=9565280`
+//! - Binance index kline price feed:
+//!   `gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&
+//!   bucketStartMs=1710000000000&decimals=8`
 
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
@@ -22,7 +25,7 @@ pub struct ParsedOracleTask {
     /// Original URI string
     pub uri: String,
 
-    /// Source type (0=BLOCKCHAIN)
+    /// Source type (`0=BLOCKCHAIN`, `3=PRICE_FEED`)
     pub source_type: u32,
 
     /// Source identifier (chain ID, etc.)
@@ -54,8 +57,13 @@ impl ParsedOracleTask {
     }
 
     /// Check if this is a blockchain source
-    pub fn is_blockchain(&self) -> bool {
+    pub const fn is_blockchain(&self) -> bool {
         self.source_type == 0
+    }
+
+    /// Check if this is a price feed source
+    pub const fn is_price_feed(&self) -> bool {
+        self.source_type == 3
     }
 }
 
@@ -126,6 +134,18 @@ mod tests {
         assert_eq!(task.task_type, "events");
         assert_eq!(task.from_block(), 9565280);
         assert!(task.portal_address().is_ok());
+    }
+
+    #[test]
+    fn test_parse_price_feed_uri() {
+        let uri = "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8";
+        let task = parse_oracle_uri(uri).unwrap();
+
+        assert_eq!(task.source_type, 3);
+        assert_eq!(task.source_id, 2001);
+        assert_eq!(task.task_type, "price_feed");
+        assert!(task.is_price_feed());
+        assert_eq!(task.params.get("decimals").map(String::as_str), Some("8"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::{
     blockchain_source::BlockchainEventSource,
     data_source::{source_types, DataSourceKind, OracleDataSource},
     persistence::{load_state_if_exists, state_file_path, RelayerState, SourceState},
+    price_feed_source::PriceFeedSource,
     uri_parser::{parse_oracle_uri, ParsedOracleTask},
 };
 use anyhow::{anyhow, Result};
@@ -309,6 +310,15 @@ impl OracleRelayerManager {
                 .await?;
                 Ok(DataSourceKind::Blockchain(source))
             }
+            source_types::PRICE_FEED => {
+                let source = PriceFeedSource::from_task_with_progress(
+                    task,
+                    latest_onchain_nonce,
+                    latest_onchain_position,
+                    Some(rpc_url),
+                )?;
+                Ok(DataSourceKind::PriceFeed(source))
+            }
             _ => Err(anyhow!("Unknown source type: {}", task.source_type)),
         }
     }
@@ -346,7 +356,7 @@ impl OracleRelayerManager {
                     onchain_position,
                     "Reconciling local source with confirmed on-chain progress"
                 );
-                source.reconcile_progress(onchain_nonce, onchain_position).await;
+                source.reconcile_progress(onchain_nonce, onchain_position).await?;
             }
         }
 
@@ -461,6 +471,8 @@ mod tests {
 
     const URI: &str =
         "gravity://0/1/events?portal=0x0000000000000000000000000000000000000001&fromBlock=100";
+    const PRICE_URI: &str =
+        "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8";
 
     fn state(last_nonce: u128, last_position: u64, cursor: u64) -> RelayerState {
         let mut state = RelayerState::new();
@@ -541,5 +553,40 @@ mod tests {
     fn rejects_source_position_outside_runtime_range() {
         let position = u128::from(u64::MAX) + 1;
         assert!(u64::try_from(position).is_err());
+    }
+
+    #[tokio::test]
+    async fn adds_binance_price_feed_without_network_access() {
+        let datadir = tempfile::tempdir().unwrap();
+        let manager = OracleRelayerManager::new(datadir.path().to_path_buf());
+
+        manager.add_uri(PRICE_URI, "https://fapi.binance.com", 0, 0).await.unwrap();
+
+        assert!(manager.has_uri(PRICE_URI).await);
+    }
+
+    #[tokio::test]
+    async fn rejects_binance_history_mismatch_during_registration() {
+        let datadir = tempfile::tempdir().unwrap();
+        let manager = OracleRelayerManager::new(datadir.path().to_path_buf());
+
+        let error = manager
+            .add_uri(PRICE_URI, "https://fapi.binance.com", 2, 1_710_000_059_999)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("task history mismatch"));
+    }
+
+    #[tokio::test]
+    async fn rejects_binance_history_mismatch_during_runtime_reconcile() {
+        let datadir = tempfile::tempdir().unwrap();
+        let manager = OracleRelayerManager::new(datadir.path().to_path_buf());
+        manager.add_uri(PRICE_URI, "https://fapi.binance.com", 1, 1_710_000_059_999).await.unwrap();
+
+        let error =
+            manager.poll_uri(PRICE_URI, Some(2), Some(1_710_000_060_000)).await.unwrap_err();
+
+        assert!(error.to_string().contains("task history mismatch"));
     }
 }
