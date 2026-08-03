@@ -114,11 +114,17 @@ impl StorageHistory {
 
         let walker = provider.static_file_provider().walk_storage_changeset_range(range);
         for result in walker {
-            if limiter.is_limit_reached() {
+            let (BlockNumberAddress((block_number, address)), entry) = result?;
+            // The walk itself deletes nothing, so an interrupted block cannot be resumed: giving
+            // up the budget inside block N reports checkpoint N-1 and the next run rereads the
+            // same entries, forever. Stop on block boundaries only, overshooting the budget by at
+            // most the rest of one block.
+            if limiter.is_limit_reached() &&
+                last_changeset_pruned_block.is_some_and(|last| last != block_number)
+            {
                 done = false;
                 break
             }
-            let (BlockNumberAddress((block_number, address)), entry) = result?;
             highest_deleted_storages.insert((address, entry.key), block_number);
             last_changeset_pruned_block = Some(block_number);
             pruned_changesets += 1;
@@ -199,9 +205,19 @@ impl StorageHistory {
             )?;
         trace!(target: "pruner", deleted = %pruned_changesets, %done, "Pruned storage history (changesets from database)");
 
+        // The table walk can stop in the middle of a block, so the interrupted block has to be
+        // pruned again on the next run.
+        let last_pruned_block = last_changeset_pruned_block.map(|block_number| {
+            if done {
+                block_number
+            } else {
+                block_number.saturating_sub(1)
+            }
+        });
+
         let result = HistoryPruneResult {
             highest_deleted: highest_deleted_storages,
-            last_pruned_block: last_changeset_pruned_block,
+            last_pruned_block,
             pruned_count: pruned_changesets,
             done,
         };
@@ -499,5 +515,125 @@ mod tests {
                 .get_highest_static_file_block(StaticFileSegment::StorageChangeSets),
             Some(100)
         );
+    }
+
+    /// A block holding at least a whole run's budget of changesets must not stall pruning: the
+    /// walk deletes no changesets, so a checkpoint rewound below such a block would make every
+    /// later run reread it and never advance.
+    #[test]
+    fn dense_block_advances_static_file_checkpoint() {
+        use alloy_primitives::U256;
+        use reth_primitives_traits::StorageEntry;
+
+        let db = TestStageDB::default();
+        let mut rng = generators::rng();
+
+        let blocks = random_block_range(
+            &mut rng,
+            0..=20,
+            BlockRangeParams { parent: Some(B256::ZERO), tx_count: 0..1, ..Default::default() },
+        );
+        db.insert_blocks(blocks.iter(), StorageKind::Database(None)).expect("insert blocks");
+
+        // Two storage changesets per block, so a budget of two (after table split) makes every
+        // block "dense".
+        const ENTRIES_PER_BLOCK: usize = 2;
+        let (address, account) = random_eoa_accounts(&mut rng, 1).into_iter().next().unwrap();
+        let keys = [B256::with_last_byte(1), B256::with_last_byte(2)];
+        let changesets = (0..=20)
+            .map(|_| {
+                vec![(
+                    address,
+                    account,
+                    keys.iter()
+                        .map(|key| StorageEntry { key: *key, value: U256::from(1) })
+                        .collect(),
+                )]
+            })
+            .collect::<Vec<_>>();
+        db.insert_changesets_to_static_files(changesets.clone(), None)
+            .expect("insert changesets to static files");
+        db.insert_history(changesets, None).expect("insert history");
+        assert!(db.table::<tables::StorageChangeSets>().unwrap().is_empty());
+
+        let to_block = 15u64;
+        let prune_mode = PruneMode::Before(to_block);
+        let segment = StorageHistory::new(prune_mode);
+
+        // Start from a checkpoint in the middle so a rewind can't be masked by block 0.
+        let mut checkpoint = PruneCheckpoint { block_number: Some(4), tx_number: None, prune_mode };
+
+        db.factory.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+
+        for _ in 0..3 {
+            let previous = checkpoint.block_number;
+            let input = PruneInput {
+                previous_checkpoint: Some(checkpoint),
+                to_block,
+                // Halved internally by STORAGE_HISTORY_TABLES_TO_PRUNE.
+                limiter: PruneLimiter::default()
+                    .set_deleted_entries_limit(ENTRIES_PER_BLOCK * STORAGE_HISTORY_TABLES_TO_PRUNE),
+            };
+
+            let provider = db.factory.database_provider_rw().unwrap();
+            provider.set_storage_settings_cache(GravityStorageSettings {
+                changesets_in_static_files: true,
+            });
+            let result = segment.prune(&provider, input).unwrap();
+            segment
+                .save_checkpoint(
+                    &provider,
+                    result.checkpoint.unwrap().as_prune_checkpoint(prune_mode),
+                )
+                .unwrap();
+            provider.commit().expect("commit");
+
+            checkpoint = db
+                .factory
+                .provider()
+                .unwrap()
+                .get_prune_checkpoint(PruneSegment::StorageHistory)
+                .unwrap()
+                .unwrap();
+
+            assert!(
+                !result.progress.is_finished(),
+                "the range is longer than one run's budget allows"
+            );
+            assert!(
+                checkpoint.block_number > previous,
+                "checkpoint must advance past the dense block, got {:?} after {previous:?}",
+                checkpoint.block_number
+            );
+        }
+        assert_eq!(checkpoint.block_number, Some(7), "one dense block cleared per run");
+
+        // With enough budget the remainder of the range completes in one run.
+        let input = PruneInput {
+            previous_checkpoint: Some(checkpoint),
+            to_block,
+            limiter: PruneLimiter::default().set_deleted_entries_limit(1000),
+        };
+        let provider = db.factory.database_provider_rw().unwrap();
+        provider.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+        let result = segment.prune(&provider, input).unwrap();
+        segment
+            .save_checkpoint(&provider, result.checkpoint.unwrap().as_prune_checkpoint(prune_mode))
+            .unwrap();
+        provider.commit().expect("commit");
+
+        let checkpoint = db
+            .factory
+            .provider()
+            .unwrap()
+            .get_prune_checkpoint(PruneSegment::StorageHistory)
+            .unwrap()
+            .unwrap();
+        assert!(result.progress.is_finished());
+        assert_eq!(checkpoint.block_number, Some(to_block));
     }
 }
