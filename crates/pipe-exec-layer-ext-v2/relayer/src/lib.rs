@@ -23,6 +23,9 @@ pub mod blockchain_source;
 /// Binance index-price feed source
 pub mod price_feed_source;
 
+/// Polygon Polymarket CTF settlement source
+pub mod polymarket_settlement_source;
+
 /// Factory for creating data sources
 pub mod factory;
 
@@ -47,5 +50,6 @@ pub use data_source::{source_types, DataSourceKind, OracleData, OracleDataSource
 pub use eth_client::EthHttpCli;
 pub use factory::DataSourceFactory;
 pub use oracle_manager::{JWKStruct, OracleRelayerManager, PollResult};
+pub use polymarket_settlement_source::PolymarketSettlementSource;
 pub use price_feed_source::PriceFeedSource;
 pub use uri_parser::{parse_oracle_uri, ParsedOracleTask};

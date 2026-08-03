@@ -71,6 +71,13 @@ impl EthHttpCli {
             .with_context(|| "Failed to get logs with filter")
     }
 
+    /// Gets the remote chain identifier.
+    pub async fn get_chain_id(&self) -> Result<u64> {
+        self.retry_with_backoff(|| async { self.provider.get_chain_id().await })
+            .await
+            .with_context(|| "Failed to get chain id")
+    }
+
     /// Gets the latest finalized block number
     pub async fn get_finalized_block_number(&self) -> Result<u64> {
         self.retry_with_backoff(|| async {

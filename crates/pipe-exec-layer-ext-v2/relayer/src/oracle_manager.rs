@@ -6,6 +6,7 @@ use crate::{
     blockchain_source::BlockchainEventSource,
     data_source::{source_types, DataSourceKind, OracleDataSource},
     persistence::{load_state_if_exists, state_file_path, RelayerState, SourceState},
+    polymarket_settlement_source::PolymarketSettlementSource,
     price_feed_source::PriceFeedSource,
     uri_parser::{parse_oracle_uri, ParsedOracleTask},
 };
@@ -319,6 +320,17 @@ impl OracleRelayerManager {
                 )?;
                 Ok(DataSourceKind::PriceFeed(source))
             }
+            source_types::POLYMARKET_SETTLEMENT => {
+                let source = PolymarketSettlementSource::from_task_with_progress(
+                    task,
+                    rpc_url,
+                    latest_onchain_nonce,
+                    latest_onchain_position,
+                    cursor,
+                )
+                .await?;
+                Ok(DataSourceKind::PolymarketSettlement(source))
+            }
             _ => Err(anyhow!("Unknown source type: {}", task.source_type)),
         }
     }
@@ -473,6 +485,8 @@ mod tests {
         "gravity://0/1/events?portal=0x0000000000000000000000000000000000000001&fromBlock=100";
     const PRICE_URI: &str =
         "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8";
+    const POLYMARKET_URI: &str =
+        "gravity://6/9001/polymarket_settlement?ctf=0x4D97DCd97eC945f40cF65F87097ACe5EA0476045&condition=0x2afe86f96be81a0d89ed776bedbd52d1c75bc47b49e6f0f791ddd009f52faf23&fromBlock=89000000&chainId=137";
 
     fn state(last_nonce: u128, last_position: u64, cursor: u64) -> RelayerState {
         let mut state = RelayerState::new();
@@ -563,6 +577,42 @@ mod tests {
         manager.add_uri(PRICE_URI, "https://fapi.binance.com", 0, 0).await.unwrap();
 
         assert!(manager.has_uri(PRICE_URI).await);
+    }
+
+    #[tokio::test]
+    async fn adds_polymarket_settlement_source_without_network_access() {
+        let datadir = tempfile::tempdir().unwrap();
+        let manager = OracleRelayerManager::new(datadir.path().to_path_buf());
+
+        manager.add_uri(POLYMARKET_URI, "http://127.0.0.1:8545", 0, 0).await.unwrap();
+
+        assert!(manager.has_uri(POLYMARKET_URI).await);
+        assert_eq!(manager.source_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn persists_polymarket_empty_scan_watermark_without_inventing_nonce() {
+        let datadir = tempfile::tempdir().unwrap();
+        let manager = OracleRelayerManager::new(datadir.path().to_path_buf());
+
+        manager
+            .update_and_save_state(
+                POLYMARKET_URI,
+                source_types::POLYMARKET_SETTLEMENT,
+                9001,
+                0,
+                0,
+                89_001_000,
+            )
+            .await;
+
+        let state = RelayerState::load(&state_file_path(datadir.path())).unwrap();
+        let source = state.get(POLYMARKET_URI).unwrap();
+        assert_eq!(source.source_type, source_types::POLYMARKET_SETTLEMENT);
+        assert_eq!(source.source_id, 9001);
+        assert_eq!(source.last_nonce, 0);
+        assert_eq!(source.last_nonce_block, 0);
+        assert_eq!(source.cursor_block, 89_001_000);
     }
 
     #[tokio::test]

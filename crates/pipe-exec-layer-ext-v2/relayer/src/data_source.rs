@@ -7,7 +7,10 @@ use alloy_primitives::{Bytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::{blockchain_source::BlockchainEventSource, price_feed_source::PriceFeedSource};
+use crate::{
+    blockchain_source::BlockchainEventSource,
+    polymarket_settlement_source::PolymarketSettlementSource, price_feed_source::PriceFeedSource,
+};
 
 /// Data returned by oracle data sources
 ///
@@ -35,6 +38,7 @@ pub trait OracleDataSource: Send + Sync {
     /// Get the source type (corresponds to NativeOracle.sourceType)
     /// - 0: BLOCKCHAIN
     /// - 3: `PRICE_FEED`
+    /// - 6: `POLYMARKET_SETTLEMENT`
     fn source_type(&self) -> u32;
 
     /// Get the source ID (corresponds to NativeOracle.sourceId)
@@ -55,6 +59,9 @@ pub mod source_types {
 
     /// Deterministic external price buckets
     pub const PRICE_FEED: u32 = 3;
+
+    /// Finalized Polygon CTF settlements
+    pub const POLYMARKET_SETTLEMENT: u32 = 6;
 }
 
 /// Extensible enum for runtime dispatch of data sources
@@ -70,6 +77,9 @@ pub enum DataSourceKind {
 
     /// Deterministic external price buckets (sourceType=3)
     PriceFeed(PriceFeedSource),
+
+    /// Finalized Polygon CTF settlements (sourceType=6)
+    PolymarketSettlement(PolymarketSettlementSource),
 }
 
 impl DataSourceKind {
@@ -77,6 +87,7 @@ impl DataSourceKind {
         match self {
             Self::Blockchain(source) => source.last_nonce().await,
             Self::PriceFeed(source) => source.last_nonce().await,
+            Self::PolymarketSettlement(source) => source.last_nonce().await,
         }
     }
 
@@ -84,6 +95,7 @@ impl DataSourceKind {
         match self {
             Self::Blockchain(source) => source.last_nonce_block().await,
             Self::PriceFeed(source) => source.last_nonce_position().await,
+            Self::PolymarketSettlement(source) => source.last_nonce_position().await,
         }
     }
 
@@ -94,6 +106,7 @@ impl DataSourceKind {
                 Ok(())
             }
             Self::PriceFeed(source) => source.reconcile_progress(nonce, position).await,
+            Self::PolymarketSettlement(source) => source.reconcile_progress(nonce, position).await,
         }
     }
 
@@ -101,6 +114,7 @@ impl DataSourceKind {
         match self {
             Self::Blockchain(source) => source.cursor(),
             Self::PriceFeed(source) => source.cursor(),
+            Self::PolymarketSettlement(source) => source.cursor(),
         }
     }
 
@@ -108,6 +122,7 @@ impl DataSourceKind {
         match self {
             Self::Blockchain(source) => source.chain_id(),
             Self::PriceFeed(source) => source.feed_id(),
+            Self::PolymarketSettlement(source) => source.mirror_id(),
         }
     }
 }
@@ -118,6 +133,7 @@ impl OracleDataSource for DataSourceKind {
         match self {
             Self::Blockchain(_) => source_types::BLOCKCHAIN,
             Self::PriceFeed(_) => source_types::PRICE_FEED,
+            Self::PolymarketSettlement(_) => source_types::POLYMARKET_SETTLEMENT,
         }
     }
 
@@ -125,6 +141,7 @@ impl OracleDataSource for DataSourceKind {
         match self {
             Self::Blockchain(s) => s.source_id(),
             Self::PriceFeed(s) => s.source_id(),
+            Self::PolymarketSettlement(s) => s.source_id(),
         }
     }
 
@@ -132,6 +149,7 @@ impl OracleDataSource for DataSourceKind {
         match self {
             Self::Blockchain(s) => s.poll().await,
             Self::PriceFeed(s) => s.poll().await,
+            Self::PolymarketSettlement(s) => s.poll().await,
         }
     }
 }

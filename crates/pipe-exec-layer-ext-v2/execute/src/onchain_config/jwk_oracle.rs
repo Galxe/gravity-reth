@@ -52,7 +52,9 @@ fn parse_source_from_issuer(issuer: &[u8]) -> Option<(u32, u64)> {
 
 fn callback_gas_limit(source_type: u32) -> Result<u64, String> {
     match source_type {
-        source_types::BLOCKCHAIN | source_types::PRICE_FEED => Ok(CALLBACK_GAS_LIMIT),
+        source_types::BLOCKCHAIN |
+        source_types::PRICE_FEED |
+        source_types::POLYMARKET_SETTLEMENT => Ok(CALLBACK_GAS_LIMIT),
         _ => Err(format!("Unsupported oracle source type: {source_type}")),
     }
 }
@@ -200,6 +202,20 @@ mod tests {
             uint8 decimals;
             int256 price;
         }
+
+        struct PolymarketSettlementPayloadForTest {
+            uint256 mirrorId;
+            uint256 polygonChainId;
+            address ctf;
+            address oracle;
+            bytes32 conditionId;
+            bytes32 questionId;
+            uint256 outcomeSlotCount;
+            uint256[] payoutNumerators;
+            bytes32 txHash;
+            uint256 logIndex;
+            uint8 settlementKind;
+        }
     }
 
     fn wrapped_jwk(nonce: u128, position: U256, payload: &[u8]) -> JWKStruct {
@@ -279,13 +295,44 @@ mod tests {
     }
 
     #[test]
+    fn preserves_polymarket_coordinates_payload_and_standard_callback_gas() {
+        let payload = PolymarketSettlementPayloadForTest {
+            mirrorId: U256::from(9001),
+            polygonChainId: U256::from(137),
+            ctf: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045".parse().unwrap(),
+            oracle: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296".parse().unwrap(),
+            conditionId: [0x11; 32].into(),
+            questionId: [0x22; 32].into(),
+            outcomeSlotCount: U256::from(2),
+            payoutNumerators: vec![U256::ZERO, U256::from(1)],
+            txHash: [0x33; 32].into(),
+            logIndex: U256::from(17),
+            settlementKind: 1,
+        }
+        .abi_encode();
+        let provider = provider(
+            b"gravity://6/9001/polymarket_settlement?chainId=137",
+            vec![wrapped_jwk(1, U256::from(50_000_000u64), &payload)],
+        );
+
+        let tx = construct_oracle_record_transaction(provider, 0, 0).unwrap();
+        let call = recordBatchCall::abi_decode(tx.input()).unwrap();
+        assert_eq!(call.sourceType, source_types::POLYMARKET_SETTLEMENT);
+        assert_eq!(call.sourceId, U256::from(9001));
+        assert_eq!(call.nonces, vec![1]);
+        assert_eq!(call.blockNumbers, vec![U256::from(50_000_000u64)]);
+        assert_eq!(call.payloads, vec![Bytes::from(payload)]);
+        assert_eq!(call.callbackGasLimits, vec![U256::from(CALLBACK_GAS_LIMIT)]);
+    }
+
+    #[test]
     fn rejects_provider_source_types_not_implemented_by_core() {
         let provider = provider(
-            b"gravity://6/1001/settlement",
+            b"gravity://7/1001/unsupported",
             vec![wrapped_jwk(1, U256::from(60_000), b"settlement")],
         );
         let error = construct_oracle_record_transaction(provider, 0, 0).unwrap_err();
-        assert_eq!(error, "Unsupported oracle source type: 6");
+        assert_eq!(error, "Unsupported oracle source type: 7");
     }
 
     #[test]
