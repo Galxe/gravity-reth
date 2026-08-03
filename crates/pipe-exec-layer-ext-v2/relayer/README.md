@@ -2,8 +2,8 @@
 
 This crate converts finalized external-source observations into the
 UnsupportedJWK payloads used by Gravity validator consensus. This core slice
-implements source type `0` (`GravityPortal.MessageSent`). Provider-specific
-source types are added in separate modules and PRs.
+implements source type `0` (`GravityPortal.MessageSent`) and source type `3`
+(Binance USD-M index-price klines). Other providers remain separate slices.
 
 ## Task Identity
 
@@ -24,8 +24,55 @@ Source type `0` example:
 gravity://0/1/events?portal=0x0000000000000000000000000000000000000001&fromBlock=19000000
 ```
 
+Source type `3` example:
+
+```text
+gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8&graceMs=120000
+```
+
 RPC URLs are local validator configuration. They are not stored in the task
 URI or committed on-chain.
+
+For Binance, the local URL is the USD-M Futures base URL. The adapter appends
+`/fapi/v1/indexPriceKlines` and the deterministic query parameters. The public
+index-kline endpoint does not require API credentials. `baseUrl` and unknown
+query parameters are rejected in the on-chain URI.
+
+## Binance Index Price Delivery
+
+For one `(sourceType=3, feedId)` task, delivery nonce `n` maps to exactly one
+bucket:
+
+```text
+bucketStart(n) = configuredBucketStart + (n - 1) * interval
+bucketEnd(n)   = bucketStart(n) + interval - 1
+sourcePosition = bucketEnd(n)
+roundId        = bucketStart(n) / interval
+resolvedAt     = bucketEnd(n)
+```
+
+The adapter waits until `bucketEnd + graceMs`, requests exactly that bucket,
+and accepts exactly one response row whose open and close timestamps match.
+The callback payload is:
+
+```solidity
+abi.encode(
+    uint256 feedId,
+    uint64 roundId,
+    uint64 resolvedAt,
+    uint8 decimals,
+    int256 price
+)
+```
+
+The decimal parser rejects negative, zero, malformed, overflowing, or
+non-representable prices. HTTP connect/request timeouts and a 64 KiB response
+limit bound validator resource use. Supported fixed intervals are `1m`, `3m`,
+`5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, and `3d`.
+
+Changing the interval or bucket origin for an active feed changes the
+nonce-to-position history. Registration and runtime reconciliation reject that
+mismatch; deploy the changed task under a new `feedId`.
 
 ## Canonical Delivery
 
