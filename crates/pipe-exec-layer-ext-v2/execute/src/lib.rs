@@ -1479,6 +1479,10 @@ impl<Storage: GravityStorage> Core<Storage> {
 
     /// Return the filtered valid transactions with sender without changing the relative order of
     /// the transactions.
+    ///
+    /// All excluded txs are discarded from the pool (`is_discarded` + `discard_txs_tx`), including
+    /// Beta+ gas-budget exclusions. Pre-Beta uses legacy gas prefix-cut; Beta+ packs with gas as
+    /// last gate but still discards non-fitting txs (audit#646 packing fix, no keep-in-pool defer).
     fn filter_invalid_txs(
         &self,
         db: &Storage::StateView,
