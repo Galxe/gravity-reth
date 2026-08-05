@@ -1,9 +1,9 @@
 //! Helpers for testing.
 
-use crate::{
-    parallel_execute::ParallelExecutor, BlockExecutionError, ConfigureEvm, EvmEnvFor,
-    ParallelDatabase,
-};
+#[cfg(feature = "std")]
+use crate::{parallel_execute::ParallelExecutor, BlockExecutionError, ParallelDatabase};
+use crate::{ConfigureEvm, EvmEnvFor};
+#[cfg(feature = "std")]
 use alloc::boxed::Box;
 use reth_primitives_traits::{BlockTy, HeaderTy, SealedBlock, SealedHeader};
 
@@ -74,6 +74,7 @@ where
         self.inner().context_for_next_block(parent, attributes)
     }
 
+    #[cfg(feature = "std")]
     fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
         &self,
         db: DB,

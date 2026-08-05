@@ -36,7 +36,8 @@ const EXPECTED_INPUT_LEN: usize = BLS_PUBKEY_LEN + BLS_POP_LEN;
 ///
 /// At ~0.05 gas/ns (mid-range for pairing ops): 2,160,000 ns × 0.05 ≈ 108,000 gas.
 /// Rounded to 110,000 to align with EIP-2537 BLS pairing (2 pairs) pricing.
-const POP_VERIFY_GAS: u64 = 110_000;
+/// Flat gas charged by the BLS proof-of-possession precompile.
+pub const POP_VERIFY_GAS: u64 = 110_000;
 
 /// Domain separation tag for BLS `PoP` verification
 /// Matches the IETF standard for BLS12-381 `PoP`
@@ -61,13 +62,17 @@ pub fn create_bls_pop_verify_precompile() -> DynPrecompile {
     let precompile_id = PrecompileId::custom("bls_pop_verify");
 
     (precompile_id, move |input: PrecompileInput<'_>| -> PrecompileResult {
-        bls_pop_verify_handler(input)
+        bls_pop_verify_handler(input.data, input.gas)
     })
         .into()
 }
 
-/// BLS `PoP` verification handler
-fn bls_pop_verify_handler(input: PrecompileInput<'_>) -> PrecompileResult {
+/// Executes BLS `PoP` verification with the precompile's complete gas semantics.
+///
+/// This is the shared entry point for EVM adapters. It checks the forwarded gas before running the
+/// comparatively expensive verification and delegates input processing to
+/// [`bls_pop_verify_handler_raw`].
+pub fn bls_pop_verify_handler(data: &[u8], gas: u64) -> PrecompileResult {
     // Charge-gas check before running the verification logic. This precompile
     // charges a flat `POP_VERIFY_GAS`, and the EVM dispatcher executes
     // `assert!(record_cost(gas_used))` after receiving `Ok(gas_used)`: if the
@@ -76,10 +81,10 @@ fn bls_pop_verify_handler(input: PrecompileInput<'_>) -> PrecompileResult {
     // network-wide halt triggerable by any user transaction). Return OutOfGas
     // early so the dispatcher takes the normal PrecompileOOG branch instead of
     // panicking.
-    if POP_VERIFY_GAS > input.gas {
+    if POP_VERIFY_GAS > gas {
         return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
     }
-    bls_pop_verify_handler_raw(input.data)
+    bls_pop_verify_handler_raw(data)
 }
 
 /// Core BLS `PoP` verification logic operating on raw input bytes.
@@ -240,5 +245,33 @@ mod tests {
 
         let result = bls_pop_verify_handler_raw(&input_data).unwrap();
         assert_eq!(result.bytes[31], 0, "Invalid PoP should return false");
+    }
+
+    #[test]
+    fn test_precompile_gas_aware_handler_boundary() {
+        let (pubkey, pop) = generate_test_keypair();
+        let mut input_data = Vec::with_capacity(EXPECTED_INPUT_LEN);
+        input_data.extend_from_slice(&pubkey);
+        input_data.extend_from_slice(&pop);
+
+        let out_of_gas = bls_pop_verify_handler(&input_data, POP_VERIFY_GAS - 1).unwrap();
+        assert!(matches!(
+            out_of_gas.status,
+            revm::precompile::PrecompileStatus::Halt(PrecompileHalt::OutOfGas)
+        ));
+        assert_eq!(out_of_gas.gas_used, 0);
+
+        let exact_gas = bls_pop_verify_handler(&input_data, POP_VERIFY_GAS).unwrap();
+        assert!(exact_gas.is_success());
+        assert_eq!(exact_gas.gas_used, POP_VERIFY_GAS);
+        assert_eq!(exact_gas.bytes[31], 1);
+
+        // At the exact gas threshold, input validation runs and preserves its existing halt.
+        let invalid_input = bls_pop_verify_handler(&[], POP_VERIFY_GAS).unwrap();
+        assert!(matches!(
+            invalid_input.status,
+            revm::precompile::PrecompileStatus::Halt(PrecompileHalt::Other(_))
+        ));
+        assert_eq!(invalid_input.gas_used, 0);
     }
 }
