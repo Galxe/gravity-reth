@@ -15,3 +15,6 @@ doc-valid-idents = [
     "MessagePack",
 ]
 allow-dbg-in-tests = true
+disallowed-methods = [
+    { path = "alloy_evm::EvmInternals::db_mut", reason = "grevm custom precompiles must access EVM state through the journal-aware capability facade" },
+]

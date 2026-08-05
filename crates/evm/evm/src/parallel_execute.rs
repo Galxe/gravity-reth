@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::execute::Executor;
 use alloy_evm::{precompiles::DynPrecompile, Database, EvmEnv};
 use alloy_primitives::Address;
+use grevm::DynParallelPrecompile;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
 use revm::{
@@ -61,7 +62,8 @@ pub trait ParallelExecutor {
     /// external bridging.
     ///
     /// `precompiles` allows callers to inject custom precompiles (e.g. mint, BLS) for this
-    /// specific transaction, in addition to any executor-level custom precompiles.
+    /// specific transaction. Executor-level user precompiles are intentionally not installed on
+    /// this system-transaction path.
     fn transact_system_txn(
         &mut self,
         evm_env: EvmEnv,
@@ -88,11 +90,11 @@ pub trait ParallelExecutor {
     /// [`apply_state_change`](Self::apply_state_change).
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error>;
 
-    /// Applies custom precompiled contracts to the executor.
-    ///
-    /// These precompiles will be available during transaction execution alongside
-    /// the standard Ethereum precompiles.
-    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>);
+    /// Applies capability-restricted custom precompiles to user transaction execution.
+    fn apply_custom_precompiles(
+        &mut self,
+        custom_precompiles: Arc<Vec<(Address, DynParallelPrecompile)>>,
+    );
 }
 
 /// Wraps a [`Executor`] to provide a [`ParallelExecutor`] implementation.
@@ -150,7 +152,14 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
     }
 
     #[inline]
-    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
-        self.0.apply_custom_precompiles(custom_precompiles);
+    fn apply_custom_precompiles(
+        &mut self,
+        custom_precompiles: Arc<Vec<(Address, DynParallelPrecompile)>>,
+    ) {
+        let custom_precompiles = custom_precompiles
+            .iter()
+            .map(|(address, precompile)| (*address, precompile.to_alloy()))
+            .collect();
+        self.0.apply_custom_precompiles(Arc::new(custom_precompiles));
     }
 }

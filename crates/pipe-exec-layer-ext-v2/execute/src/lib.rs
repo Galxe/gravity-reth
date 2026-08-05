@@ -1,6 +1,7 @@
 //! Pipeline execution layer extension
 #[macro_use]
 mod channel;
+mod custom_precompiles;
 mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
@@ -29,7 +30,7 @@ use gravity_precompiles::{
     randomness_by_height::randomness_by_height_gas_policy_at_block,
 };
 use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
-use grevm::DelegatedSafetyConfig;
+use grevm::{DelegatedSafetyConfig, DynParallelPrecompile};
 use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, GravityHardfork};
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
@@ -81,10 +82,7 @@ use crate::{
         SystemTxnResult, DKG_ADDR, NATIVE_MINT_PRECOMPILE_ADDR, NATIVE_ORACLE_ADDR,
         RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, SYSTEM_CALLER,
     },
-    randomness_precompile::{
-        create_randomness_by_height_precompile, ExecutionRandomnessProvider,
-        GravityStorageRandomnessProvider,
-    },
+    randomness_precompile::{ExecutionRandomnessProvider, GravityStorageRandomnessProvider},
 };
 
 fn extract_gravity_events_from_system_receipts(
@@ -438,8 +436,8 @@ struct Core<Storage: GravityStorage> {
     storage: Arc<Storage>,
     evm_config: EthEvmConfig,
     chain_spec: Arc<ChainSpec>,
-    bls_pop_verify_precompile: DynPrecompile,
-    pre_alpha_precompiles: Arc<Vec<(Address, DynPrecompile)>>,
+    bls_pop_verify_precompile: DynParallelPrecompile,
+    pre_alpha_precompiles: Arc<Vec<(Address, DynParallelPrecompile)>>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
@@ -575,7 +573,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         &self,
         ordered_block: &OrderedBlock,
         parent_header: &Header,
-    ) -> Arc<Vec<(Address, DynPrecompile)>> {
+    ) -> Arc<Vec<(Address, DynParallelPrecompile)>> {
         let block_number = ordered_block.number;
         let block_timestamp = ordered_block.timestamp_us / 1_000_000;
         if !self
@@ -602,7 +600,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             (BLS_PRECOMPILE_ADDR, self.bls_pop_verify_precompile.clone()),
             (
                 RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
-                create_randomness_by_height_precompile(execution_provider),
+                custom_precompiles::create_randomness_by_height_precompile(execution_provider),
             ),
         ])
     }
@@ -1703,7 +1701,7 @@ where
         "new pipe exec layer api"
     );
 
-    let bls_pop_verify_precompile = create_bls_pop_verify_precompile();
+    let bls_pop_verify_precompile = custom_precompiles::create_bls_pop_verify_precompile();
     let pre_alpha_precompiles =
         Arc::new(vec![(BLS_PRECOMPILE_ADDR, bls_pop_verify_precompile.clone())]);
     let start_time = Instant::now();

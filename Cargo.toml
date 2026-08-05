@@ -221,6 +221,7 @@ rustdoc.all = "warn"
 # rust.unnameable-types = "warn"
 
 [workspace.lints.clippy]
+disallowed_methods = "deny"
 # These are some of clippy's nursery (i.e., experimental) lints that we like.
 # By default, nursery lints are allowed. Some of the lints below have made good
 # suggestions which we fixed. The others didn't have any findings, so we can
@@ -451,7 +452,7 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types", default-features = false }
 reth-revm = { path = "crates/revm", default-features = false }
-grevm = { package = "grevm", git = "https://github.com/Galxe/grevm", rev = "dcd1460b20d9f3d793c8309c28b0b7401be91523" }
+grevm = { package = "grevm", git = "https://github.com/AshinGau/grevm", rev = "04be8ba" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }

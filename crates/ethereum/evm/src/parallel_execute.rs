@@ -12,7 +12,10 @@ use alloy_evm::{
 };
 use alloy_primitives::{map::HashMap, Address};
 use gravity_primitives::get_gravity_config;
-use grevm::{GrevmConfig, ParallelBundleState, ParallelState, Scheduler, TxExecutionOutcome};
+use grevm::{
+    DynParallelPrecompile, GrevmConfig, ParallelBundleState, ParallelState, Scheduler,
+    TxExecutionOutcome,
+};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
@@ -53,8 +56,8 @@ pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
     state: Option<ParallelState<DB>>,
     /// System caller for executing system calls.
     system_caller: SystemCaller<Arc<ChainSpec>>,
-    /// Custom precompiled contracts to inject into the EVM.
-    custom_precompiles: Option<Arc<Vec<(Address, DynPrecompile)>>>,
+    /// Capability-restricted custom precompiles available to user transactions.
+    custom_precompiles: Option<Arc<Vec<(Address, DynParallelPrecompile)>>>,
     /// Block-scoped grevm execution policy.
     grevm_config: GrevmConfig,
 }
@@ -387,7 +390,10 @@ where
             .map_err(|e| BlockExecutionError::msg(alloc::format!("basic {address}: {e:?}")))
     }
 
-    fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
+    fn apply_custom_precompiles(
+        &mut self,
+        custom_precompiles: Arc<Vec<(Address, DynParallelPrecompile)>>,
+    ) {
         self.custom_precompiles = Some(custom_precompiles);
     }
 }
@@ -493,6 +499,7 @@ mod tests {
         eip7685::EMPTY_REQUESTS_HASH,
     };
     use alloy_primitives::{keccak256, Bytes, B256, U256};
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use reth_chainspec::{
         ChainHardforks, ChainSpec, ChainSpecBuilder, ForkCondition, GravityHardfork, MAINNET,
     };
@@ -503,6 +510,7 @@ mod tests {
         bytecode::Bytecode,
         context::TxEnv,
         database::{CacheDB, EmptyDB},
+        precompile::{PrecompileId, PrecompileOutput},
         primitives::TxKind,
         state::{Account, AccountInfo, AccountStatus},
     };
@@ -873,6 +881,61 @@ mod tests {
         let info = serial_acc.info.as_ref().expect("SYSTEM_CALLER info present");
         assert_eq!(info.balance, U256::ZERO, "SYSTEM_CALLER balance must stay zero (gas-exempt)");
         assert_eq!(info.nonce, 2, "SYSTEM_CALLER nonce must reflect both system txs");
+    }
+
+    /// Executor-level custom precompiles are scoped to Grevm's user-transaction scheduler.
+    /// System transactions only see the Alloy precompiles explicitly supplied for that call.
+    #[test]
+    fn executor_custom_precompile_does_not_leak_into_system_transactions() {
+        let chain_spec = alpha_active_chainspec(1);
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let evm_env = evm_config
+            .evm_env(&alpha_block_header(1))
+            .expect("system transaction EVM environment must build");
+        let precompile_address = Address::with_last_byte(0xfe);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in_precompile = calls.clone();
+        let custom_precompile = DynParallelPrecompile::new(
+            PrecompileId::custom("system-precompile-isolation-sentinel"),
+            move |input| {
+                calls_in_precompile.fetch_add(1, Ordering::SeqCst);
+                Ok(PrecompileOutput::new(0, Bytes::new(), input.reservoir()))
+            },
+        );
+
+        let mut executor = GrevmExecutor::new(chain_spec, &evm_config, seeded_db(U256::ZERO, 0));
+        executor.apply_custom_precompiles(Arc::new(vec![(
+            precompile_address,
+            custom_precompile.clone(),
+        )]));
+
+        let mut implicit_tx = system_tx_env(0, chain_id);
+        implicit_tx.kind = TxKind::Call(precompile_address);
+        executor
+            .transact_system_txn(evm_env.clone(), Vec::new(), implicit_tx)
+            .expect("system transaction without explicit precompile must succeed");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "executor-level custom precompile must not be visible to system transactions"
+        );
+
+        let mut explicit_tx = system_tx_env(1, chain_id);
+        explicit_tx.kind = TxKind::Call(precompile_address);
+        executor
+            .transact_system_txn(
+                evm_env,
+                vec![(precompile_address, custom_precompile.to_alloy())],
+                explicit_tx,
+            )
+            .expect("system transaction with explicit precompile must succeed");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "explicit system precompile must execute exactly once"
+        );
     }
 
     // --- U-7: fee归零 + 余额不动 + coinbase 不收 tip (matrix §1.2) ---
