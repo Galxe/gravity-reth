@@ -1,5 +1,4 @@
 use crate::{
-    db_ext::DbTxPruneExt,
     segments::{
         user::history::{finalize_history_prune, HistoryPruneResult},
         PruneInput, Segment,
@@ -7,7 +6,7 @@ use crate::{
     PrunerError,
 };
 use alloy_primitives::BlockNumber;
-use reth_db_api::{models::ShardedKey, tables, transaction::DbTxMut};
+use reth_db_api::{cursor::DbCursorRO, models::ShardedKey, tables, transaction::DbTxMut};
 use reth_provider::{
     DBProvider, StaticFileProviderFactory, StaticFileSegment, StorageSettingsCache,
 };
@@ -189,31 +188,29 @@ impl AccountHistory {
         // additionally limited by the `max_reorg_depth`, so no OOM is expected here.
         let mut highest_deleted_accounts = FxHashMap::default();
         let mut last_changeset_pruned_block = None;
-        let (pruned_changesets, done) =
-            provider.tx_ref().prune_table_with_range::<tables::AccountChangeSets>(
-                range,
-                &mut limiter,
-                |_| false,
-                |(block_number, account)| {
-                    highest_deleted_accounts.insert(account.address, block_number);
-                    last_changeset_pruned_block = Some(block_number);
-                },
-            )?;
-        trace!(target: "pruner", pruned = %pruned_changesets, %done, "Pruned account history (changesets from database)");
-
-        // The table walk can stop in the middle of a block, so the interrupted block has to be
-        // pruned again on the next run.
-        let last_pruned_block = last_changeset_pruned_block.map(|block_number| {
-            if done {
-                block_number
-            } else {
-                block_number.saturating_sub(1)
+        let mut pruned_changesets = 0;
+        let mut done = true;
+        let mut cursor = provider.tx_ref().cursor_write::<tables::AccountChangeSets>()?;
+        let mut walker = cursor.walk_range(range)?;
+        while let Some((block_number, account)) = walker.next().transpose()? {
+            if limiter.is_limit_reached() &&
+                last_changeset_pruned_block.is_some_and(|last| last != block_number)
+            {
+                done = false;
+                break
             }
-        });
+
+            walker.delete_current()?;
+            limiter.increment_deleted_entries_count();
+            pruned_changesets += 1;
+            highest_deleted_accounts.insert(account.address, block_number);
+            last_changeset_pruned_block = Some(block_number);
+        }
+        trace!(target: "pruner", pruned = %pruned_changesets, %done, "Pruned account history (changesets from database)");
 
         let result = HistoryPruneResult {
             highest_deleted: highest_deleted_accounts,
-            last_pruned_block,
+            last_pruned_block: last_changeset_pruned_block,
             pruned_count: pruned_changesets,
             done,
         };
@@ -347,20 +344,12 @@ mod tests {
                     .map(|(i, _)| i)
                     .unwrap_or_default();
 
-                let mut pruned_changesets = changesets
-                    .iter()
-                    // Skip what we've pruned so far, subtracting one to get last pruned block
-                    // number further down
-                    .skip(pruned.saturating_sub(1));
+                let mut pruned_changesets = changesets.iter().skip(pruned.saturating_sub(1));
 
                 let last_pruned_block_number = pruned_changesets
-                .next()
-                .map(|(block_number, _)| if result.progress.is_finished() {
-                    *block_number
-                } else {
-                    block_number.saturating_sub(1)
-                } as BlockNumber)
-                .unwrap_or(to_block);
+                    .next()
+                    .map(|(block_number, _)| *block_number as BlockNumber)
+                    .unwrap_or(to_block);
 
                 let pruned_changesets = pruned_changesets.fold(
                     BTreeMap::<_, Vec<_>>::new(),
