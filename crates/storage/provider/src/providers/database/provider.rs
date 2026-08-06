@@ -2645,9 +2645,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriter for DatabaseProvider
                 }
                 None => {
                     num_entries += 1;
-                    if account_trie_cursor.seek_exact(nibbles)?.is_some() {
-                        account_trie_cursor.delete_current()?;
-                    }
+                    account_trie_cursor.delete_by_key(nibbles)?;
                 }
             }
         }
@@ -3445,9 +3443,48 @@ mod tests {
     use super::*;
     use crate::{
         test_utils::{blocks::BlockchainTestData, create_test_provider_factory},
-        BlockWriter,
+        BlockWriter, DatabaseProviderFactory,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
+
+    #[test]
+    fn trie_removals_override_pending_batch_updates() {
+        use reth_trie::{BranchNodeCompact, Nibbles};
+
+        let factory = create_test_provider_factory();
+        let provider = factory.database_provider_rw().unwrap();
+        let account_path = Nibbles::from_nibbles([1]);
+        let storage_path = Nibbles::from_nibbles([2]);
+        let hashed_address = B256::random();
+        let node = BranchNodeCompact::new(1, 1, 1, vec![B256::random()], None);
+
+        let mut inserted = TrieUpdates::default();
+        inserted.account_nodes.insert(account_path, node.clone());
+        inserted.storage_tries.insert(
+            hashed_address,
+            StorageTrieUpdates {
+                storage_nodes: std::iter::once((storage_path, node)).collect(),
+                ..Default::default()
+            },
+        );
+        provider.write_trie_updates(&inserted).unwrap();
+
+        let mut removed = TrieUpdates::default();
+        removed.removed_nodes.insert(account_path);
+        removed.storage_tries.insert(
+            hashed_address,
+            StorageTrieUpdates {
+                removed_nodes: std::iter::once(storage_path).collect(),
+                ..Default::default()
+            },
+        );
+        provider.write_trie_updates(&removed).unwrap();
+        provider.commit_view().unwrap();
+
+        let provider = factory.database_provider_ro().unwrap();
+        assert_eq!(provider.tx_ref().entries::<tables::AccountsTrie>().unwrap(), 0);
+        assert_eq!(provider.tx_ref().entries::<tables::StoragesTrie>().unwrap(), 0);
+    }
 
     #[test]
     fn changeset_routing_reads_from_static_files_under_new_layout() {

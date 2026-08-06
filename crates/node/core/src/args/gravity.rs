@@ -18,8 +18,8 @@ pub struct GravityArgs {
     #[arg(long = "gravity.cache.max-persist-gap", default_value_t = 128)]
     pub cache_max_persist_gap: u64,
 
-    /// Persist consecutive blocks as one merged commit per group to amortize the per-commit
-    /// fsync (much faster from-genesis catch-up). default false.
+    /// Persist consecutive blocks in merged groups to amortize per-block fsyncs (much faster
+    /// from-genesis catch-up). Incompatible with Storage V2. default false.
     #[arg(long = "gravity.persist.merge-blocks", default_value = "false")]
     pub persist_merge_blocks: bool,
 

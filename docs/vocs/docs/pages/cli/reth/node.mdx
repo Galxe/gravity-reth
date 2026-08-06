@@ -970,7 +970,7 @@ Gravity:
           [default: 128]
 
       --gravity.persist.merge-blocks
-          Persist consecutive blocks as one merged commit per group to amortize the per-commit fsync (much faster from-genesis catch-up). default false
+          Persist consecutive blocks in merged groups to amortize per-block fsyncs (much faster from-genesis catch-up). Incompatible with Storage V2. default false
 
       --gravity.cache.capacity <CACHE_CAPACITY>
           The max size of cached items
@@ -1158,11 +1158,11 @@ Static Files:
 
 Storage:
       --storage.v2 [<V2>]
-          Enable V2 (hot/cold) storage layout for new databases.
+          Enable the V2 storage layout (changesets in static files) for new databases.
 
-          When set, new databases will be initialized with the V2 storage layout that separates hot and cold data. Existing databases always use the settings persisted in their metadata regardless of this flag.
+          When set, new databases are initialized with account/storage changesets stored in static file segments instead of the state database. Existing databases always use the settings persisted in their metadata regardless of this flag.
 
-          [default: true]
+          [default: false]
           [possible values: true, false]
 
 Ress:
