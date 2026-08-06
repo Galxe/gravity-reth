@@ -30,8 +30,9 @@ use reth_db_common::DbTool;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockNumReader,
     DatabaseProviderFactory, MetadataProvider, MetadataWriter, ProviderFactory,
-    StaticFileProviderFactory, StaticFileWriter, StorageSettingsCache,
+    PruneCheckpointReader, StaticFileProviderFactory, StaticFileWriter, StorageSettingsCache,
 };
+use reth_prune_types::PruneSegment;
 use reth_static_file_types::StaticFileSegment;
 use tracing::{info, warn};
 
@@ -80,11 +81,22 @@ impl Command {
         }
 
         let tip = provider.last_block_number()?;
-        // Pruned nodes whose earliest changeset is above block 1 are not supported: the static
-        // file segments are append-only from genesis and gravity has no prune-aware start yet.
-        // Block 0 is expected, not evidence of pruning: genesis initialization writes the
-        // genesis-alloc reverts at block 0 on every chain (see `insert_genesis_state`), so stock
-        // datadirs start at 0 and databases seeded without genesis state start at 1 (#391).
+        // The account and storage histories are pruned independently. Check their authoritative
+        // checkpoints before inspecting table contents, because a late first storage change does
+        // not by itself indicate pruning.
+        for segment in [PruneSegment::AccountHistory, PruneSegment::StorageHistory] {
+            eyre::ensure!(
+                provider
+                    .get_prune_checkpoint(segment)?
+                    .and_then(|checkpoint| checkpoint.block_number)
+                    .is_none(),
+                "{segment:?} history is pruned; migrating a pruned database is not yet supported"
+            );
+        }
+
+        // Keep the table-based account check for legacy databases without prune checkpoints.
+        // Block 0 is expected: genesis initialization writes the genesis-alloc reverts there, and
+        // databases seeded without genesis state can start at block 1 (#391).
         eyre::ensure!(
             provider
                 .tx_ref()
@@ -259,8 +271,9 @@ mod tests {
     use reth_provider::{
         test_utils::{create_test_provider_factory, create_test_provider_factory_with_chain_spec},
         AccountReader, ChangeSetReader, DatabaseProviderFactory, HistoricalStateProviderRef,
-        StorageChangeSetReader, StorageSettingsCache,
+        PruneCheckpointWriter, StorageChangeSetReader, StorageSettingsCache,
     };
+    use reth_prune_types::{PruneCheckpoint, PruneMode};
     use std::{collections::BTreeMap, sync::Arc};
 
     #[test]
@@ -490,6 +503,46 @@ mod tests {
         let tool = DbTool::new(factory.clone()).unwrap();
         let err = Command.execute(&tool).unwrap_err();
         assert!(err.to_string().contains("pruned"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_pruned_storage_history() {
+        let factory = create_test_provider_factory();
+        let address = Address::with_last_byte(1);
+        let storage_key = B256::with_last_byte(1);
+        {
+            let provider_rw = factory.database_provider_rw().unwrap();
+            provider_rw
+                .tx_ref()
+                .put::<tables::AccountChangeSets>(1, AccountBeforeTx { address, info: None })
+                .unwrap();
+            provider_rw
+                .tx_ref()
+                .put::<tables::StorageChangeSets>(
+                    BlockNumberAddress((3, address)),
+                    StorageEntry { key: storage_key, value: U256::from(1) },
+                )
+                .unwrap();
+            provider_rw
+                .save_prune_checkpoint(
+                    PruneSegment::StorageHistory,
+                    PruneCheckpoint {
+                        block_number: Some(2),
+                        tx_number: None,
+                        prune_mode: PruneMode::before_inclusive(2),
+                    },
+                )
+                .unwrap();
+            provider_rw.commit().unwrap();
+        }
+
+        let tool = DbTool::new(factory.clone()).unwrap();
+        let err = Command.execute(&tool).unwrap_err();
+        assert!(err.to_string().contains("StorageHistory"), "unexpected error: {err}");
+
+        let provider = factory.database_provider_ro().unwrap();
+        assert!(!provider.cached_storage_settings().changesets_in_static_files);
+        assert_eq!(provider.storage_changeset(3).unwrap().len(), 1);
     }
 
     /// A crash before the flag flip that left partially-written segments: rerun resets them and
