@@ -18,8 +18,8 @@ pub struct Config {
     pub disable_grevm: bool,
     /// The max block height between merged and pesist block height.
     pub cache_max_persist_gap: u64,
-    /// Persist consecutive blocks as one merged commit per group (amortizes the per-commit
-    /// fsync, much faster catch-up) instead of committing every block. default false.
+    /// Persist consecutive blocks in merged groups to amortize per-block fsyncs (much faster
+    /// catch-up). Incompatible with Storage V2. default false.
     pub persist_merge_blocks: bool,
     /// The max size of cached items
     pub cache_capacity: u64,

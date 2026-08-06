@@ -15,7 +15,7 @@ use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockWriter,
     ChainStateBlockWriter, DatabaseProviderFactory, HistoryWriter, ProviderFactory,
     StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StaticFileWriter,
-    StorageLocation, TrieWriter, TrieWriterV2, PERSIST_BLOCK_CACHE,
+    StorageLocation, StorageSettingsCache, TrieWriter, TrieWriterV2, PERSIST_BLOCK_CACHE,
 };
 use reth_prune::{PrunerError, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender, StageCheckpoint, StageId};
@@ -405,13 +405,17 @@ where
         Ok(())
     }
 
-    /// Persist `blocks` as a sequence of merged groups, each committed once. Groups are bounded by
+    /// Persist `blocks` as a sequence of merged groups. Groups are bounded by
     /// [`MERGE_GROUP_MAX_GAS`] and [`MERGE_GROUP_MAX_STATE`] so the in-flight write batch and the
     /// crash-replay window stay bounded.
     fn save_merged_blocks(
         &self,
         blocks: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
     ) -> Result<(), PersistenceError> {
+        if self.provider.cached_storage_settings().changesets_in_static_files {
+            return Err(PersistenceError::MergeBlocksWithStorageV2)
+        }
+
         let mut group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>> = Vec::new();
         let mut group_gas = 0u64;
         let mut group_state = 0usize;
@@ -435,15 +439,11 @@ where
         self.commit_block_group(group)
     }
 
-    /// Write one contiguous group of executed blocks and commit it once.
+    /// Write one contiguous group of executed blocks with amortized commits.
     ///
-    /// The whole group is written into a single transaction and committed together, so the
-    /// per-commit fsync is paid once per group instead of once per block. The group is atomic: a
-    /// crash before the commit rolls it back and recovery re-executes it idempotently from the
-    /// stage checkpoints, with consensus re-supplying anything past the persisted tip. Batching the
-    /// per-block `write_*` calls is safe because state/hashed/trie writes are last-writer-wins puts
-    /// and receipts use the indices returned by `insert_blocks`, so none of them depends on
-    /// observing earlier uncommitted writes within the transaction.
+    /// State and changesets are flushed once before history indexing because `RocksDB` batches do
+    /// not provide read-your-writes. History and stage checkpoints are committed together
+    /// afterwards, so recovery can replay a group interrupted between the two commits.
     fn commit_block_group(
         &self,
         group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
@@ -480,9 +480,21 @@ where
         let body_indices = provider_rw.insert_blocks(recovered_blocks, StorageLocation::Both)?;
 
         // Receipts, state changesets and hashed state, per block.
-        for ((execution_output, hashed_state), body_index) in
-            execution_outputs.into_iter().zip(hashed_states).zip(body_indices)
+        for (block_index, ((execution_output, hashed_state), body_index)) in
+            execution_outputs.into_iter().zip(hashed_states).zip(body_indices).enumerate()
         {
+            // A primary storage wipe builds its changeset by scanning plain storage. Flush prior
+            // blocks so that scan observes slots created earlier in this merged group.
+            if block_index != 0 &&
+                execution_output
+                    .bundle
+                    .reverts
+                    .iter()
+                    .flatten()
+                    .any(|(_, revert)| revert.wipe_storage)
+            {
+                provider_rw.commit_view()?;
+            }
             provider_rw.write_state_with_indices(
                 &execution_output,
                 OriginalValuesKnown::No,
@@ -500,10 +512,15 @@ where
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
         }
 
+        // History indexing reads the changesets back through RocksDB cursors, which cannot see
+        // pending WriteBatch entries. Storage V2 is rejected before this path because its
+        // changesets live in static files and `commit_view` cannot make them visible.
+        provider_rw.commit_view()?;
+
         // History indices for the whole range, once.
         provider_rw.update_history_indices(group_first..=group_last)?;
 
-        // Advance every written stage's checkpoint to the group tip, then commit the group once.
+        // Advance every written stage's checkpoint to the group tip, then make the final commit.
         // `MerkleExecute` passes `None` (trie writes are idempotent and may resume mid-range); the
         // rest assert checkpoint continuity from `group_first`.
         let tx = provider_rw.tx_ref();
@@ -523,7 +540,7 @@ where
 
     /// Read `stage_id`'s checkpoint (asserting continuity when `check_next` is set) and re-write it
     /// at block `to`. Lets [`commit_block_group`](Self::commit_block_group) advance every stage to
-    /// the group tip within the single group commit.
+    /// the group tip within the final group commit.
     fn advance_checkpoint<TX: DbTx + DbTxMut>(
         tx: &TX,
         stage_id: StageId,
@@ -538,6 +555,10 @@ where
 /// One of the errors that can happen when using the persistence service.
 #[derive(Debug, Error)]
 pub enum PersistenceError {
+    /// Merged persistence cannot read uncommitted Storage V2 changesets.
+    #[error("--gravity.persist.merge-blocks is incompatible with Storage V2")]
+    MergeBlocksWithStorageV2,
+
     /// A pruner error
     #[error(transparent)]
     PrunerError(#[from] PrunerError),
@@ -705,11 +726,17 @@ impl Drop for ServiceGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::B256;
+    use alloy_primitives::{Address, B256, U256};
     use reth_chain_state::test_utils::TestBlockBuilder;
+    use reth_db::models::GravityStorageSettings;
+    use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
     use reth_exex_types::FinishedExExHeight;
-    use reth_provider::test_utils::create_test_provider_factory;
+    use reth_primitives_traits::Account;
+    use reth_provider::{test_utils::create_test_provider_factory, StorageChangeSetReader};
     use reth_prune::Pruner;
+    use revm::database::states::{
+        reverts::Reverts, AccountRevert, AccountStatus, BundleAccount, BundleState,
+    };
     use tokio::sync::mpsc::unbounded_channel;
 
     fn default_persistence_handle() -> PersistenceHandle<EthPrimitives> {
@@ -737,6 +764,129 @@ mod tests {
 
         let result = rx.recv().unwrap();
         assert!(result.last_block.is_none());
+    }
+
+    #[test]
+    fn rejects_merged_persistence_with_storage_v2() {
+        let provider = create_test_provider_factory();
+        provider.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        let service = PersistenceService::new(
+            provider,
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        );
+
+        assert!(matches!(
+            service.save_merged_blocks(Vec::new()),
+            Err(PersistenceError::MergeBlocksWithStorageV2)
+        ));
+    }
+
+    #[test]
+    fn merged_persistence_builds_history_from_committed_changesets() {
+        let provider = create_test_provider_factory();
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        let service = PersistenceService::new(
+            provider.clone(),
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        );
+
+        let block_number = 0;
+        let address = Address::random();
+        let state: BundleStateInit =
+            std::iter::once((address, (None, Some(Account::default()), Default::default())))
+                .collect();
+        let account_reverts = std::iter::once((address, (Some(None), vec![]))).collect();
+        let reverts: RevertsInit = std::iter::once((block_number, account_reverts)).collect();
+        let mut test_block_builder = TestBlockBuilder::eth();
+        let mut block =
+            test_block_builder.get_executed_block_with_number(block_number, B256::random());
+        block.block.execution_output = Arc::new(ExecutionOutcome::new_init(
+            state,
+            reverts,
+            [],
+            vec![vec![]],
+            block_number,
+            vec![Default::default()],
+        ));
+
+        service.save_merged_blocks(vec![block]).unwrap();
+
+        let provider_ro = provider.database_provider_ro().unwrap();
+        assert_eq!(provider_ro.tx_ref().entries::<tables::AccountsHistory>().unwrap(), 1);
+    }
+
+    #[test]
+    fn merged_persistence_storage_wipe_sees_prior_block_state() {
+        let provider = create_test_provider_factory();
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        let service = PersistenceService::new(
+            provider.clone(),
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        );
+
+        let address = Address::random();
+        let slot = B256::with_last_byte(1);
+        let value = U256::from(42);
+        let storage = std::iter::once((slot, (U256::ZERO, value))).collect();
+        let state: BundleStateInit =
+            std::iter::once((address, (None, Some(Account::default()), storage))).collect();
+        let account_reverts = std::iter::once((address, (Some(None), vec![]))).collect();
+        let reverts: RevertsInit = std::iter::once((0, account_reverts)).collect();
+        let mut test_block_builder = TestBlockBuilder::eth();
+        let mut blocks = test_block_builder.get_executed_blocks(0..2).collect::<Vec<_>>();
+        blocks[0].block.execution_output = Arc::new(ExecutionOutcome::new_init(
+            state,
+            reverts,
+            [],
+            vec![vec![]],
+            0,
+            vec![Default::default()],
+        ));
+
+        let mut wipe_bundle = BundleState::default();
+        wipe_bundle.state.insert(
+            address,
+            BundleAccount::new(
+                Some(Default::default()),
+                None,
+                Default::default(),
+                AccountStatus::Destroyed,
+            ),
+        );
+        wipe_bundle.reverts = Reverts::new(vec![vec![(
+            address,
+            AccountRevert { wipe_storage: true, ..Default::default() },
+        )]]);
+        blocks[1].block.execution_output =
+            Arc::new(ExecutionOutcome::new(wipe_bundle, vec![vec![]], 1, vec![Default::default()]));
+
+        service.save_merged_blocks(blocks).unwrap();
+
+        let changeset = provider.provider().unwrap().storage_changeset(1).unwrap();
+        assert_eq!(changeset.len(), 1);
+        assert_eq!(changeset[0].1.key, slot);
+        assert_eq!(changeset[0].1.value, value);
     }
 
     #[test]
