@@ -10882,7 +10882,6 @@ dependencies = [
  "bytes",
  "codspeed-criterion-compat",
  "derive_more",
- "gravity-primitives",
  "hash-db",
  "itertools 0.14.0",
  "nybbles",

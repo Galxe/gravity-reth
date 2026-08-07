@@ -491,10 +491,9 @@ payload 越多,收益越大。
   `nested_trie/trie.rs:213-310, 510-686`);自毁 + 重建经
   `is_deleted` 先整组删除再回填(#715 修复,写侧
   `provider.rs:2348-2352`)。
-- **并行**(#219):账户级 16 路 + 单树 `parallel_update` 按 nibble
-  递归分叉(`--gravity.trie.parallel-level`,默认 1,阈值
-  `MIN_PARALLEL_NODES=128`,`nested_trie/trie.rs:18,337-500`)+
-  哈希阶段 `std::thread::scope` 并行(`trie.rs:698-712`)。
+- **并行**:账户级 16 路 + 单树 `parallel_update` 按首 nibble 固定
+  16 路分叉(storage trie 仅在脏节点超过
+  `MIN_PARALLEL_NODES=128` 时启用)+哈希阶段 `rayon::scope` 并行。
 - **缓存——权威性 PersistBlockCache**
   (`crates/storage/storage-api/src/cache.rs:311-322`):账户 /
   bytecode / storage 槽 / 账户 trie 节点 / storage trie 节点五类,
@@ -521,7 +520,7 @@ payload 越多,收益越大。
 | 取证 | 每块必须 multiproof + reveal;proof_v2 用 15+ 个 PR 优化这一步 | **不存在这一步**:缺节点 = cache/RocksDB 按 path 点读(`nested_hash.rs:45-64,104-116`) | **gravity**(消灭问题 > 优化问题) |
 | 与执行重叠 | **块内**:state hook 边执行边算,执行结束 root 只剩尾巴 | **块间**:N+1 执行 ∥ N 状态根/密封/持久化(merklize barrier 串行化,`lib.rs:711-719`) | 平手,目标不同:上游优化单 payload 延迟,gravity 优化连续流吞吐 |
 | 内存节点表示 | arena/SlotMap + SmallVec 密集 children(§3.3) | `[Option<Box<Node>>;17]` 定长指针槽 + 每子一次 Box 分配 | **reth 2.3**——nested 最实的可改进点 |
-| 并行粒度 | 深度 2 分 256 子树 + rayon + 脏叶阈值 64 | 16 分桶 + 递归 level(默认 1)+ 阈值 128;哈希另用 std::thread | **reth 2.3 略优**(更细、更自适应);gravity 有旋钮可加深 |
+| 并行粒度 | 深度 2 分 256 子树 + rayon + 脏叶阈值 64 | 按首 nibble 固定 16 分桶;storage trie 使用阈值 128;哈希复用 rayon | **reth 2.3 更细、更自适应**;gravity 固定粒度调度更简单 |
 | 节点哈希缓存 | `Cached{rlp_node}` | `NodeFlag.rlp` + 脏路径失效 | 平手 |
 | 账户叶依赖 storage root | 异步延迟值编码(§2.4 三态 encoder) | 结构性解决:每账户任务先 storage root 后账户叶,账户树最后统一更新 | 平手(gravity 解法更简单) |
 | 跨块缓存 | LFU 剪枝保留 sparse trie(机会性,丢了只是变慢) | PersistBlockCache(**权威性**:tombstone/wipe 遮蔽陈旧 DB,#715 类 bug 由它防御) | **gravity**(承担正确性);LFU 淘汰策略可借鉴 |
@@ -553,9 +552,9 @@ trie 需要多版本/写时复制,reorg 需要节点级回滚——gravity 全�
    内存节点同样是懒加载临时态(HashNode 展开),生命周期与 sparse
    trie 类似,arena 化技术**直接可套**。先 profile
    `Trie::hash`/`insert_inner` 的分配与 cache miss,热点属实再动。
-2. **并行标定**:默认 `trie_parallel_levels=1`(16 路)对大块可能吃
-   不满核;上游 256 子树 + 脏叶阈值自适应。gravity 旋钮已有,值得
-   压测标定;顺带评估把哈希阶段的 std::thread 统一到 rayon。
+2. **并行标定**:当前固定按首 nibble 16 路;实测继续递归到 256 路
+   收益不佳,且会增加调度与正确性复杂度。后续优化应基于 profile
+   调整阈值和哈希任务粒度,而非增加递归层级。
 3. **LFU 淘汰策略**:PersistBlockCache 现按容量 + 持久化水位半窗
    收紧;`BucketedLfu`(§3.4)的 O(1) 热度追踪可提升 trie 节点命中
    率——独立小件,带 proptest 模型,可直接搬。
