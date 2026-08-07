@@ -485,7 +485,11 @@ impl PersistBlockCache {
         }
     }
 
-    /// Cache latest read bytecode
+    /// Cache bytecode loaded from persistent storage.
+    ///
+    /// Bytecode is content-addressed and immutable, so read-through caching keeps old hot
+    /// contracts warm after their creation block. Capacity pressure is handled asynchronously to
+    /// keep eviction out of this DB-read hot path.
     pub fn cache_byte_code(&self, code_hash: B256, byte_code: Bytecode) {
         if let dashmap::Entry::Vacant(entry) = self.contracts.entry(code_hash) {
             entry.insert(Tip::new(byte_code, self.persist_height()));

@@ -669,7 +669,8 @@ impl<Storage: GravityStorage> Core<Storage> {
         }
         self.storage.insert_block_id(block_number, block_id);
 
-        // Wait for persist gap with a reasonable timeout (2 seconds)
+        // Give transient disk stalls time to recover without waiting long enough to make the
+        // consensus layer time out.
         self.cache.wait_persist_gap(Some(2000));
         let start_time = Instant::now();
         let ExecuteOrderedBlockResult {

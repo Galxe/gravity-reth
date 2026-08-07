@@ -995,9 +995,8 @@ impl From<Genesis> for ChainSpec {
         }
         let gravity_hardforks = ChainHardforks::new(gravity_hardforks);
 
-        // Gravity protocol minimum base fee floor (wei). Presence marks the chainspec
-        // as Gravity; absence keeps upstream EIP-1559 semantics (e.g. Ethereum mainnet
-        // history sync).
+        // This is intentionally optional: Gravity chains enable the fee floor through genesis,
+        // while its absence preserves upstream EIP-1559 semantics for Reth tests and history sync.
         let gravity_min_base_fee =
             genesis.config.extra_fields.get("gravityMinBaseFee").and_then(|v| v.as_u64());
         // main: floor activates at genesis (block 0). Released testnet branches override

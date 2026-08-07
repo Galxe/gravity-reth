@@ -184,6 +184,10 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
             .map_err(ProviderError::Database)?
             .unwrap_or_default();
 
+        // Merkle can be ahead when its parallel commit wins the race with a failed state commit.
+        // Gravity consensus never replaces an ordered block, so recovery will replay the same
+        // block with absolute state values. Trie upserts and deletes are idempotent; retaining the
+        // ahead trie lets that replay overwrite identical nodes and complete any missing trie DB.
         if ck.block_number < block_number {
             info!(target: "engine::recovery", checkpoint = ?ck.block_number, block_number = ?block_number, "Recovering merkle state");
             let nested_state_root = NestedStateRoot::new(provider_rw.tx_ref(), None);

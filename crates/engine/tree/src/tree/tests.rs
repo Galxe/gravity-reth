@@ -9,6 +9,7 @@ use alloy_primitives::{
 use alloy_rlp::Decodable;
 use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayloadSidecar, ExecutionPayloadV1, ForkchoiceState,
+    ForkchoiceUpdateError,
 };
 use assert_matches::assert_matches;
 use reth_chain_state::{test_utils::TestBlockBuilder, BlockState};
@@ -824,6 +825,34 @@ async fn test_engine_tree_fcu_missing_head() {
         }
         _ => panic!("Unexpected event: {event:#?}"),
     }
+}
+
+#[tokio::test]
+async fn test_invalid_safe_does_not_update_finalized() {
+    let mut test_harness = TestHarness::new(MAINNET.clone());
+    let blocks: Vec<_> = test_harness.block_builder.get_executed_blocks(0..3).collect();
+    test_harness = test_harness.with_blocks(blocks.clone());
+
+    let previous_finalized = blocks[0].recovered_block().clone_sealed_header();
+    test_harness.tree.canonical_in_memory_state.set_finalized(previous_finalized.clone());
+
+    let state = ForkchoiceState {
+        head_block_hash: blocks[2].recovered_block().hash(),
+        safe_block_hash: B256::random(),
+        finalized_block_hash: blocks[1].recovered_block().hash(),
+    };
+    let outcome = test_harness
+        .tree
+        .handle_canonical_head(state, &None)
+        .unwrap()
+        .expect("canonical head should produce an outcome")
+        .outcome;
+    assert_matches!(outcome.await, Err(ForkchoiceUpdateError::InvalidState));
+    assert_eq!(
+        test_harness.tree.canonical_in_memory_state.get_finalized_num_hash(),
+        Some(previous_finalized.num_hash())
+    );
+    assert!(test_harness.action_rx.try_recv().is_err());
 }
 
 #[tokio::test]
