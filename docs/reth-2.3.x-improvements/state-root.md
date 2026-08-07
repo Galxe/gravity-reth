@@ -18,8 +18,8 @@ gravity 的 state root 引擎与上游完全不同,核心是 **每个 MPT 节点
 - 表 `StoragesTrieV2`:dup-sort,key = `hashed_address`,subkey = `StoredNibblesSubKey`(path),value = `StorageNodeEntry{path, node}`。
 - 节点类型 `Node`(`crates/trie/common/src/nested_trie/node.rs`):`FullNode`(branch,17 children)/ `ShortNode`(extension 或 leaf)/ `ValueNode` / `HashNode`(指向另一行 DB 节点的 RLP 索引)。
 - **懒加载**:`Trie::new` 只读 root,children 以 `HashNode` 占位,访问时按 path 从 reader(DB + 可选 `PersistBlockCache` overlay)按需读入。
-- **并行更新** `parallel_update`(`crates/trie/common/src/nested_trie/trie.rs`):按首 nibble 16 路分区,递归下探到 `trie_parallel_levels` 层,每层 `rayon::scope` per-child 并行;叶子层顺序 insert/delete,子树 `hash()` 自底向上、`NodeFlag.rlp` 缓存哈希、`dirty` 标脏。
-- **哈希** `hash()`:顶层 16 个 child `thread::scope` 并行 `build_hash`,再算 root。
+- **并行更新** `parallel_update`(`crates/trie/common/src/nested_trie/trie.rs`):按首 nibble 固定分成最多 16 个子任务,每个子树内部顺序 insert/delete;子树 `hash()` 自底向上、`NodeFlag.rlp` 缓存哈希、`dirty` 标脏。
+- **哈希** `hash()`:顶层 16 个 child 通过 `rayon::scope` 并行 `build_hash`,再算 root。
 - **输出** `TrieUpdatesV2 { account_nodes: HashMap, removed_nodes: HashSet, storage_tries: B256Map<StorageTrieUpdatesV2{is_deleted, storage_nodes, removed_nodes}> }`(node-diff)。写库 `write_trie_updatesv2`(`provider.rs`)用 `thread::scope` 并行写 account/storage 两棵树。
 - 已有 `Trie::get_proof`(从 nested trie 直接产 `Vec<TrieNode>`)与 `NestedStateRoot::multiproof`(历史块 via reverted_state,部分 `todo!()`);已支持 nested hash 的 `eth_getProof`(#237)。
 - 调用点:merkle stage(`crates/stages/stages/src/stages/merkle.rs`)与 engine 侧 `block_view_storage`(`crates/gravity-storage/src/block_view_storage/mod.rs`)直接 `NestedStateRoot::new(tx, cache).calculate(&hashed_state)`。gravity 的链关键路径(`pipe-exec-layer-ext-v2`)**不使用**上游的 sparse-trie payload processor / prewarm / state_root_task。

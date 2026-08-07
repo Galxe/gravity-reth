@@ -359,7 +359,7 @@ where
                                 }
                             };
                             if let Some(account) = account {
-                                let storage = hashed_storages.get(&hashed_address).cloned();
+                                let storage = hashed_storages.get(&hashed_address);
                                 // If the account was wiped (self-destructed, and possibly
                                 // recreated in the same block) the storage trie must be rebuilt
                                 // from scratch: the on-disk / cached nodes belong to the
@@ -368,23 +368,22 @@ where
                                 // writer drops all previous nodes before applying the rebuilt
                                 // ones. Note: the recreated slots are still applied below, which
                                 // is exactly what was dropped before this fix.
-                                let wiped = storage.as_ref().map(|s| s.wiped).unwrap_or(false);
+                                let wiped = storage.is_some_and(|storage| storage.wiped);
 
                                 let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] =
                                     Default::default();
                                 // only make the large storage trie parallel
-                                let parallel = storage
-                                    .as_ref()
-                                    .map(|s| s.storage.len() > MIN_PARALLEL_NODES)
-                                    .unwrap_or(false);
+                                let parallel = storage.is_some_and(|storage| {
+                                    storage.storage.len() > MIN_PARALLEL_NODES
+                                });
                                 if let Some(storage) = storage {
-                                    for (hashed_slot, value) in storage.storage {
-                                        let nibbles = Nibbles::unpack(hashed_slot);
+                                    for (hashed_slot, value) in &storage.storage {
+                                        let nibbles = Nibbles::unpack(*hashed_slot);
                                         let index = nibbles.get_unchecked(0) as usize;
                                         let value = if value.is_zero() {
                                             None
                                         } else {
-                                            let value = encode_fixed_size(&value);
+                                            let value = encode_fixed_size(value);
                                             Some(Node::ValueNode(value.to_vec()))
                                         };
                                         updated_storage_nodes[index].push((nibbles, value));

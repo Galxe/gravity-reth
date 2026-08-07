@@ -30,10 +30,6 @@ pub struct GravityArgs {
     /// Report db metrics. default false.
     #[arg(long = "gravity.report-db-metrics", default_value = "false")]
     pub report_db_metrics: bool,
-
-    /// Max parallel level in nested hash
-    #[arg(long = "gravity.trie.parallel-level", default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=64))]
-    pub trie_parallel_levels: u64,
 }
 
 impl Default for GravityArgs {
@@ -45,7 +41,6 @@ impl Default for GravityArgs {
             persist_merge_blocks: false,
             cache_capacity: 2_000_000,
             report_db_metrics: false,
-            trie_parallel_levels: 1,
         }
     }
 }
@@ -60,7 +55,6 @@ impl GravityArgs {
             persist_merge_blocks: self.persist_merge_blocks,
             cache_capacity: self.cache_capacity,
             report_db_metrics: self.report_db_metrics,
-            trie_parallel_levels: self.trie_parallel_levels,
         }
     }
 }

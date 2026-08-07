@@ -25,8 +25,6 @@ pub struct Config {
     pub cache_capacity: u64,
     /// Report db metrics
     pub report_db_metrics: bool,
-    /// Max parallel levels in nested hash
-    pub trie_parallel_levels: u64,
 }
 
 /// Global configuration instance, initialized once.
@@ -46,6 +44,5 @@ pub fn get_gravity_config() -> &'static Config {
         persist_merge_blocks: false,
         cache_capacity: 2_000_000,
         report_db_metrics: false,
-        trie_parallel_levels: 1,
     })
 }
