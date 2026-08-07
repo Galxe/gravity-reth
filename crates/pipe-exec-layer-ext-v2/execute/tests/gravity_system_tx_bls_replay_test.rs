@@ -65,6 +65,7 @@ use gravity_api_types::{
     config_storage::{BlockNumber, ConfigStorage, OnChainConfig},
     events::contract_event::GravityEvent,
 };
+use gravity_precompiles::bls_pop_verify::POP_VERIFY_GAS;
 use gravity_storage::{block_view_storage::BlockViewStorage, GravityStorage};
 use reth_chainspec::ChainSpec;
 use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
@@ -105,9 +106,6 @@ const BLS_PRECOMPILE_ADDR: Address = address!("000000000000000000000000000000016
 /// verification path (the content does not need to be a valid PoP for the
 /// byte-equal canonical assertion to be meaningful — see file-level docs).
 const BLS_INPUT_LEN: usize = 144;
-
-/// Flat gas charge of the BLS precompile (`POP_VERIFY_GAS`).
-const POP_VERIFY_GAS: u64 = 110_000;
 
 /// gas_limit for the BLS user tx: intrinsic (~21k base + ~580 for 144 zero
 /// calldata bytes) + `POP_VERIFY_GAS` headroom. 200_000 is well above and not

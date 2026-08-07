@@ -18,7 +18,9 @@
 extern crate alloc;
 
 use crate::execute::{BasicBlockBuilder, Executor};
-use alloc::{boxed::Box, vec::Vec};
+#[cfg(feature = "std")]
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
     block::{BlockExecutorFactory, BlockExecutorFor},
@@ -41,7 +43,9 @@ use revm::{
 pub mod either;
 /// EVM environment configuration.
 pub mod execute;
+#[cfg(feature = "std")]
 pub mod parallel_execute;
+#[cfg(feature = "std")]
 use parallel_execute::ParallelExecutor;
 
 mod aliases;
@@ -494,6 +498,7 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     }
 
     /// Returns a new [`ParallelExecutor`].
+    #[cfg(feature = "std")]
     fn parallel_executor<'a, DB: ParallelDatabase + 'a>(
         &self,
         db: DB,

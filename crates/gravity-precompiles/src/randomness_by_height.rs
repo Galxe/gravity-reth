@@ -129,19 +129,35 @@ where
     let precompile_id = PrecompileId::custom("randomness_by_height");
 
     (precompile_id, move |input: PrecompileInput<'_>| -> PrecompileResult {
-        // Gas guard (mirrors `bls_precompile`): explicitly enforce the precompile's gas and
-        // return OutOfGas when the call forwarded less than `gas_used`, instead of letting the
-        // precompile dispatcher underflow-panic on `record_cost`. Without this, any user
-        // transaction that calls this precompile with insufficient forwarded gas panics every
-        // node — a network-wide consensus halt. The lookup itself is cheap, so charging after
-        // computing the (data-dependent) gas tier is fine.
-        let output = randomness_by_height_handler_raw(input.data, provider.as_ref())?;
-        if output.gas_used > input.gas {
-            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
-        }
-        Ok(output)
+        randomness_by_height_handler(input.data, input.gas, provider.as_ref())
     })
         .into()
+}
+
+/// Executes a randomness lookup with the precompile's complete gas semantics.
+///
+/// The provider selects the gas tier together with the lookup result, so the lookup must run before
+/// the forwarded-gas check. This preserves the behavior of the Alloy precompile while allowing
+/// other EVM adapters to share the same data-dependent gas handling.
+pub fn randomness_by_height_handler<Provider>(
+    data: &[u8],
+    gas: u64,
+    provider: &Provider,
+) -> PrecompileResult
+where
+    Provider: RandomnessByHeightProvider + ?Sized,
+{
+    // Gas guard (mirrors `bls_precompile`): explicitly enforce the precompile's gas and
+    // return OutOfGas when the call forwarded less than `gas_used`, instead of letting the
+    // precompile dispatcher underflow-panic on `record_cost`. Without this, any user
+    // transaction that calls this precompile with insufficient forwarded gas panics every
+    // node — a network-wide consensus halt. The lookup itself is cheap, so charging after
+    // computing the (data-dependent) gas tier is fine.
+    let output = randomness_by_height_handler_raw(data, provider)?;
+    if output.gas_used > gas {
+        return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
+    }
+    Ok(output)
 }
 
 /// Core lookup logic separated from `PrecompileInput` for unit tests and RPC reuse.
@@ -206,11 +222,12 @@ pub fn encode_randomness_by_height_result(found: bool, randomness: B256) -> Byte
 #[cfg(test)]
 mod tests {
     use super::{
-        randomness_by_height_handler_raw, RandomnessByHeightGasPolicy, RandomnessByHeightLookup,
-        RandomnessByHeightProvider, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
-        RANDOMNESS_BY_HEIGHT_RECENT_GAS,
+        randomness_by_height_handler, randomness_by_height_handler_raw,
+        RandomnessByHeightGasPolicy, RandomnessByHeightLookup, RandomnessByHeightProvider,
+        RANDOMNESS_BY_HEIGHT_LOOKUP_GAS, RANDOMNESS_BY_HEIGHT_RECENT_GAS,
     };
     use alloy_primitives::{B256, U256};
+    use revm::precompile::{PrecompileHalt, PrecompileStatus};
     use std::{collections::BTreeMap, convert::Infallible};
 
     #[derive(Default)]
@@ -310,6 +327,8 @@ mod tests {
         .expect("lookup succeeds");
 
         assert!(result.is_success());
+        // Oversized heights never reach the provider and retain the historical-lookup price.
+        assert_eq!(result.gas_used, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS);
         assert_eq!(result.bytes[31], 0);
         assert_eq!(&result.bytes[32..64], B256::ZERO.as_slice());
     }
@@ -320,5 +339,47 @@ mod tests {
         let output =
             randomness_by_height_handler_raw(&[1, 2, 3], &provider).expect("halt is not fatal");
         assert!(output.is_halt());
+    }
+
+    #[test]
+    fn gas_aware_handler_enforces_provider_selected_tier() {
+        let height = encode_height(U256::from(10));
+        let lookup_provider = MockRandomnessProvider::default();
+        let lookup_oog = randomness_by_height_handler(
+            &height,
+            RANDOMNESS_BY_HEIGHT_LOOKUP_GAS - 1,
+            &lookup_provider,
+        )
+        .unwrap();
+        assert!(matches!(lookup_oog.status, PrecompileStatus::Halt(PrecompileHalt::OutOfGas)));
+        assert_eq!(lookup_oog.gas_used, 0);
+
+        let lookup_success = randomness_by_height_handler(
+            &height,
+            RANDOMNESS_BY_HEIGHT_LOOKUP_GAS,
+            &lookup_provider,
+        )
+        .unwrap();
+        assert!(lookup_success.is_success());
+        assert_eq!(lookup_success.gas_used, RANDOMNESS_BY_HEIGHT_LOOKUP_GAS);
+
+        let recent_provider = RecentMockRandomnessProvider::default();
+        let recent_success = randomness_by_height_handler(
+            &height,
+            RANDOMNESS_BY_HEIGHT_RECENT_GAS,
+            &recent_provider,
+        )
+        .unwrap();
+        assert!(recent_success.is_success());
+        assert_eq!(recent_success.gas_used, RANDOMNESS_BY_HEIGHT_RECENT_GAS);
+
+        let recent_oog = randomness_by_height_handler(
+            &height,
+            RANDOMNESS_BY_HEIGHT_RECENT_GAS - 1,
+            &recent_provider,
+        )
+        .unwrap();
+        assert!(matches!(recent_oog.status, PrecompileStatus::Halt(PrecompileHalt::OutOfGas)));
+        assert_eq!(recent_oog.gas_used, 0);
     }
 }

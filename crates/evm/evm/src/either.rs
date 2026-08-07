@@ -2,7 +2,7 @@
 
 use crate::{execute::Executor, Database, OnStateHook};
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use alloy_evm::{precompiles::DynPrecompile, EvmEnv};
 use alloy_primitives::Address;
 pub use futures_util::future::Either;

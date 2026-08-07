@@ -4480,7 +4480,7 @@ dependencies = [
 [[package]]
 name = "grevm"
 version = "2.2.2"
-source = "git+https://github.com/Galxe/grevm?rev=dcd1460b20d9f3d793c8309c28b0b7401be91523#dcd1460b20d9f3d793c8309c28b0b7401be91523"
+source = "git+https://github.com/Galxe/grevm?rev=25b71edcac1b94be7fc5ee0e4f20e5fcce6908ad#25b71edcac1b94be7fc5ee0e4f20e5fcce6908ad"
 dependencies = [
  "ahash",
  "alloy-evm",
@@ -8886,6 +8886,7 @@ dependencies = [
  "auto_impl",
  "derive_more",
  "futures-util",
+ "grevm",
  "metrics",
  "rayon",
  "reth-ethereum-primitives",
