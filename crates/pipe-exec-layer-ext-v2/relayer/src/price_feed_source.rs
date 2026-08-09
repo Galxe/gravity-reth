@@ -8,8 +8,7 @@ use crate::{
     data_source::{source_types, OracleData, OracleDataSource},
     uri_parser::ParsedOracleTask,
 };
-use alloy_primitives::{Bytes, I256, U256};
-use alloy_sol_macro::sol;
+use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -27,19 +26,12 @@ const PROVIDER_BINANCE_INDEX_KLINE: &str = "binance_index_kline_v1";
 const DEFAULT_BINANCE_GRACE_MS: u64 = 120_000;
 const BINANCE_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BINANCE_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_PRICE_DECIMALS: u8 = 18;
+const PRICE_PAYLOAD_VERSION: u8 = 1;
+const PRICE_DECIMALS: u8 = 8;
+const MAX_RESOLVED_AT_MS: u64 = (1u64 << 48) - 1;
+const MAX_PRICE: u128 = (1u128 << 96) - 1;
 const BINANCE_TASK_PARAMETERS: &[&str] =
     &["provider", "pair", "interval", "bucketStartMs", "decimals", "graceMs"];
-
-sol! {
-    struct PricePayloadSol {
-        uint256 feedId;
-        uint64 roundId;
-        uint64 resolvedAt;
-        uint8 decimals;
-        int256 price;
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct LastPriceRound {
@@ -61,7 +53,6 @@ struct BinanceIndexKlineConfig {
     interval_ms: u64,
     bucket_start_ms: u64,
     grace_ms: u64,
-    decimals: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +60,7 @@ struct BinanceIndexKlineRound {
     endpoint_url: String,
     bucket_start_ms: u64,
     bucket_end_ms: u64,
-    round_id: u64,
+    round_id: u32,
     resolved_at: u64,
     delivery_nonce: u128,
     source_position: u64,
@@ -92,7 +83,14 @@ impl BinanceIndexKlineConfig {
             .checked_add(self.interval_ms)
             .and_then(|value| value.checked_sub(1))
             .ok_or_else(|| anyhow!("Binance bucket end overflow"))?;
-        let round_id = bucket_start_ms / self.interval_ms;
+        let round_id = u32::try_from(bucket_start_ms / self.interval_ms)
+            .map_err(|_| anyhow!("Binance round ID exceeds uint32"))?;
+        if round_id == 0 {
+            return Err(anyhow!("Binance round ID must be positive"));
+        }
+        if bucket_end_ms > MAX_RESOLVED_AT_MS {
+            return Err(anyhow!("Binance resolvedAtMs exceeds uint48"));
+        }
         let endpoint_url = build_binance_index_kline_url(
             &self.base_url,
             &self.pair,
@@ -191,11 +189,11 @@ impl PriceFeedSource {
             ));
         }
         let decimals = parse_required::<u8>(task, "decimals")?;
-        if decimals > MAX_PRICE_DECIMALS {
+        if decimals != PRICE_DECIMALS {
             return Err(anyhow!(
-                "price feed decimals {} exceeds maximum {}",
-                decimals,
-                MAX_PRICE_DECIMALS
+                "Binance price feed decimals must be {}, got {}",
+                PRICE_DECIMALS,
+                decimals
             ));
         }
         let grace_ms = parse_optional(task, "graceMs")?.unwrap_or(DEFAULT_BINANCE_GRACE_MS);
@@ -214,7 +212,6 @@ impl PriceFeedSource {
             interval_ms,
             bucket_start_ms,
             grace_ms,
-            decimals,
         };
 
         if latest_onchain_nonce == 0 && latest_onchain_position != 0 {
@@ -338,13 +335,8 @@ impl OracleDataSource for PriceFeedSource {
         }
 
         let price = fetch_binance_index_kline_price(&self.client, &self.config, &round).await?;
-        let resolver_payload = encode_price_payload(
-            self.feed_id,
-            round.round_id,
-            round.resolved_at,
-            self.config.decimals,
-            price,
-        );
+        let resolver_payload =
+            encode_price_payload(self.feed_id, round.round_id, round.resolved_at, price)?;
         let wrapped_payload = SolValue::abi_encode(&(
             round.delivery_nonce,
             U256::from(round.source_position),
@@ -367,7 +359,7 @@ async fn fetch_binance_index_kline_price(
     client: &Client,
     config: &BinanceIndexKlineConfig,
     round: &BinanceIndexKlineRound,
-) -> Result<I256> {
+) -> Result<u128> {
     ensure_binance_bucket_ready(config, round)?;
     let response = client
         .get(&round.endpoint_url)
@@ -380,7 +372,7 @@ async fn fetch_binance_index_kline_price(
     let response: Value = serde_json::from_slice(&response)
         .context("failed to decode Binance index price kline response")?;
 
-    binance_index_kline_price_from_response(config, round, &response)
+    binance_index_kline_price_from_response(round, &response)
 }
 
 async fn read_binance_response_limited(mut response: reqwest::Response) -> Result<Vec<u8>> {
@@ -411,16 +403,11 @@ fn binance_response_too_large() -> anyhow::Error {
 }
 
 fn binance_index_kline_price_from_response(
-    config: &BinanceIndexKlineConfig,
     round: &BinanceIndexKlineRound,
     response: &Value,
-) -> Result<I256> {
+) -> Result<u128> {
     let close = parse_binance_index_kline_close(round, response)?;
-    let price = parse_fixed_decimal(close, config.decimals)?;
-    if price <= I256::ZERO {
-        return Err(anyhow!("Binance index price kline close must be positive"));
-    }
-    Ok(price)
+    parse_fixed_decimal(close)
 }
 
 fn parse_binance_index_kline_close<'a>(
@@ -576,42 +563,56 @@ fn binance_interval_ms(interval: &str) -> Result<u64> {
 
 fn encode_price_payload(
     feed_id: u64,
-    round_id: u64,
+    round_id: u32,
     resolved_at: u64,
-    decimals: u8,
-    price: I256,
-) -> Vec<u8> {
-    PricePayloadSol {
-        feedId: U256::from(feed_id),
-        roundId: round_id,
-        resolvedAt: resolved_at,
-        decimals,
-        price,
+    price: u128,
+) -> Result<[u8; 32]> {
+    if resolved_at > MAX_RESOLVED_AT_MS {
+        return Err(anyhow!("price payload resolvedAtMs exceeds uint48"));
     }
-    .abi_encode()
+    if price == 0 {
+        return Err(anyhow!("price payload price must be positive"));
+    }
+    if price > MAX_PRICE {
+        return Err(anyhow!("price payload price exceeds uint96"));
+    }
+
+    let mut payload = [0u8; 32];
+    payload[0] = PRICE_PAYLOAD_VERSION;
+    payload[1..9].copy_from_slice(&feed_id.to_be_bytes());
+    payload[9..13].copy_from_slice(&round_id.to_be_bytes());
+    payload[13..19].copy_from_slice(&resolved_at.to_be_bytes()[2..]);
+    payload[19..31].copy_from_slice(&price.to_be_bytes()[4..]);
+    Ok(payload)
 }
 
-fn parse_fixed_decimal(value: &str, decimals: u8) -> Result<I256> {
-    if value.starts_with('-') {
-        return Err(anyhow!("price cannot be negative"));
+fn parse_fixed_decimal(value: &str) -> Result<u128> {
+    if value.starts_with('-') || value.starts_with('+') {
+        return Err(anyhow!("price cannot have a sign prefix"));
     }
-    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
-    if whole.is_empty() && fraction.is_empty() {
+    let mut components = value.split('.');
+    let whole = components.next().unwrap_or_default();
+    let fraction = components.next();
+    if components.next().is_some() {
+        return Err(anyhow!("decimal price has multiple separators"));
+    }
+    if whole.is_empty() {
         return Err(anyhow!("empty decimal price"));
     }
-    if !whole.chars().all(|c| c.is_ascii_digit()) {
+    if !whole.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(anyhow!("invalid decimal price whole component"));
     }
-    if !fraction.chars().all(|c| c.is_ascii_digit()) {
+    if fraction.is_some_and(str::is_empty) {
+        return Err(anyhow!("empty decimal price fractional component"));
+    }
+    let fraction = fraction.unwrap_or_default();
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(anyhow!("invalid decimal price fractional component"));
     }
 
-    let mut scaled = String::with_capacity(whole.len() + decimals as usize);
-    scaled.push_str(if whole.is_empty() { "0" } else { whole });
-    let decimals = decimals as usize;
-    if fraction.len() > decimals && fraction[decimals..].bytes().any(|byte| byte != b'0') {
-        return Err(anyhow!("decimal price precision exceeds configured decimals"));
-    }
+    let decimals = usize::from(PRICE_DECIMALS);
+    let mut scaled = String::with_capacity(whole.len() + decimals);
+    scaled.push_str(whole);
     if fraction.len() >= decimals {
         scaled.push_str(&fraction[..decimals]);
     } else {
@@ -621,7 +622,14 @@ fn parse_fixed_decimal(value: &str, decimals: u8) -> Result<I256> {
 
     let scaled = scaled.trim_start_matches('0');
     let scaled = if scaled.is_empty() { "0" } else { scaled };
-    scaled.parse::<I256>().map_err(|e| anyhow!("invalid scaled decimal price: {e}"))
+    let price = scaled.parse::<u128>().map_err(|e| anyhow!("invalid scaled decimal price: {e}"))?;
+    if price == 0 {
+        return Err(anyhow!("Binance index price kline close must be positive at 8 decimals"));
+    }
+    if price > MAX_PRICE {
+        return Err(anyhow!("Binance index price kline close exceeds uint96"));
+    }
+    Ok(price)
 }
 
 fn parse_required<T>(task: &ParsedOracleTask, name: &str) -> Result<T>
@@ -658,6 +666,17 @@ mod tests {
         net::TcpListener,
         thread,
     };
+
+    const GOLDEN_PRICE_PAYLOAD_HEX: &str =
+        "0100000000000007d101b2e020018e23f2365f0000000000000009543637a800";
+    const GOLDEN_WRAPPED_PAYLOAD_HEX: &str = concat!(
+        "0000000000000000000000000000000000000000000000000000000000000020",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "0000000000000000000000000000000000000000000000000000018e23f2365f",
+        "0000000000000000000000000000000000000000000000000000000000000060",
+        "0000000000000000000000000000000000000000000000000000000000000020",
+        "0100000000000007d101b2e020018e23f2365f0000000000000009543637a800"
+    );
 
     fn binance_uri() -> &'static str {
         "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals=8"
@@ -838,9 +857,8 @@ mod tests {
         ]]);
 
         let round = source.config.round_for_delivery_nonce(1).unwrap();
-        let price =
-            binance_index_kline_price_from_response(&source.config, &round, &response).unwrap();
-        assert_eq!(price, "40067545000".parse::<I256>().unwrap());
+        let price = binance_index_kline_price_from_response(&round, &response).unwrap();
+        assert_eq!(price, 40_067_545_000);
     }
 
     #[tokio::test]
@@ -860,12 +878,20 @@ mod tests {
             <(u128, U256, Bytes)>::abi_decode(&data[0].payload).unwrap();
         assert_eq!(nonce, 1);
         assert_eq!(position, U256::from(1_710_000_059_999u64));
-        let payload = PricePayloadSol::abi_decode(&payload).unwrap();
-        assert_eq!(payload.feedId, U256::from(2001));
-        assert_eq!(payload.roundId, 28_500_000);
-        assert_eq!(payload.resolvedAt, 1_710_000_059_999);
-        assert_eq!(payload.decimals, 8);
-        assert_eq!(payload.price, "40067545000".parse::<I256>().unwrap());
+        assert_eq!(hex::encode(&payload), GOLDEN_PRICE_PAYLOAD_HEX);
+        let resolved_at = u64::from_be_bytes([
+            0,
+            0,
+            payload[13],
+            payload[14],
+            payload[15],
+            payload[16],
+            payload[17],
+            payload[18],
+        ]);
+        assert_eq!(resolved_at, data[0].source_position);
+        assert_eq!(data[0].payload.len(), 192);
+        assert_eq!(hex::encode(&data[0].payload), GOLDEN_WRAPPED_PAYLOAD_HEX);
         assert_eq!(source.last_nonce().await, Some(1));
         assert_eq!(source.last_nonce_position().await, Some(1_710_000_059_999));
 
@@ -885,8 +911,7 @@ mod tests {
             serde_json::json!([[1710000000000u64, "0", "0", "0", "0", "0", 1710000059999u64]]);
 
         let round = source.config.round_for_delivery_nonce(1).unwrap();
-        let err =
-            binance_index_kline_price_from_response(&source.config, &round, &response).unwrap_err();
+        let err = binance_index_kline_price_from_response(&round, &response).unwrap_err();
         assert!(err.to_string().contains("must be positive"));
     }
 
@@ -907,27 +932,39 @@ mod tests {
         ]]);
 
         let round = source.config.round_for_delivery_nonce(1).unwrap();
-        let err =
-            binance_index_kline_price_from_response(&source.config, &round, &response).unwrap_err();
+        let err = binance_index_kline_price_from_response(&round, &response).unwrap_err();
         assert!(err.to_string().contains("openTime mismatch"));
     }
 
     #[test]
-    fn test_price_payload_has_single_price() {
-        let encoded = encode_price_payload(
-            2001,
-            28_500_000,
-            1_710_000_059_999,
-            8,
-            "40067545000".parse::<I256>().unwrap(),
-        );
-        let payload = PricePayloadSol::abi_decode(&encoded).unwrap();
+    fn test_price_payload_matches_solidity_golden_vector() {
+        let encoded =
+            encode_price_payload(2001, 28_500_000, 1_710_000_059_999, 40_067_545_000).unwrap();
 
-        assert_eq!(payload.feedId, U256::from(2001));
-        assert_eq!(payload.roundId, 28_500_000);
-        assert_eq!(payload.resolvedAt, 1_710_000_059_999);
-        assert_eq!(payload.decimals, 8);
-        assert_eq!(payload.price, "40067545000".parse::<I256>().unwrap());
+        assert_eq!(hex::encode(encoded), GOLDEN_PRICE_PAYLOAD_HEX);
+    }
+
+    #[test]
+    fn test_price_payload_accepts_exact_field_maximums() {
+        let encoded =
+            encode_price_payload(u64::MAX, u32::MAX, MAX_RESOLVED_AT_MS, MAX_PRICE).unwrap();
+
+        assert_eq!(encoded[0], PRICE_PAYLOAD_VERSION);
+        assert!(encoded[1..31].iter().all(|byte| *byte == 0xff));
+        assert_eq!(encoded[31], 0);
+    }
+
+    #[test]
+    fn test_price_payload_rejects_invalid_bounds() {
+        assert!(encode_price_payload(1, 1, MAX_RESOLVED_AT_MS + 1, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("uint48"));
+        assert!(encode_price_payload(1, 1, 1, MAX_PRICE + 1)
+            .unwrap_err()
+            .to_string()
+            .contains("uint96"));
+        assert!(encode_price_payload(1, 1, 1, 0).unwrap_err().to_string().contains("positive"));
     }
 
     #[test]
@@ -942,9 +979,75 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_decimal_requires_exact_configured_precision() {
-        assert_eq!(parse_fixed_decimal("195.380", 2).unwrap(), "19538".parse::<I256>().unwrap());
-        assert_eq!(parse_fixed_decimal("195", 8).unwrap(), "19500000000".parse::<I256>().unwrap());
-        assert!(parse_fixed_decimal("195.389", 2).unwrap_err().to_string().contains("precision"));
+    fn test_fixed_decimal_normalizes_to_eight_places() {
+        assert_eq!(parse_fixed_decimal("195.380").unwrap(), 19_538_000_000);
+        assert_eq!(parse_fixed_decimal("195").unwrap(), 19_500_000_000);
+        assert_eq!(parse_fixed_decimal("195.389123456").unwrap(), 19_538_912_345);
+        assert_eq!(parse_fixed_decimal("792281625142643375935.43950335").unwrap(), MAX_PRICE);
+    }
+
+    #[test]
+    fn test_fixed_decimal_rejects_invalid_or_unrepresentable_prices() {
+        for value in [
+            "",
+            ".5",
+            "1.",
+            "1.2.3",
+            "-1",
+            "+1",
+            " 1",
+            "1 ",
+            "1e2",
+            "0",
+            "0.000000009",
+            "792281625142643375935.43950336",
+        ] {
+            assert!(parse_fixed_decimal(value).is_err(), "unexpectedly accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn test_binance_requires_eight_decimals() {
+        for decimals in [7, 9] {
+            let uri = format!(
+                "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs=1710000000000&decimals={decimals}"
+            );
+            let task = parse_oracle_uri(&uri).unwrap();
+            let error =
+                PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
+                    .unwrap_err();
+            assert!(error.to_string().contains("must be 8"));
+        }
+    }
+
+    #[test]
+    fn test_binance_rejects_round_id_overflow() {
+        let bucket_start_ms = (u64::from(u32::MAX) + 1) * 60_000;
+        let uri = format!(
+            "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=1m&bucketStartMs={bucket_start_ms}&decimals=8"
+        );
+        let task = parse_oracle_uri(&uri).unwrap();
+        let source =
+            PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
+                .unwrap();
+        let error = source.config.round_for_delivery_nonce(1).unwrap_err();
+
+        assert!(error.to_string().contains("uint32"));
+    }
+
+    #[test]
+    fn test_binance_rejects_resolved_at_overflow() {
+        let interval_ms = 259_200_000;
+        let bucket_start_ms = (MAX_RESOLVED_AT_MS / interval_ms + 1) * interval_ms;
+        let uri = format!(
+            "gravity://3/2001/price_feed?provider=binance_index_kline_v1&pair=TSLAUSDT&interval=3d&bucketStartMs={bucket_start_ms}&decimals=8"
+        );
+        let task = parse_oracle_uri(&uri).unwrap();
+        let source =
+            PriceFeedSource::from_task_with_rpc(&task, 0, Some("https://fapi.binance.com"))
+                .unwrap();
+        let error = source.config.round_for_delivery_nonce(1).unwrap_err();
+
+        assert!(error.to_string().contains("uint48"));
     }
 }
