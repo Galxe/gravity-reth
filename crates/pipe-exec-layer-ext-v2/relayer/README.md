@@ -19,6 +19,12 @@ which `OracleTaskConfig` registered the task. A relayer-backed
 `(sourceType, sourceId)` has exactly one task because `NativeOracle` has one
 nonce stream for that pair.
 
+For source type `3`, the contract permanently binds the feed ID to the hash of
+the first task URI bytes. Re-submitting identical bytes is allowed, but any
+config change, including parameter ordering or `graceMs`, requires a new feed
+ID. This conservative V1 rule prevents an established feed from being rebound
+to a different pair.
+
 Source type `0` example:
 
 ```text
@@ -59,27 +65,30 @@ bucketStart(n) = configuredBucketStart + (n - 1) * interval
 bucketEnd(n)   = bucketStart(n) + interval - 1
 sourcePosition = bucketEnd(n)
 roundId        = bucketStart(n) / interval
-resolvedAt     = bucketEnd(n)
+resolvedAtMs   = bucketEnd(n)
 ```
 
 The adapter waits until `bucketEnd + graceMs`, requests exactly that bucket,
 and accepts exactly one response row whose open and close timestamps match.
-The callback payload is:
+The callback payload is exactly one big-endian 32-byte word:
 
-```solidity
-abi.encode(
-    uint256 feedId,
-    uint64 roundId,
-    uint64 resolvedAt,
-    uint8 decimals,
-    int256 price
-)
+```text
+bits 255..248 : version       uint8   (1)
+bits 247..184 : feedId        uint64
+bits 183..152 : roundId       uint32
+bits 151..104 : resolvedAtMs  uint48
+bits 103..8   : price         uint96  (fixed 8 decimals)
+bits 7..0     : flags         uint8   (0)
 ```
 
-The decimal parser rejects negative, zero, malformed, overflowing, or
-non-representable prices. HTTP connect/request timeouts and a 64 KiB response
-limit bound validator resource use. Supported fixed intervals are `1m`, `3m`,
-`5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, and `3d`.
+The task URI must explicitly specify `decimals=8`; decimals are implied by
+payload version 1 and are not encoded per round. Decimal strings with fewer
+than 8 places are right-padded and strings with more than 8 places are
+truncated. Negative, zero-after-truncation, signed, malformed, scientific
+notation, and `uint96`-overflowing prices are rejected. HTTP connect/request
+timeouts and a 64 KiB response limit bound validator resource use. Supported
+fixed intervals are `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`,
+`8h`, `12h`, `1d`, and `3d`.
 
 Changing the interval or bucket origin for an active feed changes the
 nonce-to-position history. Registration and runtime reconciliation reject that
@@ -105,6 +114,12 @@ After quorum, the execution layer decodes the wrapper and calls the unchanged
 `NativeOracle.recordBatch` ABI. Its `blockNumbers` argument carries source
 positions. NativeOracle invokes the configured callback atomically and stores
 only the latest `(nonce, sourcePosition)` progress checkpoint.
+
+The current Alloy tuple encoding includes a leading top-level tuple offset. For
+packed price V1, the 32-byte callback body therefore makes this canonical
+wrapper 192 bytes. The previous five-word price body and its 320-byte wrapper
+are not accepted because the price-feed feature was not deployed before V1 was
+frozen.
 
 The execution adapter rejects:
 
