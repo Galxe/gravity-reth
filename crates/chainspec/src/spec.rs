@@ -977,10 +977,16 @@ impl From<Genesis> for ChainSpec {
 
         let hardforks = ChainHardforks::new(ordered_hardforks);
 
-        // Gravity-specific hardforks from genesis extra_fields (timestamp-gated only).
+        // Gravity-specific hardforks from genesis extra_fields.
         // Fail-closed: missing / misspelled keys (e.g. legacy `betaBlock`) mean the
-        // fork is never scheduled — Alpha gas-exempt stays off, Beta lockdown stays on.
+        // fork is never scheduled.
         let mut gravity_hardforks = Vec::new();
+        if let Some(oracle_v1_block) =
+            genesis.config.extra_fields.get("oracleV1Block").and_then(|v| v.as_u64())
+        {
+            gravity_hardforks
+                .push((GravityHardfork::OracleV1.boxed(), ForkCondition::Block(oracle_v1_block)));
+        }
         if let Some(alpha_time) =
             genesis.config.extra_fields.get("alphaTime").and_then(|v| v.as_u64())
         {
@@ -2636,6 +2642,35 @@ Post-merge hard forks (timestamp based):
             .unwrap();
         assert_eq!(acc.balance, U256::from(1));
         assert_eq!(genesis.base_fee_per_gas, Some(0x1337));
+    }
+
+    #[test]
+    fn test_parse_oracle_v1_block() {
+        let mut genesis = Genesis::default();
+        genesis.config.extra_fields.insert("oracleV1Block".to_string(), serde_json::json!(12_345));
+
+        let chainspec = ChainSpec::from(genesis);
+        assert_eq!(
+            chainspec.gravity_hardforks.fork(GravityHardfork::OracleV1),
+            ForkCondition::Block(12_345)
+        );
+    }
+
+    #[test]
+    fn test_oracle_v1_block_is_fail_closed() {
+        for (key, value) in [
+            ("oracleV1Time", serde_json::json!(12_345)),
+            ("oracleV1Block", serde_json::json!("12345")),
+        ] {
+            let mut genesis = Genesis::default();
+            genesis.config.extra_fields.insert(key.to_string(), value);
+
+            let chainspec = ChainSpec::from(genesis);
+            assert_eq!(
+                chainspec.gravity_hardforks.fork(GravityHardfork::OracleV1),
+                ForkCondition::Never
+            );
+        }
     }
 
     #[test]

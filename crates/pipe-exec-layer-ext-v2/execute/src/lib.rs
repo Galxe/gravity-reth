@@ -6,6 +6,7 @@ mod eip_2935;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
+mod oracle_v1_migration;
 pub mod randomness_precompile;
 mod system_caller_migration;
 mod tx_filter;
@@ -1299,6 +1300,18 @@ impl<Storage: GravityStorage> Core<Storage> {
             parent_header.timestamp,
             block_number,
         );
+
+        // OracleV1 replaces both oracle system-contract runtimes atomically at
+        // `oracleV1Block`. The migration deliberately runs through the shared
+        // ParallelExecutor state-diff channel before any system transaction.
+        oracle_v1_migration::apply_state_changes_for_block(
+            &mut *executor,
+            &self.chain_spec,
+            block_number,
+        )
+        .unwrap_or_else(|error| {
+            panic!("OracleV1 migration failed at block {block_number}: {error:?}")
+        });
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.
         // State changes are committed directly into executor's ParallelState.

@@ -28,6 +28,12 @@ hardfork!(
         /// `betaTime` (timestamp). Missing/unknown key → Beta never active → pre-Beta
         /// policy stays on (fail-closed).
         Beta,
+        /// OracleV1 hardfork: atomically replaces the NativeOracle and
+        /// OracleTaskConfig runtimes while preserving their account state.
+        ///
+        /// Activation is block-based via genesis `oracleV1Block`. Missing or
+        /// malformed configuration leaves the migration disabled.
+        OracleV1,
     }
 );
 
