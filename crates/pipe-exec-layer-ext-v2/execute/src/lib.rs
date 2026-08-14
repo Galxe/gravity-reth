@@ -3,6 +3,7 @@
 mod channel;
 mod custom_precompiles;
 mod eip_2935;
+mod hardfork_activation;
 mod metrics;
 pub mod mint_precompile;
 pub mod onchain_config;
@@ -1294,6 +1295,15 @@ impl<Storage: GravityStorage> Core<Storage> {
         // the account non-empty under EIP-161 (design §3.3, R5).
         system_caller_migration::apply_state_changes_for_block(
             &mut *executor,
+            &self.chain_spec,
+            ordered_block.timestamp_us / 1_000_000,
+            parent_header.timestamp,
+            block_number,
+        );
+
+        // Gravity Beta / Ethereum Osaka have no irregular state change; log
+        // once on the activation block so operators can see the crossing.
+        hardfork_activation::log_activation_for_block(
             &self.chain_spec,
             ordered_block.timestamp_us / 1_000_000,
             parent_header.timestamp,
