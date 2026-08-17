@@ -16,7 +16,9 @@ use grevm::{
     DynParallelPrecompile, GrevmConfig, ParallelBundleState, ParallelState, Scheduler,
     TxExecutionOutcome,
 };
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
+use reth_chainspec::{
+    EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks,
+};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
@@ -270,6 +272,18 @@ where
             .increment_balances(balance_increments)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
+        // Gravity hardforks are end-of-block state transitions. The activation
+        // block executes against the old runtime and commits the new runtime in
+        // its post-state, so the upgraded contracts become observable at H+1.
+        if self
+            .chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::OracleV1)
+            .transitions_at_block(block.number())
+        {
+            crate::hardfork::oracle_v1::apply_state_changes(self, block.number())?;
+        }
+
         // Note: `SystemCaller::try_on_state_with` (source-aware `OnStateHook` notification)
         // was removed from alloy-evm in 0.36 together with `StateChangeSource` /
         // `StateChangePostBlockSource`. Follow upstream: skip the balance-increment state
@@ -491,7 +505,14 @@ mod tests {
     //!   replacing.
 
     use super::*;
-    use crate::{is_system_tx_gas_exempt, EthEvmConfig, SYSTEM_CALLER};
+    use crate::{
+        hardfork::oracle_v1::{
+            NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_POST_FORK_CODE_HASH,
+            NATIVE_ORACLE_PRE_FORK_CODE_HASH, ORACLE_TASK_CONFIG_ADDRESS,
+            ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH,
+        },
+        is_system_tx_gas_exempt, EthEvmConfig, SYSTEM_CALLER,
+    };
     use alloc::sync::Arc;
     use alloy_consensus::{constants::KECCAK_EMPTY, Header};
     use alloy_eips::{
@@ -541,6 +562,44 @@ mod tests {
         Arc::new(spec)
     }
 
+    const ORACLE_V1_ACTIVATION_BLOCK: u64 = 100;
+
+    fn oracle_v1_chainspec() -> Arc<ChainSpec> {
+        let mut spec = ChainSpecBuilder::from(&*MAINNET)
+            .shanghai_activated()
+            .cancun_activated()
+            .prague_activated()
+            .build();
+        spec.gravity_hardforks = ChainHardforks::from([(
+            GravityHardfork::OracleV1,
+            ForkCondition::Block(ORACLE_V1_ACTIVATION_BLOCK),
+        )]);
+        Arc::new(spec)
+    }
+
+    fn oracle_v1_seeded_db() -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            NATIVE_ORACLE_ADDRESS,
+            AccountInfo {
+                balance: U256::from(11),
+                nonce: 7,
+                code_hash: NATIVE_ORACLE_PRE_FORK_CODE_HASH,
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            ORACLE_TASK_CONFIG_ADDRESS,
+            AccountInfo {
+                balance: U256::from(22),
+                nonce: 9,
+                code_hash: ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH,
+                ..Default::default()
+            },
+        );
+        db
+    }
+
     /// Mirrors the alloc shape that `eip_2935::apply_state_changes_for_block`
     /// produces via `deploy_contract` in the pipe layer: nonce=1, balance=0,
     /// code = HISTORY_STORAGE_CODE, no storage prefill, `Created | Touched`.
@@ -574,6 +633,61 @@ mod tests {
             ..Header::default()
         };
         RecoveredBlock::new_unhashed(Block { header, body: Default::default() }, vec![])
+    }
+
+    fn execute_oracle_v1_block(number: u64, force_sequential: bool) -> BundleState {
+        let chain_spec = oracle_v1_chainspec();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let db = oracle_v1_seeded_db();
+        let mut executor = if force_sequential {
+            GrevmExecutor::new_sequential(chain_spec, &evm_config, db)
+        } else {
+            GrevmExecutor::new(chain_spec, &evm_config, db)
+        };
+        executor
+            .execute(&prague_block(number, B256::from([0xA5; 32])))
+            .expect("OracleV1 boundary block execution must succeed")
+            .state
+    }
+
+    #[test]
+    fn oracle_v1_is_a_grevm_post_execution_transition() {
+        for block_number in [ORACLE_V1_ACTIVATION_BLOCK - 1, ORACLE_V1_ACTIVATION_BLOCK + 1] {
+            let bundle = execute_oracle_v1_block(block_number, false);
+            assert!(
+                !bundle.state.contains_key(&NATIVE_ORACLE_ADDRESS) &&
+                    !bundle.state.contains_key(&ORACLE_TASK_CONFIG_ADDRESS),
+                "OracleV1 must not change oracle accounts outside its transition block"
+            );
+        }
+
+        let parallel = execute_oracle_v1_block(ORACLE_V1_ACTIVATION_BLOCK, false);
+        let sequential = execute_oracle_v1_block(ORACLE_V1_ACTIVATION_BLOCK, true);
+
+        assert_eq!(parallel.state, sequential.state, "parallel/sequential state drift");
+        assert_eq!(parallel.contracts, sequential.contracts, "parallel/sequential code drift");
+        assert_eq!(parallel.reverts, sequential.reverts, "parallel/sequential revert drift");
+
+        let native = parallel
+            .state
+            .get(&NATIVE_ORACLE_ADDRESS)
+            .and_then(|account| account.info.as_ref())
+            .expect("NativeOracle must be upgraded in the activation block post-state");
+        assert_eq!(native.code_hash, NATIVE_ORACLE_POST_FORK_CODE_HASH);
+        assert_eq!(native.balance, U256::from(11));
+        assert_eq!(native.nonce, 7);
+
+        let task_config = parallel
+            .state
+            .get(&ORACLE_TASK_CONFIG_ADDRESS)
+            .and_then(|account| account.info.as_ref())
+            .expect("OracleTaskConfig must be upgraded in the activation block post-state");
+        assert_eq!(task_config.code_hash, ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH);
+        assert_eq!(task_config.balance, U256::from(22));
+        assert_eq!(task_config.nonce, 9);
+
+        assert!(parallel.contracts.contains_key(&NATIVE_ORACLE_POST_FORK_CODE_HASH));
+        assert!(parallel.contracts.contains_key(&ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH));
     }
 
     // --- U-1: WrapExecutor (revm path) -----------------------------------

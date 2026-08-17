@@ -1,28 +1,24 @@
 //! `OracleV1` testnet hardfork state transition.
 //!
-//! At the configured `oracleV1Block`, this hook replaces the runtime bytecode
-//! of `NativeOracle` and `OracleTaskConfig`. It preserves each account's
-//! balance, nonce, account id, and complete storage trie.
+//! At the end of the configured `oracleV1Block`, this hook replaces the runtime
+//! bytecode of `NativeOracle` and `OracleTaskConfig`. Transactions in the
+//! activation block execute against the old runtimes; the new runtimes are
+//! visible starting in the next block. Each account's balance, nonce, account
+//! id, and complete storage trie are preserved.
 //!
-//! Safety invariant: do not wire this migration only through the legacy Grevm
-//! `ethereum/evm/hardfork/common.rs` helper. That helper mutates Grevm state
-//! directly, so the `disable-grevm` serial path would observe different state.
-//! This module constructs one canonical [`EvmState`] and submits it through
-//! [`ParallelExecutor::apply_state_change`], which is shared by serial and
-//! Grevm execution.
+//! Gravity's canonical, history, and sequential execution modes all use
+//! `GrevmExecutor`; the migration is therefore invoked from Grevm's shared
+//! post-execution hook, matching the historical Gravity hardfork semantics.
 
+use alloc::{format, vec::Vec};
 use alloy_primitives::{address, b256, Address, Bytes, B256};
-use reth_chainspec::{ChainSpec, EthChainSpec, GravityHardfork};
+use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::{execute::BlockExecutionError, parallel_execute::ParallelExecutor};
-use reth_primitives::EthPrimitives;
 use revm::{
     bytecode::Bytecode,
     state::{Account, AccountInfo, AccountStatus, EvmState},
 };
 use tracing::info;
-
-type Executor<'a> =
-    &'a mut dyn ParallelExecutor<Primitives = EthPrimitives, Error = BlockExecutionError>;
 
 pub(crate) const ORACLE_V1_CONTRACTS_COMMIT: &str = "3bbc0b71bbccbeec89c706312fb2636723b594fa";
 
@@ -41,10 +37,9 @@ pub(crate) const NATIVE_ORACLE_POST_FORK_CODE_HASH: B256 =
 pub(crate) const ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH: B256 =
     b256!("a21bf93e6123b0104b9ea851b8154fb342a5b576c22c71f15f851e266faa9f7f");
 
-const NATIVE_ORACLE_RUNTIME: &[u8] =
-    include_bytes!("hardfork/bytecodes/oracle_v1/NativeOracle.bin");
+const NATIVE_ORACLE_RUNTIME: &[u8] = include_bytes!("bytecodes/oracle_v1/NativeOracle.bin");
 const ORACLE_TASK_CONFIG_RUNTIME: &[u8] =
-    include_bytes!("hardfork/bytecodes/oracle_v1/OracleTaskConfig.bin");
+    include_bytes!("bytecodes/oracle_v1/OracleTaskConfig.bin");
 
 #[derive(Clone, Copy)]
 struct CodeUpgrade {
@@ -72,24 +67,19 @@ const UPGRADES: [CodeUpgrade; 2] = [
     },
 ];
 
-/// Apply the `OracleV1` code-only migration at the configured activation block.
+/// Apply the `OracleV1` code-only migration to the current post-block state.
 ///
 /// Both accounts must be on the exact pre-fork codehash. A fully post-fork
 /// state is accepted as an idempotent replay, while missing, unknown, or
-/// partially upgraded state fails closed before any diff is committed.
-pub(crate) fn apply_state_changes_for_block(
-    executor: Executor<'_>,
-    chain_spec: &ChainSpec,
+/// partially upgraded state fails closed before any migration diff is committed.
+/// The caller is responsible for checking the configured transition block.
+pub(crate) fn apply_state_changes<Executor>(
+    executor: &mut Executor,
     block_number: u64,
-) -> Result<(), BlockExecutionError> {
-    if !chain_spec
-        .gravity_hardforks()
-        .fork(GravityHardfork::OracleV1)
-        .transitions_at_block(block_number)
-    {
-        return Ok(())
-    }
-
+) -> Result<(), BlockExecutionError>
+where
+    Executor: ParallelExecutor<Primitives = EthPrimitives, Error = BlockExecutionError> + ?Sized,
+{
     let mut previous_accounts = Vec::with_capacity(UPGRADES.len());
     let mut pre_fork_count = 0;
     let mut post_fork_count = 0;
@@ -108,8 +98,8 @@ pub(crate) fn apply_state_changes_for_block(
             post_fork_count += 1;
         } else {
             return Err(BlockExecutionError::msg(format!(
-                "OracleV1: {} has unexpected pre-state codehash {}; expected {}",
-                upgrade.name, info.code_hash, upgrade.pre_fork_hash
+                "OracleV1: {} has unexpected codehash {}; expected pre-fork {} or post-fork {}",
+                upgrade.name, info.code_hash, upgrade.pre_fork_hash, upgrade.post_fork_hash
             )))
         }
         previous_accounts.push(info);
@@ -139,7 +129,7 @@ pub(crate) fn apply_state_changes_for_block(
 
     executor.apply_state_change(state_diff)?;
     info!(
-        target: "execute_ordered_block",
+        target: "reth::evm::hardfork",
         block_number,
         contracts_commit = ORACLE_V1_CONTRACTS_COMMIT,
         native_oracle_code_hash = ?NATIVE_ORACLE_POST_FORK_CODE_HASH,
@@ -152,13 +142,13 @@ pub(crate) fn apply_state_changes_for_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{parallel_execute::GrevmExecutor, EthEvmConfig};
     use alloy_primitives::{keccak256, U256};
-    use reth_chainspec::{ChainHardforks, ChainSpecBuilder, ForkCondition, MAINNET};
+    use reth_chainspec::{ChainSpec, ChainSpecBuilder, MAINNET};
     use reth_evm::{
         execute::BasicBlockExecutor,
         parallel_execute::{ParallelExecutor, WrapExecutor},
     };
-    use reth_evm_ethereum::{parallel_execute::GrevmExecutor, EthEvmConfig};
     use revm::{
         database::{CacheDB, EmptyDB},
         state::AccountId,
@@ -167,22 +157,19 @@ mod tests {
 
     const ACTIVATION_BLOCK: u64 = 100;
 
-    type SerialExecutor =
+    type BasicExecutor =
         WrapExecutor<CacheDB<EmptyDB>, BasicBlockExecutor<EthEvmConfig, CacheDB<EmptyDB>>>;
     type ParallelGrevmExecutor =
         GrevmExecutor<CacheDB<EmptyDB>, EthEvmConfig, reth_chainspec::ChainSpec>;
 
-    fn oracle_v1_chainspec() -> Arc<ChainSpec> {
-        let mut spec = ChainSpecBuilder::from(&*MAINNET)
-            .shanghai_activated()
-            .cancun_activated()
-            .prague_activated()
-            .build();
-        spec.gravity_hardforks = ChainHardforks::from([(
-            GravityHardfork::OracleV1,
-            ForkCondition::Block(ACTIVATION_BLOCK),
-        )]);
-        Arc::new(spec)
+    fn test_chainspec() -> Arc<ChainSpec> {
+        Arc::new(
+            ChainSpecBuilder::from(&*MAINNET)
+                .shanghai_activated()
+                .cancun_activated()
+                .prague_activated()
+                .build(),
+        )
     }
 
     fn account(code_hash: B256, balance: u64, nonce: u64) -> AccountInfo {
@@ -202,7 +189,7 @@ mod tests {
         db
     }
 
-    fn serial_executor(chain_spec: Arc<ChainSpec>, db: CacheDB<EmptyDB>) -> SerialExecutor {
+    fn basic_executor(chain_spec: Arc<ChainSpec>, db: CacheDB<EmptyDB>) -> BasicExecutor {
         let evm_config = EthEvmConfig::new(chain_spec);
         WrapExecutor::new(BasicBlockExecutor::new(evm_config, db))
     }
@@ -220,11 +207,11 @@ mod tests {
 
     #[test]
     fn activation_preserves_account_fields_and_does_not_patch_storage() {
-        let chain_spec = oracle_v1_chainspec();
+        let chain_spec = test_chainspec();
         let db = seed_db(NATIVE_ORACLE_PRE_FORK_CODE_HASH, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH);
-        let mut executor = serial_executor(chain_spec.clone(), db);
+        let mut executor = basic_executor(chain_spec, db);
 
-        apply_state_changes_for_block(&mut executor, &chain_spec, ACTIVATION_BLOCK).unwrap();
+        apply_state_changes(&mut executor, ACTIVATION_BLOCK).unwrap();
         let bundle = executor.take_bundle();
 
         let native = bundle.state.get(&NATIVE_ORACLE_ADDRESS).unwrap();
@@ -245,48 +232,36 @@ mod tests {
     }
 
     #[test]
-    fn serial_and_grevm_apply_identical_state_diff() {
-        let chain_spec = oracle_v1_chainspec();
+    fn basic_and_grevm_helpers_apply_identical_state_diff() {
+        let chain_spec = test_chainspec();
         let db = seed_db(NATIVE_ORACLE_PRE_FORK_CODE_HASH, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH);
-        let mut serial = serial_executor(chain_spec.clone(), db.clone());
-        let mut grevm = grevm_executor(chain_spec.clone(), db);
+        let mut basic = basic_executor(chain_spec.clone(), db.clone());
+        let mut grevm = grevm_executor(chain_spec, db);
 
-        apply_state_changes_for_block(&mut serial, &chain_spec, ACTIVATION_BLOCK).unwrap();
-        apply_state_changes_for_block(&mut grevm, &chain_spec, ACTIVATION_BLOCK).unwrap();
+        apply_state_changes(&mut basic, ACTIVATION_BLOCK).unwrap();
+        apply_state_changes(&mut grevm, ACTIVATION_BLOCK).unwrap();
 
-        let serial_bundle = serial.take_bundle();
+        let basic_bundle = basic.take_bundle();
         let grevm_bundle = grevm.take_bundle();
-        assert_eq!(serial_bundle.state, grevm_bundle.state);
-        assert_eq!(serial_bundle.contracts, grevm_bundle.contracts);
-        assert_eq!(serial_bundle.reverts, grevm_bundle.reverts);
-        assert_eq!(serial_bundle.state_size, grevm_bundle.state_size);
-    }
-
-    #[test]
-    fn pre_and_post_activation_blocks_are_noops() {
-        let chain_spec = oracle_v1_chainspec();
-        for block_number in [ACTIVATION_BLOCK - 1, ACTIVATION_BLOCK + 1] {
-            let db =
-                seed_db(NATIVE_ORACLE_PRE_FORK_CODE_HASH, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH);
-            let mut executor = serial_executor(chain_spec.clone(), db);
-            apply_state_changes_for_block(&mut executor, &chain_spec, block_number).unwrap();
-            assert!(executor.take_bundle().state.is_empty());
-        }
+        assert_eq!(basic_bundle.state, grevm_bundle.state);
+        assert_eq!(basic_bundle.contracts, grevm_bundle.contracts);
+        assert_eq!(basic_bundle.reverts, grevm_bundle.reverts);
+        assert_eq!(basic_bundle.state_size, grevm_bundle.state_size);
     }
 
     #[test]
     fn fully_upgraded_state_is_idempotent() {
-        let chain_spec = oracle_v1_chainspec();
+        let chain_spec = test_chainspec();
         let db = seed_db(NATIVE_ORACLE_POST_FORK_CODE_HASH, ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH);
-        let mut executor = serial_executor(chain_spec.clone(), db);
+        let mut executor = basic_executor(chain_spec, db);
 
-        apply_state_changes_for_block(&mut executor, &chain_spec, ACTIVATION_BLOCK).unwrap();
+        apply_state_changes(&mut executor, ACTIVATION_BLOCK).unwrap();
         assert!(executor.take_bundle().state.is_empty());
     }
 
     #[test]
     fn unknown_or_partial_pre_state_fails_before_commit() {
-        let chain_spec = oracle_v1_chainspec();
+        let chain_spec = test_chainspec();
         let cases = [
             (B256::ZERO, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH),
             (NATIVE_ORACLE_POST_FORK_CODE_HASH, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH),
@@ -294,26 +269,23 @@ mod tests {
 
         for (native_hash, task_config_hash) in cases {
             let db = seed_db(native_hash, task_config_hash);
-            let mut executor = serial_executor(chain_spec.clone(), db);
-            assert!(apply_state_changes_for_block(&mut executor, &chain_spec, ACTIVATION_BLOCK)
-                .is_err());
+            let mut executor = basic_executor(chain_spec.clone(), db);
+            assert!(apply_state_changes(&mut executor, ACTIVATION_BLOCK).is_err());
             assert!(executor.take_bundle().state.is_empty());
         }
     }
 
     #[test]
     fn missing_account_fails_before_commit() {
-        let chain_spec = oracle_v1_chainspec();
+        let chain_spec = test_chainspec();
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(
             NATIVE_ORACLE_ADDRESS,
             account(NATIVE_ORACLE_PRE_FORK_CODE_HASH, 11, 7),
         );
-        let mut executor = serial_executor(chain_spec.clone(), db);
+        let mut executor = basic_executor(chain_spec, db);
 
-        assert!(
-            apply_state_changes_for_block(&mut executor, &chain_spec, ACTIVATION_BLOCK).is_err()
-        );
+        assert!(apply_state_changes(&mut executor, ACTIVATION_BLOCK).is_err());
         assert!(executor.take_bundle().state.is_empty());
     }
 }
