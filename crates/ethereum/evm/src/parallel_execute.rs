@@ -16,7 +16,9 @@ use grevm::{
     DynParallelPrecompile, GrevmConfig, ParallelBundleState, ParallelState, Scheduler,
     TxExecutionOutcome,
 };
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, Hardforks};
+use reth_chainspec::{
+    EthChainSpec, EthereumHardfork, EthereumHardforks, GravityHardfork, Hardforks,
+};
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_evm::{
     execute::{
@@ -270,6 +272,18 @@ where
             .increment_balances(balance_increments)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
+        // Gravity hardforks are end-of-block state transitions. The activation
+        // block executes against the old runtime and commits the new runtime in
+        // its post-state, so the upgraded contracts become observable at H+1.
+        if self
+            .chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::OracleV1)
+            .transitions_at_block(block.number())
+        {
+            crate::hardfork::oracle_v1::apply_state_changes(self, block.number())?;
+        }
+
         // Note: `SystemCaller::try_on_state_with` (source-aware `OnStateHook` notification)
         // was removed from alloy-evm in 0.36 together with `StateChangeSource` /
         // `StateChangePostBlockSource`. Follow upstream: skip the balance-increment state
@@ -491,14 +505,22 @@ mod tests {
     //!   replacing.
 
     use super::*;
-    use crate::{is_system_tx_gas_exempt, EthEvmConfig, SYSTEM_CALLER};
+    use crate::{
+        hardfork::oracle_v1::{
+            NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_POST_FORK_CODE_HASH,
+            NATIVE_ORACLE_PRE_FORK_CODE_HASH, ORACLE_TASK_CONFIG_ADDRESS,
+            ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH,
+        },
+        is_system_tx_gas_exempt, EthEvmConfig, SYSTEM_CALLER,
+    };
     use alloc::sync::Arc;
     use alloy_consensus::{constants::KECCAK_EMPTY, Header};
     use alloy_eips::{
         eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
         eip7685::EMPTY_REQUESTS_HASH,
     };
-    use alloy_primitives::{keccak256, Bytes, B256, U256};
+    use alloy_primitives::{address, keccak256, Bytes, B256, U256};
+    use alloy_sol_types::{sol, SolCall};
     use core::sync::atomic::{AtomicUsize, Ordering};
     use reth_chainspec::{
         ChainHardforks, ChainSpec, ChainSpecBuilder, ForkCondition, GravityHardfork, MAINNET,
@@ -541,6 +563,176 @@ mod tests {
         Arc::new(spec)
     }
 
+    const ORACLE_V1_ACTIVATION_BLOCK: u64 = 100;
+    const ORACLE_SOURCE_TYPE_BLOCKCHAIN: u32 = 0;
+    const ORACLE_SOURCE_ID: u64 = 1;
+    const LEGACY_SOURCE_POSITION: u128 = 19_876_543;
+    const POST_FORK_SOURCE_POSITION: u128 = LEGACY_SOURCE_POSITION + 1;
+    const NATIVE_ORACLE_PRE_FORK_RUNTIME_HEX: &str =
+        include_str!("hardfork/bytecodes/oracle_v1/NativeOracle.pre.hex");
+    const ALWAYS_TRUE_CALLBACK: Address = address!("000000000000000000000000000000000000c0de");
+    const ALWAYS_TRUE_CALLBACK_RUNTIME: &[u8] =
+        &[0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+
+    sol! {
+        function recordBatch(
+            uint32 sourceType,
+            uint256 sourceId,
+            uint128[] nonces,
+            uint256[] blockNumbers,
+            bytes[] payloads,
+            uint256[] callbackGasLimits
+        ) external;
+    }
+
+    fn oracle_v1_chainspec() -> Arc<ChainSpec> {
+        let mut spec = ChainSpecBuilder::from(&*MAINNET)
+            .shanghai_activated()
+            .cancun_activated()
+            .prague_activated()
+            .build();
+        // OracleV1 activates after Alpha in production, so zero-balance system
+        // transactions at the boundary use the already-active gas exemption.
+        spec.gravity_hardforks = ChainHardforks::from([
+            (GravityHardfork::OracleV1, ForkCondition::Block(ORACLE_V1_ACTIVATION_BLOCK)),
+            (GravityHardfork::Alpha, ForkCondition::Timestamp(0)),
+        ]);
+        Arc::new(spec)
+    }
+
+    fn oracle_v1_seeded_db() -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            NATIVE_ORACLE_ADDRESS,
+            AccountInfo {
+                balance: U256::from(11),
+                nonce: 7,
+                code_hash: NATIVE_ORACLE_PRE_FORK_CODE_HASH,
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            ORACLE_TASK_CONFIG_ADDRESS,
+            AccountInfo {
+                balance: U256::from(22),
+                nonce: 9,
+                code_hash: ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH,
+                ..Default::default()
+            },
+        );
+        db
+    }
+
+    fn solidity_mapping_slot(key: U256, slot: U256) -> U256 {
+        let mut preimage = [0u8; 64];
+        preimage[..32].copy_from_slice(&key.to_be_bytes::<32>());
+        preimage[32..].copy_from_slice(&slot.to_be_bytes::<32>());
+        U256::from_be_bytes(keccak256(preimage).0)
+    }
+
+    fn solidity_nested_mapping_slot(first_key: U256, second_key: U256, slot: u64) -> U256 {
+        let outer = solidity_mapping_slot(first_key, U256::from(slot));
+        solidity_mapping_slot(second_key, outer)
+    }
+
+    fn legacy_nonce_slot() -> U256 {
+        solidity_nested_mapping_slot(
+            U256::from(ORACLE_SOURCE_TYPE_BLOCKCHAIN),
+            U256::from(ORACLE_SOURCE_ID),
+            1,
+        )
+    }
+
+    fn legacy_record_block_number_slot(nonce: u128) -> U256 {
+        let source_records = solidity_nested_mapping_slot(
+            U256::from(ORACLE_SOURCE_TYPE_BLOCKCHAIN),
+            U256::from(ORACLE_SOURCE_ID),
+            0,
+        );
+        solidity_mapping_slot(U256::from(nonce), source_records) + U256::from(1)
+    }
+
+    fn source_progress_slot() -> U256 {
+        solidity_nested_mapping_slot(
+            U256::from(ORACLE_SOURCE_TYPE_BLOCKCHAIN),
+            U256::from(ORACLE_SOURCE_ID),
+            5,
+        )
+    }
+
+    fn oracle_v1_legacy_handoff_db() -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        let pre_fork_runtime =
+            alloy_primitives::hex::decode(NATIVE_ORACLE_PRE_FORK_RUNTIME_HEX.trim())
+                .expect("pre-fork NativeOracle runtime fixture must be valid hex");
+        assert_eq!(keccak256(&pre_fork_runtime), NATIVE_ORACLE_PRE_FORK_CODE_HASH);
+
+        db.insert_account_info(
+            NATIVE_ORACLE_ADDRESS,
+            AccountInfo {
+                code_hash: NATIVE_ORACLE_PRE_FORK_CODE_HASH,
+                code: Some(Bytecode::new_raw(Bytes::from(pre_fork_runtime))),
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            ORACLE_TASK_CONFIG_ADDRESS,
+            AccountInfo { code_hash: ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH, ..Default::default() },
+        );
+        db.insert_account_info(
+            SYSTEM_CALLER,
+            AccountInfo { balance: U256::ZERO, code_hash: KECCAK_EMPTY, ..Default::default() },
+        );
+
+        let callback_code = Bytes::from_static(ALWAYS_TRUE_CALLBACK_RUNTIME);
+        let callback_code_hash = keccak256(&callback_code);
+        db.insert_account_info(
+            ALWAYS_TRUE_CALLBACK,
+            AccountInfo {
+                code_hash: callback_code_hash,
+                code: Some(Bytecode::new_raw(callback_code)),
+                ..Default::default()
+            },
+        );
+
+        let default_callback_slot =
+            solidity_mapping_slot(U256::from(ORACLE_SOURCE_TYPE_BLOCKCHAIN), U256::from(2));
+        db.insert_account_storage(
+            NATIVE_ORACLE_ADDRESS,
+            default_callback_slot,
+            U256::from_be_slice(ALWAYS_TRUE_CALLBACK.as_slice()),
+        )
+        .expect("callback storage fixture must be writable");
+        db
+    }
+
+    fn oracle_record_batch_tx_env(
+        system_nonce: u64,
+        oracle_nonce: u128,
+        source_position: u128,
+        chain_id: u64,
+    ) -> TxEnv {
+        let call = recordBatchCall {
+            sourceType: ORACLE_SOURCE_TYPE_BLOCKCHAIN,
+            sourceId: U256::from(ORACLE_SOURCE_ID),
+            nonces: vec![oracle_nonce],
+            blockNumbers: vec![U256::from(source_position)],
+            payloads: vec![Bytes::from_static(b"oracle-v1-boundary")],
+            callbackGasLimits: vec![U256::from(100_000)],
+        };
+        TxEnv {
+            caller: SYSTEM_CALLER,
+            gas_limit: 2_000_000,
+            gas_price: 0,
+            kind: TxKind::Call(NATIVE_ORACLE_ADDRESS),
+            value: U256::ZERO,
+            data: call.abi_encode().into(),
+            nonce: system_nonce,
+            chain_id: Some(chain_id),
+            ..TxEnv::default()
+        }
+    }
+
     /// Mirrors the alloc shape that `eip_2935::apply_state_changes_for_block`
     /// produces via `deploy_contract` in the pipe layer: nonce=1, balance=0,
     /// code = HISTORY_STORAGE_CODE, no storage prefill, `Created | Touched`.
@@ -567,6 +759,7 @@ mod tests {
             parent_hash,
             timestamp: 1,
             number,
+            gas_limit: 30_000_000,
             requests_hash: Some(EMPTY_REQUESTS_HASH),
             excess_blob_gas: Some(0),
             blob_gas_used: Some(0),
@@ -574,6 +767,171 @@ mod tests {
             ..Header::default()
         };
         RecoveredBlock::new_unhashed(Block { header, body: Default::default() }, vec![])
+    }
+
+    fn execute_oracle_v1_block(number: u64, force_sequential: bool) -> BundleState {
+        let chain_spec = oracle_v1_chainspec();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let db = oracle_v1_seeded_db();
+        let mut executor = if force_sequential {
+            GrevmExecutor::new_sequential(chain_spec, &evm_config, db)
+        } else {
+            GrevmExecutor::new(chain_spec, &evm_config, db)
+        };
+        executor
+            .execute(&prague_block(number, B256::from([0xA5; 32])))
+            .expect("OracleV1 boundary block execution must succeed")
+            .state
+    }
+
+    #[test]
+    fn oracle_v1_is_a_grevm_post_execution_transition() {
+        for block_number in [ORACLE_V1_ACTIVATION_BLOCK - 1, ORACLE_V1_ACTIVATION_BLOCK + 1] {
+            let bundle = execute_oracle_v1_block(block_number, false);
+            assert!(
+                !bundle.state.contains_key(&NATIVE_ORACLE_ADDRESS) &&
+                    !bundle.state.contains_key(&ORACLE_TASK_CONFIG_ADDRESS),
+                "OracleV1 must not change oracle accounts outside its transition block"
+            );
+        }
+
+        let parallel = execute_oracle_v1_block(ORACLE_V1_ACTIVATION_BLOCK, false);
+        let sequential = execute_oracle_v1_block(ORACLE_V1_ACTIVATION_BLOCK, true);
+
+        assert_eq!(parallel.state, sequential.state, "parallel/sequential state drift");
+        assert_eq!(parallel.contracts, sequential.contracts, "parallel/sequential code drift");
+        assert_eq!(parallel.reverts, sequential.reverts, "parallel/sequential revert drift");
+
+        let native = parallel
+            .state
+            .get(&NATIVE_ORACLE_ADDRESS)
+            .and_then(|account| account.info.as_ref())
+            .expect("NativeOracle must be upgraded in the activation block post-state");
+        assert_eq!(native.code_hash, NATIVE_ORACLE_POST_FORK_CODE_HASH);
+        assert_eq!(native.balance, U256::from(11));
+        assert_eq!(native.nonce, 7);
+
+        let task_config = parallel
+            .state
+            .get(&ORACLE_TASK_CONFIG_ADDRESS)
+            .and_then(|account| account.info.as_ref())
+            .expect("OracleTaskConfig must be upgraded in the activation block post-state");
+        assert_eq!(task_config.code_hash, ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH);
+        assert_eq!(task_config.balance, U256::from(22));
+        assert_eq!(task_config.nonce, 9);
+
+        assert!(parallel.contracts.contains_key(&NATIVE_ORACLE_POST_FORK_CODE_HASH));
+        assert!(parallel.contracts.contains_key(&ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH));
+    }
+
+    fn execute_oracle_v1_legacy_handoff(force_sequential: bool) -> (BundleState, BundleState) {
+        let chain_spec = oracle_v1_chainspec();
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec.clone());
+        let mut executor = if force_sequential {
+            GrevmExecutor::new_sequential(chain_spec, &evm_config, oracle_v1_legacy_handoff_db())
+        } else {
+            GrevmExecutor::new(chain_spec, &evm_config, oracle_v1_legacy_handoff_db())
+        };
+
+        let activation_block = prague_block(ORACLE_V1_ACTIVATION_BLOCK, B256::from([0xB0; 32]));
+        let activation_env = evm_config
+            .evm_env(activation_block.header())
+            .expect("activation EVM environment must build");
+        let legacy_result = executor
+            .transact_system_txn(
+                activation_env,
+                Vec::new(),
+                oracle_record_batch_tx_env(0, 1, LEGACY_SOURCE_POSITION, chain_id),
+            )
+            .expect("legacy Oracle system transaction must execute");
+        assert!(legacy_result.is_success(), "legacy Oracle system transaction reverted");
+
+        executor
+            .execute_one(&activation_block)
+            .expect("activation block post-execution migration must succeed");
+        let activation_bundle = executor.take_bundle();
+
+        let post_fork_block = prague_block(ORACLE_V1_ACTIVATION_BLOCK + 1, B256::from([0xB1; 32]));
+        let post_fork_env = evm_config
+            .evm_env(post_fork_block.header())
+            .expect("post-fork EVM environment must build");
+        let post_fork_result = executor
+            .transact_system_txn(
+                post_fork_env,
+                Vec::new(),
+                oracle_record_batch_tx_env(1, 2, POST_FORK_SOURCE_POSITION, chain_id),
+            )
+            .expect("post-fork Oracle system transaction must execute");
+        assert!(
+            post_fork_result.is_success(),
+            "post-fork Oracle transaction must resume from the legacy nonce"
+        );
+        executor.execute_one(&post_fork_block).expect("H+1 execution must succeed");
+        (activation_bundle, executor.take_bundle())
+    }
+
+    #[test]
+    fn oracle_v1_preserves_legacy_oracle_tx_and_resumes_at_h_plus_one() {
+        let (parallel_h, parallel_h_plus_one) = execute_oracle_v1_legacy_handoff(false);
+        let (sequential_h, sequential_h_plus_one) = execute_oracle_v1_legacy_handoff(true);
+
+        assert_eq!(parallel_h.state, sequential_h.state, "H parallel/sequential state drift");
+        assert_eq!(
+            parallel_h.contracts, sequential_h.contracts,
+            "H parallel/sequential code drift"
+        );
+        assert_eq!(parallel_h.reverts, sequential_h.reverts, "H parallel/sequential revert drift");
+        assert_eq!(
+            parallel_h_plus_one.state, sequential_h_plus_one.state,
+            "H+1 parallel/sequential state drift"
+        );
+        assert_eq!(
+            parallel_h_plus_one.contracts, sequential_h_plus_one.contracts,
+            "H+1 parallel/sequential code drift"
+        );
+        assert_eq!(
+            parallel_h_plus_one.reverts, sequential_h_plus_one.reverts,
+            "H+1 parallel/sequential revert drift"
+        );
+
+        let native_at_h = parallel_h
+            .state
+            .get(&NATIVE_ORACLE_ADDRESS)
+            .expect("NativeOracle must be present in the H bundle");
+        let native_info = native_at_h.info.as_ref().expect("NativeOracle must retain account info");
+        assert_eq!(native_info.code_hash, NATIVE_ORACLE_POST_FORK_CODE_HASH);
+
+        assert_eq!(
+            native_at_h
+                .storage
+                .get(&legacy_nonce_slot())
+                .expect("H legacy nonce write must survive migration")
+                .present_value,
+            U256::from(1)
+        );
+        assert_eq!(
+            native_at_h
+                .storage
+                .get(&legacy_record_block_number_slot(1))
+                .expect("H legacy source position must survive migration")
+                .present_value,
+            U256::from(LEGACY_SOURCE_POSITION)
+        );
+
+        let expected_progress = (U256::from(POST_FORK_SOURCE_POSITION) << 128) | U256::from(2);
+        let native_at_h_plus_one = parallel_h_plus_one
+            .state
+            .get(&NATIVE_ORACLE_ADDRESS)
+            .expect("NativeOracle must be present in the H+1 bundle");
+        assert_eq!(
+            native_at_h_plus_one
+                .storage
+                .get(&source_progress_slot())
+                .expect("H+1 must write the post-fork source progress slot")
+                .present_value,
+            expected_progress
+        );
     }
 
     // --- U-1: WrapExecutor (revm path) -----------------------------------
