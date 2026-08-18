@@ -1,10 +1,10 @@
-//! `OracleV1` testnet hardfork state transition.
+//! `Gamma` hardfork state transition.
 //!
-//! At the end of the configured `oracleV1Block`, this hook replaces the runtime
-//! bytecode of `NativeOracle` and `OracleTaskConfig`. Transactions in the
-//! activation block execute against the old runtimes; the new runtimes are
-//! visible starting in the next block. Each account's balance, nonce, account
-//! id, and complete storage trie are preserved.
+//! At the end of the first block whose timestamp is at least the configured
+//! `gammaTime`, this hook replaces the runtime bytecode of `NativeOracle` and
+//! `OracleTaskConfig`. Transactions in that block execute against the old
+//! runtimes; the new runtimes are visible starting in the next block. Each
+//! account's balance, nonce, account id, and complete storage trie are preserved.
 //!
 //! Gravity's canonical, history, and sequential execution modes all use
 //! `GrevmExecutor`; the migration is therefore invoked from Grevm's shared
@@ -20,7 +20,7 @@ use revm::{
 };
 use tracing::info;
 
-pub(crate) const ORACLE_V1_CONTRACTS_COMMIT: &str = "3bbc0b71bbccbeec89c706312fb2636723b594fa";
+pub(crate) const GAMMA_CONTRACTS_COMMIT: &str = "3bbc0b71bbccbeec89c706312fb2636723b594fa";
 
 pub(crate) const NATIVE_ORACLE_ADDRESS: Address =
     address!("00000000000000000000000000000001625f4000");
@@ -37,9 +37,8 @@ pub(crate) const NATIVE_ORACLE_POST_FORK_CODE_HASH: B256 =
 pub(crate) const ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH: B256 =
     b256!("a21bf93e6123b0104b9ea851b8154fb342a5b576c22c71f15f851e266faa9f7f");
 
-const NATIVE_ORACLE_RUNTIME: &[u8] = include_bytes!("bytecodes/oracle_v1/NativeOracle.bin");
-const ORACLE_TASK_CONFIG_RUNTIME: &[u8] =
-    include_bytes!("bytecodes/oracle_v1/OracleTaskConfig.bin");
+const NATIVE_ORACLE_RUNTIME: &[u8] = include_bytes!("bytecodes/gamma/NativeOracle.bin");
+const ORACLE_TASK_CONFIG_RUNTIME: &[u8] = include_bytes!("bytecodes/gamma/OracleTaskConfig.bin");
 
 #[derive(Clone, Copy)]
 struct CodeUpgrade {
@@ -67,15 +66,16 @@ const UPGRADES: [CodeUpgrade; 2] = [
     },
 ];
 
-/// Apply the `OracleV1` code-only migration to the current post-block state.
+/// Apply the `Gamma` code-only migration to the current post-block state.
 ///
 /// Both accounts must be on the exact pre-fork codehash. A fully post-fork
 /// state is accepted as an idempotent replay, while missing, unknown, or
 /// partially upgraded state fails closed before any migration diff is committed.
-/// The caller is responsible for checking the configured transition block.
+/// The caller is responsible for checking the configured activation timestamp.
 pub(crate) fn apply_state_changes<Executor>(
     executor: &mut Executor,
     block_number: u64,
+    block_timestamp: u64,
 ) -> Result<(), BlockExecutionError>
 where
     Executor: ParallelExecutor<Primitives = EthPrimitives, Error = BlockExecutionError> + ?Sized,
@@ -87,7 +87,7 @@ where
     for upgrade in UPGRADES {
         let info = executor.basic(upgrade.address)?.ok_or_else(|| {
             BlockExecutionError::msg(format!(
-                "OracleV1: {} account is missing at {}",
+                "Gamma: {} account is missing at {}",
                 upgrade.name, upgrade.address
             ))
         })?;
@@ -98,7 +98,7 @@ where
             post_fork_count += 1;
         } else {
             return Err(BlockExecutionError::msg(format!(
-                "OracleV1: {} has unexpected codehash {}; expected pre-fork {} or post-fork {}",
+                "Gamma: {} has unexpected codehash {}; expected pre-fork {} or post-fork {}",
                 upgrade.name, info.code_hash, upgrade.pre_fork_hash, upgrade.post_fork_hash
             )))
         }
@@ -110,7 +110,7 @@ where
     }
     if pre_fork_count != UPGRADES.len() {
         return Err(BlockExecutionError::msg(
-            "OracleV1: partial oracle system-contract upgrade detected",
+            "Gamma: partial oracle system-contract upgrade detected",
         ))
     }
 
@@ -131,10 +131,11 @@ where
     info!(
         target: "reth::evm::hardfork",
         block_number,
-        contracts_commit = ORACLE_V1_CONTRACTS_COMMIT,
+        block_timestamp,
+        contracts_commit = GAMMA_CONTRACTS_COMMIT,
         native_oracle_code_hash = ?NATIVE_ORACLE_POST_FORK_CODE_HASH,
         oracle_task_config_code_hash = ?ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH,
-        "applied OracleV1 oracle system-contract migration"
+        "applied Gamma oracle system-contract migration"
     );
     Ok(())
 }
@@ -156,6 +157,7 @@ mod tests {
     use std::sync::Arc;
 
     const ACTIVATION_BLOCK: u64 = 100;
+    const ACTIVATION_TIME: u64 = 1_000;
 
     type BasicExecutor =
         WrapExecutor<CacheDB<EmptyDB>, BasicBlockExecutor<EthEvmConfig, CacheDB<EmptyDB>>>;
@@ -211,7 +213,7 @@ mod tests {
         let db = seed_db(NATIVE_ORACLE_PRE_FORK_CODE_HASH, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH);
         let mut executor = basic_executor(chain_spec, db);
 
-        apply_state_changes(&mut executor, ACTIVATION_BLOCK).unwrap();
+        apply_state_changes(&mut executor, ACTIVATION_BLOCK, ACTIVATION_TIME).unwrap();
         let bundle = executor.take_bundle();
 
         let native = bundle.state.get(&NATIVE_ORACLE_ADDRESS).unwrap();
@@ -238,8 +240,8 @@ mod tests {
         let mut basic = basic_executor(chain_spec.clone(), db.clone());
         let mut grevm = grevm_executor(chain_spec, db);
 
-        apply_state_changes(&mut basic, ACTIVATION_BLOCK).unwrap();
-        apply_state_changes(&mut grevm, ACTIVATION_BLOCK).unwrap();
+        apply_state_changes(&mut basic, ACTIVATION_BLOCK, ACTIVATION_TIME).unwrap();
+        apply_state_changes(&mut grevm, ACTIVATION_BLOCK, ACTIVATION_TIME).unwrap();
 
         let basic_bundle = basic.take_bundle();
         let grevm_bundle = grevm.take_bundle();
@@ -255,7 +257,7 @@ mod tests {
         let db = seed_db(NATIVE_ORACLE_POST_FORK_CODE_HASH, ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH);
         let mut executor = basic_executor(chain_spec, db);
 
-        apply_state_changes(&mut executor, ACTIVATION_BLOCK).unwrap();
+        apply_state_changes(&mut executor, ACTIVATION_BLOCK, ACTIVATION_TIME).unwrap();
         assert!(executor.take_bundle().state.is_empty());
     }
 
@@ -270,7 +272,7 @@ mod tests {
         for (native_hash, task_config_hash) in cases {
             let db = seed_db(native_hash, task_config_hash);
             let mut executor = basic_executor(chain_spec.clone(), db);
-            assert!(apply_state_changes(&mut executor, ACTIVATION_BLOCK).is_err());
+            assert!(apply_state_changes(&mut executor, ACTIVATION_BLOCK, ACTIVATION_TIME).is_err());
             assert!(executor.take_bundle().state.is_empty());
         }
     }
@@ -285,7 +287,7 @@ mod tests {
         );
         let mut executor = basic_executor(chain_spec, db);
 
-        assert!(apply_state_changes(&mut executor, ACTIVATION_BLOCK).is_err());
+        assert!(apply_state_changes(&mut executor, ACTIVATION_BLOCK, ACTIVATION_TIME).is_err());
         assert!(executor.take_bundle().state.is_empty());
     }
 }

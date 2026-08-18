@@ -981,11 +981,11 @@ impl From<Genesis> for ChainSpec {
         // Fail-closed: missing / misspelled keys (e.g. legacy `betaBlock`) mean the
         // fork is never scheduled.
         let mut gravity_hardforks = Vec::new();
-        if let Some(oracle_v1_block) =
-            genesis.config.extra_fields.get("oracleV1Block").and_then(|v| v.as_u64())
+        if let Some(gamma_time) =
+            genesis.config.extra_fields.get("gammaTime").and_then(|v| v.as_u64())
         {
             gravity_hardforks
-                .push((GravityHardfork::OracleV1.boxed(), ForkCondition::Block(oracle_v1_block)));
+                .push((GravityHardfork::Gamma.boxed(), ForkCondition::Timestamp(gamma_time)));
         }
         if let Some(alpha_time) =
             genesis.config.extra_fields.get("alphaTime").and_then(|v| v.as_u64())
@@ -2645,29 +2645,30 @@ Post-merge hard forks (timestamp based):
     }
 
     #[test]
-    fn test_parse_oracle_v1_block() {
+    fn test_parse_gamma_time() {
         let mut genesis = Genesis::default();
-        genesis.config.extra_fields.insert("oracleV1Block".to_string(), serde_json::json!(12_345));
+        genesis.config.extra_fields.insert("gammaTime".to_string(), serde_json::json!(12_345));
 
         let chainspec = ChainSpec::from(genesis);
         assert_eq!(
-            chainspec.gravity_hardforks.fork(GravityHardfork::OracleV1),
-            ForkCondition::Block(12_345)
+            chainspec.gravity_hardforks.fork(GravityHardfork::Gamma),
+            ForkCondition::Timestamp(12_345)
         );
     }
 
     #[test]
-    fn test_oracle_v1_block_is_fail_closed() {
+    fn test_gamma_time_is_fail_closed() {
         for (key, value) in [
-            ("oracleV1Time", serde_json::json!(12_345)),
-            ("oracleV1Block", serde_json::json!("12345")),
+            ("oracleV1Block", serde_json::json!(12_345)),
+            ("gammaBlock", serde_json::json!(12_345)),
+            ("gammaTime", serde_json::json!("12345")),
         ] {
             let mut genesis = Genesis::default();
             genesis.config.extra_fields.insert(key.to_string(), value);
 
             let chainspec = ChainSpec::from(genesis);
             assert_eq!(
-                chainspec.gravity_hardforks.fork(GravityHardfork::OracleV1),
+                chainspec.gravity_hardforks.fork(GravityHardfork::Gamma),
                 ForkCondition::Never
             );
         }

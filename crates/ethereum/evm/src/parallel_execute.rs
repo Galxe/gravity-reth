@@ -272,16 +272,18 @@ where
             .increment_balances(balance_increments)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
 
-        // Gravity hardforks are end-of-block state transitions. The activation
-        // block executes against the old runtime and commits the new runtime in
-        // its post-state, so the upgraded contracts become observable at H+1.
+        // Gravity hardforks are end-of-block state transitions. The first block
+        // at or after gammaTime executes against the old runtime and commits the
+        // new runtime in its post-state, so upgraded contracts are visible in
+        // the following block. The migration itself is codehash-idempotent, which
+        // keeps canonical, history, and sequential execution aligned even when a
+        // replay batch starts after the exact activation timestamp.
         if self
             .chain_spec
             .gravity_hardforks()
-            .fork(GravityHardfork::OracleV1)
-            .transitions_at_block(block.number())
+            .is_fork_active_at_timestamp(GravityHardfork::Gamma, block.timestamp())
         {
-            crate::hardfork::oracle_v1::apply_state_changes(self, block.number())?;
+            crate::hardfork::gamma::apply_state_changes(self, block.number(), block.timestamp())?;
         }
 
         // Note: `SystemCaller::try_on_state_with` (source-aware `OnStateHook` notification)
@@ -506,7 +508,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        hardfork::oracle_v1::{
+        hardfork::gamma::{
             NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_POST_FORK_CODE_HASH,
             NATIVE_ORACLE_PRE_FORK_CODE_HASH, ORACLE_TASK_CONFIG_ADDRESS,
             ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH, ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH,
@@ -563,13 +565,14 @@ mod tests {
         Arc::new(spec)
     }
 
-    const ORACLE_V1_ACTIVATION_BLOCK: u64 = 100;
+    const GAMMA_ACTIVATION_TIME: u64 = 100;
+    const GAMMA_ACTIVATION_BLOCK: u64 = 73;
     const ORACLE_SOURCE_TYPE_BLOCKCHAIN: u32 = 0;
     const ORACLE_SOURCE_ID: u64 = 1;
     const LEGACY_SOURCE_POSITION: u128 = 19_876_543;
     const POST_FORK_SOURCE_POSITION: u128 = LEGACY_SOURCE_POSITION + 1;
     const NATIVE_ORACLE_PRE_FORK_RUNTIME_HEX: &str =
-        include_str!("hardfork/bytecodes/oracle_v1/NativeOracle.pre.hex");
+        include_str!("hardfork/bytecodes/gamma/NativeOracle.pre.hex");
     const ALWAYS_TRUE_CALLBACK: Address = address!("000000000000000000000000000000000000c0de");
     const ALWAYS_TRUE_CALLBACK_RUNTIME: &[u8] =
         &[0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
@@ -585,22 +588,22 @@ mod tests {
         ) external;
     }
 
-    fn oracle_v1_chainspec() -> Arc<ChainSpec> {
+    fn gamma_chainspec() -> Arc<ChainSpec> {
         let mut spec = ChainSpecBuilder::from(&*MAINNET)
             .shanghai_activated()
             .cancun_activated()
             .prague_activated()
             .build();
-        // OracleV1 activates after Alpha in production, so zero-balance system
+        // Gamma activates after Alpha in production, so zero-balance system
         // transactions at the boundary use the already-active gas exemption.
         spec.gravity_hardforks = ChainHardforks::from([
-            (GravityHardfork::OracleV1, ForkCondition::Block(ORACLE_V1_ACTIVATION_BLOCK)),
+            (GravityHardfork::Gamma, ForkCondition::Timestamp(GAMMA_ACTIVATION_TIME)),
             (GravityHardfork::Alpha, ForkCondition::Timestamp(0)),
         ]);
         Arc::new(spec)
     }
 
-    fn oracle_v1_seeded_db() -> CacheDB<EmptyDB> {
+    fn gamma_seeded_db() -> CacheDB<EmptyDB> {
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(
             NATIVE_ORACLE_ADDRESS,
@@ -660,7 +663,7 @@ mod tests {
         )
     }
 
-    fn oracle_v1_legacy_handoff_db() -> CacheDB<EmptyDB> {
+    fn gamma_legacy_handoff_db() -> CacheDB<EmptyDB> {
         let mut db = CacheDB::new(EmptyDB::default());
         let pre_fork_runtime =
             alloy_primitives::hex::decode(NATIVE_ORACLE_PRE_FORK_RUNTIME_HEX.trim())
@@ -717,7 +720,7 @@ mod tests {
             sourceId: U256::from(ORACLE_SOURCE_ID),
             nonces: vec![oracle_nonce],
             blockNumbers: vec![U256::from(source_position)],
-            payloads: vec![Bytes::from_static(b"oracle-v1-boundary")],
+            payloads: vec![Bytes::from_static(b"gamma-boundary")],
             callbackGasLimits: vec![U256::from(100_000)],
         };
         TxEnv {
@@ -754,10 +757,10 @@ mod tests {
         state_diff
     }
 
-    fn prague_block(number: u64, parent_hash: B256) -> RecoveredBlock<Block> {
+    fn prague_block(number: u64, timestamp: u64, parent_hash: B256) -> RecoveredBlock<Block> {
         let header = Header {
             parent_hash,
-            timestamp: 1,
+            timestamp,
             number,
             gas_limit: 30_000_000,
             requests_hash: Some(EMPTY_REQUESTS_HASH),
@@ -769,34 +772,33 @@ mod tests {
         RecoveredBlock::new_unhashed(Block { header, body: Default::default() }, vec![])
     }
 
-    fn execute_oracle_v1_block(number: u64, force_sequential: bool) -> BundleState {
-        let chain_spec = oracle_v1_chainspec();
+    fn execute_gamma_block(number: u64, timestamp: u64, force_sequential: bool) -> BundleState {
+        let chain_spec = gamma_chainspec();
         let evm_config = EthEvmConfig::new(chain_spec.clone());
-        let db = oracle_v1_seeded_db();
+        let db = gamma_seeded_db();
         let mut executor = if force_sequential {
             GrevmExecutor::new_sequential(chain_spec, &evm_config, db)
         } else {
             GrevmExecutor::new(chain_spec, &evm_config, db)
         };
         executor
-            .execute(&prague_block(number, B256::from([0xA5; 32])))
-            .expect("OracleV1 boundary block execution must succeed")
+            .execute(&prague_block(number, timestamp, B256::from([0xA5; 32])))
+            .expect("Gamma boundary block execution must succeed")
             .state
     }
 
     #[test]
-    fn oracle_v1_is_a_grevm_post_execution_transition() {
-        for block_number in [ORACLE_V1_ACTIVATION_BLOCK - 1, ORACLE_V1_ACTIVATION_BLOCK + 1] {
-            let bundle = execute_oracle_v1_block(block_number, false);
-            assert!(
-                !bundle.state.contains_key(&NATIVE_ORACLE_ADDRESS) &&
-                    !bundle.state.contains_key(&ORACLE_TASK_CONFIG_ADDRESS),
-                "OracleV1 must not change oracle accounts outside its transition block"
-            );
-        }
+    fn gamma_is_a_timestamp_gated_grevm_post_execution_transition() {
+        let before =
+            execute_gamma_block(GAMMA_ACTIVATION_BLOCK + 10_000, GAMMA_ACTIVATION_TIME - 1, false);
+        assert!(
+            !before.state.contains_key(&NATIVE_ORACLE_ADDRESS) &&
+                !before.state.contains_key(&ORACLE_TASK_CONFIG_ADDRESS),
+            "Gamma must not change oracle accounts before gammaTime regardless of block number"
+        );
 
-        let parallel = execute_oracle_v1_block(ORACLE_V1_ACTIVATION_BLOCK, false);
-        let sequential = execute_oracle_v1_block(ORACLE_V1_ACTIVATION_BLOCK, true);
+        let parallel = execute_gamma_block(GAMMA_ACTIVATION_BLOCK, GAMMA_ACTIVATION_TIME, false);
+        let sequential = execute_gamma_block(GAMMA_ACTIVATION_BLOCK, GAMMA_ACTIVATION_TIME, true);
 
         assert_eq!(parallel.state, sequential.state, "parallel/sequential state drift");
         assert_eq!(parallel.contracts, sequential.contracts, "parallel/sequential code drift");
@@ -822,19 +824,32 @@ mod tests {
 
         assert!(parallel.contracts.contains_key(&NATIVE_ORACLE_POST_FORK_CODE_HASH));
         assert!(parallel.contracts.contains_key(&ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH));
+
+        let catch_up =
+            execute_gamma_block(GAMMA_ACTIVATION_BLOCK + 1, GAMMA_ACTIVATION_TIME + 3, false);
+        assert_eq!(
+            catch_up
+                .state
+                .get(&NATIVE_ORACLE_ADDRESS)
+                .and_then(|account| account.info.as_ref())
+                .map(|info| info.code_hash),
+            Some(NATIVE_ORACLE_POST_FORK_CODE_HASH),
+            "a replay beginning after gammaTime must not miss the migration"
+        );
     }
 
-    fn execute_oracle_v1_legacy_handoff(force_sequential: bool) -> (BundleState, BundleState) {
-        let chain_spec = oracle_v1_chainspec();
+    fn execute_gamma_legacy_handoff(force_sequential: bool) -> (BundleState, BundleState) {
+        let chain_spec = gamma_chainspec();
         let chain_id = chain_spec.chain().id();
         let evm_config = EthEvmConfig::new(chain_spec.clone());
         let mut executor = if force_sequential {
-            GrevmExecutor::new_sequential(chain_spec, &evm_config, oracle_v1_legacy_handoff_db())
+            GrevmExecutor::new_sequential(chain_spec, &evm_config, gamma_legacy_handoff_db())
         } else {
-            GrevmExecutor::new(chain_spec, &evm_config, oracle_v1_legacy_handoff_db())
+            GrevmExecutor::new(chain_spec, &evm_config, gamma_legacy_handoff_db())
         };
 
-        let activation_block = prague_block(ORACLE_V1_ACTIVATION_BLOCK, B256::from([0xB0; 32]));
+        let activation_block =
+            prague_block(GAMMA_ACTIVATION_BLOCK, GAMMA_ACTIVATION_TIME, B256::from([0xB0; 32]));
         let activation_env = evm_config
             .evm_env(activation_block.header())
             .expect("activation EVM environment must build");
@@ -852,7 +867,11 @@ mod tests {
             .expect("activation block post-execution migration must succeed");
         let activation_bundle = executor.take_bundle();
 
-        let post_fork_block = prague_block(ORACLE_V1_ACTIVATION_BLOCK + 1, B256::from([0xB1; 32]));
+        let post_fork_block = prague_block(
+            GAMMA_ACTIVATION_BLOCK + 1,
+            GAMMA_ACTIVATION_TIME + 1,
+            B256::from([0xB1; 32]),
+        );
         let post_fork_env = evm_config
             .evm_env(post_fork_block.header())
             .expect("post-fork EVM environment must build");
@@ -872,9 +891,9 @@ mod tests {
     }
 
     #[test]
-    fn oracle_v1_preserves_legacy_oracle_tx_and_resumes_at_h_plus_one() {
-        let (parallel_h, parallel_h_plus_one) = execute_oracle_v1_legacy_handoff(false);
-        let (sequential_h, sequential_h_plus_one) = execute_oracle_v1_legacy_handoff(true);
+    fn gamma_preserves_legacy_oracle_tx_and_resumes_in_the_next_block() {
+        let (parallel_h, parallel_h_plus_one) = execute_gamma_legacy_handoff(false);
+        let (sequential_h, sequential_h_plus_one) = execute_gamma_legacy_handoff(true);
 
         assert_eq!(parallel_h.state, sequential_h.state, "H parallel/sequential state drift");
         assert_eq!(
@@ -1012,7 +1031,7 @@ mod tests {
         // system call hits HISTORY_STORAGE with calldata = parent_hash and
         // writes slot (number - 1) % HISTORY_SERVE_WINDOW = 99.
         let parent_hash = B256::from([0xA9; 32]);
-        let block = prague_block(100, parent_hash);
+        let block = prague_block(100, 1, parent_hash);
 
         // `execute` internally takes the bundle and returns it via output.state,
         // so we must read the deployment + system-call effects from there.
