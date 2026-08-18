@@ -19,7 +19,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "id": 21,
+  "id": 5,
   "links": [],
   "panels": [
     {
@@ -268,7 +268,7 @@
               }
             ]
           },
-          "unit": "percentunit"
+          "unit": "percent"
         },
         "overrides": []
       },
@@ -288,7 +288,7 @@
         },
         "tooltip": {
           "hideZeros": false,
-          "mode": "single",
+          "mode": "multi",
           "sort": "none"
         }
       },
@@ -299,12 +299,16 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg(rate(reth_process_cpu_seconds_total{instance=~\"$instance\"}[1m]))",
+          "expr": "node_process_cpu_usage",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "Process",
+          "legendFormat": "{{instance}}",
           "range": true,
-          "refId": "A"
+          "refId": "A",
+          "useBackend": false
         }
       ],
       "title": "CPU",
@@ -387,7 +391,7 @@
         },
         "tooltip": {
           "hideZeros": false,
-          "mode": "single",
+          "mode": "multi",
           "sort": "none"
         }
       },
@@ -398,12 +402,16 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "editorMode": "code",
-          "expr": "reth_process_resident_memory_bytes{instance=~\"$instance\"}",
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "reth_process_resident_memory_bytes",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "Resident",
+          "legendFormat": "{{instance}}",
           "range": true,
-          "refId": "A"
+          "refId": "A",
+          "useBackend": false
         }
       ],
       "title": "Memory",
@@ -599,7 +607,7 @@
         },
         "tooltip": {
           "hideZeros": false,
-          "mode": "single",
+          "mode": "multi",
           "sort": "none"
         }
       },
@@ -611,12 +619,12 @@
             "uid": "${datasource}"
           },
           "disableTextWrap": false,
-          "editorMode": "code",
-          "expr": "rate(reth_transaction_pool_removed_transactions{instance=~\"$instance\"}[$__rate_interval])",
+          "editorMode": "builder",
+          "expr": "rate(reth_transaction_pool_removed_transactions[$__rate_interval])",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "recv_rate",
+          "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2973,7 +2981,32 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "Queued172.17.0.2:9001"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 10,
@@ -3004,26 +3037,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "reth_transaction_pool_basefee_pool_transactions{instance=\"$instance\"}",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "legendFormat": "Base Fee Pool Transactions",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "reth_transaction_pool_pending_pool_transactions{instance=\"$instance\"}",
+          "expr": "reth_transaction_pool_pending_pool_transactions",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "Pending Pool Transactions",
+          "legendFormat": "Pending({{instance}})",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -3035,28 +3053,13 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "reth_transaction_pool_queued_pool_transactions{instance=\"$instance\"}",
+          "expr": "reth_transaction_pool_queued_pool_transactions",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "Queued Pool Transactions",
+          "legendFormat": "Queued{{instance}}",
           "range": true,
           "refId": "C",
-          "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "reth_transaction_pool_blob_pool_transactions{instance=\"$instance\"}",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "legendFormat": "Blob Pool Transactions",
-          "range": true,
-          "refId": "D",
           "useBackend": false
         }
       ],
@@ -3978,8 +3981,8 @@
     "list": [
       {
         "current": {
-          "text": "test-128g",
-          "value": "beqimfn79ytq8f"
+          "text": "Prometheus",
+          "value": "gravity-prometheus"
         },
         "label": "Datasource",
         "name": "datasource",
@@ -3991,8 +3994,8 @@
       },
       {
         "current": {
-          "text": "10.128.0.56:9001",
-          "value": "10.128.0.56:9001"
+          "text": "172.17.0.10:9001",
+          "value": "172.17.0.10:9001"
         },
         "datasource": {
           "type": "prometheus",
@@ -4061,12 +4064,12 @@
     ]
   },
   "time": {
-    "from": "now-30m",
+    "from": "now-1h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Gravity Reth - Node Performance",
-  "uid": "depsbo06e0o3kb",
-  "version": 46
+  "uid": "depsbo06e0o3kc",
+  "version": 1
 }
