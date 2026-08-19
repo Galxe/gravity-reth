@@ -161,7 +161,6 @@ async fn test_testsuite_assert_mine_block() -> Result<()> {
                 withdrawals: None,
                 parent_beacon_block_root: None,
                 slot_number: None,
-                target_gas_limit: None,
             },
         ));
 
