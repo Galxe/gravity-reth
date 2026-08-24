@@ -367,7 +367,7 @@ incremental = false
 
 [workspace.dependencies]
 # reth
-gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "a64f8adc274bf2681df796766ef9a5b195fee44b" }
+gravity-api-types = { package = "api-types", git = "https://github.com/Galxe/gravity-aptos", rev = "a99143037a20da871bc32662cbbb03359bd49354" }
 reth = { path = "bin/reth" }
 reth-storage-rpc-provider = { path = "crates/storage/rpc-provider" }
 reth-basic-payload-builder = { path = "crates/payload/basic" }
