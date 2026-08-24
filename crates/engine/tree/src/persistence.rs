@@ -442,8 +442,9 @@ where
     /// Write one contiguous group of executed blocks with amortized commits.
     ///
     /// State and changesets are flushed once before history indexing because `RocksDB` batches do
-    /// not provide read-your-writes. History and stage checkpoints are committed together
-    /// afterwards, so recovery can replay a group interrupted between the two commits.
+    /// not provide read-your-writes. The execution, hashing, and trie checkpoints are committed
+    /// with that data. This keeps the execution recovery cursor from lagging behind plain state if
+    /// the process stops before history indexing completes.
     fn commit_block_group(
         &self,
         group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
@@ -515,21 +516,29 @@ where
         // History indexing reads the changesets back through RocksDB cursors, which cannot see
         // pending WriteBatch entries. Storage V2 is rejected before this path because its
         // changesets live in static files and `commit_view` cannot make them visible.
+        //
+        // Advance the checkpoints for every data set already staged before this first commit.
+        // `Execution` is the startup recovery cursor, so it must never lag behind committed plain
+        // state. Static files are committed first; if the process stops before the state commit,
+        // startup safely truncates static files that are ahead of the database.
+        {
+            let tx = provider_rw.tx_ref();
+            Self::advance_checkpoint(tx, StageId::Execution, Some(group_first), group_last)?;
+            Self::advance_checkpoint(tx, StageId::AccountHashing, Some(group_first), group_last)?;
+            Self::advance_checkpoint(tx, StageId::MerkleExecute, None, group_last)?;
+        }
+        provider_rw.static_file_provider().commit()?;
         provider_rw.commit_view()?;
+        set_fail_point!("persistence::merged_after_data_commit");
 
         // History indices for the whole range, once.
         provider_rw.update_history_indices(group_first..=group_last)?;
 
-        // Advance every written stage's checkpoint to the group tip, then make the final commit.
-        // `MerkleExecute` passes `None` (trie writes are idempotent and may resume mid-range); the
-        // rest assert checkpoint continuity from `group_first`.
+        // History is the only stage written after the durable data boundary. If interrupted here,
+        // startup rebuilds it from the committed changesets up to the execution checkpoint.
         let tx = provider_rw.tx_ref();
-        Self::advance_checkpoint(tx, StageId::Execution, Some(group_first), group_last)?;
-        Self::advance_checkpoint(tx, StageId::AccountHashing, Some(group_first), group_last)?;
         Self::advance_checkpoint(tx, StageId::IndexAccountHistory, Some(group_first), group_last)?;
-        Self::advance_checkpoint(tx, StageId::MerkleExecute, None, group_last)?;
 
-        provider_rw.static_file_provider().commit()?;
         provider_rw.commit()?;
         PERSIST_BLOCK_CACHE.persist_tip(group_last);
 
@@ -726,13 +735,16 @@ impl Drop for ServiceGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recovery::StorageRecoveryHelper;
     use alloy_primitives::{Address, B256, U256};
     use reth_chain_state::test_utils::TestBlockBuilder;
     use reth_db::models::GravityStorageSettings;
     use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
     use reth_exex_types::FinishedExExHeight;
     use reth_primitives_traits::Account;
-    use reth_provider::{test_utils::create_test_provider_factory, StorageChangeSetReader};
+    use reth_provider::{
+        test_utils::create_test_provider_factory, BlockNumReader, StorageChangeSetReader,
+    };
     use reth_prune::Pruner;
     use revm::database::states::{
         reverts::Reverts, AccountRevert, AccountStatus, BundleAccount, BundleState,
@@ -887,6 +899,69 @@ mod tests {
         assert_eq!(changeset.len(), 1);
         assert_eq!(changeset[0].1.key, slot);
         assert_eq!(changeset[0].1.value, value);
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn merged_persistence_crash_after_data_commit_recovers_from_durable_tip() {
+        let scenario = fail::FailScenario::setup();
+        let provider = create_test_provider_factory();
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        let service = PersistenceService::new(
+            provider.clone(),
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        );
+        let mut test_block_builder = TestBlockBuilder::eth();
+        let blocks = test_block_builder.get_executed_blocks(0..3).collect::<Vec<_>>();
+
+        let target_thread = std::thread::current().id();
+        fail::cfg_callback("persistence::merged_after_data_commit", move || {
+            if std::thread::current().id() == target_thread {
+                panic!("interrupt merged persistence after durable data commit");
+            }
+        })
+        .unwrap();
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.save_merged_blocks(blocks)
+        }));
+        fail::remove("persistence::merged_after_data_commit");
+        assert!(interrupted.is_err(), "failpoint must interrupt before history commit");
+
+        {
+            let provider_ro = provider.database_provider_ro().unwrap();
+            assert_eq!(provider_ro.recover_block_number().unwrap(), 2);
+            let execution = provider_ro
+                .tx_ref()
+                .get::<tables::StageCheckpoints>(StageId::Execution.to_string())
+                .unwrap()
+                .unwrap();
+            let history = provider_ro
+                .tx_ref()
+                .get::<tables::StageCheckpoints>(StageId::IndexAccountHistory.to_string())
+                .unwrap()
+                .unwrap_or_default();
+            assert_eq!(execution.block_number, 2);
+            assert_eq!(history.block_number, 0);
+        }
+
+        StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
+
+        let provider_ro = provider.database_provider_ro().unwrap();
+        assert_eq!(provider_ro.recover_block_number().unwrap(), 2);
+        assert_eq!(provider_ro.best_block_number().unwrap(), 2);
+        let history = provider_ro
+            .tx_ref()
+            .get::<tables::StageCheckpoints>(StageId::IndexAccountHistory.to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.block_number, 2);
+        drop(scenario);
     }
 
     #[test]
