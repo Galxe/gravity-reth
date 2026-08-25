@@ -11,7 +11,7 @@ use alloy_evm::{
     precompiles::{DynPrecompile, PrecompilesMap},
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
 };
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 pub use reth_execution_errors::{
     BlockExecutionError, BlockValidationError, InternalBlockExecutionError,
 };
@@ -187,6 +187,10 @@ pub trait Executor<DB: Database>: Sized {
     /// `SYSTEM_CALLER` balance migration in
     /// `pipe-exec-layer-ext-v2/.../system_caller_migration.rs`).
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error>;
+
+    /// Reads a storage slot from the executor's in-memory state without committing any
+    /// change. Used by hardfork prechecks that inspect contract storage.
+    fn storage(&mut self, address: Address, slot: U256) -> Result<U256, Self::Error>;
 
     /// Registers custom precompiles for subsequent user transaction execution.
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>);
@@ -737,6 +741,12 @@ where
             .map_err(|e| BlockExecutionError::msg(alloc::format!("basic {address}: {e:?}")))
     }
 
+    fn storage(&mut self, address: Address, slot: U256) -> Result<U256, Self::Error> {
+        RevmDatabase::storage(&mut self.db, address, slot).map_err(|e| {
+            BlockExecutionError::msg(alloc::format!("storage {address}/{slot}: {e:?}"))
+        })
+    }
+
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
         self.custom_precompiles = Some(custom_precompiles);
     }
@@ -893,6 +903,10 @@ mod tests {
         }
 
         fn basic(&mut self, _address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            unreachable!()
+        }
+
+        fn storage(&mut self, _address: Address, _slot: U256) -> Result<U256, Self::Error> {
             unreachable!()
         }
 

@@ -34,8 +34,20 @@ hardfork!(
         /// Activation is timestamp-based via genesis `gammaTime`. Missing or
         /// malformed configuration leaves the migration disabled.
         Gamma,
+        /// Testnet-only StakePool owner fix: injects forced `transferOwnership`
+        /// calls from the unrecoverable genesis owner EOAs to ceremony-generated
+        /// replacements.
+        ///
+        /// Activation is timestamp-based via genesis `testnetOwnerFixTime`. The
+        /// pipe layer also requires `chain_id == 7771625`; any other chain is a
+        /// no-op even when the timestamp key is present. Missing or malformed
+        /// configuration leaves the migration disabled (fail-closed).
+        TestnetOwnerFix,
     }
 );
+
+/// Longevity Testnet chain id. Gates [`GravityHardfork::TestnetOwnerFix`].
+pub const LONGEVITY_TESTNET_CHAIN_ID: u64 = 7_771_625;
 
 /// Canonical sender address of every Gravity protocol-injected system transaction
 /// (metadata `onBlockStart` + DKG/JWK validator txns).

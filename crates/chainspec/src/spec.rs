@@ -999,6 +999,14 @@ impl From<Genesis> for ChainSpec {
             gravity_hardforks
                 .push((GravityHardfork::Beta.boxed(), ForkCondition::Timestamp(beta_time)));
         }
+        if let Some(testnet_owner_fix_time) =
+            genesis.config.extra_fields.get("testnetOwnerFixTime").and_then(|v| v.as_u64())
+        {
+            gravity_hardforks.push((
+                GravityHardfork::TestnetOwnerFix.boxed(),
+                ForkCondition::Timestamp(testnet_owner_fix_time),
+            ));
+        }
         let gravity_hardforks = ChainHardforks::new(gravity_hardforks);
 
         // This is intentionally optional: Gravity chains enable the fee floor through genesis,
@@ -2669,6 +2677,39 @@ Post-merge hard forks (timestamp based):
             let chainspec = ChainSpec::from(genesis);
             assert_eq!(
                 chainspec.gravity_hardforks.fork(GravityHardfork::Gamma),
+                ForkCondition::Never
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_testnet_owner_fix_time() {
+        let mut genesis = Genesis::default();
+        genesis
+            .config
+            .extra_fields
+            .insert("testnetOwnerFixTime".to_string(), serde_json::json!(99_001));
+
+        let chainspec = ChainSpec::from(genesis);
+        assert_eq!(
+            chainspec.gravity_hardforks.fork(GravityHardfork::TestnetOwnerFix),
+            ForkCondition::Timestamp(99_001)
+        );
+    }
+
+    #[test]
+    fn test_testnet_owner_fix_time_is_fail_closed() {
+        for (key, value) in [
+            ("testnetOwnerFixBlock", serde_json::json!(99_001)),
+            ("testnetOwnerFixTime", serde_json::json!("99001")),
+            ("testnet_owner_fix_time", serde_json::json!(99_001)),
+        ] {
+            let mut genesis = Genesis::default();
+            genesis.config.extra_fields.insert(key.to_string(), value);
+
+            let chainspec = ChainSpec::from(genesis);
+            assert_eq!(
+                chainspec.gravity_hardforks.fork(GravityHardfork::TestnetOwnerFix),
                 ForkCondition::Never
             );
         }

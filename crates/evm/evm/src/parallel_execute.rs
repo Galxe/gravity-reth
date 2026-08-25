@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::execute::Executor;
 use alloy_evm::{precompiles::DynPrecompile, Database, EvmEnv};
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use grevm::DynParallelPrecompile;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
@@ -90,6 +90,11 @@ pub trait ParallelExecutor {
     /// [`apply_state_change`](Self::apply_state_change).
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error>;
 
+    /// Reads a storage slot from the executor's in-memory state without committing any
+    /// change. Used by hardfork prechecks that must inspect contract storage (e.g.
+    /// Ownable `owner` / `pendingOwner` slots for TestnetOwnerFix).
+    fn storage(&mut self, address: Address, slot: U256) -> Result<U256, Self::Error>;
+
     /// Applies capability-restricted custom precompiles to user transaction execution.
     ///
     /// Grevm-backed executors must only accept [`DynParallelPrecompile`] here. Adapting an
@@ -153,6 +158,11 @@ impl<DB: Database, T: Executor<DB>> ParallelExecutor for WrapExecutor<DB, T> {
     #[inline]
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         self.0.basic(address)
+    }
+
+    #[inline]
+    fn storage(&mut self, address: Address, slot: U256) -> Result<U256, Self::Error> {
+        self.0.storage(address, slot)
     }
 
     #[inline]

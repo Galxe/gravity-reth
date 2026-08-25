@@ -406,6 +406,17 @@ where
             .map_err(|e| BlockExecutionError::msg(alloc::format!("basic {address}: {e:?}")))
     }
 
+    fn storage(
+        &mut self,
+        address: Address,
+        slot: alloy_primitives::U256,
+    ) -> Result<alloy_primitives::U256, Self::Error> {
+        use revm::Database;
+        self.state.as_mut().unwrap().storage(address, slot).map_err(|e| {
+            BlockExecutionError::msg(alloc::format!("storage {address}/{slot}: {e:?}"))
+        })
+    }
+
     fn apply_custom_precompiles(
         &mut self,
         custom_precompiles: Arc<Vec<(Address, DynParallelPrecompile)>>,
