@@ -21,7 +21,7 @@ use tracing::info;
 type Executor<'a> =
     &'a mut dyn ParallelExecutor<Primitives = EthPrimitives, Error = BlockExecutionError>;
 
-/// Execute TestnetOwnerFix forced transfers when the fork is active on Longevity
+/// Execute `TestnetOwnerFix` forced transfers when the fork is active on Longevity
 /// Testnet. Returns an empty vec on no-op (wrong chain, fork inactive, or already
 /// migrated). Panics on fail-closed precheck / execution errors so the node does
 /// not commit a partial migration.

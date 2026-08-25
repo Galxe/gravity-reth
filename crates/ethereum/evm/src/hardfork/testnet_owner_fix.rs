@@ -1,6 +1,6 @@
-//! `TestnetOwnerFix` hardfork — forced Ownable2Step `transferOwnership` migration.
+//! `TestnetOwnerFix` hardfork — forced `Ownable2Step` `transferOwnership` migration.
 //!
-//! Longevity Testnet (`chain_id == 7771625`) genesis StakePools used Aptos-era
+//! Longevity Testnet (`chain_id == 7771625`) genesis `StakePool`s used Aptos-era
 //! identity material as `owner`. Those addresses look like EOAs but have no
 //! recoverable secp256k1 private key, so `onlyOwner` admin paths are stuck.
 //!
@@ -19,29 +19,29 @@ use alloc::{format, string::String};
 use alloy_primitives::{address, b256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 
-/// Longevity Testnet StakePool runtime codehash (genesis + live RPC verified
+/// Longevity Testnet `StakePool` runtime codehash (genesis + live RPC verified
 /// 2026-08-25). All four genesis pools share this bytecode.
 pub const STAKEPOOL_CODE_HASH: B256 =
     b256!("77e0b0dcaa8422c64dd50f39f1c450698fa2ee51c24fb3979e0c0bff59aadfd0");
 
-/// Ownable `_owner` storage slot on the deployed Longevity Testnet StakePool
+/// Ownable `_owner` storage slot on the deployed Longevity Testnet `StakePool`
 /// runtime (classic sequential layout — slot 0 — verified on-chain).
 pub const OWNER_SLOT: U256 = U256::ZERO;
 
-/// Ownable2Step `_pendingOwner` storage slot (slot 1).
+/// `Ownable2Step` `_pendingOwner` storage slot (slot 1).
 pub const PENDING_OWNER_SLOT: U256 = U256::from_limbs([1, 0, 0, 0]);
 
 sol! {
-    /// Ownable2Step.transferOwnership(address newOwner)
+    /// `Ownable2Step.transferOwnership(address newOwner)`
     function transferOwnership(address newOwner);
 }
 
-/// One genesis StakePool ownership migration row.
+/// One genesis `StakePool` ownership migration row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MigrationRow {
     /// Human label (node1 / node2 / node3 / node5).
     pub label: &'static str,
-    /// StakePool contract address.
+    /// `StakePool` contract address.
     pub stake_pool: Address,
     /// Current (unrecoverable) owner EOA.
     pub old_owner: Address,
@@ -87,7 +87,7 @@ pub struct PoolSnapshot {
     pub code_hash: B256,
     /// Current `owner()` / Ownable slot 0.
     pub owner: Address,
-    /// Current `pendingOwner()` / Ownable2Step slot 1.
+    /// Current `pendingOwner()` / `Ownable2Step` slot 1.
     pub pending_owner: Address,
 }
 
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(address_from_word(word), MIGRATION_TABLE[0].old_owner);
     }
 
-    /// Longevity Testnet StakePool runtime (genesis / live codehash verified).
+    /// Longevity Testnet `StakePool` runtime (genesis / live codehash verified).
     const STAKEPOOL_RUNTIME: &[u8] = include_bytes!("bytecodes/testnet_owner_fix/StakePool.bin");
 
     fn word_from_address(addr: Address) -> U256 {
@@ -260,7 +260,7 @@ mod tests {
         U256::from_be_bytes(bytes)
     }
 
-    /// Execute one forced `transferOwnership` against real StakePool runtime and
+    /// Execute one forced `transferOwnership` against real `StakePool` runtime and
     /// assert `pendingOwner == new_owner` while `owner` stays `old_owner`.
     #[test]
     fn forced_transfer_sets_pending_owner_on_stakepool_runtime() {
@@ -315,8 +315,7 @@ mod tests {
         spec.gravity_hardforks =
             ChainHardforks::from([(GravityHardfork::Alpha, ForkCondition::Timestamp(0))]);
         let chain_id = spec.chain().id();
-        let spec = Arc::new(spec);
-        let evm_config = EthEvmConfig::new(spec.clone());
+        let evm_config = EthEvmConfig::new(Arc::new(spec));
         let mut executor = WrapExecutor::new(BasicBlockExecutor::new(evm_config.clone(), db));
 
         let header = Header {

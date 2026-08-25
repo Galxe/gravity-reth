@@ -34,7 +34,7 @@ hardfork!(
         /// Activation is timestamp-based via genesis `gammaTime`. Missing or
         /// malformed configuration leaves the migration disabled.
         Gamma,
-        /// Testnet-only StakePool owner fix: injects forced `transferOwnership`
+        /// Testnet-only `StakePool` owner fix: injects forced `transferOwnership`
         /// calls from the unrecoverable genesis owner EOAs to ceremony-generated
         /// replacements.
         ///

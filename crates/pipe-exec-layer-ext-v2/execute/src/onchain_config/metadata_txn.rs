@@ -43,10 +43,10 @@ pub fn merge_state_changes(accumulated: &mut EvmState, new_changes: EvmState) {
 }
 
 /// Result of a system / protocol-injected transaction execution (metadata, DKG, JWK,
-/// or TestnetOwnerFix forced transfers).
+/// or `TestnetOwnerFix` forced transfers).
 ///
 /// These transactions are executed before the parallel user-tx executor. Protocol
-/// system txs use [`SYSTEM_CALLER`]; TestnetOwnerFix forced txs use the corresponding
+/// system txs use [`SYSTEM_CALLER`]; `TestnetOwnerFix` forced txs use the corresponding
 /// `old_owner` so body `TransactionSenders` match execution.
 #[derive(Debug)]
 pub struct SystemTxnResult {

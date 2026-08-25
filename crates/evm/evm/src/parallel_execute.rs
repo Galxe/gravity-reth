@@ -92,7 +92,7 @@ pub trait ParallelExecutor {
 
     /// Reads a storage slot from the executor's in-memory state without committing any
     /// change. Used by hardfork prechecks that must inspect contract storage (e.g.
-    /// Ownable `owner` / `pendingOwner` slots for TestnetOwnerFix).
+    /// Ownable `owner` / `pendingOwner` slots for `TestnetOwnerFix`).
     fn storage(&mut self, address: Address, slot: U256) -> Result<U256, Self::Error>;
 
     /// Applies capability-restricted custom precompiles to user transaction execution.
