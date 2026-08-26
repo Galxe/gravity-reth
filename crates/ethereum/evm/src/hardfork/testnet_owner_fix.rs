@@ -4,8 +4,9 @@
 //! identity material as `owner`. Those addresses look like EOAs but have no
 //! recoverable secp256k1 private key, so `onlyOwner` admin paths are stuck.
 //!
-//! On the first block with `timestamp >= testnetOwnerFixTime`, the pipe layer
-//! injects four synthetic top-level txs (one per genesis pool) with
+//! On the unique Longevity block that crosses `testnetOwnerFixTime`
+//! (`transitions_at_timestamp`, same one-shot gate as Alpha / EIP-2935), the
+//! pipe layer injects four synthetic top-level txs (one per genesis pool) with
 //! `from = old_owner`, calling `transferOwnership(new_owner)`. Gas reuses the
 //! existing Alpha system-tx levers (`gas_price = 0` + `transact_system_txn`
 //! basefee/balance disable). The txs are written into the block body with

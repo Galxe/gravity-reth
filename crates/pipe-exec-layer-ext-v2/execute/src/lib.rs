@@ -929,7 +929,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         (RecoveredBlock::new_unhashed(block, senders), txs_info)
     }
 
-    /// Longevity Testnet only. Wrong chain / inactive fork → empty vec.
+    /// Longevity Testnet one-shot. Non-crossing / wrong chain → empty vec.
     /// Any forced `transferOwnership` revert panics inside
     /// [`testnet_owner_fix::execute_forced_transfers`].
     fn inject_testnet_owner_fix(
@@ -942,6 +942,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         system_tx_gas_price: u128,
         block_number: u64,
         block_timestamp: u64,
+        parent_timestamp: u64,
     ) -> Vec<SystemTxnResult> {
         testnet_owner_fix::execute_forced_transfers(
             executor,
@@ -950,6 +951,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             system_tx_gas_price,
             block_number,
             block_timestamp,
+            parent_timestamp,
         )
     }
 
@@ -980,6 +982,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         block_number: u64,
         initial_nonce: u64,
         is_alpha_active: bool,
+        parent_timestamp: u64,
     ) -> SystemTxnExecutionOutcome {
         let mint_precompile = create_mint_token_precompile();
         let bls_precompile = create_bls_pop_verify_precompile();
@@ -1064,6 +1067,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 system_tx_gas_price,
                 block_number,
                 block_ts,
+                parent_timestamp,
             ));
             // merge_transitions was already called inside transact_system_txn,
             // so take_bundle() returns the complete bundle with all system-txn changes.
@@ -1192,6 +1196,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                                 system_tx_gas_price,
                                 block_number,
                                 block_ts,
+                                parent_timestamp,
                             ));
                             let bundle = executor.take_bundle();
                             return SystemTxnExecutionOutcome::EpochChanged(
@@ -1223,6 +1228,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                             system_tx_gas_price,
                             block_number,
                             block_ts,
+                            parent_timestamp,
                         ));
                         let bundle = executor.take_bundle();
                         return SystemTxnExecutionOutcome::EpochChanged(
@@ -1359,6 +1365,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // Execute system transactions (metadata, DKG, JWK) sequentially.
         // State changes are committed directly into executor's ParallelState.
+        let parent_timestamp = parent_header.timestamp;
         let (metadata_txn_result, validator_txn_results) = match Self::execute_system_transactions(
             &mut *executor,
             &self.chain_spec,
@@ -1371,6 +1378,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number,
             initial_nonce,
             is_alpha_active,
+            parent_timestamp,
         ) {
             SystemTxnExecutionOutcome::EpochChanged(result) => return result,
             SystemTxnExecutionOutcome::Continue { metadata_result, validator_results } => {
@@ -1380,7 +1388,7 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // TestnetOwnerFix is Longevity-testnet-only. Keep it off the protocol
         // `SystemTxnExecutionOutcome` shape: inject here (after SYSTEM_CALLER
-        // prefix, before user txs). Wrong chain / inactive fork → empty vec;
+        // prefix, before user txs). One-shot via transitions_at_timestamp;
         // forced-tx revert → panic inside the helper.
         let block_ts = ordered_block.timestamp_us / 1_000_000;
         let system_tx_gas_price: u128 =
@@ -1396,6 +1404,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             system_tx_gas_price,
             block_number,
             block_ts,
+            parent_timestamp,
         );
 
         // DESIGN: `filter_invalid_txs` reads from storage, not the executor's in-memory
