@@ -748,14 +748,6 @@ where
 
 fn init_panic_hook_and_tracer() {
     std::panic::set_hook(Box::new(|panic_info| {
-        let msg = panic_info.to_string();
-        // Known teardown race: after the test body returns, EngineNodeLauncher's
-        // BuiltPayloadStream can terminate while `select_next_some` is still armed.
-        // The 2s post-exit sleep makes this visible; it is not a test assertion failure.
-        if msg.contains("SelectNextSome polled after terminated") {
-            eprintln!("Ignoring known teardown panic: {msg}");
-            return;
-        }
         let backtrace = std::backtrace::Backtrace::capture();
         eprintln!("Panic occurred: {panic_info}\nBacktrace:\n{backtrace}");
         std::process::exit(1);

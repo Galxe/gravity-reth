@@ -185,7 +185,7 @@ mod tests {
         let db = CacheDB::<EmptyDB>::default();
         let evm_config = EthEvmConfig::new(spec.clone());
         let mut executor = WrapExecutor::new(BasicBlockExecutor::new(evm_config, db));
-        // Would have injected under the old `is_fork_active` gate.
+        // parent_ts already past fixTime ⇒ not a crossing block ⇒ no inject.
         let out = execute_forced_transfers(
             &mut executor,
             spec.as_ref(),
