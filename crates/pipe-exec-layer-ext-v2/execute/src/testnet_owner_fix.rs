@@ -4,16 +4,17 @@
 //! forced `transferOwnership` calls with `from = old_owner`, executes them via
 //! `transact_system_txn` (Alpha gas levers), and returns [`SystemTxnResult`]s
 //! whose `sender` is the corresponding `old_owner` (not [`SYSTEM_CALLER`]).
+//!
+//! No slot precheck: wrong chain / inactive fork → empty vec; any forced-tx
+//! revert panics so the block is not committed as a success.
 
 use crate::onchain_config::{new_system_call_txn, SystemTxnResult};
-use alloy_primitives::Address;
 use reth_chainspec::{ChainSpec, EthChainSpec, GravityHardfork, LONGEVITY_TESTNET_CHAIN_ID};
 use reth_evm::{
     execute::BlockExecutionError, parallel_execute::ParallelExecutor, EvmEnv, IntoTxEnv,
 };
 use reth_evm_ethereum::hardfork::testnet_owner_fix::{
-    address_from_word, precheck_migration, transfer_ownership_calldata, MigrationRow, PoolSnapshot,
-    PrecheckDecision, MIGRATION_TABLE, OWNER_SLOT, PENDING_OWNER_SLOT, STAKEPOOL_CODE_HASH,
+    transfer_ownership_calldata, MigrationRow, MIGRATION_TABLE,
 };
 use reth_primitives::{EthPrimitives, Recovered};
 use tracing::info;
@@ -22,9 +23,8 @@ type Executor<'a> =
     &'a mut dyn ParallelExecutor<Primitives = EthPrimitives, Error = BlockExecutionError>;
 
 /// Execute `TestnetOwnerFix` forced transfers when the fork is active on Longevity
-/// Testnet. Returns an empty vec on no-op (wrong chain, fork inactive, or already
-/// migrated). Panics on fail-closed precheck / execution errors so the node does
-/// not commit a partial migration.
+/// Testnet. Returns an empty vec on no-op (wrong chain or fork inactive).
+/// Panics if any forced transfer fails to execute or reverts.
 pub(crate) fn execute_forced_transfers(
     executor: Executor<'_>,
     chain_spec: &ChainSpec,
@@ -41,26 +41,6 @@ pub(crate) fn execute_forced_transfers(
         .is_fork_active_at_timestamp(GravityHardfork::TestnetOwnerFix, block_timestamp)
     {
         return Vec::new();
-    }
-
-    let snapshots = read_snapshots(executor).unwrap_or_else(|e| {
-        panic!("TestnetOwnerFix: failed to read StakePool state at block {block_number}: {e:?}")
-    });
-
-    match precheck_migration(&snapshots) {
-        Ok(PrecheckDecision::AlreadyMigrated) => {
-            info!(
-                target: "execute_ordered_block",
-                number = block_number,
-                timestamp = block_timestamp,
-                "TestnetOwnerFix: already migrated (idempotent no-op)"
-            );
-            return Vec::new();
-        }
-        Ok(PrecheckDecision::Apply) => {}
-        Err(err) => {
-            panic!("TestnetOwnerFix fail-closed precheck at block {block_number}: {err}");
-        }
     }
 
     let mut results = Vec::with_capacity(MIGRATION_TABLE.len());
@@ -91,31 +71,6 @@ pub(crate) fn execute_forced_transfers(
         "TestnetOwnerFix: injected forced transferOwnership txs"
     );
     results
-}
-
-fn read_snapshots(executor: Executor<'_>) -> Result<[PoolSnapshot; 4], BlockExecutionError> {
-    let mut out = [PoolSnapshot {
-        code_hash: STAKEPOOL_CODE_HASH,
-        owner: Address::ZERO,
-        pending_owner: Address::ZERO,
-    }; 4];
-
-    for (i, row) in MIGRATION_TABLE.iter().enumerate() {
-        let info = executor.basic(row.stake_pool)?.ok_or_else(|| {
-            BlockExecutionError::msg(format!(
-                "TestnetOwnerFix: {} StakePool {} account is missing",
-                row.label, row.stake_pool
-            ))
-        })?;
-        let owner_word = executor.storage(row.stake_pool, OWNER_SLOT)?;
-        let pending_word = executor.storage(row.stake_pool, PENDING_OWNER_SLOT)?;
-        out[i] = PoolSnapshot {
-            code_hash: info.code_hash,
-            owner: address_from_word(owner_word),
-            pending_owner: address_from_word(pending_word),
-        };
-    }
-    Ok(out)
 }
 
 fn execute_one(

@@ -123,17 +123,6 @@ where
         }
     }
 
-    fn storage(
-        &mut self,
-        address: Address,
-        slot: alloy_primitives::U256,
-    ) -> Result<alloy_primitives::U256, Self::Error> {
-        match self {
-            Self::Left(a) => a.storage(address, slot),
-            Self::Right(b) => b.storage(address, slot),
-        }
-    }
-
     fn apply_custom_precompiles(&mut self, custom_precompiles: Arc<Vec<(Address, DynPrecompile)>>) {
         match self {
             Self::Left(a) => a.apply_custom_precompiles(custom_precompiles),

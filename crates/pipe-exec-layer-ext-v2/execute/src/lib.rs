@@ -929,6 +929,30 @@ impl<Storage: GravityStorage> Core<Storage> {
         (RecoveredBlock::new_unhashed(block, senders), txs_info)
     }
 
+    /// Longevity Testnet only. Wrong chain / inactive fork → empty vec.
+    /// Any forced `transferOwnership` revert panics inside
+    /// [`testnet_owner_fix::execute_forced_transfers`].
+    fn inject_testnet_owner_fix(
+        executor: &mut dyn ParallelExecutor<
+            Primitives = EthPrimitives,
+            Error = BlockExecutionError,
+        >,
+        chain_spec: &ChainSpec,
+        evm_env: reth_evm::EvmEnv,
+        system_tx_gas_price: u128,
+        block_number: u64,
+        block_timestamp: u64,
+    ) -> Vec<SystemTxnResult> {
+        testnet_owner_fix::execute_forced_transfers(
+            executor,
+            chain_spec,
+            evm_env,
+            system_tx_gas_price,
+            block_number,
+            block_timestamp,
+        )
+    }
+
     /// Execute all system transactions (metadata, DKG, JWK) sequentially
     ///
     /// This function encapsulates the execution of all system-level transactions
@@ -1033,8 +1057,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             );
             let mut epoch_change_results =
                 vec![metadata_txn_result.expect("metadata result exists when it emits NewEpoch")];
-            // Longevity-testnet-only; no-op on every other chain / inactive fork.
-            epoch_change_results.extend(testnet_owner_fix::execute_forced_transfers(
+            epoch_change_results.extend(Self::inject_testnet_owner_fix(
                 executor,
                 chain_spec,
                 evm_env.clone(),
@@ -1162,16 +1185,14 @@ impl<Storage: GravityStorage> Core<Storage> {
                         );
                         if !is_alpha_active {
                             let mut epoch_change_results = vec![validator_result];
-                            epoch_change_results.extend(
-                                testnet_owner_fix::execute_forced_transfers(
-                                    executor,
-                                    chain_spec,
-                                    evm_env.clone(),
-                                    system_tx_gas_price,
-                                    block_number,
-                                    block_ts,
-                                ),
-                            );
+                            epoch_change_results.extend(Self::inject_testnet_owner_fix(
+                                executor,
+                                chain_spec,
+                                evm_env.clone(),
+                                system_tx_gas_price,
+                                block_number,
+                                block_ts,
+                            ));
                             let bundle = executor.take_bundle();
                             return SystemTxnExecutionOutcome::EpochChanged(
                                 system_txns_into_executed_ordered_block_result(
@@ -1195,7 +1216,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                         }
                         epoch_change_results.extend(validator_txn_results);
                         epoch_change_results.push(validator_result);
-                        epoch_change_results.extend(testnet_owner_fix::execute_forced_transfers(
+                        epoch_change_results.extend(Self::inject_testnet_owner_fix(
                             executor,
                             chain_spec,
                             evm_env.clone(),
@@ -1359,8 +1380,8 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // TestnetOwnerFix is Longevity-testnet-only. Keep it off the protocol
         // `SystemTxnExecutionOutcome` shape: inject here (after SYSTEM_CALLER
-        // prefix, before user txs). Wrong chain / inactive fork / already
-        // migrated → empty vec.
+        // prefix, before user txs). Wrong chain / inactive fork → empty vec;
+        // forced-tx revert → panic inside the helper.
         let block_ts = ordered_block.timestamp_us / 1_000_000;
         let system_tx_gas_price: u128 =
             if reth_chainspec::is_system_tx_gas_exempt(self.chain_spec.as_ref(), block_ts) {
@@ -1368,7 +1389,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             } else {
                 base_fee as u128
             };
-        let fix_owner_results = testnet_owner_fix::execute_forced_transfers(
+        let fix_owner_results = Self::inject_testnet_owner_fix(
             &mut *executor,
             self.chain_spec.as_ref(),
             evm_env,
