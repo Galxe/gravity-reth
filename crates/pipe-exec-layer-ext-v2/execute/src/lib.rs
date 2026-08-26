@@ -1187,21 +1187,14 @@ impl<Storage: GravityStorage> Core<Storage> {
                             new_epoch=?new_epoch,
                             "DKG triggered new epoch, discard the block"
                         );
+                        // Pre-Alpha epoch-change assembly only keeps the DKG
+                        // validator txn (historical behavior). TestnetOwnerFix is
+                        // Longevity-only and always post-Alpha — do not inject here.
                         if !is_alpha_active {
-                            let mut epoch_change_results = vec![validator_result];
-                            epoch_change_results.extend(Self::inject_testnet_owner_fix(
-                                executor,
-                                chain_spec,
-                                evm_env.clone(),
-                                system_tx_gas_price,
-                                block_number,
-                                block_ts,
-                                parent_timestamp,
-                            ));
                             let bundle = executor.take_bundle();
                             return SystemTxnExecutionOutcome::EpochChanged(
                                 system_txns_into_executed_ordered_block_result(
-                                    epoch_change_results,
+                                    vec![validator_result],
                                     chain_spec,
                                     ordered_block,
                                     base_fee,
