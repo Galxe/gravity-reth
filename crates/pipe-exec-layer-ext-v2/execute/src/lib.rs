@@ -8,6 +8,7 @@ pub mod mint_precompile;
 pub mod onchain_config;
 pub mod randomness_precompile;
 mod system_caller_migration;
+mod testnet_owner_fix;
 mod tx_filter;
 use alloy_sol_types::SolEvent;
 
@@ -23,7 +24,7 @@ use alloy_consensus::{
     constants::EMPTY_WITHDRAWALS, BlockHeader, Header, Transaction, EMPTY_OMMER_ROOT_HASH,
 };
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE, BlockNumberOrTag};
-use alloy_primitives::{Address, TxHash, B256, U256};
+use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_precompiles::{
     bls_pop_verify::{create_bls_pop_verify_precompile, BLS_PRECOMPILE_ADDR},
@@ -511,15 +512,15 @@ struct ExecuteOrderedBlockResult {
     epoch: u64,
 }
 
-/// Result of system transaction execution
+/// Result of protocol system-transaction execution (metadata / DKG / JWK).
 ///
-/// System transactions may trigger an epoch change, which requires early return.
-/// This enum represents both outcomes.
+/// Epoch change returns unfinished protocol results so the caller can append
+/// optional `TestnetOwnerFix` forced txs, then `take_bundle` and assemble.
 enum SystemTxnExecutionOutcome {
-    /// Normal execution completed, continue with block processing
+    /// Normal execution completed, continue with user-tx processing
     Continue { metadata_result: Option<SystemTxnResult>, validator_results: Vec<SystemTxnResult> },
-    /// Epoch changed, return early with the result
-    EpochChanged(ExecuteOrderedBlockResult),
+    /// NewEpoch emitted; user txs are discarded. Caller finalizes the block.
+    EpochChanged { system_results: Vec<SystemTxnResult>, validators: Bytes },
 }
 
 // DESIGN: This validation is intentionally debug-only.
@@ -928,10 +929,10 @@ impl<Storage: GravityStorage> Core<Storage> {
         (RecoveredBlock::new_unhashed(block, senders), txs_info)
     }
 
-    /// Execute all system transactions (metadata, DKG, JWK) sequentially
+    /// Execute protocol system transactions (metadata, DKG, JWK) sequentially.
     ///
-    /// This function encapsulates the execution of all system-level transactions
-    /// that must be processed before the parallel user transaction execution.
+    /// Does not run `TestnetOwnerFix` and does not assemble the final block —
+    /// the caller owns that single seam after this returns.
     ///
     /// Returns `SystemTxnExecutionOutcome::EpochChanged` if a new epoch was triggered,
     /// otherwise returns `SystemTxnExecutionOutcome::Continue` with the results.
@@ -940,21 +941,22 @@ impl<Storage: GravityStorage> Core<Storage> {
     /// EVM-level revert/halt results are kept as failed receipts in the block. Rust-level
     /// execution errors do not produce a valid receipt, so they are logged and the offending
     /// system transaction is skipped.
+    ///
+    /// `system_tx_gas_price` is computed once by the caller (Alpha gas-exempt → 0).
     fn execute_system_transactions(
         executor: &mut dyn ParallelExecutor<
             Primitives = EthPrimitives,
             Error = BlockExecutionError,
         >,
-        chain_spec: &ChainSpec,
         evm_env: reth_evm::EvmEnv,
         ordered_block: &OrderedBlock,
-        base_fee: u64,
         epoch: u64,
         block_id: B256,
         parent_id: B256,
         block_number: u64,
         initial_nonce: u64,
         is_alpha_active: bool,
+        system_tx_gas_price: u128,
     ) -> SystemTxnExecutionOutcome {
         let mint_precompile = create_mint_token_precompile();
         let bls_precompile = create_bls_pop_verify_precompile();
@@ -962,21 +964,6 @@ impl<Storage: GravityStorage> Core<Storage> {
             (NATIVE_MINT_PRECOMPILE_ADDR, mint_precompile),
             (BLS_PRECOMPILE_ADDR, bls_precompile),
         ];
-
-        // Gravity Alpha hardfork: gas-exempt system transactions (L2 — construction
-        // side). When the lever is on, every protocol-injected system tx is built
-        // with `gas_price = 0`; the L1 (cfg-side) `disable_base_fee` set in
-        // `transact_system_txn` then accepts `gas_price < basefee`. Result: fee
-        // == gas_used × 0 == 0, SYSTEM_CALLER balance is not touched, gas metering
-        // / calldata / state / receipts / gas_used otherwise unchanged.
-        // See system-tx gas-exempt design §3.2.
-        let block_ts = evm_env.block_env.timestamp.saturating_to::<u64>();
-        let system_tx_gas_price: u128 =
-            if reth_chainspec::is_system_tx_gas_exempt(chain_spec, block_ts) {
-                0
-            } else {
-                base_fee as u128
-            };
 
         let mut current_nonce = initial_nonce;
         // -----------------------------------------------------------------------
@@ -999,7 +986,11 @@ impl<Storage: GravityStorage> Core<Storage> {
         ) {
             Ok(metadata_execution_result) => {
                 current_nonce = metadata_txn.nonce() + 1;
-                Some(SystemTxnResult { result: metadata_execution_result, txn: metadata_txn })
+                Some(SystemTxnResult {
+                    result: metadata_execution_result,
+                    txn: metadata_txn,
+                    sender: SYSTEM_CALLER,
+                })
             }
             Err(error) => {
                 if !is_alpha_active {
@@ -1026,21 +1017,14 @@ impl<Storage: GravityStorage> Core<Storage> {
                 new_epoch=?new_epoch,
                 "emit new epoch, discard the block"
             );
-            // merge_transitions was already called inside transact_system_txn,
-            // so take_bundle() returns the complete bundle with all system-txn changes.
-            let bundle = executor.take_bundle();
-            return SystemTxnExecutionOutcome::EpochChanged(
-                system_txns_into_executed_ordered_block_result(
-                    vec![
-                        metadata_txn_result.expect("metadata result exists when it emits NewEpoch")
-                    ],
-                    chain_spec,
-                    ordered_block,
-                    base_fee,
-                    bundle,
-                    validators,
-                ),
-            );
+            // merge_transitions was already called inside transact_system_txn;
+            // caller appends optional TestnetOwnerFix, then take_bundle + assemble.
+            return SystemTxnExecutionOutcome::EpochChanged {
+                system_results: vec![
+                    metadata_txn_result.expect("metadata result exists when it emits NewEpoch")
+                ],
+                validators,
+            };
         }
 
         if let Some(metadata_txn_result) = metadata_txn_result.as_ref() {
@@ -1122,7 +1106,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             };
 
             current_nonce += 1;
-            let validator_result = SystemTxnResult { result: execution_result, txn };
+            let validator_result =
+                SystemTxnResult { result: execution_result, txn, sender: SYSTEM_CALLER };
 
             if !validator_result.result.is_success() {
                 error!(target: "execute_ordered_block",
@@ -1145,18 +1130,15 @@ impl<Storage: GravityStorage> Core<Storage> {
                             new_epoch=?new_epoch,
                             "DKG triggered new epoch, discard the block"
                         );
-                        let bundle = executor.take_bundle();
+                        // Pre-Alpha epoch-change assembly only keeps the DKG
+                        // validator txn (historical behavior). Caller still runs
+                        // the TestnetOwnerFix seam; gate no-ops off Longevity /
+                        // non-crossing blocks.
                         if !is_alpha_active {
-                            return SystemTxnExecutionOutcome::EpochChanged(
-                                system_txns_into_executed_ordered_block_result(
-                                    vec![validator_result],
-                                    chain_spec,
-                                    ordered_block,
-                                    base_fee,
-                                    bundle,
-                                    validators,
-                                ),
-                            );
+                            return SystemTxnExecutionOutcome::EpochChanged {
+                                system_results: vec![validator_result],
+                                validators,
+                            };
                         }
                         let mut epoch_change_results = Vec::with_capacity(
                             usize::from(metadata_txn_result.is_some()) +
@@ -1168,16 +1150,10 @@ impl<Storage: GravityStorage> Core<Storage> {
                         }
                         epoch_change_results.extend(validator_txn_results);
                         epoch_change_results.push(validator_result);
-                        return SystemTxnExecutionOutcome::EpochChanged(
-                            system_txns_into_executed_ordered_block_result(
-                                epoch_change_results,
-                                chain_spec,
-                                ordered_block,
-                                base_fee,
-                                bundle,
-                                validators,
-                            ),
-                        );
+                        return SystemTxnExecutionOutcome::EpochChanged {
+                            system_results: epoch_change_results,
+                            validators,
+                        };
                     }
                 }
 
@@ -1300,22 +1276,58 @@ impl<Storage: GravityStorage> Core<Storage> {
             block_number,
         );
 
-        // Execute system transactions (metadata, DKG, JWK) sequentially.
-        // State changes are committed directly into executor's ParallelState.
-        let (metadata_txn_result, validator_txn_results) = match Self::execute_system_transactions(
+        // Gravity Alpha hardfork: gas-exempt system transactions (L2 —
+        // construction side). Computed once for protocol system txs and
+        // optional TestnetOwnerFix. See system-tx gas-exempt design §3.2.
+        let block_ts = ordered_block.timestamp_us / 1_000_000;
+        let parent_timestamp = parent_header.timestamp;
+        let system_tx_gas_price: u128 =
+            if reth_chainspec::is_system_tx_gas_exempt(self.chain_spec.as_ref(), block_ts) {
+                0
+            } else {
+                base_fee as u128
+            };
+
+        // Protocol system txs (metadata, DKG, JWK). State commits into ParallelState.
+        let system_outcome = Self::execute_system_transactions(
             &mut *executor,
-            &self.chain_spec,
-            evm_env,
+            evm_env.clone(),
             &ordered_block,
-            base_fee,
             epoch,
             block_id,
             parent_id,
             block_number,
             initial_nonce,
             is_alpha_active,
-        ) {
-            SystemTxnExecutionOutcome::EpochChanged(result) => return result,
+            system_tx_gas_price,
+        );
+
+        // Single TestnetOwnerFix seam: after protocol system txs, before user
+        // txs / epoch-block assembly. Longevity-only one-shot via
+        // transitions_at_timestamp; forced-tx revert → panic inside the helper.
+        let fix_owner_results = testnet_owner_fix::execute_forced_transfers(
+            &mut *executor,
+            self.chain_spec.as_ref(),
+            evm_env,
+            system_tx_gas_price,
+            block_number,
+            block_ts,
+            parent_timestamp,
+        );
+
+        let (metadata_txn_result, validator_txn_results) = match system_outcome {
+            SystemTxnExecutionOutcome::EpochChanged { mut system_results, validators } => {
+                system_results.extend(fix_owner_results);
+                let bundle = executor.take_bundle();
+                return system_txns_into_executed_ordered_block_result(
+                    system_results,
+                    self.chain_spec.as_ref(),
+                    &ordered_block,
+                    base_fee,
+                    bundle,
+                    validators,
+                );
+            }
             SystemTxnExecutionOutcome::Continue { metadata_result, validator_results } => {
                 (metadata_result, validator_results)
             }
@@ -1343,7 +1355,8 @@ impl<Storage: GravityStorage> Core<Storage> {
         // amount, keeping `header.gas_used ≤ header.gas_limit` once metadata + validator
         // receipts get appended below. Closes gravity-audit#621.
         let sum_system_gas = metadata_txn_result.as_ref().map_or(0, |r| r.result.gas_used()) +
-            validator_txn_results.iter().map(|r| r.result.gas_used()).sum::<u64>();
+            validator_txn_results.iter().map(|r| r.result.gas_used()).sum::<u64>() +
+            fix_owner_results.iter().map(|r| r.result.gas_used()).sum::<u64>();
         let state_for_block = self.storage.get_state_view().unwrap();
         let (block, txs_info) = self.create_block_for_executor(
             ordered_block,
@@ -1389,7 +1402,11 @@ impl<Storage: GravityStorage> Core<Storage> {
             epoch,
         };
         let has_metadata_result = metadata_txn_result.is_some();
-        let n_system_receipts = usize::from(has_metadata_result) + validator_txn_results.len();
+        // Gravity events are mined from SYSTEM_CALLER protocol txs only (metadata +
+        // validator). FixOwner forced txs sit after that prefix and must not be
+        // scanned for NewEpoch / DKG / JWK events.
+        let n_protocol_system_receipts =
+            usize::from(has_metadata_result) + validator_txn_results.len();
         if let Some(metadata_txn_result) = metadata_txn_result {
             metadata_txn_result.insert_to_executed_ordered_block_result(&mut result, 0);
         }
@@ -1399,14 +1416,21 @@ impl<Storage: GravityStorage> Core<Storage> {
             let insert_position = usize::from(has_metadata_result) + index;
             validator_result.insert_to_executed_ordered_block_result(&mut result, insert_position);
         }
+        // TestnetOwnerFix forced transfers: after SYSTEM_CALLER prefix, before user txs.
+        // Preserves `system_txs_form_head_prefix` (FixOwner senders are not SYSTEM_CALLER).
+        for (index, fix_result) in fix_owner_results.into_iter().enumerate() {
+            let insert_position = n_protocol_system_receipts + index;
+            fix_result.insert_to_executed_ordered_block_result(&mut result, insert_position);
+        }
         debug!(target: "execute_ordered_block",
             number=?result.block.number,
             receipts_len=?result.execution_output.receipts.len(),
-            "insert metadata and validator transaction results to executed ordered block result"
+            protocol_system_receipts=?n_protocol_system_receipts,
+            "insert metadata, validator, and TestnetOwnerFix transaction results"
         );
-        // Only extract gravity events from system transaction receipts.
+        // Only extract gravity events from protocol system transaction receipts.
         let gravity_events = self.extract_gravity_events_from_receipts(
-            &result.execution_output.receipts[..n_system_receipts],
+            &result.execution_output.receipts[..n_protocol_system_receipts],
             result.block.number,
             epoch,
         );

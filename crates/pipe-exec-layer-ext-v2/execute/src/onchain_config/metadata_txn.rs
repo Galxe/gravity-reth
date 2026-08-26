@@ -8,7 +8,7 @@ use super::{
 use crate::{onchain_config::BLOCK_ADDR, ExecuteOrderedBlockResult, OrderedBlock};
 use alloy_consensus::{constants::EMPTY_WITHDRAWALS, Header, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
-use alloy_primitives::Bytes;
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolEvent};
 use gravity_api_types::events::contract_event::GravityEvent;
 use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
@@ -42,15 +42,20 @@ pub fn merge_state_changes(accumulated: &mut EvmState, new_changes: EvmState) {
     }
 }
 
-/// Result of a system transaction execution (metadata, DKG, or JWK)
-/// This is a unified structure for all system-level transactions that are executed before
-/// the parallel executor.
+/// Result of a system / protocol-injected transaction execution (metadata, DKG, JWK,
+/// or `TestnetOwnerFix` forced transfers).
+///
+/// These transactions are executed before the parallel user-tx executor. Protocol
+/// system txs use [`SYSTEM_CALLER`]; `TestnetOwnerFix` forced txs use the corresponding
+/// `old_owner` so body `TransactionSenders` match execution.
 #[derive(Debug)]
 pub struct SystemTxnResult {
     /// Result of the system transaction execution
     pub result: ExecutionResult,
     /// The system transaction
     pub txn: TransactionSigned,
+    /// Canonical sender recorded in `TransactionSenders` / block body recovery.
+    pub sender: Address,
 }
 
 impl SystemTxnResult {
@@ -69,9 +74,9 @@ impl SystemTxnResult {
         None
     }
 
-    /// Insert this system transaction into an existing executed block result at the specified
-    /// position Position 0 is reserved for metadata tx, positions 1+ are for validator
-    /// transactions
+    /// Insert this system/protocol-injected transaction into an existing executed block
+    /// result at `insert_position`. Position 0 is typically the metadata tx; later
+    /// positions are validator system txs and (on Longevity) TestnetOwnerFix forced txs.
     pub(crate) fn insert_to_executed_ordered_block_result(
         self,
         result: &mut crate::ExecuteOrderedBlockResult,
@@ -114,7 +119,7 @@ impl SystemTxnResult {
             },
         );
         result.block.body.transactions.insert(insert_position, self.txn);
-        result.senders.insert(insert_position, SYSTEM_CALLER);
+        result.senders.insert(insert_position, self.sender);
     }
 }
 
@@ -173,7 +178,7 @@ pub(crate) fn system_txns_into_executed_ordered_block_result(
     let mut receipts = Vec::with_capacity(system_txn_results.len());
     let mut senders = Vec::with_capacity(system_txn_results.len());
     let mut cumulative_gas_used = 0;
-    for SystemTxnResult { result, txn } in system_txn_results {
+    for SystemTxnResult { result, txn, sender } in system_txn_results {
         let gas_used = result.gas_used();
         cumulative_gas_used += gas_used;
         receipts.push(Receipt {
@@ -183,7 +188,7 @@ pub(crate) fn system_txns_into_executed_ordered_block_result(
             logs: result.into_logs(),
         });
         block.body.transactions.push(txn);
-        senders.push(SYSTEM_CALLER);
+        senders.push(sender);
     }
 
     let new_epoch = ordered_block.epoch + 1;
@@ -227,7 +232,7 @@ pub fn transact_system_txn(
         super::errors::log_execution_error(&result.result);
     }
 
-    (SystemTxnResult { result: result.result, txn }, result.state)
+    (SystemTxnResult { result: result.result, txn, sender: SYSTEM_CALLER }, result.state)
 }
 
 /// Execute a metadata contract call (onBlockStart from Blocker.sol)
@@ -276,6 +281,7 @@ mod tests {
                 output: Output::Call(Bytes::new()),
             },
             txn: construct_metadata_txn(nonce, 1, 1_000_000, Some(0), &[]),
+            sender: SYSTEM_CALLER,
         }
     }
 

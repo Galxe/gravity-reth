@@ -32,7 +32,7 @@ pub use api::EthChainSpec;
 pub use gravity::{
     is_block_gas_last_gate_active, is_eip7702_lockdown_active, is_gravity_system_caller,
     is_system_tx_gas_exempt, system_txs_form_head_prefix, GravityHardfork,
-    GRAVITY_TX_SKIPPED_LOG_ADDRESS, SYSTEM_CALLER,
+    GRAVITY_TX_SKIPPED_LOG_ADDRESS, LONGEVITY_TESTNET_CHAIN_ID, SYSTEM_CALLER,
 };
 pub use info::ChainInfo;
 #[cfg(any(test, feature = "test-utils"))]
