@@ -1206,8 +1206,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                         let mut epoch_change_results = Vec::with_capacity(
                             usize::from(metadata_txn_result.is_some()) +
                                 validator_txn_results.len() +
-                                1 +
-                                4,
+                                1,
                         );
                         if let Some(metadata_txn_result) = metadata_txn_result {
                             epoch_change_results.push(metadata_txn_result);
