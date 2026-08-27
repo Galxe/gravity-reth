@@ -9,6 +9,10 @@ use reth_evm::precompiles::{DynPrecompile, PrecompileInput};
 use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::{info, warn};
 
+/// Address of Gravity's native mint precompile.
+pub const NATIVE_MINT_PRECOMPILE_ADDR: Address =
+    address!("00000000000000000000000000000001625f5000");
+
 /// Authorized caller address (JWK Manager at 0x2018)
 ///
 /// Only this address is allowed to call the mint precompile.

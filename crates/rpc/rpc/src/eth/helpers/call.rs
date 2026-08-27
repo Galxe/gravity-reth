@@ -5,6 +5,7 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, U256};
 use gravity_precompiles::{
     bls_pop_verify::{create_bls_pop_verify_precompile, BLS_PRECOMPILE_ADDR},
+    mint_token::{create_mint_token_precompile, NATIVE_MINT_PRECOMPILE_ADDR},
     randomness_by_height::{
         create_randomness_by_height_precompile, randomness_by_height_gas_policy_at_block,
         RandomnessByHeightGasPolicy, RandomnessByHeightLookup, RandomnessByHeightProvider,
@@ -121,6 +122,15 @@ where
         // calls `0x…625f5001`. See gravity-audit §3.5.0.
         let bls_precompile = create_bls_pop_verify_precompile();
         evm.precompiles_mut().apply_precompile(&BLS_PRECOMPILE_ADDR, move |_| Some(bls_precompile));
+
+        // Mint precompile is registered unconditionally to mirror the pipe layer's
+        // `system_precompiles` registration in `transact_system_txn` (post-Alpha
+        // `metadata tx → BLOCK_ADDR.onBlockStart → GENESIS_ADDR → mint` is routine;
+        // pre-Alpha narrow user-EOA-direct-call surface still benefits — same logic
+        // as the BLS unconditional registration).
+        let mint_precompile = create_mint_token_precompile();
+        evm.precompiles_mut()
+            .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(mint_precompile));
 
         let Ok(block_number) = u64::try_from(block_number) else { return };
         let Ok(block_timestamp) = u64::try_from(block_timestamp) else { return };

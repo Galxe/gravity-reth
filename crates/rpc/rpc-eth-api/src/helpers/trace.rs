@@ -3,10 +3,13 @@
 use super::{Call, LoadBlock, LoadState, LoadTransaction};
 use crate::{FromEthApiError, FromEvmError};
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
-use alloy_primitives::B256;
+use alloy_primitives::{B256, U256};
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
-use reth_chainspec::{is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider};
+use reth_chainspec::{
+    is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider, EthChainSpec,
+    GravityHardfork, SYSTEM_CALLER,
+};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     block::BlockExecutor, ConfigureEvm, Database, Evm, EvmEnvFor, EvmFactory, EvmFor,
@@ -18,13 +21,13 @@ use reth_revm::{
     db::{bal::EvmDatabaseError, State},
 };
 use reth_rpc_eth_types::cache::db::StateCacheDb;
-use reth_storage_api::{ProviderBlock, ProviderTx};
+use reth_storage_api::{HeaderProvider, ProviderBlock, ProviderTx};
 use revm::{
     context::{
         result::{ExecutionResult, ResultAndState},
         Block,
     },
-    state::EvmState,
+    state::{Account, AccountInfo, AccountStatus, EvmState},
     DatabaseCommit,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -610,6 +613,62 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
             .map_err(Self::Error::from_eth_err)?
             .apply_pre_execution_changes()
             .map_err(Self::Error::from_eth_err)?;
+        // Gravity Alpha: zero SYSTEM_CALLER.balance on the activation block so
+        // RPC replay from parent state matches the pipe write path
+        // (`system_caller_migration::apply_state_changes_for_block`). Without
+        // this, `trace_block` on the Alpha activation block still sees the
+        // genesis sentinel balance and system-tx gas metering diverges.
+        self.apply_alpha_system_caller_migration(block, db)?;
+        Ok(())
+    }
+
+    /// One-shot Alpha `SYSTEM_CALLER` balance zeroing, gated by
+    /// `transitions_at_timestamp(current, parent)`.
+    ///
+    /// Mirrors the pipe hook: only `balance` is cleared; nonce and code stay so
+    /// EIP-161 does not prune the account. RPC cannot depend on the pipe crate,
+    /// so the same diff is applied here via [`DatabaseCommit`].
+    fn apply_alpha_system_caller_migration(
+        &self,
+        block: &RecoveredBlock<ProviderBlock<Self::Provider>>,
+        db: &mut StateCacheDb,
+    ) -> Result<(), Self::Error> {
+        let chain_spec = self.provider().chain_spec();
+        let current_ts = block.timestamp();
+        let parent_ts = self
+            .provider()
+            .header(&block.parent_hash())
+            .map_err(Self::Error::from_eth_err)?
+            .map(|header| header.timestamp())
+            .unwrap_or(0);
+
+        if !chain_spec
+            .gravity_hardforks()
+            .fork(GravityHardfork::Alpha)
+            .transitions_at_timestamp(current_ts, parent_ts)
+        {
+            return Ok(());
+        }
+
+        // `unwrap_or_default` covers degenerate fixtures that omit SYSTEM_CALLER
+        // from genesis alloc — same as the pipe hook.
+        let prev = revm::Database::basic(db, SYSTEM_CALLER)
+            .map_err(Self::Error::from_eth_err)?
+            .unwrap_or_default();
+        let new_info = AccountInfo {
+            balance: U256::ZERO,
+            nonce: prev.nonce,
+            code_hash: prev.code_hash,
+            code: prev.code,
+            account_id: prev.account_id,
+        };
+
+        let mut account = Account::default();
+        account.info = new_info;
+        account.status = AccountStatus::Touched;
+        let mut state_diff = EvmState::default();
+        state_diff.insert(SYSTEM_CALLER, account);
+        db.commit(state_diff);
         Ok(())
     }
 }
