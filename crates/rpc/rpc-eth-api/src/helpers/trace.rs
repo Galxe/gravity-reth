@@ -27,6 +27,7 @@ use revm::{
         result::{ExecutionResult, ResultAndState},
         Block,
     },
+    context_interface::Transaction,
     state::{Account, AccountInfo, AccountStatus, EvmState},
     DatabaseCommit,
 };
@@ -95,12 +96,14 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         let block_number = evm_env.block_env.number();
         let block_timestamp = evm_env.block_env.timestamp();
         let current_randomness = evm_env.block_env.prevrandao();
+        let for_system_tx = is_gravity_system_caller(tx_env.caller());
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
         self.register_custom_precompiles(
             &mut evm,
             block_number,
             block_timestamp,
             current_randomness,
+            for_system_tx,
         );
         evm.transact(tx_env).map_err(Self::Error::from_evm_err)
     }
@@ -401,14 +404,14 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     evm_block_timestamp.saturating_to::<u64>(),
                 );
 
-                // Classify the first transaction to pick the initial cfg.
+                // Classify the first transaction to pick the initial cfg + precompile set.
                 // If the block is empty post-take we already returned above.
                 let mut txs_iter = block.transactions_recovered().take(max_transactions).peekable();
-                let first_kind_system_exempt = exempt_fork_active &&
-                    txs_iter
-                        .peek()
-                        .map(|tx| is_gravity_system_caller(tx.signer()))
-                        .unwrap_or(false);
+                let first_is_system_caller = txs_iter
+                    .peek()
+                    .map(|tx| is_gravity_system_caller(tx.signer()))
+                    .unwrap_or(false);
+                let first_kind_system_exempt = exempt_fork_active && first_is_system_caller;
 
                 // Build the initial EVM with cfg pre-toggled per the first tx's kind.
                 let mut initial_env = evm_env;
@@ -424,8 +427,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     evm_block_number,
                     evm_block_timestamp,
                     current_randomness,
+                    first_is_system_caller,
                 );
-                let mut current_kind_system_exempt = first_kind_system_exempt;
+                let mut current_is_system_caller = first_is_system_caller;
 
                 // Protocol invariant pin: the pipe layer pins SYSTEM_CALLER-signed
                 // txs (metadata + DKG/JWK validator txs) to a contiguous block-head
@@ -441,7 +445,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                 let mut results: Vec<R> = Vec::with_capacity(max_transactions);
 
                 while let Some(tx) = txs_iter.next() {
-                    // Per-tx classification + EVM rebuild on transition.
+                    // Per-tx classification + EVM rebuild on SYSTEM_CALLER↔user.
                     let is_system_caller = is_gravity_system_caller(tx.signer());
                     debug_assert!(
                         !(is_system_caller && saw_non_system_caller_tx),
@@ -451,8 +455,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                         saw_non_system_caller_tx = true;
                     }
 
-                    let tx_is_system_exempt = exempt_fork_active && is_system_caller;
-                    if tx_is_system_exempt != current_kind_system_exempt {
+                    // Rebuild even pre-Alpha: mint is system-only and must drop on the
+                    // user boundary (cfg disables may stay false on both sides).
+                    if is_system_caller != current_is_system_caller {
+                        let tx_is_system_exempt = exempt_fork_active && is_system_caller;
                         let (db_taken, mut env_taken) = current_evm.finish();
                         env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;
                         env_taken.cfg_env.disable_balance_check = tx_is_system_exempt;
@@ -466,8 +472,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                             evm_block_number,
                             evm_block_timestamp,
                             current_randomness,
+                            is_system_caller,
                         );
-                        current_kind_system_exempt = tx_is_system_exempt;
+                        current_is_system_caller = is_system_caller;
                     }
 
                     let tx_hash = *tx.tx_hash();

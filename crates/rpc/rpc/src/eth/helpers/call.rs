@@ -112,6 +112,7 @@ where
         block_number: U256,
         block_timestamp: U256,
         current_randomness: Option<B256>,
+        for_system_tx: bool,
     ) where
         EV: Evm<Precompiles = PrecompilesMap>,
     {
@@ -123,14 +124,15 @@ where
         let bls_precompile = create_bls_pop_verify_precompile();
         evm.precompiles_mut().apply_precompile(&BLS_PRECOMPILE_ADDR, move |_| Some(bls_precompile));
 
-        // Mint precompile is registered unconditionally to mirror the pipe layer's
-        // `system_precompiles` registration in `transact_system_txn` (post-Alpha
-        // `metadata tx → BLOCK_ADDR.onBlockStart → GENESIS_ADDR → mint` is routine;
-        // pre-Alpha narrow user-EOA-direct-call surface still benefits — same logic
-        // as the BLS unconditional registration).
-        let mint_precompile = create_mint_token_precompile();
-        evm.precompiles_mut()
-            .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(mint_precompile));
+        // Mint mirrors pipe `system_precompiles` in `transact_system_txn` only — not
+        // `custom_precompiles_for_ordered_block`. Registering it for user txs would make
+        // a direct EOA CALL halt as unauthorized on RPC while canonical treats the mint
+        // address as an empty account. See #372 / PR review.
+        if for_system_tx {
+            let mint_precompile = create_mint_token_precompile();
+            evm.precompiles_mut()
+                .apply_precompile(&NATIVE_MINT_PRECOMPILE_ADDR, move |_| Some(mint_precompile));
+        }
 
         let Ok(block_number) = u64::try_from(block_number) else { return };
         let Ok(block_timestamp) = u64::try_from(block_timestamp) else { return };

@@ -6,10 +6,10 @@
 //!   1. Run without `GasPriceLessThanBasefee` / `InsufficientFunds`.
 //!   2. Keep system-tx `gas_price == 0` (L2 construction + L1 cfg exempt).
 //!   3. Match **debug**/callTracer gas to canonical receipts (execution fidelity).
-//!   4. On `SAMPLE_BLOCK`, a user tx that CALLs the mint precompile is injected (BLS-style);
-//!      callTracer must reach `NATIVE_MINT_PRECOMPILE_ADDR` and show the precompile dispatched
-//!      (unauthorized halt is fine — proves registration). `onBlockStart`+`failed_proposer` alone
-//!      does **not** reach mint on current `gravity_hardfork.json` bytecode.
+//!   4. On `SAMPLE_BLOCK`, a user EOA CALL to `NATIVE_MINT_PRECOMPILE_ADDR` is injected. Pipe user
+//!      execution does **not** register mint (only `transact_system_txn` does), so canonical treats
+//!      that address as an empty account. RPC must match that status — unauthorized mint halt would
+//!      mean over-registration on the user path (#372 review).
 //!
 //! Parity `trace_*` endpoints are exercised for **shape** only (root count,
 //! tx_hash, success/error, state_diff presence) — **not** root `gas_used` ≡
@@ -82,8 +82,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 const ALPHA_TS_BASE: u64 = 2_000_000_000;
 const ALPHA_TIME_ALWAYS: u64 = ALPHA_TS_BASE + 1;
 const POST_ALPHA_TIP: u64 = 10;
-/// Sampled for the single-tx family + mint registration cell (#372 Track B):
-/// a funded EOA user tx CALLing the mint precompile is injected here.
+/// Sampled for the single-tx family + user-path mint parity cell (#372):
+/// a funded EOA CALL to the mint address is injected here.
 const SAMPLE_BLOCK: u64 = 5;
 
 const SYSTEM_CALLER: Address = address!("00000000000000000000000000000001625f0000");
@@ -234,9 +234,8 @@ where
         let signer = funded_signer();
         for n in start..=end {
             let block = if n == SAMPLE_BLOCK {
-                // #372 Track B: inject a direct CALL to the mint precompile
-                // (unauthorized EOA). Registration is proven when callTracer
-                // shows a frame to NATIVE_MINT_PRECOMPILE_ADDR.
+                // #372: user-path negative — CALL mint address without system
+                // registration. Canonical and RPC must agree (empty-account CALL).
                 let (mint_tx, sender) = build_mint_call_tx(&signer, 0);
                 ordered_block_with_txs(
                     *epoch,
@@ -625,9 +624,9 @@ async fn run_post_alpha_trace_consistency(
         ),
     }
 
-    // 3.2.e — callTracer on the mint user tx: must dispatch the mint precompile
-    // (#372 Track B). Unauthorized caller is expected; empty-account success
-    // would mean RPC never registered mint.
+    // 3.2.e — callTracer on the mint user tx: must match canonical empty-account
+    // semantics. Pipe user execution does not register mint; RPC must not either.
+    let mint_canonical = sample_canonical.last().expect("mint canonical entry");
     let call_opts = GethDebugTracingOptions::call_tracer(CallConfig::default());
     let call_trace =
         debug_api.debug_trace_transaction(mint_tx_hash, call_opts).await.unwrap_or_else(|e| {
@@ -640,16 +639,23 @@ async fn run_post_alpha_trace_consistency(
     assert_eq!(
         call_frame.to,
         Some(NATIVE_MINT_PRECOMPILE_ADDR),
-        "[post_alpha_trace {label}] mint user tx top-frame.to must be mint precompile"
+        "[post_alpha_trace {label}] mint user tx top-frame.to must be mint address"
     );
-    // Registered mint rejects non-AUTHORIZED_CALLER with a halt/error; an
-    // unregistered address would look like a successful empty-account CALL.
-    assert!(
-        call_frame.error.is_some() || call_frame.revert_reason.is_some(),
-        "[post_alpha_trace {label}] mint precompile must reject unauthorized EOA (proves registration); got clean success error={:?} revert={:?}",
+    assert_eq!(
+        call_frame.error.is_none() && call_frame.revert_reason.is_none(),
+        mint_canonical.success,
+        "[post_alpha_trace {label}] mint user tx callTracer status must match canonical success={} (error={:?} revert={:?}); unauthorized mint halt means RPC over-registered mint on the user path",
+        mint_canonical.success,
         call_frame.error,
-        call_frame.revert_reason
+        call_frame.revert_reason,
     );
+    if mint_canonical.success {
+        assert_eq!(
+            call_frame.gas_used, mint_canonical.gas_used,
+            "[post_alpha_trace {label}] mint user tx callTracer.gas_used != canonical: got {}, want {}",
+            call_frame.gas_used, mint_canonical.gas_used,
+        );
+    }
 
     // 3.2.f — trace_transaction_opcode_gas: hash + non-empty (EVM ran).
     let txopcode = trace_api
@@ -667,7 +673,7 @@ async fn run_post_alpha_trace_consistency(
     );
 
     println!(
-        "[post_alpha_trace {label}] block-family + single-tx OK (debug gas≡receipt, parity shape-only, gas_price=0, mint reached on SAMPLE_BLOCK)"
+        "[post_alpha_trace {label}] block-family + single-tx OK (debug gas≡receipt, parity shape-only, gas_price=0, user-mint empty-account parity on SAMPLE_BLOCK)"
     );
     Ok(())
 }

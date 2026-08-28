@@ -47,9 +47,9 @@
 #      pass locally but never gate a merge.
 #  10. Every address identifier in the pipe's `system_precompiles` vec is
 #      referenced by RPC `register_custom_precompiles` in
-#      `crates/rpc/rpc/src/eth/helpers/call.rs`. Today: BLS + mint. A new
-#      system precompile that lands only on the pipe side is the #372 class
-#      of RPC replay divergence.
+#      `crates/rpc/rpc/src/eth/helpers/call.rs`. Today: BLS + mint (mint
+#      gated on `for_system_tx`). A new system precompile that lands only
+#      on the pipe side is the #372 class of RPC replay divergence.
 #
 # Invocation:
 #   bash scripts/check-gravity-invariants.sh
