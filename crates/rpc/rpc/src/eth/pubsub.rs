@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, TxReceipt};
+use alloy_eips::{eip2718::Encodable2718, BlockNumHash};
 use alloy_primitives::TxHash;
 use alloy_rpc_types_eth::{
     pubsub::{
@@ -16,7 +17,7 @@ use jsonrpsee::{
 };
 use reth_chain_state::CanonStateSubscriptions;
 use reth_network_api::NetworkInfo;
-use reth_primitives_traits::TransactionMeta;
+use reth_primitives_traits::{BlockBody, TransactionMeta};
 use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcHeader};
 use reth_rpc_eth_api::{
     pubsub::EthPubSubApiServer, EthApiTypes, RpcConvert, RpcNodeCore, RpcTransaction,
@@ -447,20 +448,34 @@ where
 
     /// Returns a stream that yields all logs that match the given filter.
     fn log_stream(&self, filter: Filter) -> impl Stream<Item = Log> {
-        self.eth_api
-            .provider()
-            .canonical_state_stream()
-            .map(move |canon_state| canon_state.block_receipts())
-            .flat_map(futures::stream::iter)
-            .flat_map(move |(block_receipts, removed)| {
-                let all_logs = logs_utils::matching_block_logs_with_tx_hashes(
-                    &filter,
-                    block_receipts.block,
-                    block_receipts.timestamp,
-                    block_receipts.tx_receipts.iter().map(|(tx, receipt)| (*tx, receipt)),
-                    removed,
-                );
-                futures::stream::iter(all_logs)
-            })
+        self.eth_api.provider().canonical_state_stream().flat_map(move |canon_state| {
+            let mut all_logs = Vec::new();
+            // Reverted logs must precede committed logs, even when bloom filtering skips blocks.
+            for (chain, removed) in canon_state
+                .reverted()
+                .into_iter()
+                .map(|chain| (chain, true))
+                .chain(std::iter::once((canon_state.committed(), false)))
+            {
+                for (block, receipts) in chain.blocks_and_receipts() {
+                    if !filter.matches_bloom(block.header().logs_bloom()) {
+                        continue;
+                    }
+                    all_logs.extend(logs_utils::matching_block_logs_with_tx_hashes(
+                        &filter,
+                        BlockNumHash::new(block.number(), block.hash()),
+                        block.timestamp(),
+                        block
+                            .body()
+                            .transactions()
+                            .iter()
+                            .zip(receipts)
+                            .map(|(tx, receipt)| (tx.trie_hash(), receipt)),
+                        removed,
+                    ));
+                }
+            }
+            futures::stream::iter(all_logs)
+        })
     }
 }

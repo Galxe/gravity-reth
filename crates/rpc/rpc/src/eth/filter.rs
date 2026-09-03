@@ -479,14 +479,20 @@ where
                 };
 
                 // Read number and timestamp from cached block or provider header
-                let (block_number, block_timestamp) = if let Some(block) = &maybe_block {
-                    (block.header().number(), block.header().timestamp())
+                let (block_number, block_timestamp, bloom_matches) = if let Some(block) =
+                    &maybe_block
+                {
+                    (
+                        block.header().number(),
+                        block.header().timestamp(),
+                        filter.matches_bloom(block.header().logs_bloom()),
+                    )
                 } else {
                     let header = self
                         .provider()
                         .header_by_hash_or_number(block_hash.into())?
                         .ok_or_else(|| ProviderError::HeaderNotFound(block_hash.into()))?;
-                    (header.number(), header.timestamp())
+                    (header.number(), header.timestamp(), filter.matches_bloom(header.logs_bloom()))
                 };
 
                 // Check if the block has been pruned (EIP-4444)
@@ -495,6 +501,9 @@ where
                     return Err(EthApiError::PrunedHistoryUnavailable.into());
                 }
 
+                if !bloom_matches {
+                    return Ok(Vec::new())
+                }
                 let block_num_hash = BlockNumHash::new(block_number, block_hash);
 
                 let mut all_logs = Vec::new();
