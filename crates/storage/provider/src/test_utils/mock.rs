@@ -66,6 +66,7 @@ pub struct MockEthProvider<T: NodePrimitives = EthPrimitives, ChainSpec = reth_c
     pub state_roots: Arc<Mutex<Vec<B256>>>,
     /// Local block body indices store
     pub block_body_indices: Arc<Mutex<HashMap<BlockNumber, StoredBlockBodyIndices>>>,
+    pending_block_num_hash: Arc<Mutex<Option<alloy_eips::BlockNumHash>>>,
     tx: TxMock,
     prune_modes: Arc<PruneModes>,
 }
@@ -83,6 +84,7 @@ where
             chain_spec: self.chain_spec.clone(),
             state_roots: self.state_roots.clone(),
             block_body_indices: self.block_body_indices.clone(),
+            pending_block_num_hash: self.pending_block_num_hash.clone(),
             tx: self.tx.clone(),
             prune_modes: self.prune_modes.clone(),
         }
@@ -100,6 +102,7 @@ impl<T: NodePrimitives> MockEthProvider<T, reth_chainspec::ChainSpec> {
             chain_spec: Arc::new(reth_chainspec::ChainSpecBuilder::mainnet().build()),
             state_roots: Default::default(),
             block_body_indices: Default::default(),
+            pending_block_num_hash: Default::default(),
             tx: Default::default(),
             prune_modes: Default::default(),
         }
@@ -169,6 +172,11 @@ impl<T: NodePrimitives, ChainSpec> MockEthProvider<T, ChainSpec> {
         self.block_body_indices.lock().insert(block_number, indices);
     }
 
+    /// Sets the pending block held by the engine.
+    pub fn set_pending_block_num_hash(&self, num_hash: Option<alloy_eips::BlockNumHash>) {
+        *self.pending_block_num_hash.lock() = num_hash;
+    }
+
     /// Add state root to local state root store
     pub fn add_state_root(&self, state_root: B256) {
         self.state_roots.lock().push(state_root);
@@ -184,6 +192,7 @@ impl<T: NodePrimitives, ChainSpec> MockEthProvider<T, ChainSpec> {
             chain_spec: Arc::new(chain_spec),
             state_roots: self.state_roots,
             block_body_indices: self.block_body_indices,
+            pending_block_num_hash: self.pending_block_num_hash,
             tx: self.tx,
             prune_modes: self.prune_modes,
         }
@@ -625,7 +634,7 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + Send + Sync + 'static> BlockId
     for MockEthProvider<T, ChainSpec>
 {
     fn pending_block_num_hash(&self) -> ProviderResult<Option<alloy_eips::BlockNumHash>> {
-        Ok(None)
+        Ok(*self.pending_block_num_hash.lock())
     }
 
     fn safe_block_num_hash(&self) -> ProviderResult<Option<alloy_eips::BlockNumHash>> {
