@@ -1477,6 +1477,7 @@ pub trait EthPoolTransaction: PoolTransaction {
 ///
 /// - `cost`: Pre-calculated max cost (gas * price + value + blob costs)
 /// - `encoded_length`: Cached RLP encoding length for size limits
+/// - `in_memory_size`: Cached transaction size for subpool memory accounting
 /// - `blob_sidecar`: Blob data state (None/Missing/Present)
 ///
 /// This avoids recalculating these values repeatedly during pool operations.
@@ -1494,6 +1495,11 @@ pub struct EthPooledTransaction<T = TransactionSigned> {
     /// This is the RLP length of the transaction, computed when the transaction is added to the
     /// pool.
     pub encoded_length: usize,
+
+    /// Cached in-memory size of `transaction`, excluding the blob sidecar.
+    ///
+    /// Must be updated if `transaction` is modified or replaced.
+    pub in_memory_size: usize,
 
     /// The blob side car for this transaction
     pub blob_sidecar: EthBlobTransactionSidecar,
@@ -1525,7 +1531,14 @@ impl<T: SignedTransaction> EthPooledTransaction<T> {
             blob_sidecar = EthBlobTransactionSidecar::Missing;
         }
 
-        Self { transaction, cost, encoded_length, blob_sidecar }
+        let in_memory_size = transaction.size();
+        Self {
+            transaction,
+            cost,
+            encoded_length,
+            in_memory_size,
+            blob_sidecar,
+        }
     }
 
     /// Return the reference to the underlying transaction.
@@ -1614,8 +1627,9 @@ impl<T: Typed2718> Typed2718 for EthPooledTransaction<T> {
 }
 
 impl<T: InMemorySize> InMemorySize for EthPooledTransaction<T> {
+    #[inline]
     fn size(&self) -> usize {
-        self.transaction.size()
+        self.in_memory_size
     }
 }
 
