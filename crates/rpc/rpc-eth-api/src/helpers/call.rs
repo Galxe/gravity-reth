@@ -101,7 +101,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into())
             }
 
-            let _permit = this.acquire_owned_blocking_io().await;
+            let permit = this
+                .acquire_owned_blocking_io()
+                .await
+                .map_err(|_| EthApiError::InternalEthError)?;
 
             let base_block =
                 this.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
@@ -114,6 +117,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 BlockId::Number(_) => BlockId::hash_canonical(base_block.hash()),
             };
             this.spawn_with_state_at_block(state_block, move |this, db| {
+                let _permit = permit;
                 let state_provider = db.database.0 .0;
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
@@ -292,7 +296,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         overrides: EvmOverrides,
     ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send {
         async move {
-            let _permit = self.acquire_owned_blocking_io().await;
             let res =
                 self.transact_call_at(request, block_number.unwrap_or_default(), overrides).await?;
 
@@ -315,7 +318,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into());
             }
 
-            let _permit = this.acquire_owned_blocking_io().await;
+            let permit = this
+                .acquire_owned_blocking_io()
+                .await
+                .map_err(|_| EthApiError::InternalEthError)?;
 
             let StateContext { transaction_index, block_number } =
                 state_context.unwrap_or_default();
@@ -363,6 +369,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             }
 
             this.spawn_with_state_at_block(at, move |this, mut db| {
+                let _permit = permit;
                 let mut all_results = Vec::with_capacity(bundles.len());
 
                 if replay_block_txs {
@@ -641,10 +648,15 @@ pub trait Call:
         Self: LoadPendingBlock,
     {
         async move {
+            let permit = self
+                .acquire_owned_blocking_io()
+                .await
+                .map_err(|_| EthApiError::InternalEthError)?;
             let guard = CancelOnDrop::default();
             let cancel = guard.clone();
             let res = self
                 .spawn_with_call_at(request, at, overrides, move |this, db, evm_env, tx_env| {
+                    let _permit = permit;
                     if cancel.is_cancelled() {
                         // callsite dropped the guard
                         return Err(EthApiError::InternalEthError.into())
