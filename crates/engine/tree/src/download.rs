@@ -120,6 +120,13 @@ where
         if count == 1 {
             self.download_full_block(hash);
         } else {
+            if self.inflight_block_range_requests.iter().any(|request| {
+                request.start_hash() == hash &&
+                    request.count() == count
+            }) {
+                return
+            }
+
             trace!(
                 target: "engine::download",
                 ?hash,
@@ -395,6 +402,20 @@ mod tests {
                 assert_eq!(blocks[num-1].number(), num as u64);
             }
         });
+    }
+
+    #[tokio::test]
+    async fn block_downloader_deduplicates_range_requests() {
+        let TestHarness { mut block_downloader, client } = TestHarness::new(3);
+        let hash = client.highest_block().unwrap().hash();
+        let request = || DownloadRequest::BlockRange(hash, 2);
+
+        block_downloader.on_action(DownloadAction::Download(request()));
+        block_downloader.on_action(DownloadAction::Download(request()));
+        assert_eq!(block_downloader.inflight_block_range_requests.len(), 1);
+
+        block_downloader.on_action(DownloadAction::Download(DownloadRequest::BlockRange(hash, 3)));
+        assert_eq!(block_downloader.inflight_block_range_requests.len(), 2);
     }
 
     #[tokio::test]
