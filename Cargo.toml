@@ -629,7 +629,7 @@ quote = "1.0"
 tokio = { version = "1.52.3", default-features = false }
 tokio-stream = "0.1.11"
 tokio-tungstenite = "0.28.0"
-tokio-util = { version = "0.7.4", features = ["codec"] }
+tokio-util = { version = "0.7.11", features = ["codec"] }
 
 # async
 async-compression = { version = "0.4", default-features = false }
