@@ -27,7 +27,6 @@ use reth_evm::{
 use reth_node_api::BlockBody;
 use reth_primitives_traits::{Recovered, RecoveredBlock};
 use reth_revm::{
-    cancelled::CancelOnDrop,
     database::StateProviderDatabase,
     db::{bal::EvmDatabaseError, State},
 };
@@ -39,6 +38,7 @@ use reth_rpc_eth_types::{
     EthApiError, StateCacheDb,
 };
 use reth_storage_api::{BlockIdReader, ProviderBlock, ProviderTx, StateProviderBox};
+use reth_tasks::CancelOnDrop;
 use revm::{
     context::Block,
     context_interface::{result::ResultAndState, Transaction},

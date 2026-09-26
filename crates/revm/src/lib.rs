@@ -15,9 +15,6 @@ extern crate alloc;
 /// Database adapters for payload building.
 pub mod cached;
 
-/// A marker that can be used to cancel execution.
-pub mod cancelled;
-
 /// Contains glue code for integrating reth database into revm's [Database].
 pub mod database;
 
