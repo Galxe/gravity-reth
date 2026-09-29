@@ -31,7 +31,9 @@ use reth_payload_primitives::{BuiltPayload, NewPayloadError, PayloadTypes};
 use reth_pipe_exec_layer_event_bus::{
     MakeCanonicalEvent, PipeExecLayerEvent, PipeExecPrimitives, WaitForPersistenceEvent,
 };
-use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader};
+use reth_primitives_traits::{
+    GotExpected, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
+};
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HashedPostStateProvider,
     ProviderError, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
@@ -39,6 +41,7 @@ use reth_provider::{
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::ControlFlow;
+use reth_storage_errors::provider::RootMismatch;
 use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
 use reth_trie::{HashedPostState, TrieInput};
 use reth_trie_db::DatabaseHashedPostState;
@@ -2332,19 +2335,33 @@ where
                 ))?
                 .build()?;
 
-            let mut trie_input = self.compute_trie_input(
-                self.persisting_kind_for(block.recovered_block.block_with_parent()),
-                self.provider.database_provider_ro()?,
-                block.recovered_block().parent_hash(),
-                None,
-            )?;
-            // Extend with block we are generating trie updates for.
-            trie_input.append_ref(block.hashed_state());
-            let (_root, updates) = provider.state_root_from_nodes_with_updates(trie_input)?;
-            debug_assert_eq!(_root, block.recovered_block().state_root());
+            let (trie_updates, trie_updates_v2) = if get_gravity_config().disable_pipe_execution {
+                let mut trie_input = self.compute_trie_input(
+                    self.persisting_kind_for(block.recovered_block.block_with_parent()),
+                    self.provider.database_provider_ro()?,
+                    block.recovered_block().parent_hash(),
+                    None,
+                )?;
+                trie_input.append_ref(block.hashed_state());
+                let (root, updates) = provider.state_root_from_nodes_with_updates(trie_input)?;
+                debug_assert_eq!(root, block.recovered_block().state_root());
+                (Arc::new(updates), None)
+            } else {
+                let (root, updates) =
+                    provider.state_root_with_updates_v2(block.hashed_state().clone())?;
+                let expected = block.recovered_block().state_root();
+                if root != expected {
+                    return Err(ProviderError::StateRootMismatch(Box::new(RootMismatch {
+                        root: GotExpected { got: root, expected },
+                        block_number: block.recovered_block().number(),
+                        block_hash: block.recovered_block().hash(),
+                    }))
+                    .into())
+                }
+                (Arc::default(), Some(Arc::new(updates)))
+            };
 
-            // Update trie updates in both tree state and blocks to persist that we return
-            let trie_updates = Arc::new(updates);
+            // Update both copies so persistence sees the validated updates.
             let tree_state_block = self
                 .state
                 .tree_state
@@ -2353,6 +2370,10 @@ where
                 .expect("blocks to persist are constructed from tree state blocks");
             tree_state_block.trie.set_present(trie_updates.clone());
             block.trie.set_present(trie_updates);
+            if let Some(trie_updates_v2) = trie_updates_v2 {
+                tree_state_block.triev2 = trie_updates_v2.clone();
+                block.triev2 = trie_updates_v2;
+            }
         }
 
         Ok(blocks_to_persist)
@@ -2827,12 +2848,17 @@ where
                         .state
                         .tree_state
                         .persisted_trie_updates
-                        .get(&block.recovered_block.hash())?
-                        .1
-                        .clone();
+                        .get(&block.recovered_block.hash())
+                        .map(|(_, trie)| trie.clone())?;
                     Some(ExecutedBlockWithTrieUpdates {
                         block: block.clone(),
-                        trie: ExecutedTrieUpdates::Present(trie),
+                        // Pipe blocks have no V1 nodes. Mark their V2 updates missing so they
+                        // are recomputed against the current canonical parent before writing.
+                        trie: if get_gravity_config().disable_pipe_execution {
+                            ExecutedTrieUpdates::Present(trie)
+                        } else {
+                            ExecutedTrieUpdates::Missing
+                        },
                         triev2: Default::default(),
                     })
                 })

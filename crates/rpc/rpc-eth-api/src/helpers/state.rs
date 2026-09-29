@@ -179,7 +179,7 @@ pub trait EthState: LoadState + SpawnBlocking {
                 let state = this.state_at_block_id(block_id).await?;
                 let storage_keys = keys.iter().map(|key| key.as_b256()).collect::<Vec<_>>();
                 let proof = state
-                    .proof_v2(Default::default(), address, &storage_keys)
+                    .proof(Default::default(), address, &storage_keys)
                     .map_err(Self::Error::from_eth_err)?;
                 Ok(proof.into_eip1186_response(keys))
             })
@@ -211,7 +211,7 @@ pub trait EthState: LoadState + SpawnBlocking {
                 // Provide a default `HashedStorage` value in order to
                 // get the storage root hash of the current state.
                 let storage_root = state
-                    .storage_root_v2(address, Default::default())
+                    .storage_root(address, Default::default())
                     .map_err(Self::Error::from_eth_err)?;
 
                 Ok(Some(Account { balance, nonce, code_hash, storage_root }))

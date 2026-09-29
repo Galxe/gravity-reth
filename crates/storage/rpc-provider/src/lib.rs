@@ -68,7 +68,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{runtime::Handle, sync::broadcast};
-use tracing::{trace, warn};
+use tracing::trace;
 
 /// Configuration for `RpcBlockchainProvider`
 #[derive(Debug, Clone)]
@@ -1196,7 +1196,7 @@ where
     N: Network,
     Node: NodeTypes,
 {
-    fn state_root_v2(&self, hashed_state: HashedPostState) -> Result<B256, ProviderError> {
+    fn state_root(&self, hashed_state: HashedPostState) -> Result<B256, ProviderError> {
         if !self.compute_state_root {
             return Err(ProviderError::UnsupportedProvider)
         }
@@ -1219,13 +1219,8 @@ where
         Ok(root)
     }
 
-    fn state_root(&self, hashed_state: HashedPostState) -> Result<B256, ProviderError> {
-        self.state_root_from_nodes(TrieInput::from_state(hashed_state))
-    }
-
     fn state_root_from_nodes(&self, _input: TrieInput) -> Result<B256, ProviderError> {
-        warn!("state_root_from_nodes is not implemented and will return zero");
-        Ok(B256::ZERO)
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_with_updates(
@@ -1239,8 +1234,7 @@ where
         &self,
         _input: TrieInput,
     ) -> Result<(B256, TrieUpdates), ProviderError> {
-        warn!("state_root_from_nodes_with_updates is not implemented and will return zero");
-        Ok((B256::ZERO, TrieUpdates::default()))
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 

@@ -1,10 +1,9 @@
 use crate::{
-    providers::state::macros::delegate_provider_impls, AccountReader, BlockHashReader,
-    HashedPostStateProvider, HeaderProvider, ProviderError, StateProvider, StateRootProvider,
-    StaticFileProviderFactory,
+    providers::state::{latest::complete_storage_accounts, macros::delegate_provider_impls},
+    AccountReader, BlockHashReader, HashedPostStateProvider, HeaderProvider, ProviderError,
+    StateProvider, StateRootProvider, StaticFileProviderFactory,
 };
 use alloy_consensus::BlockHeader;
-use alloy_eips::merge::EPOCH_SLOTS;
 use alloy_primitives::{
     keccak256,
     map::{hash_map, B256Map, HashMap},
@@ -26,16 +25,11 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
-    proof::{Proof, StorageProof},
     updates::{TrieUpdates, TrieUpdatesV2},
-    witness::TrieWitness,
     AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher, MultiProof, MultiProofTargets,
-    StateRoot, StorageMultiProof, StorageRoot, TrieInput,
+    StorageMultiProof, TrieInput,
 };
-use reth_trie_db::{
-    nested_hash::NestedStateRoot, DatabaseHashedPostState, DatabaseHashedStorage, DatabaseProof,
-    DatabaseStateRoot, DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness,
-};
+use reth_trie_db::nested_hash::NestedStateRoot;
 use std::{fmt::Debug, sync::OnceLock};
 
 /// State provider for a given block number which takes a tx reference.
@@ -122,49 +116,6 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
             |key| key.address == address && key.sharded_key.key == storage_key,
             self.lowest_available_blocks.storage_history_block_number,
         )
-    }
-
-    /// Checks and returns `true` if distance to historical block exceeds the provided limit.
-    fn check_distance_against_limit(&self, limit: u64) -> ProviderResult<bool> {
-        let tip = self.provider.last_block_number()?;
-
-        Ok(tip.saturating_sub(self.block_number) > limit)
-    }
-
-    /// Retrieve revert hashed state for this history provider.
-    fn revert_state(&self) -> ProviderResult<HashedPostState> {
-        if !self.lowest_available_blocks.is_account_history_available(self.block_number) ||
-            !self.lowest_available_blocks.is_storage_history_available(self.block_number)
-        {
-            return Err(ProviderError::StateAtBlockPruned(self.block_number))
-        }
-
-        if self.check_distance_against_limit(EPOCH_SLOTS)? {
-            tracing::warn!(
-                target: "provider::historical_sp",
-                target = self.block_number,
-                "Attempt to calculate state root for an old block might result in OOM"
-            );
-        }
-
-        Ok(HashedPostState::from_reverts::<KeccakKeyHasher>(self.tx(), self.block_number)?)
-    }
-
-    /// Retrieve revert hashed storage for this history provider and target address.
-    fn revert_storage(&self, address: Address) -> ProviderResult<HashedStorage> {
-        if !self.lowest_available_blocks.is_storage_history_available(self.block_number) {
-            return Err(ProviderError::StateAtBlockPruned(self.block_number))
-        }
-
-        if self.check_distance_against_limit(EPOCH_SLOTS * 10)? {
-            tracing::warn!(
-                target: "provider::historical_sp",
-                target = self.block_number,
-                "Attempt to calculate storage root for an old block might result in OOM"
-            );
-        }
-
-        Ok(HashedStorage::from_reverts(self.tx(), address, self.block_number)?)
     }
 
     /// Reconstructs the target state from the first before-value for each key after the target.
@@ -421,10 +372,10 @@ impl<
             + StaticFileProviderFactory,
     > StateRootProvider for HistoricalStateProviderRef<'_, Provider>
 {
-    fn state_root_v2(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
+    fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
         let mut reverted = self.revert_state_v2()?;
         reverted.extend(hashed_state);
-        NestedStateRoot::new(self.tx(), None).root(&reverted)
+        NestedStateRoot::new(self.tx(), None).root(&complete_storage_accounts(self.tx(), reverted)?)
     }
 
     fn state_root_with_updates_v2(
@@ -436,33 +387,22 @@ impl<
         NestedStateRoot::new(self.tx(), None).calculate(&reverted)
     }
 
-    fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
-        let mut revert_state = self.revert_state()?;
-        revert_state.extend(hashed_state);
-        StateRoot::overlay_root(self.tx(), revert_state).map_err(ProviderError::from)
-    }
-
-    fn state_root_from_nodes(&self, mut input: TrieInput) -> ProviderResult<B256> {
-        input.prepend(self.revert_state()?);
-        StateRoot::overlay_root_from_nodes(self.tx(), input).map_err(ProviderError::from)
+    fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_with_updates(
         &self,
-        hashed_state: HashedPostState,
+        _hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        let mut revert_state = self.revert_state()?;
-        revert_state.extend(hashed_state);
-        StateRoot::overlay_root_with_updates(self.tx(), revert_state).map_err(ProviderError::from)
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_from_nodes_with_updates(
         &self,
-        mut input: TrieInput,
+        _input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        input.prepend(self.revert_state()?);
-        StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
-            .map_err(ProviderError::from)
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 
@@ -474,7 +414,7 @@ impl<
             + StaticFileProviderFactory,
     > StorageRootProvider for HistoricalStateProviderRef<'_, Provider>
 {
-    fn storage_root_v2(
+    fn storage_root(
         &self,
         address: Address,
         hashed_storage: HashedStorage,
@@ -486,27 +426,15 @@ impl<
         NestedStateRoot::new(self.tx(), None).storage_root(hash, &storage)
     }
 
-    fn storage_root(
-        &self,
-        address: Address,
-        hashed_storage: HashedStorage,
-    ) -> ProviderResult<B256> {
-        let mut revert_storage = self.revert_storage(address)?;
-        revert_storage.extend(&hashed_storage);
-        StorageRoot::overlay_root(self.tx(), address, revert_storage)
-            .map_err(|err| ProviderError::Database(err.into()))
-    }
-
     fn storage_proof(
         &self,
         address: Address,
         slot: B256,
         hashed_storage: HashedStorage,
     ) -> ProviderResult<reth_trie::StorageProof> {
-        let mut revert_storage = self.revert_storage(address)?;
-        revert_storage.extend(&hashed_storage);
-        StorageProof::overlay_storage_proof(self.tx(), address, slot, revert_storage)
-            .map_err(ProviderError::from)
+        self.storage_multiproof(address, &[slot], hashed_storage)?
+            .storage_proof(slot)
+            .map_err(ProviderError::Rlp)
     }
 
     fn storage_multiproof(
@@ -515,10 +443,18 @@ impl<
         slots: &[B256],
         hashed_storage: HashedStorage,
     ) -> ProviderResult<StorageMultiProof> {
-        let mut revert_storage = self.revert_storage(address)?;
-        revert_storage.extend(&hashed_storage);
-        StorageProof::overlay_storage_multiproof(self.tx(), address, slots, revert_storage)
-            .map_err(ProviderError::from)
+        let hashed_address = keccak256(address);
+        let mut reverted = self.revert_state_v2()?;
+        if !hashed_storage.is_empty() {
+            reverted.storages.entry(hashed_address).or_default().extend(&hashed_storage);
+        }
+        let reverted = complete_storage_accounts(self.tx(), reverted)?;
+        let targets = MultiProofTargets::account_with_slots(
+            hashed_address,
+            slots.iter().copied().map(keccak256),
+        );
+        let mut proof = NestedStateRoot::new(self.tx(), None).multiproof(&reverted, targets)?;
+        Ok(proof.storages.remove(&hashed_address).unwrap_or_else(StorageMultiProof::empty))
     }
 }
 
@@ -531,15 +467,19 @@ impl<
             + HeaderProvider,
     > StateProofProvider for HistoricalStateProviderRef<'_, Provider>
 {
-    fn proof_v2(
+    fn proof(
         &self,
         input: TrieInput,
         address: Address,
         slots: &[B256],
     ) -> ProviderResult<AccountProof> {
+        if !input.nodes.is_empty() {
+            return Err(ProviderError::UnsupportedProvider)
+        }
         let has_overlay = !input.state.is_empty();
         let mut reverted = self.revert_state_v2()?;
         reverted.extend(input.state);
+        let reverted = complete_storage_accounts(self.tx(), reverted)?;
         let canonical_root = if has_overlay {
             None
         } else {
@@ -584,41 +524,22 @@ impl<
         Ok(proof)
     }
 
-    fn multiproof_v2(
+    fn multiproof(
         &self,
         input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
+        if !input.nodes.is_empty() {
+            return Err(ProviderError::UnsupportedProvider)
+        }
         let mut reverted = self.revert_state_v2()?;
         reverted.extend(input.state);
-        NestedStateRoot::new(self.tx(), None).multiproof(&reverted, targets)
+        NestedStateRoot::new(self.tx(), None)
+            .multiproof(&complete_storage_accounts(self.tx(), reverted)?, targets)
     }
 
-    /// Get account and storage proofs.
-    fn proof(
-        &self,
-        mut input: TrieInput,
-        address: Address,
-        slots: &[B256],
-    ) -> ProviderResult<AccountProof> {
-        input.prepend(self.revert_state()?);
-        Proof::overlay_account_proof(self.tx(), input, address, slots).map_err(ProviderError::from)
-    }
-
-    fn multiproof(
-        &self,
-        mut input: TrieInput,
-        targets: MultiProofTargets,
-    ) -> ProviderResult<MultiProof> {
-        input.prepend(self.revert_state()?);
-        Proof::overlay_multiproof(self.tx(), input, targets).map_err(ProviderError::from)
-    }
-
-    fn witness(&self, mut input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
-        input.prepend(self.revert_state()?);
-        TrieWitness::overlay_witness(self.tx(), input, target)
-            .map_err(ProviderError::from)
-            .map(|hm| hm.into_values().collect())
+    fn witness(&self, _input: TrieInput, _target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 
@@ -1198,7 +1119,7 @@ mod tests {
         assert_eq!(reverted.storages[&hash].storage[&slot_hash], U256::from(10));
 
         let expected_root = NestedStateRoot::new(provider.tx_ref(), None).root(&reverted).unwrap();
-        assert_eq!(historical.state_root_v2(HashedPostState::default()).unwrap(), expected_root);
+        assert_eq!(historical.state_root(HashedPostState::default()).unwrap(), expected_root);
         assert_ne!(expected_root, latest_root);
 
         drop(provider);
@@ -1209,14 +1130,14 @@ mod tests {
         let historical = HistoricalStateProviderRef::new(&provider, 2);
 
         let rpc_provider = factory.history_by_block_number(1).unwrap();
-        assert_eq!(rpc_provider.state_root_v2(HashedPostState::default()).unwrap(), expected_root);
+        assert_eq!(rpc_provider.state_root(HashedPostState::default()).unwrap(), expected_root);
         rpc_provider
-            .proof_v2(TrieInput::default(), ADDRESS, &[STORAGE])
+            .proof(TrieInput::default(), ADDRESS, &[STORAGE])
             .unwrap()
             .verify(expected_root)
             .unwrap();
 
-        let proof = historical.proof_v2(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
+        let proof = historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
         assert_eq!(proof.info, Some(initial));
         assert_eq!(proof.storage_proofs[0].value, U256::from(10));
         proof.verify(expected_root).unwrap();
@@ -1233,8 +1154,7 @@ mod tests {
         assert_eq!(response.storage_proof[0].value, U256::from(10));
         assert!(!response.storage_proof[0].proof.is_empty());
 
-        let absent =
-            historical.proof_v2(TrieInput::default(), created_address, &[STORAGE]).unwrap();
+        let absent = historical.proof(TrieInput::default(), created_address, &[STORAGE]).unwrap();
         assert!(absent.info.is_none());
         absent.verify(expected_root).unwrap();
         let absent_response = absent.into_eip1186_response(vec![requested_key]);
@@ -1252,19 +1172,45 @@ mod tests {
         let mut pending = HashedPostState::default();
         pending.accounts.insert(hash, Some(pending_account));
         pending.storages.entry(hash).or_default().storage.insert(slot_hash, U256::from(99));
-        let pending_root = historical.state_root_v2(pending.clone()).unwrap();
+        let pending_root = historical.state_root(pending.clone()).unwrap();
         let pending_proof =
-            historical.proof_v2(TrieInput::from_state(pending), ADDRESS, &[STORAGE]).unwrap();
+            historical.proof(TrieInput::from_state(pending), ADDRESS, &[STORAGE]).unwrap();
         assert_eq!(pending_proof.info, Some(pending_account));
         assert_eq!(pending_proof.storage_proofs[0].value, U256::from(99));
         pending_proof.verify(pending_root).unwrap();
 
+        let mut storage_only = HashedPostState::default();
+        storage_only.storages.entry(hash).or_default().storage.insert(slot_hash, U256::from(98));
+        let mut expected = historical.revert_state_v2().unwrap();
+        expected.extend(storage_only.clone());
+        let expected_root = NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
+        assert_eq!(historical.state_root(storage_only.clone()).unwrap(), expected_root);
+        historical
+            .proof(TrieInput::from_state(storage_only), ADDRESS, &[STORAGE])
+            .unwrap()
+            .verify(expected_root)
+            .unwrap();
+
         let mut storage = HashedStorage::default();
         storage.storage.insert(slot_hash, U256::from(10));
         assert_eq!(
-            historical.storage_root_v2(ADDRESS, HashedStorage::default()).unwrap(),
+            historical.storage_root(ADDRESS, HashedStorage::default()).unwrap(),
             NestedStateRoot::new(provider.tx_ref(), None).storage_root(hash, &storage).unwrap()
         );
+        let storage_root = historical.storage_root(ADDRESS, HashedStorage::default()).unwrap();
+        let storage_proof =
+            historical.storage_proof(ADDRESS, STORAGE, HashedStorage::default()).unwrap();
+        assert_eq!(storage_proof.value, U256::from(10));
+        storage_proof.verify(storage_root).unwrap();
+        let missing_slot = B256::with_last_byte(2);
+        let multiproof = historical
+            .storage_multiproof(ADDRESS, &[STORAGE, missing_slot], HashedStorage::default())
+            .unwrap();
+        assert_eq!(multiproof.storage_proof(missing_slot).unwrap().value, U256::ZERO);
+        multiproof.storage_proof(missing_slot).unwrap().verify(storage_root).unwrap();
+        let wiped = historical.storage_proof(ADDRESS, STORAGE, HashedStorage::new(true)).unwrap();
+        assert_eq!(wiped.value, U256::ZERO);
+        wiped.verify(EMPTY_ROOT_HASH).unwrap();
 
         let intermediate_state = HistoricalStateProviderRef::new(&provider, 3);
         let reverted = intermediate_state.revert_state_v2().unwrap();
@@ -1272,7 +1218,34 @@ mod tests {
         assert_eq!(reverted.storages[&hash].storage[&slot_hash], U256::from(20));
         let latest_state = HistoricalStateProviderRef::new(&provider, 4);
         assert!(latest_state.revert_state_v2().unwrap().is_empty());
-        assert_eq!(latest_state.state_root_v2(HashedPostState::default()).unwrap(), latest_root);
+        assert_eq!(latest_state.state_root(HashedPostState::default()).unwrap(), latest_root);
+
+        let mut storage_only = HashedPostState::default();
+        storage_only.storages.entry(hash).or_default().storage.insert(slot_hash, U256::from(40));
+        let mut expected = storage_only.clone();
+        expected.accounts.insert(hash, Some(current));
+        let expected_root = NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
+        assert_eq!(latest_state.state_root(storage_only.clone()).unwrap(), expected_root);
+        assert_eq!(
+            crate::LatestStateProviderRef::new(&provider).state_root(storage_only).unwrap(),
+            expected_root
+        );
+        let latest = crate::LatestStateProviderRef::new(&provider);
+        assert!(matches!(
+            latest.state_root_with_updates(HashedPostState::default()),
+            Err(ProviderError::UnsupportedProvider)
+        ));
+        assert!(matches!(
+            latest.witness(TrieInput::default(), HashedPostState::default()),
+            Err(ProviderError::UnsupportedProvider)
+        ));
+        let storage_root = latest.storage_root(ADDRESS, HashedStorage::default()).unwrap();
+        let proof = latest.storage_proof(ADDRESS, STORAGE, HashedStorage::default()).unwrap();
+        assert_eq!(proof.value, U256::from(30));
+        proof.verify(storage_root).unwrap();
+        let wiped = latest.storage_proof(ADDRESS, STORAGE, HashedStorage::new(true)).unwrap();
+        assert_eq!(wiped.value, U256::ZERO);
+        wiped.verify(EMPTY_ROOT_HASH).unwrap();
     }
 
     #[test]
@@ -1322,7 +1295,7 @@ mod tests {
             .insert(hashed_slot, U256::from(10));
         let expected_root = NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
         assert_ne!(expected_root, latest_root);
-        assert_eq!(historical.state_root_v2(HashedPostState::default()).unwrap(), expected_root);
+        assert_eq!(historical.state_root(HashedPostState::default()).unwrap(), expected_root);
 
         drop(provider);
         let provider = factory.provider_rw().unwrap();
@@ -1331,7 +1304,7 @@ mod tests {
         let provider = factory.provider().unwrap();
         let historical = HistoricalStateProviderRef::new(&provider, 2);
 
-        let proof = historical.proof_v2(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
+        let proof = historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
         assert_eq!(proof.info, Some(account));
         assert_eq!(proof.storage_proofs[0].value, U256::from(10));
         proof.verify(expected_root).unwrap();
@@ -1341,7 +1314,7 @@ mod tests {
         write_canonical_header(provider.tx_ref(), 1, B256::ZERO);
         provider.commit().unwrap();
         let provider = factory.provider().unwrap();
-        let result = HistoricalStateProviderRef::new(&provider, 2).proof_v2(
+        let result = HistoricalStateProviderRef::new(&provider, 2).proof(
             TrieInput::default(),
             ADDRESS,
             &[STORAGE],

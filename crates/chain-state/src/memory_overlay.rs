@@ -26,10 +26,8 @@ pub struct MemoryOverlayStateProviderRef<
     pub(crate) historical: Box<dyn StateProvider + 'a>,
     /// The collection of executed parent blocks. Expected order is newest to oldest.
     pub(crate) in_memory: Vec<ExecutedBlockWithTrieUpdates<N>>,
-    /// Lazy-loaded in-memory trie data.
-    pub(crate) trie_input: OnceLock<TrieInput>,
     /// V2 calls reuse the same ordered in-memory overlay for this provider.
-    v2_hashed_state: OnceLock<HashedPostState>,
+    hashed_state_v2: OnceLock<HashedPostState>,
     /// Locally built pending blocks do not have a computed state root in their header.
     verify_proof_header_root: bool,
 }
@@ -53,8 +51,7 @@ impl<'a, N: NodePrimitives> MemoryOverlayStateProviderRef<'a, N> {
         Self {
             historical,
             in_memory,
-            trie_input: OnceLock::new(),
-            v2_hashed_state: OnceLock::new(),
+            hashed_state_v2: OnceLock::new(),
             verify_proof_header_root: true,
         }
     }
@@ -70,20 +67,8 @@ impl<'a, N: NodePrimitives> MemoryOverlayStateProviderRef<'a, N> {
         Box::new(self)
     }
 
-    /// Return lazy-loaded trie state aggregated from in-memory blocks.
-    fn trie_input(&self) -> &TrieInput {
-        self.trie_input.get_or_init(|| {
-            TrieInput::from_blocks(
-                self.in_memory
-                    .iter()
-                    .rev()
-                    .map(|block| (block.hashed_state.as_ref(), block.trie.as_ref())),
-            )
-        })
-    }
-
     fn hashed_state_v2(&self) -> &HashedPostState {
-        self.v2_hashed_state.get_or_init(|| {
+        self.hashed_state_v2.get_or_init(|| {
             let mut state = HashedPostState::default();
             for block in self.in_memory.iter().rev() {
                 state.extend_ref(block.hashed_state.as_ref());
@@ -147,10 +132,10 @@ impl<N: NodePrimitives> AccountReader for MemoryOverlayStateProviderRef<'_, N> {
 }
 
 impl<N: NodePrimitives> StateRootProvider for MemoryOverlayStateProviderRef<'_, N> {
-    fn state_root_v2(&self, state: HashedPostState) -> ProviderResult<B256> {
+    fn state_root(&self, state: HashedPostState) -> ProviderResult<B256> {
         let mut merged = self.hashed_state_v2().clone();
         merged.extend(state);
-        self.historical.state_root_v2(merged)
+        self.historical.state_root(merged)
     }
 
     fn state_root_with_updates_v2(
@@ -162,88 +147,72 @@ impl<N: NodePrimitives> StateRootProvider for MemoryOverlayStateProviderRef<'_, 
         self.historical.state_root_with_updates_v2(merged)
     }
 
-    fn state_root(&self, state: HashedPostState) -> ProviderResult<B256> {
-        self.state_root_from_nodes(TrieInput::from_state(state))
-    }
-
-    fn state_root_from_nodes(&self, mut input: TrieInput) -> ProviderResult<B256> {
-        input.prepend_self(self.trie_input().clone());
-        self.historical.state_root_from_nodes(input)
+    fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_with_updates(
         &self,
-        state: HashedPostState,
+        _state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        self.state_root_from_nodes_with_updates(TrieInput::from_state(state))
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_from_nodes_with_updates(
         &self,
-        mut input: TrieInput,
+        _input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        input.prepend_self(self.trie_input().clone());
-        self.historical.state_root_from_nodes_with_updates(input)
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 
 impl<N: NodePrimitives> StorageRootProvider for MemoryOverlayStateProviderRef<'_, N> {
-    fn storage_root_v2(&self, address: Address, storage: HashedStorage) -> ProviderResult<B256> {
+    fn storage_root(&self, address: Address, storage: HashedStorage) -> ProviderResult<B256> {
         let mut merged =
             self.hashed_state_v2().storages.get(&keccak256(address)).cloned().unwrap_or_default();
         merged.extend(&storage);
-        self.historical.storage_root_v2(address, merged)
+        self.historical.storage_root(address, merged)
     }
 
-    // TODO: Currently this does not reuse available in-memory trie nodes.
-    fn storage_root(&self, address: Address, storage: HashedStorage) -> ProviderResult<B256> {
-        let state = &self.trie_input().state;
-        let mut hashed_storage =
-            state.storages.get(&keccak256(address)).cloned().unwrap_or_default();
-        hashed_storage.extend(&storage);
-        self.historical.storage_root(address, hashed_storage)
-    }
-
-    // TODO: Currently this does not reuse available in-memory trie nodes.
     fn storage_proof(
         &self,
         address: Address,
         slot: B256,
         storage: HashedStorage,
     ) -> ProviderResult<reth_trie::StorageProof> {
-        let state = &self.trie_input().state;
         let mut hashed_storage =
-            state.storages.get(&keccak256(address)).cloned().unwrap_or_default();
+            self.hashed_state_v2().storages.get(&keccak256(address)).cloned().unwrap_or_default();
         hashed_storage.extend(&storage);
         self.historical.storage_proof(address, slot, hashed_storage)
     }
 
-    // TODO: Currently this does not reuse available in-memory trie nodes.
     fn storage_multiproof(
         &self,
         address: Address,
         slots: &[B256],
         storage: HashedStorage,
     ) -> ProviderResult<StorageMultiProof> {
-        let state = &self.trie_input().state;
         let mut hashed_storage =
-            state.storages.get(&keccak256(address)).cloned().unwrap_or_default();
+            self.hashed_state_v2().storages.get(&keccak256(address)).cloned().unwrap_or_default();
         hashed_storage.extend(&storage);
         self.historical.storage_multiproof(address, slots, hashed_storage)
     }
 }
 
 impl<N: NodePrimitives> StateProofProvider for MemoryOverlayStateProviderRef<'_, N> {
-    fn proof_v2(
+    fn proof(
         &self,
         input: TrieInput,
         address: Address,
         slots: &[B256],
     ) -> ProviderResult<AccountProof> {
+        if !input.nodes.is_empty() {
+            return Err(ProviderError::UnsupportedProvider)
+        }
         let verify_header_root = self.verify_proof_header_root && input.state.is_empty();
         let mut merged = self.hashed_state_v2().clone();
         merged.extend(input.state);
-        let proof = self.historical.proof_v2(TrieInput::from_state(merged), address, slots)?;
+        let proof = self.historical.proof(TrieInput::from_state(merged), address, slots)?;
         if verify_header_root && let Some(target) = self.in_memory.first() {
             proof
                 .verify(target.recovered_block().header().state_root())
@@ -252,38 +221,21 @@ impl<N: NodePrimitives> StateProofProvider for MemoryOverlayStateProviderRef<'_,
         Ok(proof)
     }
 
-    fn multiproof_v2(
+    fn multiproof(
         &self,
         input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
+        if !input.nodes.is_empty() {
+            return Err(ProviderError::UnsupportedProvider)
+        }
         let mut merged = self.hashed_state_v2().clone();
         merged.extend(input.state);
-        self.historical.multiproof_v2(TrieInput::from_state(merged), targets)
+        self.historical.multiproof(TrieInput::from_state(merged), targets)
     }
 
-    fn proof(
-        &self,
-        mut input: TrieInput,
-        address: Address,
-        slots: &[B256],
-    ) -> ProviderResult<AccountProof> {
-        input.prepend_self(self.trie_input().clone());
-        self.historical.proof(input, address, slots)
-    }
-
-    fn multiproof(
-        &self,
-        mut input: TrieInput,
-        targets: MultiProofTargets,
-    ) -> ProviderResult<MultiProof> {
-        input.prepend_self(self.trie_input().clone());
-        self.historical.multiproof(input, targets)
-    }
-
-    fn witness(&self, mut input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
-        input.prepend_self(self.trie_input().clone());
-        self.historical.witness(input, target)
+    fn witness(&self, _input: TrieInput, _target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 
@@ -370,13 +322,9 @@ mod tests {
     }
 
     impl StateRootProvider for AssertingHistoricalProvider {
-        fn state_root_v2(&self, state: HashedPostState) -> ProviderResult<B256> {
+        fn state_root(&self, state: HashedPostState) -> ProviderResult<B256> {
             assert_eq!(state, self.expected);
             Ok(B256::repeat_byte(0xab))
-        }
-
-        fn state_root(&self, _state: HashedPostState) -> ProviderResult<B256> {
-            unreachable!()
         }
 
         fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {
@@ -405,25 +353,27 @@ mod tests {
 
         fn storage_proof(
             &self,
-            _address: Address,
-            _slot: B256,
-            _storage: HashedStorage,
+            address: Address,
+            slot: B256,
+            storage: HashedStorage,
         ) -> ProviderResult<StorageProof> {
-            unreachable!()
+            assert_eq!(&storage, &self.expected.storages[&keccak256(address)]);
+            Ok(StorageProof::new(slot))
         }
 
         fn storage_multiproof(
             &self,
-            _address: Address,
+            address: Address,
             _slots: &[B256],
-            _storage: HashedStorage,
+            storage: HashedStorage,
         ) -> ProviderResult<StorageMultiProof> {
-            unreachable!()
+            assert_eq!(&storage, &self.expected.storages[&keccak256(address)]);
+            Ok(StorageMultiProof::empty())
         }
     }
 
     impl StateProofProvider for AssertingHistoricalProvider {
-        fn proof_v2(
+        fn proof(
             &self,
             input: TrieInput,
             address: Address,
@@ -431,15 +381,6 @@ mod tests {
         ) -> ProviderResult<AccountProof> {
             assert_eq!(input.state, self.expected);
             Ok(AccountProof::new(address))
-        }
-
-        fn proof(
-            &self,
-            _input: TrieInput,
-            _address: Address,
-            _slots: &[B256],
-        ) -> ProviderResult<AccountProof> {
-            unreachable!()
         }
 
         fn multiproof(
@@ -498,6 +439,7 @@ mod tests {
         let mut expected = oldest.clone();
         expected.extend(newest.clone());
         expected.extend(request.clone());
+        let request_storage = request.storages[&hashed_address].clone();
 
         let mut builder: TestBlockBuilder<reth_ethereum_primitives::EthPrimitives> =
             TestBlockBuilder::default();
@@ -511,14 +453,23 @@ mod tests {
             Box::new(AssertingHistoricalProvider { expected }),
             vec![newer_block, older_block],
         );
-        assert_eq!(provider.state_root_v2(request.clone()).unwrap(), B256::repeat_byte(0xab));
+        assert_eq!(provider.state_root(request.clone()).unwrap(), B256::repeat_byte(0xab));
         assert_eq!(
-            provider
-                .proof_v2(TrieInput::from_state(request), address, &[old_slot])
-                .unwrap()
-                .address,
+            provider.proof(TrieInput::from_state(request), address, &[old_slot]).unwrap().address,
             address
         );
+        assert_eq!(
+            provider.storage_proof(address, old_slot, request_storage.clone()).unwrap().key,
+            old_slot
+        );
+        assert_eq!(
+            provider.storage_multiproof(address, &[old_slot], request_storage).unwrap().root,
+            EMPTY_ROOT_HASH
+        );
+        assert!(matches!(
+            provider.state_root_with_updates(HashedPostState::default()),
+            Err(ProviderError::UnsupportedProvider)
+        ));
     }
 
     #[test]
@@ -534,11 +485,11 @@ mod tests {
             Box::new(AssertingHistoricalProvider { expected: HashedPostState::default() }),
             vec![block.clone()],
         );
-        assert!(provider.proof_v2(TrieInput::default(), address, &[]).is_err());
+        assert!(provider.proof(TrieInput::default(), address, &[]).is_err());
         assert_eq!(
             provider
                 .without_proof_header_root_check()
-                .proof_v2(TrieInput::default(), address, &[])
+                .proof(TrieInput::default(), address, &[])
                 .unwrap()
                 .address,
             address
@@ -551,8 +502,19 @@ mod tests {
             vec![block],
         );
         assert_eq!(
-            provider.proof_v2(TrieInput::from_state(overlay), address, &[]).unwrap().address,
+            provider.proof(TrieInput::from_state(overlay), address, &[]).unwrap().address,
             address
         );
+
+        let mut legacy_input = TrieInput::default();
+        legacy_input.nodes.removed_nodes.insert(Default::default());
+        assert!(matches!(
+            provider.proof(legacy_input.clone(), address, &[]),
+            Err(ProviderError::UnsupportedProvider)
+        ));
+        assert!(matches!(
+            provider.multiproof(legacy_input, MultiProofTargets::account(keccak256(address))),
+            Err(ProviderError::UnsupportedProvider)
+        ));
     }
 }

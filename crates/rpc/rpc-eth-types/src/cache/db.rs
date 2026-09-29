@@ -44,13 +44,6 @@ impl StateRootProvider for StateProviderTraitObjWrapper {
         self.0.state_root(hashed_state)
     }
 
-    fn state_root_v2(
-        &self,
-        hashed_state: reth_trie::HashedPostState,
-    ) -> reth_errors::ProviderResult<B256> {
-        self.0.state_root_v2(hashed_state)
-    }
-
     fn state_root_from_nodes(
         &self,
         input: reth_trie::TrieInput,
@@ -93,14 +86,6 @@ impl reth_storage_api::StorageRootProvider for StateProviderTraitObjWrapper {
         self.0.storage_root(address, hashed_storage)
     }
 
-    fn storage_root_v2(
-        &self,
-        address: Address,
-        hashed_storage: HashedStorage,
-    ) -> ProviderResult<B256> {
-        self.0.storage_root_v2(address, hashed_storage)
-    }
-
     fn storage_proof(
         &self,
         address: Address,
@@ -130,29 +115,12 @@ impl reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper {
         self.0.proof(input, address, slots)
     }
 
-    fn proof_v2(
-        &self,
-        input: reth_trie::TrieInput,
-        address: Address,
-        slots: &[B256],
-    ) -> reth_errors::ProviderResult<reth_trie::AccountProof> {
-        self.0.proof_v2(input, address, slots)
-    }
-
     fn multiproof(
         &self,
         input: reth_trie::TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<reth_trie::MultiProof> {
         self.0.multiproof(input, targets)
-    }
-
-    fn multiproof_v2(
-        &self,
-        input: reth_trie::TrieInput,
-        targets: MultiProofTargets,
-    ) -> ProviderResult<reth_trie::MultiProof> {
-        self.0.multiproof_v2(input, targets)
     }
 
     fn witness(
@@ -241,7 +209,7 @@ fn v2_simulation_root_with_updates(
     provider: &impl StateRootProvider,
     hashed_state: reth_trie::HashedPostState,
 ) -> ProviderResult<(B256, reth_trie::updates::TrieUpdates)> {
-    provider.state_root_v2(hashed_state).map(|root| (root, Default::default()))
+    provider.state_root(hashed_state).map(|root| (root, Default::default()))
 }
 
 #[cfg(test)]
@@ -251,14 +219,10 @@ mod tests {
     use reth_storage_api::noop::NoopProvider;
     use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 
-    struct DistinctRoots(B256);
+    struct TestRoot(B256);
 
-    impl StateRootProvider for DistinctRoots {
+    impl StateRootProvider for TestRoot {
         fn state_root(&self, _state: HashedPostState) -> ProviderResult<B256> {
-            Ok(B256::ZERO)
-        }
-
-        fn state_root_v2(&self, _state: HashedPostState) -> ProviderResult<B256> {
             Ok(self.0)
         }
 
@@ -284,7 +248,7 @@ mod tests {
     #[test]
     fn simulation_root_uses_v2_without_persisted_updates() {
         let expected = B256::repeat_byte(0x42);
-        let provider = DistinctRoots(expected);
+        let provider = TestRoot(expected);
         let (root, updates) =
             v2_simulation_root_with_updates(&provider, HashedPostState::default()).unwrap();
         assert_eq!(root, expected);

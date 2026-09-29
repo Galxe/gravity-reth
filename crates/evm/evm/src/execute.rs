@@ -20,7 +20,7 @@ pub use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives_traits::{
     Block, HeaderTy, NodePrimitives, ReceiptTy, Recovered, RecoveredBlock, SealedHeader, TxTy,
 };
-use reth_storage_api::StateProvider;
+use reth_storage_api::{StateProvider, StateRootProvider};
 pub use reth_storage_errors::provider::ProviderError;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::{
@@ -365,8 +365,8 @@ pub struct BlockBuilderOutcome<N: NodePrimitives> {
     pub execution_result: BlockExecutionResult<N::Receipt>,
     /// Hashed state after execution.
     pub hashed_state: HashedPostState,
-    /// Trie updates collected during state root calculation.
-    pub trie_updates: TrieUpdates,
+    /// Legacy trie updates, when they were supplied by a trie task.
+    pub trie_updates: Option<TrieUpdates>,
     /// The built block.
     pub block: RecoveredBlock<N::Block>,
     /// Block access list built during execution (EIP-7928, Amsterdam).
@@ -424,9 +424,9 @@ pub trait BlockBuilder {
 
     /// Completes the block building process and returns the [`BlockBuilderOutcome`].
     ///
-    /// When `state_root_precomputed` is `None`, the state root is computed internally via
-    /// `state_root_with_updates()`. When `Some`, the provided root and trie updates are used
-    /// directly, skipping the expensive computation (e.g. when using the sparse trie pipeline).
+    /// When `state_root_precomputed` is `None`, the state root is computed internally without
+    /// trie updates. When `Some`, the provided root and trie updates are used directly, skipping
+    /// the expensive computation (e.g. when using the sparse trie pipeline).
     fn finish(
         self,
         state_provider: impl StateProvider,
@@ -570,12 +570,8 @@ where
             block_access_list.as_ref().map(|bal| compute_block_access_list_hash(bal.as_slice()));
 
         let hashed_state = state.hashed_post_state(&db.bundle_state);
-        let (state_root, trie_updates) = match state_root_precomputed {
-            Some(precomputed) => precomputed,
-            None => state
-                .state_root_with_updates(hashed_state.clone())
-                .map_err(BlockExecutionError::other)?,
-        };
+        let (state_root, trie_updates) =
+            block_builder_state_root(&state, &hashed_state, state_root_precomputed)?;
 
         let (transactions, senders) =
             self.transactions.into_iter().map(|tx| tx.into_parts()).unzip();
@@ -613,6 +609,20 @@ where
 
     fn into_executor(self) -> Self::Executor {
         self.executor
+    }
+}
+
+fn block_builder_state_root(
+    state: &impl StateRootProvider,
+    hashed_state: &HashedPostState,
+    precomputed: Option<(B256, TrieUpdates)>,
+) -> Result<(B256, Option<TrieUpdates>), BlockExecutionError> {
+    match precomputed {
+        Some((root, updates)) => Ok((root, Some(updates))),
+        None => state
+            .state_root(hashed_state.clone())
+            .map(|root| (root, None))
+            .map_err(BlockExecutionError::other),
     }
 }
 
@@ -825,6 +835,8 @@ mod tests {
     use crate::Address;
     use core::marker::PhantomData;
     use reth_ethereum_primitives::EthPrimitives;
+    use reth_storage_errors::provider::ProviderResult;
+    use reth_trie_common::TrieInput;
     use revm::{
         database::{CacheDB, EmptyDB},
         state::AccountInfo,
@@ -843,6 +855,60 @@ mod tests {
     }
 
     struct TestExecutor<DB>(PhantomData<DB>);
+
+    struct RootOnlyProvider {
+        expected_state: HashedPostState,
+        root: B256,
+    }
+
+    impl StateRootProvider for RootOnlyProvider {
+        fn state_root(&self, state: HashedPostState) -> ProviderResult<B256> {
+            assert_eq!(state, self.expected_state);
+            Ok(self.root)
+        }
+
+        fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {
+            Err(ProviderError::UnsupportedProvider)
+        }
+
+        fn state_root_with_updates(
+            &self,
+            _state: HashedPostState,
+        ) -> ProviderResult<(B256, TrieUpdates)> {
+            Err(ProviderError::UnsupportedProvider)
+        }
+
+        fn state_root_from_nodes_with_updates(
+            &self,
+            _input: TrieInput,
+        ) -> ProviderResult<(B256, TrieUpdates)> {
+            Err(ProviderError::UnsupportedProvider)
+        }
+    }
+
+    #[test]
+    fn block_builder_uses_root_without_legacy_updates() {
+        let mut state = HashedPostState::default();
+        let address = B256::with_last_byte(1);
+        state.accounts.insert(address, None);
+        let root = B256::with_last_byte(2);
+        let provider = RootOnlyProvider { expected_state: state.clone(), root };
+
+        let (computed_root, updates) = block_builder_state_root(&provider, &state, None).unwrap();
+        assert_eq!(computed_root, root);
+        assert!(updates.is_none());
+
+        let supplied_root = B256::with_last_byte(3);
+        let supplied_updates = TrieUpdates::default();
+        let (computed_root, updates) = block_builder_state_root(
+            &provider,
+            &state,
+            Some((supplied_root, supplied_updates.clone())),
+        )
+        .unwrap();
+        assert_eq!(computed_root, supplied_root);
+        assert_eq!(updates, Some(supplied_updates));
+    }
 
     impl<DB: Database> Executor<DB> for TestExecutor<DB> {
         type Primitives = EthPrimitives;

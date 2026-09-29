@@ -10,7 +10,13 @@ use alloy_primitives::{
 use reth_chainspec::EthChainSpec;
 use reth_codecs::Compact;
 use reth_config::config::EtlConfig;
-use reth_db_api::{models::GravityStorageSettings, tables, transaction::DbTxMut, DatabaseError};
+use reth_db_api::{
+    cursor::DbCursorRO,
+    models::GravityStorageSettings,
+    tables,
+    transaction::{DbTx, DbTxMut},
+    DatabaseError,
+};
 use reth_etl::Collector;
 use reth_execution_errors::StateRootError;
 use reth_primitives_traits::{Account, Bytecode, GotExpected, NodePrimitives, StorageEntry};
@@ -20,16 +26,11 @@ use reth_provider::{
     DatabaseProviderFactory, ExecutionOutcome, HashingWriter, HeaderProvider, HistoryWriter,
     MetadataWriter, OriginalValuesKnown, ProviderError, RevertsInit, StageCheckpointReader,
     StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StorageLocation,
-    StorageSettingsCache, TrieWriter, TrieWriterV2,
+    StorageSettingsCache, TrieWriterV2,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
-use reth_trie::{
-    prefix_set::{TriePrefixSets, TriePrefixSetsMut},
-    HashedPostState, HashedStorage, IntermediateStateRootState, Nibbles,
-    StateRoot as StateRootComputer, StateRootProgress,
-};
-use reth_trie_db::DatabaseStateRoot;
+use reth_trie::{HashedPostState, HashedStorage, EMPTY_ROOT_HASH};
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
@@ -49,8 +50,8 @@ pub const DEFAULT_SOFT_LIMIT_BYTE_LEN_ACCOUNTS_CHUNK: usize = 1_000_000_000;
 // account)
 pub const AVERAGE_COUNT_ACCOUNTS_PER_GB_STATE_DUMP: usize = 285_228;
 
-/// Soft limit for the number of flushed updates after which to log progress summary.
-const SOFT_LIMIT_COUNT_FLUSHED_UPDATES: usize = 1_000_000;
+/// Limit the memory used by state-dump trie reconstruction.
+const STATE_DUMP_TRIE_CHUNK_ENTRIES: usize = 256_000;
 
 /// Storage initialization error type.
 #[derive(Debug, thiserror::Error, Clone)]
@@ -108,7 +109,6 @@ where
         + HashingWriter
         + StateWriter
         + TrieWriterV2
-        + TrieWriter
         + MetadataWriter
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
@@ -145,7 +145,6 @@ where
         + HashingWriter
         + StateWriter
         + TrieWriterV2
-        + TrieWriter
         + MetadataWriter
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
@@ -204,7 +203,15 @@ where
     provider_rw.write_storage_settings(settings)?;
     factory.set_storage_settings_cache(settings);
 
-    insert_world_trie(&provider_rw, alloc.iter())?;
+    let computed_genesis_root = insert_world_trie_with_root(&provider_rw, alloc.iter())?;
+    let expected_genesis_root = chain.genesis_header().state_root();
+    // Custom chain specs may leave the genesis header root empty while supplying an alloc.
+    if expected_genesis_root != EMPTY_ROOT_HASH && computed_genesis_root != expected_genesis_root {
+        return Err(InitStorageError::StateRootMismatch(GotExpected {
+            got: computed_genesis_root,
+            expected: expected_genesis_root,
+        }))
+    }
     insert_genesis_hashes(&provider_rw, alloc.iter())?;
     insert_genesis_history(&provider_rw, alloc.iter())?;
 
@@ -212,9 +219,6 @@ where
     insert_genesis_header(&provider_rw, &chain)?;
 
     insert_genesis_state(&provider_rw, alloc.iter())?;
-
-    // compute state root to populate trie tables
-    compute_state_root(&provider_rw, None)?;
 
     // insert sync stage
     for stage in StageId::ALL {
@@ -383,6 +387,16 @@ pub fn insert_world_trie<'a, 'b, Provider>(
 where
     Provider: DBProvider<Tx: DbTxMut> + TrieWriterV2,
 {
+    insert_world_trie_with_root(provider, alloc).map(|_| ())
+}
+
+fn insert_world_trie_with_root<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)> + Clone,
+) -> ProviderResult<B256>
+where
+    Provider: DBProvider<Tx: DbTxMut> + TrieWriterV2,
+{
     let mut accounts = HashMap::default();
     let mut storages = HashMap::default();
 
@@ -406,7 +420,7 @@ where
     info!(target: "reth::cli",
     root_hash=?root_hash,
     "Inserted world trie");
-    Ok(())
+    Ok(root_hash)
 }
 
 /// Inserts history indices for genesis accounts and storage.
@@ -494,7 +508,7 @@ where
         + HistoryWriter
         + HeaderProvider
         + HashingWriter
-        + TrieWriter
+        + TrieWriterV2
         + StateWriter
         + AsRef<Provider>,
 {
@@ -535,14 +549,12 @@ where
     // remaining lines are accounts
     let collector = parse_accounts(&mut reader, etl_config)?;
 
-    // write state to db and collect prefix sets
-    let mut prefix_sets = TriePrefixSetsMut::default();
-    dump_state(collector, provider_rw, block, &mut prefix_sets)?;
+    dump_state(collector, provider_rw, block)?;
 
     info!(target: "reth::cli", "All accounts written to database, starting state root computation (may take some time)");
 
     // compute and compare state root. this advances the stage checkpoints.
-    let computed_state_root = compute_state_root(provider_rw, Some(prefix_sets.freeze()))?;
+    let computed_state_root = compute_state_root(provider_rw)?;
     if computed_state_root == expected_state_root {
         info!(target: "reth::cli",
             ?computed_state_root,
@@ -618,7 +630,6 @@ fn dump_state<Provider>(
     mut collector: Collector<Address, GenesisAccount>,
     provider_rw: &Provider,
     block: u64,
-    prefix_sets: &mut TriePrefixSetsMut,
 ) -> Result<(), eyre::Error>
 where
     Provider: StaticFileProviderFactory
@@ -637,22 +648,6 @@ where
         let (address, account) = entry?;
         let (address, _) = Address::from_compact(address.as_slice(), address.len());
         let (account, _) = GenesisAccount::from_compact(account.as_slice(), account.len());
-
-        // Add to prefix sets
-        let hashed_address = keccak256(address);
-        prefix_sets.account_prefix_set.insert(Nibbles::unpack(hashed_address));
-
-        // Add storage keys to prefix sets if storage exists
-        if let Some(ref storage) = account.storage {
-            for key in storage.keys() {
-                let hashed_key = keccak256(key);
-                prefix_sets
-                    .storage_prefix_sets
-                    .entry(hashed_address)
-                    .or_default()
-                    .insert(Nibbles::unpack(hashed_key));
-            }
-        }
 
         accounts.push((address, account));
 
@@ -691,65 +686,73 @@ where
     Ok(())
 }
 
-/// Computes the state root (from scratch) based on the accounts and storages present in the
-/// database.
-fn compute_state_root<Provider>(
+/// Rebuilds the V2 trie from the hashed state after importing a state dump.
+fn compute_state_root<Provider>(provider: &Provider) -> Result<B256, InitStorageError>
+where
+    Provider: DBProvider<Tx: DbTxMut> + TrieWriterV2,
+{
+    compute_state_root_with_chunk_limit(provider, STATE_DUMP_TRIE_CHUNK_ENTRIES)
+}
+
+fn compute_state_root_with_chunk_limit<Provider>(
     provider: &Provider,
-    prefix_sets: Option<TriePrefixSets>,
+    chunk_entries_threshold: usize,
 ) -> Result<B256, InitStorageError>
 where
-    Provider: DBProvider<Tx: DbTxMut> + TrieWriter,
+    Provider: DBProvider<Tx: DbTxMut> + TrieWriterV2,
 {
-    trace!(target: "reth::cli", "Computing state root");
-
     let tx = provider.tx_ref();
-    let mut intermediate_state: Option<IntermediateStateRootState> = None;
-    let mut total_flushed_updates = 0;
+    tx.clear::<tables::AccountsTrieV2>()?;
+    tx.clear::<tables::StoragesTrieV2>()?;
+    // V2 trie readers use the RocksDB view. Publish each chunk before calculating the next one.
+    tx.commit_view()?;
 
-    loop {
-        let mut state_root =
-            StateRootComputer::from_tx(tx).with_intermediate_state(intermediate_state);
+    let mut accounts = tx.cursor_read::<tables::HashedAccounts>()?;
+    let mut storages = tx.cursor_dup_read::<tables::HashedStorages>()?;
+    let mut hashed_state = HashedPostState::default();
+    let mut chunk_entries = 0;
+    let mut root = EMPTY_ROOT_HASH;
 
-        if let Some(sets) = prefix_sets.clone() {
-            state_root = state_root.with_prefix_sets(sets);
+    for account in accounts.walk(None)? {
+        let (hashed_address, account) = account?;
+        hashed_state.accounts.insert(hashed_address, Some(account));
+        chunk_entries += 1;
+
+        let mut storage = HashedStorage::default();
+        let mut entry = storages.seek(hashed_address)?;
+        while let Some((found_address, slot)) = entry {
+            if found_address != hashed_address {
+                break;
+            }
+            if !slot.value.is_zero() {
+                storage.storage.insert(slot.key, slot.value);
+                chunk_entries += 1;
+            }
+            entry = storages.next()?;
+        }
+        if !storage.storage.is_empty() {
+            hashed_state.storages.insert(hashed_address, storage);
         }
 
-        match state_root.root_with_progress()? {
-            StateRootProgress::Progress(state, _, updates) => {
-                let updated_len = provider.write_trie_updates(&updates)?;
-                total_flushed_updates += updated_len;
-
-                trace!(target: "reth::cli",
-                    last_account_key = %state.account_root_state.last_hashed_key,
-                    updated_len,
-                    total_flushed_updates,
-                    "Flushing trie updates"
-                );
-
-                intermediate_state = Some(*state);
-
-                if total_flushed_updates.is_multiple_of(SOFT_LIMIT_COUNT_FLUSHED_UPDATES) {
-                    info!(target: "reth::cli",
-                        total_flushed_updates,
-                        "Flushing trie updates"
-                    );
-                }
-            }
-            StateRootProgress::Complete(root, _, updates) => {
-                let updated_len = provider.write_trie_updates(&updates)?;
-                total_flushed_updates += updated_len;
-
-                trace!(target: "reth::cli",
-                    %root,
-                    updated_len,
-                    total_flushed_updates,
-                    "State root has been computed"
-                );
-
-                return Ok(root)
-            }
+        if chunk_entries >= chunk_entries_threshold {
+            let (chunk_root, updates) = NestedStateRoot::new(tx, None).calculate(&hashed_state)?;
+            provider.write_trie_updatesv2(&updates)?;
+            tx.commit_view()?;
+            root = chunk_root;
+            hashed_state.clear();
+            chunk_entries = 0;
         }
     }
+
+    if !hashed_state.accounts.is_empty() {
+        let (chunk_root, updates) = NestedStateRoot::new(tx, None).calculate(&hashed_state)?;
+        provider.write_trie_updatesv2(&updates)?;
+        tx.commit_view()?;
+        root = chunk_root;
+    }
+
+    trace!(target: "reth::cli", %root, "State root has been computed");
+    Ok(root)
 }
 
 /// Type to deserialize state root from state dump file.
@@ -967,6 +970,78 @@ mod tests {
 
     const SF_SETTINGS: GravityStorageSettings =
         GravityStorageSettings { changesets_in_static_files: true };
+
+    #[test]
+    fn genesis_initialization_writes_only_v2_trie() {
+        let (_, _, _, chain_spec) = alloc_chain_spec();
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
+
+        init_genesis(&factory).unwrap();
+        let provider = factory.database_provider_ro().unwrap();
+        let tx = provider.tx_ref();
+        assert_eq!(tx.entries::<tables::AccountsTrie>().unwrap(), 0);
+        assert_eq!(tx.entries::<tables::StoragesTrie>().unwrap(), 0);
+        assert!(tx.entries::<tables::AccountsTrieV2>().unwrap() > 0);
+        let root = NestedStateRoot::new(tx, None).root(&HashedPostState::default()).unwrap();
+        assert_ne!(root, EMPTY_ROOT_HASH);
+        let accounts_v2 = tx.entries::<tables::AccountsTrieV2>().unwrap();
+        let storages_v2 = tx.entries::<tables::StoragesTrieV2>().unwrap();
+        drop(provider);
+
+        init_genesis(&factory).unwrap();
+        let provider = factory.database_provider_ro().unwrap();
+        let tx = provider.tx_ref();
+        assert_eq!(tx.entries::<tables::AccountsTrie>().unwrap(), 0);
+        assert_eq!(tx.entries::<tables::StoragesTrie>().unwrap(), 0);
+        assert_eq!(tx.entries::<tables::AccountsTrieV2>().unwrap(), accounts_v2);
+        assert_eq!(tx.entries::<tables::StoragesTrieV2>().unwrap(), storages_v2);
+        assert_eq!(NestedStateRoot::new(tx, None).root(&HashedPostState::default()).unwrap(), root);
+    }
+
+    #[test]
+    fn state_dump_rebuild_uses_only_v2_trie() {
+        let (_, _, _, chain_spec) = alloc_chain_spec();
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis(&factory).unwrap();
+
+        let provider = factory.database_provider_rw().unwrap();
+        let original_root = NestedStateRoot::new(provider.tx_ref(), None)
+            .root(&HashedPostState::default())
+            .unwrap();
+        assert_eq!(compute_state_root_with_chunk_limit(&provider, 1).unwrap(), original_root);
+        assert_eq!(provider.tx_ref().entries::<tables::AccountsTrie>().unwrap(), 0);
+        assert_eq!(provider.tx_ref().entries::<tables::StoragesTrie>().unwrap(), 0);
+
+        // A stopped import can leave a partial V2 trie. Rebuilding starts by clearing it.
+        provider.tx_ref().clear::<tables::AccountsTrieV2>().unwrap();
+        provider.tx_ref().clear::<tables::StoragesTrieV2>().unwrap();
+        provider.tx_ref().commit_view().unwrap();
+        let mut partial = HashedPostState::default();
+        let (address, account) = provider
+            .tx_ref()
+            .cursor_read::<tables::HashedAccounts>()
+            .unwrap()
+            .walk(None)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        partial.accounts.insert(address, Some(account));
+        let (_, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&partial).unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        provider.tx_ref().commit_view().unwrap();
+        assert_eq!(compute_state_root_with_chunk_limit(&provider, 1).unwrap(), original_root);
+        provider.commit().unwrap();
+
+        let provider = factory.database_provider_ro().unwrap();
+        assert_eq!(
+            NestedStateRoot::new(provider.tx_ref(), None)
+                .root(&HashedPostState::default())
+                .unwrap(),
+            original_root
+        );
+    }
 
     #[test]
     fn init_genesis_sf_writes_entity_block0_changesets() {

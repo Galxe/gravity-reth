@@ -21,11 +21,6 @@ pub trait StateRootProvider: Send + Sync {
     /// computation.
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256>;
 
-    /// Returns the state root using the V2 trie.
-    fn state_root_v2(&self, _hashed_state: HashedPostState) -> ProviderResult<B256> {
-        Err(ProviderError::UnsupportedProvider)
-    }
-
     /// Returns the state root of the `HashedPostState` on top of the current state but reuses the
     /// intermediate nodes to speed up the computation. It's up to the caller to construct the
     /// prefix sets and inform the provider of the trie paths that have changes.
@@ -62,15 +57,6 @@ pub trait StorageRootProvider: Send + Sync {
     fn storage_root(&self, address: Address, hashed_storage: HashedStorage)
         -> ProviderResult<B256>;
 
-    /// Returns the storage root using the V2 trie.
-    fn storage_root_v2(
-        &self,
-        _address: Address,
-        _hashed_storage: HashedStorage,
-    ) -> ProviderResult<B256> {
-        Err(ProviderError::UnsupportedProvider)
-    }
-
     /// Returns the storage proof of the `HashedStorage` for target slot on top of the current
     /// state.
     fn storage_proof(
@@ -101,16 +87,6 @@ pub trait StateProofProvider: Send + Sync {
         slots: &[B256],
     ) -> ProviderResult<AccountProof>;
 
-    /// Returns an account and storage proof using the V2 trie.
-    fn proof_v2(
-        &self,
-        _input: TrieInput,
-        _address: Address,
-        _slots: &[B256],
-    ) -> ProviderResult<AccountProof> {
-        Err(ProviderError::UnsupportedProvider)
-    }
-
     /// Generate [`MultiProof`] for target hashed account and corresponding
     /// hashed storage slot keys.
     fn multiproof(
@@ -118,15 +94,6 @@ pub trait StateProofProvider: Send + Sync {
         input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof>;
-
-    /// Returns a multiproof using the V2 trie.
-    fn multiproof_v2(
-        &self,
-        _input: TrieInput,
-        _targets: MultiProofTargets,
-    ) -> ProviderResult<MultiProof> {
-        Err(ProviderError::UnsupportedProvider)
-    }
 
     /// Get trie witness for provided state.
     fn witness(&self, input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>>;
