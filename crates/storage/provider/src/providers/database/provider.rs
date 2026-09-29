@@ -160,7 +160,7 @@ impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
     }
 }
 
-impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
+impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
     /// State provider for latest state
     pub fn latest<'a>(&'a self) -> Box<dyn StateProvider + 'a> {
         trace!(target: "providers::db", "Returning latest state provider");
@@ -430,7 +430,9 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
     }
 }
 
-impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for DatabaseProvider<TX, N> {
+impl<TX: DbTx + 'static, N: NodeTypesForProvider> TryIntoHistoricalStateProvider
+    for DatabaseProvider<TX, N>
+{
     fn try_into_history_at_block(
         self,
         mut block_number: BlockNumber,

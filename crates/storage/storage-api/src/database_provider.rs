@@ -155,6 +155,13 @@ pub trait DatabaseProviderFactory: Send + Sync {
     /// Create new read-only database provider.
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider>;
 
+    /// Create a read-only provider that observes live committed database writes.
+    ///
+    /// Backends without a distinct live read view use their regular read-only provider.
+    fn database_provider_live_ro(&self) -> ProviderResult<Self::Provider> {
+        self.database_provider_ro()
+    }
+
     /// Create new read-write database provider.
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW>;
 }

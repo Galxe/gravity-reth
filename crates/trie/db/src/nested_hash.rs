@@ -5,9 +5,9 @@ use core::ops::RangeInclusive;
 use alloy_primitives::{
     keccak256,
     map::{hash_map, B256Map, HashMap},
-    BlockNumber, B256, U256,
+    BlockNumber, Bytes, B256, U256,
 };
-use alloy_rlp::encode_fixed_size;
+use alloy_rlp::{encode_fixed_size, Decodable};
 use once_cell::sync::OnceCell;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
@@ -23,8 +23,8 @@ use reth_storage_errors::{db::DatabaseError, provider::ProviderResult};
 use reth_trie::{
     nested_trie::{Node, Trie, TrieReader, MIN_PARALLEL_NODES},
     updates::TrieUpdatesV2,
-    AccountProof, HashedPostState, HashedStorage, MultiProofTargets, Nibbles, StorageTrieUpdatesV2,
-    StoredNibbles, StoredNibblesSubKey,
+    HashedPostState, HashedStorage, MultiProof, MultiProofTargets, Nibbles, StorageMultiProof,
+    StorageTrieUpdatesV2, StoredNibbles, StoredNibblesSubKey, TrieAccount, TrieNode,
 };
 
 /// Storage trie node reader
@@ -241,78 +241,35 @@ impl<'tx, Tx> NestedStateRoot<'tx, Tx>
 where
     Tx: DbTx,
 {
-    /// Generate merkle proofs for target accounts and storage slots at a historical block.
-    ///
-    /// # Algorithm Background
-    ///
-    /// To query proofs at block N when the current trie height is H:
-    ///
-    /// ```text
-    /// Block Timeline:
-    ///
-    ///     Block N        Block N+1       Block N+2        ...        Block H (snapshot)
-    ///        │               │               │                           │
-    ///        ▼               ▼               ▼                           ▼
-    ///   ┌─────────┐    ┌─────────┐    ┌─────────┐                  ┌─────────┐
-    ///   │ State N │───▶│State N+1│───▶│State N+2│───▶  ...  ───▶   │ State H │
-    ///   └─────────┘    └─────────┘    └─────────┘                  └─────────┘
-    ///        ▲               │               │                           │
-    ///        │               │               │                           │
-    ///        │         ChangeSets from N+1 to H (reverted_state)         │
-    ///        │◀──────────────────────────────────────────────────────────┘
-    ///        │                    Revert/Rollback
-    ///   ┌─────────┐
-    ///   │ Query N │  ◀── We need proofs at this state
-    ///   └─────────┘
-    /// ```
-    ///
-    /// # Workflow
-    ///
-    /// **Step 1**: Obtain a `RocksDB` snapshot that guarantees account trie and storage trie
-    /// are at the same height H with complete data. Read the trie checkpoint to get height H.
-    ///
-    /// **Step 2**: Construct `reverted_state` by reading `AccountChangeSets` and
-    /// `StorageChangeSets` for blocks N+1 to H, extracting "before" values to reconstruct
-    /// Block N's state.
-    ///
-    /// **Step 3**: Apply `reverted_state` to rollback the trie from H to N and collect proofs.
-    ///
-    /// # Why `reverted_state` Construction is Correct
-    ///
-    /// The change set tables (`AccountChangeSets`, `StorageChangeSets`) use block number as
-    /// key prefix. Even if block production continues and height advances beyond H, reading
-    /// change sets for blocks N+1 to H remains unaffected - the data is immutable once written.
-    ///
-    /// The proof calculation process is identical to `calculate()` for block production,
-    /// since `reverted_state` represents exactly the state values at Block N.
-    ///
-    /// # Current TODO Status
-    ///
-    /// This function contains `todo!()` placeholders because **Step 1** is not yet implemented.
-    /// The current `RocksDB` storage design has consistency challenges:
-    ///
-    /// 1. **Trie tables only store latest state**: While `multiproof` is called, block production
-    ///    continues, so trie height may have advanced to H+1, H+2, etc.
-    ///
-    /// 2. **No block-level transaction guarantee**: `RocksDB` writes don't guarantee atomicity at
-    ///    the block level. Storage trie might be at H while account trie is at H+1.
-    ///
-    /// ## Required Changes for Implementation
-    ///
-    /// To use `RocksDB`'s snapshot interface for an immutable read-only view:
-    /// 1. **Single database**: Cannot use separate DBs, otherwise unable to get a consistent
-    ///    snapshot across all trie tables
-    /// 2. **Atomic writes**: Account trie and storage trie updates must be in the same `WriteBatch`
-    ///    to ensure height consistency
+    /// Generate a V2 multiproof over a consistent base trie plus the supplied hashed overlay.
+    /// The caller must keep the base trie, hashed state, and historical reverts at one height.
+    /// Storage updates require a corresponding entry in `accounts` to change the root.
+    /// Branch masks are omitted, as in the default legacy multiproof mode; the returned nodes
+    /// support account and storage proof extraction, including absence proofs.
     pub fn multiproof(
         &self,
         reverted_state: &HashedPostState,
         targets: MultiProofTargets,
-    ) -> ProviderResult<B256Map<AccountProof>> {
-        self.calculate_and_proof(reverted_state, targets).map(|r| r.2)
+    ) -> ProviderResult<MultiProof> {
+        self.multiproof_with_root(reverted_state, targets).map(|(_, proof)| proof)
     }
 
-    /// Calculate the root hash of nested trie
+    /// Calculate the V2 state root and multiproof in one trie traversal.
+    pub fn multiproof_with_root(
+        &self,
+        reverted_state: &HashedPostState,
+        targets: MultiProofTargets,
+    ) -> ProviderResult<(B256, MultiProof)> {
+        self.calculate_and_proof(reverted_state, targets).map(|(root, _, proof)| (root, proof))
+    }
+
+    /// Calculate only the V2 state root after applying the hashed-state overlay.
+    pub fn root(&self, hashed_state: &HashedPostState) -> ProviderResult<B256> {
+        self.calculate(hashed_state).map(|r| r.0)
+    }
+
+    /// Calculate the root hash of nested trie.
+    /// Storage updates without a corresponding account entry are ignored.
     pub fn calculate(
         &self,
         hashed_state: &HashedPostState,
@@ -320,14 +277,22 @@ where
         self.calculate_and_proof(hashed_state, Default::default()).map(|r| (r.0, r.1))
     }
 
+    /// Calculate a V2 storage root after applying a hashed storage overlay.
+    pub fn storage_root(
+        &self,
+        hashed_address: B256,
+        storage: &HashedStorage,
+    ) -> ProviderResult<B256> {
+        self.storage_proof(hashed_address, storage, &[]).map(|proof| proof.root)
+    }
+
     fn calculate_and_proof(
         &self,
         hashed_state: &HashedPostState,
         targets: MultiProofTargets,
-    ) -> ProviderResult<(B256, TrieUpdatesV2, B256Map<AccountProof>)> {
+    ) -> ProviderResult<(B256, TrieUpdatesV2, MultiProof)> {
         let need_update = targets.is_empty();
         let trie_update = Mutex::new(TrieUpdatesV2::default());
-        let proofs: Mutex<B256Map<AccountProof>> = Default::default();
         let updated_account_nodes: [Mutex<Vec<(Nibbles, Option<Node>)>>; 16] = Default::default();
         let mut partitioned_accounts: [Vec<(&B256, &Option<Account>)>; 16] = Default::default();
         let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
@@ -447,8 +412,6 @@ where
                                             )
                                             .is_none());
                                     }
-                                } else if targets.get(&hashed_address).is_some() {
-                                    todo!("update storage proofs");
                                 }
                             } else {
                                 updated_account_nodes.push((path, None));
@@ -469,7 +432,7 @@ where
 
         let updated_account_nodes = updated_account_nodes.map(|u| u.into_inner());
         let mut trie_update = trie_update.into_inner();
-        let proofs = proofs.into_inner();
+        let mut proofs = MultiProof::default();
         let create_reader = || {
             let cursor = self.tx.cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
@@ -479,16 +442,99 @@ where
         account_trie.parallel_update(updated_account_nodes, create_reader)?;
 
         let root_hash = account_trie.hash();
+        for (hashed_address, slots) in targets {
+            let account_proof =
+                account_trie.get_proof_with_paths(Nibbles::unpack(hashed_address))?;
+            let account = account_from_proof(&account_proof, hashed_address)?;
+            for (path, node) in account_proof {
+                proofs.account_subtree.insert(path, Bytes::from(alloy_rlp::encode(node)));
+            }
+            let storage_proof = if let Some(account) = account {
+                let empty_storage = HashedStorage::default();
+                let proof = self.storage_proof(
+                    hashed_address,
+                    hashed_storages.get(&hashed_address).unwrap_or(&empty_storage),
+                    &slots.into_iter().collect::<Vec<_>>(),
+                )?;
+                if proof.root != account.storage_root {
+                    return Err(DatabaseError::Other(format!(
+                        "V2 storage proof root for {hashed_address} does not match account leaf"
+                    ))
+                    .into());
+                }
+                proof
+            } else {
+                StorageMultiProof::empty()
+            };
+            proofs.storages.insert(hashed_address, storage_proof);
+        }
         if need_update {
             let output = account_trie.take_output();
             trie_update.account_nodes = output.update_nodes;
             trie_update.removed_nodes = output.removed_nodes;
-        } else {
-            todo!("update account proofs");
         }
 
         Ok((root_hash, trie_update, proofs))
     }
+
+    fn storage_proof(
+        &self,
+        hashed_address: B256,
+        storage: &HashedStorage,
+        slots: &[B256],
+    ) -> ProviderResult<StorageMultiProof> {
+        let create_reader = || {
+            if storage.wiped {
+                Ok(MaybeEmptyStorageReader::Empty)
+            } else {
+                let cursor = self.tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
+                Ok(MaybeEmptyStorageReader::Storage(StorageTrieReader::new(
+                    cursor,
+                    hashed_address,
+                    self.cache.clone(),
+                )))
+            }
+        };
+        let mut trie = Trie::new(create_reader()?, storage.storage.len() > MIN_PARALLEL_NODES)?;
+        let mut updated_nodes: [Vec<(Nibbles, Option<Node>)>; 16] = Default::default();
+        for (hashed_slot, value) in &storage.storage {
+            let path = Nibbles::unpack(*hashed_slot);
+            let node =
+                (!value.is_zero()).then(|| Node::ValueNode(encode_fixed_size(value).to_vec()));
+            updated_nodes[path.get_unchecked(0) as usize].push((path, node));
+        }
+        trie.parallel_update(updated_nodes, create_reader)?;
+        let root = trie.hash();
+        let mut proof = StorageMultiProof {
+            root,
+            subtree: Default::default(),
+            branch_node_hash_masks: Default::default(),
+            branch_node_tree_masks: Default::default(),
+        };
+        for slot in slots {
+            for (path, node) in trie.get_proof_with_paths(Nibbles::unpack(*slot))? {
+                proof.subtree.insert(path, Bytes::from(alloy_rlp::encode(node)));
+            }
+        }
+        Ok(proof)
+    }
+}
+
+fn account_from_proof(
+    proof: &[(Nibbles, TrieNode)],
+    hashed_address: B256,
+) -> ProviderResult<Option<TrieAccount>> {
+    let Some((prefix, TrieNode::Leaf(leaf))) = proof.last() else {
+        return Ok(None);
+    };
+    let mut path = *prefix;
+    path.extend(&leaf.key);
+    if path != Nibbles::unpack(hashed_address) {
+        return Ok(None);
+    }
+    let account = TrieAccount::decode(&mut &leaf.value[..])
+        .map_err(|err| DatabaseError::Other(format!("invalid trie account: {err}")))?;
+    Ok(Some(account))
 }
 
 #[cfg(test)]
@@ -504,7 +550,8 @@ mod tests {
     use rand::Rng;
     use reth_primitives_traits::Account;
     use reth_provider::{
-        test_utils::create_test_provider_factory, DatabaseProviderFactory, TrieWriterV2,
+        test_utils::create_test_provider_factory, DatabaseProviderFactory, StateWriter,
+        TrieWriterV2,
     };
     use reth_trie::{
         nested_trie::{Node, NodeFlag, Trie, TrieReader},
@@ -758,6 +805,283 @@ mod tests {
         let (parallel_root_hash, ..) =
             NestedStateRoot::new(tx, None).calculate(&hashed_state).unwrap();
         assert_eq!(parallel_root_hash, test_utils::state_root(state))
+    }
+
+    #[test]
+    fn v2_multiproof_verifies_account_storage_overlay_and_absence() {
+        let factory = create_test_provider_factory();
+        let address = Address::random();
+        let other = Address::random();
+        let missing = Address::random();
+        let hashed_address = keccak256(address);
+        let slot = B256::from(U256::from(1u64));
+        let other_slot = B256::from(U256::from(2u64));
+        let missing_slot = B256::from(U256::from(3u64));
+        let account = Account { balance: U256::from(42u64), ..Default::default() };
+        let storage_with_slot = |value| {
+            let mut storage = HashedStorage::new(false);
+            storage.storage.insert(keccak256(slot), value);
+            storage
+        };
+
+        let mut initial = HashedPostState::default();
+        initial.accounts.insert(hashed_address, Some(account));
+        initial.accounts.insert(keccak256(other), Some(Account::default()));
+        let mut initial_storage = storage_with_slot(U256::from(11u64));
+        initial_storage.storage.insert(keccak256(other_slot), U256::from(22u64));
+        initial.storages.insert(hashed_address, initial_storage);
+        let provider = factory.provider_rw().unwrap();
+        let (_, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&initial).unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        provider.write_hashed_state(&initial.clone().into_sorted()).unwrap();
+        provider.commit().unwrap();
+
+        let mut overlay = HashedPostState::default();
+        overlay.storages.insert(hashed_address, storage_with_slot(U256::from(99u64)));
+        let provider = factory.database_provider_ro().unwrap();
+        let nested = NestedStateRoot::new(provider.tx_ref(), None);
+        let (unchanged_root, unchanged_updates) = nested.calculate(&overlay).unwrap();
+        let (base_root, base_updates) = nested.calculate(&HashedPostState::default()).unwrap();
+        assert_eq!((unchanged_root, unchanged_updates), (base_root, base_updates));
+        assert_eq!(nested.root(&overlay).unwrap(), unchanged_root);
+        let err = nested
+            .multiproof(
+                &overlay,
+                MultiProofTargets::account_with_slots(hashed_address, [keccak256(slot)]),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match account leaf"));
+        overlay.accounts.insert(hashed_address, Some(account));
+        let root = nested.root(&overlay).unwrap();
+        let proof = nested
+            .multiproof(
+                &overlay,
+                MultiProofTargets::from_iter([
+                    (
+                        hashed_address,
+                        [keccak256(slot), keccak256(other_slot), keccak256(missing_slot)]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    (keccak256(missing), std::iter::once(keccak256(slot)).collect()),
+                ]),
+            )
+            .unwrap();
+        assert!(proof.branch_node_hash_masks.is_empty());
+        assert!(proof.branch_node_tree_masks.is_empty());
+        let existing = proof.account_proof(address, &[slot, other_slot, missing_slot]).unwrap();
+        assert_eq!(existing.info, Some(account));
+        assert_eq!(existing.storage_proofs[0].value, U256::from(99u64));
+        assert_eq!(existing.storage_proofs[1].value, U256::from(22u64));
+        assert_eq!(existing.storage_proofs[2].value, U256::ZERO);
+        existing.verify(root).unwrap();
+
+        let absent = proof.account_proof(missing, &[slot]).unwrap();
+        assert!(absent.info.is_none());
+        absent.verify(root).unwrap();
+
+        assert_eq!(
+            nested.storage_root(hashed_address, &overlay.storages[&hashed_address]).unwrap(),
+            existing.storage_root
+        );
+
+        let mut wiped = HashedPostState::default();
+        wiped.accounts.insert(hashed_address, Some(account));
+        let mut new_storage = storage_with_slot(U256::from(5u64));
+        new_storage.wiped = true;
+        wiped.storages.insert(hashed_address, new_storage);
+        let wiped_root = nested.root(&wiped).unwrap();
+        let wiped_proof = nested
+            .multiproof(
+                &wiped,
+                MultiProofTargets::account_with_slots(
+                    hashed_address,
+                    [keccak256(slot), keccak256(other_slot)],
+                ),
+            )
+            .unwrap()
+            .account_proof(address, &[slot, other_slot])
+            .unwrap();
+        assert_eq!(wiped_proof.storage_proofs[0].value, U256::from(5u64));
+        assert_eq!(wiped_proof.storage_proofs[1].value, U256::ZERO);
+        wiped_proof.verify(wiped_root).unwrap();
+    }
+
+    #[test]
+    fn v2_multiproof_empty_trie_and_orphan_storage() {
+        let factory = create_test_provider_factory();
+        let provider = factory.database_provider_ro().unwrap();
+        let nested = NestedStateRoot::new(provider.tx_ref(), None);
+        let address = Address::random();
+        let slot = B256::from(U256::from(7u64));
+        let proof = nested
+            .multiproof(
+                &HashedPostState::default(),
+                MultiProofTargets::account_with_slots(keccak256(address), [keccak256(slot)]),
+            )
+            .unwrap()
+            .account_proof(address, &[slot])
+            .unwrap();
+        proof.verify(EMPTY_ROOT_HASH).unwrap();
+
+        let mut storage = HashedStorage::new(false);
+        storage.storage.insert(keccak256(slot), U256::from(1u64));
+        let orphan = HashedPostState::from_hashed_storage(keccak256(address), storage);
+        assert_eq!(nested.root(&orphan).unwrap(), EMPTY_ROOT_HASH);
+        nested
+            .multiproof(
+                &orphan,
+                MultiProofTargets::account_with_slots(keccak256(address), [keccak256(slot)]),
+            )
+            .unwrap()
+            .account_proof(address, &[slot])
+            .unwrap()
+            .verify(EMPTY_ROOT_HASH)
+            .unwrap();
+    }
+
+    #[test]
+    fn v2_multiproof_uses_unpersisted_trie_cache() {
+        let factory = create_test_provider_factory();
+        let cache = PersistBlockCache::new();
+        let address = Address::random();
+        let hashed_address = keccak256(address);
+        let first_slot = B256::from(U256::from(1u64));
+        let second_slot = B256::from(U256::from(2u64));
+        let account = Account { balance: U256::from(42u64), ..Default::default() };
+
+        let mut initial = HashedPostState::default();
+        initial.accounts.insert(hashed_address, Some(account));
+        let mut initial_storage = HashedStorage::new(false);
+        initial_storage.storage.insert(keccak256(first_slot), U256::from(11u64));
+        initial.storages.insert(hashed_address, initial_storage);
+
+        let provider = factory.database_provider_ro().unwrap();
+        let (_, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&initial).unwrap();
+        cache.write_trie_updates(&updates, 1);
+
+        let mut storage = HashedStorage::new(false);
+        storage.storage.insert(keccak256(second_slot), U256::from(22u64));
+        let mut overlay = HashedPostState::from_hashed_storage(hashed_address, storage);
+        overlay.accounts.insert(hashed_address, Some(account));
+        let nested = NestedStateRoot::new(provider.tx_ref(), Some(cache));
+        let root = nested.root(&overlay).unwrap();
+        let proof = nested
+            .multiproof(
+                &overlay,
+                MultiProofTargets::account_with_slots(
+                    hashed_address,
+                    [keccak256(first_slot), keccak256(second_slot)],
+                ),
+            )
+            .unwrap()
+            .account_proof(address, &[first_slot, second_slot])
+            .unwrap();
+
+        let mut expected_storage = HashMap::<B256, U256>::default();
+        expected_storage.insert(first_slot, U256::from(11u64));
+        expected_storage.insert(second_slot, U256::from(22u64));
+        let expected = HashMap::<Address, (Account, HashMap<B256, U256>)>::from_iter([(
+            address,
+            (account, expected_storage),
+        )]);
+        assert_eq!(root, test_utils::state_root(expected));
+        assert_eq!(proof.info, Some(account));
+        proof.verify(root).unwrap();
+    }
+
+    #[test]
+    fn v2_multiproof_ignores_stale_hashed_account() {
+        let factory = create_test_provider_factory();
+        let cache = PersistBlockCache::new();
+        let address = Address::random();
+        let hashed_address = keccak256(address);
+        let slot = B256::from(U256::from(1u64));
+        let old_account = Account { balance: U256::from(1u64), ..Default::default() };
+        let new_account = Account { balance: U256::from(2u64), ..Default::default() };
+
+        let mut initial = HashedPostState::default();
+        initial.accounts.insert(hashed_address, Some(old_account));
+        let provider = factory.provider_rw().unwrap();
+        let (_, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&initial).unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        provider.write_hashed_state(&initial.into_sorted()).unwrap();
+        provider.commit().unwrap();
+
+        let mut pending = HashedPostState::default();
+        pending.accounts.insert(hashed_address, Some(new_account));
+        let provider = factory.database_provider_ro().unwrap();
+        let (_, updates) = NestedStateRoot::new(provider.tx_ref(), Some(cache.clone()))
+            .calculate(&pending)
+            .unwrap();
+        cache.write_trie_updates(&updates, 2);
+
+        let overlay = HashedPostState::default();
+        let nested = NestedStateRoot::new(provider.tx_ref(), Some(cache));
+        let root = nested.root(&overlay).unwrap();
+        let proof = nested
+            .multiproof(
+                &overlay,
+                MultiProofTargets::account_with_slots(hashed_address, [keccak256(slot)]),
+            )
+            .unwrap()
+            .account_proof(address, &[slot])
+            .unwrap();
+
+        let expected = HashMap::<Address, (Account, HashMap<B256, U256>)>::from_iter([(
+            address,
+            (new_account, HashMap::default()),
+        )]);
+        assert_eq!(root, test_utils::state_root(expected));
+        assert_eq!(proof.info, Some(new_account));
+        assert_eq!(proof.storage_proofs[0].value, U256::ZERO);
+        proof.verify(root).unwrap();
+    }
+
+    #[test]
+    fn v2_multiproof_does_not_resurrect_deleted_account() {
+        let factory = create_test_provider_factory();
+        let cache = PersistBlockCache::new();
+        let address = Address::random();
+        let hashed_address = keccak256(address);
+        let account = Account { balance: U256::from(1u64), ..Default::default() };
+
+        let mut initial = HashedPostState::default();
+        initial.accounts.insert(hashed_address, Some(account));
+        let provider = factory.provider_rw().unwrap();
+        let (_, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&initial).unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        provider.write_hashed_state(&initial.into_sorted()).unwrap();
+        provider.commit().unwrap();
+
+        let mut deleted = HashedPostState::default();
+        deleted.accounts.insert(hashed_address, None);
+        let provider = factory.database_provider_ro().unwrap();
+        let (_, updates) = NestedStateRoot::new(provider.tx_ref(), Some(cache.clone()))
+            .calculate(&deleted)
+            .unwrap();
+        cache.write_trie_updates(&updates, 2);
+
+        let mut storage = HashedStorage::new(false);
+        storage.storage.insert(keccak256(B256::ZERO), U256::from(1u64));
+        let overlay = HashedPostState::from_hashed_storage(hashed_address, storage);
+        let nested = NestedStateRoot::new(provider.tx_ref(), Some(cache));
+        assert_eq!(
+            nested.root(&overlay).unwrap(),
+            nested.root(&HashedPostState::default()).unwrap()
+        );
+        let root = nested.root(&overlay).unwrap();
+        let proof = nested
+            .multiproof(&overlay, MultiProofTargets::account(hashed_address))
+            .unwrap()
+            .account_proof(address, &[])
+            .unwrap();
+        assert!(proof.info.is_none());
+        proof.verify(root).unwrap();
     }
 
     #[test]

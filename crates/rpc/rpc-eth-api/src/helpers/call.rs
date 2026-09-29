@@ -113,7 +113,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             let max_simulate_blocks = self.max_simulate_blocks();
 
             self.spawn_with_state_at_block(block, move |this, db| {
-                let state_provider = db.database.0 .0;
+                let state_provider = db.database.0.for_v2_simulation();
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
                     .with_bundle_update()
@@ -714,7 +714,7 @@ pub trait Call:
         self.spawn_blocking_io_fut(async move |this| {
             let state = this.state_at_block_id(at).await?;
             let db = State::builder()
-                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
+                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper::new(state)))
                 .build();
             f(this, db)
         })

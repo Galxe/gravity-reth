@@ -10,6 +10,7 @@ use alloy_primitives::BlockNumber;
 use reth_db::{
     tables,
     transaction::{DbTx, DbTxMut},
+    Database,
 };
 use reth_errors::ProviderError;
 use reth_primitives_traits::GotExpected;
@@ -114,10 +115,11 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     /// - History indices correctly track all state changes
     /// - All checkpoints are synchronized at `recover_block_number`
     pub fn check_and_recover(&self) -> ProviderResult<()> {
-        let provider_ro = self.factory.database_provider_ro()?;
-        let recover_block_number = provider_ro.recover_block_number()?;
-        let best_block_number = provider_ro.best_block_number()?;
-        drop(provider_ro);
+        let mut write_guard = self.factory.db_ref().consistent_write();
+        let provider_rw = self.factory.database_provider_rw()?;
+        let recover_block_number = provider_rw.recover_block_number()?;
+        let best_block_number = provider_rw.best_block_number()?;
+        drop(provider_rw);
 
         if recover_block_number != best_block_number {
             info!(target: "engine::recovery", recover_block = ?recover_block_number, best_block = ?best_block_number, "Detected interrupted block write, starting recovery");
@@ -135,6 +137,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         let provider_rw = self.factory.database_provider_rw()?;
         provider_rw.update_pipeline_stages(recover_block_number, false)?;
         provider_rw.commit()?;
+        write_guard.recovered();
         info!(target: "engine::recovery", recover_block_number = ?recover_block_number, "Recovery completed successfully");
         Ok(())
     }

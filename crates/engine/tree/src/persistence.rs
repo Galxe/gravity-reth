@@ -7,6 +7,7 @@ use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
     set_fail_point, tables,
     transaction::{DbTx, DbTxMut},
+    Database,
 };
 use reth_errors::ProviderError;
 use reth_ethereum_primitives::EthPrimitives;
@@ -151,6 +152,7 @@ where
         &self,
         new_tip_num: u64,
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
+        let mut write_guard = self.provider.db_ref().consistent_write();
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
         let start_time = Instant::now();
         let provider_rw = self.provider.database_provider_rw()?;
@@ -159,6 +161,7 @@ where
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
         UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(new_tip_num)?;
         UnifiedStorageWriter::commit_unwind(provider_rw)?;
+        write_guard.complete();
 
         debug!(target: "engine::persistence", ?new_tip_num, ?new_tip_hash, "Removed blocks from disk");
         self.metrics.remove_blocks_above_duration_seconds.record(start_time.elapsed());
@@ -224,6 +227,7 @@ where
             }
 
             // Pipeline progress and any deferred finalized/safe markers share one commit.
+            let mut write_guard = self.provider.db_ref().consistent_write();
             let provider_rw = self.provider.database_provider_rw()?;
             provider_rw.update_pipeline_stages(last.number, false)?;
             if let Some(finalized) = pending_finalized {
@@ -239,6 +243,7 @@ where
                 }
             }
             provider_rw.commit()?;
+            write_guard.complete();
             debug!(target: "engine::persistence", first=?first_block, last=?last_block, "Saved range of blocks");
         }
 
@@ -253,11 +258,13 @@ where
         // The durable save is already committed at this point, so pruning can happen after we
         // acknowledge the save without extending the synchronous persistence wait.
         if self.pruner.is_pruning_needed(block_number) {
+            let mut write_guard = self.provider.db_ref().consistent_write();
             debug!(target: "engine::persistence", block_num=?block_number, "Running pruner");
             let prune_start = Instant::now();
             let provider_rw = self.provider.database_provider_rw()?;
             let _ = self.pruner.run_with_provider(&provider_rw, block_number)?;
             provider_rw.commit()?;
+            write_guard.complete();
             debug!(target: "engine::persistence", tip=?block_number, "Finished pruning after saving blocks");
             self.metrics.prune_before_duration_seconds.record(prune_start.elapsed());
         }
@@ -278,6 +285,7 @@ where
             triev2,
         } in blocks
         {
+            let mut write_guard = self.provider.db_ref().consistent_write();
             let block_number = recovered_block.number();
             let block_hash = recovered_block.hash();
             let inner_provider = &self.provider;
@@ -401,6 +409,7 @@ where
                 trie_handle.join().unwrap()
             })?;
             PERSIST_BLOCK_CACHE.persist_tip(block_number);
+            write_guard.complete();
         }
         Ok(())
     }
@@ -449,6 +458,7 @@ where
         group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
     ) -> Result<(), PersistenceError> {
         let Some(first) = group.first() else { return Ok(()) };
+        let mut write_guard = self.provider.db_ref().consistent_write();
         let group_first = first.recovered_block().number();
         let group_last = group.last().unwrap().recovered_block().number();
         let block_count = group.len() as u32;
@@ -532,6 +542,7 @@ where
         provider_rw.static_file_provider().commit()?;
         provider_rw.commit()?;
         PERSIST_BLOCK_CACHE.persist_tip(group_last);
+        write_guard.complete();
 
         metrics::histogram!("save_blocks_time", &[("process", "merge_block")])
             .record(start.elapsed() / block_count);
@@ -727,7 +738,7 @@ impl Drop for ServiceGuard {
 mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, U256};
-    use reth_chain_state::test_utils::TestBlockBuilder;
+    use reth_chain_state::{test_utils::TestBlockBuilder, ExecutedTrieUpdates};
     use reth_db::models::GravityStorageSettings;
     use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
     use reth_exex_types::FinishedExExHeight;
@@ -907,6 +918,38 @@ mod tests {
         let result = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("test timed out");
 
         assert_eq!(block_hash, result.last_block.unwrap().hash);
+    }
+
+    #[test]
+    fn incomplete_block_write_rejects_new_read_views() {
+        let provider = create_test_provider_factory();
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        let service = PersistenceService::new(
+            provider.clone(),
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        );
+
+        let mut block = TestBlockBuilder::eth().get_executed_block_with_number(0, B256::ZERO);
+        let block_hash = block.recovered_block().hash();
+        block.trie = ExecutedTrieUpdates::Missing;
+
+        // The state worker commits before the missing trie update is reported by the other worker.
+        assert!(matches!(
+            service.save_blocks_per_block(vec![block]),
+            Err(PersistenceError::ProviderError(ProviderError::MissingTrieUpdates(_)))
+        ));
+        assert_eq!(
+            provider.db_ref().db().tx_mut().unwrap().get::<tables::CanonicalHeaders>(0).unwrap(),
+            Some(block_hash)
+        );
+        assert!(provider.db_ref().db().tx().is_err());
+        assert!(provider.db_ref().db().tx_live().is_err());
     }
 
     #[test]

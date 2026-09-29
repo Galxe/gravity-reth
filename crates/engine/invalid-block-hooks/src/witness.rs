@@ -160,6 +160,7 @@ fn generate(
     hashed_state: reth_trie::HashedPostState,
     state_provider: Box<dyn StateProvider>,
 ) -> eyre::Result<ExecutionWitness> {
+    ensure_legacy_trie_matches_v2(state_provider.as_ref())?;
     let state = state_provider.witness(Default::default(), hashed_state)?;
     Ok(ExecutionWitness {
         state,
@@ -167,6 +168,15 @@ fn generate(
         keys: preimages.into_values().collect(),
         ..Default::default()
     })
+}
+
+fn ensure_legacy_trie_matches_v2(state_provider: &dyn StateProvider) -> eyre::Result<()> {
+    if state_provider.state_root(Default::default())? !=
+        state_provider.state_root_v2(Default::default())?
+    {
+        eyre::bail!("legacy trie does not match V2 state root")
+    }
+    Ok(())
 }
 
 /// Hook for generating execution witnesses when invalid blocks are detected.
@@ -301,6 +311,7 @@ where
         block_prefix: &str,
     ) -> eyre::Result<()> {
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
+        ensure_legacy_trie_matches_v2(state_provider.as_ref())?;
         let hashed_state = state_provider.hashed_post_state(bundle_state);
         let (re_executed_root, trie_output) =
             state_provider.state_root_with_updates(hashed_state)?;

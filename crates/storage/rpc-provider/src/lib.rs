@@ -60,6 +60,7 @@ use reth_storage_api::{
     ReceiptProviderIdExt, StatsReader,
 };
 use reth_trie::{updates::TrieUpdates, AccountProof, HashedPostState, MultiProof, TrieInput};
+use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     future::{Future, IntoFuture},
@@ -1078,6 +1079,29 @@ impl<P: Clone, Node: NodeTypes, N> RpcBlockchainStateProvider<P, Node, N> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct RpcTrieUpdateVersion {
+    version: u8,
+}
+
+#[cfg(test)]
+mod rpc_trie_update_tests {
+    use super::RpcTrieUpdateVersion;
+
+    #[test]
+    fn remote_v2_update_version_is_required() {
+        let v2: RpcTrieUpdateVersion = serde_json::from_str(
+            r#"{"version":2,"accountNodes":{},"removedNodes":[],"storageTries":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(v2.version, 2);
+        assert!(serde_json::from_str::<RpcTrieUpdateVersion>(
+            r#"{"account_nodes":{},"removed_nodes":[],"storage_tries":{}}"#
+        )
+        .is_err());
+    }
+}
+
 impl<P, Node, N> StateProvider for RpcBlockchainStateProvider<P, Node, N>
 where
     P: Provider<N> + Clone + 'static,
@@ -1172,6 +1196,29 @@ where
     N: Network,
     Node: NodeTypes,
 {
+    fn state_root_v2(&self, hashed_state: HashedPostState) -> Result<B256, ProviderError> {
+        if !self.compute_state_root {
+            return Err(ProviderError::UnsupportedProvider)
+        }
+
+        let (root, updates) = self.block_on_async(async {
+            self.provider
+                .raw_request::<(HashedPostState, BlockId), (B256, RpcTrieUpdateVersion)>(
+                    "debug_stateRootWithUpdates".into(),
+                    (hashed_state, self.block_id),
+                )
+                .into_future()
+                .await
+                .map_err(ProviderError::other)
+        })?;
+        if updates.version != 2 {
+            return Err(ProviderError::other(std::io::Error::other(
+                "remote state-root updates use an unsupported trie version",
+            )))
+        }
+        Ok(root)
+    }
+
     fn state_root(&self, hashed_state: HashedPostState) -> Result<B256, ProviderError> {
         self.state_root_from_nodes(TrieInput::from_state(hashed_state))
     }
@@ -1183,22 +1230,9 @@ where
 
     fn state_root_with_updates(
         &self,
-        hashed_state: HashedPostState,
+        _hashed_state: HashedPostState,
     ) -> Result<(B256, TrieUpdates), ProviderError> {
-        if !self.compute_state_root {
-            return Ok((B256::ZERO, TrieUpdates::default()));
-        }
-
-        self.block_on_async(async {
-            self.provider
-                .raw_request::<(HashedPostState, BlockId), (B256, TrieUpdates)>(
-                    "debug_stateRootWithUpdates".into(),
-                    (hashed_state, self.block_id),
-                )
-                .into_future()
-                .await
-                .map_err(ProviderError::other)
-        })
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_from_nodes_with_updates(

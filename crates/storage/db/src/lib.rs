@@ -80,7 +80,9 @@ pub mod test_utils {
     use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
-        database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
+        database::{ConsistentWriteGuard, Database},
+        database_metrics::DatabaseMetrics,
+        models::ClientVersion,
     };
     use reth_fs_util;
     use std::{
@@ -175,8 +177,19 @@ pub mod test_utils {
             Ok(tx)
         }
 
+        fn tx_live(&self) -> Result<Self::TX, DatabaseError> {
+            self.pre_tx_hook.read()();
+            let tx = self.db().tx_live()?;
+            self.post_tx_hook.read()();
+            Ok(tx)
+        }
+
         fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
             self.db().tx_mut()
+        }
+
+        fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+            self.db().consistent_write()
         }
     }
 
@@ -238,6 +251,7 @@ pub mod test_utils {
 mod tests {
     use crate::{
         init_db, open_db, tables,
+        test_utils::create_test_rw_db,
         version::{db_version_file_path, DatabaseVersionError},
         DatabaseArguments,
     };
@@ -247,6 +261,16 @@ mod tests {
     };
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn temp_database_forwards_read_modes_and_write_guard() {
+        let db = create_test_rw_db();
+        assert_eq!(db.tx_live().unwrap().snapshot_block_number().unwrap(), None);
+        assert_eq!(db.tx().unwrap().snapshot_block_number().unwrap(), Some(0));
+
+        drop(db.consistent_write());
+        assert!(db.tx().is_err());
+    }
 
     #[test]
     fn db_version() {

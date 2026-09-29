@@ -75,6 +75,16 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         Ok(Self { storage_provider, head_block, canonical_in_memory_state: state })
     }
 
+    /// Create a view with the same in-memory head ordering but live database reads.
+    pub(crate) fn new_live(
+        storage_provider_factory: ProviderFactory<N>,
+        state: CanonicalInMemoryState<N::Primitives>,
+    ) -> ProviderResult<Self> {
+        let head_block = state.head_state();
+        let storage_provider = storage_provider_factory.database_provider_live_ro()?;
+        Ok(Self { storage_provider, head_block, canonical_in_memory_state: state })
+    }
+
     // Helper function to convert range bounds
     fn convert_range_bounds<T>(
         &self,

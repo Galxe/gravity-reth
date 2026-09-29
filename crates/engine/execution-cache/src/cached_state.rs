@@ -15,8 +15,9 @@ use reth_provider::{
 };
 use reth_revm::db::BundleState;
 use reth_trie::{
-    updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
-    MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
+    updates::{TrieUpdates, TrieUpdatesV2},
+    AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
+    StorageProof, TrieInput,
 };
 use std::{
     fmt,
@@ -591,6 +592,17 @@ impl<S: BytecodeReader> BytecodeReader for CachedStateProvider<S> {
 }
 
 impl<S: StateRootProvider> StateRootProvider for CachedStateProvider<S> {
+    fn state_root_v2(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
+        self.state_provider.state_root_v2(hashed_state)
+    }
+
+    fn state_root_with_updates_v2(
+        &self,
+        hashed_state: HashedPostState,
+    ) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        self.state_provider.state_root_with_updates_v2(hashed_state)
+    }
+
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
         self.state_provider.state_root(hashed_state)
     }
@@ -615,6 +627,23 @@ impl<S: StateRootProvider> StateRootProvider for CachedStateProvider<S> {
 }
 
 impl<S: StateProofProvider> StateProofProvider for CachedStateProvider<S> {
+    fn proof_v2(
+        &self,
+        input: TrieInput,
+        address: Address,
+        slots: &[B256],
+    ) -> ProviderResult<AccountProof> {
+        self.state_provider.proof_v2(input, address, slots)
+    }
+
+    fn multiproof_v2(
+        &self,
+        input: TrieInput,
+        targets: MultiProofTargets,
+    ) -> ProviderResult<MultiProof> {
+        self.state_provider.multiproof_v2(input, targets)
+    }
+
     fn proof(
         &self,
         input: TrieInput,
@@ -642,6 +671,14 @@ impl<S: StateProofProvider> StateProofProvider for CachedStateProvider<S> {
 }
 
 impl<S: StorageRootProvider> StorageRootProvider for CachedStateProvider<S> {
+    fn storage_root_v2(
+        &self,
+        address: Address,
+        hashed_storage: HashedStorage,
+    ) -> ProviderResult<B256> {
+        self.state_provider.storage_root_v2(address, hashed_storage)
+    }
+
     fn storage_root(
         &self,
         address: Address,

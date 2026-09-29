@@ -103,4 +103,10 @@ mod tests {
         let account = eth_api.get_account(address, Default::default()).await.unwrap();
         assert!(account.is_none());
     }
+
+    #[test]
+    fn pending_proof_window_falls_back_to_latest() {
+        let eth_api = noop_eth_api();
+        assert!(eth_api.ensure_within_proof_window(alloy_eips::BlockId::pending()).is_ok());
+    }
 }

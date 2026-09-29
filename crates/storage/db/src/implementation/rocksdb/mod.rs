@@ -2,8 +2,13 @@
 
 use crate::{DatabaseError, TableSet};
 use metrics::Label;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use reth_db_api::{
-    database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, tables, Tables,
+    database::{ConsistentWriteGuard, Database},
+    database_metrics::DatabaseMetrics,
+    models::ClientVersion,
+    table::Table,
+    tables, Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
 use reth_tracing::tracing::info;
@@ -11,7 +16,10 @@ use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 pub(crate) mod cursor;
@@ -256,6 +264,35 @@ pub struct DatabaseEnv {
     pub(crate) storage_db: Arc<DB>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
+    /// Coordinates snapshot creation with a whole logical state/trie write range.
+    snapshot_barrier: RwLock<()>,
+    /// A failed partial write requires recovery before a read view can be trusted again.
+    incomplete_write: AtomicBool,
+}
+
+struct RocksWriteGuard<'a> {
+    _guard: RwLockWriteGuard<'a, ()>,
+    incomplete_write: &'a AtomicBool,
+    complete: bool,
+}
+
+impl ConsistentWriteGuard for RocksWriteGuard<'_> {
+    fn complete(&mut self) {
+        self.complete = true;
+    }
+
+    fn recovered(&mut self) {
+        self.complete = true;
+        self.incomplete_write.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for RocksWriteGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.incomplete_write.store(true, Ordering::Release);
+        }
+    }
 }
 
 impl DatabaseEnv {
@@ -282,7 +319,14 @@ impl DatabaseEnv {
         let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
         let storage_db = dbs.get(&storage_path).cloned().expect("storage DB handle missing");
 
-        Ok(Self { state_db, account_db, storage_db, kind })
+        Ok(Self {
+            state_db,
+            account_db,
+            storage_db,
+            kind,
+            snapshot_barrier: RwLock::new(()),
+            incomplete_write: AtomicBool::new(false),
+        })
     }
 
     /// Resolve shard paths based on configuration.
@@ -686,16 +730,43 @@ impl DatabaseMetrics for DatabaseEnv {
 }
 
 // Implement Database trait for RocksDB
-impl reth_db_api::database::Database for DatabaseEnv {
+impl Database for DatabaseEnv {
     type TX = tx::Tx<tx::RO>;
     type TXMut = tx::Tx<tx::RW>;
 
     fn tx(&self) -> Result<Self::TX, crate::DatabaseError> {
+        let _guard = self.snapshot_barrier.read();
+        if self.incomplete_write.load(Ordering::Acquire) {
+            return Err(crate::DatabaseError::Other(
+                "state/trie write was interrupted; storage recovery is required".into(),
+            ));
+        }
+        Ok(tx::Tx::new_snapshot(
+            self.state_db.clone(),
+            self.account_db.clone(),
+            self.storage_db.clone(),
+        ))
+    }
+
+    fn tx_live(&self) -> Result<Self::TX, crate::DatabaseError> {
+        if self.incomplete_write.load(Ordering::Acquire) {
+            return Err(crate::DatabaseError::Other(
+                "state/trie write was interrupted; storage recovery is required".into(),
+            ));
+        }
         Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
         Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
+    }
+
+    fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+        Box::new(RocksWriteGuard {
+            _guard: self.snapshot_barrier.write(),
+            incomplete_write: &self.incomplete_write,
+            complete: false,
+        })
     }
 }
 
@@ -722,6 +793,226 @@ fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{address, b256, Bytes, U256};
+    use reth_db_api::{
+        cursor::{DbCursorRO, DbDupCursorRO},
+        transaction::{DbTx, DbTxMut},
+    };
+    use reth_primitives_traits::StorageEntry;
+    use reth_trie_common::{nested_trie::StorageNodeEntry, StoredNibbles, StoredNibblesSubKey};
+
+    #[test]
+    fn read_transaction_and_cursor_keep_their_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DatabaseEnv::open(
+            dir.path(),
+            DatabaseEnvKind::RW,
+            DatabaseArguments::new(ClientVersion::default()),
+        )
+        .unwrap();
+        let address = address!("0000000000000000000000000000000000000001");
+        let slot = b256!("0000000000000000000000000000000000000000000000000000000000000001");
+        let account_path = StoredNibbles::from(vec![1]);
+        let storage_path = StoredNibblesSubKey::from(vec![2]);
+
+        let writer = env.tx_mut().unwrap();
+        writer.put::<tables::Metadata>("snapshot-test".into(), vec![1]).unwrap();
+        writer
+            .put::<tables::PlainStorageState>(
+                address,
+                StorageEntry { key: slot, value: U256::from(1) },
+            )
+            .unwrap();
+        writer.put::<tables::AccountsTrieV2>(account_path.clone(), Bytes::from(vec![1])).unwrap();
+        writer
+            .put::<tables::StoragesTrieV2>(
+                slot,
+                StorageNodeEntry { path: storage_path.clone(), node: Bytes::from(vec![1]) },
+            )
+            .unwrap();
+        writer.commit().unwrap();
+
+        let reader = env.tx().unwrap();
+        assert_eq!(reader.snapshot_block_number().unwrap(), Some(0));
+        let mut cursor = reader.cursor_read::<tables::Metadata>().unwrap();
+        let mut dup_cursor = reader.cursor_dup_read::<tables::PlainStorageState>().unwrap();
+
+        let writer = env.tx_mut().unwrap();
+        writer.put::<tables::Metadata>("snapshot-test".into(), vec![2]).unwrap();
+        writer
+            .put::<tables::PlainStorageState>(
+                address,
+                StorageEntry { key: slot, value: U256::from(2) },
+            )
+            .unwrap();
+        writer.put::<tables::AccountsTrieV2>(account_path.clone(), Bytes::from(vec![2])).unwrap();
+        writer
+            .put::<tables::StoragesTrieV2>(
+                slot,
+                StorageNodeEntry { path: storage_path.clone(), node: Bytes::from(vec![2]) },
+            )
+            .unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(reader.get::<tables::Metadata>("snapshot-test".into()).unwrap(), Some(vec![1]));
+        assert_eq!(
+            reader.get::<tables::AccountsTrieV2>(account_path).unwrap(),
+            Some(Bytes::from(vec![1]))
+        );
+        assert_eq!(
+            reader.get::<tables::StoragesTrieV2>(slot).unwrap(),
+            Some(StorageNodeEntry { path: storage_path, node: Bytes::from(vec![1]) })
+        );
+        assert_eq!(cursor.get("snapshot-test".into()).unwrap().unwrap().1, vec![1]);
+        assert_eq!(
+            dup_cursor.get_by_key_subkey(address, slot).unwrap(),
+            Some(StorageEntry { key: slot, value: U256::from(1) })
+        );
+        drop(reader);
+        assert_eq!(cursor.get("snapshot-test".into()).unwrap().unwrap().1, vec![1]);
+        assert_eq!(
+            dup_cursor.get_by_key_subkey(address, slot).unwrap(),
+            Some(StorageEntry { key: slot, value: U256::from(1) })
+        );
+    }
+
+    #[test]
+    fn live_read_transaction_observes_later_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DatabaseEnv::open(
+            dir.path(),
+            DatabaseEnvKind::RW,
+            DatabaseArguments::new(ClientVersion::default()),
+        )
+        .unwrap();
+        let account_path = StoredNibbles::from(vec![1]);
+
+        let writer = env.tx_mut().unwrap();
+        writer.put::<tables::AccountsTrieV2>(account_path.clone(), Bytes::from(vec![1])).unwrap();
+        writer.commit().unwrap();
+
+        let snapshot = env.tx().unwrap();
+        let live = env.tx_live().unwrap();
+        assert_eq!(snapshot.snapshot_block_number().unwrap(), Some(0));
+        assert_eq!(live.snapshot_block_number().unwrap(), None);
+
+        let writer = env.tx_mut().unwrap();
+        writer.put::<tables::AccountsTrieV2>(account_path.clone(), Bytes::from(vec![2])).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(
+            snapshot.get::<tables::AccountsTrieV2>(account_path.clone()).unwrap(),
+            Some(Bytes::from(vec![1]))
+        );
+        assert_eq!(
+            live.get::<tables::AccountsTrieV2>(account_path).unwrap(),
+            Some(Bytes::from(vec![2]))
+        );
+    }
+
+    #[test]
+    fn read_view_waits_for_all_shard_commits() {
+        use std::{sync::mpsc, time::Duration};
+
+        let dir = tempfile::tempdir().unwrap();
+        let env = Arc::new(
+            DatabaseEnv::open(
+                dir.path(),
+                DatabaseEnvKind::RW,
+                DatabaseArguments::new(ClientVersion::default()),
+            )
+            .unwrap(),
+        );
+        let account_path = StoredNibbles::from(vec![1]);
+        let storage_path = StoredNibblesSubKey::from(vec![2]);
+        let slot = b256!("0000000000000000000000000000000000000000000000000000000000000001");
+
+        let mut guard = env.consistent_write();
+        let state_writer = env.tx_mut().unwrap();
+        state_writer.put::<tables::Metadata>("coordinated-read".into(), vec![1]).unwrap();
+        state_writer.commit().unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let reader_env = env.clone();
+        let reader_path = account_path.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let tx = reader_env.tx().unwrap();
+            result_tx
+                .send((
+                    tx.get::<tables::Metadata>("coordinated-read".into()).unwrap(),
+                    tx.get::<tables::AccountsTrieV2>(reader_path).unwrap(),
+                    tx.get::<tables::StoragesTrieV2>(slot).unwrap(),
+                ))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        let trie_writer = env.tx_mut().unwrap();
+        trie_writer.put::<tables::AccountsTrieV2>(account_path, Bytes::from(vec![2])).unwrap();
+        trie_writer
+            .put::<tables::StoragesTrieV2>(
+                slot,
+                StorageNodeEntry { path: storage_path.clone(), node: Bytes::from(vec![3]) },
+            )
+            .unwrap();
+        trie_writer.commit().unwrap();
+        guard.complete();
+        drop(guard);
+
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (
+                Some(vec![1]),
+                Some(Bytes::from(vec![2])),
+                Some(StorageNodeEntry { path: storage_path, node: Bytes::from(vec![3]) }),
+            )
+        );
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn interrupted_write_requires_recovery_before_new_read_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DatabaseEnv::open(
+            dir.path(),
+            DatabaseEnvKind::RW,
+            DatabaseArguments::new(ClientVersion::default()),
+        )
+        .unwrap();
+
+        drop(env.consistent_write());
+        assert!(env.tx().is_err());
+        assert!(env.tx_live().is_err());
+
+        let mut guard = env.consistent_write();
+        guard.recovered();
+        drop(guard);
+        assert!(env.tx().is_ok());
+        assert!(env.tx_live().is_ok());
+    }
+
+    #[test]
+    fn incomplete_stage_checkpoints_reject_new_read_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DatabaseEnv::open(
+            dir.path(),
+            DatabaseEnvKind::RW,
+            DatabaseArguments::new(ClientVersion::default()),
+        )
+        .unwrap();
+        let writer = env.tx_mut().unwrap();
+        let checkpoint = <tables::StageCheckpoints as Table>::Value::new(1);
+        writer.put::<tables::StageCheckpoints>("Execution".into(), checkpoint).unwrap();
+        writer.commit().unwrap();
+
+        assert!(env.tx().unwrap().snapshot_block_number().is_err());
+    }
 
     /// Returns the newest `OPTIONS-*` file RocksDB wrote for the instance at `db_dir`.
     /// It records the options each column family was actually opened with.

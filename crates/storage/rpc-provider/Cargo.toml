@@ -41,9 +41,11 @@ tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
 # other
 tracing.workspace = true
 parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
 
 # revm
 revm.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json.workspace = true

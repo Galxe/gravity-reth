@@ -169,6 +169,10 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for BlockchainProvider<N> {
         self.database.database_provider_ro()
     }
 
+    fn database_provider_live_ro(&self) -> ProviderResult<Self::Provider> {
+        self.database.database_provider_live_ro()
+    }
+
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
         self.database.database_provider_rw()
     }
@@ -197,6 +201,11 @@ impl<N: ProviderNodeTypes> HeaderProvider for BlockchainProvider<N> {
 
     fn header_by_number(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
         self.consistent_provider()?.header_by_number(num)
+    }
+
+    fn header_by_number_live(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
+        ConsistentProvider::new_live(self.database.clone(), self.canonical_in_memory_state())?
+            .header_by_number(num)
     }
 
     fn header_td(&self, hash: &BlockHash) -> ProviderResult<Option<U256>> {
@@ -514,6 +523,23 @@ impl<N: NodeTypesWithDB> ChainSpecProvider for BlockchainProvider<N> {
 }
 
 impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
+    fn state_by_block_id(&self, block_id: BlockId) -> ProviderResult<StateProviderBox> {
+        match block_id {
+            BlockId::Number(number_or_tag) => self.state_by_block_number_or_tag(number_or_tag),
+            BlockId::Hash(hash) => {
+                let block_hash = hash.block_hash;
+                let provider = self.consistent_provider()?;
+                let number = provider
+                    .block_number(block_hash)?
+                    .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
+                if provider.block_hash(number)? != Some(block_hash) {
+                    return Err(ProviderError::BlockHashNotFound(block_hash))
+                }
+                provider.into_state_provider_at_block_hash(block_hash)
+            }
+        }
+    }
+
     /// Storage provider for latest block
     fn latest(&self) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting latest block state provider");
@@ -768,7 +794,7 @@ mod tests {
         BlockWriter, CanonChainTracker, ProviderFactory, StaticFileProviderFactory,
         StaticFileWriter,
     };
-    use alloy_eips::{BlockHashOrNumber, BlockNumHash, BlockNumberOrTag};
+    use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumHash, BlockNumberOrTag};
     use alloy_primitives::{BlockNumber, TxNumber, B256};
     use itertools::Itertools;
     use rand::Rng;
@@ -784,7 +810,7 @@ mod tests {
         cursor::DbCursorRO,
         models::{AccountBeforeTx, StoredBlockBodyIndices},
         tables,
-        transaction::DbTx,
+        transaction::{DbTx, DbTxMut},
     };
     use reth_errors::ProviderError;
     use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
@@ -1338,6 +1364,15 @@ mod tests {
         let blocks = [database_blocks, in_memory_blocks].concat();
 
         assert_eq!(
+            provider.header_by_number_live(database_block.number)?,
+            Some(database_block.header().clone())
+        );
+        assert_eq!(
+            provider.header_by_number_live(in_memory_block.number)?,
+            Some(in_memory_block.header().clone())
+        );
+
+        assert_eq!(
             provider.header_td_by_number(database_block.number)?,
             Some(database_block.difficulty)
         );
@@ -1779,6 +1814,35 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn state_by_block_hash_rejects_noncanonical_header_number() -> eyre::Result<()> {
+        let mut rng = generators::rng();
+        let (provider, database_blocks, in_memory_blocks, _) =
+            provider_with_random_blocks(&mut rng, 2, 1, BlockRangeParams::default())?;
+        let db_block = &database_blocks[1];
+        let in_memory_block = &in_memory_blocks[0];
+
+        assert!(provider.state_by_block_id(BlockId::hash_canonical(db_block.hash())).is_ok());
+        assert!(provider
+            .state_by_block_id(BlockId::hash_canonical(in_memory_block.hash()))
+            .is_ok());
+
+        let noncanonical_hash = B256::random();
+        let db = provider.database.provider_rw()?;
+        db.tx_ref().put::<tables::HeaderNumbers>(noncanonical_hash, db_block.number)?;
+        db.commit()?;
+
+        for block_id in
+            [BlockId::hash(noncanonical_hash), BlockId::hash_canonical(noncanonical_hash)]
+        {
+            assert!(matches!(
+                provider.state_by_block_id(block_id),
+                Err(ProviderError::BlockHashNotFound(hash)) if hash == noncanonical_hash
+            ));
+        }
         Ok(())
     }
 
@@ -2576,7 +2640,10 @@ mod tests {
             |hash: B256,
              canonical_in_memory_state: CanonicalInMemoryState,
              factory: ProviderFactory<MockNodeTypesWithDB>| {
-                assert!(factory.transaction_by_hash(hash)?.is_some(), "should be in database");
+                assert!(
+                    factory.database_provider_live_ro()?.transaction_by_hash(hash)?.is_some(),
+                    "should be in database"
+                );
                 Ok::<_, ProviderError>(canonical_in_memory_state.transaction_by_hash(hash))
             };
 

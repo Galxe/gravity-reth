@@ -172,6 +172,14 @@ where
         let mut hashed_state = db.into_state();
         hashed_state.extend(record.hashed_state);
 
+        // The legacy witness algorithm reads the legacy trie. A V2-only writer can leave that
+        // trie behind, in which case its nodes cannot witness the requested parent state.
+        if witness_state_provider.state_root(Default::default())? !=
+            witness_state_provider.state_root_v2(Default::default())?
+        {
+            return Err(ProviderError::UnsupportedProvider)
+        }
+
         // Gather the state witness.
         let witness = if hashed_state.is_empty() {
             // If no state was accessed, at least the root node must be present.

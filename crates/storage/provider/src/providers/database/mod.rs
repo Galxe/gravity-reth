@@ -89,14 +89,19 @@ impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> 
 /// metadata entry is missing, unreadable, or the database can't be opened yet (a fresh datadir
 /// is initialized by `init_genesis`, which also refreshes this cache).
 fn load_storage_settings<DB: Database>(db: &DB) -> GravityStorageSettings {
+    fn read<T: DbTx>(tx: &T) -> Option<GravityStorageSettings> {
+        tx.get::<tables::Metadata>(metadata_keys::GRAVITY_STORAGE_SETTINGS.to_string())
+            .ok()
+            .flatten()
+            .and_then(|bytes| GravityStorageSettings::from_metadata_bytes(&bytes))
+    }
+
     db.tx()
         .ok()
-        .and_then(|tx| {
-            tx.get::<tables::Metadata>(metadata_keys::GRAVITY_STORAGE_SETTINGS.to_string())
-                .ok()
-                .flatten()
-        })
-        .and_then(|bytes| GravityStorageSettings::from_metadata_bytes(&bytes))
+        .and_then(|tx| read(&tx))
+        // Startup recovery may have incomplete stage checkpoints, which deliberately prevents
+        // opening a consistent RO snapshot. Metadata is independent of those stage writes.
+        .or_else(|| db.tx_mut().ok().and_then(|tx| read(&tx)))
         .unwrap_or_else(GravityStorageSettings::legacy)
 }
 
@@ -241,6 +246,17 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for ProviderFactory<N> {
 
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
         self.provider()
+    }
+
+    fn database_provider_live_ro(&self) -> ProviderResult<Self::Provider> {
+        Ok(DatabaseProvider::new(
+            self.db.tx_live()?,
+            self.chain_spec.clone(),
+            self.static_file_provider.clone(),
+            self.prune_modes.clone(),
+            self.storage.clone(),
+            self.storage_settings.clone(),
+        ))
     }
 
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
