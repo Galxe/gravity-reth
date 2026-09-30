@@ -215,7 +215,6 @@ fn v2_simulation_root_with_updates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_errors::ProviderError;
     use reth_storage_api::noop::NoopProvider;
     use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 
@@ -257,9 +256,9 @@ mod tests {
         let legacy = StateProviderTraitObjWrapper::new(Box::new(NoopProvider::default()));
         assert!(legacy.state_root_with_updates(HashedPostState::default()).is_ok());
         let simulation = legacy.for_v2_simulation();
-        assert!(matches!(
-            simulation.state_root_with_updates(HashedPostState::default()),
-            Err(ProviderError::UnsupportedProvider)
-        ));
+        let (root, updates) =
+            simulation.state_root_with_updates(HashedPostState::default()).unwrap();
+        assert_eq!(root, B256::ZERO);
+        assert!(updates.is_empty());
     }
 }

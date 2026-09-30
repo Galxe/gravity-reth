@@ -92,6 +92,7 @@ test-utils = [
     "reth-db/test-utils",
     "reth-nippy-jar/test-utils",
     "reth-trie/test-utils",
+    "reth-trie-common/test-utils",
     "reth-chain-state/test-utils",
     "reth-ethereum-engine-primitives",
     "reth-ethereum-primitives/test-utils",

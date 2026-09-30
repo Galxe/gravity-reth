@@ -57,7 +57,7 @@ impl<'a, N: NodePrimitives> MemoryOverlayStateProviderRef<'a, N> {
     }
 
     /// Skip header-root verification for a locally built pending block without a computed root.
-    pub fn without_proof_header_root_check(mut self) -> Self {
+    pub const fn without_proof_header_root_check(mut self) -> Self {
         self.verify_proof_header_root = false;
         self
     }

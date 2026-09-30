@@ -31,7 +31,6 @@ reth-revm.workspace = true
 reth-stages-api.workspace = true
 reth-storage-errors.workspace = true
 reth-tasks.workspace = true
-reth-trie-db.workspace = true
 reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
 reth-pipe-exec-layer-event-bus.workspace = true
@@ -142,7 +141,6 @@ test-utils = [
     "reth-trie/test-utils",
     "reth-trie-sparse/test-utils",
     "reth-prune-types?/test-utils",
-    "reth-trie-db/test-utils",
     "reth-trie-parallel/test-utils",
     "reth-ethereum-primitives/test-utils",
     "reth-node-ethereum/test-utils",
