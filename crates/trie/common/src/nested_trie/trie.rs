@@ -75,15 +75,26 @@ where
     /// Get proof for leaf node with `path`.
     /// Returns a vector of `TrieNodes` from root to the target path.
     pub fn get_proof(&mut self, path: Nibbles) -> Result<Vec<TrieNode>, DatabaseError> {
+        Ok(self.get_proof_with_paths(path)?.into_iter().map(|(_, node)| node).collect())
+    }
+
+    /// Get proof nodes with their full trie paths, for merging proofs of multiple targets.
+    pub fn get_proof_with_paths(
+        &mut self,
+        path: Nibbles,
+    ) -> Result<Vec<(Nibbles, TrieNode)>, DatabaseError> {
         let mut proof_nodes = Vec::new();
         if let Some(mut root) = self.root.take() {
             let mut buf = Vec::new();
             // make sure no dirty trie node
             root.build_hash(&mut buf);
-            self.get_proof_inner(&mut root, Nibbles::new(), path, &mut proof_nodes)?;
+            let result = self.get_proof_inner(&mut root, Nibbles::new(), path, &mut proof_nodes);
             self.root = Some(root);
+            result?;
+        } else {
+            return Ok(vec![(Nibbles::new(), TrieNode::EmptyRoot)]);
         }
-        Ok(proof_nodes.into_iter().map(Into::into).collect())
+        Ok(proof_nodes.into_iter().map(|(path, node)| (path, node.into())).collect())
     }
 
     fn get_proof_inner(
@@ -91,7 +102,7 @@ where
         node: &mut Node,
         prefix: Nibbles,
         key: Nibbles,
-        proof: &mut Vec<Node>,
+        proof: &mut Vec<(Nibbles, Node)>,
     ) -> Result<(), DatabaseError> {
         match node {
             Node::FullNode { children, .. } => {
@@ -102,7 +113,10 @@ where
                         convert[nibble] = Some(Box::new(Node::HashNode(rlp)));
                     }
                 }
-                proof.push(Node::FullNode { children: convert, flags: NodeFlag::default() });
+                proof.push((
+                    prefix,
+                    Node::FullNode { children: convert, flags: NodeFlag::default() },
+                ));
                 if key.is_empty() {
                     return Ok(());
                 }
@@ -118,17 +132,25 @@ where
             Node::ShortNode { key: node_key, value: node_value, .. } => {
                 let matchlen = key.common_prefix_length(node_key);
                 if let Node::ValueNode(value) = node_value.as_ref() {
-                    proof.push(Node::ShortNode {
-                        key: *node_key,
-                        value: Box::new(Node::ValueNode(value.clone())),
-                        flags: NodeFlag::default(),
-                    });
+                    proof.push((
+                        prefix,
+                        Node::ShortNode {
+                            key: *node_key,
+                            value: Box::new(Node::ValueNode(value.clone())),
+                            flags: NodeFlag::default(),
+                        },
+                    ));
                 } else {
-                    proof.push(Node::ShortNode {
-                        key: *node_key,
-                        value: Box::new(Node::HashNode(node_value.cached_rlp().unwrap().clone())),
-                        flags: NodeFlag::default(),
-                    });
+                    proof.push((
+                        prefix,
+                        Node::ShortNode {
+                            key: *node_key,
+                            value: Box::new(Node::HashNode(
+                                node_value.cached_rlp().unwrap().clone(),
+                            )),
+                            flags: NodeFlag::default(),
+                        },
+                    ));
                     if matchlen != node_key.len() {
                         return Ok(());
                     }
@@ -144,7 +166,9 @@ where
                 Ok(())
             }
             Node::HashNode(rlp) => {
-                let mut real_node = self.reader.read(&prefix)?.unwrap();
+                let mut real_node = self.reader.read(&prefix)?.ok_or_else(|| {
+                    DatabaseError::Other(format!("missing trie node at path {prefix:?}"))
+                })?;
                 real_node.set_rlp(rlp.clone());
                 self.get_proof_inner(&mut real_node, prefix, key, proof)?;
                 *node = real_node;

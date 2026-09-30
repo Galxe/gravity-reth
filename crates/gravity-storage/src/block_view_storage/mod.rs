@@ -81,14 +81,14 @@ where
 
     fn get_state_view(&self) -> ProviderResult<Self::StateView> {
         Ok(RawBlockViewProvider::new(
-            self.client.database_provider_ro()?.into_tx(),
+            self.client.database_provider_live_ro()?.into_tx(),
             Some(self.cache.clone()),
             self.block_number_to_id.clone(),
         ))
     }
 
     fn state_root(&self, hashed_state: &HashedPostState) -> ProviderResult<(B256, TrieUpdatesV2)> {
-        let tx = self.client.database_provider_ro()?.into_tx();
+        let tx = self.client.database_provider_live_ro()?.into_tx();
         let nested_hash = NestedStateRoot::new(&tx, Some(self.cache.clone()));
         nested_hash.calculate(hashed_state)
     }
@@ -120,7 +120,7 @@ where
     }
 
     fn randomness_by_height(&self, block_number: u64) -> ProviderResult<Option<B256>> {
-        Ok(self.client.header_by_number(block_number)?.and_then(|header| header.mix_hash()))
+        Ok(self.client.header_by_number_live(block_number)?.and_then(|header| header.mix_hash()))
     }
 }
 
@@ -284,16 +284,22 @@ mod tests {
     use reth_db_api::mock::{DatabaseMock, TxMock};
     use reth_primitives_traits::SealedHeader;
     use reth_provider::{test_utils::MockEthProvider, BlockHashReader, BlockIdReader};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Debug)]
     struct TestClient {
         provider: MockEthProvider,
         headers: BTreeMap<u64, Header>,
+        live_header_calls: Arc<AtomicUsize>,
     }
 
     impl TestClient {
         fn new(provider: MockEthProvider) -> Self {
-            Self { provider, headers: BTreeMap::new() }
+            Self {
+                provider,
+                headers: BTreeMap::new(),
+                live_header_calls: Arc::new(AtomicUsize::new(0)),
+            }
         }
 
         fn with_header(mut self, number: u64, header: Header) -> Self {
@@ -370,6 +376,11 @@ mod tests {
                 return Ok(Some(header.clone()))
             }
             self.provider.header_by_number(num)
+        }
+
+        fn header_by_number_live(&self, num: u64) -> ProviderResult<Option<Self::Header>> {
+            self.live_header_calls.fetch_add(1, Ordering::Relaxed);
+            self.header_by_number(num)
         }
 
         fn header_td(&self, hash: &BlockHash) -> ProviderResult<Option<U256>> {
@@ -494,12 +505,17 @@ mod tests {
     fn randomness_by_height_reads_client_header_provider_before_db_provider() {
         let provider = MockEthProvider::new();
         let randomness = B256::repeat_byte(0x33);
-        let storage = BlockViewStorage::new(
-            TestClient::new(provider)
-                .with_header(7, Header { number: 7, mix_hash: randomness, ..Default::default() }),
+        provider.add_header(
+            B256::repeat_byte(0x44),
+            Header { number: 7, mix_hash: B256::repeat_byte(0x55), ..Default::default() },
         );
+        let client = TestClient::new(provider)
+            .with_header(7, Header { number: 7, mix_hash: randomness, ..Default::default() });
+        let live_header_calls = client.live_header_calls.clone();
+        let storage = BlockViewStorage::new(client);
 
         assert_eq!(GravityStorage::randomness_by_height(&storage, 7).unwrap(), Some(randomness));
+        assert_eq!(live_header_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]

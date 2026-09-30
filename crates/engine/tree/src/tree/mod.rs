@@ -14,6 +14,7 @@ use alloy_rpc_types_engine::{
 use crossbeam_channel::{Receiver, Sender};
 use error::{InsertBlockError, InsertBlockFatalError};
 use gravity_primitives::get_gravity_config;
+#[cfg(test)]
 use persistence_state::CurrentPersistenceAction;
 use reth_chain_state::{
     CanonicalInMemoryState, ExecutedBlock, ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates,
@@ -31,17 +32,18 @@ use reth_payload_primitives::{BuiltPayload, NewPayloadError, PayloadTypes};
 use reth_pipe_exec_layer_event_bus::{
     MakeCanonicalEvent, PipeExecLayerEvent, PipeExecPrimitives, WaitForPersistenceEvent,
 };
-use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader};
+use reth_primitives_traits::{
+    GotExpected, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
+};
 use reth_provider::{
-    BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HashedPostStateProvider,
-    ProviderError, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
-    TransactionVariant,
+    BlockReader, DatabaseProviderFactory, HashedPostStateProvider, ProviderError, StateProviderBox,
+    StateProviderFactory, StateReader, StateRootProvider, TransactionVariant,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::ControlFlow;
+use reth_storage_errors::provider::RootMismatch;
 use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
-use reth_trie::{HashedPostState, TrieInput};
-use reth_trie_db::DatabaseHashedPostState;
+use reth_trie::updates::TrieUpdates;
 use revm::interpreter::debug_unreachable;
 use state::TreeState;
 use std::{
@@ -83,7 +85,6 @@ pub use payload_processor::*;
 pub use payload_validator::{BasicEngineValidator, EngineValidator};
 pub use persistence_state::PersistenceState;
 pub use reth_engine_primitives::TreeConfig;
-use reth_trie::KeccakKeyHasher;
 
 pub mod state;
 
@@ -1323,29 +1324,6 @@ where
         Ok(true)
     }
 
-    /// Returns the persisting kind for the input block.
-    fn persisting_kind_for(&self, block: BlockWithParent) -> PersistingKind {
-        // Check that we're currently persisting.
-        let Some(action) = self.persistence_state.current_action() else {
-            return PersistingKind::NotPersisting
-        };
-        // Check that the persistince action is saving blocks, not removing them.
-        let CurrentPersistenceAction::SavingBlocks { highest } = action else {
-            return PersistingKind::PersistingNotDescendant
-        };
-
-        // The block being validated can only be a descendant if its number is higher than
-        // the highest block persisting. Otherwise, it's likely a fork of a lower block.
-        if block.block.number > highest.number &&
-            self.state.tree_state.is_descendant(*highest, block)
-        {
-            return PersistingKind::PersistingDescendant
-        }
-
-        // In all other cases, the block is not a descendant.
-        PersistingKind::PersistingNotDescendant
-    }
-
     /// Invoked when we receive a new forkchoice update message. Calls into the blockchain tree
     /// to resolve chain forks and ensure that the Execution Layer is working with the latest valid
     /// chain.
@@ -2332,19 +2310,21 @@ where
                 ))?
                 .build()?;
 
-            let mut trie_input = self.compute_trie_input(
-                self.persisting_kind_for(block.recovered_block.block_with_parent()),
-                self.provider.database_provider_ro()?,
-                block.recovered_block().parent_hash(),
-                None,
-            )?;
-            // Extend with block we are generating trie updates for.
-            trie_input.append_ref(block.hashed_state());
-            let (_root, updates) = provider.state_root_from_nodes_with_updates(trie_input)?;
-            debug_assert_eq!(_root, block.recovered_block().state_root());
+            let (root, updates) =
+                provider.state_root_with_updates_v2(block.hashed_state().clone())?;
+            let expected = block.recovered_block().state_root();
+            if root != expected {
+                return Err(ProviderError::StateRootMismatch(Box::new(RootMismatch {
+                    root: GotExpected { got: root, expected },
+                    block_number: block.recovered_block().number(),
+                    block_hash: block.recovered_block().hash(),
+                }))
+                .into())
+            }
+            let trie_updates: Arc<TrieUpdates> = Arc::default();
+            let trie_updates_v2 = Arc::new(updates);
 
-            // Update trie updates in both tree state and blocks to persist that we return
-            let trie_updates = Arc::new(updates);
+            // Update both copies so persistence sees the validated updates.
             let tree_state_block = self
                 .state
                 .tree_state
@@ -2353,6 +2333,8 @@ where
                 .expect("blocks to persist are constructed from tree state blocks");
             tree_state_block.trie.set_present(trie_updates.clone());
             block.trie.set_present(trie_updates);
+            tree_state_block.triev2 = trie_updates_v2.clone();
+            block.triev2 = trie_updates_v2;
         }
 
         Ok(blocks_to_persist)
@@ -2823,16 +2805,15 @@ where
             let old = old
                 .iter()
                 .filter_map(|block| {
-                    let trie = self
-                        .state
+                    self.state
                         .tree_state
                         .persisted_trie_updates
-                        .get(&block.recovered_block.hash())?
-                        .1
-                        .clone();
+                        .get(&block.recovered_block.hash())?;
                     Some(ExecutedBlockWithTrieUpdates {
                         block: block.clone(),
-                        trie: ExecutedTrieUpdates::Present(trie),
+                        // The legacy cache has no V2 nodes. Recompute updates against the
+                        // current canonical parent before writing.
+                        trie: ExecutedTrieUpdates::Missing,
                         triev2: Default::default(),
                     })
                 })
@@ -3182,109 +3163,6 @@ where
             .record(block_insert_start.elapsed().as_secs_f64());
         debug!(target: "engine::tree", block=?block_num_hash, "Finished inserting block");
         Ok(InsertPayloadOk::Inserted(BlockStatus::Valid))
-    }
-
-    /// Computes the trie input at the provided parent hash.
-    ///
-    /// The goal of this function is to take in-memory blocks and generate a [`TrieInput`] that
-    /// serves as an overlay to the database blocks.
-    ///
-    /// It works as follows:
-    /// 1. Collect in-memory blocks that are descendants of the provided parent hash using
-    ///    [`TreeState::blocks_by_hash`].
-    /// 2. If the persistence is in progress, and the block that we're computing the trie input for
-    ///    is a descendant of the currently persisting blocks, we need to be sure that in-memory
-    ///    blocks are not overlapping with the database blocks that may have been already persisted.
-    ///    To do that, we're filtering out in-memory blocks that are lower than the highest database
-    ///    block.
-    /// 3. Once in-memory blocks are collected and optionally filtered, we compute the
-    ///    [`HashedPostState`] from them.
-    fn compute_trie_input<TP: DBProvider + BlockNumReader>(
-        &self,
-        persisting_kind: PersistingKind,
-        provider: TP,
-        parent_hash: B256,
-        allocated_trie_input: Option<TrieInput>,
-    ) -> ProviderResult<TrieInput> {
-        // get allocated trie input or use a default trie input
-        let mut input = allocated_trie_input.unwrap_or_default();
-
-        let best_block_number = provider.best_block_number()?;
-
-        let (mut historical, mut blocks) = self
-            .state
-            .tree_state
-            .blocks_by_hash(parent_hash)
-            .map_or_else(|| (parent_hash.into(), vec![]), |(hash, blocks)| (hash.into(), blocks));
-
-        // If the current block is a descendant of the currently persisting blocks, then we need to
-        // filter in-memory blocks, so that none of them are already persisted in the database.
-        if persisting_kind.is_descendant() {
-            // Iterate over the blocks from oldest to newest.
-            while let Some(block) = blocks.last() {
-                let recovered_block = block.recovered_block();
-                if recovered_block.number() <= best_block_number {
-                    // Remove those blocks that lower than or equal to the highest database
-                    // block.
-                    blocks.pop();
-                } else {
-                    // If the block is higher than the best block number, stop filtering, as it's
-                    // the first block that's not in the database.
-                    break
-                }
-            }
-
-            historical = if let Some(block) = blocks.last() {
-                // If there are any in-memory blocks left after filtering, set the anchor to the
-                // parent of the oldest block.
-                (block.recovered_block().number() - 1).into()
-            } else {
-                // Otherwise, set the anchor to the original provided parent hash.
-                parent_hash.into()
-            };
-        }
-
-        if blocks.is_empty() {
-            debug!(target: "engine::tree", %parent_hash, "Parent found on disk");
-        } else {
-            debug!(target: "engine::tree", %parent_hash, %historical, blocks = blocks.len(), "Parent found in memory");
-        }
-
-        // Convert the historical block to the block number.
-        let block_number = provider
-            .convert_hash_or_number(historical)?
-            .ok_or_else(|| ProviderError::BlockHashNotFound(historical.as_hash().unwrap()))?;
-
-        // Retrieve revert state for historical block.
-        let revert_state = if block_number == best_block_number {
-            // We do not check against the `last_block_number` here because
-            // `HashedPostState::from_reverts` only uses the database tables, and not static files.
-            debug!(target: "engine::tree", block_number, best_block_number, "Empty revert state");
-            HashedPostState::default()
-        } else {
-            let revert_state = HashedPostState::from_reverts::<KeccakKeyHasher>(
-                provider.tx_ref(),
-                block_number + 1,
-            )
-            .map_err(ProviderError::from)?;
-            debug!(
-                target: "engine::tree",
-                block_number,
-                best_block_number,
-                accounts = revert_state.accounts.len(),
-                storages = revert_state.storages.len(),
-                "Non-empty revert state"
-            );
-            revert_state
-        };
-        input.append(revert_state);
-
-        // Extend with contents of parent in-memory blocks.
-        input.extend_with_blocks(
-            blocks.iter().rev().map(|block| (block.hashed_state(), block.trie_updates())),
-        );
-
-        Ok(input)
     }
 
     /// Handles an error that occurred while inserting a block.

@@ -22,26 +22,25 @@ use reth_chainspec::{
 };
 use reth_engine_primitives::ConsensusEngineEvent;
 use reth_errors::RethError;
-use reth_evm::{block::BlockExecutor, execute::Executor, ConfigureEvm, EvmEnvFor};
+use reth_evm::{block::BlockExecutor, ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::{
     Block as BlockTrait, BlockBody, BlockTy, ReceiptWithBloom, RecoveredBlock,
 };
-use reth_revm::{db::State, witness::ExecutionWitnessRecord};
-use reth_rpc_api::DebugApiServer;
+use reth_rpc_api::{DebugApiServer, RpcTrieUpdatesV2};
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
-    helpers::{pre_alpha_epoch_block::is_pre_alpha_dkg_epoch_block, EthTransactions, TraceExt},
+    helpers::{EthTransactions, TraceExt},
     FromEthApiError, FromEvmError, RpcConvert, RpcNodeCore,
 };
 use reth_rpc_eth_types::{EthApiError, StateCacheDb};
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use reth_storage_api::{
     BlockIdReader, BlockReaderIdExt, HashedPostStateProvider, HeaderProvider, ProviderBlock,
-    ReceiptProviderIdExt, StateProofProvider, StateProviderFactory, StateRootProvider,
-    StorageRootProvider, TransactionVariant,
+    ReceiptProviderIdExt, StateProviderFactory, StateRootProvider, StorageRootProvider,
+    TransactionVariant,
 };
 use reth_tasks::{pool::BlockingTaskGuard, Runtime};
-use reth_trie_common::{updates::TrieUpdates, HashedPostState, HashedStorage};
+use reth_trie_common::{HashedPostState, HashedStorage};
 use revm::{
     context::Block, database::states::bundle_state::BundleRetention, Database, DatabaseCommit,
 };
@@ -569,73 +568,14 @@ where
         self.debug_execution_witness_for_block(block).await
     }
 
-    /// Generates an execution witness, using the given recovered block.
+    /// V2 trie witnesses are not available yet.
     pub async fn debug_execution_witness_for_block(
         &self,
-        block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
+        _block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
     ) -> Result<ExecutionWitness, Eth::Error> {
-        // The witness comes from re-executing the body as a standalone block, which cannot
-        // include the `onBlockStart` such a block executed outside its body.
-        if is_pre_alpha_dkg_epoch_block(self.provider().chain_spec().as_ref(), &block) {
-            return Err(Eth::Error::from_eth_err(EthApiError::Unsupported(
-                "execution witness is unavailable for a pre-Alpha DKG epoch-change block: its \
-                 body omits the executed onBlockStart metadata transaction",
-            )))
-        }
-
-        let block_number = block.header().number();
-
-        let (mut exec_witness, lowest_block_number) = self
-            .eth_api()
-            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
-                let block_executor = eth_api.evm_config().executor(&mut db);
-
-                let mut witness_record = ExecutionWitnessRecord::default();
-
-                let _ = block_executor
-                    .execute_with_state_closure(&block, |statedb: &State<_>| {
-                        witness_record.record_executed_state(statedb);
-                    })
-                    .map_err(|err| EthApiError::Internal(err.into()))?;
-
-                let ExecutionWitnessRecord { hashed_state, codes, keys, lowest_block_number } =
-                    witness_record;
-
-                let state = db
-                    .database
-                    .0
-                    .witness(Default::default(), hashed_state)
-                    .map_err(EthApiError::from)?;
-                Ok((
-                    ExecutionWitness { state, codes, keys, ..Default::default() },
-                    lowest_block_number,
-                ))
-            })
-            .await?;
-
-        let smallest = match lowest_block_number {
-            Some(smallest) => smallest,
-            None => {
-                // Return only the parent header, if there were no calls to the
-                // BLOCKHASH opcode.
-                block_number.saturating_sub(1)
-            }
-        };
-
-        let range = smallest..block_number;
-        exec_witness.headers = self
-            .provider()
-            .headers_range(range)
-            .map_err(EthApiError::from)?
-            .into_iter()
-            .map(|header| {
-                let mut serialized_header = Vec::new();
-                header.encode(&mut serialized_header);
-                serialized_header.into()
-            })
-            .collect();
-
-        Ok(exec_witness)
+        Err(Eth::Error::from_eth_err(EthApiError::Unsupported(
+            "execution witness requires V2 trie witness support",
+        )))
     }
 
     /// Returns account information, including the storage root, after replaying the block through
@@ -772,7 +712,7 @@ where
         &self,
         hashed_state: HashedPostState,
         block_id: Option<BlockId>,
-    ) -> Result<(B256, TrieUpdates), Eth::Error> {
+    ) -> Result<(B256, RpcTrieUpdatesV2), Eth::Error> {
         self.inner
             .eth_api
             .spawn_blocking_io(move |this| {
@@ -780,7 +720,10 @@ where
                     .provider()
                     .state_by_block_id(block_id.unwrap_or_default())
                     .map_err(Eth::Error::from_eth_err)?;
-                state.state_root_with_updates(hashed_state).map_err(Eth::Error::from_eth_err)
+                let (root, updates) = state
+                    .state_root_with_updates_v2(hashed_state)
+                    .map_err(Eth::Error::from_eth_err)?;
+                Ok((root, updates.into()))
             })
             .await
     }
@@ -1215,7 +1158,7 @@ where
         &self,
         hashed_state: HashedPostState,
         block_id: Option<BlockId>,
-    ) -> RpcResult<(B256, TrieUpdates)> {
+    ) -> RpcResult<(B256, RpcTrieUpdatesV2)> {
         Self::debug_state_root_with_updates(self, hashed_state, block_id).await.map_err(Into::into)
     }
 

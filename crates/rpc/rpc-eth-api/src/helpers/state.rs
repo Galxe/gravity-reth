@@ -42,6 +42,7 @@ pub trait EthState: LoadState + SpawnBlocking {
             .provider()
             .block_number_for_id(block_id)
             .map_err(Self::Error::from_eth_err)?
+            .or_else(|| block_id.is_pending().then_some(chain_info.best_number))
             .ok_or(EthApiError::HeaderNotFound(block_id))?;
         if chain_info.best_number.saturating_sub(block_number) > self.max_proof_window() {
             return Err(EthApiError::ExceedsMaxProofWindow.into())

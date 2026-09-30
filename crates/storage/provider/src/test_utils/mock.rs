@@ -37,8 +37,9 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::{ConsistentViewError, ProviderError, ProviderResult};
 use reth_trie::{
-    updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
-    MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
+    updates::{TrieUpdates, TrieUpdatesV2},
+    AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
+    StorageProof, TrieInput,
 };
 use std::{
     collections::BTreeMap,
@@ -64,6 +65,8 @@ pub struct MockEthProvider<T: NodePrimitives = EthPrimitives, ChainSpec = reth_c
     pub chain_spec: Arc<ChainSpec>,
     /// Local state roots
     pub state_roots: Arc<Mutex<Vec<B256>>>,
+    /// V2 root results supplied by tests that exercise V2 persistence.
+    pub state_root_v2_results: Arc<Mutex<Vec<(B256, TrieUpdatesV2)>>>,
     /// Local block body indices store
     pub block_body_indices: Arc<Mutex<HashMap<BlockNumber, StoredBlockBodyIndices>>>,
     tx: TxMock,
@@ -82,6 +85,7 @@ where
             accounts: self.accounts.clone(),
             chain_spec: self.chain_spec.clone(),
             state_roots: self.state_roots.clone(),
+            state_root_v2_results: self.state_root_v2_results.clone(),
             block_body_indices: self.block_body_indices.clone(),
             tx: self.tx.clone(),
             prune_modes: self.prune_modes.clone(),
@@ -99,6 +103,7 @@ impl<T: NodePrimitives> MockEthProvider<T, reth_chainspec::ChainSpec> {
             accounts: Default::default(),
             chain_spec: Arc::new(reth_chainspec::ChainSpecBuilder::mainnet().build()),
             state_roots: Default::default(),
+            state_root_v2_results: Default::default(),
             block_body_indices: Default::default(),
             tx: Default::default(),
             prune_modes: Default::default(),
@@ -174,6 +179,11 @@ impl<T: NodePrimitives, ChainSpec> MockEthProvider<T, ChainSpec> {
         self.state_roots.lock().push(state_root);
     }
 
+    /// Add a V2 root and its trie updates for the next V2 root calculation.
+    pub fn add_state_root_v2_result(&self, root: B256, updates: TrieUpdatesV2) {
+        self.state_root_v2_results.lock().push((root, updates));
+    }
+
     /// Set chain spec.
     pub fn with_chain_spec<C>(self, chain_spec: C) -> MockEthProvider<T, C> {
         MockEthProvider {
@@ -183,6 +193,7 @@ impl<T: NodePrimitives, ChainSpec> MockEthProvider<T, ChainSpec> {
             accounts: self.accounts,
             chain_spec: Arc::new(chain_spec),
             state_roots: self.state_roots,
+            state_root_v2_results: self.state_root_v2_results,
             block_body_indices: self.block_body_indices,
             tx: self.tx,
             prune_modes: self.prune_modes,
@@ -784,6 +795,13 @@ where
     T: NodePrimitives,
     ChainSpec: Send + Sync,
 {
+    fn state_root_with_updates_v2(
+        &self,
+        _state: HashedPostState,
+    ) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        self.state_root_v2_results.lock().pop().ok_or(ProviderError::UnsupportedProvider)
+    }
+
     fn state_root(&self, _state: HashedPostState) -> ProviderResult<B256> {
         Ok(self.state_roots.lock().pop().unwrap_or_default())
     }

@@ -42,7 +42,7 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
                     .map_err(Self::Error::from_eth_err)?;
 
                 let mut db = State::builder()
-                    .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
+                    .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper::new(state)))
                     .with_bal_builder()
                     .build();
 

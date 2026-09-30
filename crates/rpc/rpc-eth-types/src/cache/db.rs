@@ -5,7 +5,9 @@
 use alloy_primitives::{Address, B256, U256};
 use reth_errors::ProviderResult;
 use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::{BytecodeReader, HashedPostStateProvider, StateProvider, StateProviderBox};
+use reth_storage_api::{
+    BytecodeReader, HashedPostStateProvider, StateProvider, StateProviderBox, StateRootProvider,
+};
 use reth_trie::{HashedStorage, MultiProofTargets};
 use revm::database::{BundleState, State};
 
@@ -19,9 +21,22 @@ pub type StateCacheDb = State<StateProviderDatabase<StateProviderTraitObjWrapper
 /// [`StateProvider`] trait objects. This type is a workaround which should help the compiler to
 /// understand that there are no lifetimes involved.
 #[expect(missing_debug_implementations)]
-pub struct StateProviderTraitObjWrapper(pub StateProviderBox);
+pub struct StateProviderTraitObjWrapper(pub StateProviderBox, bool);
 
-impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper {
+impl StateProviderTraitObjWrapper {
+    /// Wraps a state provider for RPC execution.
+    pub fn new(provider: StateProviderBox) -> Self {
+        Self(provider, false)
+    }
+
+    /// Uses the V2 root in simulated blocks; their legacy trie updates are never persisted.
+    pub const fn for_v2_simulation(mut self) -> Self {
+        self.1 = true;
+        self
+    }
+}
+
+impl StateRootProvider for StateProviderTraitObjWrapper {
     fn state_root(
         &self,
         hashed_state: reth_trie::HashedPostState,
@@ -40,7 +55,18 @@ impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper {
         &self,
         hashed_state: reth_trie::HashedPostState,
     ) -> reth_errors::ProviderResult<(B256, reth_trie::updates::TrieUpdates)> {
-        self.0.state_root_with_updates(hashed_state)
+        if self.1 {
+            v2_simulation_root_with_updates(&self.0, hashed_state)
+        } else {
+            self.0.state_root_with_updates(hashed_state)
+        }
+    }
+
+    fn state_root_with_updates_v2(
+        &self,
+        hashed_state: reth_trie::HashedPostState,
+    ) -> reth_errors::ProviderResult<(B256, reth_trie::updates::TrieUpdatesV2)> {
+        self.0.state_root_with_updates_v2(hashed_state)
     }
 
     fn state_root_from_nodes_with_updates(
@@ -176,5 +202,63 @@ impl BytecodeReader for StateProviderTraitObjWrapper {
         code_hash: &B256,
     ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Bytecode>> {
         self.0.bytecode_by_hash(code_hash)
+    }
+}
+
+fn v2_simulation_root_with_updates(
+    provider: &impl StateRootProvider,
+    hashed_state: reth_trie::HashedPostState,
+) -> ProviderResult<(B256, reth_trie::updates::TrieUpdates)> {
+    provider.state_root(hashed_state).map(|root| (root, Default::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_storage_api::noop::NoopProvider;
+    use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
+
+    struct TestRoot(B256);
+
+    impl StateRootProvider for TestRoot {
+        fn state_root(&self, _state: HashedPostState) -> ProviderResult<B256> {
+            Ok(self.0)
+        }
+
+        fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {
+            Ok(B256::ZERO)
+        }
+
+        fn state_root_with_updates(
+            &self,
+            _state: HashedPostState,
+        ) -> ProviderResult<(B256, TrieUpdates)> {
+            Ok((B256::ZERO, TrieUpdates::default()))
+        }
+
+        fn state_root_from_nodes_with_updates(
+            &self,
+            _input: TrieInput,
+        ) -> ProviderResult<(B256, TrieUpdates)> {
+            Ok((B256::ZERO, TrieUpdates::default()))
+        }
+    }
+
+    #[test]
+    fn simulation_root_uses_v2_without_persisted_updates() {
+        let expected = B256::repeat_byte(0x42);
+        let provider = TestRoot(expected);
+        let (root, updates) =
+            v2_simulation_root_with_updates(&provider, HashedPostState::default()).unwrap();
+        assert_eq!(root, expected);
+        assert!(updates.is_empty());
+
+        let legacy = StateProviderTraitObjWrapper::new(Box::new(NoopProvider::default()));
+        assert!(legacy.state_root_with_updates(HashedPostState::default()).is_ok());
+        let simulation = legacy.for_v2_simulation();
+        let (root, updates) =
+            simulation.state_root_with_updates(HashedPostState::default()).unwrap();
+        assert_eq!(root, B256::ZERO);
+        assert!(updates.is_empty());
     }
 }

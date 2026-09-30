@@ -69,6 +69,7 @@ reth-db = { workspace = true, features = ["test-utils"] }
 reth-primitives-traits = { workspace = true, features = ["arbitrary", "test-utils"] }
 reth-chain-state = { workspace = true, features = ["test-utils"] }
 reth-trie = { workspace = true, features = ["test-utils"] }
+reth-trie-common = { workspace = true, features = ["eip1186"] }
 reth-testing-utils.workspace = true
 reth-ethereum-engine-primitives.workspace = true
 reth-ethereum-primitives.workspace = true
@@ -83,6 +84,7 @@ rand.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
 
 alloy-consensus.workspace = true
+alloy-serde.workspace = true
 
 [features]
 pipe_test = []
@@ -90,6 +92,7 @@ test-utils = [
     "reth-db/test-utils",
     "reth-nippy-jar/test-utils",
     "reth-trie/test-utils",
+    "reth-trie-common/test-utils",
     "reth-chain-state/test-utils",
     "reth-ethereum-engine-primitives",
     "reth-ethereum-primitives/test-utils",

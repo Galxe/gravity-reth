@@ -33,6 +33,11 @@ pub trait HeaderProvider: Send + Sync {
     /// Get header by block number
     fn header_by_number(&self, num: u64) -> ProviderResult<Option<Self::Header>>;
 
+    /// Get a header without fixing a database snapshot when the provider supports live reads.
+    fn header_by_number_live(&self, num: u64) -> ProviderResult<Option<Self::Header>> {
+        self.header_by_number(num)
+    }
+
     /// Get header by block number or hash
     fn header_by_hash_or_number(
         &self,

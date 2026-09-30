@@ -394,7 +394,7 @@ async fn test_tree_persist_blocks() {
     let test_harness = TestHarness::new(chain_spec).with_blocks(blocks.clone());
     std::thread::Builder::new()
         .name("Engine Task".to_string())
-        .spawn(|| test_harness.tree.run())
+        .spawn(|| test_harness.tree.run_inner())
         .unwrap();
 
     // send a message to the tree to enter the main loop.
@@ -799,6 +799,93 @@ async fn test_get_canonical_blocks_to_persist() {
             highest: blocks_to_persist.last().unwrap().recovered_block().num_hash()
         })
     );
+}
+
+#[test]
+fn reorged_pipe_block_rejects_v2_root_mismatch() {
+    if get_gravity_config().disable_pipe_execution {
+        return;
+    }
+
+    let mut builder = TestBlockBuilder::eth();
+    let parent = builder.get_executed_block_with_number(0, B256::ZERO);
+    let parent_hash = parent.recovered_block().hash();
+    let old = builder.get_executed_block_with_number(1, parent_hash);
+    let new = builder.get_executed_block_with_number(1, parent_hash);
+    let mut test_harness = TestHarness::new(MAINNET.clone()).with_blocks(vec![parent]);
+    let old_hash = old.recovered_block().hash();
+    assert_ne!(old.recovered_block().state_root(), B256::ZERO);
+    test_harness.tree.state.tree_state.persisted_trie_updates.insert(old_hash, (1, Arc::default()));
+    test_harness.provider.add_state_root_v2_result(B256::ZERO, Default::default());
+
+    test_harness.tree.on_canonical_chain_update(NewCanonicalChain::Reorg {
+        new: vec![new],
+        old: vec![old.block],
+    });
+
+    let reinserted = test_harness.tree.state.tree_state.executed_block_by_hash(old_hash).unwrap();
+    assert!(reinserted.trie.is_missing());
+    assert_eq!(reinserted.triev2.as_ref(), &Default::default());
+
+    test_harness.tree.state.tree_state.set_canonical_head(reinserted.recovered_block().num_hash());
+    assert!(matches!(
+        test_harness.tree.get_canonical_blocks_to_persist(PersistTarget::Head),
+        Err(AdvancePersistenceError::Provider(ProviderError::StateRootMismatch(_)))
+    ));
+    assert!(test_harness.provider.state_root_v2_results.lock().is_empty());
+    assert!(test_harness
+        .tree
+        .state
+        .tree_state
+        .executed_block_by_hash(old_hash)
+        .unwrap()
+        .trie
+        .is_missing());
+}
+
+#[test]
+fn reorged_pipe_block_recomputes_v2_updates_before_persist() {
+    if get_gravity_config().disable_pipe_execution {
+        return;
+    }
+
+    let mut builder = TestBlockBuilder::eth();
+    let parent = builder.get_executed_block_with_number(0, B256::ZERO);
+    let parent_hash = parent.recovered_block().hash();
+    let old = builder.get_executed_block_with_number(1, parent_hash);
+    let new = builder.get_executed_block_with_number(1, parent_hash);
+    let old_hash = old.recovered_block().hash();
+    let expected_root = old.recovered_block().state_root();
+    let mut test_harness = TestHarness::new(MAINNET.clone()).with_blocks(vec![parent]);
+    test_harness.tree.persistence_state.last_persisted_block =
+        test_harness.blocks[0].recovered_block().num_hash();
+    test_harness.tree.state.tree_state.persisted_trie_updates.insert(old_hash, (1, Arc::default()));
+    let mut updates = reth_trie::updates::TrieUpdatesV2::default();
+    updates.removed_nodes.insert(Default::default());
+    test_harness.provider.add_state_root_v2_result(expected_root, updates.clone());
+
+    test_harness.tree.on_canonical_chain_update(NewCanonicalChain::Reorg {
+        new: vec![new],
+        old: vec![old.block],
+    });
+    let reinserted = test_harness.tree.state.tree_state.executed_block_by_hash(old_hash).unwrap();
+    assert!(reinserted.trie.is_missing());
+    test_harness.tree.state.tree_state.set_canonical_head(reinserted.recovered_block().num_hash());
+
+    test_harness.tree.config =
+        TreeConfig::default().with_persistence_threshold(0).with_memory_block_buffer_target(0);
+    test_harness.tree.advance_persistence().unwrap();
+    let PersistenceAction::SaveBlocks(ready, _) = test_harness.action_rx.recv().unwrap() else {
+        panic!("expected SaveBlocks action");
+    };
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].recovered_block().hash(), old_hash);
+    assert!(ready[0].trie.is_present());
+    assert_eq!(ready[0].triev2.as_ref(), &updates);
+    assert!(test_harness.provider.state_root_v2_results.lock().is_empty());
+    let cached = test_harness.tree.state.tree_state.executed_block_by_hash(old_hash).unwrap();
+    assert!(cached.trie.is_present());
+    assert_eq!(cached.triev2.as_ref(), &updates);
 }
 
 #[tokio::test]

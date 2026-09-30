@@ -8,7 +8,12 @@ use alloy_rpc_types_trace::geth::{
     BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
-use reth_trie_common::{updates::TrieUpdates, HashedPostState};
+use reth_trie_common::{
+    updates::{StorageTrieUpdatesV2, TrieUpdatesV2},
+    HashedPostState, Nibbles,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Debug rpc interface.
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "debug"))]
@@ -336,7 +341,7 @@ pub trait DebugApi<TxReq: RpcObject> {
         &self,
         hashed_state: HashedPostState,
         block_id: Option<BlockId>,
-    ) -> RpcResult<(B256, TrieUpdates)>;
+    ) -> RpcResult<(B256, RpcTrieUpdatesV2)>;
 
     /// Returns the storage at the given block height and transaction index. The result can be
     /// paged by providing a `maxResult` to cap the number of storage slots returned as well as
@@ -370,4 +375,113 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Note: Only available when built with the `failpoints` feature.
     #[method(name = "setFailpoint")]
     async fn debug_set_failpoint(&self, name: String, actions: String) -> RpcResult<()>;
+}
+
+/// V2 trie updates returned by `debug_stateRootWithUpdates`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcTrieUpdatesV2 {
+    /// Trie update format version.
+    pub version: u8,
+    /// Updated account nodes, keyed by their full nibble path.
+    pub account_nodes: BTreeMap<String, Bytes>,
+    /// Removed account node paths.
+    pub removed_nodes: Vec<String>,
+    /// Updated storage tries, keyed by hashed address.
+    pub storage_tries: BTreeMap<B256, RpcStorageTrieUpdatesV2>,
+}
+
+/// V2 updates for one account's storage trie.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcStorageTrieUpdatesV2 {
+    /// Whether the previous storage trie was removed.
+    pub is_deleted: bool,
+    /// Updated storage nodes, keyed by their full nibble path.
+    pub storage_nodes: BTreeMap<String, Bytes>,
+    /// Removed storage node paths.
+    pub removed_nodes: Vec<String>,
+}
+
+impl From<TrieUpdatesV2> for RpcTrieUpdatesV2 {
+    fn from(updates: TrieUpdatesV2) -> Self {
+        Self {
+            version: 2,
+            account_nodes: updates
+                .account_nodes
+                .into_iter()
+                .map(|(path, node)| (nibble_path(path), node.into()))
+                .collect(),
+            removed_nodes: sorted_paths(updates.removed_nodes),
+            storage_tries: updates
+                .storage_tries
+                .into_iter()
+                .map(|(address, updates)| (address, updates.into()))
+                .collect(),
+        }
+    }
+}
+
+impl From<StorageTrieUpdatesV2> for RpcStorageTrieUpdatesV2 {
+    fn from(updates: StorageTrieUpdatesV2) -> Self {
+        Self {
+            is_deleted: updates.is_deleted,
+            storage_nodes: updates
+                .storage_nodes
+                .into_iter()
+                .map(|(path, node)| (nibble_path(path), node.into()))
+                .collect(),
+            removed_nodes: sorted_paths(updates.removed_nodes),
+        }
+    }
+}
+
+fn nibble_path(path: Nibbles) -> String {
+    path.iter().map(|nibble| char::from_digit(u32::from(nibble), 16).unwrap()).collect()
+}
+
+fn sorted_paths(paths: impl IntoIterator<Item = Nibbles>) -> Vec<String> {
+    let mut paths = paths.into_iter().map(nibble_path).collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_trie_common::nested_trie::{Node, NodeFlag, StoredNode};
+
+    #[test]
+    fn v2_updates_json_preserves_nibble_paths_and_nodes() {
+        let odd_path = Nibbles::from_nibbles_unchecked(vec![1]);
+        let even_path = Nibbles::from_nibbles_unchecked(vec![1, 0]);
+        let node = Node::ShortNode {
+            key: odd_path,
+            value: Box::new(Node::ValueNode(vec![0xab])),
+            flags: NodeFlag::default(),
+        };
+        let mut updates = TrieUpdatesV2::default();
+        updates.account_nodes.insert(odd_path, node.clone());
+        updates.removed_nodes.insert(even_path);
+        updates.storage_tries.insert(
+            B256::ZERO,
+            StorageTrieUpdatesV2 {
+                storage_nodes: std::iter::once((even_path, node.clone())).collect(),
+                ..Default::default()
+            },
+        );
+
+        let encoded = serde_json::to_string(&RpcTrieUpdatesV2::from(updates)).unwrap();
+        let decoded: RpcTrieUpdatesV2 = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.version, 2);
+        assert_eq!(decoded.removed_nodes, ["10"]);
+        assert_eq!(Node::from(StoredNode::from(decoded.account_nodes["1"].clone())), node);
+        assert_eq!(
+            Node::from(StoredNode::from(
+                decoded.storage_tries[&B256::ZERO].storage_nodes["10"].clone()
+            )),
+            node
+        );
+    }
 }

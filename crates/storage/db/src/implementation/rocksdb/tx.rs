@@ -11,11 +11,49 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_storage_errors::db::DatabaseErrorInfo;
-use rocksdb::{WriteOptions, DB};
-use std::{sync::Arc, thread};
+use rocksdb::{SnapshotWithThreadMode, WriteOptions, DB};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+};
 
 use crate::set_fail_point;
 pub(crate) use cursor::{RO, RW};
+
+/// Owns the DB behind a `RocksDB` snapshot. A cursor may outlive its transaction, so it holds an
+/// `Arc` of this object; the snapshot is released before the DB handle is dropped.
+pub(crate) struct DbSnapshot {
+    snapshot: SnapshotWithThreadMode<'static, DB>,
+    _db: Arc<DB>,
+}
+
+impl DbSnapshot {
+    fn new(db: Arc<DB>) -> Self {
+        let snapshot = unsafe {
+            // SAFETY: `_db` owns the referenced DB for the entire snapshot lifetime. Field drop
+            // order releases `snapshot` before `_db`, and cursors retain this owner in an Arc.
+            std::mem::transmute::<SnapshotWithThreadMode<'_, DB>, SnapshotWithThreadMode<'static, DB>>(
+                db.snapshot(),
+            )
+        };
+        Self { snapshot, _db: db }
+    }
+
+    pub(crate) fn get_cf(
+        &self,
+        cf: &rocksdb::ColumnFamily,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Option<Vec<u8>>, rocksdb::Error> {
+        self.snapshot.get_cf(cf, key)
+    }
+
+    pub(crate) fn raw_iterator_cf(&self, cf: &rocksdb::ColumnFamily) -> rocksdb::DBRawIterator<'_> {
+        self.snapshot.raw_iterator_cf(cf)
+    }
+}
 
 /// `RocksDB` transaction with three-database sharding architecture.
 ///
@@ -60,6 +98,11 @@ pub struct Tx<K: cursor::TransactionKind> {
     /// Can be committed in parallel with `account_db`.
     storage_db: Arc<DB>,
 
+    state_snapshot: Option<Arc<DbSnapshot>>,
+    account_snapshot: Option<Arc<DbSnapshot>>,
+    storage_snapshot: Option<Arc<DbSnapshot>>,
+    committed_writes: AtomicBool,
+
     /// Write batch for state database.
     /// Arc<Mutex<_>> enables shared access across threads during parallel commit.
     state_batch: Arc<Mutex<rocksdb::WriteBatch>>,
@@ -89,10 +132,22 @@ impl<K: cursor::TransactionKind> Tx<K> {
             state_db,
             account_db,
             storage_db,
+            state_snapshot: None,
+            account_snapshot: None,
+            storage_snapshot: None,
+            committed_writes: AtomicBool::new(false),
             state_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
             account_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
             storage_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
             _mode: std::marker::PhantomData,
+        }
+    }
+
+    fn snapshot_for_table<T: Table>(&self) -> Option<&Arc<DbSnapshot>> {
+        match T::NAME {
+            tables::AccountsTrieV2::NAME => self.account_snapshot.as_ref(),
+            tables::StoragesTrieV2::NAME => self.storage_snapshot.as_ref(),
+            _ => self.state_snapshot.as_ref(),
         }
     }
 
@@ -162,9 +217,52 @@ impl<K: cursor::TransactionKind> Tx<K> {
     }
 }
 
+impl Tx<RO> {
+    pub(crate) fn new_snapshot(
+        state_db: Arc<DB>,
+        account_db: Arc<DB>,
+        storage_db: Arc<DB>,
+    ) -> Self {
+        let state_snapshot = Some(Arc::new(DbSnapshot::new(state_db.clone())));
+        let account_snapshot = Some(Arc::new(DbSnapshot::new(account_db.clone())));
+        let storage_snapshot = Some(Arc::new(DbSnapshot::new(storage_db.clone())));
+        Self {
+            state_snapshot,
+            account_snapshot,
+            storage_snapshot,
+            ..Self::new(state_db, account_db, storage_db)
+        }
+    }
+}
+
 impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     type Cursor<T: Table> = cursor::Cursor<K, T>;
     type DupCursor<T: DupSort> = cursor::Cursor<K, T>;
+
+    fn snapshot_block_number(&self) -> Result<Option<u64>, DatabaseError> {
+        if self.state_snapshot.is_none() {
+            return Ok(None);
+        }
+        // All four reads use the transaction's fixed state snapshot.
+        let stages = ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute"];
+        let mut heights = stages
+            .into_iter()
+            .map(|stage| self.get::<tables::StageCheckpoints>(stage.to_string()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|checkpoint| checkpoint.unwrap_or_default().block_number);
+        let height = heights.next().unwrap_or_default();
+        if !heights.all(|other| other == height) {
+            return Err(DatabaseError::Other(
+                "state/trie stage checkpoints do not identify a complete block".into(),
+            ));
+        }
+        Ok(Some(height))
+    }
+
+    fn has_committed_writes(&self) -> bool {
+        self.committed_writes.load(Ordering::Acquire)
+    }
 
     fn get<T: Table>(&self, key: T::Key) -> Result<Option<T::Value>, DatabaseError> {
         let encoded_key = key.encode();
@@ -181,7 +279,10 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         if T::DUPSORT {
             // For DupSort tables, we need to seek to the first entry with this key prefix
             // because RocksDB stores composite keys (primary_key + subkey)
-            let mut iter = db.raw_iterator_cf(cf_handle);
+            let mut iter = match self.snapshot_for_table::<T>() {
+                Some(snapshot) => snapshot.raw_iterator_cf(cf_handle),
+                None => db.raw_iterator_cf(cf_handle),
+            };
             let encoded_key_ref = key.as_ref();
             iter.seek(encoded_key_ref);
 
@@ -197,7 +298,11 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             }
             Ok(None)
         } else {
-            match db.get_cf(cf_handle, key) {
+            let result = match self.snapshot_for_table::<T>() {
+                Some(snapshot) => snapshot.get_cf(cf_handle, key),
+                None => db.get_cf(cf_handle, key),
+            };
+            match result {
                 Ok(Some(value)) => {
                     T::Value::decompress(&value).map(Some).map_err(|_| DatabaseError::Decode)
                 }
@@ -273,6 +378,12 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         let mut account_batch = self.account_batch.lock();
         let mut storage_batch = self.storage_batch.lock();
 
+        if !state_batch.is_empty() || !account_batch.is_empty() || !storage_batch.is_empty() {
+            // Set before the first write: a failed multi-DB commit may have written only one
+            // shard, so the caller must treat its view as potentially incomplete.
+            self.committed_writes.store(true, Ordering::Release);
+        }
+
         // Phase 1: Commit trie batches (potentially in parallel)
         if !account_batch.is_empty() && !storage_batch.is_empty() {
             // Both trie batches have data - commit them in parallel for maximum throughput.
@@ -340,11 +451,19 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn cursor_read<T: Table>(&self) -> Result<Self::Cursor<T>, DatabaseError> {
-        cursor::Cursor::new(self.db_for_table::<T>().clone(), self.batch_for_table::<T>().clone())
+        cursor::Cursor::new(
+            self.db_for_table::<T>().clone(),
+            self.batch_for_table::<T>().clone(),
+            self.snapshot_for_table::<T>().cloned(),
+        )
     }
 
     fn cursor_dup_read<T: DupSort>(&self) -> Result<Self::DupCursor<T>, DatabaseError> {
-        cursor::Cursor::new(self.db_for_table::<T>().clone(), self.batch_for_table::<T>().clone())
+        cursor::Cursor::new(
+            self.db_for_table::<T>().clone(),
+            self.batch_for_table::<T>().clone(),
+            self.snapshot_for_table::<T>().cloned(),
+        )
     }
 
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
@@ -475,11 +594,19 @@ impl DbTxMut for Tx<cursor::RW> {
     }
 
     fn cursor_write<T: Table>(&self) -> Result<Self::CursorMut<T>, DatabaseError> {
-        cursor::Cursor::new(self.db_for_table::<T>().clone(), self.batch_for_table::<T>().clone())
+        cursor::Cursor::new(
+            self.db_for_table::<T>().clone(),
+            self.batch_for_table::<T>().clone(),
+            None,
+        )
     }
 
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError> {
-        cursor::Cursor::new(self.db_for_table::<T>().clone(), self.batch_for_table::<T>().clone())
+        cursor::Cursor::new(
+            self.db_for_table::<T>().clone(),
+            self.batch_for_table::<T>().clone(),
+            None,
+        )
     }
 }
 

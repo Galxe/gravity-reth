@@ -587,6 +587,7 @@ impl AccountProof {
         slots: Vec<alloy_serde::JsonStorageKey>,
     ) -> alloy_rpc_types_eth::EIP1186AccountProofResponse {
         let info = self.info.unwrap_or_default();
+        let mut slots = slots;
         alloy_rpc_types_eth::EIP1186AccountProofResponse {
             address: self.address,
             balance: info.balance,
@@ -598,8 +599,8 @@ impl AccountProof {
                 .storage_proofs
                 .into_iter()
                 .filter_map(|proof| {
-                    let input_slot = slots.iter().find(|s| s.as_b256() == proof.key)?;
-                    Some(proof.into_eip1186_proof(*input_slot))
+                    let index = slots.iter().position(|slot| slot.as_b256() == proof.key)?;
+                    Some(proof.into_eip1186_proof(slots.remove(index)))
                 })
                 .collect(),
         }
@@ -1066,5 +1067,55 @@ mod tests {
         acc.info.take();
         acc.storage_root = EMPTY_ROOT_HASH;
         assert_eq!(acc, inverse);
+    }
+
+    #[test]
+    #[cfg(feature = "eip1186")]
+    fn eip_1186_duplicate_storage_keys_preserve_input_representation() {
+        let slot = B256::with_last_byte(1);
+        let number_key = alloy_serde::JsonStorageKey::Number(U256::from(1));
+        let hash_key = alloy_serde::JsonStorageKey::Hash(slot);
+        let storage_proof = StorageProof { value: U256::from(42), ..StorageProof::new(slot) };
+        let account_proof = AccountProof {
+            address: Address::random(),
+            info: Some(Account {
+                nonce: 1,
+                bytecode_hash: Some(KECCAK_EMPTY),
+                ..Default::default()
+            }),
+            proof: vec![],
+            storage_root: B256::ZERO,
+            storage_proofs: vec![storage_proof.clone(), storage_proof],
+        };
+
+        let response = account_proof.clone().into_eip1186_response(vec![number_key, hash_key]);
+        assert_eq!(response.storage_proof.len(), 2);
+        assert_eq!(response.storage_proof[0].key, number_key);
+        assert_eq!(response.storage_proof[1].key, hash_key);
+        assert_eq!(AccountProof::from_eip1186_proof(response), account_proof);
+    }
+
+    #[test]
+    #[cfg(feature = "eip1186")]
+    fn eip_1186_storage_proof_only_uses_matching_input_keys() {
+        let first = B256::with_last_byte(1);
+        let second = B256::with_last_byte(2);
+        let proof = AccountProof {
+            storage_proofs: vec![
+                StorageProof::new(first),
+                StorageProof::new(second),
+                StorageProof::new(B256::with_last_byte(4)),
+            ],
+            ..AccountProof::new(Address::ZERO)
+        };
+
+        let response = proof.into_eip1186_response(vec![
+            alloy_serde::JsonStorageKey::Hash(second),
+            alloy_serde::JsonStorageKey::Hash(B256::with_last_byte(3)),
+            alloy_serde::JsonStorageKey::Hash(first),
+        ]);
+        assert_eq!(response.storage_proof.len(), 2);
+        assert_eq!(response.storage_proof[0].key.as_b256(), first);
+        assert_eq!(response.storage_proof[1].key.as_b256(), second);
     }
 }

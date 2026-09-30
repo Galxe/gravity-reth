@@ -1,5 +1,5 @@
 use crate::{
-    implementation::rocksdb::{get_cf_handle, read_error},
+    implementation::rocksdb::{get_cf_handle, read_error, tx::DbSnapshot},
     DatabaseError,
 };
 use parking_lot::Mutex;
@@ -58,6 +58,8 @@ macro_rules! compress_to_buf_or_ref {
 pub struct Cursor<K: TransactionKind, T: Table> {
     /// Iterator for cursor operations - always ready to use
     iterator: rocksdb::DBRawIterator<'static>,
+    /// Retains the read view until after the iterator has been dropped.
+    snapshot: Option<Arc<DbSnapshot>>,
     /// db should drop after iterator
     db: Arc<DB>,
     /// Cache buffer that receives compressed values.
@@ -83,6 +85,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
     pub(crate) fn new(
         db: Arc<DB>,
         batch: Arc<Mutex<rocksdb::WriteBatch>>,
+        snapshot: Option<Arc<DbSnapshot>>,
     ) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&db)?;
 
@@ -90,11 +93,14 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         let iterator = unsafe {
             // SAFETY: We ensure the DB outlives the iterator by holding Arc<DB>
             std::mem::transmute::<rocksdb::DBRawIterator<'_>, rocksdb::DBRawIterator<'static>>(
-                db.raw_iterator_cf(cf_handle),
+                match &snapshot {
+                    Some(snapshot) => snapshot.raw_iterator_cf(cf_handle),
+                    None => db.raw_iterator_cf(cf_handle),
+                },
             )
         };
 
-        Ok(Self { iterator, db, batch, buf: Vec::new(), _phantom: PhantomData })
+        Ok(Self { iterator, snapshot, db, batch, buf: Vec::new(), _phantom: PhantomData })
     }
 
     /// Encode `DupSort` composite key: key + subkey
@@ -114,7 +120,11 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
     /// High-performance point query - doesn't move cursor position
     fn point_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(&self.db)?;
-        self.db.get_cf(cf_handle, key).map_err(read_error)
+        match &self.snapshot {
+            Some(snapshot) => snapshot.get_cf(cf_handle, key),
+            None => self.db.get_cf(cf_handle, key),
+        }
+        .map_err(read_error)
     }
 
     fn decode_key_value(key: &[u8], value: &[u8]) -> Result<(T::Key, T::Value), DatabaseError> {
