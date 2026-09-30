@@ -38,7 +38,7 @@ use reth_rpc_eth_types::{
     EthApiError, StateCacheDb,
 };
 use reth_storage_api::{BlockIdReader, ProviderBlock, ProviderTx, StateProviderBox};
-use reth_tasks::CancelOnDrop;
+use reth_tasks::{cancel::is_cancelled, CancelOnDrop};
 use revm::{
     context::Block,
     context_interface::{result::ResultAndState, Transaction},
@@ -379,6 +379,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
                     for tx in block.transactions_recovered().take(num_txs) {
+                        if is_cancelled() {
+                            return Err(EthApiError::InternalEthError.into())
+                        }
                         executor.execute_transaction(tx).map_err(Self::Error::from_eth_err)?;
                     }
                 }
@@ -396,6 +399,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                     // transact all transactions in the bundle
                     for (tx_index, tx) in transactions.into_iter().enumerate() {
+                        if is_cancelled() {
+                            return Err(EthApiError::InternalEthError.into())
+                        }
+
                         // Apply overrides, state overrides are only applied for the first tx in the
                         // request
                         let overrides =
@@ -787,6 +794,9 @@ pub trait Call:
                     if block_tx.tx_hash() == tx.tx_hash() {
                         break;
                     }
+                    if is_cancelled() {
+                        return Err(EthApiError::InternalEthError.into())
+                    }
                     executor.execute_transaction(block_tx).map_err(Self::Error::from_eth_err)?;
                 }
 
@@ -849,6 +859,9 @@ pub trait Call:
             if *tx.tx_hash() == target_tx_hash {
                 // reached the target transaction
                 break
+            }
+            if is_cancelled() {
+                return Err(EthApiError::InternalEthError.into())
             }
 
             let tx_env = self.evm_config().tx_env(tx);
