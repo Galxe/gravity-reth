@@ -12,6 +12,7 @@ use crate::{
     },
     NetworkConfig, NetworkConfigBuilder, NetworkHandle, NetworkManager, PeersConfig,
 };
+use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use futures::{FutureExt, StreamExt};
 use pin_project::pin_project;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks, Hardforks};
@@ -224,18 +225,16 @@ where
     ) -> Testnet<C, EthTransactionPool<C, InMemoryBlobStore, EthEvmConfig>> {
         self.map_pool(|peer| {
             let blob_store = InMemoryBlobStore::default();
-            let pool = TransactionValidationTaskExecutor::eth(
+            // Test peers usually sit on mainnet's genesis, whose 5,000 gas limit would reject
+            // every transaction.
+            let validator = TransactionValidationTaskExecutor::eth_builder(
                 peer.client.clone(),
                 EthEvmConfig::mainnet(),
-                blob_store.clone(),
-                Runtime::test(),
-            );
-
-            peer.map_transactions_manager_with(
-                EthTransactionPool::eth_pool(pool, blob_store, Default::default()),
-                tx_manager_config.clone(),
-                policy,
             )
+            .set_block_gas_limit(ETHEREUM_BLOCK_GAS_LIMIT_30M)
+            .build_with_tasks(Runtime::test(), blob_store.clone());
+            let pool = EthTransactionPool::eth_pool(validator, blob_store, Default::default());
+            peer.map_transactions_manager_with(pool, tx_manager_config.clone(), policy)
         })
     }
 }

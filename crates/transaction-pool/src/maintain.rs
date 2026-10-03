@@ -926,6 +926,7 @@ mod tests {
         provider.add_account(sender, ExtendedAccount::new(42, U256::MAX));
         let blob_store = InMemoryBlobStore::default();
         let validator = EthTransactionValidatorBuilder::new(provider, EthEvmConfig::mainnet())
+            .set_block_gas_limit(ETHEREUM_BLOCK_GAS_LIMIT_30M)
             .build(blob_store.clone());
 
         let txpool = Pool::new(

@@ -22,7 +22,7 @@ use alloy_consensus::{
     BlockHeader,
 };
 use alloy_eips::{
-    eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip4844::env_settings::EnvKzgSettings,
+    eip4844::env_settings::EnvKzgSettings,
     eip7840::BlobParams, BlockId,
 };
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
@@ -1094,7 +1094,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             evm_config.evm_env(&tip).expect("evm_env should not fail for existing blocks");
 
         Self {
-            block_gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M.into(),
+            block_gas_limit: tip.gas_limit().into(),
             client,
             chain_id: chain_spec.chain().id(),
             evm_config,
@@ -1505,7 +1505,8 @@ mod tests {
         traits::PoolTransaction, CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
     };
     use alloy_consensus::Transaction;
-    use alloy_eips::eip2718::Decodable2718;
+    use alloy_eips::{eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip2718::Decodable2718};
+    use reth_chainspec::{ChainSpecBuilder, MAINNET};
     use alloy_primitives::{hex, Address, Bytes, U256};
     use reth_ethereum_primitives::PooledTransactionVariant;
     use reth_evm_ethereum::EthEvmConfig;
@@ -1517,18 +1518,17 @@ mod tests {
         EthEvmConfig::mainnet()
     }
 
-    /// Seeds a mock provider with the chain-spec genesis block.
-    ///
-    /// `MockEthProvider::with_genesis_block` was a v2.3.0-only helper; the provider crate
-    /// was restored to the gravity baseline which lacks it, so tests seed the block here.
     fn provider_with_genesis_block() -> MockEthProvider {
-        let provider = MockEthProvider::default();
-        let genesis_hash = provider.chain_spec.genesis_hash();
-        let genesis_header = provider.chain_spec.genesis_header().clone();
-        provider.add_block(
-            genesis_hash,
-            reth_ethereum_primitives::Block::new(genesis_header, Default::default()),
-        );
+        mock_provider_with_gas_limit(ETHEREUM_BLOCK_GAS_LIMIT_30M)
+    }
+
+    fn mock_provider_with_gas_limit(gas_limit: u64) -> MockEthProvider {
+        let mut genesis = MAINNET.genesis.clone();
+        genesis.gas_limit = gas_limit;
+        let provider = MockEthProvider::default()
+            .with_chain_spec(ChainSpecBuilder::mainnet().genesis(genesis).build());
+        provider.add_block(provider.chain_spec.genesis_hash(),
+            reth_ethereum_primitives::Block::new(provider.chain_spec.genesis_header().clone(), Default::default()));
         provider
     }
 
@@ -2221,5 +2221,35 @@ mod tests {
             ))
         ));
         assert!(pool.get(blob_tx.hash()).is_none());
+    }
+    #[test]
+    fn block_gas_limit_from_latest_header() {
+        let gas_limit = 60_000_000;
+        let validator = EthTransactionValidatorBuilder::new(
+            mock_provider_with_gas_limit(gas_limit),
+            test_evm_config(),
+        )
+        .build(InMemoryBlobStore::default());
+        let transaction = |gas_limit| {
+            EthPooledTransaction::try_from_consensus(
+                TransactionBuilder::default()
+                    .chain_id(validator.chain_id())
+                    .gas_limit(gas_limit)
+                    .to(Address::ZERO)
+                    .into_eip1559()
+                    .try_into_recovered()
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(validator.block_gas_limit(), gas_limit);
+        assert!(validator
+            .validate_stateless(TransactionOrigin::External, &transaction(gas_limit))
+            .is_ok());
+        assert!(matches!(
+            validator.validate_stateless(TransactionOrigin::External, &transaction(gas_limit + 1)),
+            Err(InvalidPoolTransactionError::ExceedsGasLimit(60_000_001, 60_000_000))
+        ));
     }
 }
