@@ -21,6 +21,7 @@ mod gravity;
 pub mod gravity_system_contracts;
 /// The chain info module.
 mod info;
+mod oracle_task_install;
 /// The chain spec module.
 mod spec;
 
@@ -36,6 +37,7 @@ pub use gravity::{
     GRAVITY_TX_SKIPPED_LOG_ADDRESS, LONGEVITY_TESTNET_CHAIN_ID, SYSTEM_CALLER,
 };
 pub use info::ChainInfo;
+pub use oracle_task_install::{oracle_task_install_config, OracleTaskInstallConfig};
 #[cfg(any(test, feature = "test-utils"))]
 pub use spec::test_fork_ids;
 pub use spec::{

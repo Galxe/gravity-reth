@@ -5,7 +5,7 @@ use super::{
     GravityChainReader, GravityEvm, GravityEvmFactory,
 };
 use crate::{
-    hardfork::{alpha, common::DbHardforkState, eip_2935, gamma},
+    hardfork::{alpha, common::DbHardforkState, eip_2935, gamma, oracle_task_install},
     RethReceiptBuilder,
 };
 use alloc::{format, sync::Arc};
@@ -18,7 +18,7 @@ use alloy_evm::{
     eth::{
         EthBlockExecutionCtx, EthBlockExecutor, EthBlockExecutorFactory, EthEvmContext, EthTxResult,
     },
-    Evm, FromRecoveredTx,
+    Evm, EvmEnv, FromRecoveredTx,
 };
 use alloy_primitives::B256;
 use alloy_sol_types::SolCall;
@@ -30,8 +30,9 @@ use reth_chainspec::{
 };
 use reth_ethereum_primitives::{Receipt, TransactionSigned};
 use revm::{
-    context::{result::HaltReason, Block as _, TxEnv},
+    context::{result::HaltReason, Block as _, BlockEnv, TxEnv},
     context_interface::result::ResultAndState,
+    primitives::hardfork::SpecId,
     Database, DatabaseCommit, Inspector,
 };
 
@@ -120,6 +121,7 @@ impl BlockExecutorFactory for GravityBlockExecutorFactory {
             chain_block: ctx.chain_block,
             reader: self.reader.as_ref(),
             epoch_change: false,
+            parent_timestamp: None,
         }
     }
 }
@@ -144,11 +146,12 @@ pub struct GravityBlockExecutor<'a, E> {
     /// Whether the chain block changed the epoch. The pipe runs no block-level step on such a
     /// block besides the one-shot hardfork changes.
     epoch_change: bool,
+    parent_timestamp: Option<u64>,
 }
 
 impl<E> GravityBlockExecutor<'_, E>
 where
-    E: Evm<DB: StateDB, Tx = TxEnv, HaltReason = HaltReason>,
+    E: Evm<DB: StateDB, Tx = TxEnv, HaltReason = HaltReason, Spec = SpecId, BlockEnv = BlockEnv>,
 {
     fn block_number(&self) -> u64 {
         self.inner.evm.block().number().saturating_to()
@@ -255,7 +258,7 @@ where
 
 impl<'a, E> BlockExecutor for GravityBlockExecutor<'a, E>
 where
-    E: Evm<DB: StateDB, Tx = TxEnv, HaltReason = HaltReason>,
+    E: Evm<DB: StateDB, Tx = TxEnv, HaltReason = HaltReason, Spec = SpecId, BlockEnv = BlockEnv>,
 {
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
@@ -266,6 +269,22 @@ where
         let Some(chain_block) = self.chain_block else {
             return self.inner.apply_pre_execution_changes()
         };
+
+        oracle_task_install::validate_config(self.inner.spec.as_ref())?;
+        if reth_chainspec::oracle_task_install_config(self.inner.spec.as_ref())
+            .map_err(BlockExecutionError::msg)?
+            .is_some()
+        {
+            let parent_hash = self.inner.ctx.parent_hash;
+            self.parent_timestamp = Some(
+                self.reader
+                    .header_timestamp(parent_hash)
+                    .map_err(BlockExecutionError::other)?
+                    .ok_or_else(|| {
+                        BlockExecutionError::msg(format!("parent header {parent_hash} not found"))
+                    })?,
+            );
+        }
 
         // Replaying chain history is only defined for blocks the chain committed.
         let number = self.block_number();
@@ -335,9 +354,22 @@ where
     fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
         let (number, timestamp) = (self.block_number(), self.block_timestamp());
         let chain_spec = self.inner.spec.clone();
+        let parent_timestamp = self.parent_timestamp;
+        let env = EvmEnv {
+            cfg_env: self.inner.evm.cfg_env().clone(),
+            block_env: self.inner.evm.block().clone(),
+        };
 
         if self.epoch_change {
-            let inner = self.inner;
+            let mut inner = self.inner;
+            oracle_task_install::apply_state_changes_for_block(
+                inner.evm.db_mut(),
+                chain_spec.as_ref(),
+                env,
+                parent_timestamp,
+                number,
+                "rpc-committed-replay",
+            )?;
             return Ok((
                 inner.evm,
                 BlockExecutionResult {
@@ -359,6 +391,16 @@ where
         {
             gamma::apply_state_changes(&mut DbHardforkState(evm.db_mut()), number, timestamp)?;
         }
+        if is_chain_block {
+            oracle_task_install::apply_state_changes_for_block(
+                evm.db_mut(),
+                chain_spec.as_ref(),
+                env,
+                parent_timestamp,
+                number,
+                "rpc-committed-replay",
+            )?;
+        }
         Ok((evm, result))
     }
 
@@ -372,5 +414,143 @@ where
 
     fn receipts(&self) -> &[Self::Receipt] {
         self.inner.receipts()
+    }
+}
+
+#[cfg(test)]
+mod oracle_task_install_tests {
+    use super::*;
+    use crate::hardfork::oracle_task_install::tests::{assert_installed, env, seeded_db, spec};
+    use alloy_evm::EvmFactory;
+    use alloy_primitives::{Address, Bytes, Log, LogData, U256};
+    use alloy_sol_types::SolEvent;
+    use reth_chainspec::gravity_system_contracts::{NewEpochEvent, RECONFIGURATION_ADDR};
+    use reth_storage_errors::provider::ProviderResult;
+
+    #[derive(Debug)]
+    struct Reader {
+        epoch: bool,
+        parent: Option<u64>,
+    }
+    const HASH: B256 = B256::repeat_byte(7);
+    impl GravityChainReader for Reader {
+        fn mix_hash_by_number(&self, _: u64) -> ProviderResult<Option<B256>> {
+            Ok(None)
+        }
+        fn canonical_hash(&self, _: u64) -> ProviderResult<Option<B256>> {
+            Ok(Some(HASH))
+        }
+        fn header_timestamp(&self, _: B256) -> ProviderResult<Option<u64>> {
+            Ok(self.parent)
+        }
+        fn receipts_by_block_hash(
+            &self,
+            _: B256,
+        ) -> ProviderResult<Option<alloc::vec::Vec<Receipt>>> {
+            let logs = if self.epoch {
+                vec![Log {
+                    address: RECONFIGURATION_ADDR,
+                    data: LogData::new_unchecked(vec![NewEpochEvent::SIGNATURE_HASH], Bytes::new()),
+                }]
+            } else {
+                vec![]
+            };
+            Ok(Some(vec![Receipt {
+                tx_type: TxType::Legacy,
+                success: true,
+                cumulative_gas_used: 0,
+                logs,
+            }]))
+        }
+        fn storage_after_block(
+            &self,
+            _: B256,
+            _: Address,
+            _: B256,
+        ) -> ProviderResult<Option<U256>> {
+            Ok(None)
+        }
+    }
+
+    fn ctx(chain: bool) -> GravityBlockExecutionCtx<'static> {
+        GravityBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                parent_hash: B256::repeat_byte(6),
+                parent_beacon_block_root: Some(B256::ZERO),
+                ommers: &[],
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                tx_count_hint: Some(0),
+                slot_number: None,
+            },
+            chain_block: chain.then_some(ChainBlock::new(
+                HASH,
+                BodyFacts { only_system_txs: true, is_pre_alpha_dkg_epoch_block: false },
+            )),
+        }
+    }
+
+    #[test]
+    fn oracle_task_install_rpc_committed_normal_and_epoch_finish_install_identically() {
+        for epoch in [false, true] {
+            let factory = GravityBlockExecutorFactory::new(
+                spec(),
+                Arc::new(Reader { epoch, parent: Some(99) }),
+            );
+            let evm = factory.evm_factory().create_evm(seeded_db(), env(100));
+            let mut executor = factory.create_executor(evm, ctx(true));
+            executor.apply_pre_execution_changes().unwrap();
+            assert_eq!(executor.epoch_change, epoch, "exercise the actual early-return branch");
+            let (mut evm, result) = executor.finish().unwrap();
+            assert_installed(evm.db_mut(), 100);
+            assert_eq!(result.gas_used, 0);
+            assert!(result.receipts.is_empty(), "installer creates no receipt");
+        }
+    }
+
+    #[test]
+    fn oracle_task_install_rpc_missing_parent_and_malformed_config_reject_before_mutation() {
+        let factory = GravityBlockExecutorFactory::new(
+            spec(),
+            Arc::new(Reader { epoch: false, parent: None }),
+        );
+        let evm = factory.evm_factory().create_evm(seeded_db(), env(100));
+        let mut executor = factory.create_executor(evm, ctx(true));
+        assert!(executor.apply_pre_execution_changes().is_err());
+        assert_eq!(executor.evm_mut().db_mut().basic(SYSTEM_CALLER).unwrap(), None);
+        let mut invalid = (*spec()).clone();
+        invalid
+            .genesis
+            .config
+            .extra_fields
+            .insert("oracleTaskInstallTime".into(), serde_json::json!("100"));
+        let factory = GravityBlockExecutorFactory::new(
+            Arc::new(invalid),
+            Arc::new(Reader { epoch: false, parent: Some(99) }),
+        );
+        let evm = factory.evm_factory().create_evm(seeded_db(), env(100));
+        let mut executor = factory.create_executor(evm, ctx(true));
+        assert!(executor.apply_pre_execution_changes().is_err());
+        assert_eq!(executor.evm_mut().db_mut().basic(SYSTEM_CALLER).unwrap(), None);
+    }
+
+    #[test]
+    fn oracle_task_install_rpc_simulation_does_not_install() {
+        let factory = GravityBlockExecutorFactory::new(
+            spec(),
+            Arc::new(Reader { epoch: false, parent: None }),
+        );
+        let evm = factory.evm_factory().create_evm(seeded_db(), env(100));
+        let mut executor = factory.create_executor(evm, ctx(false));
+        executor.apply_pre_execution_changes().unwrap();
+        let (mut evm, _) = executor.finish().unwrap();
+        // NativeOracle default mapping slot2 remains zero after simulation.
+        use alloy_primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        let slot = U256::from_be_bytes(keccak256((U256::ZERO, U256::from(2)).abi_encode()).0);
+        assert_eq!(
+            evm.db_mut().storage(crate::hardfork::gamma::NATIVE_ORACLE_ADDRESS, slot).unwrap(),
+            U256::ZERO
+        );
     }
 }

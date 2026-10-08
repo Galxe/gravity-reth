@@ -64,6 +64,7 @@ reqwest.workspace = true
 eyre.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 # reth
 reth-chainspec.workspace = true
 reth-db = { workspace = true, features = ["test-utils"] }

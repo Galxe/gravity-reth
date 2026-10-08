@@ -62,6 +62,8 @@ pub struct GrevmExecutor<DB, EvmConfig, ChainSpec> {
     custom_precompiles: Option<Arc<Vec<(Address, DynParallelPrecompile)>>>,
     /// Block-scoped grevm execution policy.
     grevm_config: GrevmConfig,
+    /// Actual parent context for the current block's one-shot post migration.
+    parent_timestamp: Option<u64>,
 }
 
 impl<DB, EvmConfig, ChainSpec> GrevmExecutor<DB, EvmConfig, ChainSpec>
@@ -102,6 +104,7 @@ where
             system_caller,
             custom_precompiles: None,
             grevm_config,
+            parent_timestamp: None,
         }
     }
 
@@ -286,6 +289,16 @@ where
             crate::hardfork::gamma::apply_state_changes(self, block.number(), block.timestamp())?;
         }
 
+        let env = self.evm_config.evm_env(block.header()).map_err(BlockExecutionError::other)?;
+        crate::hardfork::oracle_task_install::apply_state_changes_for_block(
+            self.state.as_mut().unwrap(),
+            self.chain_spec.as_ref(),
+            env,
+            self.parent_timestamp,
+            block.number(),
+            "grevm",
+        )?;
+
         // Note: `SystemCaller::try_on_state_with` (source-aware `OnStateHook` notification)
         // was removed from alloy-evm in 0.36 together with `StateChangeSource` /
         // `StateChangePostBlockSource`. Follow upstream: skip the balance-increment state
@@ -308,11 +321,51 @@ where
     type Error = BlockExecutionError;
     type Primitives = EvmConfig::Primitives;
 
+    fn validate_installation_config(&self) -> Result<(), Self::Error> {
+        crate::hardfork::oracle_task_install::validate_config(self.chain_spec.as_ref())
+    }
+
+    fn execute_one_with_parent_timestamp(
+        &mut self,
+        block: &RecoveredBlock<Block>,
+        parent_timestamp: u64,
+    ) -> Result<BlockExecutionResult<Receipt>, Self::Error> {
+        self.parent_timestamp = Some(parent_timestamp);
+        let result = self.execute_one(block);
+        self.parent_timestamp = None;
+        result
+    }
+
+    fn apply_oracle_task_install(
+        &mut self,
+        env: EvmEnv,
+        parent_timestamp: u64,
+        block_number: u64,
+    ) -> Result<(), Self::Error> {
+        crate::hardfork::oracle_task_install::apply_state_changes_for_block(
+            self.state.as_mut().unwrap(),
+            self.chain_spec.as_ref(),
+            env,
+            Some(parent_timestamp),
+            block_number,
+            "grevm-epoch",
+        )
+    }
+
     fn execute_one(
         &mut self,
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
+        self.validate_installation_config()?;
+        // Reject missing context before any block mutation, including system EIP calls.
+        if self.parent_timestamp.is_none() &&
+            reth_chainspec::oracle_task_install_config(self.chain_spec.as_ref())
+                .map_err(BlockExecutionError::msg)?
+                .is_some_and(|config| block.timestamp() >= config.timestamp)
+        {
+            return Err(BlockExecutionError::msg("OracleTaskInstall: missing parent timestamp"))
+        }
         self.apply_pre_execution_changes(block)?;
         let ExecuteOutput { receipts, gas_used } = if block.transaction_count() == 0 {
             ExecuteOutput { receipts: Vec::new(), gas_used: 0 }

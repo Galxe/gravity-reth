@@ -29,6 +29,43 @@ pub trait ParallelExecutor {
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>;
 
+    /// Validate configured irregular migrations before any block transaction runs.
+    fn validate_installation_config(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Execute with the actual parent's consensus timestamp.
+    /// Generic non-Gravity executors do not require this additional context.
+    fn execute_one_with_parent_timestamp(
+        &mut self,
+        block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+        _parent_timestamp: u64,
+    ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
+    {
+        self.execute_one(block)
+    }
+
+    /// Execute and extract the bundle with authenticated parent context.
+    fn execute_with_parent_timestamp(
+        &mut self,
+        block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+        parent_timestamp: u64,
+    ) -> Result<BlockExecutionOutput<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
+    {
+        let result = self.execute_one_with_parent_timestamp(block, parent_timestamp)?;
+        Ok(BlockExecutionOutput { state: self.take_bundle(), result })
+    }
+
+    /// Apply the new installation on an epoch block that skips normal post steps.
+    fn apply_oracle_task_install(
+        &mut self,
+        _evm_env: EvmEnv,
+        _parent_timestamp: u64,
+        _block_number: u64,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Takes the `BundleState` changeset from the State, replacing it with an empty one.
     fn take_bundle(&mut self) -> BundleState;
 
