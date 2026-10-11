@@ -22,7 +22,7 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
     BlockNumberList,
 };
-use reth_ethereum_primitives::{Block, Receipt, TransactionSigned};
+use reth_ethereum_primitives::{Block, EthPrimitives, Receipt, TransactionSigned};
 use reth_execution_types::ExecutionOutcome;
 use reth_primitives_traits::{Account, RecoveredBlock, SealedHeader};
 use reth_stages_types::{StageCheckpoint, StageId};
@@ -36,6 +36,7 @@ use std::{
 use tempfile::TempDir;
 
 type TestFactory = ProviderFactory<MockNodeTypesWithDB<DatabaseEnv>>;
+type TestProvider = BlockchainProvider<MockNodeTypesWithDB<DatabaseEnv>>;
 
 struct TestStorage {
     factory: TestFactory,
@@ -54,6 +55,14 @@ impl TestStorage {
             StaticFileProvider::read_write(static_dir.path()).unwrap(),
         );
         Self { factory, _db_dir: db_dir, _static_dir: static_dir }
+    }
+
+    fn with_chain() -> (Self, TestProvider, SealedHeader<Header>) {
+        let storage = Self::new();
+        let genesis = publish_genesis(&storage.factory);
+        let provider =
+            BlockchainProvider::with_latest(storage.factory.clone(), genesis.clone()).unwrap();
+        (storage, provider, genesis)
     }
 }
 
@@ -275,36 +284,41 @@ fn published_rpc_static_file_reads_ignore_unpublished_append() {
     write.complete();
 }
 
-fn add_memory_head(
-    provider: &BlockchainProvider<MockNodeTypesWithDB<DatabaseEnv>>,
-    number: u64,
-    parent_hash: B256,
-) {
+fn add_memory_head(provider: &TestProvider, number: u64, parent_hash: B256) {
     add_memory_head_with_outcome(provider, number, parent_hash, Default::default());
 }
 
 fn add_memory_head_with_outcome(
-    provider: &BlockchainProvider<MockNodeTypesWithDB<DatabaseEnv>>,
+    provider: &TestProvider,
     number: u64,
     parent_hash: B256,
     outcome: ExecutionOutcome<Receipt>,
 ) {
+    provider.canonical_in_memory_state().update_chain(NewCanonicalChain::Commit {
+        new: vec![executed_block(number, parent_hash, 0, outcome)],
+    });
+}
+
+fn executed_block(
+    number: u64,
+    parent_hash: B256,
+    timestamp: u64,
+    outcome: ExecutionOutcome<Receipt>,
+) -> ExecutedBlockWithTrieUpdates<EthPrimitives> {
     let block = RecoveredBlock::new_unhashed(
         Block {
-            header: Header { number, parent_hash, ..Default::default() },
+            header: Header { number, parent_hash, timestamp, ..Default::default() },
             body: Default::default(),
         },
         Vec::new(),
     );
-    provider.canonical_in_memory_state().update_chain(NewCanonicalChain::Commit {
-        new: vec![ExecutedBlockWithTrieUpdates::new(
-            Arc::new(block),
-            Arc::new(outcome),
-            Default::default(),
-            ExecutedTrieUpdates::empty(),
-            Default::default(),
-        )],
-    });
+    ExecutedBlockWithTrieUpdates::new(
+        Arc::new(block),
+        Arc::new(outcome),
+        Default::default(),
+        ExecutedTrieUpdates::empty(),
+        Default::default(),
+    )
 }
 
 #[test]
@@ -354,22 +368,9 @@ fn published_rpc_changeset_reads_clip_static_file_append() {
 
 #[test]
 fn published_rpc_view_checks_in_memory_anchor_height_and_hash() {
-    let storage = TestStorage::new();
+    let (storage, provider, genesis) = TestStorage::with_chain();
     let factory = &storage.factory;
-    let genesis = publish_genesis(factory);
-    let provider = BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
-    let original = Account { balance: U256::from(1), ..Default::default() };
-    let changed = Account { balance: U256::from(2), ..Default::default() };
-    let outcome = ExecutionOutcome {
-        bundle: BundleState::new(
-            [(Address::ZERO, Some(original.into()), Some(changed.into()), Default::default())],
-            [vec![(Address::ZERO, Some(Some(original.into())), [])]],
-            [],
-        ),
-        first_block: 1,
-        ..Default::default()
-    };
-    add_memory_head_with_outcome(&provider, 1, genesis.hash(), outcome);
+    add_memory_head_with_outcome(&provider, 1, genesis.hash(), balance_outcome(1, 2));
     let rpc_provider = provider.rpc_provider();
     assert_eq!(rpc_provider.consistent_provider().unwrap().best_block_number().unwrap(), 1);
     assert_eq!(
@@ -389,22 +390,9 @@ fn published_rpc_view_checks_in_memory_anchor_height_and_hash() {
 
 #[test]
 fn published_rpc_captured_memory_survives_persistence_and_eviction() {
-    let storage = TestStorage::new();
+    let (storage, provider, genesis) = TestStorage::with_chain();
     let factory = &storage.factory;
-    let genesis = publish_genesis(factory);
-    let provider = BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
-    let original = Account { balance: U256::from(1), ..Default::default() };
-    let changed = Account { balance: U256::from(2), ..Default::default() };
-    let outcome = ExecutionOutcome {
-        bundle: BundleState::new(
-            [(Address::ZERO, Some(original.into()), Some(changed.into()), Default::default())],
-            [vec![(Address::ZERO, Some(Some(original.into())), [])]],
-            [],
-        ),
-        first_block: 1,
-        ..Default::default()
-    };
-    add_memory_head_with_outcome(&provider, 1, genesis.hash(), outcome);
+    add_memory_head_with_outcome(&provider, 1, genesis.hash(), balance_outcome(1, 2));
     let captured = provider.rpc_provider().consistent_provider().unwrap();
     let memory_hash = captured.block_hash(1).unwrap().unwrap();
     let memory_header = captured.sealed_header(1).unwrap().unwrap();
@@ -428,24 +416,27 @@ fn published_rpc_captured_memory_survives_persistence_and_eviction() {
     );
 }
 
-fn set_pending_with_balance(
-    provider: &BlockchainProvider<MockNodeTypesWithDB<DatabaseEnv>>,
-    number: u64,
-    parent_hash: B256,
-) -> B256 {
+fn set_pending_with_balance(provider: &TestProvider, number: u64, parent_hash: B256) -> B256 {
     set_pending_state(provider, number, parent_hash, 9, 0)
 }
 
 fn set_pending_state(
-    provider: &BlockchainProvider<MockNodeTypesWithDB<DatabaseEnv>>,
+    provider: &TestProvider,
     number: u64,
     parent_hash: B256,
     balance: u64,
     timestamp: u64,
 ) -> B256 {
+    let block = executed_block(number, parent_hash, timestamp, balance_outcome(number, balance));
+    let hash = block.recovered_block().hash();
+    provider.canonical_in_memory_state().set_pending_block(block);
+    hash
+}
+
+fn balance_outcome(number: u64, balance: u64) -> ExecutionOutcome<Receipt> {
     let original = Account { balance: U256::from(1), ..Default::default() };
     let changed = Account { balance: U256::from(balance), ..Default::default() };
-    let outcome = ExecutionOutcome {
+    ExecutionOutcome {
         bundle: BundleState::new(
             [(Address::ZERO, Some(original.into()), Some(changed.into()), Default::default())],
             [vec![(Address::ZERO, Some(Some(original.into())), [])]],
@@ -453,29 +444,10 @@ fn set_pending_state(
         ),
         first_block: number,
         ..Default::default()
-    };
-    let block = RecoveredBlock::new_unhashed(
-        Block {
-            header: Header { number, parent_hash, timestamp, ..Default::default() },
-            body: Default::default(),
-        },
-        Vec::new(),
-    );
-    let hash = block.hash();
-    provider.canonical_in_memory_state().set_pending_block(ExecutedBlockWithTrieUpdates::new(
-        Arc::new(block),
-        Arc::new(outcome),
-        Default::default(),
-        ExecutedTrieUpdates::empty(),
-        Default::default(),
-    ));
-    hash
+    }
 }
 
-fn assert_rpc_pending_filtered(
-    provider: &BlockchainProvider<MockNodeTypesWithDB<DatabaseEnv>>,
-    pending_hash: B256,
-) {
+fn assert_rpc_pending_filtered(provider: &TestProvider, pending_hash: B256) {
     let rpc = provider.rpc_provider();
     let captured = rpc.consistent_provider().unwrap();
     assert!(!captured.has_rpc_pending_state());
@@ -504,10 +476,7 @@ fn assert_rpc_pending_filtered(
 
 #[test]
 fn published_rpc_pending_without_memory_head_must_extend_published_tip() {
-    let storage = TestStorage::new();
-    let factory = &storage.factory;
-    let genesis = publish_genesis(factory);
-    let provider = BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
+    let (_storage, provider, genesis) = TestStorage::with_chain();
     assert!(provider.canonical_in_memory_state().head_state().is_none());
 
     for (number, parent_hash) in [(1, B256::repeat_byte(1)), (2, genesis.hash())] {
@@ -548,10 +517,7 @@ fn published_rpc_pending_without_memory_head_must_extend_published_tip() {
 
 #[test]
 fn published_rpc_pending_capture_keeps_its_head_and_filters_stale_parent() {
-    let storage = TestStorage::new();
-    let factory = &storage.factory;
-    let genesis = publish_genesis(factory);
-    let provider = BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
+    let (_storage, provider, genesis) = TestStorage::with_chain();
     add_memory_head(&provider, 1, genesis.hash());
     let parent_hash = provider.block_hash(1).unwrap().unwrap();
     let pending_hash = set_pending_with_balance(&provider, 2, parent_hash);
@@ -569,10 +535,7 @@ fn published_rpc_pending_capture_keeps_its_head_and_filters_stale_parent() {
 
 #[test]
 fn published_rpc_pending_state_hash_never_switches_to_replacement() {
-    let storage = TestStorage::new();
-    let factory = &storage.factory;
-    let genesis = publish_genesis(factory);
-    let provider = BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
+    let (_storage, provider, genesis) = TestStorage::with_chain();
     let first = set_pending_state(&provider, 1, genesis.hash(), 9, 0);
     let rpc = provider.rpc_provider();
     let captured = rpc.state_by_block_hash(first).unwrap();
@@ -614,10 +577,7 @@ fn published_rpc_pending_state_hash_never_switches_to_replacement() {
 
 #[test]
 fn published_rpc_pending_state_hash_remains_valid_after_becoming_canonical() {
-    let storage = TestStorage::new();
-    let factory = &storage.factory;
-    let genesis = publish_genesis(factory);
-    let provider = BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
+    let (_storage, provider, genesis) = TestStorage::with_chain();
     let hash = set_pending_state(&provider, 1, genesis.hash(), 9, 0);
     let pending = provider.canonical_in_memory_state().pending_state().unwrap();
     let rpc = provider.rpc_provider();

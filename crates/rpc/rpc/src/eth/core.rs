@@ -620,7 +620,8 @@ mod tests {
     use reth_provider::{
         providers::BlockchainProvider,
         test_utils::{
-            create_test_provider_factory, ExtendedAccount, MockEthProvider, NoopProvider,
+            create_test_provider_factory, ExtendedAccount, MockEthProvider, MockNodeTypesWithDB,
+            NoopProvider,
         },
         DatabaseProviderFactory, PruneCheckpointReader, StageCheckpointReader,
     };
@@ -666,6 +667,31 @@ mod tests {
         .build()
     }
 
+    fn write_rpc_genesis(tx: &impl DbTxMut, genesis: &SealedHeader<Header>) {
+        tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
+        tx.put::<tables::HeaderNumbers>(genesis.hash(), 0).unwrap();
+        tx.put::<tables::CanonicalHeaders>(0, genesis.hash()).unwrap();
+        tx.put::<tables::BlockBodyIndices>(0, StoredBlockBodyIndices::default()).unwrap();
+        for stage in
+            ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute", "Finish"]
+        {
+            tx.put::<tables::StageCheckpoints>(stage.to_string(), Default::default()).unwrap();
+        }
+    }
+
+    fn build_rpc_test_eth_api(
+        provider: BlockchainProvider<MockNodeTypesWithDB>,
+    ) -> FakeEthApi<BlockchainProvider<MockNodeTypesWithDB>> {
+        EthApiBuilder::new(
+            provider.clone(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::new(provider.chain_spec()),
+        )
+        .provider(provider.rpc_provider())
+        .build()
+    }
+
     #[tokio::test]
     async fn rpc_provider_override_leaves_node_provider_unchanged() {
         let address = Address::ZERO;
@@ -707,12 +733,9 @@ mod tests {
             let mut write = factory.consistent_write();
             let provider = factory.provider_rw().unwrap();
             let tx = provider.tx_ref();
-            tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
-            tx.put::<tables::HeaderNumbers>(genesis.hash(), 0).unwrap();
+            write_rpc_genesis(tx, &genesis);
             // A known number mapping alone must never establish canonicality for this hash.
             tx.put::<tables::HeaderNumbers>(unconfirmed_hash, 0).unwrap();
-            tx.put::<tables::CanonicalHeaders>(0, genesis.hash()).unwrap();
-            tx.put::<tables::BlockBodyIndices>(0, StoredBlockBodyIndices::default()).unwrap();
             tx.put::<tables::PlainAccountState>(
                 Address::ZERO,
                 Account { balance: U256::from(1), ..Default::default() },
@@ -723,25 +746,13 @@ mod tests {
                 BlockNumberList::new([0]).unwrap(),
             )
             .unwrap();
-            for stage in
-                ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute", "Finish"]
-            {
-                tx.put::<tables::StageCheckpoints>(stage.to_string(), Default::default()).unwrap();
-            }
             provider.commit().unwrap();
             factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
             write.complete();
         }
         let node_provider =
             BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
-        let eth_api: FakeEthApi<_> = EthApiBuilder::new(
-            node_provider.clone(),
-            testing_pool(),
-            NoopNetwork::default(),
-            EthEvmConfig::new(node_provider.chain_spec()),
-        )
-        .provider(node_provider.rpc_provider())
-        .build();
+        let eth_api = build_rpc_test_eth_api(node_provider);
 
         for require_canonical in [None, Some(false), Some(true)] {
             let requested =
@@ -824,15 +835,7 @@ mod tests {
             let mut write = factory.consistent_write();
             let provider = factory.provider_rw().unwrap();
             let tx = provider.tx_ref();
-            tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
-            tx.put::<tables::HeaderNumbers>(genesis.hash(), 0).unwrap();
-            tx.put::<tables::CanonicalHeaders>(0, genesis.hash()).unwrap();
-            tx.put::<tables::BlockBodyIndices>(0, StoredBlockBodyIndices::default()).unwrap();
-            for stage in
-                ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute", "Finish"]
-            {
-                tx.put::<tables::StageCheckpoints>(stage.to_string(), Default::default()).unwrap();
-            }
+            write_rpc_genesis(tx, &genesis);
             provider.commit().unwrap();
             factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
             write.complete();
@@ -876,14 +879,7 @@ mod tests {
                 Default::default(),
             ),
         );
-        let eth_api: FakeEthApi<_> = EthApiBuilder::new(
-            node_provider.clone(),
-            testing_pool(),
-            NoopNetwork::default(),
-            EthEvmConfig::new(node_provider.chain_spec()),
-        )
-        .provider(node_provider.rpc_provider())
-        .build();
+        let eth_api = build_rpc_test_eth_api(node_provider);
 
         for require_canonical in [None, Some(false)] {
             let block_id =
@@ -921,10 +917,7 @@ mod tests {
             let mut write = factory.consistent_write();
             let provider = factory.provider_rw().unwrap();
             let tx = provider.tx_ref();
-            tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
-            tx.put::<tables::HeaderNumbers>(genesis.hash(), 0).unwrap();
-            tx.put::<tables::CanonicalHeaders>(0, genesis.hash()).unwrap();
-            tx.put::<tables::BlockBodyIndices>(0, StoredBlockBodyIndices::default()).unwrap();
+            write_rpc_genesis(tx, &genesis);
             tx.put::<tables::PlainAccountState>(
                 address,
                 Account {
@@ -940,11 +933,6 @@ mod tests {
                 BlockNumberList::new([0]).unwrap(),
             )
             .unwrap();
-            for stage in
-                ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute", "Finish"]
-            {
-                tx.put::<tables::StageCheckpoints>(stage.to_string(), Default::default()).unwrap();
-            }
             provider.commit().unwrap();
             factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
             write.complete();
@@ -967,14 +955,7 @@ mod tests {
             write.complete();
         }
         let node_provider = BlockchainProvider::with_latest(factory.clone(), genesis).unwrap();
-        let eth_api: FakeEthApi<_> = EthApiBuilder::new(
-            node_provider.clone(),
-            testing_pool(),
-            NoopNetwork::default(),
-            EthEvmConfig::new(node_provider.chain_spec()),
-        )
-        .provider(node_provider.rpc_provider())
-        .build();
+        let eth_api = build_rpc_test_eth_api(node_provider);
         let internal_api = eth_api.with_execution_provider().clone();
         let request = TransactionRequest {
             to: Some(TxKind::Call(address)),

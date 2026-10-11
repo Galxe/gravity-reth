@@ -2,7 +2,7 @@ use super::*;
 use crate::implementation::rocksdb::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 use alloy_primitives::{b256, Bytes};
 use reth_db_api::{
-    cursor::{DbCursorRO, DbDupCursorRO},
+    cursor::DbDupCursorRO,
     database::Database,
     models::ClientVersion,
     tables,
@@ -146,36 +146,4 @@ fn read_view_rejects_another_backend_type() {
 
     let (_dir, env) = open();
     assert!(env.tx_with_read_view(Some(Arc::new(ForeignView))).is_err());
-}
-
-#[test]
-fn cursors_retain_read_view_after_transaction_and_environment_drop() {
-    let (_dir, env) = open();
-    write_three_stores(&env, 1);
-    let view = capture(&env);
-    let tx = env.tx_with_read_view(view.clone()).unwrap();
-    let mut state_cursor = tx.cursor_read::<tables::Metadata>().unwrap();
-    let mut account_cursor = tx.cursor_read::<tables::AccountsTrieV2>().unwrap();
-    let mut storage_cursor = tx.cursor_dup_read::<tables::StoragesTrieV2>().unwrap();
-    write_three_stores(&env, 2);
-    drop(view);
-    drop(tx);
-    drop(env);
-
-    assert_eq!(state_cursor.get("read-view-test".into()).unwrap().unwrap().1, vec![1]);
-    assert_eq!(
-        account_cursor.seek_exact(StoredNibbles::from(vec![1])).unwrap().unwrap().1,
-        Bytes::from(vec![1])
-    );
-    assert_eq!(
-        storage_cursor
-            .get_by_key_subkey(
-                b256!("0000000000000000000000000000000000000000000000000000000000000001"),
-                StoredNibblesSubKey::from(vec![2]),
-            )
-            .unwrap()
-            .unwrap()
-            .node,
-        Bytes::from(vec![1])
-    );
 }

@@ -779,7 +779,10 @@ mod tests {
     use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
     use reth_exex_types::FinishedExExHeight;
     use reth_primitives_traits::Account;
-    use reth_provider::{test_utils::create_test_provider_factory, StorageChangeSetReader};
+    use reth_provider::{
+        test_utils::{create_test_provider_factory, MockNodeTypesWithDB},
+        StorageChangeSetReader,
+    };
     use reth_prune::Pruner;
     use revm::database::states::{
         reverts::Reverts, AccountRevert, AccountStatus, BundleAccount, BundleState,
@@ -797,6 +800,22 @@ mod tests {
 
         let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
         PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
+    }
+
+    fn persistence_service(
+        provider: &ProviderFactory<MockNodeTypesWithDB>,
+    ) -> PersistenceService<MockNodeTypesWithDB> {
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        PersistenceService::new(
+            provider.clone(),
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        )
     }
 
     #[test]
@@ -840,17 +859,7 @@ mod tests {
     #[test]
     fn complete_blocks_publish_rpc_views_without_waiting_for_old_readers() {
         let provider = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            provider.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
+        let service = persistence_service(&provider);
         let rpc_provider = provider.rpc_provider();
         assert!(rpc_provider.provider().is_err());
 
@@ -861,15 +870,13 @@ mod tests {
         service.save_blocks_per_block(blocks).unwrap();
         let first_view = rpc_provider.provider().unwrap();
         let first_bounds = first_view.rpc_read_view_bounds().unwrap();
-        assert_eq!(first_bounds.block_number, 0);
-        assert_eq!(first_bounds.block_hash, first_hash);
+        assert_eq!((first_bounds.block_number, first_bounds.block_hash), (0, first_hash));
 
         // Holding the old complete view must not prevent the original staged append commits.
         service.save_blocks_per_block(vec![next_block]).unwrap();
         let next_view = rpc_provider.provider().unwrap();
         let next_bounds = next_view.rpc_read_view_bounds().unwrap();
-        assert_eq!(next_bounds.block_number, 1);
-        assert_eq!(next_bounds.block_hash, next_hash);
+        assert_eq!((next_bounds.block_number, next_bounds.block_hash), (1, next_hash));
         assert_eq!(first_view.block_hash(1).unwrap(), None);
         assert_eq!(next_view.block_hash(1).unwrap(), Some(next_hash));
         assert_eq!(first_view.rpc_read_view_bounds(), Some(first_bounds));
@@ -986,20 +993,9 @@ mod tests {
         use reth_trie_parallel::nested_hash::NestedStateRoot;
 
         let factory = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(factory.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            factory.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
+        let service = persistence_service(&factory);
         let address = Address::with_last_byte(1);
         let slot = B256::with_last_byte(2);
-        let reference = create_test_provider_factory();
         let mut blocks = Vec::new();
         let mut parent_hash = B256::ZERO;
         let mut previous_account = None;
@@ -1047,7 +1043,7 @@ mod tests {
                     vec![Default::default()],
                 )
             };
-            let provider = reference.database_provider_rw().unwrap();
+            let provider = factory.database_provider_rw().unwrap();
             let (root, updates) =
                 NestedStateRoot::new(provider.tx_ref(), None).calculate(&hashed).unwrap();
             expected_root = root;
@@ -1132,17 +1128,7 @@ mod tests {
     #[test]
     fn incomplete_block_write_rejects_new_read_views() {
         let provider = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            provider.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
+        let service = persistence_service(&provider);
 
         let mut block = TestBlockBuilder::eth().get_executed_block_with_number(0, B256::ZERO);
         let block_hash = block.recovered_block().hash();
@@ -1159,6 +1145,7 @@ mod tests {
         );
         assert!(provider.db_ref().db().tx().is_err());
         assert!(provider.db_ref().db().tx_live().is_err());
+        assert!(provider.rpc_provider().provider().is_err());
     }
 
     #[test]

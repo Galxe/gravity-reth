@@ -232,6 +232,13 @@ mod tests {
 
     static INIT: Once = Once::new();
 
+    const RECOVERY_STAGES: [StageId; 4] = [
+        StageId::Execution,
+        StageId::AccountHashing,
+        StageId::IndexAccountHistory,
+        StageId::MerkleExecute,
+    ];
+
     fn init_test_gravity_config() {
         INIT.call_once(|| {
             init_gravity_config(GravityConfig {
@@ -472,12 +479,7 @@ mod tests {
         tx.put::<tables::Headers>(1, header.clone()).unwrap();
         tx.put::<tables::CanonicalHeaders>(1, header.hash_slow()).unwrap();
         tx.put::<tables::BlockBodyIndices>(1, StoredBlockBodyIndices::default()).unwrap();
-        for stage in [
-            StageId::Execution,
-            StageId::AccountHashing,
-            StageId::IndexAccountHistory,
-            StageId::MerkleExecute,
-        ] {
+        for stage in RECOVERY_STAGES {
             write_checkpoint(tx, stage, 1);
         }
         provider.commit().unwrap();
@@ -545,15 +547,11 @@ mod tests {
             )
             .unwrap();
         }
-        for stage in [
-            StageId::Execution,
-            StageId::AccountHashing,
-            StageId::MerkleExecute,
-            StageId::IndexAccountHistory,
-        ] {
+        for stage in RECOVERY_STAGES {
             write_checkpoint(tx, stage, 1);
         }
         provider.commit().unwrap();
+        let checkpoints = factory.database_provider_ro().unwrap().get_all_checkpoints().unwrap();
 
         let error = StorageRecoveryHelper::new(&factory).check_and_recover().unwrap_err();
         assert!(error.to_string().contains("body tip 2 exceeds Execution checkpoint 1"));
@@ -584,15 +582,7 @@ mod tests {
                 .0,
             2
         );
-        for stage in [
-            StageId::Execution,
-            StageId::AccountHashing,
-            StageId::MerkleExecute,
-            StageId::IndexAccountHistory,
-        ] {
-            assert_eq!(provider.get_stage_checkpoint(stage).unwrap().unwrap().block_number, 1);
-        }
-        assert!(provider.get_stage_checkpoint(StageId::Finish).unwrap().is_none());
+        assert_eq!(provider.get_all_checkpoints().unwrap(), checkpoints);
         assert!(factory.rpc_provider().provider().is_err());
     }
 
