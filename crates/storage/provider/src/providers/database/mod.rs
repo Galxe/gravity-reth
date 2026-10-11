@@ -170,24 +170,7 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
         static_file_provider: StaticFileProvider<N::Primitives>,
     ) -> RethResult<Self> {
         let db = Arc::new(init_db(path, args).map_err(RethError::msg)?);
-        let storage_settings = Arc::new(RwLock::new(load_storage_settings(&db)));
-        let rpc_views = Arc::new(super::rpc_read_view::RpcViewManager::new(
-            read_replay_floor(&db).unwrap_or_else(|error| {
-                tracing::warn!(target: "provider::rpc", %error,
-                    "RPC replay boundary is unavailable; admission remains closed");
-                u64::MAX
-            }),
-        ));
-        Ok(Self {
-            db,
-            chain_spec,
-            static_file_provider,
-            prune_modes: PruneModes::none(),
-            storage: Default::default(),
-            storage_settings,
-            rpc_reads: false,
-            rpc_views,
-        })
+        Ok(Self::new(db, chain_spec, static_file_provider))
     }
 }
 
@@ -266,7 +249,8 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     }
 
     /// Whether a complete height needs validation after startup or an interrupted write.
-    pub fn rpc_read_view_requires_validation(&self, block_number: u64) -> bool {
+    #[cfg(test)]
+    pub(crate) fn rpc_read_view_requires_validation(&self, block_number: u64) -> bool {
         self.rpc_views.requires_validation(block_number)
     }
 

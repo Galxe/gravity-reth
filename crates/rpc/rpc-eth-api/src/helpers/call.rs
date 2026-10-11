@@ -669,7 +669,7 @@ pub trait Call:
         self.spawn_blocking_io_fut(async move |this| {
             let state = this.state_at_block_id(at).await?;
             let db = State::builder()
-                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper::new(state)))
+                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
                 .build();
             f(this, db)
         })

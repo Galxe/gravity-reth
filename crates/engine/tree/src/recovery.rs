@@ -8,18 +8,14 @@
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
 use alloy_primitives::BlockNumber;
-use reth_db::{
-    cursor::DbCursorRO,
-    tables,
-    transaction::{DbTx, DbTxMut},
-};
+use reth_db::{cursor::DbCursorRO, tables, transaction::DbTx};
 use reth_errors::ProviderError;
 use reth_primitives_traits::GotExpected;
 use reth_provider::{
     providers::ProviderNodeTypes, AccountExtReader, BlockHashReader, BlockNumReader,
     ChangesetRangeReader, DatabaseProviderFactory, HashingWriter, HeaderProvider, HistoryWriter,
-    ProviderFactory, ProviderResult, StageCheckpointWriter, StorageReader, StorageSettingsCache,
-    TrieWriterV2,
+    ProviderFactory, ProviderResult, StageCheckpointReader, StageCheckpointWriter, StorageReader,
+    StorageSettingsCache, TrieWriterV2,
 };
 use reth_stages_api::{StageCheckpoint, StageId};
 use reth_storage_errors::provider::RootMismatch;
@@ -113,11 +109,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     /// Recover `AccountHashing` stage if needed.
     fn recover_hashing(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
-        let ck = provider_rw
-            .tx_ref()
-            .get::<tables::StageCheckpoints>(StageId::AccountHashing.to_string())
-            .map_err(ProviderError::Database)?
-            .unwrap_or_default();
+        let ck = provider_rw.get_stage_checkpoint(StageId::AccountHashing)?.unwrap_or_default();
 
         if ck.block_number < block_number {
             info!(target: "engine::recovery", checkpoint = ?ck.block_number, block_number = ?block_number, "Recovering hashing state");
@@ -132,13 +124,10 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
             let storages = provider_rw.plain_state_storages(lists)?;
             provider_rw.insert_storage_for_hashing(storages)?;
 
-            provider_rw
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::AccountHashing.to_string(),
-                    StageCheckpoint { block_number, ..ck },
-                )
-                .map_err(ProviderError::Database)?;
+            provider_rw.save_stage_checkpoint(
+                StageId::AccountHashing,
+                StageCheckpoint { block_number, ..ck },
+            )?;
             provider_rw.commit()?;
             info!(target: "engine::recovery", block_number = ?block_number, "Hashing state recovered");
         }
@@ -149,11 +138,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     /// Recover `MerkleExecute` stage if needed.
     fn recover_merkle(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
-        let ck = provider_rw
-            .tx_ref()
-            .get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string())
-            .map_err(ProviderError::Database)?
-            .unwrap_or_default();
+        let ck = provider_rw.get_stage_checkpoint(StageId::MerkleExecute)?.unwrap_or_default();
 
         // Merkle can be ahead when its parallel commit wins the race with a failed state commit.
         // Gravity consensus never replaces an ordered block, so recovery will replay the same
@@ -195,13 +180,10 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
 
             provider_rw.write_trie_updatesv2(&trie_updates_v2).map_err(ProviderError::Database)?;
 
-            provider_rw
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::MerkleExecute.to_string(),
-                    StageCheckpoint { block_number, ..ck },
-                )
-                .map_err(ProviderError::Database)?;
+            provider_rw.save_stage_checkpoint(
+                StageId::MerkleExecute,
+                StageCheckpoint { block_number, ..ck },
+            )?;
             provider_rw.commit()?;
             info!(target: "engine::recovery", block_number = ?block_number, "Merkle state recovered");
         }
@@ -212,23 +194,17 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
     /// Recover `IndexAccountHistory` stage if needed.
     fn recover_history_indices(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
-        let ck = provider_rw
-            .tx_ref()
-            .get::<tables::StageCheckpoints>(StageId::IndexAccountHistory.to_string())
-            .map_err(ProviderError::Database)?
-            .unwrap_or_default();
+        let ck =
+            provider_rw.get_stage_checkpoint(StageId::IndexAccountHistory)?.unwrap_or_default();
 
         if ck.block_number < block_number {
             info!(target: "engine::recovery", checkpoint = ?ck.block_number, block_number = ?block_number, "Recovering history indices");
             provider_rw.update_history_indices(ck.block_number + 1..=block_number)?;
 
-            provider_rw
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::IndexAccountHistory.to_string(),
-                    StageCheckpoint { block_number, ..ck },
-                )
-                .map_err(ProviderError::Database)?;
+            provider_rw.save_stage_checkpoint(
+                StageId::IndexAccountHistory,
+                StageCheckpoint { block_number, ..ck },
+            )?;
             provider_rw.commit()?;
             info!(target: "engine::recovery", block_number = ?block_number, "History indices recovered");
         }
@@ -249,9 +225,7 @@ mod tests {
         transaction::{DbTx, DbTxMut},
     };
     use reth_primitives_traits::{Account, StorageEntry};
-    use reth_provider::{
-        test_utils::create_test_provider_factory, AccountReader, StageCheckpointReader, StateWriter,
-    };
+    use reth_provider::{test_utils::create_test_provider_factory, AccountReader, StateWriter};
     use reth_stages_api::{StageCheckpoint, StageId};
     use reth_trie::{updates::TrieUpdatesV2, HashedPostState, HashedStorage};
     use std::sync::Once;

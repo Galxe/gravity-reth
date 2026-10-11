@@ -23,13 +23,6 @@ pub type StateCacheDb = State<StateProviderDatabase<StateProviderTraitObjWrapper
 #[expect(missing_debug_implementations)]
 pub struct StateProviderTraitObjWrapper(pub StateProviderBox);
 
-impl StateProviderTraitObjWrapper {
-    /// Wraps a state provider for RPC execution.
-    pub fn new(provider: StateProviderBox) -> Self {
-        Self(provider)
-    }
-}
-
 impl StateRootProvider for StateProviderTraitObjWrapper {
     fn state_root(
         &self,

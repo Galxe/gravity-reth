@@ -382,30 +382,15 @@ where
 
                                 if need_update {
                                     let trie_output = storage_trie.take_output();
-                                    if wiped {
-                                        // Always emit the deletion marker so the previous
-                                        // storage trie is wiped, carrying the rebuilt nodes
-                                        // (which are empty iff the recreated storage is empty).
+                                    // A wipe must emit a deletion marker even when no nodes remain.
+                                    if wiped || !trie_output.is_empty() {
                                         assert!(trie_update
                                             .lock()
                                             .storage_tries
                                             .insert(
                                                 hashed_address,
                                                 StorageTrieUpdatesV2 {
-                                                    is_deleted: true,
-                                                    storage_nodes: trie_output.update_nodes,
-                                                    removed_nodes: trie_output.removed_nodes,
-                                                }
-                                            )
-                                            .is_none());
-                                    } else if !trie_output.is_empty() {
-                                        assert!(trie_update
-                                            .lock()
-                                            .storage_tries
-                                            .insert(
-                                                hashed_address,
-                                                StorageTrieUpdatesV2 {
-                                                    is_deleted: false,
+                                                    is_deleted: wiped,
                                                     storage_nodes: trie_output.update_nodes,
                                                     removed_nodes: trie_output.removed_nodes,
                                                 }

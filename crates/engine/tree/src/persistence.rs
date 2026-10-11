@@ -574,7 +574,6 @@ where
         Self::advance_checkpoint(tx, StageId::IndexAccountHistory, Some(group_first), group_last)?;
         Self::advance_checkpoint(tx, StageId::MerkleExecute, None, group_last)?;
 
-        provider_rw.static_file_provider().commit()?;
         provider_rw.commit()?;
         PERSIST_BLOCK_CACHE.persist_tip(group_last);
         self.provider
