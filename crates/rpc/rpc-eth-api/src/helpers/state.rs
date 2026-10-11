@@ -38,12 +38,20 @@ pub trait EthState: LoadState + SpawnBlocking {
         Self: EthApiSpec,
     {
         let chain_info = self.chain_info().map_err(Self::Error::from_eth_err)?;
-        let block_number = self
-            .provider()
-            .block_number_for_id(block_id)
-            .map_err(Self::Error::from_eth_err)?
-            .or_else(|| block_id.is_pending().then_some(chain_info.best_number))
-            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+        let block_number =
+            self.provider().block_number_for_id(block_id).map_err(Self::Error::from_eth_err)?;
+        let block_number = match (block_number, block_id) {
+            (Some(number), _) => Some(number),
+            (None, block_id) if block_id.is_pending() => Some(chain_info.best_number),
+            (None, BlockId::Hash(hash)) if hash.require_canonical != Some(true) => self
+                .provider()
+                .pending_block_num_hash()
+                .map_err(Self::Error::from_eth_err)?
+                .filter(|pending| pending.hash == hash.block_hash)
+                .map(|pending| pending.number),
+            _ => None,
+        }
+        .ok_or(EthApiError::HeaderNotFound(block_id))?;
         if chain_info.best_number.saturating_sub(block_number) > self.max_proof_window() {
             return Err(EthApiError::ExceedsMaxProofWindow.into())
         }

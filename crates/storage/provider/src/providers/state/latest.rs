@@ -31,7 +31,7 @@ impl<'b, Provider: DBProvider> LatestStateProviderRef<'b, Provider> {
     }
 
     fn v2_tx(&self) -> ProviderResult<&Provider::Tx> {
-        self.tx().snapshot_block_number()?;
+        snapshot_block_number(self.tx())?;
         Ok(self.tx())
     }
 }
@@ -244,6 +244,31 @@ impl<Provider: DBProvider> LatestStateProvider<Provider> {
 
 // Delegates all provider impls to [LatestStateProviderRef]
 delegate_provider_impls!(LatestStateProvider<Provider> where [Provider: DBProvider + BlockHashReader ]);
+
+/// Check fixed snapshots before using hashed state and trie together. Live execution readers
+/// retain their original semantics and obtain their visible height from the provider.
+pub(crate) fn snapshot_block_number<Tx: DbTx>(tx: &Tx) -> ProviderResult<Option<u64>> {
+    if !tx.is_snapshot() {
+        return Ok(None);
+    }
+    let mut height = None;
+    for stage in [
+        reth_stages_types::StageId::Execution,
+        reth_stages_types::StageId::AccountHashing,
+        reth_stages_types::StageId::IndexAccountHistory,
+        reth_stages_types::StageId::MerkleExecute,
+    ] {
+        let next =
+            tx.get::<tables::StageCheckpoints>(stage.to_string())?.unwrap_or_default().block_number;
+        if height.is_some_and(|height| next != height) {
+            return Err(ProviderError::other(std::io::Error::other(
+                "state/trie stage checkpoints do not identify a complete block",
+            )));
+        }
+        height = Some(next);
+    }
+    Ok(height)
+}
 
 #[cfg(test)]
 mod tests {

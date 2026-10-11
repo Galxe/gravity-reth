@@ -131,7 +131,7 @@ fn commit_block_metadata(factory: &TestFactory, header: &SealedHeader<Header>) {
 }
 
 fn publish_genesis(factory: &TestFactory) -> SealedHeader<Header> {
-    let mut guard = factory.db_ref().consistent_write();
+    let mut guard = factory.consistent_write();
     let genesis = append_static_block(factory, 0, B256::ZERO);
     commit_block_metadata(factory, &genesis);
     factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
@@ -143,7 +143,7 @@ fn publish_genesis(factory: &TestFactory) -> SealedHeader<Header> {
 fn failed_rpc_publication_does_not_fail_a_committed_write_and_can_retry() {
     let storage = TestStorage::new();
     let factory = &storage.factory;
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     let genesis = append_static_block_with_root(factory, 0, B256::ZERO, reth_trie::EMPTY_ROOT_HASH);
     commit_block_metadata(factory, &genesis);
     factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
@@ -152,7 +152,7 @@ fn failed_rpc_publication_does_not_fail_a_committed_write_and_can_retry() {
     let rpc_factory = factory.rpc_provider();
     let old = rpc_factory.provider().unwrap();
 
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     // A publication preflight error must close the old RPC view and leave the committed state
     // usable by the original execution providers. It must not poison the storage write guard.
     factory
@@ -172,7 +172,7 @@ fn failed_rpc_publication_does_not_fail_a_committed_write_and_can_retry() {
     );
 
     // A later complete boundary validates storage again and reopens RPC admission.
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
     write.complete();
     drop(write);
@@ -187,7 +187,7 @@ fn published_rpc_reads_do_not_wait_for_ordinary_state_write() {
     let rpc_factory = factory.rpc_provider();
     let old_provider = rpc_factory.provider().unwrap();
 
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     let next = append_static_block(factory, 1, genesis.hash());
     commit_block_metadata(factory, &next);
     assert_eq!(
@@ -239,7 +239,7 @@ fn published_rpc_static_file_reads_ignore_unpublished_append() {
     let factory = &storage.factory;
     let genesis = publish_genesis(factory);
     let old_provider = factory.rpc_provider().provider().unwrap();
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     let next = append_static_block(factory, 1, genesis.hash());
     commit_block_metadata(factory, &next);
 
@@ -313,7 +313,7 @@ fn published_rpc_changeset_reads_clip_static_file_append() {
     let factory = &storage.factory;
     factory.set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files: true });
     let genesis = publish_genesis(factory);
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     let next = append_static_block(factory, 1, genesis.hash());
     let manager = factory.static_file_provider();
     let mut accounts = manager.latest_writer(StaticFileSegment::AccountChangeSets).unwrap();
@@ -376,13 +376,8 @@ fn published_rpc_view_checks_in_memory_anchor_height_and_hash() {
         rpc_provider.latest().unwrap().account_balance(&Address::ZERO).unwrap(),
         Some(U256::from(2))
     );
-    assert_eq!(provider.database_provider_live_ro().unwrap().tx_ref().rpc_read_view_bounds(), None);
-    assert!(rpc_provider
-        .database_provider_live_ro()
-        .unwrap()
-        .tx_ref()
-        .rpc_read_view_bounds()
-        .is_some());
+    assert_eq!(provider.database_provider_live_ro().unwrap().rpc_read_view_bounds(), None);
+    assert!(rpc_provider.database_provider_live_ro().unwrap().rpc_read_view_bounds().is_some());
 
     for (number, parent_hash) in [(1, B256::repeat_byte(1)), (2, genesis.hash())] {
         let provider = BlockchainProvider::with_latest(factory.clone(), genesis.clone()).unwrap();
@@ -414,7 +409,7 @@ fn published_rpc_captured_memory_survives_persistence_and_eviction() {
     let memory_hash = captured.block_hash(1).unwrap().unwrap();
     let memory_header = captured.sealed_header(1).unwrap().unwrap();
 
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     let next = append_static_block_with_root(factory, 1, genesis.hash(), memory_header.state_root);
     assert_eq!(next.hash(), memory_hash);
     commit_block_metadata(factory, &next);
@@ -707,12 +702,12 @@ fn published_rpc_reopen_rejects_legacy_storage_only_merged_tail_until_replay() {
         MAINNET.clone(),
         static_files,
     );
-    let mut maintenance = factory.db_ref().rpc_maintenance(true).unwrap();
+    let mut maintenance = factory.rpc_maintenance(true).unwrap();
     factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
     maintenance.complete();
     drop(maintenance);
 
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     let root = write_account(&factory, 2u64);
     let first = append_static_block_with_root(&factory, 1, genesis.hash(), root);
     commit_block_metadata(&factory, &first);
@@ -722,7 +717,7 @@ fn published_rpc_reopen_rejects_legacy_storage_only_merged_tail_until_replay() {
     assert!(factory.rpc_provider().provider().is_err());
     assert_eq!(factory.provider().unwrap().best_block_number().unwrap(), 1);
 
-    let mut write = factory.db_ref().consistent_write();
+    let mut write = factory.consistent_write();
     let tx = factory.db_ref().tx_mut().unwrap();
     tx.delete::<tables::StoragesTrieV2>(orphan, None).unwrap();
     tx.commit().unwrap();
@@ -733,5 +728,5 @@ fn published_rpc_reopen_rejects_legacy_storage_only_merged_tail_until_replay() {
     write.complete();
     drop(write);
     assert_eq!(rpc_factory_read_balance(&factory), U256::from(3));
-    assert!(!factory.db_ref().rpc_read_view_requires_validation(2));
+    assert!(!factory.rpc_read_view_requires_validation(2));
 }

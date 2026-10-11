@@ -151,9 +151,19 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, shared with the provider factory.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
+    /// Bounds and reader ownership belong to the provider's external storage view.
+    pub(crate) rpc_view: Option<(
+        super::super::rpc_read_view::RpcReadViewBounds,
+        Arc<super::super::rpc_read_view::ReadLease>,
+    )>,
 }
 
 impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
+    /// Persisted bounds of this provider's fixed external read view.
+    pub fn rpc_read_view_bounds(&self) -> Option<super::super::rpc_read_view::RpcReadViewBounds> {
+        self.rpc_view.as_ref().map(|(bounds, _)| *bounds)
+    }
+
     /// Returns reference to prune modes.
     pub const fn prune_modes_ref(&self) -> &PruneModes {
         &self.prune_modes
@@ -257,7 +267,15 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
         storage: Arc<N::Storage>,
         storage_settings: Arc<RwLock<GravityStorageSettings>>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage, storage_settings }
+        Self {
+            tx,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings,
+            rpc_view: None,
+        }
     }
 }
 
@@ -269,22 +287,22 @@ impl<TX, N: NodeTypes> AsRef<Self> for DatabaseProvider<TX, N> {
 
 impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
     fn rpc_block_visible(&self, number: BlockNumber) -> bool {
-        self.tx.rpc_read_view_bounds().is_none_or(|view| number <= view.block_number)
+        self.rpc_read_view_bounds().is_none_or(|view| number <= view.block_number)
     }
 
     fn rpc_tx_visible(&self, number: TxNumber) -> bool {
-        self.tx.rpc_read_view_bounds().is_none_or(|view| number < view.next_tx_num)
+        self.rpc_read_view_bounds().is_none_or(|view| number < view.next_tx_num)
     }
 
     fn rpc_block_range(&self, range: impl RangeBounds<BlockNumber>) -> Range<BlockNumber> {
-        match self.tx.rpc_read_view_bounds() {
+        match self.rpc_read_view_bounds() {
             Some(view) => Self::bounded_rpc_range(range, view.block_number.saturating_add(1)),
             None => to_range(range),
         }
     }
 
     fn rpc_tx_range(&self, range: impl RangeBounds<TxNumber>) -> Range<TxNumber> {
-        match self.tx.rpc_read_view_bounds() {
+        match self.rpc_read_view_bounds() {
             Some(view) => Self::bounded_rpc_range(range, view.next_tx_num),
             None => to_range(range),
         }
@@ -310,7 +328,7 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<(BlockNumber, AccountBeforeTx)>> {
         if self.cached_storage_settings().changesets_in_static_files {
-            if self.tx.rpc_read_view_bounds().is_none() {
+            if self.rpc_read_view_bounds().is_none() {
                 return self.static_file_provider.account_changesets_range(range);
             }
             self.static_file_provider.account_changesets_range(self.rpc_block_range(range))
@@ -348,7 +366,7 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
                 // the end to the segment tip anyway.
                 Bound::Unbounded => u64::MAX,
             };
-            let end = self.tx.rpc_read_view_bounds().map_or(end, |view| end.min(view.block_number));
+            let end = self.rpc_read_view_bounds().map_or(end, |view| end.min(view.block_number));
             if start > end {
                 return Ok(Vec::new());
             }
@@ -368,7 +386,7 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<(BlockNumberAddress, StorageEntry)>> {
         if self.cached_storage_settings().changesets_in_static_files {
-            if self.tx.rpc_read_view_bounds().is_none() {
+            if self.rpc_read_view_bounds().is_none() {
                 return self.static_file_provider.storage_changesets_range(range);
             }
             let range = self.rpc_block_range(range);
@@ -636,7 +654,15 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         storage: Arc<N::Storage>,
         storage_settings: Arc<RwLock<GravityStorageSettings>>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage, storage_settings }
+        Self {
+            tx,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings,
+            rpc_view: None,
+        }
     }
 
     /// Consume `DbTx` or `DbTxMut`.
@@ -1308,7 +1334,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
     }
 
     fn best_block_number(&self) -> ProviderResult<BlockNumber> {
-        if let Some(view) = self.tx.rpc_read_view_bounds() {
+        if let Some(view) = self.rpc_read_view_bounds() {
             return Ok(view.block_number);
         }
         // The best block number is tracked via the finished stage which gets updated in the same tx
@@ -1320,7 +1346,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
     }
 
     fn last_block_number(&self) -> ProviderResult<BlockNumber> {
-        if let Some(view) = self.tx.rpc_read_view_bounds() {
+        if let Some(view) = self.rpc_read_view_bounds() {
             return Ok(view.block_number);
         }
         Ok(self
@@ -1678,7 +1704,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<Vec<Self::Transaction>>> {
         let range = self.rpc_block_range(range);
-        if self.tx.rpc_read_view_bounds().is_some() && range.is_empty() {
+        if self.rpc_read_view_bounds().is_some() && range.is_empty() {
             return Ok(Vec::new());
         }
         let mut tx_cursor = self.tx.cursor_read::<tables::Transactions<Self::Transaction>>()?;
@@ -1713,7 +1739,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
         &self,
         range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Address>> {
-        if self.tx.rpc_read_view_bounds().is_none() {
+        if self.rpc_read_view_bounds().is_none() {
             return self.cursor_read_collect::<tables::TransactionSenders>(range);
         }
         self.cursor_read_collect::<tables::TransactionSenders>(self.rpc_tx_range(range))
@@ -1784,7 +1810,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> ReceiptProvider for DatabasePr
         &self,
         block_range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<Vec<Self::Receipt>>> {
-        let block_range = if let Some(view) = self.tx.rpc_read_view_bounds() {
+        let block_range = if let Some(view) = self.rpc_read_view_bounds() {
             *block_range.start()..=(*block_range.end()).min(view.block_number)
         } else {
             block_range

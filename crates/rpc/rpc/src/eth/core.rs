@@ -608,7 +608,6 @@ mod tests {
     use reth_chain_state::CanonStateSubscriptions;
     use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec};
     use reth_db_api::{
-        database::Database,
         models::{ShardedKey, StoredBlockBodyIndices},
         tables,
         transaction::DbTxMut,
@@ -705,7 +704,7 @@ mod tests {
             SealedHeader::seal_slow(Header { gas_limit: 30_000_000, ..Default::default() });
         let unconfirmed_hash = B256::repeat_byte(0xee);
         {
-            let mut write = factory.db_ref().consistent_write();
+            let mut write = factory.consistent_write();
             let provider = factory.provider_rw().unwrap();
             let tx = provider.tx_ref();
             tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
@@ -806,6 +805,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_hash_proofs_preserve_require_canonical() {
+        use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
+        use reth_execution_types::ExecutionOutcome;
+        use reth_primitives_traits::RecoveredBlock;
+        use reth_rpc_eth_api::helpers::EthState;
+        use reth_trie_common::{AccountProof, HashedPostState, EMPTY_ROOT_HASH};
+        use revm::database::BundleState;
+        use std::sync::Arc;
+
+        let factory = create_test_provider_factory();
+        let genesis = SealedHeader::seal_slow(Header {
+            state_root: EMPTY_ROOT_HASH,
+            gas_limit: 30_000_000,
+            ..Default::default()
+        });
+        {
+            let mut write = factory.consistent_write();
+            let provider = factory.provider_rw().unwrap();
+            let tx = provider.tx_ref();
+            tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
+            tx.put::<tables::HeaderNumbers>(genesis.hash(), 0).unwrap();
+            tx.put::<tables::CanonicalHeaders>(0, genesis.hash()).unwrap();
+            tx.put::<tables::BlockBodyIndices>(0, StoredBlockBodyIndices::default()).unwrap();
+            for stage in
+                ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute", "Finish"]
+            {
+                tx.put::<tables::StageCheckpoints>(stage.to_string(), Default::default()).unwrap();
+            }
+            provider.commit().unwrap();
+            factory.publish_rpc_read_view(genesis.num_hash()).unwrap();
+            write.complete();
+        }
+        let node_provider = BlockchainProvider::with_latest(factory, genesis.clone()).unwrap();
+        let address = Address::repeat_byte(0x21);
+        let account = Account { balance: U256::from(9), ..Default::default() };
+        let mut hashed_state = HashedPostState::default();
+        hashed_state.accounts.insert(keccak256(address), Some(account));
+        let pending_root =
+            node_provider.latest().unwrap().state_root(hashed_state.clone()).unwrap();
+        let block = RecoveredBlock::new_unhashed(
+            Block {
+                header: Header {
+                    number: 1,
+                    parent_hash: genesis.hash(),
+                    state_root: pending_root,
+                    gas_limit: 30_000_000,
+                    ..Default::default()
+                },
+                body: Default::default(),
+            },
+            Vec::new(),
+        );
+        let pending_hash = block.hash();
+        let outcome = ExecutionOutcome {
+            bundle: BundleState::new(
+                [(address, None, Some(account.into()), Default::default())],
+                [vec![(address, Some(None), [])]],
+                [],
+            ),
+            first_block: 1,
+            ..Default::default()
+        };
+        node_provider.canonical_in_memory_state().set_pending_block(
+            ExecutedBlockWithTrieUpdates::new(
+                Arc::new(block),
+                Arc::new(outcome),
+                Arc::new(hashed_state),
+                ExecutedTrieUpdates::empty(),
+                Default::default(),
+            ),
+        );
+        let eth_api: FakeEthApi<_> = EthApiBuilder::new(
+            node_provider.clone(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::new(node_provider.chain_spec()),
+        )
+        .provider(node_provider.rpc_provider())
+        .build();
+
+        for require_canonical in [None, Some(false)] {
+            let block_id =
+                BlockId::Hash(RpcBlockHash { block_hash: pending_hash, require_canonical });
+            let proof = EthState::get_proof(&eth_api, address, Vec::new(), Some(block_id))
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(proof.balance, account.balance);
+            AccountProof::from_eip1186_proof(proof).verify(pending_root).unwrap();
+        }
+        for block_id in
+            [BlockId::hash_canonical(pending_hash), BlockId::hash(B256::repeat_byte(0xee))]
+        {
+            assert!(matches!(
+                EthState::get_proof(&eth_api, address, Vec::new(), Some(block_id))
+                    .unwrap()
+                    .await,
+                Err(EthApiError::HeaderNotFound(id)) if id == block_id
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn internal_eth_call_uses_execution_state_when_rpc_view_is_closed() {
         let factory = create_test_provider_factory();
         let address = Address::repeat_byte(0x11);
@@ -816,7 +918,7 @@ mod tests {
         let genesis =
             SealedHeader::seal_slow(Header { gas_limit: 30_000_000, ..Default::default() });
         {
-            let mut write = factory.db_ref().consistent_write();
+            let mut write = factory.consistent_write();
             let provider = factory.provider_rw().unwrap();
             let tx = provider.tx_ref();
             tx.put::<tables::Headers>(0, genesis.header().clone()).unwrap();
@@ -848,7 +950,7 @@ mod tests {
             write.complete();
         }
         {
-            let mut write = factory.db_ref().consistent_write();
+            let mut write = factory.consistent_write();
             let provider = factory.provider_rw().unwrap();
             provider
                 .tx_ref()
@@ -892,7 +994,7 @@ mod tests {
             Bytes::copy_from_slice(&U256::from(2).to_be_bytes::<32>())
         );
 
-        let maintenance = factory.db_ref().rpc_maintenance(false).unwrap();
+        let maintenance = factory.rpc_maintenance(false).unwrap();
         assert!(factory.rpc_provider().provider().is_err());
         assert!(EthCall::call(&eth_api, request.clone(), None, EvmOverrides::new(None, None))
             .await

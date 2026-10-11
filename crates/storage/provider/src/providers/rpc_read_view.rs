@@ -1,16 +1,15 @@
-//! Complete RPC snapshots and admission around destructive storage maintenance.
+//! Published storage views and reader lifetime during destructive maintenance.
 
-use super::tx::DbSnapshot;
-use crate::DatabaseError;
+use alloy_primitives::B256;
 use parking_lot::{Condvar, Mutex};
-use reth_db_api::database::{RpcMaintenanceGuard, RpcReadLease, RpcReadViewBounds};
-use rocksdb::DB;
-use std::{any::Any, fmt, sync::Arc};
+use reth_db_api::database::DatabaseReadView;
+use reth_storage_errors::provider::{ProviderError, ProviderResult};
+use std::{fmt, sync::Arc};
 
 /// Ordinary writes replace this view without waiting for RPC readers. Maintenance closes
 /// admission first and drains leases before modifying data outside `RocksDB` snapshots.
 #[derive(Default)]
-pub(super) struct RpcViewManager {
+pub(crate) struct RpcViewManager {
     state: Mutex<ViewState>,
     changed: Condvar,
 }
@@ -27,7 +26,7 @@ impl fmt::Debug for RpcViewManager {
 }
 
 impl RpcViewManager {
-    pub(super) fn new(replay_floor: u64) -> Self {
+    pub(crate) fn new(replay_floor: u64) -> Self {
         Self {
             state: Mutex::new(ViewState {
                 replay_floor,
@@ -38,7 +37,7 @@ impl RpcViewManager {
         }
     }
 
-    pub(super) fn lease(self: &Arc<Self>) -> Result<Arc<dyn RpcReadLease>, DatabaseError> {
+    pub(crate) fn lease(self: &Arc<Self>) -> ProviderResult<Arc<ReadLease>> {
         let mut state = self.state.lock();
         if state.status != Status::Ready || state.maintenance {
             return Err(unavailable());
@@ -47,26 +46,25 @@ impl RpcViewManager {
         Ok(Arc::new(ReadLease { manager: Arc::clone(self) }))
     }
 
-    pub(super) fn view(
+    pub(crate) fn view(
         self: &Arc<Self>,
-        lease: &Arc<dyn RpcReadLease>,
-    ) -> Result<Arc<PublishedRpcView>, DatabaseError> {
-        let Some(lease) = lease.as_any().downcast_ref::<ReadLease>() else {
-            return Err(DatabaseError::Other("RPC read lease belongs to another database".into()));
-        };
+        lease: &Arc<ReadLease>,
+    ) -> ProviderResult<Arc<PublishedRpcView>> {
         if !Arc::ptr_eq(self, &lease.manager) {
-            return Err(DatabaseError::Other("RPC read lease belongs to another database".into()));
+            return Err(ProviderError::other(std::io::Error::other(
+                "read lease belongs to another provider factory",
+            )));
         }
         // A lease acquired before closure may still open its view while maintenance waits.
         self.state.lock().current.clone().ok_or_else(unavailable)
     }
 
-    pub(super) fn requires_validation(&self, block_number: u64) -> bool {
+    pub(crate) fn requires_validation(&self, block_number: u64) -> bool {
         let state = self.state.lock();
         state.needs_validation && block_number >= state.replay_floor
     }
 
-    pub(super) fn publish(&self, view: PublishedRpcView, verified: bool) {
+    pub(crate) fn publish(&self, view: PublishedRpcView, verified: bool) {
         let mut state = self.state.lock();
         state.generation += 1;
         state.published_generation = state.generation;
@@ -92,7 +90,7 @@ impl RpcViewManager {
         drop(previous);
     }
 
-    pub(super) fn interrupt(&self, replay_floor: u64) {
+    pub(crate) fn interrupt(&self, replay_floor: u64) {
         let mut state = self.state.lock();
         state.status = Status::Interrupted;
         state.generation += 1;
@@ -108,7 +106,7 @@ impl RpcViewManager {
         self.changed.notify_all();
     }
 
-    pub(super) fn publication_failed(&self) {
+    pub(crate) fn publication_failed(&self) {
         let mut state = self.state.lock();
         state.generation += 1;
         // This is a complete publication of an unavailable view. Successful storage maintenance
@@ -127,10 +125,7 @@ impl RpcViewManager {
         self.changed.notify_all();
     }
 
-    pub(super) fn maintenance(
-        self: &Arc<Self>,
-        wait: bool,
-    ) -> Option<Box<dyn RpcMaintenanceGuard>> {
+    pub(crate) fn maintenance(self: &Arc<Self>, wait: bool) -> Option<MaintenanceGuard> {
         let mut state = self.state.lock();
         while state.maintenance {
             if !wait {
@@ -147,35 +142,28 @@ impl RpcViewManager {
         while state.readers != 0 {
             self.changed.wait(&mut state);
         }
-        Some(Box::new(MaintenanceGuard {
+        Some(MaintenanceGuard {
             manager: Arc::clone(self),
             generation: state.generation,
             complete: false,
-        }))
+        })
     }
 }
 
-pub(super) struct PublishedRpcView {
-    pub(super) bounds: RpcReadViewBounds,
-    pub(super) state: Arc<DbSnapshot>,
-    pub(super) accounts: Arc<DbSnapshot>,
-    pub(super) storages: Arc<DbSnapshot>,
+/// Complete persisted block and exclusive transaction bound of a provider read view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RpcReadViewBounds {
+    /// Last complete persisted block.
+    pub block_number: u64,
+    /// Canonical hash at the persisted block.
+    pub block_hash: B256,
+    /// First transaction number outside the view.
+    pub next_tx_num: u64,
 }
 
-impl PublishedRpcView {
-    pub(super) fn new(
-        bounds: RpcReadViewBounds,
-        state: Arc<DB>,
-        accounts: Arc<DB>,
-        storages: Arc<DB>,
-    ) -> Self {
-        Self {
-            bounds,
-            state: Arc::new(DbSnapshot::new(state)),
-            accounts: Arc::new(DbSnapshot::new(accounts)),
-            storages: Arc::new(DbSnapshot::new(storages)),
-        }
-    }
+pub(crate) struct PublishedRpcView {
+    pub(crate) bounds: RpcReadViewBounds,
+    pub(crate) storage: Arc<dyn DatabaseReadView>,
 }
 
 #[derive(Default)]
@@ -200,14 +188,8 @@ enum Status {
 }
 
 #[derive(Debug)]
-struct ReadLease {
+pub(crate) struct ReadLease {
     manager: Arc<RpcViewManager>,
-}
-
-impl RpcReadLease for ReadLease {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl Drop for ReadLease {
@@ -220,14 +202,17 @@ impl Drop for ReadLease {
     }
 }
 
-struct MaintenanceGuard {
+/// Holds external-reader admission closed during destructive storage maintenance.
+#[derive(Debug)]
+pub struct MaintenanceGuard {
     manager: Arc<RpcViewManager>,
     generation: u64,
     complete: bool,
 }
 
-impl RpcMaintenanceGuard for MaintenanceGuard {
-    fn complete(&mut self) {
+impl MaintenanceGuard {
+    /// Maintenance committed and published its replacement view.
+    pub fn complete(&mut self) {
         let mut state = self.manager.state.lock();
         // A stage may catch an interrupted write and retry inside this same maintenance range.
         // Only a verified publication after the last interruption can make the range usable.
@@ -259,12 +244,12 @@ impl Drop for MaintenanceGuard {
     }
 }
 
-fn unavailable() -> DatabaseError {
-    DatabaseError::Other(
-        "complete RPC storage view is unavailable during startup or recovery".into(),
-    )
+fn unavailable() -> ProviderError {
+    ProviderError::other(std::io::Error::other(
+        "complete RPC storage view is unavailable during startup or recovery",
+    ))
 }
 
 #[cfg(test)]
-#[path = "rpc_read_view_tests.rs"]
+#[path = "rpc_read_view_manager_tests.rs"]
 mod tests;

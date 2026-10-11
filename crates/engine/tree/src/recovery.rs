@@ -9,9 +9,9 @@ use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
 use alloy_primitives::BlockNumber;
 use reth_db::{
+    cursor::DbCursorRO,
     tables,
     transaction::{DbTx, DbTxMut},
-    Database,
 };
 use reth_errors::ProviderError;
 use reth_primitives_traits::GotExpected;
@@ -44,87 +44,43 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
 
     /// Check checkpoints and recover any unfinished block writes.
     ///
-    /// # Recovery Logic and Correctness Guarantees
+    /// The execution checkpoint determines the durable state height. Hashing and history
+    /// recovery read changed keys from changesets, which are available before history indexing
+    /// completes. Merkle recovery applies the current hashed values and checks the resulting
+    /// root against the stored header before writing the rebuilt trie.
     ///
-    /// This method detects and recovers from interrupted block writes by leveraging the
-    /// checkpoint-based commit ordering described in `Tx::commit`. The recovery process
-    /// ensures data consistency even when trie commits succeed but state commits fail.
+    /// The parallel trie writer can also finish ahead of execution. Such trie data is retained
+    /// for deterministic replay of the same ordered blocks; resetting pipeline checkpoints does
+    /// not roll it back. Checkpoint alignment therefore does not, by itself, certify a complete
+    /// RPC view. Publication additionally respects the original replay boundary and validates
+    /// the trie when reopening after interruption.
     ///
-    /// ## Detection: Checkpoint Comparison
+    /// All recovery reads use live RW transactions. A published read snapshot can lag the
+    /// interrupted stages, and opening a normal RO transaction under the write guard would
+    /// recursively acquire the snapshot barrier.
     ///
-    /// We compare two critical checkpoints:
-    /// - `recover_block_number`: The execution checkpoint from `state_db`, indicating the last
-    ///   block whose state commit completed successfully
-    /// - `best_block_number`: The highest block number that has been fully executed
-    ///
-    /// If these don't match, it means execution progressed beyond the last successful
-    /// state commit, indicating an interrupted block write.
-    ///
-    /// ## Why Interruption Happens: Partial Commit Failures
-    ///
-    /// During parallel execution (`state_handle` + `trie_handle` in persistence.rs), several
-    /// failure scenarios can leave orphaned data:
-    ///
-    /// 1. **State commit succeeds, trie commit fails**: No orphaned data, but trie is incomplete.
-    ///    Stages need to be re-executed.
-    ///
-    /// 2. **Trie commits succeed, state commit fails**: Account and storage trie data is written to
-    ///    disk, but no checkpoint is recorded in `state_db` (since `state_batch` is committed last
-    ///    in `Tx::commit`). This leaves orphaned trie data.
-    ///
-    /// 3. **Partial trie commit**: Account trie succeeds but storage trie fails (or vice versa).
-    ///    State commit never happens, so no checkpoint is written. Leaves partial orphaned trie
-    ///    data.
-    ///
-    /// ## Recovery Strategy: Stage-by-Stage Rebuild
-    ///
-    /// We recover by re-executing stages in dependency order, using each stage's checkpoint
-    /// to determine what needs to be rebuilt:
-    ///
-    /// 1. **`AccountHashing`**: Rebuild hashed account/storage state from plain state.
-    ///    - Reads changed accounts/storages from history indices
-    ///    - Idempotent: re-hashing the same data produces identical hashes
-    ///
-    /// 2. **`MerkleExecute`**: Rebuild account and storage trie nodes.
-    ///    - Reads hashed state from `AccountHashing` stage
-    ///    - **Idempotent**: Writing the same trie node data overwrites orphaned data with identical
-    ///      content, producing a consistent trie structure
-    ///
-    /// 3. **`IndexAccountHistory`**: Rebuild history indices for changed accounts/storages.
-    ///    - Reads account/storage changes from plain state
-    ///    - Idempotent: re-indexing the same changes produces identical indices
-    ///
-    /// ## Why This Works: Checkpoint-Driven Idempotency
-    ///
-    /// Each stage checks its own checkpoint (stored in `state_db`) to determine if it needs
-    /// to re-execute. Since all checkpoints are in `state_db` and `state_batch` is committed
-    /// last (see `Tx::commit`), the checkpoint accurately reflects which stages completed:
-    ///
-    /// - If a stage's checkpoint is behind `recover_block_number`, it means the stage's data commit
-    ///   may have succeeded but the checkpoint write (in `state_batch`) failed.
-    /// - Re-executing the stage is safe because all stage operations are idempotent.
-    /// - Orphaned trie data from failed commits is harmlessly overwritten with identical data
-    ///   during recovery.
-    ///
-    /// ## Correctness Guarantee
-    ///
-    /// After recovery completes, all stages are brought to `recover_block_number`, and
-    /// the pipeline stages are updated to reflect this. The system state is consistent:
-    /// - Plain state reflects execution up to `recover_block_number`
-    /// - Hashed state matches plain state
-    /// - Trie nodes correctly represent hashed state
-    /// - History indices correctly track all state changes
-    /// - All checkpoints are synchronized at `recover_block_number`
+    /// Production calls this helper for pipe execution, where block bodies and the execution
+    /// checkpoint commit with plain state. A body tail above execution identifies an interrupted
+    /// legacy merged flush whose plain-state height cannot be inferred safely. Refuse that data
+    /// before modifying checkpoints rather than starting the EVM from an unknown state height.
     pub fn check_and_recover(&self) -> ProviderResult<()> {
         let mut rpc_maintenance = self
             .factory
-            .db_ref()
             .rpc_maintenance(true)
             .expect("blocking RPC maintenance always acquires a guard");
-        let mut write_guard = self.factory.db_ref().consistent_write();
+        let mut write_guard = self.factory.consistent_write();
         let provider_rw = self.factory.database_provider_rw()?;
         let recover_block_number = provider_rw.recover_block_number()?;
         let best_block_number = provider_rw.best_block_number()?;
+        if let Some((body_tip, _)) =
+            provider_rw.tx_ref().cursor_read::<tables::BlockBodyIndices>()?.last()? &&
+            body_tip > recover_block_number
+        {
+            return Err(ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                "legacy interrupted persistence: body tip {body_tip} exceeds Execution checkpoint \
+                 {recover_block_number}; plain-state height is unknown, refusing automatic recovery"
+            ))));
+        }
         drop(provider_rw);
 
         if recover_block_number != best_block_number {
@@ -284,13 +240,20 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Header;
+    use alloy_primitives::{keccak256, Address, B256, U256};
     use gravity_primitives::{init_gravity_config, Config as GravityConfig};
     use reth_db::{
+        models::{AccountBeforeTx, BlockNumberAddress, StoredBlockBodyIndices},
         tables,
         transaction::{DbTx, DbTxMut},
     };
-    use reth_provider::test_utils::create_test_provider_factory;
+    use reth_primitives_traits::{Account, StorageEntry};
+    use reth_provider::{
+        test_utils::create_test_provider_factory, AccountReader, StageCheckpointReader, StateWriter,
+    };
     use reth_stages_api::{StageCheckpoint, StageId};
+    use reth_trie::{updates::TrieUpdatesV2, HashedPostState, HashedStorage};
     use std::sync::Once;
 
     static INIT: Once = Once::new();
@@ -350,96 +313,334 @@ mod tests {
 
     #[test]
     fn test_recover_hashing_when_checkpoint_behind() {
-        reth_tracing::init_test_tracing();
         let factory = create_test_provider_factory();
-
-        // Set AccountHashing checkpoint to block 3 (behind execution at 5)
-        {
-            let provider = factory.database_provider_rw().unwrap();
-            provider
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::Execution.to_string(),
-                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
-                )
-                .unwrap();
-            provider
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::AccountHashing.to_string(),
-                    StageCheckpoint { block_number: 3, stage_checkpoint: None },
-                )
-                .unwrap();
-            provider
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::MerkleExecute.to_string(),
-                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
-                )
-                .unwrap();
-            provider
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::IndexAccountHistory.to_string(),
-                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
-                )
-                .unwrap();
-            provider.commit().unwrap();
+        let address = Address::with_last_byte(1);
+        let deleted_address = Address::with_last_byte(2);
+        let slot = B256::with_last_byte(3);
+        let removed_slot = B256::with_last_byte(4);
+        let current = Account { balance: U256::from(7), ..Default::default() };
+        let before = Account { balance: U256::from(2), ..Default::default() };
+        let provider = factory.database_provider_rw().unwrap();
+        let tx = provider.tx_ref();
+        tx.put::<tables::PlainAccountState>(address, current).unwrap();
+        tx.put::<tables::PlainStorageState>(
+            address,
+            StorageEntry { key: slot, value: U256::from(9) },
+        )
+        .unwrap();
+        for changed in [address, deleted_address] {
+            tx.put::<tables::HashedAccounts>(keccak256(changed), before).unwrap();
+            tx.put::<tables::AccountChangeSets>(
+                1,
+                AccountBeforeTx { address: changed, info: Some(before) },
+            )
+            .unwrap();
         }
+        for changed_slot in [slot, removed_slot] {
+            let previous = StorageEntry { key: changed_slot, value: U256::from(2) };
+            tx.put::<tables::StorageChangeSets>(BlockNumberAddress((1, address)), previous)
+                .unwrap();
+            tx.put::<tables::HashedStorages>(
+                keccak256(address),
+                StorageEntry { key: keccak256(changed_slot), value: previous.value },
+            )
+            .unwrap();
+        }
+        write_checkpoint(tx, StageId::Execution, 1);
+        provider.commit().unwrap();
 
-        let helper = StorageRecoveryHelper::new(&factory);
-
-        // Call recover_hashing directly (normally called by check_and_recover)
-        // This should handle the case where no actual data exists gracefully
-        let result = helper.recover_hashing(5);
-        assert!(result.is_ok());
+        // No history index exists yet. Recovery must discover both updates and removals from
+        // changesets and load their current values from plain state.
+        StorageRecoveryHelper::new(&factory).recover_hashing(1).unwrap();
+        let provider = factory.database_provider_ro().unwrap();
+        let tx = provider.tx_ref();
+        assert_eq!(tx.get::<tables::HashedAccounts>(keccak256(address)).unwrap(), Some(current));
+        assert_eq!(tx.get::<tables::HashedAccounts>(keccak256(deleted_address)).unwrap(), None);
+        let state = NestedStateRoot::new(tx, None).read_hashed_state(None).unwrap();
+        let storage = &state.storages[&keccak256(address)].storage;
+        assert_eq!(storage.len(), 1);
+        assert_eq!(storage[&keccak256(slot)], U256::from(9));
+        assert_eq!(
+            provider.get_stage_checkpoint(StageId::AccountHashing).unwrap().unwrap().block_number,
+            1
+        );
+        assert_eq!(tx.entries::<tables::AccountsHistory>().unwrap(), 0);
+        assert_eq!(tx.entries::<tables::StoragesHistory>().unwrap(), 0);
     }
 
     #[test]
     fn test_recover_merkle_when_checkpoint_behind() {
-        reth_tracing::init_test_tracing();
+        init_test_gravity_config();
+        // A failed trie commit may leave either shard ahead while its checkpoint remains old.
+        for committed_shard in [None, Some(true), Some(false)] {
+            let factory = create_test_provider_factory();
+            let address = Address::with_last_byte(1);
+            let slot = B256::with_last_byte(2);
+            let before = recovery_state(address, slot, 3, 4);
+            let current = recovery_state(address, slot, 7, 9);
+            let provider = factory.database_provider_rw().unwrap();
+            let (_, updates) =
+                NestedStateRoot::new(provider.tx_ref(), None).calculate(&before).unwrap();
+            provider.write_trie_updatesv2(&updates).unwrap();
+            provider.commit().unwrap();
+
+            let provider = factory.database_provider_rw().unwrap();
+            let (expected, updates) =
+                NestedStateRoot::new(provider.tx_ref(), None).calculate(&current).unwrap();
+            let expected_storage = NestedStateRoot::new(provider.tx_ref(), None)
+                .storage_root(keccak256(address), &current.storages[&keccak256(address)])
+                .unwrap();
+            if let Some(account_shard) = committed_shard {
+                let partial = if account_shard {
+                    TrieUpdatesV2 {
+                        account_nodes: updates.account_nodes,
+                        removed_nodes: updates.removed_nodes,
+                        ..Default::default()
+                    }
+                } else {
+                    TrieUpdatesV2 { storage_tries: updates.storage_tries, ..Default::default() }
+                };
+                provider.write_trie_updatesv2(&partial).unwrap();
+            }
+            provider.write_hashed_state(&current.into_sorted()).unwrap();
+            let tx = provider.tx_ref();
+            tx.put::<tables::AccountChangeSets>(
+                1,
+                AccountBeforeTx { address, info: before.accounts[&keccak256(address)] },
+            )
+            .unwrap();
+            tx.put::<tables::StorageChangeSets>(
+                BlockNumberAddress((1, address)),
+                StorageEntry { key: slot, value: U256::from(4) },
+            )
+            .unwrap();
+            let header = Header { number: 1, state_root: expected, ..Default::default() };
+            tx.put::<tables::Headers>(1, header.clone()).unwrap();
+            tx.put::<tables::CanonicalHeaders>(1, header.hash_slow()).unwrap();
+            write_checkpoint(tx, StageId::Execution, 1);
+            write_checkpoint(tx, StageId::AccountHashing, 1);
+            provider.commit().unwrap();
+
+            StorageRecoveryHelper::new(&factory).recover_merkle(1).unwrap();
+            let provider = factory.database_provider_ro().unwrap();
+            let root = NestedStateRoot::new(provider.tx_ref(), None)
+                .root(&HashedPostState::default())
+                .unwrap();
+            assert_eq!(root, expected, "committed account shard: {committed_shard:?}");
+            assert_eq!(
+                NestedStateRoot::new(provider.tx_ref(), None)
+                    .storage_root(keccak256(address), &HashedStorage::default())
+                    .unwrap(),
+                expected_storage,
+                "committed account shard: {committed_shard:?}",
+            );
+            assert_eq!(
+                provider
+                    .get_stage_checkpoint(StageId::MerkleExecute)
+                    .unwrap()
+                    .unwrap()
+                    .block_number,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn merkle_recovery_rejects_root_mismatch_before_writing_trie_or_checkpoint() {
         init_test_gravity_config();
         let factory = create_test_provider_factory();
+        let address = Address::with_last_byte(1);
+        let slot = B256::with_last_byte(2);
+        let provider = factory.database_provider_rw().unwrap();
+        provider.write_hashed_state(&recovery_state(address, slot, 7, 9).into_sorted()).unwrap();
+        let tx = provider.tx_ref();
+        tx.put::<tables::AccountChangeSets>(1, AccountBeforeTx { address, info: None }).unwrap();
+        tx.put::<tables::StorageChangeSets>(
+            BlockNumberAddress((1, address)),
+            StorageEntry { key: slot, value: U256::ZERO },
+        )
+        .unwrap();
+        let header = Header { number: 1, state_root: B256::ZERO, ..Default::default() };
+        tx.put::<tables::Headers>(1, header.clone()).unwrap();
+        tx.put::<tables::CanonicalHeaders>(1, header.hash_slow()).unwrap();
+        provider.commit().unwrap();
 
-        // Set MerkleExecute checkpoint to block 3 (behind execution at 5)
-        {
-            let provider = factory.database_provider_rw().unwrap();
-            provider
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::Execution.to_string(),
-                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
-                )
-                .unwrap();
-            provider
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::AccountHashing.to_string(),
-                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
-                )
-                .unwrap();
-            provider
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::MerkleExecute.to_string(),
-                    StageCheckpoint { block_number: 3, stage_checkpoint: None },
-                )
-                .unwrap();
-            provider
-                .tx_ref()
-                .put::<tables::StageCheckpoints>(
-                    StageId::IndexAccountHistory.to_string(),
-                    StageCheckpoint { block_number: 5, stage_checkpoint: None },
-                )
-                .unwrap();
-            provider.commit().unwrap();
+        assert!(matches!(
+            StorageRecoveryHelper::new(&factory).recover_merkle(1),
+            Err(ProviderError::StateRootMismatch(_)),
+        ));
+        let provider = factory.database_provider_ro().unwrap();
+        assert!(provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap().is_none());
+        assert_eq!(provider.tx_ref().entries::<tables::AccountsTrieV2>().unwrap(), 0);
+        assert_eq!(provider.tx_ref().entries::<tables::StoragesTrieV2>().unwrap(), 0);
+    }
+
+    #[test]
+    fn recovery_retains_ahead_trie_but_does_not_publish_it_at_execution_height() {
+        init_test_gravity_config();
+        let factory = create_test_provider_factory();
+        let address = Address::with_last_byte(1);
+        let slot = B256::with_last_byte(2);
+        let current = recovery_state(address, slot, 3, 4);
+        let provider = factory.database_provider_rw().unwrap();
+        let (root, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&current).unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        let tx = provider.tx_ref();
+        let account = current.accounts[&keccak256(address)].unwrap();
+        tx.put::<tables::PlainAccountState>(address, account).unwrap();
+        tx.put::<tables::PlainStorageState>(
+            address,
+            StorageEntry { key: slot, value: U256::from(4) },
+        )
+        .unwrap();
+        let header = Header { number: 1, state_root: root, ..Default::default() };
+        tx.put::<tables::Headers>(1, header.clone()).unwrap();
+        tx.put::<tables::CanonicalHeaders>(1, header.hash_slow()).unwrap();
+        tx.put::<tables::BlockBodyIndices>(1, StoredBlockBodyIndices::default()).unwrap();
+        for stage in [
+            StageId::Execution,
+            StageId::AccountHashing,
+            StageId::IndexAccountHistory,
+            StageId::MerkleExecute,
+        ] {
+            write_checkpoint(tx, stage, 1);
         }
+        provider.commit().unwrap();
+        factory
+            .publish_rpc_read_view(BlockNumHash { number: 1, hash: header.hash_slow() })
+            .unwrap();
+        let rpc = factory.rpc_provider();
+        assert_eq!(rpc.provider().unwrap().basic_account(&address).unwrap(), Some(account));
 
-        let helper = StorageRecoveryHelper::new(&factory);
+        let interrupted = factory.consistent_write();
+        let provider = factory.database_provider_rw().unwrap();
+        let (ahead_root, updates) = NestedStateRoot::new(provider.tx_ref(), None)
+            .calculate(&recovery_state(address, slot, 7, 9))
+            .unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        write_checkpoint(provider.tx_ref(), StageId::MerkleExecute, 2);
+        provider.commit().unwrap();
+        drop(interrupted);
+        assert!(rpc.provider().is_err());
 
-        // Call recover_merkle directly
-        let result = helper.recover_merkle(5);
-        assert!(result.is_ok());
+        // Even if given a factory configured for published reads, recovery must use live RW
+        // transactions and retain the ahead trie for the original deterministic replay path.
+        StorageRecoveryHelper::new(&rpc).check_and_recover().unwrap();
+        let provider = factory.database_provider_ro().unwrap();
+        assert_eq!(provider.basic_account(&address).unwrap(), Some(account));
+        assert_eq!(
+            NestedStateRoot::new(provider.tx_ref(), None)
+                .root(&HashedPostState::default())
+                .unwrap(),
+            ahead_root
+        );
+        assert_ne!(root, ahead_root);
+        assert_eq!(
+            provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap().unwrap().block_number,
+            1
+        );
+        assert!(rpc.provider().is_err());
+    }
+
+    #[test]
+    fn recovery_rejects_legacy_future_plain_state_before_modifying_database() {
+        init_test_gravity_config();
+        let factory = create_test_provider_factory();
+        let address = Address::with_last_byte(1);
+        let slot = B256::with_last_byte(2);
+        let account = Account { nonce: 2, balance: U256::from(14), ..Default::default() };
+        let mut future = recovery_state(address, slot, 14, 18);
+        future.accounts.insert(keccak256(address), Some(account));
+        let provider = factory.database_provider_rw().unwrap();
+        let (future_root, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&future).unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        provider.write_hashed_state(&future.into_sorted()).unwrap();
+        let tx = provider.tx_ref();
+        tx.put::<tables::PlainAccountState>(address, account).unwrap();
+        tx.put::<tables::PlainStorageState>(
+            address,
+            StorageEntry { key: slot, value: U256::from(18) },
+        )
+        .unwrap();
+        for number in [1, 2] {
+            tx.put::<tables::BlockBodyIndices>(
+                number,
+                StoredBlockBodyIndices { first_tx_num: number, tx_count: 1 },
+            )
+            .unwrap();
+        }
+        for stage in [
+            StageId::Execution,
+            StageId::AccountHashing,
+            StageId::MerkleExecute,
+            StageId::IndexAccountHistory,
+        ] {
+            write_checkpoint(tx, stage, 1);
+        }
+        provider.commit().unwrap();
+
+        let error = StorageRecoveryHelper::new(&factory).check_and_recover().unwrap_err();
+        assert!(error.to_string().contains("body tip 2 exceeds Execution checkpoint 1"));
+        let provider = factory.database_provider_rw().unwrap();
+        assert_eq!(provider.basic_account(&address).unwrap(), Some(account));
+        assert_eq!(
+            provider.plain_state_storages([(address, [slot])]).unwrap()[0].1[0].value,
+            U256::from(18)
+        );
+        assert_eq!(
+            NestedStateRoot::new(provider.tx_ref(), None)
+                .root(&HashedPostState::default())
+                .unwrap(),
+            future_root
+        );
+        assert_eq!(
+            provider.tx_ref().get::<tables::HashedAccounts>(keccak256(address)).unwrap(),
+            Some(account)
+        );
+        assert_eq!(
+            provider
+                .tx_ref()
+                .cursor_read::<tables::BlockBodyIndices>()
+                .unwrap()
+                .last()
+                .unwrap()
+                .unwrap()
+                .0,
+            2
+        );
+        for stage in [
+            StageId::Execution,
+            StageId::AccountHashing,
+            StageId::MerkleExecute,
+            StageId::IndexAccountHistory,
+        ] {
+            assert_eq!(provider.get_stage_checkpoint(stage).unwrap().unwrap().block_number, 1);
+        }
+        assert!(provider.get_stage_checkpoint(StageId::Finish).unwrap().is_none());
+        assert!(factory.rpc_provider().provider().is_err());
+    }
+
+    fn write_checkpoint<TX: DbTxMut>(tx: &TX, stage: StageId, number: u64) {
+        tx.put::<tables::StageCheckpoints>(
+            stage.to_string(),
+            StageCheckpoint { block_number: number, ..Default::default() },
+        )
+        .unwrap();
+    }
+
+    fn recovery_state(address: Address, slot: B256, balance: u64, value: u64) -> HashedPostState {
+        let mut state = HashedPostState::default();
+        state.accounts.insert(
+            keccak256(address),
+            Some(Account { balance: U256::from(balance), ..Default::default() }),
+        );
+        state.storages.insert(
+            keccak256(address),
+            HashedStorage::from_iter(false, [(keccak256(slot), U256::from(value))]),
+        );
+        state
     }
 
     #[test]

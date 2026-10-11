@@ -161,7 +161,7 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
             return Err(ProviderError::StateAtBlockPruned(self.block_number))
         }
 
-        let height = match self.tx().snapshot_block_number()? {
+        let height = match super::latest::snapshot_block_number(self.tx())? {
             Some(height) => height,
             None => self.provider.last_block_number()?,
         };

@@ -192,43 +192,21 @@ pub mod test_utils {
             self.db().consistent_write()
         }
 
-        fn rpc_read_lease(
+        fn read_view(
             &self,
-        ) -> Result<Option<Arc<dyn reth_db_api::database::RpcReadLease>>, DatabaseError> {
-            self.db().rpc_read_lease()
+        ) -> Result<Option<Arc<dyn reth_db_api::database::DatabaseReadView>>, DatabaseError>
+        {
+            self.db().read_view()
         }
 
-        fn tx_rpc(
+        fn tx_with_read_view(
             &self,
-            lease: Option<Arc<dyn reth_db_api::database::RpcReadLease>>,
+            view: Option<Arc<dyn reth_db_api::database::DatabaseReadView>>,
         ) -> Result<Self::TX, DatabaseError> {
             self.pre_tx_hook.read()();
-            let tx = self.db().tx_rpc(lease)?;
+            let tx = self.db().tx_with_read_view(view)?;
             self.post_tx_hook.read()();
             Ok(tx)
-        }
-
-        fn publish_rpc_view(
-            &self,
-            bounds: reth_db_api::database::RpcReadViewBounds,
-            verified: bool,
-        ) -> Result<(), DatabaseError> {
-            self.db().publish_rpc_view(bounds, verified)
-        }
-
-        fn rpc_read_view_requires_validation(&self, block_number: u64) -> bool {
-            self.db().rpc_read_view_requires_validation(block_number)
-        }
-
-        fn rpc_publication_failed(&self) {
-            self.db().rpc_publication_failed();
-        }
-
-        fn rpc_maintenance(
-            &self,
-            wait: bool,
-        ) -> Option<Box<dyn reth_db_api::database::RpcMaintenanceGuard + '_>> {
-            self.db().rpc_maintenance(wait)
         }
     }
 
@@ -296,7 +274,10 @@ mod tests {
     };
     use assert_matches::assert_matches;
     use reth_db_api::{
-        cursor::DbCursorRO, database::Database, models::ClientVersion, transaction::DbTx,
+        cursor::DbCursorRO,
+        database::Database,
+        models::ClientVersion,
+        transaction::{DbTx, DbTxMut},
     };
     use std::time::Duration;
     use tempfile::tempdir;
@@ -304,8 +285,25 @@ mod tests {
     #[test]
     fn temp_database_forwards_read_modes_and_write_guard() {
         let db = create_test_rw_db();
-        assert_eq!(db.tx_live().unwrap().snapshot_block_number().unwrap(), None);
-        assert_eq!(db.tx().unwrap().snapshot_block_number().unwrap(), Some(0));
+        assert!(!db.tx_live().unwrap().is_snapshot());
+        assert!(db.tx().unwrap().is_snapshot());
+
+        let writer = db.tx_mut().unwrap();
+        writer.put::<tables::Metadata>("shared-read-view".into(), vec![1]).unwrap();
+        writer.commit().unwrap();
+        let mut write = db.consistent_write();
+        let view = db.read_view().unwrap();
+        write.complete();
+        drop(write);
+        let writer = db.tx_mut().unwrap();
+        writer.put::<tables::Metadata>("shared-read-view".into(), vec![2]).unwrap();
+        writer.commit().unwrap();
+        // Exercise the &DB forwarding implementation in addition to Arc and TempDatabase.
+        let reader = Database::tx_with_read_view(&&*db, view).unwrap();
+        assert_eq!(
+            reader.get::<tables::Metadata>("shared-read-view".into()).unwrap(),
+            Some(vec![1])
+        );
 
         drop(db.consistent_write());
         assert!(db.tx().is_err());

@@ -4,16 +4,14 @@ use crate::{DatabaseError, TableSet};
 use metrics::Label;
 use parking_lot::{RwLock, RwLockWriteGuard};
 use reth_db_api::{
-    database::{
-        ConsistentWriteGuard, Database, RpcMaintenanceGuard, RpcReadLease, RpcReadViewBounds,
-    },
+    database::{ConsistentWriteGuard, Database, DatabaseReadView},
     database_metrics::DatabaseMetrics,
     models::ClientVersion,
     table::Table,
     tables, Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
-use reth_tracing::tracing::{info, warn};
+use reth_tracing::tracing::info;
 use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
 use std::{
     collections::HashMap,
@@ -25,7 +23,7 @@ use std::{
 };
 
 pub(crate) mod cursor;
-mod rpc_read_view;
+mod read_view;
 pub(crate) mod tx;
 
 /// Database environment kind.
@@ -271,8 +269,6 @@ pub struct DatabaseEnv {
     snapshot_barrier: RwLock<()>,
     /// A failed partial write requires recovery before a read view can be trusted again.
     incomplete_write: AtomicBool,
-    /// Published complete snapshots for RPC, independent of the execution read barrier.
-    rpc_views: Arc<rpc_read_view::RpcViewManager>,
 }
 
 struct RocksWriteGuard<'a> {
@@ -296,9 +292,6 @@ impl Drop for RocksWriteGuard<'_> {
     fn drop(&mut self) {
         if !self.complete {
             self.env.incomplete_write.store(true, Ordering::Release);
-            // Capture before recovery truncates checkpoints. Read failure must keep RPC closed.
-            let floor = self.env.rpc_replay_floor().unwrap_or(u64::MAX);
-            self.env.rpc_views.interrupt(floor);
         }
     }
 }
@@ -327,49 +320,14 @@ impl DatabaseEnv {
         let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
         let storage_db = dbs.get(&storage_path).cloned().expect("storage DB handle missing");
 
-        // Recovery can truncate checkpoints before replaying an interrupted write. Capture the
-        // original tail first, so an earlier complete replay block cannot expose residual trie
-        // updates from a later block. Existing clean databases conservatively wait one block.
-        let mut env = Self {
+        Ok(Self {
             state_db,
             account_db,
             storage_db,
             kind,
             snapshot_barrier: RwLock::new(()),
             incomplete_write: AtomicBool::new(false),
-            rpc_views: Arc::default(),
-        };
-        let replay_floor = env.rpc_replay_floor().unwrap_or_else(|error| {
-            warn!(target: "db::rpc", %error,
-                "RPC replay boundary is unavailable; RPC storage admission remains closed");
-            u64::MAX
-        });
-        env.rpc_views = Arc::new(rpc_read_view::RpcViewManager::new(replay_floor));
-        Ok(env)
-    }
-
-    fn rpc_replay_floor(&self) -> Result<u64, DatabaseError> {
-        use reth_db_api::{cursor::DbCursorRO, transaction::DbTx};
-        let tx = tx::Tx::<tx::RO>::new(
-            self.state_db.clone(),
-            self.account_db.clone(),
-            self.storage_db.clone(),
-        );
-        let body_tip =
-            tx.cursor_read::<tables::BlockBodyIndices>()?.last()?.map(|(number, _)| number);
-        let stage_tip = ["Execution", "AccountHashing", "IndexAccountHistory", "MerkleExecute"]
-            .into_iter()
-            .map(|stage| tx.get::<tables::StageCheckpoints>(stage.to_string()))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .map(|checkpoint| checkpoint.block_number)
-            .max();
-        let minimum = u64::from(body_tip.is_some() || stage_tip.is_some());
-        Ok(body_tip
-            .unwrap_or_default()
-            .max(stage_tip.map_or(0, |tip| tip.saturating_add(1)))
-            .max(minimum))
+        })
     }
 
     /// Resolve shard paths based on configuration.
@@ -812,50 +770,26 @@ impl Database for DatabaseEnv {
         })
     }
 
-    fn rpc_read_lease(&self) -> Result<Option<Arc<dyn RpcReadLease>>, DatabaseError> {
-        self.rpc_views.lease().map(Some)
-    }
-
-    fn tx_rpc(&self, lease: Option<Arc<dyn RpcReadLease>>) -> Result<Self::TX, DatabaseError> {
-        let lease =
-            lease.ok_or_else(|| DatabaseError::Other("RPC read lease is required".into()))?;
-        let view = self.rpc_views.view(&lease)?;
-        Ok(tx::Tx::new_rpc_snapshot(
+    fn read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+        Ok(Some(Arc::new(read_view::ReadView::new(
             self.state_db.clone(),
             self.account_db.clone(),
             self.storage_db.clone(),
-            &view,
-            lease,
-        ))
+        ))))
     }
 
-    fn publish_rpc_view(
+    fn tx_with_read_view(
         &self,
-        bounds: RpcReadViewBounds,
-        verified: bool,
-    ) -> Result<(), DatabaseError> {
-        self.rpc_views.publish(
-            rpc_read_view::PublishedRpcView::new(
-                bounds,
-                self.state_db.clone(),
-                self.account_db.clone(),
-                self.storage_db.clone(),
-            ),
-            verified,
-        );
-        Ok(())
-    }
-
-    fn rpc_read_view_requires_validation(&self, block_number: u64) -> bool {
-        self.rpc_views.requires_validation(block_number)
-    }
-
-    fn rpc_publication_failed(&self) {
-        self.rpc_views.publication_failed();
-    }
-
-    fn rpc_maintenance(&self, wait: bool) -> Option<Box<dyn RpcMaintenanceGuard + '_>> {
-        self.rpc_views.maintenance(wait)
+        view: Option<Arc<dyn DatabaseReadView>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        let Some(view) = view else { return self.tx() };
+        let Some(view) = view.as_any().downcast_ref::<read_view::ReadView>() else {
+            return Err(DatabaseError::Other("read view belongs to another database".into()));
+        };
+        if !view.belongs_to(&self.state_db, &self.account_db, &self.storage_db) {
+            return Err(DatabaseError::Other("read view belongs to another database".into()));
+        }
+        Ok(tx::Tx::new_read_view(view))
     }
 }
 
@@ -922,9 +856,11 @@ mod tests {
         writer.commit().unwrap();
 
         let reader = env.tx().unwrap();
-        assert_eq!(reader.snapshot_block_number().unwrap(), Some(0));
+        assert!(reader.is_snapshot());
         let mut cursor = reader.cursor_read::<tables::Metadata>().unwrap();
         let mut dup_cursor = reader.cursor_dup_read::<tables::PlainStorageState>().unwrap();
+        let mut account_cursor = reader.cursor_read::<tables::AccountsTrieV2>().unwrap();
+        let mut storage_cursor = reader.cursor_dup_read::<tables::StoragesTrieV2>().unwrap();
 
         let writer = env.tx_mut().unwrap();
         writer.put::<tables::Metadata>("snapshot-test".into(), vec![2]).unwrap();
@@ -945,12 +881,12 @@ mod tests {
 
         assert_eq!(reader.get::<tables::Metadata>("snapshot-test".into()).unwrap(), Some(vec![1]));
         assert_eq!(
-            reader.get::<tables::AccountsTrieV2>(account_path).unwrap(),
+            reader.get::<tables::AccountsTrieV2>(account_path.clone()).unwrap(),
             Some(Bytes::from(vec![1]))
         );
         assert_eq!(
             reader.get::<tables::StoragesTrieV2>(slot).unwrap(),
-            Some(StorageNodeEntry { path: storage_path, node: Bytes::from(vec![1]) })
+            Some(StorageNodeEntry { path: storage_path.clone(), node: Bytes::from(vec![1]) })
         );
         assert_eq!(cursor.get("snapshot-test".into()).unwrap().unwrap().1, vec![1]);
         assert_eq!(
@@ -958,10 +894,19 @@ mod tests {
             Some(StorageEntry { key: slot, value: U256::from(1) })
         );
         drop(reader);
+        drop(env);
         assert_eq!(cursor.get("snapshot-test".into()).unwrap().unwrap().1, vec![1]);
         assert_eq!(
             dup_cursor.get_by_key_subkey(address, slot).unwrap(),
             Some(StorageEntry { key: slot, value: U256::from(1) })
+        );
+        assert_eq!(
+            account_cursor.seek_exact(account_path).unwrap().unwrap().1,
+            Bytes::from(vec![1])
+        );
+        assert_eq!(
+            storage_cursor.get_by_key_subkey(slot, storage_path).unwrap().unwrap().node,
+            Bytes::from(vec![1])
         );
     }
 
@@ -982,8 +927,8 @@ mod tests {
 
         let snapshot = env.tx().unwrap();
         let live = env.tx_live().unwrap();
-        assert_eq!(snapshot.snapshot_block_number().unwrap(), Some(0));
-        assert_eq!(live.snapshot_block_number().unwrap(), None);
+        assert!(snapshot.is_snapshot());
+        assert!(!live.is_snapshot());
 
         let writer = env.tx_mut().unwrap();
         writer.put::<tables::AccountsTrieV2>(account_path.clone(), Bytes::from(vec![2])).unwrap();
@@ -1084,23 +1029,6 @@ mod tests {
         drop(guard);
         assert!(env.tx().is_ok());
         assert!(env.tx_live().is_ok());
-    }
-
-    #[test]
-    fn incomplete_stage_checkpoints_reject_new_read_view() {
-        let dir = tempfile::tempdir().unwrap();
-        let env = DatabaseEnv::open(
-            dir.path(),
-            DatabaseEnvKind::RW,
-            DatabaseArguments::new(ClientVersion::default()),
-        )
-        .unwrap();
-        let writer = env.tx_mut().unwrap();
-        let checkpoint = <tables::StageCheckpoints as Table>::Value::new(1);
-        writer.put::<tables::StageCheckpoints>("Execution".into(), checkpoint).unwrap();
-        writer.commit().unwrap();
-
-        assert!(env.tx().unwrap().snapshot_block_number().is_err());
     }
 
     /// Returns the newest `OPTIONS-*` file RocksDB wrote for the instance at `db_dir`.

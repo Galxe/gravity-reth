@@ -1,6 +1,5 @@
 use crate::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
-    database::RpcReadViewBounds,
     table::{DupSort, Encode, Table},
     DatabaseError,
 };
@@ -13,14 +12,9 @@ pub trait DbTx: Debug + Send + Sync {
     /// `DupCursor` type for this read-only transaction
     type DupCursor<T: DupSort>: DbDupCursorRO<T> + DbCursorRO<T> + Send + Sync;
 
-    /// Complete persisted block represented by this read transaction, when available.
-    fn snapshot_block_number(&self) -> Result<Option<u64>, DatabaseError> {
-        Ok(None)
-    }
-
-    /// Complete block and static-file bounds for a published RPC transaction.
-    fn rpc_read_view_bounds(&self) -> Option<RpcReadViewBounds> {
-        None
+    /// Whether reads use a fixed database snapshot rather than observing later commits.
+    fn is_snapshot(&self) -> bool {
+        false
     }
 
     /// Whether this transaction may already have committed part of its write batch.

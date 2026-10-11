@@ -59,3 +59,6 @@ where
 {
 }
 impl<T> ProviderNodeTypes for T where T: NodeTypesForProvider + NodeTypesWithDB {}
+
+mod rpc_read_view;
+pub use rpc_read_view::{MaintenanceGuard, RpcReadViewBounds};

@@ -1221,14 +1221,12 @@ fn init_genesis_rpc_read_view<N: ProviderNodeTypes>(
         return init_genesis_with_settings(factory, settings)
     }
 
-    let mut rpc_maintenance = factory
-        .db_ref()
-        .rpc_maintenance(true)
-        .expect("blocking RPC maintenance always acquires a guard");
+    let mut rpc_maintenance =
+        factory.rpc_maintenance(true).expect("blocking RPC maintenance always acquires a guard");
     // Genesis checks open ordinary read transactions, so acquire the original snapshot barrier
     // only after initialization returns. The node's execution services have not started yet.
     let hash = init_genesis_with_settings(factory, settings)?;
-    let mut write_guard = factory.db_ref().consistent_write();
+    let mut write_guard = factory.consistent_write();
     factory.publish_rpc_read_view(BlockNumHash { number: 0, hash })?;
     write_guard.complete();
     rpc_maintenance.complete();
@@ -1309,11 +1307,7 @@ mod tests {
     use reth_chainspec::SEPOLIA;
     use reth_config::Config;
     use reth_db::{test_utils::TempDatabase, DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
-    use reth_db_api::{
-        models::{ClientVersion, GravityStorageSettings},
-        transaction::DbTx,
-        Database,
-    };
+    use reth_db_api::models::{ClientVersion, GravityStorageSettings};
     use reth_node_core::args::PruningArgs;
     use reth_provider::{
         test_utils::{create_test_provider_factory_with_chain_spec, MockNodeTypesWithDB},
@@ -1327,12 +1321,12 @@ mod tests {
     fn fresh_genesis_opens_rpc_after_complete_initialization() {
         let factory = create_test_provider_factory_with_chain_spec(SEPOLIA.clone());
         // Startup recovery may have closed admission before discovering the empty datadir.
-        drop(factory.db_ref().rpc_maintenance(true).unwrap());
+        drop(factory.rpc_maintenance(true).unwrap());
         assert!(factory.rpc_provider().provider().is_err());
 
         let hash = init_genesis_rpc_read_view(&factory, GravityStorageSettings::current()).unwrap();
         let provider = factory.rpc_provider().provider().unwrap();
-        let bounds = provider.tx_ref().rpc_read_view_bounds().unwrap();
+        let bounds = provider.rpc_read_view_bounds().unwrap();
         assert_eq!(bounds.block_number, 0);
         assert_eq!(bounds.block_hash, hash);
         assert_eq!(bounds.next_tx_num, 0);
@@ -1362,7 +1356,7 @@ mod tests {
         assert!(factory.rpc_provider().provider().is_err());
 
         // Equal genesis checkpoints still cannot rule out an uncheckpointed block-1 trie commit.
-        let mut write_guard = factory.db_ref().consistent_write();
+        let mut write_guard = factory.consistent_write();
         factory.publish_rpc_read_view(BlockNumHash { number: 0, hash }).unwrap();
         write_guard.complete();
         assert!(factory.rpc_provider().provider().is_err());

@@ -17,10 +17,7 @@ use alloy_primitives::{
 };
 use reth_chain_state::{BlockState, CanonicalInMemoryState, MemoryOverlayStateProviderRef};
 use reth_chainspec::ChainInfo;
-use reth_db_api::{
-    models::{AccountBeforeTx, BlockNumberAddress, StoredBlockBodyIndices},
-    transaction::DbTx,
-};
+use reth_db_api::models::{AccountBeforeTx, BlockNumberAddress, StoredBlockBodyIndices};
 use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
 use reth_node_types::{BlockTy, HeaderTy, ReceiptTy, TxTy};
 use reth_primitives_traits::{Account, BlockBody, RecoveredBlock, SealedHeader, StorageEntry};
@@ -84,7 +81,7 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
             state.head_state()
         };
         let storage_provider = storage_provider_factory.provider_with_rpc_lease(lease)?;
-        if storage_provider.tx_ref().rpc_read_view_bounds().is_some() &&
+        if storage_provider.rpc_read_view_bounds().is_some() &&
             let Some(head) = &head_block
         {
             let anchor = head.anchor();
@@ -95,7 +92,7 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
             }
         }
         let rpc_pending_block = if let (Some(pending), Some(bounds)) =
-            (rpc_pending_block, storage_provider.tx_ref().rpc_read_view_bounds())
+            (rpc_pending_block, storage_provider.rpc_read_view_bounds())
         {
             let (head_number, head_hash) = head_block
                 .as_ref()
@@ -917,7 +914,7 @@ impl<N: ProviderNodeTypes> BlockNumReader for ConsistentProvider<N> {
 
 impl<N: ProviderNodeTypes> BlockIdReader for ConsistentProvider<N> {
     fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        if self.storage_provider.tx_ref().rpc_read_view_bounds().is_some() {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
             return Ok(self
                 .rpc_pending_block
                 .as_ref()
@@ -954,7 +951,7 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
         }
 
         if matches!(source, BlockSource::Pending | BlockSource::Any) {
-            if self.storage_provider.tx_ref().rpc_read_view_bounds().is_some() {
+            if self.storage_provider.rpc_read_view_bounds().is_some() {
                 return Ok(self
                     .rpc_pending_block
                     .as_ref()
@@ -980,7 +977,7 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
     }
 
     fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
-        if self.storage_provider.tx_ref().rpc_read_view_bounds().is_some() {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
             return Ok(self
                 .rpc_pending_block
                 .as_ref()
@@ -992,7 +989,7 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
     fn pending_block_and_receipts(
         &self,
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
-        if self.storage_provider.tx_ref().rpc_read_view_bounds().is_some() {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
             return Ok(self
                 .rpc_pending_block
                 .as_ref()
@@ -1406,7 +1403,7 @@ impl<N: ProviderNodeTypes> BlockReaderIdExt for ConsistentProvider<N> {
     }
 
     fn header_by_number_or_tag(&self, id: BlockNumberOrTag) -> ProviderResult<Option<HeaderTy<N>>> {
-        if self.storage_provider.tx_ref().rpc_read_view_bounds().is_some() {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
             return match id {
                 BlockNumberOrTag::Latest => self.header_by_number(self.best_block_number()?),
                 BlockNumberOrTag::Pending => Ok(self
@@ -1451,7 +1448,7 @@ impl<N: ProviderNodeTypes> BlockReaderIdExt for ConsistentProvider<N> {
         &self,
         id: BlockNumberOrTag,
     ) -> ProviderResult<Option<SealedHeader<HeaderTy<N>>>> {
-        if self.storage_provider.tx_ref().rpc_read_view_bounds().is_some() {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
             return Ok(self.header_by_number_or_tag(id)?.map(SealedHeader::seal_slow));
         }
         match id {

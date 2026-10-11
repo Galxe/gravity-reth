@@ -110,7 +110,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             let max_simulate_blocks = self.max_simulate_blocks();
 
             self.spawn_with_state_at_block(state_block, move |this, db| {
-                let state_provider = db.database.0.for_v2_simulation();
+                let state_provider = db.database.0;
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
                     .with_bundle_update()

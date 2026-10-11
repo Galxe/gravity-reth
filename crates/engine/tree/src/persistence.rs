@@ -7,7 +7,6 @@ use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
     set_fail_point, tables,
     transaction::{DbTx, DbTxMut},
-    Database,
 };
 use reth_errors::ProviderError;
 use reth_ethereum_primitives::EthPrimitives;
@@ -154,10 +153,9 @@ where
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
         let mut rpc_maintenance = self
             .provider
-            .db_ref()
             .rpc_maintenance(true)
             .expect("blocking RPC maintenance always acquires a guard");
-        let mut write_guard = self.provider.db_ref().consistent_write();
+        let mut write_guard = self.provider.consistent_write();
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
         let start_time = Instant::now();
         let provider_rw = self.provider.database_provider_rw()?;
@@ -236,7 +234,7 @@ where
             }
 
             // Pipeline progress and any deferred finalized/safe markers share one commit.
-            let mut write_guard = self.provider.db_ref().consistent_write();
+            let mut write_guard = self.provider.consistent_write();
             let provider_rw = self.provider.database_provider_rw()?;
             provider_rw.update_pipeline_stages(last.number, false)?;
             if let Some(finalized) = pending_finalized {
@@ -270,10 +268,10 @@ where
         if self.pruner.is_pruning_needed(block_number) {
             // A long RPC must not extend the append persistence wait. Retry pruning on a later
             // save when no request still depends on the old static-file range.
-            let Some(mut rpc_maintenance) = self.provider.db_ref().rpc_maintenance(false) else {
+            let Some(mut rpc_maintenance) = self.provider.rpc_maintenance(false) else {
                 return Ok(())
             };
-            let mut write_guard = self.provider.db_ref().consistent_write();
+            let mut write_guard = self.provider.consistent_write();
             debug!(target: "engine::persistence", block_num=?block_number, "Running pruner");
             let prune_start = Instant::now();
             let provider_rw = self.provider.database_provider_rw()?;
@@ -305,7 +303,7 @@ where
             triev2,
         } in blocks
         {
-            let mut write_guard = self.provider.db_ref().consistent_write();
+            let mut write_guard = self.provider.consistent_write();
             let block_number = recovered_block.number();
             let block_hash = recovered_block.hash();
             let inner_provider = &self.provider;
@@ -316,9 +314,9 @@ where
             // account_db (for account trie), and storage_db (for storage trie). This allows
             // concurrent writes and commits across different DB instances without conflicts.
             // The `write_trie_updatesv2` implementation also parallelizes writes to account_db
-            // and storage_db internally. For fault tolerance, stage checkpoints ensure
-            // idempotency - each stage's checkpoint is verified before writing, guaranteeing
-            // exactly-once execution even if the process crashes mid-block.
+            // and storage_db internally. Stage checkpoints record committed progress for
+            // recovery at the durable Execution height. A trie shard can commit before its
+            // checkpoint, so recovery and ordered replay must also repair partial trie writes.
             thread::scope(|scope| -> Result<(), PersistenceError> {
                 let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
                     let start = Instant::now();
@@ -453,10 +451,20 @@ where
         for block in blocks {
             let gas = block.recovered_block().header().gas_used();
             let state = block.hashed_state().accounts.len();
-            // Close the current (non-empty) group before it would cross a bound; a single block
-            // that alone exceeds a bound becomes its own group.
+            // Storage wipes scan committed plain storage. Start a new group so they see all
+            // preceding blocks without committing a prefix with the whole group's body metadata.
+            let wipes_storage = block
+                .block
+                .execution_output
+                .bundle
+                .reverts
+                .iter()
+                .flatten()
+                .any(|(_, revert)| revert.wipe_storage);
+            // A block that alone exceeds a bound becomes its own group.
             if !group.is_empty() &&
-                (group_gas.saturating_add(gas) > MERGE_GROUP_MAX_GAS ||
+                (wipes_storage ||
+                    group_gas.saturating_add(gas) > MERGE_GROUP_MAX_GAS ||
                     group_state.saturating_add(state) > MERGE_GROUP_MAX_STATE)
             {
                 self.commit_block_group(std::mem::take(&mut group))?;
@@ -472,15 +480,15 @@ where
 
     /// Write one contiguous group of executed blocks with amortized commits.
     ///
-    /// State and changesets are flushed once before history indexing because `RocksDB` batches do
-    /// not provide read-your-writes. History and stage checkpoints are committed together
-    /// afterwards, so recovery can replay a group interrupted between the two commits.
+    /// State, changesets and their execution checkpoints are flushed before trie/history writes.
+    /// An interruption then leaves a precise execution height for recovery to rebuild the
+    /// remaining stages. Storage wipes start groups and need no intermediate state commit.
     fn commit_block_group(
         &self,
         group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
     ) -> Result<(), PersistenceError> {
         let Some(first) = group.first() else { return Ok(()) };
-        let mut write_guard = self.provider.db_ref().consistent_write();
+        let mut write_guard = self.provider.consistent_write();
         let group_first = first.recovered_block().number();
         let group_last = group.last().unwrap().recovered_block().number();
         let group_last_hash = group.last().unwrap().recovered_block().hash();
@@ -508,26 +516,21 @@ where
 
         let provider_rw = self.provider.database_provider_rw()?;
 
+        // A durable plain/hashed-state prefix must carry its execution checkpoints. Recovery
+        // starts the EVM at Execution, so leaving that checkpoint behind would replay against
+        // balances and nonces from a later block.
+        let execution_checkpoint =
+            Self::get_checkpoint(provider_rw.tx_ref(), StageId::Execution, Some(group_first))?;
+        let hashing_checkpoint =
+            Self::get_checkpoint(provider_rw.tx_ref(), StageId::AccountHashing, Some(group_first))?;
         // Headers / bodies / senders / tx lookups for the whole group (transaction numbers threaded
         // across the batch in memory by `insert_blocks`).
         let body_indices = provider_rw.insert_blocks(recovered_blocks, StorageLocation::Both)?;
 
         // Receipts, state changesets and hashed state, per block.
-        for (block_index, ((execution_output, hashed_state), body_index)) in
-            execution_outputs.into_iter().zip(hashed_states).zip(body_indices).enumerate()
+        for ((execution_output, hashed_state), body_index) in
+            execution_outputs.into_iter().zip(hashed_states).zip(body_indices)
         {
-            // A primary storage wipe builds its changeset by scanning plain storage. Flush prior
-            // blocks so that scan observes slots created earlier in this merged group.
-            if block_index != 0 &&
-                execution_output
-                    .bundle
-                    .reverts
-                    .iter()
-                    .flatten()
-                    .any(|(_, revert)| revert.wipe_storage)
-            {
-                provider_rw.commit_view()?;
-            }
             provider_rw.write_state_with_indices(
                 &execution_output,
                 OriginalValuesKnown::No,
@@ -537,10 +540,22 @@ where
             provider_rw.write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
         }
 
-        // Publish the group's body tail and changesets before any trie shard can commit. A crash
-        // must leave a durable upper bound for replay even when a trie commit succeeds alone.
-        // History indexing needs this flush because RocksDB batches have no read-your-writes.
+        // Commit state and its checkpoints before any trie shard. Recovery can rebuild an
+        // interrupted trie from the entire durable state range. History indexing also needs
+        // this flush because RocksDB batches have no read-your-writes.
+        Self::update_checkpoint(
+            provider_rw.tx_ref(),
+            StageId::Execution,
+            StageCheckpoint { block_number: group_last, ..execution_checkpoint },
+        )?;
+        Self::update_checkpoint(
+            provider_rw.tx_ref(),
+            StageId::AccountHashing,
+            StageCheckpoint { block_number: group_last, ..hashing_checkpoint },
+        )?;
+        provider_rw.static_file_provider().commit()?;
         provider_rw.commit_view()?;
+        set_fail_point!("persistence::after_merged_state_commit");
 
         // Trie updates, per block. The final commit flushes these before history/checkpoints.
         for (trie, triev2, block_hash) in &trie_updates {
@@ -553,12 +568,9 @@ where
         // History indices for the whole range, once.
         provider_rw.update_history_indices(group_first..=group_last)?;
 
-        // Advance every written stage's checkpoint to the group tip, then make the final commit.
-        // `MerkleExecute` passes `None` (trie writes are idempotent and may resume mid-range); the
-        // rest assert checkpoint continuity from `group_first`.
+        // State checkpoints were committed with state. Advance history and trie only after
+        // their updates are complete; trie updates may resume an interrupted range.
         let tx = provider_rw.tx_ref();
-        Self::advance_checkpoint(tx, StageId::Execution, Some(group_first), group_last)?;
-        Self::advance_checkpoint(tx, StageId::AccountHashing, Some(group_first), group_last)?;
         Self::advance_checkpoint(tx, StageId::IndexAccountHistory, Some(group_first), group_last)?;
         Self::advance_checkpoint(tx, StageId::MerkleExecute, None, group_last)?;
 
@@ -764,7 +776,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, U256};
     use reth_chain_state::{test_utils::TestBlockBuilder, ExecutedTrieUpdates};
-    use reth_db::models::GravityStorageSettings;
+    use reth_db::{models::GravityStorageSettings, Database};
     use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
     use reth_exex_types::FinishedExExHeight;
     use reth_primitives_traits::Account;
@@ -849,19 +861,19 @@ mod tests {
         let next_hash = next_block.recovered_block().hash();
         service.save_blocks_per_block(blocks).unwrap();
         let first_view = rpc_provider.provider().unwrap();
-        let first_bounds = first_view.tx_ref().rpc_read_view_bounds().unwrap();
+        let first_bounds = first_view.rpc_read_view_bounds().unwrap();
         assert_eq!(first_bounds.block_number, 0);
         assert_eq!(first_bounds.block_hash, first_hash);
 
         // Holding the old complete view must not prevent the original staged append commits.
         service.save_blocks_per_block(vec![next_block]).unwrap();
         let next_view = rpc_provider.provider().unwrap();
-        let next_bounds = next_view.tx_ref().rpc_read_view_bounds().unwrap();
+        let next_bounds = next_view.rpc_read_view_bounds().unwrap();
         assert_eq!(next_bounds.block_number, 1);
         assert_eq!(next_bounds.block_hash, next_hash);
         assert_eq!(first_view.block_hash(1).unwrap(), None);
         assert_eq!(next_view.block_hash(1).unwrap(), Some(next_hash));
-        assert_eq!(first_view.tx_ref().rpc_read_view_bounds(), Some(first_bounds));
+        assert_eq!(first_view.rpc_read_view_bounds(), Some(first_bounds));
     }
 
     #[test]
@@ -961,6 +973,141 @@ mod tests {
         assert_eq!(changeset.len(), 1);
         assert_eq!(changeset[0].1.key, slot);
         assert_eq!(changeset[0].1.value, value);
+    }
+
+    #[test]
+    fn interrupted_merged_state_recovers_at_its_durable_execution_height() {
+        use crate::recovery::StorageRecoveryHelper;
+        use alloy_consensus::Header;
+        use alloy_primitives::keccak256;
+        use reth_ethereum_primitives::Block;
+        use reth_primitives_traits::{RecoveredBlock, StorageEntry};
+        use reth_provider::{AccountReader, BlockNumReader, StageCheckpointReader, StorageReader};
+        use reth_trie::{HashedPostState, HashedStorage};
+        use reth_trie_parallel::nested_hash::NestedStateRoot;
+
+        let factory = create_test_provider_factory();
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(factory.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        let service = PersistenceService::new(
+            factory.clone(),
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        );
+        let address = Address::with_last_byte(1);
+        let slot = B256::with_last_byte(2);
+        let reference = create_test_provider_factory();
+        let mut blocks = Vec::new();
+        let mut parent_hash = B256::ZERO;
+        let mut previous_account = None;
+        let mut previous_value = U256::ZERO;
+        let mut expected_root = B256::ZERO;
+        for number in 0..=2 {
+            let account =
+                Account { nonce: number, balance: U256::from(number * 7), ..Default::default() };
+            let value = U256::from(number * 9);
+            let mut hashed = HashedPostState::default();
+            let outcome = if number == 0 {
+                ExecutionOutcome::new(
+                    BundleState::default(),
+                    vec![vec![]],
+                    number,
+                    vec![Default::default()],
+                )
+            } else {
+                hashed.accounts.insert(keccak256(address), Some(account));
+                hashed.storages.insert(
+                    keccak256(address),
+                    HashedStorage::from_iter(false, [(keccak256(slot), value)]),
+                );
+                let storage = std::iter::once((slot, (previous_value, value))).collect();
+                let state: BundleStateInit =
+                    std::iter::once((address, (previous_account, Some(account), storage)))
+                        .collect();
+                let account_reverts = std::iter::once((
+                    address,
+                    (
+                        Some(previous_account),
+                        vec![StorageEntry { key: slot, value: previous_value }],
+                    ),
+                ))
+                .collect();
+                let reverts: RevertsInit = std::iter::once((number, account_reverts)).collect();
+                previous_account = Some(account);
+                previous_value = value;
+                ExecutionOutcome::new_init(
+                    state,
+                    reverts,
+                    [],
+                    vec![vec![]],
+                    number,
+                    vec![Default::default()],
+                )
+            };
+            let provider = reference.database_provider_rw().unwrap();
+            let (root, updates) =
+                NestedStateRoot::new(provider.tx_ref(), None).calculate(&hashed).unwrap();
+            expected_root = root;
+            let block = RecoveredBlock::new_unhashed(
+                Block {
+                    header: Header { number, parent_hash, state_root: root, ..Default::default() },
+                    body: Default::default(),
+                },
+                Vec::new(),
+            );
+            parent_hash = block.hash();
+            blocks.push(ExecutedBlockWithTrieUpdates::new(
+                Arc::new(block),
+                Arc::new(outcome),
+                Arc::new(hashed),
+                ExecutedTrieUpdates::empty(),
+                Arc::new(updates),
+            ));
+        }
+        blocks[1].trie = ExecutedTrieUpdates::Missing;
+        assert!(matches!(
+            service.save_merged_blocks(blocks),
+            Err(PersistenceError::ProviderError(ProviderError::MissingTrieUpdates(_))),
+        ));
+
+        let provider = factory.database_provider_rw().unwrap();
+        assert_eq!(provider.recover_block_number().unwrap(), 2);
+        assert_eq!(
+            provider.get_stage_checkpoint(StageId::AccountHashing).unwrap().unwrap().block_number,
+            2
+        );
+        assert_eq!(provider.basic_account(&address).unwrap(), previous_account);
+        assert_eq!(
+            provider.plain_state_storages([(address, [slot])]).unwrap()[0].1[0].value,
+            previous_value
+        );
+        assert!(provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap().is_none());
+        drop(provider);
+        assert!(factory.rpc_provider().provider().is_err());
+
+        StorageRecoveryHelper::new(&factory).check_and_recover().unwrap();
+        let provider = factory.database_provider_ro().unwrap();
+        // The EVM resumes after block 2, rather than applying these transactions again to nonce 2.
+        assert_eq!(provider.recover_block_number().unwrap(), 2);
+        assert_eq!(provider.basic_account(&address).unwrap(), previous_account);
+        assert_eq!(
+            provider.plain_state_storages([(address, [slot])]).unwrap()[0].1[0].value,
+            previous_value
+        );
+        assert_eq!(
+            NestedStateRoot::new(provider.tx_ref(), None)
+                .root(&HashedPostState::default())
+                .unwrap(),
+            expected_root
+        );
+        for stage in [StageId::AccountHashing, StageId::IndexAccountHistory, StageId::MerkleExecute]
+        {
+            assert_eq!(provider.get_stage_checkpoint(stage).unwrap().unwrap().block_number, 2);
+        }
     }
 
     #[test]

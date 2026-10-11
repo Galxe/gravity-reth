@@ -18,7 +18,7 @@ use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_db::{init_db, DatabaseArguments, DatabaseEnv};
 use reth_db_api::{
-    database::{Database, RpcReadLease, RpcReadViewBounds},
+    database::{ConsistentWriteGuard, Database},
     models::{GravityStorageSettings, StoredBlockBodyIndices},
     tables,
     transaction::DbTx,
@@ -78,6 +78,8 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
     /// This instance reads the last fully published view instead of waiting for current writes.
     rpc_reads: bool,
+    /// Shared publication and external-reader coordination for this storage factory.
+    rpc_views: Arc<super::rpc_read_view::RpcViewManager>,
 }
 
 impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> {
@@ -115,6 +117,13 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
         static_file_provider: StaticFileProvider<N::Primitives>,
     ) -> Self {
         let storage_settings = Arc::new(RwLock::new(load_storage_settings(&db)));
+        let rpc_views = Arc::new(super::rpc_read_view::RpcViewManager::new(
+            read_replay_floor(&db).unwrap_or_else(|error| {
+                tracing::warn!(target: "provider::rpc", %error,
+                    "RPC replay boundary is unavailable; admission remains closed");
+                u64::MAX
+            }),
+        ));
         Self {
             db,
             chain_spec,
@@ -123,6 +132,7 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
             storage: Default::default(),
             storage_settings,
             rpc_reads: false,
+            rpc_views,
         }
     }
 
@@ -161,6 +171,13 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
     ) -> RethResult<Self> {
         let db = Arc::new(init_db(path, args).map_err(RethError::msg)?);
         let storage_settings = Arc::new(RwLock::new(load_storage_settings(&db)));
+        let rpc_views = Arc::new(super::rpc_read_view::RpcViewManager::new(
+            read_replay_floor(&db).unwrap_or_else(|error| {
+                tracing::warn!(target: "provider::rpc", %error,
+                    "RPC replay boundary is unavailable; admission remains closed");
+                u64::MAX
+            }),
+        ));
         Ok(Self {
             db,
             chain_spec,
@@ -169,6 +186,7 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
             storage: Default::default(),
             storage_settings,
             rpc_reads: false,
+            rpc_views,
         })
     }
 }
@@ -190,9 +208,11 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         self.rpc_reads
     }
 
-    pub(crate) fn rpc_read_lease(&self) -> ProviderResult<Option<Arc<dyn RpcReadLease>>> {
+    pub(crate) fn rpc_read_lease(
+        &self,
+    ) -> ProviderResult<Option<Arc<super::rpc_read_view::ReadLease>>> {
         if self.rpc_reads {
-            Ok(self.db.rpc_read_lease()?)
+            Ok(Some(self.rpc_views.lease()?))
         } else {
             Ok(None)
         }
@@ -200,16 +220,54 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
 
     pub(crate) fn provider_with_rpc_lease(
         &self,
-        lease: Option<Arc<dyn RpcReadLease>>,
+        lease: Option<Arc<super::rpc_read_view::ReadLease>>,
     ) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
-        Ok(DatabaseProvider::new(
-            if self.rpc_reads { self.db.tx_rpc(lease)? } else { self.db.tx()? },
+        let view = if self.rpc_reads {
+            Some(self.rpc_views.view(lease.as_ref().ok_or_else(|| {
+                ProviderError::other(std::io::Error::other("provider read lease is required"))
+            })?)?)
+        } else {
+            None
+        };
+        let tx = match &view {
+            Some(view) => self.db.tx_with_read_view(Some(view.storage.clone()))?,
+            None => self.db.tx()?,
+        };
+        let mut provider = DatabaseProvider::new(
+            tx,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
             self.storage.clone(),
             self.storage_settings.clone(),
-        ))
+        );
+        provider.rpc_view = view.map(|view| (view.bounds, lease.expect("view has a read lease")));
+        Ok(provider)
+    }
+
+    /// Close external-reader admission before destructive maintenance. Ordinary append writes
+    /// never wait for these readers. Acquire before the coordinated storage write guard.
+    pub fn rpc_maintenance(&self, wait: bool) -> Option<super::rpc_read_view::MaintenanceGuard> {
+        self.rpc_views.maintenance(wait)
+    }
+
+    /// Coordinate a logical storage write and remember its original tail if it is interrupted.
+    pub fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+        Box::new(ProviderWriteGuard {
+            guard: self.db.consistent_write(),
+            factory: self,
+            complete: false,
+        })
+    }
+
+    /// Close external storage reads when an auxiliary publication check fails.
+    pub fn rpc_publication_failed(&self) {
+        self.rpc_views.publication_failed();
+    }
+
+    /// Whether a complete height needs validation after startup or an interrupted write.
+    pub fn rpc_read_view_requires_validation(&self, block_number: u64) -> bool {
+        self.rpc_views.requires_validation(block_number)
     }
 
     /// Publishes a complete block while the caller holds the coordinated write range.
@@ -217,7 +275,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     /// Publication-only failures close RPC admission; they cannot fail a completed storage write.
     pub fn publish_rpc_read_view(&self, block: BlockNumHash) -> ProviderResult<()> {
         if let Err(error) = self.try_publish_rpc_read_view(block) {
-            self.db.rpc_publication_failed();
+            self.rpc_views.publication_failed();
             tracing::warn!(target: "provider::rpc", block = block.number, %error,
                 "RPC storage publication failed; execution storage remains available");
         }
@@ -247,7 +305,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         // Legacy merged commits could persist a trie shard before recording the group tail.
         // The replay floor protects state/history; this startup-only traversal also verifies
         // reachable trie data rather than trusting cached hashes in parent nodes.
-        let verified = if self.db.rpc_read_view_requires_validation(block.number) {
+        let verified = if self.rpc_views.requires_validation(block.number) {
             let header = provider
                 .header_by_number(block.number)?
                 .ok_or(ProviderError::HeaderNotFound(block.number.into()))?;
@@ -259,14 +317,20 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             tracing::warn!(target: "provider::rpc", block = block.number,
                 "RPC storage view remains closed until trie replay is complete");
         }
-        self.db.publish_rpc_view(
-            RpcReadViewBounds {
-                block_number: block.number,
-                block_hash: block.hash,
-                next_tx_num: indices.next_tx_num(),
+        // A published height must retain its actual storage snapshot. A fresh transaction
+        // cannot be paired with bounds from an earlier publication.
+        let storage = self.db.read_view()?.ok_or(ProviderError::UnsupportedProvider)?;
+        self.rpc_views.publish(
+            super::rpc_read_view::PublishedRpcView {
+                bounds: super::rpc_read_view::RpcReadViewBounds {
+                    block_number: block.number,
+                    block_hash: block.hash,
+                    next_tx_num: indices.next_tx_num(),
+                },
+                storage,
             },
             verified,
-        )?;
+        );
         Ok(())
     }
 
@@ -782,6 +846,7 @@ where
             storage,
             storage_settings: _,
             rpc_reads: _,
+            rpc_views: _,
         } = self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
@@ -803,6 +868,7 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             storage: self.storage.clone(),
             storage_settings: self.storage_settings.clone(),
             rpc_reads: self.rpc_reads,
+            rpc_views: self.rpc_views.clone(),
         }
     }
 }
@@ -814,6 +880,57 @@ impl<N: NodeTypesWithDB> StorageSettingsCache for ProviderFactory<N> {
 
     fn set_storage_settings_cache(&self, settings: GravityStorageSettings) {
         *self.storage_settings.write() = settings;
+    }
+}
+
+/// Capture before recovery resets checkpoints; a trie shard may still contain later updates.
+fn read_replay_floor<DB: Database>(db: &DB) -> Result<u64, reth_db_api::DatabaseError> {
+    use reth_db_api::cursor::DbCursorRO;
+    let tx = db.tx_mut()?;
+    let body_tip = tx.cursor_read::<tables::BlockBodyIndices>()?.last()?.map(|(number, _)| number);
+    let mut stage_tip = None;
+    for stage in [
+        StageId::Execution,
+        StageId::AccountHashing,
+        StageId::IndexAccountHistory,
+        StageId::MerkleExecute,
+    ] {
+        if let Some(checkpoint) = tx.get::<tables::StageCheckpoints>(stage.to_string())? {
+            stage_tip = Some(stage_tip.unwrap_or(0).max(checkpoint.block_number));
+        }
+    }
+    let minimum = u64::from(body_tip.is_some() || stage_tip.is_some());
+    Ok(body_tip
+        .unwrap_or_default()
+        .max(stage_tip.map_or(0, |tip| tip.saturating_add(1)))
+        .max(minimum))
+}
+
+struct ProviderWriteGuard<'a, N: ProviderNodeTypes> {
+    guard: Box<dyn ConsistentWriteGuard + 'a>,
+    factory: &'a ProviderFactory<N>,
+    complete: bool,
+}
+
+impl<N: ProviderNodeTypes> ConsistentWriteGuard for ProviderWriteGuard<'_, N> {
+    fn complete(&mut self) {
+        self.guard.complete();
+        self.complete = true;
+    }
+
+    fn recovered(&mut self) {
+        self.guard.recovered();
+        self.complete = true;
+    }
+}
+
+impl<N: ProviderNodeTypes> Drop for ProviderWriteGuard<'_, N> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.factory
+                .rpc_views
+                .interrupt(read_replay_floor(&self.factory.db).unwrap_or(u64::MAX));
+        }
     }
 }
 
