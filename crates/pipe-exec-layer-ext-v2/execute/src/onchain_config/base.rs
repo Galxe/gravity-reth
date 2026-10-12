@@ -36,8 +36,8 @@ where
     EthApi::NetworkTypes: RpcTypes<TransactionRequest = TransactionRequest>,
 {
     /// Create a new onchain config fetcher
-    pub const fn new(eth_api: EthApi) -> Self {
-        Self { eth_api }
+    pub fn new(eth_api: EthApi) -> Self {
+        Self { eth_api: eth_api.with_execution_provider() }
     }
 
     /// Execute an `eth_call` with retry logic

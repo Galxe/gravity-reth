@@ -167,10 +167,16 @@ where
         let witness_state_provider = self.provider.state_by_block_hash(ancestor_hash)?;
         let mut trie_input = TrieInput::default();
         for block in executed_ancestors.into_iter().rev() {
-            trie_input.append_cached_ref(block.trie.as_ref().unwrap(), &block.hashed_state);
+            let updates = block.trie.as_ref().ok_or(ProviderError::UnsupportedProvider)?;
+            trie_input.append_cached_ref(updates, &block.hashed_state);
         }
         let mut hashed_state = db.into_state();
         hashed_state.extend(record.hashed_state);
+
+        // The state provider must supply a witness for its trie format before this path can
+        // serve one; local V2 providers currently return UnsupportedProvider.
+        let state_witness =
+            witness_state_provider.witness(trie_input.clone(), hashed_state.clone())?;
 
         // Gather the state witness.
         let witness = if hashed_state.is_empty() {
@@ -187,7 +193,7 @@ where
             }
             witness
         } else {
-            witness_state_provider.witness(trie_input, hashed_state)?
+            state_witness
         };
 
         // Insert witness into the cache.

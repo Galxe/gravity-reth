@@ -12,6 +12,16 @@ pub trait DbTx: Debug + Send + Sync {
     /// `DupCursor` type for this read-only transaction
     type DupCursor<T: DupSort>: DbDupCursorRO<T> + DbCursorRO<T> + Send + Sync;
 
+    /// Whether reads use a fixed database snapshot rather than observing later commits.
+    fn is_snapshot(&self) -> bool {
+        false
+    }
+
+    /// Whether this transaction may already have committed part of its write batch.
+    fn has_committed_writes(&self) -> bool {
+        false
+    }
+
     /// Get value by an owned key
     fn get<T: Table>(&self, key: T::Key) -> Result<Option<T::Value>, DatabaseError>;
     /// Get value by a reference to the encoded key, especially useful for "raw" keys

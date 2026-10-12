@@ -1,14 +1,23 @@
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_genesis::ChainConfig;
 use alloy_json_rpc::RpcObject;
-use alloy_primitives::{Address, Bytes, B256, U64};
+use alloy_primitives::{
+    map::{HashMap, HashSet},
+    Address, Bytes, B256, U64,
+};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{Account, AccountInfo, Bundle, Index, StateContext};
 use alloy_rpc_types_trace::geth::{
     BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
-use reth_trie_common::{updates::TrieUpdates, HashedPostState};
+use reth_trie_common::{
+    nested_trie::Node,
+    updates::{StorageTrieUpdates, StorageTrieUpdatesV2, TrieUpdates, TrieUpdatesV2},
+    BranchNodeCompact, HashedPostState, Nibbles, TrieMask,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Debug rpc interface.
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "debug"))]
@@ -336,7 +345,7 @@ pub trait DebugApi<TxReq: RpcObject> {
         &self,
         hashed_state: HashedPostState,
         block_id: Option<BlockId>,
-    ) -> RpcResult<(B256, TrieUpdates)>;
+    ) -> RpcResult<(B256, RpcTrieUpdatesV2)>;
 
     /// Returns the storage at the given block height and transaction index. The result can be
     /// paged by providing a `maxResult` to cap the number of storage slots returned as well as
@@ -370,4 +379,261 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Note: Only available when built with the `failpoints` feature.
     #[method(name = "setFailpoint")]
     async fn debug_set_failpoint(&self, name: String, actions: String) -> RpcResult<()>;
+}
+
+/// V2 trie updates returned by `debug_stateRootWithUpdates`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcTrieUpdatesV2 {
+    /// Branch summaries in the existing RPC field names and packed-path encoding.
+    ///
+    /// These describe V2 nodes, not a delta to write into V1 trie tables. `tree_mask` marks
+    /// child subtrees with branches included in this summary, not all branches in the database.
+    /// The V2 fields retain full node contents and exact nibble paths, including odd lengths.
+    #[serde(flatten)]
+    pub branch_summary: TrieUpdates,
+    /// Trie update format version.
+    pub version: u8,
+    /// Updated account nodes, keyed by their full nibble path.
+    pub account_nodes: BTreeMap<String, Bytes>,
+    /// Removed account node paths.
+    pub removed_nodes: Vec<String>,
+    /// Updated storage tries, keyed by hashed address.
+    pub storage_tries: BTreeMap<B256, RpcStorageTrieUpdatesV2>,
+}
+
+/// V2 updates for one account's storage trie.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcStorageTrieUpdatesV2 {
+    /// Whether the previous storage trie was removed.
+    pub is_deleted: bool,
+    /// Updated storage nodes, keyed by their full nibble path.
+    pub storage_nodes: BTreeMap<String, Bytes>,
+    /// Removed storage node paths.
+    pub removed_nodes: Vec<String>,
+}
+
+impl From<TrieUpdatesV2> for RpcTrieUpdatesV2 {
+    fn from(mut updates: TrieUpdatesV2) -> Self {
+        let (account_nodes, removed_nodes) =
+            branch_summaries(&mut updates.account_nodes, &updates.removed_nodes);
+        let storage_tries = updates
+            .storage_tries
+            .iter_mut()
+            .map(|(address, updates)| {
+                let (storage_nodes, removed_nodes) =
+                    branch_summaries(&mut updates.storage_nodes, &updates.removed_nodes);
+                (
+                    *address,
+                    StorageTrieUpdates {
+                        is_deleted: updates.is_deleted,
+                        storage_nodes,
+                        removed_nodes,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            branch_summary: TrieUpdates { account_nodes, removed_nodes, storage_tries },
+            version: 2,
+            account_nodes: updates
+                .account_nodes
+                .into_iter()
+                .map(|(path, node)| (nibble_path(path), node.into()))
+                .collect(),
+            removed_nodes: sorted_paths(updates.removed_nodes),
+            storage_tries: updates
+                .storage_tries
+                .into_iter()
+                .map(|(address, updates)| (address, updates.into()))
+                .collect(),
+        }
+    }
+}
+
+fn branch_summaries(
+    nodes: &mut HashMap<Nibbles, Node>,
+    removed: &HashSet<Nibbles>,
+) -> (HashMap<Nibbles, BranchNodeCompact>, HashSet<Nibbles>) {
+    let mut tree_masks: HashMap<Nibbles, TrieMask> = HashMap::default();
+    for (path, node) in nodes.iter() {
+        if matches!(node, Node::FullNode { .. }) {
+            for depth in 0..path.len() {
+                let prefix = path.slice(..depth);
+                if matches!(nodes.get(&prefix), Some(Node::FullNode { .. })) {
+                    tree_masks.entry(prefix).or_default().set_bit(path.get_unchecked(depth));
+                }
+            }
+        }
+    }
+
+    let mut branches = HashMap::default();
+    let mut removed = removed.clone();
+    for (path, node) in nodes.iter_mut() {
+        if !matches!(node, Node::FullNode { .. }) {
+            // A leaf or extension replacing a branch invalidates its previous branch summary.
+            removed.insert(*path);
+            continue;
+        }
+        node.build_hash(&mut Vec::new());
+        let root_hash = Some(node.hash());
+        let Node::FullNode { children, .. } = node else { unreachable!() };
+        let mut state_mask = TrieMask::default();
+        let mut hash_mask = TrieMask::default();
+        let mut hashes = Vec::new();
+        for (nibble, child) in children.iter().enumerate() {
+            if let Some(child) = child {
+                state_mask.set_bit(nibble as u8);
+                if let Some(hash) = child.cached_rlp().and_then(|reference| reference.as_hash()) {
+                    hash_mask.set_bit(nibble as u8);
+                    hashes.push(hash);
+                }
+            }
+        }
+        let tree_mask = tree_masks.remove(path).unwrap_or_default();
+        branches.insert(
+            *path,
+            BranchNodeCompact::new(state_mask, tree_mask, hash_mask, hashes, root_hash),
+        );
+        removed.remove(path);
+    }
+    (branches, removed)
+}
+
+impl From<StorageTrieUpdatesV2> for RpcStorageTrieUpdatesV2 {
+    fn from(updates: StorageTrieUpdatesV2) -> Self {
+        Self {
+            is_deleted: updates.is_deleted,
+            storage_nodes: updates
+                .storage_nodes
+                .into_iter()
+                .map(|(path, node)| (nibble_path(path), node.into()))
+                .collect(),
+            removed_nodes: sorted_paths(updates.removed_nodes),
+        }
+    }
+}
+
+fn nibble_path(path: Nibbles) -> String {
+    path.iter().map(|nibble| char::from_digit(u32::from(nibble), 16).unwrap()).collect()
+}
+
+fn sorted_paths(paths: impl IntoIterator<Item = Nibbles>) -> Vec<String> {
+    let mut paths = paths.into_iter().map(nibble_path).collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_trie_common::{nested_trie::NodeFlag, RlpNode};
+
+    fn branch() -> Node {
+        let mut children: [Option<Box<Node>>; 17] = Default::default();
+        children[2] = Some(Box::new(Node::HashNode(RlpNode::word_rlp(&B256::repeat_byte(2)))));
+        children[5] = Some(Box::new(Node::HashNode(RlpNode::word_rlp(&B256::repeat_byte(5)))));
+        Node::FullNode { children, flags: NodeFlag::default() }
+    }
+
+    #[test]
+    fn legacy_branch_summary_keeps_actual_hashes_and_packed_paths() {
+        let path = Nibbles::from_nibbles_unchecked(vec![1]);
+        let extension_path = Nibbles::from_nibbles_unchecked(vec![1, 3]);
+        let descendant_path = Nibbles::from_nibbles_unchecked(vec![1, 3, 4]);
+        let mut descendant = branch();
+        let mut extension = Node::ShortNode {
+            key: Nibbles::from_nibbles_unchecked(vec![4]),
+            value: Box::new(Node::HashNode(descendant.build_hash(&mut Vec::new()).clone())),
+            flags: NodeFlag::default(),
+        };
+        let mut leaf = Node::ShortNode {
+            key: Nibbles::from_nibbles_unchecked(vec![0]),
+            value: Box::new(Node::ValueNode(vec![1])),
+            flags: NodeFlag::default(),
+        };
+        let embedded = leaf.build_hash(&mut Vec::new()).clone();
+        assert!(embedded.as_hash().is_none());
+        let reference = extension.build_hash(&mut Vec::new()).clone();
+        let child_hash = reference.as_hash().unwrap();
+        let mut children: [Option<Box<Node>>; 17] = Default::default();
+        children[3] = Some(Box::new(Node::HashNode(reference)));
+        children[7] = Some(Box::new(Node::HashNode(embedded)));
+        let mut node = Node::FullNode { children, flags: NodeFlag::default() };
+        node.build_hash(&mut Vec::new());
+        let branch_hash = node.hash();
+
+        let mut updates = TrieUpdatesV2::default();
+        updates.storage_tries.insert(
+            B256::ZERO,
+            StorageTrieUpdatesV2 {
+                is_deleted: true,
+                storage_nodes: HashMap::from_iter([(path, node.clone())]),
+                removed_nodes: HashSet::from_iter([path, extension_path]),
+            },
+        );
+        updates.account_nodes.extend([
+            (path, node),
+            (extension_path, extension),
+            (descendant_path, descendant),
+        ]);
+        updates.removed_nodes.insert(path);
+        let state_root = B256::repeat_byte(0xab);
+        let encoded = serde_json::to_value((state_root, RpcTrieUpdatesV2::from(updates))).unwrap();
+        let (decoded_root, legacy): (B256, TrieUpdates) =
+            serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded_root, state_root);
+
+        // The old wire encoding pads odd nibble paths; the V2 extension retains their exact length.
+        let packed_path = Nibbles::from_nibbles_unchecked(vec![1, 0]);
+        let summary = &legacy.account_nodes[&packed_path];
+        assert_eq!(summary.state_mask, TrieMask::new((1 << 3) | (1 << 7)));
+        assert_eq!(summary.hash_mask, TrieMask::new(1 << 3));
+        assert_eq!(summary.tree_mask, TrieMask::new(1 << 3));
+        assert_eq!(summary.hashes.as_ref(), &[child_hash]);
+        assert_eq!(summary.root_hash, Some(branch_hash));
+        assert!(!legacy.removed_nodes.contains(&packed_path));
+        assert!(legacy.removed_nodes.contains(&extension_path));
+        let storage = &legacy.storage_tries[&B256::ZERO];
+        assert!(storage.is_deleted);
+        assert_eq!(storage.storage_nodes[&packed_path].root_hash, Some(branch_hash));
+        assert_eq!(storage.removed_nodes, HashSet::from_iter([extension_path]));
+        let (_, decoded): (B256, RpcTrieUpdatesV2) = serde_json::from_value(encoded).unwrap();
+        let mut raw = Node::from(decoded.account_nodes["1"].clone());
+        raw.build_hash(&mut Vec::new());
+        assert_eq!(raw.hash(), branch_hash);
+        assert!(decoded.account_nodes.contains_key("134"));
+    }
+
+    #[test]
+    fn v2_updates_json_preserves_nibble_paths_and_nodes() {
+        let odd_path = Nibbles::from_nibbles_unchecked(vec![1]);
+        let even_path = Nibbles::from_nibbles_unchecked(vec![1, 0]);
+        let node = Node::ShortNode {
+            key: odd_path,
+            value: Box::new(Node::ValueNode(vec![0xab])),
+            flags: NodeFlag::default(),
+        };
+        let mut updates = TrieUpdatesV2::default();
+        updates.account_nodes.insert(odd_path, node.clone());
+        updates.removed_nodes.insert(even_path);
+        updates.storage_tries.insert(
+            B256::ZERO,
+            StorageTrieUpdatesV2 {
+                storage_nodes: std::iter::once((even_path, node.clone())).collect(),
+                ..Default::default()
+            },
+        );
+
+        let encoded = serde_json::to_string(&RpcTrieUpdatesV2::from(updates)).unwrap();
+        let decoded: RpcTrieUpdatesV2 = serde_json::from_str(&encoded).unwrap();
+        let bytes: Bytes = node.clone().into();
+
+        assert_eq!(decoded.version, 2);
+        assert_eq!(decoded.removed_nodes, ["10"]);
+        assert_eq!(decoded.account_nodes["1"], bytes);
+        assert_eq!(decoded.storage_tries[&B256::ZERO].storage_nodes["10"], bytes);
+        assert_eq!(Node::from(bytes), node);
+    }
 }

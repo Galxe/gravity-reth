@@ -155,6 +155,26 @@ pub trait DatabaseProviderFactory: Send + Sync {
     /// Create new read-only database provider.
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider>;
 
+    /// Create a read-only provider that observes live committed database writes.
+    ///
+    /// Backends without a distinct live read view use their regular read-only provider.
+    fn database_provider_live_ro(&self) -> ProviderResult<Self::Provider> {
+        self.database_provider_ro()
+    }
+
+    /// Returns a provider configured for RPC reads of complete persisted blocks.
+    ///
+    /// Backends without a separate RPC read view keep their existing read behavior. Reference and
+    /// `Arc` wrappers retain the configuration of the wrapped provider; configure the owned
+    /// provider before wrapping it.
+    #[auto_impl(keep_default_for(&, Arc))]
+    fn rpc_provider(&self) -> Self
+    where
+        Self: Sized + Clone,
+    {
+        self.clone()
+    }
+
     /// Create new read-write database provider.
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW>;
 }

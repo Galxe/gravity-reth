@@ -54,6 +54,12 @@ pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, 
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
 pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes {
+    /// Returns a handler using the node's execution provider for internal configuration reads.
+    /// Implementations without a separate RPC provider retain their existing behavior.
+    fn with_execution_provider(&self) -> Self {
+        self.clone()
+    }
+
     /// Estimate gas needed for execution of the `request` at the [`BlockId`].
     fn estimate_gas_at(
         &self,
@@ -96,10 +102,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
             let parent = base_block.sealed_header().clone();
+            let state_block = match block {
+                BlockId::Hash(_) => block,
+                _ if block.is_pending() => block,
+                BlockId::Number(_) => BlockId::hash_canonical(base_block.hash()),
+            };
             let max_simulate_blocks = self.max_simulate_blocks();
 
-            self.spawn_with_state_at_block(block, move |this, db| {
-                let state_provider = db.database.0 .0;
+            self.spawn_with_state_at_block(state_block, move |this, db| {
+                let state_provider = db.database.0;
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
                     .with_bundle_update()
@@ -318,7 +329,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 else {
                     return Err(EthApiError::HeaderNotFound(target_block).into())
                 };
-                target_block = block_hash.into();
+                target_block = match target_block {
+                    BlockId::Hash(_) => target_block,
+                    BlockId::Number(_) => BlockId::hash_canonical(block_hash),
+                };
             }
 
             let block = self
@@ -330,7 +344,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             // we're essentially replaying the transactions in the block here, hence we need the
             // state that points to the beginning of the block, which is the state at
             // the parent block
-            let mut at = block.parent_hash();
+            let mut at = BlockId::hash_canonical(block.parent_hash());
             let mut replay_block_txs = true;
 
             let num_txs =
@@ -339,7 +353,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             // however only if we're not targeting the pending block, because for pending we can't
             // rely on the block's state being available
             if !is_block_target_pending && num_txs == block.body().transactions().len() {
-                at = block.hash();
+                at = target_block;
                 replay_block_txs = false;
             }
 

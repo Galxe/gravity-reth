@@ -595,6 +595,47 @@ mod changeset_tests {
     use reth_ethereum_primitives::EthPrimitives;
     use reth_primitives_traits::Account;
     use reth_storage_api::{ChangeSetReader, StorageChangeSetReader};
+    use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn history_read_guard_delays_changeset_truncation() -> eyre::Result<()> {
+        let (static_dir, _) = create_test_static_files_dir();
+        let sf = StaticFileProvider::<EthPrimitives>::read_write(&static_dir)?;
+        let segment = StaticFileSegment::AccountChangeSets;
+        {
+            let mut writer = sf.latest_writer(segment)?;
+            for block in 0..=2 {
+                writer.append_account_changeset(
+                    vec![AccountBeforeTx { address: Address::with_last_byte(1), info: None }],
+                    block,
+                )?;
+            }
+            writer.commit()?;
+        }
+
+        let guard = sf.history_read_guard();
+        let writer_sf = sf.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let writer_thread = thread::spawn(move || -> ProviderResult<()> {
+            let mut writer = writer_sf.latest_writer(segment)?;
+            writer.prune_account_changesets(1)?;
+            started_tx.send(()).unwrap();
+            writer.commit()?;
+            finished_tx.send(()).unwrap();
+            Ok(())
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(2))?;
+        assert!(finished_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(sf.account_changesets_range(0..=2)?.len(), 3);
+
+        drop(guard);
+        finished_rx.recv_timeout(Duration::from_secs(2))?;
+        writer_thread.join().unwrap()?;
+        assert!(sf.account_changesets_range(2..=2)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn changeset_segments_roundtrip() -> eyre::Result<()> {

@@ -3,7 +3,29 @@ use crate::{
     transaction::{DbTx, DbTxMut},
     DatabaseError,
 };
-use std::{fmt::Debug, sync::Arc};
+use std::{any::Any, fmt::Debug, sync::Arc};
+
+/// An immutable, backend-specific database read view shared by read transactions.
+pub trait DatabaseReadView: Any + Debug + Send + Sync {
+    /// Backend-specific view identity, used to reject a view from another database.
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// Marks a coordinated write range complete. Dropping an unfinished guard tells backends that
+/// may have committed part of the range not to serve a mixed read view.
+pub trait ConsistentWriteGuard {
+    /// The complete logical write range has been committed successfully.
+    fn complete(&mut self);
+
+    /// Recovery has repaired any previously interrupted range.
+    fn recovered(&mut self) {
+        self.complete();
+    }
+}
+
+impl ConsistentWriteGuard for () {
+    fn complete(&mut self) {}
+}
 
 /// Main Database trait that can open read-only and read-write transactions.
 ///
@@ -18,9 +40,41 @@ pub trait Database: Send + Sync + Debug {
     #[track_caller]
     fn tx(&self) -> Result<Self::TX, DatabaseError>;
 
+    /// Create a read-only transaction that observes subsequent database commits.
+    ///
+    /// Backends without a separate snapshot mode may use their normal read transaction.
+    #[track_caller]
+    fn tx_live(&self) -> Result<Self::TX, DatabaseError> {
+        self.tx()
+    }
+
     /// Create read write transaction only possible if database is open with write access.
     #[track_caller]
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError>;
+
+    /// Coordinate all commits of one logical state/trie update with read snapshot creation.
+    fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+        Box::new(())
+    }
+
+    /// Capture a shareable read view of the database's stores.
+    ///
+    /// The caller must hold `consistent_write` and finish all coordinated writes before capture.
+    /// Backends without shareable snapshots return `None` and use their normal transactions.
+    fn read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+        Ok(None)
+    }
+
+    /// Open a read transaction using a previously captured view.
+    ///
+    /// Backends with shareable views validate that the view belongs to this database. Opening a
+    /// retained view does not wait for new writes; `None` uses the normal read transaction.
+    fn tx_with_read_view(
+        &self,
+        _view: Option<Arc<dyn DatabaseReadView>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        self.tx()
+    }
 
     /// Takes a function and passes a read-only transaction into it, making sure it's closed in the
     /// end of the execution.
@@ -59,8 +113,27 @@ impl<DB: Database> Database for Arc<DB> {
         <DB as Database>::tx(self)
     }
 
+    fn tx_live(&self) -> Result<Self::TX, DatabaseError> {
+        <DB as Database>::tx_live(self)
+    }
+
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
         <DB as Database>::tx_mut(self)
+    }
+
+    fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+        <DB as Database>::consistent_write(self)
+    }
+
+    fn read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+        <DB as Database>::read_view(self)
+    }
+
+    fn tx_with_read_view(
+        &self,
+        view: Option<Arc<dyn DatabaseReadView>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        <DB as Database>::tx_with_read_view(self, view)
     }
 }
 
@@ -72,7 +145,26 @@ impl<DB: Database> Database for &DB {
         <DB as Database>::tx(self)
     }
 
+    fn tx_live(&self) -> Result<Self::TX, DatabaseError> {
+        <DB as Database>::tx_live(self)
+    }
+
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
         <DB as Database>::tx_mut(self)
+    }
+
+    fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+        <DB as Database>::consistent_write(self)
+    }
+
+    fn read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+        <DB as Database>::read_view(self)
+    }
+
+    fn tx_with_read_view(
+        &self,
+        view: Option<Arc<dyn DatabaseReadView>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        <DB as Database>::tx_with_read_view(self, view)
     }
 }

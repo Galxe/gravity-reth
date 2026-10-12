@@ -459,6 +459,18 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
     pub fn commit(&mut self) -> ProviderResult<()> {
         let start = Instant::now();
 
+        let prune_history = self.prune_on_commit.as_ref().is_some_and(|strategy| {
+            matches!(
+                strategy,
+                PruneStrategy::Headers { .. } |
+                    PruneStrategy::AccountChangeSets { .. } |
+                    PruneStrategy::StorageChangeSets { .. }
+            )
+        });
+        let reader =
+            prune_history.then(|| self.reader.upgrade().expect("StaticFileProvider is dropped"));
+        let _history_guard = reader.as_ref().map(|reader| reader.history_write_guard());
+
         // Truncates the data file if instructed to.
         if let Some(strategy) = self.prune_on_commit.take() {
             match strategy {
@@ -1333,9 +1345,6 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
 
         // Clear current changeset offset tracking since we've pruned
         self.current_changeset_offset = None;
-
-        // Commits new changes to disk
-        self.commit()?;
 
         Ok(())
     }

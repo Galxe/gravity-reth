@@ -67,7 +67,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{runtime::Handle, sync::broadcast};
-use tracing::{trace, warn};
+use tracing::trace;
 
 /// Configuration for `RpcBlockchainProvider`
 #[derive(Debug, Clone)]
@@ -1173,40 +1173,39 @@ where
     Node: NodeTypes,
 {
     fn state_root(&self, hashed_state: HashedPostState) -> Result<B256, ProviderError> {
-        self.state_root_from_nodes(TrieInput::from_state(hashed_state))
-    }
-
-    fn state_root_from_nodes(&self, _input: TrieInput) -> Result<B256, ProviderError> {
-        warn!("state_root_from_nodes is not implemented and will return zero");
-        Ok(B256::ZERO)
-    }
-
-    fn state_root_with_updates(
-        &self,
-        hashed_state: HashedPostState,
-    ) -> Result<(B256, TrieUpdates), ProviderError> {
         if !self.compute_state_root {
-            return Ok((B256::ZERO, TrieUpdates::default()));
+            return Err(ProviderError::UnsupportedProvider)
         }
 
-        self.block_on_async(async {
+        let (root, _) = self.block_on_async(async {
             self.provider
-                .raw_request::<(HashedPostState, BlockId), (B256, TrieUpdates)>(
+                .raw_request::<(HashedPostState, BlockId), (B256, serde::de::IgnoredAny)>(
                     "debug_stateRootWithUpdates".into(),
                     (hashed_state, self.block_id),
                 )
                 .into_future()
                 .await
                 .map_err(ProviderError::other)
-        })
+        })?;
+        Ok(root)
+    }
+
+    fn state_root_from_nodes(&self, _input: TrieInput) -> Result<B256, ProviderError> {
+        Err(ProviderError::UnsupportedProvider)
+    }
+
+    fn state_root_with_updates(
+        &self,
+        _hashed_state: HashedPostState,
+    ) -> Result<(B256, TrieUpdates), ProviderError> {
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_from_nodes_with_updates(
         &self,
         _input: TrieInput,
     ) -> Result<(B256, TrieUpdates), ProviderError> {
-        warn!("state_root_from_nodes_with_updates is not implemented and will return zero");
-        Ok((B256::ZERO, TrieUpdates::default()))
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 

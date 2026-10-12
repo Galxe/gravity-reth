@@ -34,7 +34,7 @@ use crate::{
     hooks::OnComponentInitializedHook,
     BuilderContext, ExExLauncher, NodeAdapter, PrimitivesTy,
 };
-use alloy_eips::eip2124::Head;
+use alloy_eips::{eip2124::Head, BlockNumHash};
 use alloy_primitives::{BlockNumber, B256};
 use eyre::Context;
 use gravity_primitives::get_gravity_config;
@@ -42,7 +42,9 @@ use rayon::ThreadPoolBuilder;
 use reth_chainspec::{Chain, EthChainSpec, EthereumHardforks};
 use reth_config::{config::EtlConfig, PruneConfig};
 use reth_consensus::noop::NoopConsensus;
-use reth_db_api::{database::Database, database_metrics::DatabaseMetrics};
+use reth_db_api::{
+    database::Database, database_metrics::DatabaseMetrics, models::GravityStorageSettings,
+};
 use reth_db_common::init::{init_genesis_with_settings, InitStorageError};
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
 use reth_engine_local::MiningMode;
@@ -661,7 +663,7 @@ where
     /// existing database keeps the settings persisted in its metadata (the flag never
     /// overrides them).
     pub fn init_genesis(&self) -> Result<B256, InitStorageError> {
-        init_genesis_with_settings(self.provider_factory(), self.node_config().storage_settings())
+        init_genesis_rpc_read_view(self.provider_factory(), self.node_config().storage_settings())
     }
 
     /// Creates a new `WithMeteredProvider` container and attaches it to the
@@ -1198,6 +1200,37 @@ impl<L, R> Attached<L, R> {
     pub const fn right_mut(&mut self) -> &mut R {
         &mut self.right
     }
+}
+
+/// Fresh genesis is a complete write boundary. Checking an existing genesis alone does not prove
+/// that later state/trie writes completed, so existing datadirs keep their recovery admission.
+fn init_genesis_rpc_read_view<N: ProviderNodeTypes>(
+    factory: &ProviderFactory<N>,
+    settings: GravityStorageSettings,
+) -> Result<B256, InitStorageError> {
+    let fresh = match factory.block_hash(0) {
+        Ok(None) |
+        Err(ProviderError::MissingStaticFileBlock(
+            reth_provider::StaticFileSegment::Headers,
+            0,
+        )) => true,
+        Ok(Some(_)) => false,
+        Err(err) => return Err(err.into()),
+    };
+    if !fresh {
+        return init_genesis_with_settings(factory, settings)
+    }
+
+    let mut rpc_maintenance =
+        factory.rpc_maintenance(true).expect("blocking RPC maintenance always acquires a guard");
+    // Genesis checks open ordinary read transactions, so acquire the original snapshot barrier
+    // only after initialization returns. The node's execution services have not started yet.
+    let hash = init_genesis_with_settings(factory, settings)?;
+    let mut write_guard = factory.consistent_write();
+    factory.publish_rpc_read_view(BlockNumHash { number: 0, hash })?;
+    write_guard.complete();
+    rpc_maintenance.complete();
+    Ok(hash)
 }
 
 /// Helper container type to bundle the initial [`NodeConfig`] and the loaded settings from the

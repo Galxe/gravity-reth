@@ -34,7 +34,7 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter, PayloadBuilderConfig,
 };
 use reth_payload_primitives::PayloadTypes;
-use reth_provider::{providers::ProviderFactoryBuilder, EthStorage};
+use reth_provider::{providers::ProviderFactoryBuilder, DatabaseProviderFactory, EthStorage};
 use reth_rpc::{
     eth::core::{EthApiFor, EthRpcConverterFor},
     TestingApi, ValidationApi,
@@ -323,7 +323,7 @@ where
         ctx: reth_node_api::AddOnsContext<'_, N>,
     ) -> eyre::Result<Self::Handle> {
         let validation_api = ValidationApi::<_, _, <N::Types as NodeTypes>::Payload>::new(
-            ctx.node.provider().clone(),
+            ctx.node.provider().rpc_provider(),
             Arc::new(ctx.node.consensus().clone()),
             ctx.node.evm_config().clone(),
             ctx.config.rpc.flashbots_config(),
@@ -331,8 +331,10 @@ where
             Arc::new(EthereumEngineValidator::new(ctx.config.chain.clone())),
         );
 
-        let eth_config =
-            EthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
+        let eth_config = EthConfigHandler::new(
+            ctx.node.provider().rpc_provider(),
+            ctx.node.evm_config().clone(),
+        );
 
         let testing_skip_invalid_transactions = ctx.config.rpc.testing_skip_invalid_transactions;
         let testing_gas_limit_override = ctx.config.rpc.testing_gas_limit;

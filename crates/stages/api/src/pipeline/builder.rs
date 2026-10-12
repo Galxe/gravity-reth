@@ -90,6 +90,7 @@ impl<Provider> PipelineBuilder<Provider> {
             fail_on_unwind,
             last_detached_head_unwind_target: None,
             detached_head_attempts: 0,
+            incomplete_stage_write: false,
         }
     }
 }

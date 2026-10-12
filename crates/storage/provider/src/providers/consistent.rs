@@ -49,6 +49,8 @@ pub struct ConsistentProvider<N: ProviderNodeTypes> {
     storage_provider: <ProviderFactory<N> as DatabaseProviderFactory>::Provider,
     /// Head block at time of [`Self`] creation
     head_block: Option<Arc<BlockState<N::Primitives>>>,
+    /// Pending state captured before loading a published DB view.
+    rpc_pending_block: Option<BlockState<N::Primitives>>,
     /// In-memory canonical state. This is not a snapshot, and can change! Use with caution.
     canonical_in_memory_state: CanonicalInMemoryState<N::Primitives>,
 }
@@ -70,9 +72,65 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         // mean that our database provider would not have access to the flushed blocks (since it's
         // working under an older view), while the in-memory state may have deleted them
         // entirely. Resulting in gaps on the range.
+        let lease = storage_provider_factory.rpc_read_lease()?;
+        let rpc_pending_block =
+            storage_provider_factory.uses_rpc_reads().then(|| state.pending_state()).flatten();
+        let head_block = if storage_provider_factory.uses_rpc_reads() {
+            state.head_state_for_rpc()
+        } else {
+            state.head_state()
+        };
+        let storage_provider = storage_provider_factory.provider_with_rpc_lease(lease)?;
+        if storage_provider.rpc_read_view_bounds().is_some() &&
+            let Some(head) = &head_block
+        {
+            let anchor = head.anchor();
+            if anchor.number > storage_provider.last_block_number()? ||
+                storage_provider.block_hash(anchor.number)? != Some(anchor.hash)
+            {
+                return Err(ProviderError::BlockHashNotFound(anchor.hash));
+            }
+        }
+        let rpc_pending_block = if let (Some(pending), Some(bounds)) =
+            (rpc_pending_block, storage_provider.rpc_read_view_bounds())
+        {
+            let (head_number, head_hash) = head_block
+                .as_ref()
+                .map(|head| (head.number(), head.hash()))
+                .unwrap_or((bounds.block_number, bounds.block_hash));
+            let anchor = pending.anchor();
+            (head_number.checked_add(1) == Some(pending.number()) &&
+                pending.block_ref().recovered_block().parent_hash() == head_hash &&
+                anchor.number <= bounds.block_number &&
+                storage_provider.block_hash(anchor.number)? == Some(anchor.hash))
+            .then_some(pending)
+        } else {
+            None
+        };
+        Ok(Self {
+            storage_provider,
+            head_block,
+            rpc_pending_block,
+            canonical_in_memory_state: state,
+        })
+    }
+
+    /// Create a view with the same in-memory head ordering but live database reads.
+    pub(crate) fn new_live(
+        storage_provider_factory: ProviderFactory<N>,
+        state: CanonicalInMemoryState<N::Primitives>,
+    ) -> ProviderResult<Self> {
+        if storage_provider_factory.uses_rpc_reads() {
+            return Self::new(storage_provider_factory, state);
+        }
         let head_block = state.head_state();
-        let storage_provider = storage_provider_factory.database_provider_ro()?;
-        Ok(Self { storage_provider, head_block, canonical_in_memory_state: state })
+        let storage_provider = storage_provider_factory.database_provider_live_ro()?;
+        Ok(Self {
+            storage_provider,
+            head_block,
+            rpc_pending_block: None,
+            canonical_in_memory_state: state,
+        })
     }
 
     // Helper function to convert range bounds
@@ -612,6 +670,57 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         }
         into_history_at_block_hash(block_hash)
     }
+
+    pub(crate) fn into_latest_state_provider(self) -> ProviderResult<Box<dyn StateProvider>> {
+        let hash = self
+            .head_block
+            .as_ref()
+            .map(|head| head.hash())
+            .unwrap_or(self.storage_provider.chain_info()?.best_hash);
+        self.into_state_provider_at_block_hash(hash)
+    }
+
+    pub(crate) fn into_pending_state_provider(
+        self,
+        pending: BlockState<N::Primitives>,
+    ) -> ProviderResult<Box<dyn StateProvider>> {
+        let anchor = pending.anchor();
+        if anchor.number > self.storage_provider.last_block_number()? ||
+            self.storage_provider.block_hash(anchor.number)? != Some(anchor.hash)
+        {
+            return Err(ProviderError::BlockHashNotFound(anchor.hash));
+        }
+        let base = self.storage_provider.try_into_history_at_block(anchor.number)?;
+        Ok(Box::new(pending.state_provider(base)))
+    }
+
+    pub(crate) const fn has_rpc_pending_state(&self) -> bool {
+        self.rpc_pending_block.is_some()
+    }
+
+    pub(crate) fn into_rpc_pending_state_provider(
+        mut self,
+        hash: Option<BlockHash>,
+    ) -> ProviderResult<Option<Box<dyn StateProvider>>> {
+        if let Some(pending) = self.rpc_pending_block.take() {
+            if hash.is_some_and(|hash| hash != pending.hash()) {
+                return Ok(None);
+            }
+            if pending.block_ref().recovered_block().parent_hash() != self.chain_info()?.best_hash {
+                return if hash.is_some() {
+                    Ok(None)
+                } else {
+                    self.into_latest_state_provider().map(Some)
+                };
+            }
+            return self.into_pending_state_provider(pending).map(Some);
+        }
+        if hash.is_some() {
+            Ok(None)
+        } else {
+            self.into_latest_state_provider().map(Some)
+        }
+    }
 }
 
 impl<N: ProviderNodeTypes> ConsistentProvider<N> {
@@ -805,6 +914,12 @@ impl<N: ProviderNodeTypes> BlockNumReader for ConsistentProvider<N> {
 
 impl<N: ProviderNodeTypes> BlockIdReader for ConsistentProvider<N> {
     fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
+            return Ok(self
+                .rpc_pending_block
+                .as_ref()
+                .map(|pending| BlockNumHash { number: pending.number(), hash: pending.hash() }));
+        }
         Ok(self.canonical_in_memory_state.pending_block_num_hash())
     }
 
@@ -836,6 +951,13 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
         }
 
         if matches!(source, BlockSource::Pending | BlockSource::Any) {
+            if self.storage_provider.rpc_read_view_bounds().is_some() {
+                return Ok(self
+                    .rpc_pending_block
+                    .as_ref()
+                    .filter(|b| b.hash() == hash)
+                    .map(|b| b.block_ref().recovered_block().clone_block()));
+            }
             return Ok(self
                 .canonical_in_memory_state
                 .pending_block()
@@ -855,12 +977,24 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
     }
 
     fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
+            return Ok(self
+                .rpc_pending_block
+                .as_ref()
+                .map(|b| b.block_ref().recovered_block().clone()));
+        }
         Ok(self.canonical_in_memory_state.pending_recovered_block())
     }
 
     fn pending_block_and_receipts(
         &self,
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
+            return Ok(self
+                .rpc_pending_block
+                .as_ref()
+                .map(|b| (b.block_ref().recovered_block().clone(), b.executed_block_receipts())));
+        }
         Ok(self.canonical_in_memory_state.pending_block_and_receipts())
     }
 
@@ -1269,6 +1403,30 @@ impl<N: ProviderNodeTypes> BlockReaderIdExt for ConsistentProvider<N> {
     }
 
     fn header_by_number_or_tag(&self, id: BlockNumberOrTag) -> ProviderResult<Option<HeaderTy<N>>> {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
+            return match id {
+                BlockNumberOrTag::Latest => self.header_by_number(self.best_block_number()?),
+                BlockNumberOrTag::Pending => Ok(self
+                    .rpc_pending_block
+                    .as_ref()
+                    .map(|b| b.block_ref().recovered_block().clone_header())),
+                BlockNumberOrTag::Safe | BlockNumberOrTag::Finalized => {
+                    let block = if id == BlockNumberOrTag::Safe {
+                        self.safe_block_num_hash()?
+                    } else {
+                        self.finalized_block_num_hash()?
+                    };
+                    match block {
+                        Some(block) if self.block_hash(block.number)? == Some(block.hash) => {
+                            self.header_by_number(block.number)
+                        }
+                        _ => Ok(None),
+                    }
+                }
+                BlockNumberOrTag::Earliest => self.header_by_number(self.earliest_block_number()?),
+                BlockNumberOrTag::Number(number) => self.header_by_number(number),
+            };
+        }
         Ok(match id {
             BlockNumberOrTag::Latest => {
                 Some(self.canonical_in_memory_state.get_canonical_head().unseal())
@@ -1290,6 +1448,9 @@ impl<N: ProviderNodeTypes> BlockReaderIdExt for ConsistentProvider<N> {
         &self,
         id: BlockNumberOrTag,
     ) -> ProviderResult<Option<SealedHeader<HeaderTy<N>>>> {
+        if self.storage_provider.rpc_read_view_bounds().is_some() {
+            return Ok(self.header_by_number_or_tag(id)?.map(SealedHeader::seal_slow));
+        }
         match id {
             BlockNumberOrTag::Latest => {
                 Ok(Some(self.canonical_in_memory_state.get_canonical_head()))

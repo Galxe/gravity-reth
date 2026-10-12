@@ -587,6 +587,7 @@ impl AccountProof {
         slots: Vec<alloy_serde::JsonStorageKey>,
     ) -> alloy_rpc_types_eth::EIP1186AccountProofResponse {
         let info = self.info.unwrap_or_default();
+        let mut slots = slots;
         alloy_rpc_types_eth::EIP1186AccountProofResponse {
             address: self.address,
             balance: info.balance,
@@ -598,8 +599,8 @@ impl AccountProof {
                 .storage_proofs
                 .into_iter()
                 .filter_map(|proof| {
-                    let input_slot = slots.iter().find(|s| s.as_b256() == proof.key)?;
-                    Some(proof.into_eip1186_proof(*input_slot))
+                    let index = slots.iter().position(|slot| slot.as_b256() == proof.key)?;
+                    Some(proof.into_eip1186_proof(slots.remove(index)))
                 })
                 .collect(),
         }

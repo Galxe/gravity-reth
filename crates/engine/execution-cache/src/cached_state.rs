@@ -15,8 +15,9 @@ use reth_provider::{
 };
 use reth_revm::db::BundleState;
 use reth_trie::{
-    updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
-    MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
+    updates::{TrieUpdates, TrieUpdatesV2},
+    AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
+    StorageProof, TrieInput,
 };
 use std::{
     fmt,
@@ -591,6 +592,13 @@ impl<S: BytecodeReader> BytecodeReader for CachedStateProvider<S> {
 }
 
 impl<S: StateRootProvider> StateRootProvider for CachedStateProvider<S> {
+    fn state_root_with_updates_v2(
+        &self,
+        hashed_state: HashedPostState,
+    ) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        self.state_provider.state_root_with_updates_v2(hashed_state)
+    }
+
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
         self.state_provider.state_root(hashed_state)
     }

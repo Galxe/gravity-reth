@@ -80,7 +80,9 @@ pub mod test_utils {
     use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
-        database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
+        database::{ConsistentWriteGuard, Database},
+        database_metrics::DatabaseMetrics,
+        models::ClientVersion,
     };
     use reth_fs_util;
     use std::{
@@ -175,8 +177,36 @@ pub mod test_utils {
             Ok(tx)
         }
 
+        fn tx_live(&self) -> Result<Self::TX, DatabaseError> {
+            self.pre_tx_hook.read()();
+            let tx = self.db().tx_live()?;
+            self.post_tx_hook.read()();
+            Ok(tx)
+        }
+
         fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
             self.db().tx_mut()
+        }
+
+        fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+            self.db().consistent_write()
+        }
+
+        fn read_view(
+            &self,
+        ) -> Result<Option<Arc<dyn reth_db_api::database::DatabaseReadView>>, DatabaseError>
+        {
+            self.db().read_view()
+        }
+
+        fn tx_with_read_view(
+            &self,
+            view: Option<Arc<dyn reth_db_api::database::DatabaseReadView>>,
+        ) -> Result<Self::TX, DatabaseError> {
+            self.pre_tx_hook.read()();
+            let tx = self.db().tx_with_read_view(view)?;
+            self.post_tx_hook.read()();
+            Ok(tx)
         }
     }
 

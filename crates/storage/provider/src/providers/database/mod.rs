@@ -10,15 +10,15 @@ use crate::{
     PruneCheckpointReader, StageCheckpointReader, StateProviderBox, StaticFileProviderFactory,
     TransactionVariant, TransactionsProvider,
 };
-use alloy_consensus::transaction::TransactionMeta;
-use alloy_eips::BlockHashOrNumber;
+use alloy_consensus::{transaction::TransactionMeta, BlockHeader};
+use alloy_eips::{BlockHashOrNumber, BlockNumHash};
 use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256};
 use core::fmt;
 use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_db::{init_db, DatabaseArguments, DatabaseEnv};
 use reth_db_api::{
-    database::Database,
+    database::{ConsistentWriteGuard, Database},
     models::{GravityStorageSettings, StoredBlockBodyIndices},
     tables,
     transaction::DbTx,
@@ -76,6 +76,10 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, loaded from the metadata table at construction.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
+    /// This instance reads the last fully published view instead of waiting for current writes.
+    rpc_reads: bool,
+    /// Shared publication and external-reader coordination for this storage factory.
+    rpc_views: Arc<super::rpc_read_view::RpcViewManager>,
 }
 
 impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> {
@@ -89,14 +93,19 @@ impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> 
 /// metadata entry is missing, unreadable, or the database can't be opened yet (a fresh datadir
 /// is initialized by `init_genesis`, which also refreshes this cache).
 fn load_storage_settings<DB: Database>(db: &DB) -> GravityStorageSettings {
+    fn read<T: DbTx>(tx: &T) -> Option<GravityStorageSettings> {
+        tx.get::<tables::Metadata>(metadata_keys::GRAVITY_STORAGE_SETTINGS.to_string())
+            .ok()
+            .flatten()
+            .and_then(|bytes| GravityStorageSettings::from_metadata_bytes(&bytes))
+    }
+
     db.tx()
         .ok()
-        .and_then(|tx| {
-            tx.get::<tables::Metadata>(metadata_keys::GRAVITY_STORAGE_SETTINGS.to_string())
-                .ok()
-                .flatten()
-        })
-        .and_then(|bytes| GravityStorageSettings::from_metadata_bytes(&bytes))
+        .and_then(|tx| read(&tx))
+        // Startup recovery may have incomplete stage checkpoints, which deliberately prevents
+        // opening a consistent RO snapshot. Metadata is independent of those stage writes.
+        .or_else(|| db.tx_mut().ok().and_then(|tx| read(&tx)))
         .unwrap_or_else(GravityStorageSettings::legacy)
 }
 
@@ -108,6 +117,13 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
         static_file_provider: StaticFileProvider<N::Primitives>,
     ) -> Self {
         let storage_settings = Arc::new(RwLock::new(load_storage_settings(&db)));
+        let rpc_views = Arc::new(super::rpc_read_view::RpcViewManager::new(
+            read_replay_floor(&db).unwrap_or_else(|error| {
+                tracing::warn!(target: "provider::rpc", %error,
+                    "RPC replay boundary is unavailable; admission remains closed");
+                u64::MAX
+            }),
+        ));
         Self {
             db,
             chain_spec,
@@ -115,6 +131,8 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
             prune_modes: PruneModes::none(),
             storage: Default::default(),
             storage_settings,
+            rpc_reads: false,
+            rpc_views,
         }
     }
 
@@ -152,15 +170,7 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
         static_file_provider: StaticFileProvider<N::Primitives>,
     ) -> RethResult<Self> {
         let db = Arc::new(init_db(path, args).map_err(RethError::msg)?);
-        let storage_settings = Arc::new(RwLock::new(load_storage_settings(&db)));
-        Ok(Self {
-            db,
-            chain_spec,
-            static_file_provider,
-            prune_modes: PruneModes::none(),
-            storage: Default::default(),
-            storage_settings,
-        })
+        Ok(Self::new(db, chain_spec, static_file_provider))
     }
 }
 
@@ -173,14 +183,133 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     /// data.
     #[track_caller]
     pub fn provider(&self) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
-        Ok(DatabaseProvider::new(
-            self.db.tx()?,
+        let lease = self.rpc_read_lease()?;
+        self.provider_with_rpc_lease(lease)
+    }
+
+    pub(crate) const fn uses_rpc_reads(&self) -> bool {
+        self.rpc_reads
+    }
+
+    pub(crate) fn rpc_read_lease(
+        &self,
+    ) -> ProviderResult<Option<Arc<super::rpc_read_view::ReadLease>>> {
+        if self.rpc_reads {
+            Ok(Some(self.rpc_views.lease()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn provider_with_rpc_lease(
+        &self,
+        lease: Option<Arc<super::rpc_read_view::ReadLease>>,
+    ) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
+        let view = if self.rpc_reads {
+            Some(self.rpc_views.view(lease.as_ref().ok_or_else(|| {
+                ProviderError::other(std::io::Error::other("provider read lease is required"))
+            })?)?)
+        } else {
+            None
+        };
+        let tx = match &view {
+            Some(view) => self.db.tx_with_read_view(Some(view.storage.clone()))?,
+            None => self.db.tx()?,
+        };
+        let mut provider = DatabaseProvider::new(
+            tx,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
             self.storage.clone(),
             self.storage_settings.clone(),
-        ))
+        );
+        provider.rpc_view = view.map(|view| (view.bounds, lease.expect("view has a read lease")));
+        Ok(provider)
+    }
+
+    /// Close external-reader admission before destructive maintenance. Ordinary append writes
+    /// never wait for these readers. Acquire before the coordinated storage write guard.
+    pub fn rpc_maintenance(&self, wait: bool) -> Option<super::rpc_read_view::MaintenanceGuard> {
+        self.rpc_views.maintenance(wait)
+    }
+
+    /// Coordinate a logical storage write and remember its original tail if it is interrupted.
+    pub fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+        Box::new(ProviderWriteGuard {
+            guard: self.db.consistent_write(),
+            factory: self,
+            complete: false,
+        })
+    }
+
+    /// Close external storage reads when an auxiliary publication check fails.
+    pub fn rpc_publication_failed(&self) {
+        self.rpc_views.publication_failed();
+    }
+
+    /// Publishes a complete block while the caller holds the coordinated write range.
+    /// Reads use a RW provider here to avoid recursively acquiring the snapshot barrier.
+    /// Publication-only failures close RPC admission; they cannot fail a completed storage write.
+    pub fn publish_rpc_read_view(&self, block: BlockNumHash) -> ProviderResult<()> {
+        if let Err(error) = self.try_publish_rpc_read_view(block) {
+            self.rpc_views.publication_failed();
+            tracing::warn!(target: "provider::rpc", block = block.number, %error,
+                "RPC storage publication failed; execution storage remains available");
+        }
+        Ok(())
+    }
+
+    fn try_publish_rpc_read_view(&self, block: BlockNumHash) -> ProviderResult<()> {
+        let provider = self.provider_rw()?;
+        for stage in [
+            StageId::Execution,
+            StageId::AccountHashing,
+            StageId::IndexAccountHistory,
+            StageId::MerkleExecute,
+        ] {
+            if provider.get_stage_checkpoint(stage)?.unwrap_or_default().block_number !=
+                block.number
+            {
+                return Err(ProviderError::HeaderNotFound(block.number.into()));
+            }
+        }
+        if provider.block_hash(block.number)? != Some(block.hash) {
+            return Err(ProviderError::BlockHashNotFound(block.hash));
+        }
+        let indices = provider
+            .block_body_indices(block.number)?
+            .ok_or(ProviderError::BlockBodyIndicesNotFound(block.number))?;
+        // Legacy merged commits could persist a trie shard before recording the group tail.
+        // The replay floor protects state/history; this startup-only traversal also verifies
+        // reachable trie data rather than trusting cached hashes in parent nodes.
+        let verified = if self.rpc_views.requires_validation(block.number) {
+            let header = provider
+                .header_by_number(block.number)?
+                .ok_or(ProviderError::HeaderNotFound(block.number.into()))?;
+            reth_trie_db::validate_storage_trie(provider.tx_ref(), header.state_root())?
+        } else {
+            true
+        };
+        if !verified {
+            tracing::warn!(target: "provider::rpc", block = block.number,
+                "RPC storage view remains closed until trie replay is complete");
+        }
+        // A published height must retain its actual storage snapshot. A fresh transaction
+        // cannot be paired with bounds from an earlier publication.
+        let storage = self.db.read_view()?.ok_or(ProviderError::UnsupportedProvider)?;
+        self.rpc_views.publish(
+            super::rpc_read_view::PublishedRpcView {
+                bounds: super::rpc_read_view::RpcReadViewBounds {
+                    block_number: block.number,
+                    block_hash: block.hash,
+                    next_tx_num: indices.next_tx_num(),
+                },
+                storage,
+            },
+            verified,
+        );
+        Ok(())
     }
 
     /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
@@ -239,8 +368,28 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for ProviderFactory<N> {
     type Provider = DatabaseProvider<<N::DB as Database>::TX, N>;
     type ProviderRW = DatabaseProvider<<N::DB as Database>::TXMut, N>;
 
+    fn rpc_provider(&self) -> Self {
+        let mut provider = self.clone();
+        provider.rpc_reads = true;
+        provider
+    }
+
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
         self.provider()
+    }
+
+    fn database_provider_live_ro(&self) -> ProviderResult<Self::Provider> {
+        if self.rpc_reads {
+            return self.provider();
+        }
+        Ok(DatabaseProvider::new(
+            self.db.tx_live()?,
+            self.chain_spec.clone(),
+            self.static_file_provider.clone(),
+            self.prune_modes.clone(),
+            self.storage.clone(),
+            self.storage_settings.clone(),
+        ))
     }
 
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
@@ -281,6 +430,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
     }
 
     fn header_by_number(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
+        if self.rpc_reads {
+            return self.provider()?.header_by_number(num);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             num,
@@ -301,6 +453,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<Self::Header>> {
+        if self.rpc_reads {
+            return self.provider()?.headers_range(range);
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             to_range(range),
@@ -314,6 +469,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         &self,
         number: BlockNumber,
     ) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
+        if self.rpc_reads {
+            return self.provider()?.sealed_header(number);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -334,6 +492,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         range: impl RangeBounds<BlockNumber>,
         predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
     ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
+        if self.rpc_reads {
+            return self.provider()?.sealed_headers_while(range, predicate);
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             to_range(range),
@@ -346,6 +507,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
 
 impl<N: ProviderNodeTypes> BlockHashReader for ProviderFactory<N> {
     fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
+        if self.rpc_reads {
+            return self.provider()?.block_hash(number);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -359,6 +523,9 @@ impl<N: ProviderNodeTypes> BlockHashReader for ProviderFactory<N> {
         start: BlockNumber,
         end: BlockNumber,
     ) -> ProviderResult<Vec<B256>> {
+        if self.rpc_reads {
+            return self.provider()?.canonical_hashes_range(start, end);
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             start..end,
@@ -465,6 +632,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
     }
 
     fn transaction_by_id(&self, id: TxNumber) -> ProviderResult<Option<Self::Transaction>> {
+        if self.rpc_reads {
+            return self.provider()?.transaction_by_id(id);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -477,6 +647,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
         &self,
         id: TxNumber,
     ) -> ProviderResult<Option<Self::Transaction>> {
+        if self.rpc_reads {
+            return self.provider()?.transaction_by_id_unhashed(id);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -536,6 +709,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
 impl<N: ProviderNodeTypes> ReceiptProvider for ProviderFactory<N> {
     type Receipt = ReceiptTy<N>;
     fn receipt(&self, id: TxNumber) -> ProviderResult<Option<Self::Receipt>> {
+        if self.rpc_reads {
+            return self.provider()?.receipt(id);
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Receipts,
             id,
@@ -559,6 +735,9 @@ impl<N: ProviderNodeTypes> ReceiptProvider for ProviderFactory<N> {
         &self,
         range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Self::Receipt>> {
+        if self.rpc_reads {
+            return self.provider()?.receipts_by_tx_range(range);
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Receipts,
             to_range(range),
@@ -644,6 +823,8 @@ where
             prune_modes,
             storage,
             storage_settings: _,
+            rpc_reads: _,
+            rpc_views: _,
         } = self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
@@ -664,6 +845,8 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             prune_modes: self.prune_modes.clone(),
             storage: self.storage.clone(),
             storage_settings: self.storage_settings.clone(),
+            rpc_reads: self.rpc_reads,
+            rpc_views: self.rpc_views.clone(),
         }
     }
 }
@@ -675,6 +858,57 @@ impl<N: NodeTypesWithDB> StorageSettingsCache for ProviderFactory<N> {
 
     fn set_storage_settings_cache(&self, settings: GravityStorageSettings) {
         *self.storage_settings.write() = settings;
+    }
+}
+
+/// Capture before recovery resets checkpoints; a trie shard may still contain later updates.
+fn read_replay_floor<DB: Database>(db: &DB) -> Result<u64, reth_db_api::DatabaseError> {
+    use reth_db_api::cursor::DbCursorRO;
+    let tx = db.tx_mut()?;
+    let body_tip = tx.cursor_read::<tables::BlockBodyIndices>()?.last()?.map(|(number, _)| number);
+    let mut stage_tip = None;
+    for stage in [
+        StageId::Execution,
+        StageId::AccountHashing,
+        StageId::IndexAccountHistory,
+        StageId::MerkleExecute,
+    ] {
+        if let Some(checkpoint) = tx.get::<tables::StageCheckpoints>(stage.to_string())? {
+            stage_tip = Some(stage_tip.unwrap_or(0).max(checkpoint.block_number));
+        }
+    }
+    let minimum = u64::from(body_tip.is_some() || stage_tip.is_some());
+    Ok(body_tip
+        .unwrap_or_default()
+        .max(stage_tip.map_or(0, |tip| tip.saturating_add(1)))
+        .max(minimum))
+}
+
+struct ProviderWriteGuard<'a, N: ProviderNodeTypes> {
+    guard: Box<dyn ConsistentWriteGuard + 'a>,
+    factory: &'a ProviderFactory<N>,
+    complete: bool,
+}
+
+impl<N: ProviderNodeTypes> ConsistentWriteGuard for ProviderWriteGuard<'_, N> {
+    fn complete(&mut self) {
+        self.guard.complete();
+        self.complete = true;
+    }
+
+    fn recovered(&mut self) {
+        self.guard.recovered();
+        self.complete = true;
+    }
+}
+
+impl<N: ProviderNodeTypes> Drop for ProviderWriteGuard<'_, N> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.factory
+                .rpc_views
+                .interrupt(read_replay_floor(&self.factory.db).unwrap_or(u64::MAX));
+        }
     }
 }
 

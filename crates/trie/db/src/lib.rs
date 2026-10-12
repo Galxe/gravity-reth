@@ -12,6 +12,7 @@ mod proof;
 mod state;
 mod storage;
 mod trie_cursor;
+mod validate_storage;
 mod witness;
 
 pub use commitment::{MerklePatriciaTrie, StateCommitment};
@@ -25,4 +26,5 @@ pub use storage::{DatabaseHashedStorage, DatabaseStorageRoot};
 pub use trie_cursor::{
     DatabaseAccountTrieCursor, DatabaseStorageTrieCursor, DatabaseTrieCursorFactory,
 };
+pub use validate_storage::validate_storage_trie;
 pub use witness::DatabaseTrieWitness;

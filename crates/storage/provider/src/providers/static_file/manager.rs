@@ -19,7 +19,7 @@ use alloy_primitives::{
 use dashmap::DashMap;
 use gravity_primitives::get_gravity_config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, NamedChain, SYSTEM_CALLER};
 use reth_db::{
     lockfile::StorageLock,
@@ -103,6 +103,11 @@ impl<N> Clone for StaticFileProvider<N> {
 }
 
 impl<N: NodePrimitives> StaticFileProvider<N> {
+    /// Keeps changeset jars available while a historical reader materializes its range.
+    pub fn history_read_guard(&self) -> RwLockReadGuard<'_, ()> {
+        self.0.history_read_lock.read()
+    }
+
     /// Creates a new [`StaticFileProvider`] with the given [`StaticFileAccess`].
     fn new(path: impl AsRef<Path>, access: StaticFileAccess) -> ProviderResult<Self> {
         let provider = Self(Arc::new(StaticFileProviderInner::new(path, access)?));
@@ -258,6 +263,8 @@ pub struct StaticFileProviderInner<N> {
     static_files_max_block: RwLock<HashMap<StaticFileSegment, u64>>,
     /// Available static file block ranges on disk indexed by max transactions.
     static_files_tx_index: RwLock<SegmentRanges>,
+    /// Prevents changeset truncation and jar deletion during bounded historical scans.
+    history_read_lock: RwLock<()>,
     /// Directory where `static_files` are located
     path: PathBuf,
     /// Maintains a writer set of [`StaticFileSegment`].
@@ -275,6 +282,10 @@ pub struct StaticFileProviderInner<N> {
 }
 
 impl<N: NodePrimitives> StaticFileProviderInner<N> {
+    pub(crate) fn history_write_guard(&self) -> RwLockWriteGuard<'_, ()> {
+        self.history_read_lock.write()
+    }
+
     /// Creates a new [`StaticFileProviderInner`].
     fn new(path: impl AsRef<Path>, access: StaticFileAccess) -> ProviderResult<Self> {
         let _lock_file = if access.is_read_write() {
@@ -290,6 +301,7 @@ impl<N: NodePrimitives> StaticFileProviderInner<N> {
             earliest_history_height: Default::default(),
             static_files_max_block: Default::default(),
             static_files_tx_index: Default::default(),
+            history_read_lock: Default::default(),
             path: path.as_ref().to_path_buf(),
             metrics: None,
             access,
@@ -538,6 +550,11 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
     ///
     /// This will re-initialize the index after deletion, so all files are tracked.
     pub fn delete_jar(&self, segment: StaticFileSegment, block: BlockNumber) -> ProviderResult<()> {
+        // Match the writer commit lock order: release the cached writer before taking the
+        // history lock, so a concurrent changeset prune cannot wait on us while holding it.
+        self.writers.remove(segment);
+        let _history_guard = (segment.is_change_based() || segment == StaticFileSegment::Headers)
+            .then(|| self.0.history_write_guard());
         let fixed_block_range = self.find_fixed_range(block);
         let key = (fixed_block_range.end(), segment);
         let jar = if let Some((_, jar)) = self.map.remove(&key) {
@@ -553,10 +570,6 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             );
             NippyJar::<SegmentHeader>::load(&file).map_err(ProviderError::other)?
         };
-
-        // Deleting the file invalidates any cached writer for this segment; drop it so a
-        // later `latest_writer` reopens fresh state instead of stale block/offset tracking.
-        self.writers.remove(segment);
 
         // Delete the sidecar file for changeset segments before deleting the main jar
         if segment.is_change_based() {

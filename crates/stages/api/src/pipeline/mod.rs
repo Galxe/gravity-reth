@@ -2,14 +2,17 @@ mod ctrl;
 mod event;
 pub use crate::pipeline::ctrl::ControlFlow;
 use crate::{PipelineTarget, StageCheckpoint, StageId};
+use alloy_eips::BlockNumHash;
 use alloy_primitives::{BlockNumber, B256};
 pub use event::*;
 use futures_util::Future;
+use reth_db_api::transaction::DbTx;
 use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
-    providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockNumReader,
-    ChainStateBlockReader, ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory,
-    PruneCheckpointReader, StageCheckpointReader, StageCheckpointWriter,
+    providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockBodyIndicesProvider,
+    BlockHashReader, BlockNumReader, ChainStateBlockReader, ChainStateBlockWriter,
+    DatabaseProviderFactory, ProviderFactory, PruneCheckpointReader, StageCheckpointReader,
+    StageCheckpointWriter,
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
@@ -94,6 +97,8 @@ pub struct Pipeline<N: ProviderNodeTypes> {
     /// Number of consecutive unwind attempts due to [`StageError::DetachedHead`] for the current
     /// fork.
     detached_head_attempts: u64,
+    /// Set when a failed stage has already committed part of its write range.
+    incomplete_stage_write: bool,
 }
 
 impl<N: ProviderNodeTypes> Pipeline<N> {
@@ -159,11 +164,20 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 match target {
                     PipelineTarget::Sync(tip) => self.set_tip(tip),
                     PipelineTarget::Unwind(target) => {
-                        if let Err(err) = self.move_to_static_files() {
+                        let factory = self.provider_factory.clone();
+                        let mut rpc_maintenance = factory
+                            .rpc_maintenance(true)
+                            .expect("blocking RPC maintenance always acquires a guard");
+                        if let Err(err) = self.move_to_static_files_inner() {
                             return (self, Err(err.into()))
                         }
-                        if let Err(err) = self.unwind(target, None) {
+                        if let Err(err) = self.unwind_inner(target, None) {
                             return (self, Err(err))
+                        }
+                        match self.publish_complete_rpc_read_view() {
+                            Ok(true) => rpc_maintenance.complete(),
+                            Ok(false) => {}
+                            Err(err) => return (self, Err(err.into())),
                         }
                         self.progress.update(target);
 
@@ -222,7 +236,11 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// the pipeline (for example the `Finish` stage). Or [`ControlFlow::Unwind`] of the stage
     /// that caused the unwind.
     pub async fn run_loop(&mut self) -> Result<ControlFlow, PipelineError> {
-        self.move_to_static_files()?;
+        let factory = self.provider_factory.clone();
+        let mut rpc_maintenance = factory
+            .rpc_maintenance(true)
+            .expect("blocking RPC maintenance always acquires a guard");
+        self.move_to_static_files_inner()?;
 
         let mut previous_stage = None;
         for stage_index in 0..self.stages.len() {
@@ -242,7 +260,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 }
                 ControlFlow::Continue { block_number } => self.progress.update(block_number),
                 ControlFlow::Unwind { target, bad_block } => {
-                    self.unwind(target, Some(bad_block.block.number))?;
+                    self.unwind_inner(target, Some(bad_block.block.number))?;
+                    if self.publish_complete_rpc_read_view()? {
+                        rpc_maintenance.complete();
+                    }
                     return Ok(ControlFlow::Unwind { target, bad_block })
                 }
             }
@@ -256,6 +277,9 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             );
         }
 
+        if self.publish_complete_rpc_read_view()? {
+            rpc_maintenance.complete();
+        }
         Ok(self.progress.next_ctrl())
     }
 
@@ -273,6 +297,18 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// CAUTION: This method locks the static file producer Mutex, hence can block the thread if the
     /// lock is occupied.
     pub fn move_to_static_files(&self) -> RethResult<()> {
+        let factory = self.provider_factory.clone();
+        let mut rpc_maintenance = factory
+            .rpc_maintenance(true)
+            .expect("blocking RPC maintenance always acquires a guard");
+        self.move_to_static_files_inner()?;
+        if self.publish_complete_rpc_read_view()? {
+            rpc_maintenance.complete();
+        }
+        Ok(())
+    }
+
+    fn move_to_static_files_inner(&self) -> RethResult<()> {
         // Copies data from database to static files
         let lowest_static_file_height =
             self.static_file_producer.lock().copy_to_static_files()?.min_block_num();
@@ -285,7 +321,12 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 .delete_limit(usize::MAX)
                 .build_with_provider_factory(self.provider_factory.clone());
 
-            pruner.run(prune_tip)?;
+            let factory = self.provider_factory.clone();
+            let mut write_guard = factory.consistent_write();
+            let provider_rw = self.provider_factory.database_provider_rw()?;
+            pruner.run_with_provider(&provider_rw, prune_tip)?;
+            provider_rw.commit()?;
+            write_guard.complete();
         }
 
         Ok(())
@@ -299,9 +340,25 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         to: BlockNumber,
         bad_block: Option<BlockNumber>,
     ) -> Result<(), PipelineError> {
+        let factory = self.provider_factory.clone();
+        let mut rpc_maintenance = factory
+            .rpc_maintenance(true)
+            .expect("blocking RPC maintenance always acquires a guard");
+        self.unwind_inner(to, bad_block)?;
+        if self.publish_complete_rpc_read_view()? {
+            rpc_maintenance.complete();
+        }
+        Ok(())
+    }
+
+    fn unwind_inner(
+        &mut self,
+        to: BlockNumber,
+        bad_block: Option<BlockNumber>,
+    ) -> Result<(), PipelineError> {
         // Add validation before starting unwind
         let (latest_block, prune_modes, checkpoints) = {
-            let provider = self.provider_factory.provider()?;
+            let provider = self.provider_factory.database_provider_rw()?;
             (
                 provider.last_block_number()?,
                 provider.prune_modes_ref().clone(),
@@ -345,6 +402,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 "Starting unwind"
             );
             while checkpoint.block_number > to {
+                let factory = self.provider_factory.clone();
+                let mut write_guard = factory.consistent_write();
                 let unwind_started_at = Instant::now();
                 let input = UnwindInput { checkpoint, unwind_to: to, bad_block };
                 self.event_sender.notify(PipelineEvent::Unwind { stage_id, input });
@@ -406,6 +465,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                         UnifiedStorageWriter::commit_unwind(provider_rw)?;
 
                         stage.post_unwind_commit()?;
+                        write_guard.complete();
 
                         provider_rw = self.provider_factory.database_provider_rw()?;
                     }
@@ -418,7 +478,63 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             }
         }
 
+        if self.incomplete_stage_write {
+            let factory = self.provider_factory.clone();
+            let mut write_guard = factory.consistent_write();
+            write_guard.recovered();
+            self.incomplete_stage_write = false;
+        }
+
         Ok(())
+    }
+
+    /// A stage commit is not a complete RPC view. Keep readers closed until all of the state
+    /// stages agree; a pipeline containing only download or custom stages may not reach one.
+    fn publish_complete_rpc_read_view(&self) -> Result<bool, reth_errors::ProviderError> {
+        let factory = self.provider_factory.clone();
+        let mut write_guard = factory.consistent_write();
+        let publication = (|| {
+            let provider = self.provider_factory.database_provider_rw()?;
+            let Some(execution) = provider.get_stage_checkpoint(StageId::Execution)? else {
+                return Ok(false)
+            };
+            for stage in [
+                StageId::AccountHashing,
+                StageId::StorageHashing,
+                StageId::IndexAccountHistory,
+                StageId::IndexStorageHistory,
+                StageId::MerkleExecute,
+                StageId::Finish,
+            ] {
+                if provider.get_stage_checkpoint(stage)?.map(|checkpoint| checkpoint.block_number) !=
+                    Some(execution.block_number)
+                {
+                    return Ok(false)
+                }
+            }
+            let Some(hash) = provider.block_hash(execution.block_number)? else { return Ok(false) };
+            if provider.block_body_indices(execution.block_number)?.is_none() {
+                return Ok(false)
+            }
+            drop(provider);
+            self.provider_factory
+                .publish_rpc_read_view(BlockNumHash { number: execution.block_number, hash })?;
+            Ok::<_, reth_errors::ProviderError>(true)
+        })();
+        // The pipeline's storage work has already succeeded. Auxiliary reads for RPC admission
+        // must not mark that work interrupted or stop the original pipeline.
+        write_guard.complete();
+        match publication {
+            Ok(complete) => Ok(complete),
+            Err(error) => {
+                factory.rpc_publication_failed();
+                tracing::warn!(target: "sync::pipeline", %error,
+                    "RPC storage publication failed; pipeline storage remains available");
+                // The replacement decision completed with RPC closed. Let the surrounding
+                // maintenance guard finish without inventing an interrupted storage write.
+                Ok(true)
+            }
+        }
     }
 
     async fn execute_stage_to_completion(
@@ -433,7 +549,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         let target = self.max_block.or(previous_stage);
 
         loop {
-            let prev_checkpoint = self.provider_factory.get_stage_checkpoint(stage_id)?;
+            let prev_checkpoint =
+                self.provider_factory.database_provider_rw()?.get_stage_checkpoint(stage_id)?;
 
             let stage_reached_max_block = prev_checkpoint
                 .zip(self.max_block)
@@ -488,6 +605,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             });
 
             let start = Instant::now();
+            let factory = self.provider_factory.clone();
+            let mut write_guard = factory.consistent_write();
             match self.stage(stage_index).execute(&provider_rw, exec_input) {
                 Ok(out @ ExecOutput { checkpoint, done }) => {
                     // Update stage checkpoint.
@@ -506,6 +625,12 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
                     // Invoke stage post commit hook.
                     self.stage(stage_index).post_execute_commit()?;
+                    if self.incomplete_stage_write {
+                        write_guard.recovered();
+                        self.incomplete_stage_write = false;
+                    } else {
+                        write_guard.complete();
+                    }
 
                     // Notify event listeners and update metrics.
                     self.event_sender.notify(PipelineEvent::Ran {
@@ -537,7 +662,14 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                     }
                 }
                 Err(err) => {
+                    if provider_rw.tx_ref().has_committed_writes() {
+                        self.incomplete_stage_write = true;
+                    } else {
+                        // The uncommitted batch is discarded with `provider_rw`.
+                        write_guard.complete();
+                    }
                     drop(provider_rw);
+                    drop(write_guard);
                     self.event_sender.notify(PipelineEvent::Error { stage_id });
 
                     if let Some(ctrl) = self.on_stage_error(stage_id, prev_checkpoint, err)? {
@@ -578,7 +710,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 )
                 .max(1);
 
-            self.last_detached_head_unwind_target = self.provider_factory.block_hash(unwind_to)?;
+            self.last_detached_head_unwind_target =
+                self.provider_factory.database_provider_rw()?.block_hash(unwind_to)?;
             Ok(Some(ControlFlow::Unwind { target: unwind_to, bad_block: local_head }))
         } else if let StageError::Block { block, error } = err {
             match error {
@@ -593,6 +726,8 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                     // FIXME: When handling errors, we do not commit the database transaction. This
                     // leads to the Merkle stage not clearing its checkpoint, and restarting from an
                     // invalid place.
+                    let factory = self.provider_factory.clone();
+                    let mut write_guard = factory.consistent_write();
                     let provider_rw = self.provider_factory.database_provider_rw()?;
                     provider_rw.save_stage_checkpoint_progress(StageId::MerkleExecute, vec![])?;
                     provider_rw.save_stage_checkpoint(
@@ -601,6 +736,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                     )?;
 
                     UnifiedStorageWriter::commit(provider_rw)?;
+                    write_guard.complete();
 
                     // We unwind because of a validation error. If the unwind itself
                     // fails, we bail entirely,
@@ -671,12 +807,17 @@ impl<N: ProviderNodeTypes> std::fmt::Debug for Pipeline<N> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use reth_db_api::Database;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     use super::*;
     use crate::{test_utils::TestStage, UnwindOutput};
     use assert_matches::assert_matches;
     use reth_consensus::ConsensusError;
+    use reth_db_api::{tables, transaction::DbTxMut};
     use reth_errors::ProviderError;
     use reth_provider::test_utils::{create_test_provider_factory, MockNodeTypesWithDB};
     use reth_prune::PruneModes;
@@ -1193,6 +1334,65 @@ mod tests {
             Err(PipelineError::Stage(StageError::DatabaseIntegrity(
                 ProviderError::BlockBodyIndicesNotFound(5)
             )))
+        );
+    }
+
+    #[tokio::test]
+    async fn recoverable_partial_commit_restores_read_view_after_retry() {
+        struct PartialCommitStage(Arc<AtomicUsize>);
+
+        impl Stage<DatabaseProviderRW<MockNodeTypesWithDB>> for PartialCommitStage {
+            fn id(&self) -> StageId {
+                StageId::Other("PartialCommit")
+            }
+
+            fn execute(
+                &mut self,
+                provider: &DatabaseProviderRW<MockNodeTypesWithDB>,
+                _: ExecInput,
+            ) -> Result<ExecOutput, StageError> {
+                if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    provider
+                        .tx_ref()
+                        .put::<tables::CanonicalHeaders>(1, B256::with_last_byte(1))
+                        .unwrap();
+                    provider.tx_ref().commit_view().unwrap();
+                    return Err(StageError::Recoverable(Box::new(std::fmt::Error)));
+                }
+
+                Ok(ExecOutput { checkpoint: StageCheckpoint::new(1), done: true })
+            }
+
+            fn unwind(
+                &mut self,
+                _: &DatabaseProviderRW<MockNodeTypesWithDB>,
+                _: UnwindInput,
+            ) -> Result<UnwindOutput, StageError> {
+                unreachable!("a recoverable stage error must be retried")
+            }
+        }
+
+        let provider_factory = create_test_provider_factory();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut pipeline = Pipeline::<MockNodeTypesWithDB>::builder()
+            .add_stage(PartialCommitStage(executions.clone()))
+            .with_max_block(1)
+            .build(
+                provider_factory.clone(),
+                StaticFileProducer::new(provider_factory.clone(), PruneModes::default()),
+            );
+
+        pipeline.run().await.unwrap();
+
+        assert_eq!(executions.load(Ordering::Relaxed), 2);
+        let read_tx = provider_factory.db_ref().tx().unwrap();
+        assert_eq!(
+            read_tx.get::<tables::CanonicalHeaders>(1).unwrap(),
+            Some(B256::with_last_byte(1))
+        );
+        assert_eq!(
+            read_tx.get::<tables::StageCheckpoints>("PartialCommit".to_string()).unwrap(),
+            Some(StageCheckpoint::new(1))
         );
     }
 }

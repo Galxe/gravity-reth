@@ -151,6 +151,11 @@ where
         &self,
         new_tip_num: u64,
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
+        let mut rpc_maintenance = self
+            .provider
+            .rpc_maintenance(true)
+            .expect("blocking RPC maintenance always acquires a guard");
+        let mut write_guard = self.provider.consistent_write();
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
         let start_time = Instant::now();
         let provider_rw = self.provider.database_provider_rw()?;
@@ -159,6 +164,11 @@ where
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
         UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(new_tip_num)?;
         UnifiedStorageWriter::commit_unwind(provider_rw)?;
+        if let Some(hash) = new_tip_hash {
+            self.provider.publish_rpc_read_view(BlockNumHash { number: new_tip_num, hash })?;
+            rpc_maintenance.complete();
+        }
+        write_guard.complete();
 
         debug!(target: "engine::persistence", ?new_tip_num, ?new_tip_hash, "Removed blocks from disk");
         self.metrics.remove_blocks_above_duration_seconds.record(start_time.elapsed());
@@ -224,6 +234,7 @@ where
             }
 
             // Pipeline progress and any deferred finalized/safe markers share one commit.
+            let mut write_guard = self.provider.consistent_write();
             let provider_rw = self.provider.database_provider_rw()?;
             provider_rw.update_pipeline_stages(last.number, false)?;
             if let Some(finalized) = pending_finalized {
@@ -239,6 +250,8 @@ where
                 }
             }
             provider_rw.commit()?;
+            self.provider.publish_rpc_read_view(last)?;
+            write_guard.complete();
             debug!(target: "engine::persistence", first=?first_block, last=?last_block, "Saved range of blocks");
         }
 
@@ -253,11 +266,23 @@ where
         // The durable save is already committed at this point, so pruning can happen after we
         // acknowledge the save without extending the synchronous persistence wait.
         if self.pruner.is_pruning_needed(block_number) {
+            // A long RPC must not extend the append persistence wait. Retry pruning on a later
+            // save when no request still depends on the old static-file range.
+            let Some(mut rpc_maintenance) = self.provider.rpc_maintenance(false) else {
+                return Ok(())
+            };
+            let mut write_guard = self.provider.consistent_write();
             debug!(target: "engine::persistence", block_num=?block_number, "Running pruner");
             let prune_start = Instant::now();
             let provider_rw = self.provider.database_provider_rw()?;
+            let block_hash = provider_rw.block_hash(block_number)?;
             let _ = self.pruner.run_with_provider(&provider_rw, block_number)?;
             provider_rw.commit()?;
+            if let Some(hash) = block_hash {
+                self.provider.publish_rpc_read_view(BlockNumHash { number: block_number, hash })?;
+                rpc_maintenance.complete();
+            }
+            write_guard.complete();
             debug!(target: "engine::persistence", tip=?block_number, "Finished pruning after saving blocks");
             self.metrics.prune_before_duration_seconds.record(prune_start.elapsed());
         }
@@ -278,6 +303,7 @@ where
             triev2,
         } in blocks
         {
+            let mut write_guard = self.provider.consistent_write();
             let block_number = recovered_block.number();
             let block_hash = recovered_block.hash();
             let inner_provider = &self.provider;
@@ -288,9 +314,9 @@ where
             // account_db (for account trie), and storage_db (for storage trie). This allows
             // concurrent writes and commits across different DB instances without conflicts.
             // The `write_trie_updatesv2` implementation also parallelizes writes to account_db
-            // and storage_db internally. For fault tolerance, stage checkpoints ensure
-            // idempotency - each stage's checkpoint is verified before writing, guaranteeing
-            // exactly-once execution even if the process crashes mid-block.
+            // and storage_db internally. Stage checkpoints record committed progress for
+            // recovery at the durable Execution height. A trie shard can commit before its
+            // checkpoint, so recovery and ordered replay must also repair partial trie writes.
             thread::scope(|scope| -> Result<(), PersistenceError> {
                 let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
                     let start = Instant::now();
@@ -401,6 +427,9 @@ where
                 trie_handle.join().unwrap()
             })?;
             PERSIST_BLOCK_CACHE.persist_tip(block_number);
+            self.provider
+                .publish_rpc_read_view(BlockNumHash { number: block_number, hash: block_hash })?;
+            write_guard.complete();
         }
         Ok(())
     }
@@ -422,10 +451,20 @@ where
         for block in blocks {
             let gas = block.recovered_block().header().gas_used();
             let state = block.hashed_state().accounts.len();
-            // Close the current (non-empty) group before it would cross a bound; a single block
-            // that alone exceeds a bound becomes its own group.
+            // Storage wipes scan committed plain storage. Start a new group so they see all
+            // preceding blocks without committing a prefix with the whole group's body metadata.
+            let wipes_storage = block
+                .block
+                .execution_output
+                .bundle
+                .reverts
+                .iter()
+                .flatten()
+                .any(|(_, revert)| revert.wipe_storage);
+            // A block that alone exceeds a bound becomes its own group.
             if !group.is_empty() &&
-                (group_gas.saturating_add(gas) > MERGE_GROUP_MAX_GAS ||
+                (wipes_storage ||
+                    group_gas.saturating_add(gas) > MERGE_GROUP_MAX_GAS ||
                     group_state.saturating_add(state) > MERGE_GROUP_MAX_STATE)
             {
                 self.commit_block_group(std::mem::take(&mut group))?;
@@ -441,16 +480,18 @@ where
 
     /// Write one contiguous group of executed blocks with amortized commits.
     ///
-    /// State and changesets are flushed once before history indexing because `RocksDB` batches do
-    /// not provide read-your-writes. History and stage checkpoints are committed together
-    /// afterwards, so recovery can replay a group interrupted between the two commits.
+    /// State, changesets and their execution checkpoints are flushed before trie/history writes.
+    /// An interruption then leaves a precise execution height for recovery to rebuild the
+    /// remaining stages. Storage wipes start groups and need no intermediate state commit.
     fn commit_block_group(
         &self,
         group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
     ) -> Result<(), PersistenceError> {
         let Some(first) = group.first() else { return Ok(()) };
+        let mut write_guard = self.provider.consistent_write();
         let group_first = first.recovered_block().number();
         let group_last = group.last().unwrap().recovered_block().number();
+        let group_last_hash = group.last().unwrap().recovered_block().hash();
         let block_count = group.len() as u32;
         info!(target: "persistence::save_block", group_first, group_last, count = block_count, "Write merged block group into DB");
         let start = Instant::now();
@@ -475,26 +516,21 @@ where
 
         let provider_rw = self.provider.database_provider_rw()?;
 
+        // A durable plain/hashed-state prefix must carry its execution checkpoints. Recovery
+        // starts the EVM at Execution, so leaving that checkpoint behind would replay against
+        // balances and nonces from a later block.
+        let execution_checkpoint =
+            Self::get_checkpoint(provider_rw.tx_ref(), StageId::Execution, Some(group_first))?;
+        let hashing_checkpoint =
+            Self::get_checkpoint(provider_rw.tx_ref(), StageId::AccountHashing, Some(group_first))?;
         // Headers / bodies / senders / tx lookups for the whole group (transaction numbers threaded
         // across the batch in memory by `insert_blocks`).
         let body_indices = provider_rw.insert_blocks(recovered_blocks, StorageLocation::Both)?;
 
         // Receipts, state changesets and hashed state, per block.
-        for (block_index, ((execution_output, hashed_state), body_index)) in
-            execution_outputs.into_iter().zip(hashed_states).zip(body_indices).enumerate()
+        for ((execution_output, hashed_state), body_index) in
+            execution_outputs.into_iter().zip(hashed_states).zip(body_indices)
         {
-            // A primary storage wipe builds its changeset by scanning plain storage. Flush prior
-            // blocks so that scan observes slots created earlier in this merged group.
-            if block_index != 0 &&
-                execution_output
-                    .bundle
-                    .reverts
-                    .iter()
-                    .flatten()
-                    .any(|(_, revert)| revert.wipe_storage)
-            {
-                provider_rw.commit_view()?;
-            }
             provider_rw.write_state_with_indices(
                 &execution_output,
                 OriginalValuesKnown::No,
@@ -504,7 +540,24 @@ where
             provider_rw.write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
         }
 
-        // Trie updates, per block.
+        // Commit state and its checkpoints before any trie shard. Recovery can rebuild an
+        // interrupted trie from the entire durable state range. History indexing also needs
+        // this flush because RocksDB batches have no read-your-writes.
+        Self::update_checkpoint(
+            provider_rw.tx_ref(),
+            StageId::Execution,
+            StageCheckpoint { block_number: group_last, ..execution_checkpoint },
+        )?;
+        Self::update_checkpoint(
+            provider_rw.tx_ref(),
+            StageId::AccountHashing,
+            StageCheckpoint { block_number: group_last, ..hashing_checkpoint },
+        )?;
+        provider_rw.static_file_provider().commit()?;
+        provider_rw.commit_view()?;
+        set_fail_point!("persistence::after_merged_state_commit");
+
+        // Trie updates, per block. The final commit flushes these before history/checkpoints.
         for (trie, triev2, block_hash) in &trie_updates {
             provider_rw.write_trie_updates(
                 trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(*block_hash))?,
@@ -512,26 +565,20 @@ where
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
         }
 
-        // History indexing reads the changesets back through RocksDB cursors, which cannot see
-        // pending WriteBatch entries. Storage V2 is rejected before this path because its
-        // changesets live in static files and `commit_view` cannot make them visible.
-        provider_rw.commit_view()?;
-
         // History indices for the whole range, once.
         provider_rw.update_history_indices(group_first..=group_last)?;
 
-        // Advance every written stage's checkpoint to the group tip, then make the final commit.
-        // `MerkleExecute` passes `None` (trie writes are idempotent and may resume mid-range); the
-        // rest assert checkpoint continuity from `group_first`.
+        // State checkpoints were committed with state. Advance history and trie only after
+        // their updates are complete; trie updates may resume an interrupted range.
         let tx = provider_rw.tx_ref();
-        Self::advance_checkpoint(tx, StageId::Execution, Some(group_first), group_last)?;
-        Self::advance_checkpoint(tx, StageId::AccountHashing, Some(group_first), group_last)?;
         Self::advance_checkpoint(tx, StageId::IndexAccountHistory, Some(group_first), group_last)?;
         Self::advance_checkpoint(tx, StageId::MerkleExecute, None, group_last)?;
 
-        provider_rw.static_file_provider().commit()?;
         provider_rw.commit()?;
         PERSIST_BLOCK_CACHE.persist_tip(group_last);
+        self.provider
+            .publish_rpc_read_view(BlockNumHash { number: group_last, hash: group_last_hash })?;
+        write_guard.complete();
 
         metrics::histogram!("save_blocks_time", &[("process", "merge_block")])
             .record(start.elapsed() / block_count);
@@ -727,12 +774,15 @@ impl Drop for ServiceGuard {
 mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, U256};
-    use reth_chain_state::test_utils::TestBlockBuilder;
-    use reth_db::models::GravityStorageSettings;
+    use reth_chain_state::{test_utils::TestBlockBuilder, ExecutedTrieUpdates};
+    use reth_db::{models::GravityStorageSettings, Database};
     use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
     use reth_exex_types::FinishedExExHeight;
     use reth_primitives_traits::Account;
-    use reth_provider::{test_utils::create_test_provider_factory, StorageChangeSetReader};
+    use reth_provider::{
+        test_utils::{create_test_provider_factory, MockNodeTypesWithDB},
+        StorageChangeSetReader,
+    };
     use reth_prune::Pruner;
     use revm::database::states::{
         reverts::Reverts, AccountRevert, AccountStatus, BundleAccount, BundleState,
@@ -750,6 +800,22 @@ mod tests {
 
         let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
         PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
+    }
+
+    fn persistence_service(
+        provider: &ProviderFactory<MockNodeTypesWithDB>,
+    ) -> PersistenceService<MockNodeTypesWithDB> {
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        PersistenceService::new(
+            provider.clone(),
+            std::sync::mpsc::channel().1,
+            pruner,
+            sync_metrics_tx,
+        )
     }
 
     #[test]
@@ -791,19 +857,35 @@ mod tests {
     }
 
     #[test]
+    fn complete_blocks_publish_rpc_views_without_waiting_for_old_readers() {
+        let provider = create_test_provider_factory();
+        let service = persistence_service(&provider);
+        let rpc_provider = provider.rpc_provider();
+        assert!(rpc_provider.provider().is_err());
+
+        let mut blocks = TestBlockBuilder::eth().get_executed_blocks(0..2).collect::<Vec<_>>();
+        let next_block = blocks.pop().unwrap();
+        let first_hash = blocks[0].recovered_block().hash();
+        let next_hash = next_block.recovered_block().hash();
+        service.save_blocks_per_block(blocks).unwrap();
+        let first_view = rpc_provider.provider().unwrap();
+        let first_bounds = first_view.rpc_read_view_bounds().unwrap();
+        assert_eq!((first_bounds.block_number, first_bounds.block_hash), (0, first_hash));
+
+        // Holding the old complete view must not prevent the original staged append commits.
+        service.save_blocks_per_block(vec![next_block]).unwrap();
+        let next_view = rpc_provider.provider().unwrap();
+        let next_bounds = next_view.rpc_read_view_bounds().unwrap();
+        assert_eq!((next_bounds.block_number, next_bounds.block_hash), (1, next_hash));
+        assert_eq!(first_view.block_hash(1).unwrap(), None);
+        assert_eq!(next_view.block_hash(1).unwrap(), Some(next_hash));
+        assert_eq!(first_view.rpc_read_view_bounds(), Some(first_bounds));
+    }
+
+    #[test]
     fn merged_persistence_builds_history_from_committed_changesets() {
         let provider = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            provider.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
+        let service = persistence_service(&provider);
 
         let block_number = 0;
         let address = Address::random();
@@ -833,17 +915,7 @@ mod tests {
     #[test]
     fn merged_persistence_storage_wipe_sees_prior_block_state() {
         let provider = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            provider.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
+        let service = persistence_service(&provider);
 
         let address = Address::random();
         let slot = B256::with_last_byte(1);
@@ -907,6 +979,29 @@ mod tests {
         let result = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("test timed out");
 
         assert_eq!(block_hash, result.last_block.unwrap().hash);
+    }
+
+    #[test]
+    fn incomplete_block_write_rejects_new_read_views() {
+        let provider = create_test_provider_factory();
+        let service = persistence_service(&provider);
+
+        let mut block = TestBlockBuilder::eth().get_executed_block_with_number(0, B256::ZERO);
+        let block_hash = block.recovered_block().hash();
+        block.trie = ExecutedTrieUpdates::Missing;
+
+        // The state worker commits before the missing trie update is reported by the other worker.
+        assert!(matches!(
+            service.save_blocks_per_block(vec![block]),
+            Err(PersistenceError::ProviderError(ProviderError::MissingTrieUpdates(_)))
+        ));
+        assert_eq!(
+            provider.db_ref().db().tx_mut().unwrap().get::<tables::CanonicalHeaders>(0).unwrap(),
+            Some(block_hash)
+        );
+        assert!(provider.db_ref().db().tx().is_err());
+        assert!(provider.db_ref().db().tx_live().is_err());
+        assert!(provider.rpc_provider().provider().is_err());
     }
 
     #[test]

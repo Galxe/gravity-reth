@@ -1,5 +1,5 @@
 use crate::{
-    implementation::rocksdb::{get_cf_handle, read_error},
+    implementation::rocksdb::{get_cf_handle, read_error, tx::DbReadSource},
     DatabaseError,
 };
 use parking_lot::Mutex;
@@ -9,7 +9,6 @@ use reth_db_api::{
     table::{Compress, Decode, Decompress, DupSort, Encode, Table},
 };
 use reth_storage_errors::db::DatabaseErrorInfo;
-use rocksdb::DB;
 use std::{
     fmt::Debug,
     marker::PhantomData,
@@ -58,8 +57,8 @@ macro_rules! compress_to_buf_or_ref {
 pub struct Cursor<K: TransactionKind, T: Table> {
     /// Iterator for cursor operations - always ready to use
     iterator: rocksdb::DBRawIterator<'static>,
-    /// db should drop after iterator
-    db: Arc<DB>,
+    /// Owns the database and any fixed snapshot until after the iterator has been dropped.
+    source: DbReadSource,
     /// Cache buffer that receives compressed values.
     batch: Arc<Mutex<rocksdb::WriteBatch>>,
     buf: Vec<u8>,
@@ -70,7 +69,7 @@ impl<K: TransactionKind, T: Table> std::fmt::Debug for Cursor<K, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cursor")
             .field("iterator", &"<DBRawIterator>")
-            .field("db", &self.db)
+            .field("db", self.source.db())
             .field("batch", &"<WriteBatch>")
             .field("_phantom", &self._phantom)
             .finish()
@@ -81,20 +80,21 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
     const KEY_LENGTH: usize = mem::size_of::<<T::Key as Encode>::Encoded>();
 
     pub(crate) fn new(
-        db: Arc<DB>,
+        source: DbReadSource,
         batch: Arc<Mutex<rocksdb::WriteBatch>>,
     ) -> Result<Self, DatabaseError> {
-        let cf_handle = get_cf_handle::<T>(&db)?;
+        let cf_handle = get_cf_handle::<T>(source.db())?;
 
         // Create iterator at construction time - always ready to use
         let iterator = unsafe {
-            // SAFETY: We ensure the DB outlives the iterator by holding Arc<DB>
+            // SAFETY: `source` owns the DB and any snapshot used by this iterator. Field drop
+            // order releases the iterator before its source.
             std::mem::transmute::<rocksdb::DBRawIterator<'_>, rocksdb::DBRawIterator<'static>>(
-                db.raw_iterator_cf(cf_handle),
+                source.raw_iterator_cf(cf_handle),
             )
         };
 
-        Ok(Self { iterator, db, batch, buf: Vec::new(), _phantom: PhantomData })
+        Ok(Self { iterator, source, batch, buf: Vec::new(), _phantom: PhantomData })
     }
 
     /// Encode `DupSort` composite key: key + subkey
@@ -113,8 +113,8 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
 
     /// High-performance point query - doesn't move cursor position
     fn point_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DatabaseError> {
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
-        self.db.get_cf(cf_handle, key).map_err(read_error)
+        let cf_handle = get_cf_handle::<T>(self.source.db())?;
+        self.source.get_cf(cf_handle, key).map_err(read_error)
     }
 
     fn decode_key_value(key: &[u8], value: &[u8]) -> Result<(T::Key, T::Value), DatabaseError> {
@@ -281,7 +281,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     /// If you write a key and then immediately seek to it, you will observe the
     /// **old value** (or "not found") until the batch is committed.
     fn upsert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        let cf_handle = get_cf_handle::<T>(self.source.db())?;
         let encoded_key = key.encode();
         let value_ref = compress_to_buf_or_ref!(self, value);
         let compressed_value = value_ref.unwrap_or(&self.buf);
@@ -309,7 +309,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         if self.iterator.valid() &&
             let Some(key) = self.iterator.key()
         {
-            let cf_handle = get_cf_handle::<T>(&self.db)?;
+            let cf_handle = get_cf_handle::<T>(self.source.db())?;
             let mut batch = self.batch.lock();
             batch.delete_cf(cf_handle, key);
         }
@@ -317,7 +317,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     }
 
     fn delete_by_key(&mut self, key: T::Key) -> Result<(), DatabaseError> {
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        let cf_handle = get_cf_handle::<T>(self.source.db())?;
         if T::DUPSORT {
             let main_key: Vec<u8> = key.encode().into();
             // Calculate the next key (main_key + 1) for range deletion
@@ -337,7 +337,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
 
             let mut batch = self.batch.lock();
             if carry {
-                let iter = self.db.iterator_cf(
+                let iter = self.source.db().iterator_cf(
                     cf_handle,
                     rocksdb::IteratorMode::From(&main_key, rocksdb::Direction::Forward),
                 );
@@ -555,7 +555,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
     }
 
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError> {
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        let cf_handle = get_cf_handle::<T>(self.source.db())?;
         let encoded_key = key.encode();
 
         // For DupSort tables, we need to extract the subkey from the value
@@ -580,7 +580,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let encoded_subkey = subkey.encode();
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
 
-        let cf_handle = get_cf_handle::<T>(&self.db)?;
+        let cf_handle = get_cf_handle::<T>(self.source.db())?;
         let mut batch = self.batch.lock();
         batch.delete_cf(cf_handle, &composite_key);
         Ok(())

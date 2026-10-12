@@ -1,9 +1,14 @@
 use crate::{
-    providers::state::macros::delegate_provider_impls, AccountReader, BlockHashReader,
-    HashedPostStateProvider, ProviderError, StateProvider, StateRootProvider,
+    providers::state::{latest::complete_storage_accounts, macros::delegate_provider_impls},
+    AccountReader, BlockHashReader, HashedPostStateProvider, HeaderProvider, ProviderError,
+    StateProvider, StateRootProvider, StaticFileProviderFactory,
 };
-use alloy_eips::merge::EPOCH_SLOTS;
-use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
+use alloy_consensus::BlockHeader;
+use alloy_primitives::{
+    keccak256,
+    map::{hash_map, B256Map, HashMap},
+    Address, BlockNumber, Bytes, StorageKey, StorageValue, B256,
+};
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
     models::{storage_sharded_key::StorageShardedKey, ShardedKey},
@@ -12,24 +17,20 @@ use reth_db_api::{
     transaction::DbTx,
     BlockNumberList,
 };
-use reth_primitives_traits::{Account, Bytecode};
+use reth_primitives_traits::{Account, Bytecode, GotExpected};
+use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
-    BlockNumReader, BytecodeReader, ChangeSetReader, DBProvider, StateProofProvider,
-    StorageChangeSetReader, StorageRootProvider, StorageSettingsCache,
+    BlockNumReader, BytecodeReader, ChangeSetReader, ChangesetRangeReader, DBProvider,
+    StateProofProvider, StorageChangeSetReader, StorageRootProvider, StorageSettingsCache,
 };
-use reth_storage_errors::provider::ProviderResult;
+use reth_storage_errors::provider::{ProviderResult, RootMismatch};
 use reth_trie::{
-    proof::{Proof, StorageProof},
-    updates::TrieUpdates,
-    witness::TrieWitness,
+    updates::{TrieUpdates, TrieUpdatesV2},
     AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher, MultiProof, MultiProofTargets,
-    StateRoot, StorageMultiProof, StorageRoot, TrieInput,
+    StorageMultiProof, TrieInput,
 };
-use reth_trie_db::{
-    DatabaseHashedPostState, DatabaseHashedStorage, DatabaseProof, DatabaseStateRoot,
-    DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness,
-};
-use std::fmt::Debug;
+use reth_trie_db::nested_hash::NestedStateRoot;
+use std::{fmt::Debug, sync::OnceLock};
 
 /// State provider for a given block number which takes a tx reference.
 ///
@@ -50,6 +51,8 @@ pub struct HistoricalStateProviderRef<'b, Provider> {
     block_number: BlockNumber,
     /// Lowest blocks at which different parts of the state are available.
     lowest_available_blocks: LowestAvailableBlocks,
+    /// Shared only by the owned provider, so repeated root calls reuse the same historical base.
+    revert_cache: Option<&'b OnceLock<HashedPostState>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -63,7 +66,12 @@ pub enum HistoryInfo {
 impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, Provider> {
     /// Create new `StateProvider` for historical block number
     pub fn new(provider: &'b Provider, block_number: BlockNumber) -> Self {
-        Self { provider, block_number, lowest_available_blocks: Default::default() }
+        Self {
+            provider,
+            block_number,
+            lowest_available_blocks: Default::default(),
+            revert_cache: None,
+        }
     }
 
     /// Create new `StateProvider` for historical block number and lowest block numbers at which
@@ -73,7 +81,7 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
         block_number: BlockNumber,
         lowest_available_blocks: LowestAvailableBlocks,
     ) -> Self {
-        Self { provider, block_number, lowest_available_blocks }
+        Self { provider, block_number, lowest_available_blocks, revert_cache: None }
     }
 
     /// Lookup an account in the `AccountsHistory` table
@@ -110,47 +118,124 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
         )
     }
 
-    /// Checks and returns `true` if distance to historical block exceeds the provided limit.
-    fn check_distance_against_limit(&self, limit: u64) -> ProviderResult<bool> {
-        let tip = self.provider.last_block_number()?;
+    /// Reconstructs the target state from the first before-value for each key after the target.
+    fn revert_state_v2(&self) -> ProviderResult<HashedPostState>
+    where
+        Provider: ChangesetRangeReader + StorageSettingsCache + StaticFileProviderFactory,
+    {
+        if let Some(reverted) = self.revert_cache.and_then(OnceLock::get) {
+            return Ok(reverted.clone())
+        }
 
-        Ok(tip.saturating_sub(self.block_number) > limit)
+        let reverted = self.load_revert_state_v2()?;
+        if let Some(cache) = self.revert_cache {
+            let _ = cache.set(reverted.clone());
+        }
+        Ok(reverted)
     }
 
-    /// Retrieve revert hashed state for this history provider.
-    fn revert_state(&self) -> ProviderResult<HashedPostState> {
+    fn snapshot_canonical_hash(&self, height: BlockNumber) -> ProviderResult<B256>
+    where
+        Provider: StaticFileProviderFactory,
+    {
+        let snapshot_height = match super::latest::snapshot_block_number(self.tx())? {
+            Some(height) => height,
+            None => self.provider.last_block_number()?,
+        };
+        if height > snapshot_height {
+            return Err(ProviderError::HeaderNotFound(height.into()))
+        }
+        if let Some(hash) = self.tx().get::<tables::CanonicalHeaders>(height)? {
+            return Ok(hash)
+        }
+        // Header migration removes the canonical-height index but retains the reverse index,
+        // which anchors the static header to this transaction's view.
+        if let Some(hash) = self.provider.static_file_provider().block_hash(height)? &&
+            self.tx().get::<tables::HeaderNumbers>(hash)? == Some(height)
+        {
+            return Ok(hash)
+        }
+        Err(ProviderError::HeaderNotFound(height.into()))
+    }
+
+    fn load_revert_state_v2(&self) -> ProviderResult<HashedPostState>
+    where
+        Provider: ChangesetRangeReader + StorageSettingsCache + StaticFileProviderFactory,
+    {
         if !self.lowest_available_blocks.is_account_history_available(self.block_number) ||
             !self.lowest_available_blocks.is_storage_history_available(self.block_number)
         {
             return Err(ProviderError::StateAtBlockPruned(self.block_number))
         }
 
-        if self.check_distance_against_limit(EPOCH_SLOTS)? {
-            tracing::warn!(
-                target: "provider::historical_sp",
-                target = self.block_number,
-                "Attempt to calculate state root for an old block might result in OOM"
-            );
+        let height = match super::latest::snapshot_block_number(self.tx())? {
+            Some(height) => height,
+            None => self.provider.last_block_number()?,
+        };
+        if self.block_number > height.saturating_add(1) {
+            return Err(ProviderError::BlockNotExecuted {
+                requested: self.block_number - 1,
+                executed: height,
+            })
+        }
+        let static_files = self.provider.static_file_provider();
+        let _history_guard = self
+            .provider
+            .cached_storage_settings()
+            .changesets_in_static_files
+            .then(|| static_files.history_read_guard());
+        if _history_guard.is_some() {
+            let snapshot_hash = self.snapshot_canonical_hash(height)?;
+            if static_files.block_hash(height)? != Some(snapshot_hash) {
+                return Err(ProviderError::other(std::io::Error::other(
+                    "static-file headers no longer match the state snapshot",
+                )))
+            }
+        }
+        if self.block_number > height {
+            return Ok(HashedPostState::default())
+        }
+        if _history_guard.is_some() {
+            for segment in
+                [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+            {
+                if static_files
+                    .get_highest_static_file_block(segment)
+                    .is_none_or(|last| last < height)
+                {
+                    return Err(ProviderError::MissingStaticFileBlock(segment, height))
+                }
+                let first_jar_end = static_files.get_lowest_static_file_block(segment);
+                if first_jar_end.is_some_and(|first| {
+                    static_files.find_fixed_range(self.block_number).end() < first
+                }) {
+                    return Err(ProviderError::StateAtBlockPruned(self.block_number))
+                }
+            }
+        }
+        let mut accounts = HashMap::default();
+        for (_, before) in self.provider.account_changesets_range(self.block_number..=height)? {
+            accounts.entry(keccak256(before.address)).or_insert(before.info);
         }
 
-        Ok(HashedPostState::from_reverts::<KeccakKeyHasher>(self.tx(), self.block_number)?)
-    }
-
-    /// Retrieve revert hashed storage for this history provider and target address.
-    fn revert_storage(&self, address: Address) -> ProviderResult<HashedStorage> {
-        if !self.lowest_available_blocks.is_storage_history_available(self.block_number) {
-            return Err(ProviderError::StateAtBlockPruned(self.block_number))
+        let mut storages: B256Map<HashedStorage> = HashMap::default();
+        for (block_address, before) in
+            self.provider.storage_changesets_range(self.block_number..=height)?
+        {
+            let hashed_address = keccak256(block_address.address());
+            if let hash_map::Entry::Vacant(entry) = accounts.entry(hashed_address) {
+                // An unchanged account has no changeset; the snapshot's hashed account matches it.
+                entry.insert(self.tx().get::<tables::HashedAccounts>(hashed_address)?);
+            }
+            storages
+                .entry(hashed_address)
+                .or_default()
+                .storage
+                .entry(keccak256(before.key))
+                .or_insert(before.value);
         }
 
-        if self.check_distance_against_limit(EPOCH_SLOTS * 10)? {
-            tracing::warn!(
-                target: "provider::historical_sp",
-                target = self.block_number,
-                "Attempt to calculate storage root for an old block might result in OOM"
-            );
-        }
-
-        Ok(HashedStorage::from_reverts(self.tx(), address, self.block_number)?)
+        Ok(HashedPostState { accounts, storages })
     }
 
     fn history_info<T, K>(
@@ -300,51 +385,67 @@ impl<Provider: DBProvider + BlockNumReader + BlockHashReader> BlockHashReader
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader> StateRootProvider
-    for HistoricalStateProviderRef<'_, Provider>
+impl<
+        Provider: DBProvider
+            + BlockNumReader
+            + ChangesetRangeReader
+            + StorageSettingsCache
+            + StaticFileProviderFactory,
+    > StateRootProvider for HistoricalStateProviderRef<'_, Provider>
 {
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
-        let mut revert_state = self.revert_state()?;
-        revert_state.extend(hashed_state);
-        StateRoot::overlay_root(self.tx(), revert_state).map_err(ProviderError::from)
+        let mut reverted = self.revert_state_v2()?;
+        reverted.extend(hashed_state);
+        NestedStateRoot::new(self.tx(), None).root(&complete_storage_accounts(self.tx(), reverted)?)
     }
 
-    fn state_root_from_nodes(&self, mut input: TrieInput) -> ProviderResult<B256> {
-        input.prepend(self.revert_state()?);
-        StateRoot::overlay_root_from_nodes(self.tx(), input).map_err(ProviderError::from)
+    fn state_root_with_updates_v2(
+        &self,
+        hashed_state: HashedPostState,
+    ) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        let mut reverted = self.revert_state_v2()?;
+        reverted.extend(hashed_state);
+        NestedStateRoot::new(self.tx(), None)
+            .calculate(&complete_storage_accounts(self.tx(), reverted)?)
+    }
+
+    fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_with_updates(
         &self,
-        hashed_state: HashedPostState,
+        _hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        let mut revert_state = self.revert_state()?;
-        revert_state.extend(hashed_state);
-        StateRoot::overlay_root_with_updates(self.tx(), revert_state).map_err(ProviderError::from)
+        Err(ProviderError::UnsupportedProvider)
     }
 
     fn state_root_from_nodes_with_updates(
         &self,
-        mut input: TrieInput,
+        _input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        input.prepend(self.revert_state()?);
-        StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
-            .map_err(ProviderError::from)
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader> StorageRootProvider
-    for HistoricalStateProviderRef<'_, Provider>
+impl<
+        Provider: DBProvider
+            + BlockNumReader
+            + ChangesetRangeReader
+            + StorageSettingsCache
+            + StaticFileProviderFactory,
+    > StorageRootProvider for HistoricalStateProviderRef<'_, Provider>
 {
     fn storage_root(
         &self,
         address: Address,
         hashed_storage: HashedStorage,
     ) -> ProviderResult<B256> {
-        let mut revert_storage = self.revert_storage(address)?;
-        revert_storage.extend(&hashed_storage);
-        StorageRoot::overlay_root(self.tx(), address, revert_storage)
-            .map_err(|err| ProviderError::Database(err.into()))
+        let mut reverted = self.revert_state_v2()?;
+        let hash = keccak256(address);
+        let mut storage = reverted.storages.remove(&hash).unwrap_or_default();
+        storage.extend(&hashed_storage);
+        NestedStateRoot::new(self.tx(), None).storage_root(hash, &storage)
     }
 
     fn storage_proof(
@@ -353,10 +454,9 @@ impl<Provider: DBProvider + BlockNumReader> StorageRootProvider
         slot: B256,
         hashed_storage: HashedStorage,
     ) -> ProviderResult<reth_trie::StorageProof> {
-        let mut revert_storage = self.revert_storage(address)?;
-        revert_storage.extend(&hashed_storage);
-        StorageProof::overlay_storage_proof(self.tx(), address, slot, revert_storage)
-            .map_err(ProviderError::from)
+        self.storage_multiproof(address, &[slot], hashed_storage)?
+            .storage_proof(slot)
+            .map_err(ProviderError::Rlp)
     }
 
     fn storage_multiproof(
@@ -365,41 +465,100 @@ impl<Provider: DBProvider + BlockNumReader> StorageRootProvider
         slots: &[B256],
         hashed_storage: HashedStorage,
     ) -> ProviderResult<StorageMultiProof> {
-        let mut revert_storage = self.revert_storage(address)?;
-        revert_storage.extend(&hashed_storage);
-        StorageProof::overlay_storage_multiproof(self.tx(), address, slots, revert_storage)
-            .map_err(ProviderError::from)
+        let hashed_address = keccak256(address);
+        let mut reverted = self.revert_state_v2()?;
+        if !hashed_storage.is_empty() {
+            reverted.storages.entry(hashed_address).or_default().extend(&hashed_storage);
+        }
+        let reverted = complete_storage_accounts(self.tx(), reverted)?;
+        let targets = MultiProofTargets::account_with_slots(
+            hashed_address,
+            slots.iter().copied().map(keccak256),
+        );
+        let mut proof = NestedStateRoot::new(self.tx(), None).multiproof(&reverted, targets)?;
+        Ok(proof.storages.remove(&hashed_address).unwrap_or_else(StorageMultiProof::empty))
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader> StateProofProvider
-    for HistoricalStateProviderRef<'_, Provider>
+impl<
+        Provider: DBProvider
+            + BlockNumReader
+            + ChangesetRangeReader
+            + StorageSettingsCache
+            + StaticFileProviderFactory
+            + HeaderProvider,
+    > StateProofProvider for HistoricalStateProviderRef<'_, Provider>
 {
-    /// Get account and storage proofs.
     fn proof(
         &self,
-        mut input: TrieInput,
+        input: TrieInput,
         address: Address,
         slots: &[B256],
     ) -> ProviderResult<AccountProof> {
-        input.prepend(self.revert_state()?);
-        Proof::overlay_account_proof(self.tx(), input, address, slots).map_err(ProviderError::from)
+        if !input.nodes.is_empty() {
+            return Err(ProviderError::UnsupportedProvider)
+        }
+        let has_overlay = !input.state.is_empty();
+        let mut reverted = self.revert_state_v2()?;
+        reverted.extend(input.state);
+        let reverted = complete_storage_accounts(self.tx(), reverted)?;
+        let canonical_root = if has_overlay {
+            None
+        } else {
+            let target = self
+                .block_number
+                .checked_sub(1)
+                .ok_or_else(|| ProviderError::HeaderNotFound(self.block_number.into()))?;
+            let static_files = self.provider.static_file_provider();
+            let _history_guard = static_files.history_read_guard();
+            let canonical_hash = self.snapshot_canonical_hash(target)?;
+            let header = self
+                .provider
+                .sealed_header(target)?
+                .ok_or_else(|| ProviderError::HeaderNotFound(target.into()))?;
+            if header.hash() != canonical_hash {
+                return Err(ProviderError::other(std::io::Error::other(
+                    "proof header no longer matches the state snapshot",
+                )))
+            }
+            Some((target, canonical_hash, header.header().state_root()))
+        };
+        let targets = MultiProofTargets::account_with_slots(
+            keccak256(address),
+            slots.iter().copied().map(keccak256),
+        );
+        let (root, multiproof) =
+            NestedStateRoot::new(self.tx(), None).multiproof_with_root(&reverted, targets)?;
+        if let Some((block_number, block_hash, expected)) = canonical_root &&
+            root != expected
+        {
+            return Err(ProviderError::StateRootMismatch(Box::new(RootMismatch {
+                root: GotExpected { got: root, expected },
+                block_number,
+                block_hash,
+            })))
+        }
+        let proof = multiproof.account_proof(address, slots).map_err(ProviderError::Rlp)?;
+        proof.verify(root).map_err(ProviderError::other)?;
+        Ok(proof)
     }
 
     fn multiproof(
         &self,
-        mut input: TrieInput,
+        input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
-        input.prepend(self.revert_state()?);
-        Proof::overlay_multiproof(self.tx(), input, targets).map_err(ProviderError::from)
+        if !input.nodes.is_empty() {
+            return Err(ProviderError::UnsupportedProvider)
+        }
+        let mut reverted = self.revert_state_v2()?;
+        reverted.extend(input.state);
+        NestedStateRoot::new(self.tx(), None)
+            .multiproof(&complete_storage_accounts(self.tx(), reverted)?, targets)
     }
 
-    fn witness(&self, mut input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
-        input.prepend(self.revert_state()?);
-        TrieWitness::overlay_witness(self.tx(), input, target)
-            .map_err(ProviderError::from)
-            .map(|hm| hm.into_values().collect())
+    fn witness(&self, _input: TrieInput, _target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 
@@ -415,7 +574,10 @@ impl<
             + BlockHashReader
             + StorageSettingsCache
             + ChangeSetReader
-            + StorageChangeSetReader,
+            + StorageChangeSetReader
+            + ChangesetRangeReader
+            + StaticFileProviderFactory
+            + HeaderProvider,
     > StateProvider for HistoricalStateProviderRef<'_, Provider>
 {
     /// Get storage.
@@ -485,45 +647,54 @@ pub struct HistoricalStateProvider<Provider> {
     block_number: BlockNumber,
     /// Lowest blocks at which different parts of the state are available.
     lowest_available_blocks: LowestAvailableBlocks,
+    revert_cache: OnceLock<HashedPostState>,
 }
 
 impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
     /// Create new `StateProvider` for historical block number
     pub fn new(provider: Provider, block_number: BlockNumber) -> Self {
-        Self { provider, block_number, lowest_available_blocks: Default::default() }
+        Self {
+            provider,
+            block_number,
+            lowest_available_blocks: Default::default(),
+            revert_cache: OnceLock::new(),
+        }
     }
 
     /// Set the lowest block number at which the account history is available.
-    pub const fn with_lowest_available_account_history_block_number(
+    pub fn with_lowest_available_account_history_block_number(
         mut self,
         block_number: BlockNumber,
     ) -> Self {
         self.lowest_available_blocks.account_history_block_number = Some(block_number);
+        self.revert_cache = OnceLock::new();
         self
     }
 
     /// Set the lowest block number at which the storage history is available.
-    pub const fn with_lowest_available_storage_history_block_number(
+    pub fn with_lowest_available_storage_history_block_number(
         mut self,
         block_number: BlockNumber,
     ) -> Self {
         self.lowest_available_blocks.storage_history_block_number = Some(block_number);
+        self.revert_cache = OnceLock::new();
         self
     }
 
     /// Returns a new provider that takes the `TX` as reference
     #[inline(always)]
     const fn as_ref(&self) -> HistoricalStateProviderRef<'_, Provider> {
-        HistoricalStateProviderRef::new_with_lowest_available_blocks(
-            &self.provider,
-            self.block_number,
-            self.lowest_available_blocks,
-        )
+        HistoricalStateProviderRef {
+            provider: &self.provider,
+            block_number: self.block_number,
+            lowest_available_blocks: self.lowest_available_blocks,
+            revert_cache: Some(&self.revert_cache),
+        }
     }
 }
 
 // Delegates all provider impls to [HistoricalStateProviderRef]
-delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader + StorageSettingsCache + ChangeSetReader + StorageChangeSetReader ]);
+delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader + StorageSettingsCache + ChangeSetReader + StorageChangeSetReader + ChangesetRangeReader + StaticFileProviderFactory + HeaderProvider ]);
 
 /// Lowest blocks at which different parts of the state are available.
 /// They may be [Some] if pruning is enabled.
@@ -559,20 +730,30 @@ mod tests {
         providers::state::historical::{HistoryInfo, LowestAvailableBlocks},
         test_utils::create_test_provider_factory,
         AccountReader, HistoricalStateProvider, HistoricalStateProviderRef, StateProvider,
+        StateRootProvider, StaticFileProviderFactory, StaticFileWriter, TrieWriterV2,
     };
-    use alloy_primitives::{address, b256, Address, B256, U256};
+    use alloy_consensus::Header;
+    use alloy_primitives::{address, b256, keccak256, Address, B256, U256};
     use reth_db_api::{
-        models::{storage_sharded_key::StorageShardedKey, AccountBeforeTx, ShardedKey},
+        models::{
+            storage_sharded_key::StorageShardedKey, AccountBeforeTx, GravityStorageSettings,
+            ShardedKey, StorageBeforeTx,
+        },
         tables,
         transaction::{DbTx, DbTxMut},
         BlockNumberList,
     };
     use reth_primitives_traits::{Account, StorageEntry};
+    use reth_stages_types::{StageCheckpoint, StageId};
+    use reth_static_file_types::StaticFileSegment;
     use reth_storage_api::{
-        BlockHashReader, BlockNumReader, ChangeSetReader, DBProvider, DatabaseProviderFactory,
+        BlockHashReader, BlockNumReader, ChangeSetReader, ChangesetRangeReader, DBProvider,
+        DatabaseProviderFactory, HeaderProvider, StateProofProvider, StateWriter,
         StorageChangeSetReader, StorageSettingsCache,
     };
     use reth_storage_errors::provider::ProviderError;
+    use reth_trie::{HashedPostState, HashedStorage, TrieInput, EMPTY_ROOT_HASH};
+    use reth_trie_db::nested_hash::NestedStateRoot;
 
     const ADDRESS: Address = address!("0x0000000000000000000000000000000000000001");
     const HIGHER_ADDRESS: Address = address!("0x0000000000000000000000000000000000000005");
@@ -587,9 +768,34 @@ mod tests {
             + BlockHashReader
             + StorageSettingsCache
             + ChangeSetReader
-            + StorageChangeSetReader,
+            + StorageChangeSetReader
+            + ChangesetRangeReader
+            + StaticFileProviderFactory
+            + HeaderProvider,
     >() {
         assert_state_provider::<HistoricalStateProvider<T>>();
+    }
+
+    fn set_complete_height<T: DbTxMut>(tx: &T, height: u64) {
+        for stage in [
+            StageId::Execution,
+            StageId::AccountHashing,
+            StageId::IndexAccountHistory,
+            StageId::MerkleExecute,
+        ] {
+            tx.put::<tables::StageCheckpoints>(
+                stage.to_string(),
+                StageCheckpoint { block_number: height, ..Default::default() },
+            )
+            .unwrap();
+        }
+    }
+
+    fn write_canonical_header<T: DbTxMut>(tx: &T, height: u64, state_root: B256) {
+        let header = Header { number: height, state_root, ..Default::default() };
+        let hash = header.hash_slow();
+        tx.put::<tables::Headers<Header>>(height, header).unwrap();
+        tx.put::<tables::CanonicalHeaders>(height, hash).unwrap();
     }
 
     #[test]
@@ -861,5 +1067,227 @@ mod tests {
             provider.storage_history_lookup(ADDRESS, STORAGE),
             Ok(HistoryInfo::MaybeInPlainState)
         ));
+    }
+
+    #[test]
+    fn history_v2_storage_only_revert_keeps_account_in_root_and_proof() {
+        for static_changesets in [false, true] {
+            let factory = create_test_provider_factory();
+            factory.set_storage_settings_cache(GravityStorageSettings {
+                changesets_in_static_files: static_changesets,
+            });
+            let hashed_address = keccak256(ADDRESS);
+            let hashed_slot = keccak256(STORAGE);
+            let account = Account { nonce: 7, balance: U256::from(42), ..Default::default() };
+            let changed_hash = keccak256(HIGHER_ADDRESS);
+            let first = Account { nonce: 1, ..Default::default() };
+
+            let mut latest = HashedPostState::default();
+            latest.accounts.insert(hashed_address, Some(account));
+            latest.accounts.insert(changed_hash, Some(Account { nonce: 3, ..Default::default() }));
+            latest
+                .storages
+                .entry(hashed_address)
+                .or_default()
+                .storage
+                .insert(hashed_slot, U256::from(20));
+            let provider = factory.provider_rw().unwrap();
+            let (latest_root, updates) =
+                NestedStateRoot::new(provider.tx_ref(), None).calculate(&latest).unwrap();
+            provider.write_trie_updatesv2(&updates).unwrap();
+            provider.write_hashed_state(&latest.into_sorted()).unwrap();
+            let mut expected = HashedPostState::default();
+            expected.accounts.insert(hashed_address, Some(account));
+            expected.accounts.insert(changed_hash, Some(first));
+            expected
+                .storages
+                .entry(hashed_address)
+                .or_default()
+                .storage
+                .insert(hashed_slot, U256::from(10));
+            let expected_root =
+                NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
+            let static_files = factory.static_file_provider();
+            if static_changesets {
+                let mut headers = static_files.latest_writer(StaticFileSegment::Headers).unwrap();
+                for number in 0..=3 {
+                    let header = Header {
+                        number,
+                        state_root: if number == 1 { expected_root } else { latest_root },
+                        ..Default::default()
+                    };
+                    let hash = header.hash_slow();
+                    headers.append_header(&header, U256::ZERO, &hash).unwrap();
+                    provider.tx_ref().put::<tables::CanonicalHeaders>(number, hash).unwrap();
+                }
+                headers.commit().unwrap();
+            } else {
+                provider
+                    .tx_ref()
+                    .put::<tables::CanonicalHeaders>(3, B256::with_last_byte(3))
+                    .unwrap();
+            }
+            set_complete_height(provider.tx_ref(), 3);
+            let mut changeset_writers = static_changesets.then(|| {
+                let mut accounts =
+                    static_files.latest_writer(StaticFileSegment::AccountChangeSets).unwrap();
+                let mut storages =
+                    static_files.latest_writer(StaticFileSegment::StorageChangeSets).unwrap();
+                for writer in [&mut accounts, &mut storages] {
+                    writer.increment_block(0).unwrap();
+                    writer.increment_block(1).unwrap();
+                }
+                (accounts, storages)
+            });
+            for (height, before_value) in [(2, 10), (3, 15)] {
+                let account_before = AccountBeforeTx {
+                    address: HIGHER_ADDRESS,
+                    info: Some(Account { nonce: height - 1, ..Default::default() }),
+                };
+                let storage_before = StorageBeforeTx {
+                    address: ADDRESS,
+                    key: STORAGE,
+                    value: U256::from(before_value),
+                };
+                if let Some((accounts, storages)) = &mut changeset_writers {
+                    accounts.append_account_changeset(vec![account_before], height).unwrap();
+                    storages.append_storage_changeset(vec![storage_before], height).unwrap();
+                } else {
+                    provider
+                        .tx_ref()
+                        .put::<tables::AccountChangeSets>(height, account_before)
+                        .unwrap();
+                    provider
+                        .tx_ref()
+                        .put::<tables::StorageChangeSets>(
+                            (height, ADDRESS).into(),
+                            StorageEntry { key: STORAGE, value: storage_before.value },
+                        )
+                        .unwrap();
+                }
+            }
+            if let Some((mut accounts, mut storages)) = changeset_writers {
+                accounts.commit().unwrap();
+                storages.commit().unwrap();
+            }
+            provider.commit().unwrap();
+
+            let provider = factory.provider().unwrap();
+            let historical = HistoricalStateProviderRef::new(&provider, 2);
+            let reverted = historical.revert_state_v2().unwrap();
+            assert_eq!(reverted.accounts[&hashed_address], Some(account));
+            assert_eq!(reverted.accounts[&changed_hash], Some(first));
+            assert_eq!(reverted.storages[&hashed_address].storage[&hashed_slot], U256::from(10));
+
+            assert_ne!(expected_root, latest_root);
+            assert_eq!(historical.state_root(HashedPostState::default()).unwrap(), expected_root);
+
+            drop(provider);
+            let provider = factory.provider_rw().unwrap();
+            write_canonical_header(provider.tx_ref(), 1, expected_root);
+            provider.commit().unwrap();
+            let provider = factory.provider().unwrap();
+            let historical = HistoricalStateProviderRef::new(&provider, 2);
+
+            let proof = historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
+            assert_eq!(proof.info, Some(account));
+            assert_eq!(proof.storage_proofs[0].value, U256::from(10));
+            proof.verify(expected_root).unwrap();
+
+            let latest = crate::LatestStateProviderRef::new(&provider);
+            let tip = HistoricalStateProviderRef::new(&provider, 4);
+            for wiped in [false, true] {
+                let mut storage_only = HashedPostState::default();
+                let mut storage = HashedStorage::new(wiped);
+                if !wiped {
+                    storage.storage.insert(hashed_slot, U256::from(40));
+                }
+                storage_only.storages.insert(hashed_address, storage);
+                let mut expected = storage_only.clone();
+                expected.accounts.insert(hashed_address, Some(account));
+                let expected_root =
+                    NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
+                for state in [&tip as &dyn StateRootProvider, &latest] {
+                    assert_eq!(state.state_root(storage_only.clone()).unwrap(), expected_root);
+                    let (root, updates) =
+                        state.state_root_with_updates_v2(storage_only.clone()).unwrap();
+                    assert_eq!(root, expected_root);
+                    assert_ne!(root, latest_root);
+                    assert!(!updates.account_nodes.is_empty());
+                    let storage = &updates.storage_tries[&hashed_address];
+                    assert_eq!(storage.is_deleted, wiped);
+                    assert!(wiped || !storage.storage_nodes.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn history_v2_static_headers_require_snapshot_hash_anchor() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+        let static_files = factory.static_file_provider();
+        let writer = factory.provider_rw().unwrap();
+        let mut hashes = Vec::new();
+        {
+            let mut headers = static_files.latest_writer(StaticFileSegment::Headers).unwrap();
+            for number in 0..=2 {
+                let header = Header {
+                    number,
+                    parent_hash: hashes.last().copied().unwrap_or_default(),
+                    state_root: EMPTY_ROOT_HASH,
+                    ..Default::default()
+                };
+                let hash = header.hash_slow();
+                headers.append_header(&header, U256::ZERO, &hash).unwrap();
+                writer.tx_ref().put::<tables::HeaderNumbers>(hash, number).unwrap();
+                hashes.push(hash);
+            }
+            headers.commit().unwrap();
+        }
+        set_complete_height(writer.tx_ref(), 1);
+        writer.commit().unwrap();
+
+        // Header migration leaves only static headers and the snapshot's reverse hash index.
+        let provider = factory.provider().unwrap();
+        assert!(provider.tx_ref().get::<tables::CanonicalHeaders>(1).unwrap().is_none());
+        let historical = HistoricalStateProviderRef::new(&provider, 2);
+        historical
+            .proof(TrieInput::default(), ADDRESS, &[STORAGE])
+            .unwrap()
+            .verify(EMPTY_ROOT_HASH)
+            .unwrap();
+        // A known static header beyond the complete snapshot height is still unavailable.
+        assert!(matches!(
+            historical.snapshot_canonical_hash(2),
+            Err(ProviderError::HeaderNotFound(_))
+        ));
+
+        for anchor_height in [Some(2), None] {
+            let writer = factory.provider_rw().unwrap();
+            if let Some(height) = anchor_height {
+                writer.tx_ref().put::<tables::HeaderNumbers>(hashes[1], height).unwrap();
+            } else {
+                writer.tx_ref().delete::<tables::HeaderNumbers>(hashes[1], None).unwrap();
+            }
+            writer.commit().unwrap();
+            let changed = factory.provider().unwrap();
+            assert!(matches!(
+                HistoricalStateProviderRef::new(&changed, 2).proof(
+                    TrieInput::default(),
+                    ADDRESS,
+                    &[STORAGE],
+                ),
+                Err(ProviderError::HeaderNotFound(_))
+            ));
+        }
+        // A retained snapshot still uses the valid anchor from before those commits.
+        historical
+            .proof(TrieInput::default(), ADDRESS, &[STORAGE])
+            .unwrap()
+            .verify(EMPTY_ROOT_HASH)
+            .unwrap();
     }
 }

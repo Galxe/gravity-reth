@@ -5,7 +5,9 @@
 use alloy_primitives::{Address, B256, U256};
 use reth_errors::ProviderResult;
 use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::{BytecodeReader, HashedPostStateProvider, StateProvider, StateProviderBox};
+use reth_storage_api::{
+    BytecodeReader, HashedPostStateProvider, StateProvider, StateProviderBox, StateRootProvider,
+};
 use reth_trie::{HashedStorage, MultiProofTargets};
 use revm::database::{BundleState, State};
 
@@ -21,7 +23,7 @@ pub type StateCacheDb = State<StateProviderDatabase<StateProviderTraitObjWrapper
 #[expect(missing_debug_implementations)]
 pub struct StateProviderTraitObjWrapper(pub StateProviderBox);
 
-impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper {
+impl StateRootProvider for StateProviderTraitObjWrapper {
     fn state_root(
         &self,
         hashed_state: reth_trie::HashedPostState,
@@ -41,6 +43,13 @@ impl reth_storage_api::StateRootProvider for StateProviderTraitObjWrapper {
         hashed_state: reth_trie::HashedPostState,
     ) -> reth_errors::ProviderResult<(B256, reth_trie::updates::TrieUpdates)> {
         self.0.state_root_with_updates(hashed_state)
+    }
+
+    fn state_root_with_updates_v2(
+        &self,
+        hashed_state: reth_trie::HashedPostState,
+    ) -> reth_errors::ProviderResult<(B256, reth_trie::updates::TrieUpdatesV2)> {
+        self.0.state_root_with_updates_v2(hashed_state)
     }
 
     fn state_root_from_nodes_with_updates(

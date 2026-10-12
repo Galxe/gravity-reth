@@ -2,8 +2,13 @@
 
 use crate::{DatabaseError, TableSet};
 use metrics::Label;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use reth_db_api::{
-    database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, tables, Tables,
+    database::{ConsistentWriteGuard, Database, DatabaseReadView},
+    database_metrics::DatabaseMetrics,
+    models::ClientVersion,
+    table::Table,
+    tables, Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
 use reth_tracing::tracing::info;
@@ -11,10 +16,14 @@ use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 pub(crate) mod cursor;
+mod read_view;
 pub(crate) mod tx;
 
 /// Database environment kind.
@@ -256,6 +265,35 @@ pub struct DatabaseEnv {
     pub(crate) storage_db: Arc<DB>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
+    /// Coordinates snapshot creation with a whole logical state/trie write range.
+    snapshot_barrier: RwLock<()>,
+    /// A failed partial write requires recovery before a read view can be trusted again.
+    incomplete_write: AtomicBool,
+}
+
+struct RocksWriteGuard<'a> {
+    _guard: RwLockWriteGuard<'a, ()>,
+    env: &'a DatabaseEnv,
+    complete: bool,
+}
+
+impl ConsistentWriteGuard for RocksWriteGuard<'_> {
+    fn complete(&mut self) {
+        self.complete = true;
+    }
+
+    fn recovered(&mut self) {
+        self.complete = true;
+        self.env.incomplete_write.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for RocksWriteGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.env.incomplete_write.store(true, Ordering::Release);
+        }
+    }
 }
 
 impl DatabaseEnv {
@@ -282,7 +320,14 @@ impl DatabaseEnv {
         let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
         let storage_db = dbs.get(&storage_path).cloned().expect("storage DB handle missing");
 
-        Ok(Self { state_db, account_db, storage_db, kind })
+        Ok(Self {
+            state_db,
+            account_db,
+            storage_db,
+            kind,
+            snapshot_barrier: RwLock::new(()),
+            incomplete_write: AtomicBool::new(false),
+        })
     }
 
     /// Resolve shard paths based on configuration.
@@ -686,16 +731,65 @@ impl DatabaseMetrics for DatabaseEnv {
 }
 
 // Implement Database trait for RocksDB
-impl reth_db_api::database::Database for DatabaseEnv {
+impl Database for DatabaseEnv {
     type TX = tx::Tx<tx::RO>;
     type TXMut = tx::Tx<tx::RW>;
 
     fn tx(&self) -> Result<Self::TX, crate::DatabaseError> {
+        let _guard = self.snapshot_barrier.read();
+        if self.incomplete_write.load(Ordering::Acquire) {
+            return Err(crate::DatabaseError::Other(
+                "state/trie write was interrupted; storage recovery is required".into(),
+            ));
+        }
+        Ok(tx::Tx::new_snapshot(
+            self.state_db.clone(),
+            self.account_db.clone(),
+            self.storage_db.clone(),
+        ))
+    }
+
+    fn tx_live(&self) -> Result<Self::TX, crate::DatabaseError> {
+        if self.incomplete_write.load(Ordering::Acquire) {
+            return Err(crate::DatabaseError::Other(
+                "state/trie write was interrupted; storage recovery is required".into(),
+            ));
+        }
         Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
         Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
+    }
+
+    fn consistent_write(&self) -> Box<dyn ConsistentWriteGuard + '_> {
+        Box::new(RocksWriteGuard {
+            _guard: self.snapshot_barrier.write(),
+            env: self,
+            complete: false,
+        })
+    }
+
+    fn read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+        Ok(Some(Arc::new(read_view::ReadView::new(
+            self.state_db.clone(),
+            self.account_db.clone(),
+            self.storage_db.clone(),
+        ))))
+    }
+
+    fn tx_with_read_view(
+        &self,
+        view: Option<Arc<dyn DatabaseReadView>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        let Some(view) = view else { return self.tx() };
+        let Some(view) = view.as_any().downcast_ref::<read_view::ReadView>() else {
+            return Err(DatabaseError::Other("read view belongs to another database".into()));
+        };
+        if !view.belongs_to(&self.state_db, &self.account_db, &self.storage_db) {
+            return Err(DatabaseError::Other("read view belongs to another database".into()));
+        }
+        Ok(tx::Tx::new_read_view(view))
     }
 }
 
@@ -722,6 +816,42 @@ fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth_db_api::{
+        cursor::DbCursorRO,
+        transaction::{DbTx, DbTxMut},
+    };
+
+    #[test]
+    fn snapshot_and_live_reads_keep_distinct_visibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DatabaseEnv::open(
+            dir.path(),
+            DatabaseEnvKind::RW,
+            DatabaseArguments::new(ClientVersion::default()),
+        )
+        .unwrap();
+        let write = |value| {
+            let tx = env.tx_mut().unwrap();
+            tx.put::<tables::Metadata>("snapshot-test".into(), vec![value]).unwrap();
+            tx.commit().unwrap();
+        };
+        write(1);
+        let snapshot = env.tx().unwrap();
+        let mut cursor = snapshot.cursor_read::<tables::Metadata>().unwrap();
+        let live = env.tx_live().unwrap();
+        write(2);
+        assert!(snapshot.is_snapshot());
+        assert!(!live.is_snapshot());
+        assert_eq!(
+            snapshot.get::<tables::Metadata>("snapshot-test".into()).unwrap(),
+            Some(vec![1])
+        );
+        assert_eq!(live.get::<tables::Metadata>("snapshot-test".into()).unwrap(), Some(vec![2]));
+        drop(snapshot);
+        drop(live);
+        drop(env);
+        assert_eq!(cursor.get("snapshot-test".into()).unwrap().unwrap().1, vec![1]);
+    }
 
     /// Returns the newest `OPTIONS-*` file RocksDB wrote for the instance at `db_dir`.
     /// It records the options each column family was actually opened with.

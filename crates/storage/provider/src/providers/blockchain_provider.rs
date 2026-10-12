@@ -73,6 +73,12 @@ impl<N: NodeTypesWithDB> Clone for BlockchainProvider<N> {
 }
 
 impl<N: ProviderNodeTypes> BlockchainProvider<N> {
+    /// Returns the shared provider factory for preparing storage before test services start.
+    #[cfg(feature = "test-utils")]
+    pub const fn provider_factory(&self) -> &ProviderFactory<N> {
+        &self.database
+    }
+
     /// Create a new [`BlockchainProvider`] using only the storage, fetching the latest
     /// header from the database to initialize the provider.
     pub fn new(storage: ProviderFactory<N>) -> ProviderResult<Self> {
@@ -165,8 +171,19 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for BlockchainProvider<N> {
     type Provider = <ProviderFactory<N> as DatabaseProviderFactory>::Provider;
     type ProviderRW = <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW;
 
+    fn rpc_provider(&self) -> Self {
+        Self {
+            database: self.database.rpc_provider(),
+            canonical_in_memory_state: self.canonical_in_memory_state.clone(),
+        }
+    }
+
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
         self.database.database_provider_ro()
+    }
+
+    fn database_provider_live_ro(&self) -> ProviderResult<Self::Provider> {
+        self.database.database_provider_live_ro()
     }
 
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
@@ -197,6 +214,11 @@ impl<N: ProviderNodeTypes> HeaderProvider for BlockchainProvider<N> {
 
     fn header_by_number(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
         self.consistent_provider()?.header_by_number(num)
+    }
+
+    fn header_by_number_live(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
+        ConsistentProvider::new_live(self.database.clone(), self.canonical_in_memory_state())?
+            .header_by_number(num)
     }
 
     fn header_td(&self, hash: &BlockHash) -> ProviderResult<Option<U256>> {
@@ -279,6 +301,9 @@ impl<N: ProviderNodeTypes> BlockNumReader for BlockchainProvider<N> {
 
 impl<N: ProviderNodeTypes> BlockIdReader for BlockchainProvider<N> {
     fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.pending_block_num_hash();
+        }
         Ok(self.canonical_in_memory_state.pending_block_num_hash())
     }
 
@@ -307,12 +332,18 @@ impl<N: ProviderNodeTypes> BlockReader for BlockchainProvider<N> {
     }
 
     fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.pending_block();
+        }
         Ok(self.canonical_in_memory_state.pending_recovered_block())
     }
 
     fn pending_block_and_receipts(
         &self,
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.pending_block_and_receipts();
+        }
         Ok(self.canonical_in_memory_state.pending_block_and_receipts())
     }
 
@@ -514,8 +545,38 @@ impl<N: NodeTypesWithDB> ChainSpecProvider for BlockchainProvider<N> {
 }
 
 impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
+    fn state_by_block_id(&self, block_id: BlockId) -> ProviderResult<StateProviderBox> {
+        match block_id {
+            BlockId::Number(number_or_tag) => self.state_by_block_number_or_tag(number_or_tag),
+            BlockId::Hash(hash) => {
+                let block_hash = hash.block_hash;
+                let provider = self.consistent_provider()?;
+                if self.database.uses_rpc_reads() &&
+                    hash.require_canonical != Some(true) &&
+                    provider
+                        .pending_block_num_hash()?
+                        .is_some_and(|pending| pending.hash == block_hash)
+                {
+                    return provider
+                        .into_rpc_pending_state_provider(Some(block_hash))?
+                        .ok_or(ProviderError::BlockHashNotFound(block_hash));
+                }
+                let number = provider
+                    .block_number(block_hash)?
+                    .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
+                if provider.block_hash(number)? != Some(block_hash) {
+                    return Err(ProviderError::BlockHashNotFound(block_hash))
+                }
+                provider.into_state_provider_at_block_hash(block_hash)
+            }
+        }
+    }
+
     /// Storage provider for latest block
     fn latest(&self) -> ProviderResult<StateProviderBox> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.into_latest_state_provider();
+        }
         trace!(target: "providers::blockchain", "Getting latest block state provider");
         // use latest state provider if the head state exists
         if let Some(state) = self.canonical_in_memory_state.head_state() {
@@ -580,6 +641,9 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
 
     fn state_by_block_hash(&self, hash: BlockHash) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?hash, "Getting state by block hash");
+        if self.database.uses_rpc_reads() {
+            return self.state_by_block_id(BlockId::hash(hash));
+        }
         if let Ok(state) = self.history_by_block_hash(hash) {
             // This could be tracked by a historical block
             Ok(state)
@@ -599,6 +663,12 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     fn pending(&self) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting provider for pending state");
 
+        if self.database.uses_rpc_reads() {
+            return self
+                .consistent_provider()?
+                .into_rpc_pending_state_provider(None)
+                .and_then(|state| state.ok_or(ProviderError::StateForHashNotFound(B256::ZERO)));
+        }
         if let Some(pending) = self.canonical_in_memory_state.pending_state() {
             // we have a pending block
             return Ok(Box::new(self.block_state_provider(&pending)?));
@@ -609,6 +679,9 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     }
 
     fn pending_state_by_hash(&self, block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+        if self.database.uses_rpc_reads() {
+            return self.consistent_provider()?.into_rpc_pending_state_provider(Some(block_hash));
+        }
         if let Some(pending) = self.canonical_in_memory_state.pending_state() &&
             pending.hash() == block_hash
         {
@@ -618,6 +691,13 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     }
 
     fn maybe_pending(&self) -> ProviderResult<Option<StateProviderBox>> {
+        if self.database.uses_rpc_reads() {
+            let provider = self.consistent_provider()?;
+            if provider.has_rpc_pending_state() {
+                return provider.into_rpc_pending_state_provider(None);
+            }
+            return Ok(None);
+        }
         if let Some(pending) = self.canonical_in_memory_state.pending_state() {
             return Ok(Some(Box::new(self.block_state_provider(&pending)?)))
         }
@@ -768,7 +848,7 @@ mod tests {
         BlockWriter, CanonChainTracker, ProviderFactory, StaticFileProviderFactory,
         StaticFileWriter,
     };
-    use alloy_eips::{BlockHashOrNumber, BlockNumHash, BlockNumberOrTag};
+    use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumHash, BlockNumberOrTag};
     use alloy_primitives::{BlockNumber, TxNumber, B256};
     use itertools::Itertools;
     use rand::Rng;
@@ -784,7 +864,7 @@ mod tests {
         cursor::DbCursorRO,
         models::{AccountBeforeTx, StoredBlockBodyIndices},
         tables,
-        transaction::DbTx,
+        transaction::{DbTx, DbTxMut},
     };
     use reth_errors::ProviderError;
     use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
@@ -1338,6 +1418,15 @@ mod tests {
         let blocks = [database_blocks, in_memory_blocks].concat();
 
         assert_eq!(
+            provider.header_by_number_live(database_block.number)?,
+            Some(database_block.header().clone())
+        );
+        assert_eq!(
+            provider.header_by_number_live(in_memory_block.number)?,
+            Some(in_memory_block.header().clone())
+        );
+
+        assert_eq!(
             provider.header_td_by_number(database_block.number)?,
             Some(database_block.difficulty)
         );
@@ -1779,6 +1868,35 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn state_by_block_hash_rejects_noncanonical_header_number() -> eyre::Result<()> {
+        let mut rng = generators::rng();
+        let (provider, database_blocks, in_memory_blocks, _) =
+            provider_with_random_blocks(&mut rng, 2, 1, BlockRangeParams::default())?;
+        let db_block = &database_blocks[1];
+        let in_memory_block = &in_memory_blocks[0];
+
+        assert!(provider.state_by_block_id(BlockId::hash_canonical(db_block.hash())).is_ok());
+        assert!(provider
+            .state_by_block_id(BlockId::hash_canonical(in_memory_block.hash()))
+            .is_ok());
+
+        let noncanonical_hash = B256::random();
+        let db = provider.database.provider_rw()?;
+        db.tx_ref().put::<tables::HeaderNumbers>(noncanonical_hash, db_block.number)?;
+        db.commit()?;
+
+        for block_id in
+            [BlockId::hash(noncanonical_hash), BlockId::hash_canonical(noncanonical_hash)]
+        {
+            assert!(matches!(
+                provider.state_by_block_id(block_id),
+                Err(ProviderError::BlockHashNotFound(hash)) if hash == noncanonical_hash
+            ));
+        }
         Ok(())
     }
 
@@ -2576,7 +2694,10 @@ mod tests {
             |hash: B256,
              canonical_in_memory_state: CanonicalInMemoryState,
              factory: ProviderFactory<MockNodeTypesWithDB>| {
-                assert!(factory.transaction_by_hash(hash)?.is_some(), "should be in database");
+                assert!(
+                    factory.database_provider_live_ro()?.transaction_by_hash(hash)?.is_some(),
+                    "should be in database"
+                );
                 Ok::<_, ProviderError>(canonical_in_memory_state.transaction_by_hash(hash))
             };
 

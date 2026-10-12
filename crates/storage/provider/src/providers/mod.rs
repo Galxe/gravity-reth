@@ -28,6 +28,9 @@ pub use blockchain_provider::BlockchainProvider;
 mod consistent;
 pub use consistent::ConsistentProvider;
 
+#[cfg(test)]
+mod rpc_read_view_tests;
+
 /// Helper trait to bound [`NodeTypes`] so that combined with database they satisfy
 /// [`ProviderNodeTypes`].
 pub trait NodeTypesForProvider
@@ -56,3 +59,6 @@ where
 {
 }
 impl<T> ProviderNodeTypes for T where T: NodeTypesForProvider + NodeTypesWithDB {}
+
+mod rpc_read_view;
+pub use rpc_read_view::{MaintenanceGuard, RpcReadViewBounds};

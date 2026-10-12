@@ -394,7 +394,7 @@ async fn test_tree_persist_blocks() {
     let test_harness = TestHarness::new(chain_spec).with_blocks(blocks.clone());
     std::thread::Builder::new()
         .name("Engine Task".to_string())
-        .spawn(|| test_harness.tree.run())
+        .spawn(|| test_harness.tree.run_inner())
         .unwrap();
 
     // send a message to the tree to enter the main loop.

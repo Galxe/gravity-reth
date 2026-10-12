@@ -49,6 +49,7 @@ libc.workspace = true
 # reth libs with arbitrary
 reth-primitives-traits = { workspace = true, features = ["reth-codec"] }
 reth-prune-types.workspace = true
+reth-trie-common.workspace = true
 
 alloy-primitives = { workspace = true, features = ["getrandom"] }
 alloy-consensus.workspace = true
@@ -92,6 +93,7 @@ test-utils = [
     "reth-nippy-jar/test-utils",
     "reth-primitives-traits/test-utils",
     "reth-prune-types/test-utils",
+    "reth-trie-common/test-utils",
 ]
 arbitrary = [
     "reth-db-api/arbitrary",
@@ -99,6 +101,7 @@ arbitrary = [
     "alloy-consensus/arbitrary",
     "reth-primitives-traits/arbitrary",
     "reth-prune-types/arbitrary",
+    "reth-trie-common/arbitrary",
 ]
 failpoints = ["fail/failpoints"]
 disable-lock = []

@@ -2,11 +2,9 @@ use alloc::vec::Vec;
 use alloy_primitives::{Address, Bytes, B256};
 #[cfg(feature = "db-api")]
 use reth_db_api::DatabaseError;
-use reth_storage_errors::provider::ProviderResult;
-#[cfg(feature = "db-api")]
-use reth_trie_common::updates::TrieUpdatesV2;
+use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_trie_common::{
-    updates::{StorageTrieUpdates, TrieUpdates},
+    updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesV2},
     AccountProof, HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
     StorageProof, TrieInput,
 };
@@ -34,6 +32,14 @@ pub trait StateRootProvider: Send + Sync {
         &self,
         hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)>;
+
+    /// Returns the state root and V2 trie updates.
+    fn state_root_with_updates_v2(
+        &self,
+        _hashed_state: HashedPostState,
+    ) -> ProviderResult<(B256, TrieUpdatesV2)> {
+        Err(ProviderError::UnsupportedProvider)
+    }
 
     /// Returns state root and trie updates.
     /// See [`StateRootProvider::state_root_from_nodes`] for more info.

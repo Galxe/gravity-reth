@@ -1,18 +1,19 @@
-//! Setup utilities for importing RLP chain data before starting nodes.
+//! Setup utilities for importing RLP chain data before starting node services.
 
 use crate::{node::NodeTestContext, NodeHelperType, Wallet};
 use alloy_rpc_types_engine::PayloadAttributes;
 use reth_chainspec::ChainSpec;
 use reth_cli_commands::import_core::{import_blocks_from_file, ImportConfig};
 use reth_config::Config;
-use reth_db::DatabaseEnv;
-use reth_node_api::{NodeTypesWithDBAdapter, TreeConfig};
-use reth_node_builder::{EngineNodeLauncher, Node, NodeBuilder, NodeConfig, NodeHandle};
+use reth_node_api::TreeConfig;
+use reth_node_builder::{
+    common::WithConfigs, BuilderContext, EngineNodeLauncher, Node, NodeBuilder,
+    NodeComponentsBuilder, NodeConfig, NodeHandle,
+};
 use reth_node_core::args::{DiscoveryArgs, NetworkArgs, RpcServerArgs};
 use reth_node_ethereum::EthereumNode;
 use reth_provider::{
-    providers::BlockchainProvider, DatabaseProviderFactory, ProviderFactory, StageCheckpointReader,
-    StaticFileProviderFactory,
+    providers::BlockchainProvider, BlockNumReader, HeaderProvider, StageCheckpointReader,
 };
 use reth_rpc_server_types::RpcModuleSelection;
 use reth_stages_types::StageId;
@@ -44,8 +45,8 @@ impl std::fmt::Debug for ChainImportResult {
 ///
 /// This function:
 /// 1. Creates a temporary datadir for each node
-/// 2. Imports the specified RLP chain data into the datadir
-/// 3. Starts the nodes with the pre-populated database
+/// 2. Initializes genesis and imports the specified RLP chain data
+/// 3. Starts the node components with the imported chain
 /// 4. Returns the running nodes ready for testing
 ///
 /// Note: This function is currently specific to `EthereumNode` because the import process
@@ -97,123 +98,67 @@ pub async fn setup_engine_with_chain_import(
         let span = span!(Level::INFO, "node", idx);
         let _enter = span.enter();
 
-        // First, import the chain data into this datadir
-        info!(target: "test", "Importing chain data from {:?} for node {} into {:?}", rlp_path, idx, datadir);
-
-        // Create database path and static files path
-        let db_path = datadir.join("db");
-        let static_files_path = datadir.join("static_files");
-
-        // Initialize the database using init_db (same as CLI import command)
-        // Use the same database arguments as the node will use
-        let db_args = reth_node_core::args::DatabaseArgs::default().database_args();
-        let db_env = reth_db::init_db(&db_path, db_args)?;
-        let db = Arc::new(db_env);
-
-        // Create a provider factory with the initialized database (use regular DB, not
-        // TempDatabase) We need to specify the node types properly for the adapter
-        let provider_factory = ProviderFactory::<
-            NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-        >::new(
-            db.clone(),
-            chain_spec.clone(),
-            reth_provider::providers::StaticFileProvider::read_write(static_files_path.clone())?,
-        );
-
-        // Initialize genesis if needed
-        reth_db_common::init::init_genesis(&provider_factory)?;
-
-        // Import the chain data
-        // Use no_state to skip state validation for test chains
-        let import_config = ImportConfig::default();
-        let config = Config::default();
-
-        // Create EVM and consensus for Ethereum
-        let evm_config = reth_node_ethereum::EthEvmConfig::new(chain_spec.clone());
-        // Use NoopConsensus to skip gas limit validation for test imports
-        let consensus = reth_consensus::noop::NoopConsensus::arc();
-
-        let result = import_blocks_from_file(
-            rlp_path,
-            import_config,
-            provider_factory.clone(),
-            &config,
-            evm_config,
-            consensus,
-            runtime.clone(),
-        )
-        .await?;
-
-        info!(
-            target: "test",
-            "Imported {} blocks and {} transactions for node {}",
-            result.total_imported_blocks,
-            result.total_imported_txns,
-            idx
-        );
-
-        debug!(target: "e2e::import",
-            "Import result for node {}: decoded {} blocks, imported {} blocks, complete: {}",
-            idx,
-            result.total_decoded_blocks,
-            result.total_imported_blocks,
-            result.is_complete()
-        );
-
-        if result.total_decoded_blocks != result.total_imported_blocks {
-            debug!(target: "e2e::import",
-                "Import block count mismatch: decoded {} != imported {}",
-                result.total_decoded_blocks, result.total_imported_blocks
-            );
-            return Err(eyre::eyre!("Chain import block count mismatch for node {}", idx));
-        }
-
-        if result.total_decoded_txns != result.total_imported_txns {
-            debug!(target: "e2e::import",
-                "Import transaction count mismatch: decoded {} != imported {}",
-                result.total_decoded_txns, result.total_imported_txns
-            );
-            return Err(eyre::eyre!("Chain import transaction count mismatch for node {}", idx));
-        }
-
-        // Verify the database was properly initialized by checking stage checkpoints
-        {
-            let provider = provider_factory.database_provider_ro()?;
-            let headers_checkpoint = provider.get_stage_checkpoint(StageId::Headers)?;
-            if headers_checkpoint.is_none() {
-                return Err(eyre::eyre!("Headers stage checkpoint is missing after import!"));
-            }
-            debug!(target: "e2e::import", "Headers stage checkpoint after import: {headers_checkpoint:?}");
-            drop(provider);
-        }
-
-        // IMPORTANT: We need to properly flush and close the static files provider
-        // The static files provider may have open file handles that need to be closed
-        // before we can reopen the database in the node launcher
-        {
-            let static_file_provider = provider_factory.static_file_provider();
-            // This will ensure all static file writers are properly closed
-            drop(static_file_provider);
-        }
-
-        // Close all database handles to release locks before launching the node
-        drop(provider_factory);
-        drop(db);
-
-        // Give the OS a moment to release file locks
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Now launch the node with the pre-populated datadir
-        debug!(target: "e2e::import", "Launching node with datadir: {:?}", datadir);
-
-        // Use the testing_node_with_datadir method which properly handles opening existing
-        // databases
         let node = EthereumNode::default();
+        let components = node.components_builder();
+        let import_path = rlp_path.to_path_buf();
+        let import_runtime = runtime.clone();
+        let import_chain_spec = chain_spec.clone();
 
-        let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config.clone())
-            .testing_node_with_datadir(runtime.clone(), datadir.clone())
+        let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
+            .testing_node_with_datadir(runtime.clone(), datadir)
             .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
-            .with_components(node.components_builder())
+            .with_components(move |ctx: &BuilderContext<crate::TmpNodeAdapter<EthereumNode>>| {
+                let provider = ctx.provider().clone();
+                let executor = ctx.task_executor().clone();
+                let configs = WithConfigs {
+                    config: ctx.config().clone(),
+                    toml_config: ctx.reth_config().clone(),
+                };
+                async move {
+                    // Import before starting the engine and RPC services, using the same factory
+                    // that published fresh genesis. Reopening an imported datadir deliberately
+                    // keeps RPC closed until a new complete persisted block is available.
+                    let factory = provider.provider_factory();
+                    let result = import_blocks_from_file(
+                        &import_path,
+                        ImportConfig::default(),
+                        factory.clone(),
+                        &Config::default(),
+                        reth_node_ethereum::EthEvmConfig::new(import_chain_spec),
+                        reth_consensus::noop::NoopConsensus::arc(),
+                        import_runtime,
+                    )
+                    .await?;
+
+                    info!(target: "test", blocks = result.total_imported_blocks,
+                        transactions = result.total_imported_txns, idx, "Imported chain data");
+                    if result.total_decoded_blocks != result.total_imported_blocks {
+                        return Err(eyre::eyre!(
+                            "Chain import block count mismatch for node {}",
+                            idx
+                        ));
+                    }
+                    if result.total_decoded_txns != result.total_imported_txns {
+                        return Err(eyre::eyre!(
+                            "Chain import transaction count mismatch for node {}",
+                            idx
+                        ));
+                    }
+                    if factory.get_stage_checkpoint(StageId::Headers)?.is_none() {
+                        return Err(eyre::eyre!(
+                            "Headers stage checkpoint is missing after import!"
+                        ));
+                    }
+
+                    let tip = factory
+                        .sealed_header(factory.last_block_number()?)?
+                        .ok_or_else(|| eyre::eyre!("Imported chain tip is missing"))?;
+                    provider.canonical_in_memory_state().set_canonical_head(tip);
+                    let head = configs.config.lookup_head(factory)?;
+                    let ctx = BuilderContext::new(head, provider, executor, configs);
+                    components.build_components(&ctx).await
+                }
+            })
             .with_add_ons(node.add_ons())
             .launch_with_fn(|builder| {
                 let launcher = EngineNodeLauncher::new(
@@ -267,11 +212,13 @@ mod tests {
     use crate::test_rlp_utils::{create_fcu_json, generate_test_blocks, write_blocks_to_rlp};
     use alloy_rpc_types_engine::PayloadAttributes;
     use reth_chainspec::{ChainSpecBuilder, MAINNET};
-    use reth_db::DatabaseArguments;
+    use reth_db::{DatabaseArguments, DatabaseEnv};
     use reth_ethereum_primitives::Block;
+    use reth_node_api::NodeTypesWithDBAdapter;
     use reth_primitives_traits::SealedBlock;
     use reth_provider::{
         test_utils::MockNodeTypesWithDB, BlockHashReader, BlockNumReader, BlockReaderIdExt,
+        DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory,
     };
     use std::path::PathBuf;
 

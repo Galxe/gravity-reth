@@ -390,6 +390,15 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
         self.inner.in_memory_state.head_state()
     }
 
+    /// Captures the head while holding both maps in the same order as chain updates.
+    /// RPC readers must not interpret an eviction between the two lookups as an empty chain.
+    pub fn head_state_for_rpc(&self) -> Option<Arc<BlockState<N>>> {
+        let numbers = self.inner.in_memory_state.numbers.read();
+        let blocks = self.inner.in_memory_state.blocks.read();
+        let hash = numbers.last_key_value()?.1;
+        blocks.get(hash).cloned()
+    }
+
     /// Returns the in memory pending state.
     pub fn pending_state(&self) -> Option<BlockState<N>> {
         self.inner.in_memory_state.pending_state()

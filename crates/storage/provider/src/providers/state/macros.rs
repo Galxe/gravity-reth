@@ -44,6 +44,7 @@ macro_rules! delegate_provider_impls {
                 fn bytecode_by_hash(&self, code_hash: &alloy_primitives::B256) -> reth_storage_errors::provider::ProviderResult<Option<reth_primitives_traits::Bytecode>>;
             }
             StateRootProvider $(where [$($generics)*])? {
+                fn state_root_with_updates_v2(&self, state: reth_trie::HashedPostState) -> reth_storage_errors::provider::ProviderResult<(alloy_primitives::B256, reth_trie::updates::TrieUpdatesV2)>;
                 fn state_root(&self, state: reth_trie::HashedPostState) -> reth_storage_errors::provider::ProviderResult<alloy_primitives::B256>;
                 fn state_root_from_nodes(&self, input: reth_trie::TrieInput) -> reth_storage_errors::provider::ProviderResult<alloy_primitives::B256>;
                 fn state_root_with_updates(&self, state: reth_trie::HashedPostState) -> reth_storage_errors::provider::ProviderResult<(alloy_primitives::B256, reth_trie::updates::TrieUpdates)>;

@@ -132,8 +132,8 @@ impl<C: ChainSpecParser> Command<C> {
                 reset_stage_checkpoint(tx, StageId::StorageHashing)?;
             }
             StageEnum::Merkle => {
-                tx.clear::<tables::AccountsTrie>()?;
-                tx.clear::<tables::StoragesTrie>()?;
+                tx.clear::<tables::AccountsTrieV2>()?;
+                tx.clear::<tables::StoragesTrieV2>()?;
 
                 reset_stage_checkpoint(tx, StageId::MerkleExecute)?;
                 reset_stage_checkpoint(tx, StageId::MerkleUnwind)?;

@@ -125,7 +125,9 @@ pub trait LoadPendingBlock:
 
             let state = BlockState::from(pending_block);
 
-            Ok(Some(Box::new(state.state_provider(latest_historical)) as StateProviderBox))
+            Ok(Some(Box::new(
+                state.state_provider(latest_historical).without_proof_header_root_check(),
+            ) as StateProviderBox))
         }
     }
 

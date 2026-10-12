@@ -365,8 +365,8 @@ pub struct BlockBuilderOutcome<N: NodePrimitives> {
     pub execution_result: BlockExecutionResult<N::Receipt>,
     /// Hashed state after execution.
     pub hashed_state: HashedPostState,
-    /// Trie updates collected during state root calculation.
-    pub trie_updates: TrieUpdates,
+    /// Legacy trie updates, when they were supplied by a trie task.
+    pub trie_updates: Option<TrieUpdates>,
     /// The built block.
     pub block: RecoveredBlock<N::Block>,
     /// Block access list built during execution (EIP-7928, Amsterdam).
@@ -424,9 +424,9 @@ pub trait BlockBuilder {
 
     /// Completes the block building process and returns the [`BlockBuilderOutcome`].
     ///
-    /// When `state_root_precomputed` is `None`, the state root is computed internally via
-    /// `state_root_with_updates()`. When `Some`, the provided root and trie updates are used
-    /// directly, skipping the expensive computation (e.g. when using the sparse trie pipeline).
+    /// When `state_root_precomputed` is `None`, the state root is computed internally without
+    /// trie updates. When `Some`, the provided root and trie updates are used directly, skipping
+    /// the expensive computation (e.g. when using the sparse trie pipeline).
     fn finish(
         self,
         state_provider: impl StateProvider,
@@ -571,10 +571,10 @@ where
 
         let hashed_state = state.hashed_post_state(&db.bundle_state);
         let (state_root, trie_updates) = match state_root_precomputed {
-            Some(precomputed) => precomputed,
-            None => state
-                .state_root_with_updates(hashed_state.clone())
-                .map_err(BlockExecutionError::other)?,
+            Some((root, updates)) => (root, Some(updates)),
+            None => {
+                (state.state_root(hashed_state.clone()).map_err(BlockExecutionError::other)?, None)
+            }
         };
 
         let (transactions, senders) =

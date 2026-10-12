@@ -38,11 +38,20 @@ pub trait EthState: LoadState + SpawnBlocking {
         Self: EthApiSpec,
     {
         let chain_info = self.chain_info().map_err(Self::Error::from_eth_err)?;
-        let block_number = self
-            .provider()
-            .block_number_for_id(block_id)
-            .map_err(Self::Error::from_eth_err)?
-            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+        let block_number =
+            self.provider().block_number_for_id(block_id).map_err(Self::Error::from_eth_err)?;
+        let block_number = match (block_number, block_id) {
+            (Some(number), _) => Some(number),
+            (None, block_id) if block_id.is_pending() => Some(chain_info.best_number),
+            (None, BlockId::Hash(hash)) if hash.require_canonical != Some(true) => self
+                .provider()
+                .pending_block_num_hash()
+                .map_err(Self::Error::from_eth_err)?
+                .filter(|pending| pending.hash == hash.block_hash)
+                .map(|pending| pending.number),
+            _ => None,
+        }
+        .ok_or(EthApiError::HeaderNotFound(block_id))?;
         if chain_info.best_number.saturating_sub(block_number) > self.max_proof_window() {
             return Err(EthApiError::ExceedsMaxProofWindow.into())
         }
@@ -266,8 +275,8 @@ pub trait LoadState:
 
     /// Returns the state at the given [`BlockId`] enum.
     ///
-    /// Note: if not [`BlockNumberOrTag::Pending`](alloy_eips::BlockNumberOrTag) then this
-    /// will only return canonical state. See also <https://github.com/paradigmxyz/reth/issues/4515>
+    /// Hashes with `requireCanonical` unset or false may identify a known pending block.
+    /// Other identifiers only return canonical state, except for the pending tag.
     fn state_at_block_id(
         &self,
         at: BlockId,
@@ -282,6 +291,14 @@ pub trait LoadState:
                 return Ok(state)
             }
 
+            if let BlockId::Hash(hash) = at &&
+                hash.require_canonical != Some(true)
+            {
+                return self
+                    .provider()
+                    .state_by_block_hash(hash.block_hash)
+                    .map_err(Self::Error::from_eth_err)
+            }
             self.provider().state_by_block_id(at).map_err(Self::Error::from_eth_err)
         }
     }
@@ -323,10 +340,8 @@ pub trait LoadState:
 
     /// Returns the revm evm env for the requested [`BlockId`]
     ///
-    /// If the [`BlockId`] this will return the [`BlockId`] of the block the env was configured
-    /// for.
-    /// If the [`BlockId`] is pending, this will return the "Pending" tag, otherwise this returns
-    /// the hash of the exact block.
+    /// Returns the hash identifying the state the environment was configured for. A derived
+    /// pending environment uses its latest canonical parent; actual pending uses its own hash.
     fn evm_env_at(
         &self,
         at: BlockId,
@@ -348,16 +363,19 @@ pub trait LoadState:
                     .ok_or_else(|| EthApiError::HeaderNotFound(at))?;
                 let evm_env = self.evm_env_for_header(&header)?;
 
-                Ok((evm_env, header.hash().into()))
+                let state_block = match at {
+                    BlockId::Hash(_) => at,
+                    BlockId::Number(_) => BlockId::hash_canonical(header.hash()),
+                };
+                Ok((evm_env, state_block))
             }
         }
     }
 
     /// Returns the recovered block, revm evm env, and state block id for the requested [`BlockId`].
     ///
-    /// For pending blocks, this preserves the state id returned by [`Self::evm_env_at`], which can
-    /// be the pending tag for an actual pending block or the latest block hash when the pending env
-    /// is derived from latest.
+    /// For pending blocks, both the environment and block come from one captured origin. The
+    /// state id identifies that pending block or the parent used to derive the environment.
     #[expect(clippy::type_complexity)]
     fn evm_env_and_recovered_block_at(
         &self,
@@ -373,11 +391,15 @@ pub trait LoadState:
     {
         async move {
             if at.is_pending() {
-                let (evm_env, block_id) = self.evm_env_at(at).await?;
-                let block = self
-                    .recovered_block(block_id)
-                    .await?
-                    .ok_or_else(|| EthApiError::HeaderNotFound(at))?;
+                let PendingBlockEnv { evm_env, origin } = self.pending_block_env_and_cfg()?;
+                let block_id = origin.state_block_id();
+                let block = if let Some(block) = origin.into_actual_pending() {
+                    block
+                } else {
+                    self.recovered_block(block_id)
+                        .await?
+                        .ok_or_else(|| EthApiError::HeaderNotFound(at))?
+                };
 
                 Ok((block, evm_env, block_id))
             } else {
@@ -386,7 +408,10 @@ pub trait LoadState:
                     .await?
                     .ok_or_else(|| EthApiError::HeaderNotFound(at))?;
                 let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
-                let block_id = block.hash().into();
+                let block_id = match at {
+                    BlockId::Hash(_) => at,
+                    BlockId::Number(_) => BlockId::hash_canonical(block.hash()),
+                };
 
                 Ok((block, evm_env, block_id))
             }
