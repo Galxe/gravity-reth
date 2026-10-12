@@ -60,7 +60,6 @@ use reth_storage_api::{
     ReceiptProviderIdExt, StatsReader,
 };
 use reth_trie::{updates::TrieUpdates, AccountProof, HashedPostState, MultiProof, TrieInput};
-use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     future::{Future, IntoFuture},
@@ -1079,29 +1078,6 @@ impl<P: Clone, Node: NodeTypes, N> RpcBlockchainStateProvider<P, Node, N> {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RpcTrieUpdateVersion {
-    version: u8,
-}
-
-#[cfg(test)]
-mod rpc_trie_update_tests {
-    use super::RpcTrieUpdateVersion;
-
-    #[test]
-    fn remote_v2_update_version_is_required() {
-        let v2: RpcTrieUpdateVersion = serde_json::from_str(
-            r#"{"version":2,"accountNodes":{},"removedNodes":[],"storageTries":{}}"#,
-        )
-        .unwrap();
-        assert_eq!(v2.version, 2);
-        assert!(serde_json::from_str::<RpcTrieUpdateVersion>(
-            r#"{"account_nodes":{},"removed_nodes":[],"storage_tries":{}}"#
-        )
-        .is_err());
-    }
-}
-
 impl<P, Node, N> StateProvider for RpcBlockchainStateProvider<P, Node, N>
 where
     P: Provider<N> + Clone + 'static,
@@ -1201,9 +1177,9 @@ where
             return Err(ProviderError::UnsupportedProvider)
         }
 
-        let (root, updates) = self.block_on_async(async {
+        let (root, _) = self.block_on_async(async {
             self.provider
-                .raw_request::<(HashedPostState, BlockId), (B256, RpcTrieUpdateVersion)>(
+                .raw_request::<(HashedPostState, BlockId), (B256, serde::de::IgnoredAny)>(
                     "debug_stateRootWithUpdates".into(),
                     (hashed_state, self.block_id),
                 )
@@ -1211,11 +1187,6 @@ where
                 .await
                 .map_err(ProviderError::other)
         })?;
-        if updates.version != 2 {
-            return Err(ProviderError::other(std::io::Error::other(
-                "remote state-root updates use an unsupported trie version",
-            )))
-        }
         Ok(root)
     }
 

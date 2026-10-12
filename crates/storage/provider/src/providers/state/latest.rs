@@ -88,7 +88,8 @@ impl<Provider: DBProvider + Sync> StateRootProvider for LatestStateProviderRef<'
         &self,
         hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdatesV2)> {
-        NestedStateRoot::new(self.v2_tx()?, None).calculate(&hashed_state)
+        let tx = self.v2_tx()?;
+        NestedStateRoot::new(tx, None).calculate(&complete_storage_accounts(tx, hashed_state)?)
     }
 
     fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {

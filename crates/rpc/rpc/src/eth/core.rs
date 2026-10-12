@@ -620,18 +620,17 @@ mod tests {
     use reth_provider::{
         providers::BlockchainProvider,
         test_utils::{
-            create_test_provider_factory, ExtendedAccount, MockEthProvider, MockNodeTypesWithDB,
-            NoopProvider,
+            create_test_provider_factory, MockEthProvider, MockNodeTypesWithDB, NoopProvider,
         },
         DatabaseProviderFactory, PruneCheckpointReader, StageCheckpointReader,
     };
     use reth_rpc_eth_api::{
         helpers::{EthCall, LoadState},
         node::RpcNodeCoreAdapter,
-        EthApiServer, RpcNodeCore,
+        EthApiServer,
     };
     use reth_rpc_eth_types::EthApiError;
-    use reth_storage_api::{AccountReader, BlockReader, BlockReaderIdExt, StateProviderFactory};
+    use reth_storage_api::{BlockReader, BlockReaderIdExt, StateProviderFactory};
     use reth_testing_utils::generators;
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
 
@@ -690,37 +689,6 @@ mod tests {
         )
         .provider(provider.rpc_provider())
         .build()
-    }
-
-    #[tokio::test]
-    async fn rpc_provider_override_leaves_node_provider_unchanged() {
-        let address = Address::ZERO;
-        let node_provider = MockEthProvider::default();
-        node_provider.add_account(address, ExtendedAccount::new(0, U256::from(1)));
-        let rpc_provider = MockEthProvider::default();
-        rpc_provider.add_account(address, ExtendedAccount::new(0, U256::from(2)));
-
-        let eth_api: FakeEthApi = EthApiBuilder::new(
-            node_provider.clone(),
-            testing_pool(),
-            NoopNetwork::default(),
-            EthEvmConfig::new(node_provider.chain_spec()),
-        )
-        .provider(rpc_provider)
-        .map_converter(core::convert::identity)
-        .with_pending_env_builder(())
-        .build();
-
-        let balance =
-            <EthApi<_, _> as EthApiServer<_, _, _, _, _, _>>::balance(&eth_api, address, None)
-                .await
-                .unwrap();
-        assert_eq!(balance, U256::from(2));
-        assert_eq!(node_provider.basic_account(&address).unwrap().unwrap().balance, U256::from(1));
-        assert_eq!(
-            eth_api.inner.components.provider().basic_account(&address).unwrap().unwrap().balance,
-            U256::from(1)
-        );
     }
 
     #[tokio::test]

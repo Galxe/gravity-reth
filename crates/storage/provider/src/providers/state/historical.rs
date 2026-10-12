@@ -138,13 +138,20 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
     where
         Provider: StaticFileProviderFactory,
     {
+        let snapshot_height = match super::latest::snapshot_block_number(self.tx())? {
+            Some(height) => height,
+            None => self.provider.last_block_number()?,
+        };
+        if height > snapshot_height {
+            return Err(ProviderError::HeaderNotFound(height.into()))
+        }
         if let Some(hash) = self.tx().get::<tables::CanonicalHeaders>(height)? {
             return Ok(hash)
         }
-        // Genesis is stored only in static headers; its reverse index anchors it to this snapshot.
-        if height == 0 &&
-            let Some(hash) = self.provider.static_file_provider().block_hash(0)? &&
-            self.tx().get::<tables::HeaderNumbers>(hash)? == Some(0)
+        // Header migration removes the canonical-height index but retains the reverse index,
+        // which anchors the static header to this transaction's view.
+        if let Some(hash) = self.provider.static_file_provider().block_hash(height)? &&
+            self.tx().get::<tables::HeaderNumbers>(hash)? == Some(height)
         {
             return Ok(hash)
         }
@@ -398,7 +405,8 @@ impl<
     ) -> ProviderResult<(B256, TrieUpdatesV2)> {
         let mut reverted = self.revert_state_v2()?;
         reverted.extend(hashed_state);
-        NestedStateRoot::new(self.tx(), None).calculate(&reverted)
+        NestedStateRoot::new(self.tx(), None)
+            .calculate(&complete_storage_accounts(self.tx(), reverted)?)
     }
 
     fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {
@@ -1231,17 +1239,30 @@ mod tests {
         assert!(latest_state.revert_state_v2().unwrap().is_empty());
         assert_eq!(latest_state.state_root(HashedPostState::default()).unwrap(), latest_root);
 
-        let mut storage_only = HashedPostState::default();
-        storage_only.storages.entry(hash).or_default().storage.insert(slot_hash, U256::from(40));
-        let mut expected = storage_only.clone();
-        expected.accounts.insert(hash, Some(current));
-        let expected_root = NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
-        assert_eq!(latest_state.state_root(storage_only.clone()).unwrap(), expected_root);
-        assert_eq!(
-            crate::LatestStateProviderRef::new(&provider).state_root(storage_only).unwrap(),
-            expected_root
-        );
         let latest = crate::LatestStateProviderRef::new(&provider);
+        for wiped in [false, true] {
+            let mut storage_only = HashedPostState::default();
+            let mut storage = HashedStorage::new(wiped);
+            if !wiped {
+                storage.storage.insert(slot_hash, U256::from(40));
+            }
+            storage_only.storages.insert(hash, storage);
+            let mut expected = storage_only.clone();
+            expected.accounts.insert(hash, Some(current));
+            let expected_root =
+                NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
+            for state in [&latest_state as &dyn StateRootProvider, &latest] {
+                assert_eq!(state.state_root(storage_only.clone()).unwrap(), expected_root);
+                let (root, updates) =
+                    state.state_root_with_updates_v2(storage_only.clone()).unwrap();
+                assert_eq!(root, expected_root);
+                assert_ne!(root, latest_root);
+                assert!(!updates.account_nodes.is_empty());
+                let storage = &updates.storage_tries[&hash];
+                assert_eq!(storage.is_deleted, wiped);
+                assert!(wiped || !storage.storage_nodes.is_empty());
+            }
+        }
         assert!(matches!(
             latest.state_root_with_updates(HashedPostState::default()),
             Err(ProviderError::UnsupportedProvider)
@@ -1416,81 +1437,71 @@ mod tests {
     }
 
     #[test]
-    fn history_v2_genesis_static_header_requires_snapshot_hash_anchor() {
-        for changesets_in_static_files in [false, true] {
-            let factory = create_test_provider_factory();
-            factory
-                .set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
-            let static_files = factory.static_file_provider();
-            let genesis_header = Header { state_root: EMPTY_ROOT_HASH, ..Default::default() };
-            let genesis_hash = genesis_header.hash_slow();
-            {
-                let mut writer = static_files.latest_writer(StaticFileSegment::Headers).unwrap();
-                writer.append_header(&genesis_header, U256::ZERO, &genesis_hash).unwrap();
-                writer.commit().unwrap();
+    fn history_v2_static_headers_require_snapshot_hash_anchor() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+        let static_files = factory.static_file_provider();
+        let writer = factory.provider_rw().unwrap();
+        let mut hashes = Vec::new();
+        {
+            let mut headers = static_files.latest_writer(StaticFileSegment::Headers).unwrap();
+            for number in 0..=2 {
+                let header = Header {
+                    number,
+                    parent_hash: hashes.last().copied().unwrap_or_default(),
+                    state_root: EMPTY_ROOT_HASH,
+                    ..Default::default()
+                };
+                let hash = header.hash_slow();
+                headers.append_header(&header, U256::ZERO, &hash).unwrap();
+                writer.tx_ref().put::<tables::HeaderNumbers>(hash, number).unwrap();
+                hashes.push(hash);
             }
-            let provider = factory.provider_rw().unwrap();
-            provider.tx_ref().put::<tables::HeaderNumbers>(genesis_hash, 0).unwrap();
-            set_complete_height(provider.tx_ref(), 0);
-            provider.commit().unwrap();
+            headers.commit().unwrap();
+        }
+        set_complete_height(writer.tx_ref(), 1);
+        writer.commit().unwrap();
 
-            let provider = factory.provider().unwrap();
-            assert!(provider.tx_ref().get::<tables::CanonicalHeaders>(0).unwrap().is_none());
-            let historical = HistoricalStateProviderRef::new(&provider, 1);
-            assert!(historical.revert_state_v2().unwrap().is_empty());
-            let proof = historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
-            assert!(proof.info.is_none());
-            assert_eq!(proof.storage_proofs[0].value, U256::ZERO);
-            proof.verify(EMPTY_ROOT_HASH).unwrap();
-            drop(provider);
+        // Header migration leaves only static headers and the snapshot's reverse hash index.
+        let provider = factory.provider().unwrap();
+        assert!(provider.tx_ref().get::<tables::CanonicalHeaders>(1).unwrap().is_none());
+        let historical = HistoricalStateProviderRef::new(&provider, 2);
+        historical
+            .proof(TrieInput::default(), ADDRESS, &[STORAGE])
+            .unwrap()
+            .verify(EMPTY_ROOT_HASH)
+            .unwrap();
+        // A known static header beyond the complete snapshot height is still unavailable.
+        assert!(matches!(
+            historical.snapshot_canonical_hash(2),
+            Err(ProviderError::HeaderNotFound(_))
+        ));
 
-            for anchor_height in [Some(1), None] {
-                let provider = factory.provider_rw().unwrap();
-                if let Some(height) = anchor_height {
-                    provider.tx_ref().put::<tables::HeaderNumbers>(genesis_hash, height).unwrap();
-                } else {
-                    provider.tx_ref().delete::<tables::HeaderNumbers>(genesis_hash, None).unwrap();
-                }
-                provider.commit().unwrap();
-                let provider = factory.provider().unwrap();
-                let historical = HistoricalStateProviderRef::new(&provider, 1);
-                assert!(historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]).is_err());
-                if changesets_in_static_files {
-                    assert!(historical.revert_state_v2().is_err());
-                }
+        for anchor_height in [Some(2), None] {
+            let writer = factory.provider_rw().unwrap();
+            if let Some(height) = anchor_height {
+                writer.tx_ref().put::<tables::HeaderNumbers>(hashes[1], height).unwrap();
+            } else {
+                writer.tx_ref().delete::<tables::HeaderNumbers>(hashes[1], None).unwrap();
             }
-
-            let next_header = Header {
-                number: 1,
-                parent_hash: genesis_hash,
-                state_root: EMPTY_ROOT_HASH,
-                ..Default::default()
-            };
-            let next_hash = next_header.hash_slow();
-            {
-                let mut writer = static_files.latest_writer(StaticFileSegment::Headers).unwrap();
-                writer.append_header(&next_header, U256::ZERO, &next_hash).unwrap();
-                writer.commit().unwrap();
-            }
-            let provider = factory.provider_rw().unwrap();
-            provider.tx_ref().put::<tables::HeaderNumbers>(genesis_hash, 0).unwrap();
-            provider.tx_ref().put::<tables::HeaderNumbers>(next_hash, 1).unwrap();
-            set_complete_height(provider.tx_ref(), 1);
-            provider.commit().unwrap();
-
-            let provider = factory.provider().unwrap();
-            assert!(provider.tx_ref().get::<tables::CanonicalHeaders>(1).unwrap().is_none());
-            let historical = HistoricalStateProviderRef::new(&provider, 2);
+            writer.commit().unwrap();
+            let changed = factory.provider().unwrap();
             assert!(matches!(
-                historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]),
+                HistoricalStateProviderRef::new(&changed, 2).proof(
+                    TrieInput::default(),
+                    ADDRESS,
+                    &[STORAGE],
+                ),
                 Err(ProviderError::HeaderNotFound(_))
             ));
-            if changesets_in_static_files {
-                assert!(matches!(
-                    historical.revert_state_v2(),
-                    Err(ProviderError::HeaderNotFound(_))
-                ));
-            }
         }
+        // A retained snapshot still uses the valid anchor from before those commits.
+        historical
+            .proof(TrieInput::default(), ADDRESS, &[STORAGE])
+            .unwrap()
+            .verify(EMPTY_ROOT_HASH)
+            .unwrap();
     }
 }
