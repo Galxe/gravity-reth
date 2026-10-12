@@ -4,6 +4,7 @@ use alloy_provider::{
     network::{
         Ethereum, EthereumWallet, NetworkWallet, TransactionBuilder, TransactionBuilder7702,
     },
+    transport::TransportResult,
     Provider, ProviderBuilder, SendableTx,
 };
 use alloy_rpc_types_engine::PayloadAttributes;
@@ -15,6 +16,7 @@ use reth_ethereum_primitives::TxType;
 use reth_node_api::NodeTypesWithDBAdapter;
 use reth_node_ethereum::EthereumNode;
 use reth_provider::FullProvider;
+use std::{future::Future, time::Duration};
 
 /// Helper function to create a new eth payload attributes
 pub(crate) const fn eth_payload_attributes(timestamp: u64) -> PayloadAttributes {
@@ -58,6 +60,36 @@ pub(crate) const fn eth_payload_attributes_amsterdam(timestamp: u64) -> PayloadA
     }
 }
 
+/// Background pruning temporarily closes RPC admission after persistence acknowledges a block.
+pub(crate) async fn retry_rpc_read<T, F, Fut>(mut request: F) -> TransportResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = TransportResult<T>>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut result = request().await;
+    loop {
+        let unavailable =
+            result.as_ref().err().and_then(|error| error.as_error_resp()).is_some_and(|error| {
+                error.code == -32603 &&
+                    error.message ==
+                        "complete RPC storage view is unavailable during startup or recovery"
+            });
+        if !unavailable {
+            return result
+        }
+        match tokio::time::timeout_at(deadline, async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            request().await
+        })
+        .await
+        {
+            Ok(next) => result = next,
+            Err(_) => return result,
+        }
+    }
+}
+
 /// Advances node by producing blocks with random transactions.
 pub(crate) async fn advance_with_random_transactions<Provider>(
     node: &mut NodeHelperType<EthereumNode, Provider>,
@@ -85,10 +117,13 @@ where
             let signer = signers.choose(rng).unwrap();
             let tx_type = TxType::try_from(rng.random_range(0..=4) as u64).unwrap();
 
-            let nonce = provider
-                .get_transaction_count(signer.address())
-                .block_id(BlockId::Number(BlockNumberOrTag::Pending))
-                .await?;
+            let nonce = retry_rpc_read(|| async {
+                provider
+                    .get_transaction_count(signer.address())
+                    .block_id(BlockId::Number(BlockNumberOrTag::Pending))
+                    .await
+            })
+            .await?;
 
             let mut tx =
                 TransactionRequest::default().with_from(signer.address()).with_nonce(nonce);
@@ -104,7 +139,9 @@ where
             }
 
             if matches!(tx_type, TxType::Legacy | TxType::Eip2930) {
-                tx = tx.with_gas_price(provider.get_gas_price().await?);
+                tx = tx.with_gas_price(
+                    retry_rpc_read(|| async { provider.get_gas_price().await }).await?,
+                );
             }
 
             if rng.random::<bool>() || tx_type == TxType::Eip2930 {
@@ -122,24 +159,34 @@ where
                 let auth = Authorization {
                     chain_id: U256::from(provider.get_chain_id().await?),
                     address: *call_destinations.choose(rng).unwrap(),
-                    nonce: provider
-                        .get_transaction_count(signer.address())
-                        .block_id(BlockId::Number(BlockNumberOrTag::Pending))
-                        .await?,
+                    nonce: retry_rpc_read(|| async {
+                        provider
+                            .get_transaction_count(signer.address())
+                            .block_id(BlockId::Number(BlockNumberOrTag::Pending))
+                            .await
+                    })
+                    .await?,
                 };
                 let sig = signer.sign_hash_sync(&auth.signature_hash())?;
                 tx = tx.with_authorization_list(vec![auth.into_signed(sig)])
             }
 
-            let gas = provider
-                .estimate_gas(tx.clone())
-                .block(BlockId::Number(BlockNumberOrTag::Pending))
-                .await
-                .unwrap_or(1_000_000);
+            let gas = retry_rpc_read(|| async {
+                provider
+                    .estimate_gas(tx.clone())
+                    .block(BlockId::Number(BlockNumberOrTag::Pending))
+                    .await
+            })
+            .await
+            .unwrap_or(1_000_000);
 
             tx.set_gas_limit(gas);
 
-            let SendableTx::Builder(tx) = provider.fill(tx).await? else { unreachable!() };
+            let SendableTx::Builder(tx) =
+                retry_rpc_read(|| async { provider.fill(tx.clone()).await }).await?
+            else {
+                unreachable!()
+            };
             let tx =
                 NetworkWallet::<Ethereum>::sign_request(&EthereumWallet::new(signer.clone()), tx)
                     .await?;
@@ -153,8 +200,13 @@ where
         if finalize {
             node.update_forkchoice(payload.block().hash(), payload.block().hash()).await?;
         } else {
-            let last_safe =
-                provider.get_block_by_number(BlockNumberOrTag::Safe).await?.unwrap().header.hash;
+            let last_safe = retry_rpc_read(|| async {
+                provider.get_block_by_number(BlockNumberOrTag::Safe).await
+            })
+            .await?
+            .unwrap()
+            .header
+            .hash;
             node.update_forkchoice(last_safe, payload.block().hash()).await?;
         }
 

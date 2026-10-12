@@ -73,6 +73,12 @@ impl<N: NodeTypesWithDB> Clone for BlockchainProvider<N> {
 }
 
 impl<N: ProviderNodeTypes> BlockchainProvider<N> {
+    /// Returns the shared provider factory for preparing storage before test services start.
+    #[cfg(feature = "test-utils")]
+    pub const fn provider_factory(&self) -> &ProviderFactory<N> {
+        &self.database
+    }
+
     /// Create a new [`BlockchainProvider`] using only the storage, fetching the latest
     /// header from the database to initialize the provider.
     pub fn new(storage: ProviderFactory<N>) -> ProviderResult<Self> {

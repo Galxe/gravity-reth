@@ -1,4 +1,4 @@
-use crate::utils::{eth_payload_attributes, eth_payload_attributes_amsterdam};
+use crate::utils::{eth_payload_attributes, eth_payload_attributes_amsterdam, retry_rpc_read};
 use alloy_eips::{eip2718::Encodable2718, eip7910::EthConfig};
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, Bytes, B256, U256};
@@ -162,7 +162,9 @@ async fn test_flashbots_validate_v3() -> eyre::Result<()> {
         let provider = provider.clone();
         Box::pin(async move {
             let SendableTx::Envelope(tx) =
-                provider.fill(TransactionRequest::default().to(Address::ZERO)).await.unwrap()
+                retry_rpc_read(|| provider.fill(TransactionRequest::default().to(Address::ZERO)))
+                    .await
+                    .unwrap()
             else {
                 unreachable!()
             };
@@ -244,7 +246,9 @@ async fn test_flashbots_validate_v4() -> eyre::Result<()> {
         let provider = provider.clone();
         Box::pin(async move {
             let SendableTx::Envelope(tx) =
-                provider.fill(TransactionRequest::default().to(Address::ZERO)).await.unwrap()
+                retry_rpc_read(|| provider.fill(TransactionRequest::default().to(Address::ZERO)))
+                    .await
+                    .unwrap()
             else {
                 unreachable!()
             };
