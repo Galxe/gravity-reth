@@ -158,14 +158,14 @@ async fn test_flashbots_validate_v3() -> eyre::Result<()> {
         .wallet(EthereumWallet::new(wallet.wallet_gen().swap_remove(0)))
         .connect_http(node.rpc_url());
 
-    node.advance(100, |_| {
+    node.advance(100, |nonce| {
         let provider = provider.clone();
         Box::pin(async move {
-            let SendableTx::Envelope(tx) =
-                retry_rpc_read(|| provider.fill(TransactionRequest::default().to(Address::ZERO)))
-                    .await
-                    .unwrap()
-            else {
+            let SendableTx::Envelope(tx) = retry_rpc_read(|| {
+                provider.fill(TransactionRequest::default().to(Address::ZERO).nonce(nonce))
+            })
+            .await
+            .unwrap() else {
                 unreachable!()
             };
 
@@ -174,7 +174,14 @@ async fn test_flashbots_validate_v3() -> eyre::Result<()> {
     })
     .await?;
 
-    let _ = provider.send_transaction(TransactionRequest::default().to(Address::ZERO)).await?;
+    let SendableTx::Envelope(tx) = retry_rpc_read(|| {
+        provider.fill(TransactionRequest::default().to(Address::ZERO).nonce(100))
+    })
+    .await?
+    else {
+        unreachable!()
+    };
+    let _ = provider.send_tx_envelope(tx).await?;
     let payload = node.new_payload().await?;
 
     let mut request = BuilderBlockValidationRequestV3 {
@@ -242,14 +249,14 @@ async fn test_flashbots_validate_v4() -> eyre::Result<()> {
         .wallet(EthereumWallet::new(wallet.wallet_gen().swap_remove(0)))
         .connect_http(node.rpc_url());
 
-    node.advance(100, |_| {
+    node.advance(100, |nonce| {
         let provider = provider.clone();
         Box::pin(async move {
-            let SendableTx::Envelope(tx) =
-                retry_rpc_read(|| provider.fill(TransactionRequest::default().to(Address::ZERO)))
-                    .await
-                    .unwrap()
-            else {
+            let SendableTx::Envelope(tx) = retry_rpc_read(|| {
+                provider.fill(TransactionRequest::default().to(Address::ZERO).nonce(nonce))
+            })
+            .await
+            .unwrap() else {
                 unreachable!()
             };
 
@@ -258,7 +265,14 @@ async fn test_flashbots_validate_v4() -> eyre::Result<()> {
     })
     .await?;
 
-    let _ = provider.send_transaction(TransactionRequest::default().to(Address::ZERO)).await?;
+    let SendableTx::Envelope(tx) = retry_rpc_read(|| {
+        provider.fill(TransactionRequest::default().to(Address::ZERO).nonce(100))
+    })
+    .await?
+    else {
+        unreachable!()
+    };
+    let _ = provider.send_tx_envelope(tx).await?;
     let payload = node.new_payload().await?;
 
     let mut request = BuilderBlockValidationRequestV4 {

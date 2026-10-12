@@ -61,6 +61,8 @@ pub(crate) const fn eth_payload_attributes_amsterdam(timestamp: u64) -> PayloadA
 }
 
 /// Background pruning temporarily closes RPC admission after persistence acknowledges a block.
+/// Retried transaction fills must have an explicit nonce because the client reserves nonces before
+/// completing the remaining reads.
 pub(crate) async fn retry_rpc_read<T, F, Fut>(mut request: F) -> TransportResult<T>
 where
     F: FnMut() -> Fut,
