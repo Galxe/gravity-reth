@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn oracle_task_install_staged_history_uses_real_parent_and_rolls_batch_timestamp() {
+    fn oracle_task_install_staged_history_uses_real_parent_across_timestamp_jump() {
         use reth_chainspec::{Chain, LONGEVITY_TESTNET_CHAIN_ID, MAINNET};
         use reth_primitives_traits::Block as _;
         use reth_provider::{

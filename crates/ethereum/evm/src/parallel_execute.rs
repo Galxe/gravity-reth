@@ -357,12 +357,11 @@ where
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
-        self.validate_installation_config()?;
+        let installation = reth_chainspec::oracle_task_install_config(self.chain_spec.as_ref())
+            .map_err(BlockExecutionError::msg)?;
         // Reject missing context before any block mutation, including system EIP calls.
         if self.parent_timestamp.is_none() &&
-            reth_chainspec::oracle_task_install_config(self.chain_spec.as_ref())
-                .map_err(BlockExecutionError::msg)?
-                .is_some_and(|config| block.timestamp() >= config.timestamp)
+            installation.is_some_and(|config| block.timestamp() >= config.timestamp)
         {
             return Err(BlockExecutionError::msg("OracleTaskInstall: missing parent timestamp"))
         }

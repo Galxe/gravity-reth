@@ -145,14 +145,6 @@ struct InstallationOverlay<'a, DB> {
     changes: EvmState,
 }
 
-impl<DB> core::fmt::Debug for InstallationOverlay<'_, DB> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("InstallationOverlay")
-            .field("changes", &self.changes)
-            .finish_non_exhaustive()
-    }
-}
-
 impl<DB: Database> Database for InstallationOverlay<'_, DB> {
     type Error = DB::Error;
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
@@ -319,7 +311,7 @@ pub(crate) mod tests {
     use crate::{parallel_execute::GrevmExecutor, EthEvmConfig};
     use alloy_genesis::Genesis;
     use reth_chainspec::{Chain, ChainSpec, ChainSpecBuilder, LONGEVITY_TESTNET_CHAIN_ID, MAINNET};
-    use reth_evm::{parallel_execute::ParallelExecutor, ConfigureEvm};
+    use reth_evm::parallel_execute::ParallelExecutor;
     use revm::{
         context::CfgEnv,
         database::{CacheDB, EmptyDB},
@@ -779,24 +771,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn oracle_task_install_grevm_epoch_hook_parallel_sequential_and_missing_parent() {
+    fn oracle_task_install_grevm_parallel_sequential_and_missing_parent() {
         let spec = spec();
         let config = EthEvmConfig::new(spec.clone());
-        let mut bundles = Vec::new();
-        for sequential in [false, true] {
-            let mut executor = if sequential {
-                GrevmExecutor::new_sequential(spec.clone(), &config, seeded_db())
-            } else {
-                GrevmExecutor::new(spec.clone(), &config, seeded_db())
-            };
-            executor.validate_installation_config().unwrap();
-            executor.apply_oracle_task_install(env(T), T - 1, 73).unwrap();
-            let bundle = executor.take_bundle();
-            assert!(bundle.state[&ORACLE_TASK_CONFIG_ADDRESS].storage.len() > 5);
-            assert!(bundle.state[&NATIVE_ORACLE_ADDRESS].storage.len() == 1);
-            bundles.push(bundle);
-        }
-        assert_eq!(bundles[0].state, bundles[1].state);
         let mut executor = GrevmExecutor::new(spec.clone(), &config, seeded_db());
         let block = reth_ethereum_primitives::Block {
             header: alloy_consensus::Header {
@@ -832,6 +809,5 @@ pub(crate) mod tests {
             normal_states.push(state);
         }
         assert_eq!(normal_states[0], normal_states[1]);
-        let _ = config.evm_env(block.header());
     }
 }

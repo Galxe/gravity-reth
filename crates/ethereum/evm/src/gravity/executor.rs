@@ -270,7 +270,6 @@ where
             return self.inner.apply_pre_execution_changes()
         };
 
-        oracle_task_install::validate_config(self.inner.spec.as_ref())?;
         if reth_chainspec::oracle_task_install_config(self.inner.spec.as_ref())
             .map_err(BlockExecutionError::msg)?
             .is_some()
