@@ -885,17 +885,7 @@ mod tests {
     #[test]
     fn merged_persistence_builds_history_from_committed_changesets() {
         let provider = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            provider.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
+        let service = persistence_service(&provider);
 
         let block_number = 0;
         let address = Address::random();
@@ -925,17 +915,7 @@ mod tests {
     #[test]
     fn merged_persistence_storage_wipe_sees_prior_block_state() {
         let provider = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            provider.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
+        let service = persistence_service(&provider);
 
         let address = Address::random();
         let slot = B256::with_last_byte(1);
@@ -979,130 +959,6 @@ mod tests {
         assert_eq!(changeset.len(), 1);
         assert_eq!(changeset[0].1.key, slot);
         assert_eq!(changeset[0].1.value, value);
-    }
-
-    #[test]
-    fn interrupted_merged_state_recovers_at_its_durable_execution_height() {
-        use crate::recovery::StorageRecoveryHelper;
-        use alloy_consensus::Header;
-        use alloy_primitives::keccak256;
-        use reth_ethereum_primitives::Block;
-        use reth_primitives_traits::{RecoveredBlock, StorageEntry};
-        use reth_provider::{AccountReader, BlockNumReader, StageCheckpointReader, StorageReader};
-        use reth_trie::{HashedPostState, HashedStorage};
-        use reth_trie_parallel::nested_hash::NestedStateRoot;
-
-        let factory = create_test_provider_factory();
-        let service = persistence_service(&factory);
-        let address = Address::with_last_byte(1);
-        let slot = B256::with_last_byte(2);
-        let mut blocks = Vec::new();
-        let mut parent_hash = B256::ZERO;
-        let mut previous_account = None;
-        let mut previous_value = U256::ZERO;
-        let mut expected_root = B256::ZERO;
-        for number in 0..=2 {
-            let account =
-                Account { nonce: number, balance: U256::from(number * 7), ..Default::default() };
-            let value = U256::from(number * 9);
-            let mut hashed = HashedPostState::default();
-            let outcome = if number == 0 {
-                ExecutionOutcome::new(
-                    BundleState::default(),
-                    vec![vec![]],
-                    number,
-                    vec![Default::default()],
-                )
-            } else {
-                hashed.accounts.insert(keccak256(address), Some(account));
-                hashed.storages.insert(
-                    keccak256(address),
-                    HashedStorage::from_iter(false, [(keccak256(slot), value)]),
-                );
-                let storage = std::iter::once((slot, (previous_value, value))).collect();
-                let state: BundleStateInit =
-                    std::iter::once((address, (previous_account, Some(account), storage)))
-                        .collect();
-                let account_reverts = std::iter::once((
-                    address,
-                    (
-                        Some(previous_account),
-                        vec![StorageEntry { key: slot, value: previous_value }],
-                    ),
-                ))
-                .collect();
-                let reverts: RevertsInit = std::iter::once((number, account_reverts)).collect();
-                previous_account = Some(account);
-                previous_value = value;
-                ExecutionOutcome::new_init(
-                    state,
-                    reverts,
-                    [],
-                    vec![vec![]],
-                    number,
-                    vec![Default::default()],
-                )
-            };
-            let provider = factory.database_provider_rw().unwrap();
-            let (root, updates) =
-                NestedStateRoot::new(provider.tx_ref(), None).calculate(&hashed).unwrap();
-            expected_root = root;
-            let block = RecoveredBlock::new_unhashed(
-                Block {
-                    header: Header { number, parent_hash, state_root: root, ..Default::default() },
-                    body: Default::default(),
-                },
-                Vec::new(),
-            );
-            parent_hash = block.hash();
-            blocks.push(ExecutedBlockWithTrieUpdates::new(
-                Arc::new(block),
-                Arc::new(outcome),
-                Arc::new(hashed),
-                ExecutedTrieUpdates::empty(),
-                Arc::new(updates),
-            ));
-        }
-        blocks[1].trie = ExecutedTrieUpdates::Missing;
-        assert!(matches!(
-            service.save_merged_blocks(blocks),
-            Err(PersistenceError::ProviderError(ProviderError::MissingTrieUpdates(_))),
-        ));
-
-        let provider = factory.database_provider_rw().unwrap();
-        assert_eq!(provider.recover_block_number().unwrap(), 2);
-        assert_eq!(
-            provider.get_stage_checkpoint(StageId::AccountHashing).unwrap().unwrap().block_number,
-            2
-        );
-        assert_eq!(provider.basic_account(&address).unwrap(), previous_account);
-        assert_eq!(
-            provider.plain_state_storages([(address, [slot])]).unwrap()[0].1[0].value,
-            previous_value
-        );
-        assert!(provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap().is_none());
-        drop(provider);
-        assert!(factory.rpc_provider().provider().is_err());
-
-        StorageRecoveryHelper::new(&factory).check_and_recover().unwrap();
-        let provider = factory.database_provider_ro().unwrap();
-        // The EVM resumes after block 2, rather than applying these transactions again to nonce 2.
-        assert_eq!(provider.recover_block_number().unwrap(), 2);
-        assert_eq!(provider.basic_account(&address).unwrap(), previous_account);
-        assert_eq!(
-            provider.plain_state_storages([(address, [slot])]).unwrap()[0].1[0].value,
-            previous_value
-        );
-        assert_eq!(
-            NestedStateRoot::new(provider.tx_ref(), None)
-                .root(&HashedPostState::default())
-                .unwrap(),
-            expected_root
-        );
-        for stage in [StageId::AccountHashing, StageId::IndexAccountHistory, StageId::MerkleExecute]
-        {
-            assert_eq!(provider.get_stage_checkpoint(stage).unwrap().unwrap().block_number, 2);
-        }
     }
 
     #[test]

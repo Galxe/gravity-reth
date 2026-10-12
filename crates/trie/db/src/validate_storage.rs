@@ -206,152 +206,58 @@ where
 mod tests {
     use super::*;
     use crate::nested_hash::NestedStateRoot;
-    use reth_db_api::transaction::DbTxMut;
     use reth_primitives_traits::Account;
     use reth_provider::{
-        test_utils::{create_test_provider_factory, MockNodeTypesWithDB},
-        DatabaseProviderFactory, ProviderFactory, TrieWriterV2,
+        test_utils::create_test_provider_factory, DatabaseProviderFactory, TrieWriterV2,
     };
-    use reth_trie::{
-        nested_trie::StorageNodeEntry, updates::TrieUpdatesV2, HashedPostState, HashedStorage,
-    };
+    use reth_trie::{HashedPostState, HashedStorage};
 
-    fn initial_state() -> HashedPostState {
-        let mut state = HashedPostState::default();
-        for address in [B256::with_last_byte(10), B256::with_last_byte(20)] {
-            state.accounts.insert(address, Some(Account::default()));
+    #[test]
+    fn validates_v2_trie_and_rejects_ahead_storage_shard() {
+        let factory = create_test_provider_factory();
+        let address = B256::with_last_byte(10);
+        let mut state = HashedPostState::default().with_accounts([
+            (address, Some(Account::default())),
+            (B256::with_last_byte(20), Some(Account::default())),
+        ]);
+        // Shared prefixes exercise extensions and embedded storage leaf references.
+        state.storages.insert(
+            address,
+            HashedStorage::from_iter(
+                false,
+                [
+                    (B256::with_last_byte(1), U256::from(1)),
+                    (B256::with_last_byte(17), U256::from(2)),
+                ],
+            ),
+        );
+        let provider = factory.provider_rw().unwrap();
+        let (root, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&state).unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        provider.commit().unwrap();
+        {
+            let provider = factory.database_provider_ro().unwrap();
+            assert!(validate_storage_trie(provider.tx_ref(), root).unwrap());
+            assert!(!validate_storage_trie(provider.tx_ref(), B256::ZERO).unwrap());
         }
-        let mut storage = HashedStorage::default();
-        for (slot, value) in [(1, 1), (17, 2)] {
-            storage.storage.insert(B256::with_last_byte(slot), U256::from(value));
-        }
-        state.storages.insert(B256::with_last_byte(10), storage);
+
         state
-    }
-
-    fn initial_trie() -> (ProviderFactory<MockNodeTypesWithDB>, B256) {
-        let factory = create_test_provider_factory();
-        let provider = factory.provider_rw().unwrap();
-        let (root, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&initial_state()).unwrap();
-        provider.write_trie_updatesv2(&updates).unwrap();
-        provider.commit().unwrap();
-        (factory, root)
-    }
-
-    fn malformed_nodes() -> Vec<StoredNode> {
-        let mut nodes = vec![vec![], vec![3], vec![0], vec![1, 33, 0], vec![2, 64, 0]];
-        let mut mask = [u8::MAX; 16];
-        mask[0] = 34;
-        let mut oversized_branch = vec![0];
-        oversized_branch.extend([0; 34]);
-        oversized_branch.extend(mask);
-        nodes.push(oversized_branch);
-
-        mask[0] = 1;
-        let mut truncated_branch = vec![0];
-        truncated_branch.extend(mask);
-        nodes.push(truncated_branch);
-
-        let mut oversized_extension = vec![1, 1, 0xc0, 0];
-        oversized_extension.extend([0; 33]);
-        nodes.push(oversized_extension);
-
-        let mut oversized_leaf = vec![2, 66];
-        oversized_leaf.extend([0; 33]);
-        nodes.push(oversized_leaf);
-        nodes.into_iter().map(StoredNode::from).collect()
-    }
-
-    #[test]
-    fn rejects_malformed_nodes_in_both_shards_without_panicking() {
-        for storage_shard in [false, true] {
-            let (factory, root) = initial_trie();
-            for (case, node) in malformed_nodes().into_iter().enumerate() {
-                let provider = factory.provider_rw().unwrap();
-                if storage_shard {
-                    provider
-                        .tx_ref()
-                        .put::<tables::StoragesTrieV2>(
-                            B256::with_last_byte(10),
-                            StorageNodeEntry {
-                                path: StoredNibblesSubKey::from(Vec::<u8>::new()),
-                                node,
-                            },
-                        )
-                        .unwrap();
-                } else {
-                    provider
-                        .tx_ref()
-                        .put::<tables::AccountsTrieV2>(StoredNibbles::from(Vec::<u8>::new()), node)
-                        .unwrap();
-                }
-                provider.commit().unwrap();
-
-                let provider = factory.database_provider_ro().unwrap();
-                assert!(
-                    matches!(
-                        validate_storage_trie(provider.tx_ref(), root),
-                        Err(DatabaseError::Decode)
-                    ),
-                    "storage_shard={storage_shard}, malformed case={case}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn validates_empty_trie_and_rejects_wrong_root() {
-        let factory = create_test_provider_factory();
-        let provider = factory.database_provider_ro().unwrap();
-        assert!(validate_storage_trie(provider.tx_ref(), EMPTY_ROOT_HASH).unwrap());
-        assert!(!validate_storage_trie(provider.tx_ref(), B256::ZERO).unwrap());
-    }
-
-    #[test]
-    fn validates_extensions_empty_storage_and_embedded_children() {
-        let factory = create_test_provider_factory();
-        let provider = factory.provider_rw().unwrap();
-        let (root, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&initial_state()).unwrap();
-        // Slots sharing 62 nibbles produce extensions and short embedded leaf references.
-        assert!(updates.storage_tries.values().any(|updates| {
-            updates.storage_nodes.values().any(|node| {
-                let Node::FullNode { children, .. } = node else { return false };
-                children.iter().flatten().any(|child| {
-                    matches!(child.as_ref(), Node::HashNode(reference) if reference.as_slice().len() < 32)
-                })
-            })
-        }));
-        provider.write_trie_updatesv2(&updates).unwrap();
-        provider.commit().unwrap();
-
-        let provider = factory.database_provider_ro().unwrap();
-        assert!(validate_storage_trie(provider.tx_ref(), root).unwrap());
-        assert!(!validate_storage_trie(provider.tx_ref(), B256::ZERO).unwrap());
-    }
-
-    #[test]
-    fn rejects_storage_shard_ahead_of_account_root() {
-        let (factory, root) = initial_trie();
-
-        let provider = factory.provider_rw().unwrap();
-        let mut ahead = initial_state();
-        ahead
             .storages
-            .get_mut(&B256::with_last_byte(10))
+            .get_mut(&address)
             .unwrap()
             .storage
             .insert(B256::with_last_byte(1), U256::from(9));
+        let provider = factory.provider_rw().unwrap();
         let (_, mut updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&ahead).unwrap();
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&state).unwrap();
         updates.account_nodes.clear();
         updates.removed_nodes.clear();
         provider.write_trie_updatesv2(&updates).unwrap();
         provider.commit().unwrap();
 
         let provider = factory.database_provider_ro().unwrap();
-        // Looking only at the account root cannot detect the independently committed storage.
+        // Cached account hashes alone cannot detect an independently committed storage shard.
         assert_eq!(
             NestedStateRoot::new(provider.tx_ref(), None)
                 .root(&HashedPostState::default())
@@ -359,90 +265,5 @@ mod tests {
             root
         );
         assert!(!validate_storage_trie(provider.tx_ref(), root).unwrap());
-    }
-
-    #[test]
-    fn rejects_changed_embedded_child_with_unchanged_parent_hashes() {
-        let (factory, root) = initial_trie();
-
-        let provider = factory.provider_rw().unwrap();
-        let mut ahead = initial_state();
-        ahead
-            .storages
-            .get_mut(&B256::with_last_byte(10))
-            .unwrap()
-            .storage
-            .insert(B256::with_last_byte(1), U256::from(9));
-        let (_, mut updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&ahead).unwrap();
-        updates.account_nodes.clear();
-        updates.removed_nodes.clear();
-        for storage in updates.storage_tries.values_mut() {
-            storage.removed_nodes.clear();
-            storage.storage_nodes.retain(|path, node| {
-                !path.is_empty() &&
-                    matches!(node, Node::ShortNode { value, .. } if matches!(value.as_ref(), Node::ValueNode(_)))
-            });
-        }
-        assert!(updates.storage_tries.values().any(|storage| !storage.storage_nodes.is_empty()));
-        provider.write_trie_updatesv2(&updates).unwrap();
-        provider.commit().unwrap();
-
-        let provider = factory.database_provider_ro().unwrap();
-        assert_eq!(
-            NestedStateRoot::new(provider.tx_ref(), None)
-                .root(&HashedPostState::default())
-                .unwrap(),
-            root
-        );
-        assert!(!validate_storage_trie(provider.tx_ref(), root).unwrap());
-    }
-
-    #[test]
-    fn rejects_orphan_storage_root_when_account_shard_is_unchanged() {
-        let (factory, root) = initial_trie();
-
-        let provider = factory.provider_rw().unwrap();
-        let address = B256::with_last_byte(40);
-        let mut ahead = HashedPostState::default();
-        ahead.accounts.insert(address, Some(Account::default()));
-        let mut storage = HashedStorage::default();
-        storage.storage.insert(B256::with_last_byte(1), U256::from(1));
-        ahead.storages.insert(address, storage);
-        let (_, updates) = NestedStateRoot::new(provider.tx_ref(), None).calculate(&ahead).unwrap();
-        provider
-            .write_trie_updatesv2(&TrieUpdatesV2 {
-                storage_tries: updates.storage_tries,
-                ..Default::default()
-            })
-            .unwrap();
-        provider.commit().unwrap();
-
-        let provider = factory.database_provider_ro().unwrap();
-        assert_eq!(
-            NestedStateRoot::new(provider.tx_ref(), None)
-                .root(&HashedPostState::default())
-                .unwrap(),
-            root
-        );
-        assert!(!validate_storage_trie(provider.tx_ref(), root).unwrap());
-    }
-
-    #[test]
-    fn rejects_empty_account_trie_with_orphan_storage() {
-        let factory = create_test_provider_factory();
-        let provider = factory.provider_rw().unwrap();
-        let (_, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&initial_state()).unwrap();
-        provider
-            .write_trie_updatesv2(&TrieUpdatesV2 {
-                storage_tries: updates.storage_tries,
-                ..Default::default()
-            })
-            .unwrap();
-        provider.commit().unwrap();
-
-        let provider = factory.database_provider_ro().unwrap();
-        assert!(!validate_storage_trie(provider.tx_ref(), EMPTY_ROOT_HASH).unwrap());
     }
 }

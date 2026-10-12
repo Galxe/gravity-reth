@@ -248,12 +248,6 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         self.rpc_views.publication_failed();
     }
 
-    /// Whether a complete height needs validation after startup or an interrupted write.
-    #[cfg(test)]
-    pub(crate) fn rpc_read_view_requires_validation(&self, block_number: u64) -> bool {
-        self.rpc_views.requires_validation(block_number)
-    }
-
     /// Publishes a complete block while the caller holds the coordinated write range.
     /// Reads use a RW provider here to avoid recursively acquiring the snapshot barrier.
     /// Publication-only failures close RPC admission; they cannot fail a completed storage write.

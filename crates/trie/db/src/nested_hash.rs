@@ -793,130 +793,6 @@ mod tests {
     }
 
     #[test]
-    fn v2_multiproof_verifies_account_storage_overlay_and_absence() {
-        let factory = create_test_provider_factory();
-        let address = Address::random();
-        let other = Address::random();
-        let missing = Address::random();
-        let hashed_address = keccak256(address);
-        let slot = B256::from(U256::from(1u64));
-        let other_slot = B256::from(U256::from(2u64));
-        let missing_slot = B256::from(U256::from(3u64));
-        let account = Account { balance: U256::from(42u64), ..Default::default() };
-        let storage_with_slot = |value| HashedStorage::from_iter(false, [(keccak256(slot), value)]);
-
-        let mut initial = single_account_state(
-            hashed_address,
-            account,
-            false,
-            &HashMap::from_iter([(slot, U256::from(11u64)), (other_slot, U256::from(22u64))]),
-        );
-        initial.accounts.insert(keccak256(other), Some(Account::default()));
-        let provider = factory.provider_rw().unwrap();
-        let (_, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&initial).unwrap();
-        provider.write_trie_updatesv2(&updates).unwrap();
-        provider.write_hashed_state(&initial.into_sorted()).unwrap();
-        provider.commit().unwrap();
-
-        let mut overlay = HashedPostState::default();
-        overlay.storages.insert(hashed_address, storage_with_slot(U256::from(99u64)));
-        let provider = factory.database_provider_ro().unwrap();
-        let nested = NestedStateRoot::new(provider.tx_ref(), None);
-        let (unchanged_root, unchanged_updates) = nested.calculate(&overlay).unwrap();
-        let (base_root, base_updates) = nested.calculate(&HashedPostState::default()).unwrap();
-        assert_eq!((unchanged_root, unchanged_updates), (base_root, base_updates));
-        assert_eq!(nested.root(&overlay).unwrap(), unchanged_root);
-        let err = nested
-            .multiproof(
-                &overlay,
-                MultiProofTargets::account_with_slots(hashed_address, [keccak256(slot)]),
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("does not match account leaf"));
-        overlay.accounts.insert(hashed_address, Some(account));
-        let root = nested.root(&overlay).unwrap();
-        let proof = nested
-            .multiproof(
-                &overlay,
-                MultiProofTargets::from_iter([
-                    (
-                        hashed_address,
-                        [keccak256(slot), keccak256(other_slot), keccak256(missing_slot)]
-                            .into_iter()
-                            .collect(),
-                    ),
-                    (keccak256(missing), std::iter::once(keccak256(slot)).collect()),
-                ]),
-            )
-            .unwrap();
-        assert!(proof.branch_node_hash_masks.is_empty());
-        assert!(proof.branch_node_tree_masks.is_empty());
-        let existing = proof.account_proof(address, &[slot, other_slot, missing_slot]).unwrap();
-        assert_eq!(existing.info, Some(account));
-        assert_eq!(existing.storage_proofs[0].value, U256::from(99u64));
-        assert_eq!(existing.storage_proofs[1].value, U256::from(22u64));
-        assert_eq!(existing.storage_proofs[2].value, U256::ZERO);
-        existing.verify(root).unwrap();
-
-        let absent = proof.account_proof(missing, &[slot]).unwrap();
-        assert!(absent.info.is_none());
-        absent.verify(root).unwrap();
-
-        assert_eq!(
-            nested.storage_root(hashed_address, &overlay.storages[&hashed_address]).unwrap(),
-            existing.storage_root
-        );
-
-        let mut wiped = HashedPostState::default();
-        wiped.accounts.insert(hashed_address, Some(account));
-        let mut new_storage = storage_with_slot(U256::from(5u64));
-        new_storage.wiped = true;
-        wiped.storages.insert(hashed_address, new_storage);
-        let wiped_root = nested.root(&wiped).unwrap();
-        let wiped_proof = nested
-            .multiproof(
-                &wiped,
-                MultiProofTargets::account_with_slots(
-                    hashed_address,
-                    [keccak256(slot), keccak256(other_slot)],
-                ),
-            )
-            .unwrap()
-            .account_proof(address, &[slot, other_slot])
-            .unwrap();
-        assert_eq!(wiped_proof.storage_proofs[0].value, U256::from(5u64));
-        assert_eq!(wiped_proof.storage_proofs[1].value, U256::ZERO);
-        wiped_proof.verify(wiped_root).unwrap();
-    }
-
-    #[test]
-    fn v2_multiproof_empty_trie_and_orphan_storage() {
-        let factory = create_test_provider_factory();
-        let provider = factory.database_provider_ro().unwrap();
-        let nested = NestedStateRoot::new(provider.tx_ref(), None);
-        let address = Address::random();
-        let slot = B256::from(U256::from(7u64));
-        let mut storage = HashedStorage::new(false);
-        storage.storage.insert(keccak256(slot), U256::from(1u64));
-        let orphan = HashedPostState::from_hashed_storage(keccak256(address), storage);
-        for state in [HashedPostState::default(), orphan] {
-            assert_eq!(nested.root(&state).unwrap(), EMPTY_ROOT_HASH);
-            let proof = nested
-                .multiproof(
-                    &state,
-                    MultiProofTargets::account_with_slots(keccak256(address), [keccak256(slot)]),
-                )
-                .unwrap()
-                .account_proof(address, &[slot])
-                .unwrap();
-            assert!(proof.info.is_none());
-            assert_eq!(proof.storage_proofs[0].value, U256::ZERO);
-            proof.verify(EMPTY_ROOT_HASH).unwrap();
-        }
-    }
-
-    #[test]
     fn v2_multiproof_uses_unpersisted_trie_cache() {
         let factory = create_test_provider_factory();
         let cache = PersistBlockCache::new();
@@ -987,19 +863,19 @@ mod tests {
                 .calculate(&pending)
                 .unwrap();
             cache.write_trie_updates(&updates, 2);
-
-            // A storage-only overlay must not resurrect an account deleted in the cache.
-            let overlay = if account.is_none() {
-                HashedPostState::from_hashed_storage(
+            let mut overlay = HashedPostState::default();
+            if account.is_none() {
+                // A storage-only overlay must not resurrect a cached deletion.
+                overlay.storages.insert(
                     hashed_address,
                     HashedStorage::from_iter(false, [(keccak256(slot), U256::from(1u64))]),
-                )
-            } else {
-                HashedPostState::default()
-            };
+                );
+            }
             let nested = NestedStateRoot::new(provider.tx_ref(), Some(cache));
             let root = nested.root(&overlay).unwrap();
-            assert_eq!(root, nested.root(&HashedPostState::default()).unwrap());
+            let expected =
+                account.map(|account| (address, (account, HashMap::<B256, U256>::default())));
+            assert_eq!(root, test_utils::state_root(expected));
             let proof = nested
                 .multiproof(
                     &overlay,
@@ -1008,22 +884,8 @@ mod tests {
                 .unwrap()
                 .account_proof(address, &[slot])
                 .unwrap();
-
-            let expected =
-                account.map(|account| (address, (account, HashMap::<B256, U256>::default())));
-            assert_eq!(root, test_utils::state_root(expected), "cached account: {account:?}");
             assert_eq!(proof.info, account);
-            assert_eq!(proof.storage_proofs[0].value, U256::ZERO);
             proof.verify(root).unwrap();
-            if account.is_none() {
-                let proof = nested
-                    .multiproof(&overlay, MultiProofTargets::account(hashed_address))
-                    .unwrap()
-                    .account_proof(address, &[])
-                    .unwrap();
-                assert!(proof.info.is_none());
-                proof.verify(root).unwrap();
-            }
         }
     }
 

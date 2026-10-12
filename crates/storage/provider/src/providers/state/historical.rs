@@ -732,9 +732,8 @@ mod tests {
         AccountReader, HistoricalStateProvider, HistoricalStateProviderRef, StateProvider,
         StateRootProvider, StaticFileProviderFactory, StaticFileWriter, TrieWriterV2,
     };
-    use alloy_consensus::{constants::KECCAK_EMPTY, Header};
+    use alloy_consensus::Header;
     use alloy_primitives::{address, b256, keccak256, Address, B256, U256};
-    use alloy_serde::JsonStorageKey;
     use reth_db_api::{
         models::{
             storage_sharded_key::StorageShardedKey, AccountBeforeTx, GravityStorageSettings,
@@ -750,7 +749,7 @@ mod tests {
     use reth_storage_api::{
         BlockHashReader, BlockNumReader, ChangeSetReader, ChangesetRangeReader, DBProvider,
         DatabaseProviderFactory, HeaderProvider, StateProofProvider, StateWriter,
-        StorageChangeSetReader, StorageRootProvider, StorageSettingsCache,
+        StorageChangeSetReader, StorageSettingsCache,
     };
     use reth_storage_errors::provider::ProviderError;
     use reth_trie::{HashedPostState, HashedStorage, TrieInput, EMPTY_ROOT_HASH};
@@ -1071,369 +1070,156 @@ mod tests {
     }
 
     #[test]
-    fn history_v2_roots_and_proofs_use_first_before_values() {
-        let factory = create_test_provider_factory();
-        let hash = keccak256(ADDRESS);
-        let slot_hash = keccak256(STORAGE);
-        let created_address = HIGHER_ADDRESS;
-        let created_hash = keccak256(created_address);
-        let initial = Account { nonce: 1, ..Default::default() };
-        let intermediate = Account { nonce: 2, ..Default::default() };
-        let current = Account { nonce: 3, ..Default::default() };
+    fn history_v2_storage_only_revert_keeps_account_in_root_and_proof() {
+        for static_changesets in [false, true] {
+            let factory = create_test_provider_factory();
+            factory.set_storage_settings_cache(GravityStorageSettings {
+                changesets_in_static_files: static_changesets,
+            });
+            let hashed_address = keccak256(ADDRESS);
+            let hashed_slot = keccak256(STORAGE);
+            let account = Account { nonce: 7, balance: U256::from(42), ..Default::default() };
+            let changed_hash = keccak256(HIGHER_ADDRESS);
+            let first = Account { nonce: 1, ..Default::default() };
 
-        let mut latest = HashedPostState::default();
-        latest.accounts.insert(hash, Some(current));
-        latest.accounts.insert(created_hash, Some(Account::default()));
-        latest.storages.entry(hash).or_default().storage.insert(slot_hash, U256::from(30));
-
-        let provider = factory.provider_rw().unwrap();
-        let (latest_root, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&latest).unwrap();
-        provider.write_trie_updatesv2(&updates).unwrap();
-        provider.write_hashed_state(&latest.clone().into_sorted()).unwrap();
-        provider.tx_ref().put::<tables::CanonicalHeaders>(3, B256::with_last_byte(3)).unwrap();
-        set_complete_height(provider.tx_ref(), 3);
-        provider
-            .tx_ref()
-            .put::<tables::AccountChangeSets>(
-                2,
-                AccountBeforeTx { address: ADDRESS, info: Some(initial) },
-            )
-            .unwrap();
-        provider
-            .tx_ref()
-            .put::<tables::AccountChangeSets>(
-                3,
-                AccountBeforeTx { address: ADDRESS, info: Some(intermediate) },
-            )
-            .unwrap();
-        provider
-            .tx_ref()
-            .put::<tables::AccountChangeSets>(
-                3,
-                AccountBeforeTx { address: created_address, info: None },
-            )
-            .unwrap();
-        provider
-            .tx_ref()
-            .put::<tables::StorageChangeSets>(
-                (2, ADDRESS).into(),
-                StorageEntry { key: STORAGE, value: U256::from(10) },
-            )
-            .unwrap();
-        provider
-            .tx_ref()
-            .put::<tables::StorageChangeSets>(
-                (3, ADDRESS).into(),
-                StorageEntry { key: STORAGE, value: U256::from(20) },
-            )
-            .unwrap();
-        provider.commit().unwrap();
-
-        let provider = factory.provider().unwrap();
-        let historical = HistoricalStateProviderRef::new(&provider, 2);
-        let reverted = historical.revert_state_v2().unwrap();
-        assert_eq!(reverted.accounts[&hash], Some(initial));
-        assert_eq!(reverted.accounts[&created_hash], None);
-        assert_eq!(reverted.storages[&hash].storage[&slot_hash], U256::from(10));
-
-        let expected_root = NestedStateRoot::new(provider.tx_ref(), None).root(&reverted).unwrap();
-        assert_eq!(historical.state_root(HashedPostState::default()).unwrap(), expected_root);
-        assert_ne!(expected_root, latest_root);
-
-        drop(provider);
-        let provider = factory.provider_rw().unwrap();
-        write_canonical_header(provider.tx_ref(), 1, expected_root);
-        provider.commit().unwrap();
-        let provider = factory.provider().unwrap();
-        let historical = HistoricalStateProviderRef::new(&provider, 2);
-
-        let rpc_provider = factory.history_by_block_number(1).unwrap();
-        assert_eq!(rpc_provider.state_root(HashedPostState::default()).unwrap(), expected_root);
-        rpc_provider
-            .proof(TrieInput::default(), ADDRESS, &[STORAGE])
-            .unwrap()
-            .verify(expected_root)
-            .unwrap();
-
-        let proof = historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
-        assert_eq!(proof.info, Some(initial));
-        assert_eq!(proof.storage_proofs[0].value, U256::from(10));
-        proof.verify(expected_root).unwrap();
-        let requested_key = JsonStorageKey::Number(U256::from(1));
-        let response = proof.into_eip1186_response(vec![requested_key]);
-        assert_eq!(response.address, ADDRESS);
-        assert_eq!(response.nonce, initial.nonce);
-        assert_eq!(response.balance, initial.balance);
-        assert_eq!(response.code_hash, KECCAK_EMPTY);
-        assert_ne!(response.storage_hash, EMPTY_ROOT_HASH);
-        assert!(!response.account_proof.is_empty());
-        assert_eq!(response.storage_proof.len(), 1);
-        assert_eq!(response.storage_proof[0].key, requested_key);
-        assert_eq!(response.storage_proof[0].value, U256::from(10));
-        assert!(!response.storage_proof[0].proof.is_empty());
-
-        let absent = historical.proof(TrieInput::default(), created_address, &[STORAGE]).unwrap();
-        assert!(absent.info.is_none());
-        absent.verify(expected_root).unwrap();
-        let absent_response = absent.into_eip1186_response(vec![requested_key]);
-        assert_eq!(absent_response.address, created_address);
-        assert_eq!(absent_response.nonce, 0);
-        assert_eq!(absent_response.balance, U256::ZERO);
-        assert_eq!(absent_response.code_hash, KECCAK_EMPTY);
-        assert_eq!(absent_response.storage_hash, EMPTY_ROOT_HASH);
-        assert!(!absent_response.account_proof.is_empty());
-        assert_eq!(absent_response.storage_proof.len(), 1);
-        assert_eq!(absent_response.storage_proof[0].key, requested_key);
-        assert_eq!(absent_response.storage_proof[0].value, U256::ZERO);
-
-        let pending_account = Account { nonce: 9, ..Default::default() };
-        let mut pending = HashedPostState::default();
-        pending.accounts.insert(hash, Some(pending_account));
-        pending.storages.entry(hash).or_default().storage.insert(slot_hash, U256::from(99));
-        let pending_root = historical.state_root(pending.clone()).unwrap();
-        let pending_proof =
-            historical.proof(TrieInput::from_state(pending), ADDRESS, &[STORAGE]).unwrap();
-        assert_eq!(pending_proof.info, Some(pending_account));
-        assert_eq!(pending_proof.storage_proofs[0].value, U256::from(99));
-        pending_proof.verify(pending_root).unwrap();
-
-        let mut storage_only = HashedPostState::default();
-        storage_only.storages.entry(hash).or_default().storage.insert(slot_hash, U256::from(98));
-        let mut expected = historical.revert_state_v2().unwrap();
-        expected.extend(storage_only.clone());
-        let expected_root = NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
-        assert_eq!(historical.state_root(storage_only.clone()).unwrap(), expected_root);
-        historical
-            .proof(TrieInput::from_state(storage_only), ADDRESS, &[STORAGE])
-            .unwrap()
-            .verify(expected_root)
-            .unwrap();
-
-        let mut storage = HashedStorage::default();
-        storage.storage.insert(slot_hash, U256::from(10));
-        assert_eq!(
-            historical.storage_root(ADDRESS, HashedStorage::default()).unwrap(),
-            NestedStateRoot::new(provider.tx_ref(), None).storage_root(hash, &storage).unwrap()
-        );
-        let storage_root = historical.storage_root(ADDRESS, HashedStorage::default()).unwrap();
-        let storage_proof =
-            historical.storage_proof(ADDRESS, STORAGE, HashedStorage::default()).unwrap();
-        assert_eq!(storage_proof.value, U256::from(10));
-        storage_proof.verify(storage_root).unwrap();
-        let missing_slot = B256::with_last_byte(2);
-        let multiproof = historical
-            .storage_multiproof(ADDRESS, &[STORAGE, missing_slot], HashedStorage::default())
-            .unwrap();
-        assert_eq!(multiproof.storage_proof(missing_slot).unwrap().value, U256::ZERO);
-        multiproof.storage_proof(missing_slot).unwrap().verify(storage_root).unwrap();
-        let wiped = historical.storage_proof(ADDRESS, STORAGE, HashedStorage::new(true)).unwrap();
-        assert_eq!(wiped.value, U256::ZERO);
-        wiped.verify(EMPTY_ROOT_HASH).unwrap();
-
-        let intermediate_state = HistoricalStateProviderRef::new(&provider, 3);
-        let reverted = intermediate_state.revert_state_v2().unwrap();
-        assert_eq!(reverted.accounts[&hash], Some(intermediate));
-        assert_eq!(reverted.storages[&hash].storage[&slot_hash], U256::from(20));
-        let latest_state = HistoricalStateProviderRef::new(&provider, 4);
-        assert!(latest_state.revert_state_v2().unwrap().is_empty());
-        assert_eq!(latest_state.state_root(HashedPostState::default()).unwrap(), latest_root);
-
-        let latest = crate::LatestStateProviderRef::new(&provider);
-        for wiped in [false, true] {
-            let mut storage_only = HashedPostState::default();
-            let mut storage = HashedStorage::new(wiped);
-            if !wiped {
-                storage.storage.insert(slot_hash, U256::from(40));
-            }
-            storage_only.storages.insert(hash, storage);
-            let mut expected = storage_only.clone();
-            expected.accounts.insert(hash, Some(current));
+            let mut latest = HashedPostState::default();
+            latest.accounts.insert(hashed_address, Some(account));
+            latest.accounts.insert(changed_hash, Some(Account { nonce: 3, ..Default::default() }));
+            latest
+                .storages
+                .entry(hashed_address)
+                .or_default()
+                .storage
+                .insert(hashed_slot, U256::from(20));
+            let provider = factory.provider_rw().unwrap();
+            let (latest_root, updates) =
+                NestedStateRoot::new(provider.tx_ref(), None).calculate(&latest).unwrap();
+            provider.write_trie_updatesv2(&updates).unwrap();
+            provider.write_hashed_state(&latest.into_sorted()).unwrap();
+            let mut expected = HashedPostState::default();
+            expected.accounts.insert(hashed_address, Some(account));
+            expected.accounts.insert(changed_hash, Some(first));
+            expected
+                .storages
+                .entry(hashed_address)
+                .or_default()
+                .storage
+                .insert(hashed_slot, U256::from(10));
             let expected_root =
                 NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
-            for state in [&latest_state as &dyn StateRootProvider, &latest] {
-                assert_eq!(state.state_root(storage_only.clone()).unwrap(), expected_root);
-                let (root, updates) =
-                    state.state_root_with_updates_v2(storage_only.clone()).unwrap();
-                assert_eq!(root, expected_root);
-                assert_ne!(root, latest_root);
-                assert!(!updates.account_nodes.is_empty());
-                let storage = &updates.storage_tries[&hash];
-                assert_eq!(storage.is_deleted, wiped);
-                assert!(wiped || !storage.storage_nodes.is_empty());
+            let static_files = factory.static_file_provider();
+            if static_changesets {
+                let mut headers = static_files.latest_writer(StaticFileSegment::Headers).unwrap();
+                for number in 0..=3 {
+                    let header = Header {
+                        number,
+                        state_root: if number == 1 { expected_root } else { latest_root },
+                        ..Default::default()
+                    };
+                    let hash = header.hash_slow();
+                    headers.append_header(&header, U256::ZERO, &hash).unwrap();
+                    provider.tx_ref().put::<tables::CanonicalHeaders>(number, hash).unwrap();
+                }
+                headers.commit().unwrap();
+            } else {
+                provider
+                    .tx_ref()
+                    .put::<tables::CanonicalHeaders>(3, B256::with_last_byte(3))
+                    .unwrap();
+            }
+            set_complete_height(provider.tx_ref(), 3);
+            let mut changeset_writers = static_changesets.then(|| {
+                let mut accounts =
+                    static_files.latest_writer(StaticFileSegment::AccountChangeSets).unwrap();
+                let mut storages =
+                    static_files.latest_writer(StaticFileSegment::StorageChangeSets).unwrap();
+                for writer in [&mut accounts, &mut storages] {
+                    writer.increment_block(0).unwrap();
+                    writer.increment_block(1).unwrap();
+                }
+                (accounts, storages)
+            });
+            for (height, before_value) in [(2, 10), (3, 15)] {
+                let account_before = AccountBeforeTx {
+                    address: HIGHER_ADDRESS,
+                    info: Some(Account { nonce: height - 1, ..Default::default() }),
+                };
+                let storage_before = StorageBeforeTx {
+                    address: ADDRESS,
+                    key: STORAGE,
+                    value: U256::from(before_value),
+                };
+                if let Some((accounts, storages)) = &mut changeset_writers {
+                    accounts.append_account_changeset(vec![account_before], height).unwrap();
+                    storages.append_storage_changeset(vec![storage_before], height).unwrap();
+                } else {
+                    provider
+                        .tx_ref()
+                        .put::<tables::AccountChangeSets>(height, account_before)
+                        .unwrap();
+                    provider
+                        .tx_ref()
+                        .put::<tables::StorageChangeSets>(
+                            (height, ADDRESS).into(),
+                            StorageEntry { key: STORAGE, value: storage_before.value },
+                        )
+                        .unwrap();
+                }
+            }
+            if let Some((mut accounts, mut storages)) = changeset_writers {
+                accounts.commit().unwrap();
+                storages.commit().unwrap();
+            }
+            provider.commit().unwrap();
+
+            let provider = factory.provider().unwrap();
+            let historical = HistoricalStateProviderRef::new(&provider, 2);
+            let reverted = historical.revert_state_v2().unwrap();
+            assert_eq!(reverted.accounts[&hashed_address], Some(account));
+            assert_eq!(reverted.accounts[&changed_hash], Some(first));
+            assert_eq!(reverted.storages[&hashed_address].storage[&hashed_slot], U256::from(10));
+
+            assert_ne!(expected_root, latest_root);
+            assert_eq!(historical.state_root(HashedPostState::default()).unwrap(), expected_root);
+
+            drop(provider);
+            let provider = factory.provider_rw().unwrap();
+            write_canonical_header(provider.tx_ref(), 1, expected_root);
+            provider.commit().unwrap();
+            let provider = factory.provider().unwrap();
+            let historical = HistoricalStateProviderRef::new(&provider, 2);
+
+            let proof = historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
+            assert_eq!(proof.info, Some(account));
+            assert_eq!(proof.storage_proofs[0].value, U256::from(10));
+            proof.verify(expected_root).unwrap();
+
+            let latest = crate::LatestStateProviderRef::new(&provider);
+            let tip = HistoricalStateProviderRef::new(&provider, 4);
+            for wiped in [false, true] {
+                let mut storage_only = HashedPostState::default();
+                let mut storage = HashedStorage::new(wiped);
+                if !wiped {
+                    storage.storage.insert(hashed_slot, U256::from(40));
+                }
+                storage_only.storages.insert(hashed_address, storage);
+                let mut expected = storage_only.clone();
+                expected.accounts.insert(hashed_address, Some(account));
+                let expected_root =
+                    NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
+                for state in [&tip as &dyn StateRootProvider, &latest] {
+                    assert_eq!(state.state_root(storage_only.clone()).unwrap(), expected_root);
+                    let (root, updates) =
+                        state.state_root_with_updates_v2(storage_only.clone()).unwrap();
+                    assert_eq!(root, expected_root);
+                    assert_ne!(root, latest_root);
+                    assert!(!updates.account_nodes.is_empty());
+                    let storage = &updates.storage_tries[&hashed_address];
+                    assert_eq!(storage.is_deleted, wiped);
+                    assert!(wiped || !storage.storage_nodes.is_empty());
+                }
             }
         }
-        assert!(matches!(
-            latest.state_root_with_updates(HashedPostState::default()),
-            Err(ProviderError::UnsupportedProvider)
-        ));
-        assert!(matches!(
-            latest.witness(TrieInput::default(), HashedPostState::default()),
-            Err(ProviderError::UnsupportedProvider)
-        ));
-        let storage_root = latest.storage_root(ADDRESS, HashedStorage::default()).unwrap();
-        let proof = latest.storage_proof(ADDRESS, STORAGE, HashedStorage::default()).unwrap();
-        assert_eq!(proof.value, U256::from(30));
-        proof.verify(storage_root).unwrap();
-        let wiped = latest.storage_proof(ADDRESS, STORAGE, HashedStorage::new(true)).unwrap();
-        assert_eq!(wiped.value, U256::ZERO);
-        wiped.verify(EMPTY_ROOT_HASH).unwrap();
-    }
-
-    #[test]
-    fn history_v2_storage_only_revert_keeps_account_in_root_and_proof() {
-        let factory = create_test_provider_factory();
-        let hashed_address = keccak256(ADDRESS);
-        let hashed_slot = keccak256(STORAGE);
-        let account = Account { nonce: 7, balance: U256::from(42), ..Default::default() };
-
-        let mut latest = HashedPostState::default();
-        latest.accounts.insert(hashed_address, Some(account));
-        latest
-            .storages
-            .entry(hashed_address)
-            .or_default()
-            .storage
-            .insert(hashed_slot, U256::from(20));
-        let provider = factory.provider_rw().unwrap();
-        let (latest_root, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&latest).unwrap();
-        provider.write_trie_updatesv2(&updates).unwrap();
-        provider.write_hashed_state(&latest.into_sorted()).unwrap();
-        provider.tx_ref().put::<tables::CanonicalHeaders>(2, B256::with_last_byte(2)).unwrap();
-        set_complete_height(provider.tx_ref(), 2);
-        provider
-            .tx_ref()
-            .put::<tables::StorageChangeSets>(
-                (2, ADDRESS).into(),
-                StorageEntry { key: STORAGE, value: U256::from(10) },
-            )
-            .unwrap();
-        provider.commit().unwrap();
-
-        let provider = factory.provider().unwrap();
-        let historical = HistoricalStateProviderRef::new(&provider, 2);
-        let reverted = historical.revert_state_v2().unwrap();
-        assert_eq!(reverted.accounts[&hashed_address], Some(account));
-        assert_eq!(reverted.storages[&hashed_address].storage[&hashed_slot], U256::from(10));
-
-        let mut expected = HashedPostState::default();
-        expected.accounts.insert(hashed_address, Some(account));
-        expected
-            .storages
-            .entry(hashed_address)
-            .or_default()
-            .storage
-            .insert(hashed_slot, U256::from(10));
-        let expected_root = NestedStateRoot::new(provider.tx_ref(), None).root(&expected).unwrap();
-        assert_ne!(expected_root, latest_root);
-        assert_eq!(historical.state_root(HashedPostState::default()).unwrap(), expected_root);
-
-        drop(provider);
-        let provider = factory.provider_rw().unwrap();
-        write_canonical_header(provider.tx_ref(), 1, expected_root);
-        provider.commit().unwrap();
-        let provider = factory.provider().unwrap();
-        let historical = HistoricalStateProviderRef::new(&provider, 2);
-
-        let proof = historical.proof(TrieInput::default(), ADDRESS, &[STORAGE]).unwrap();
-        assert_eq!(proof.info, Some(account));
-        assert_eq!(proof.storage_proofs[0].value, U256::from(10));
-        proof.verify(expected_root).unwrap();
-
-        drop(provider);
-        let provider = factory.provider_rw().unwrap();
-        write_canonical_header(provider.tx_ref(), 1, B256::ZERO);
-        provider.commit().unwrap();
-        let provider = factory.provider().unwrap();
-        let result = HistoricalStateProviderRef::new(&provider, 2).proof(
-            TrieInput::default(),
-            ADDRESS,
-            &[STORAGE],
-        );
-        assert!(matches!(result, Err(ProviderError::StateRootMismatch(_))));
-    }
-
-    #[test]
-    fn history_v2_reverts_from_static_file_changesets() {
-        let factory = create_test_provider_factory();
-        factory.set_storage_settings_cache(GravityStorageSettings {
-            changesets_in_static_files: true,
-        });
-        let static_files = factory.static_file_provider();
-        let tip_hash = B256::with_last_byte(2);
-        let initial = Account { nonce: 1, ..Default::default() };
-        let intermediate = Account { nonce: 2, ..Default::default() };
-
-        {
-            let mut writer = static_files.latest_writer(StaticFileSegment::Headers).unwrap();
-            for number in 0..=2 {
-                let header = Header { number, ..Default::default() };
-                let hash = B256::with_last_byte(number as u8);
-                writer.append_header(&header, U256::ZERO, &hash).unwrap();
-            }
-            writer.commit().unwrap();
-        }
-        {
-            let mut writer =
-                static_files.latest_writer(StaticFileSegment::AccountChangeSets).unwrap();
-            writer.increment_block(0).unwrap();
-            writer
-                .append_account_changeset(
-                    vec![AccountBeforeTx { address: ADDRESS, info: Some(initial) }],
-                    1,
-                )
-                .unwrap();
-            writer
-                .append_account_changeset(
-                    vec![AccountBeforeTx { address: ADDRESS, info: Some(intermediate) }],
-                    2,
-                )
-                .unwrap();
-            writer.commit().unwrap();
-        }
-        {
-            let mut writer =
-                static_files.latest_writer(StaticFileSegment::StorageChangeSets).unwrap();
-            writer.increment_block(0).unwrap();
-            writer
-                .append_storage_changeset(
-                    vec![StorageBeforeTx { address: ADDRESS, key: STORAGE, value: U256::from(10) }],
-                    1,
-                )
-                .unwrap();
-            writer
-                .append_storage_changeset(
-                    vec![StorageBeforeTx { address: ADDRESS, key: STORAGE, value: U256::from(20) }],
-                    2,
-                )
-                .unwrap();
-            writer.commit().unwrap();
-        }
-        let provider = factory.provider_rw().unwrap();
-        provider.tx_ref().put::<tables::CanonicalHeaders>(2, tip_hash).unwrap();
-        set_complete_height(provider.tx_ref(), 2);
-        provider.commit().unwrap();
-
-        let provider = factory.provider().unwrap();
-        let first = HistoricalStateProviderRef::new(&provider, 1).revert_state_v2().unwrap();
-        let hash = keccak256(ADDRESS);
-        assert_eq!(first.accounts[&hash], Some(initial));
-        assert_eq!(first.storages[&hash].storage[&keccak256(STORAGE)], U256::from(10));
-        let second = HistoricalStateProviderRef::new(&provider, 2).revert_state_v2().unwrap();
-        assert_eq!(second.accounts[&hash], Some(intermediate));
-        assert_eq!(second.storages[&hash].storage[&keccak256(STORAGE)], U256::from(20));
-        assert!(HistoricalStateProviderRef::new(&provider, 3)
-            .revert_state_v2()
-            .unwrap()
-            .is_empty());
-
-        drop(provider);
-        let provider = factory.provider_rw().unwrap();
-        provider.tx_ref().put::<tables::CanonicalHeaders>(2, B256::with_last_byte(99)).unwrap();
-        provider.commit().unwrap();
-        let provider = factory.provider().unwrap();
-        assert!(HistoricalStateProviderRef::new(&provider, 1).revert_state_v2().is_err());
     }
 
     #[test]

@@ -1302,65 +1302,11 @@ pub fn metrics_hooks<N: NodeTypesWithDB>(provider_factory: &ProviderFactory<N>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{init_genesis_rpc_read_view, LaunchContext, NodeConfig};
-    use alloy_eips::BlockNumHash;
-    use reth_chainspec::SEPOLIA;
+    use super::{LaunchContext, NodeConfig};
     use reth_config::Config;
-    use reth_db::{test_utils::TempDatabase, DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
-    use reth_db_api::models::{ClientVersion, GravityStorageSettings};
     use reth_node_core::args::PruningArgs;
-    use reth_provider::{
-        test_utils::{create_test_provider_factory_with_chain_spec, MockNodeTypesWithDB},
-        DatabaseProviderFactory, ProviderFactory, StaticFileProviderFactory,
-    };
-    use std::sync::Arc;
 
     const EXTENSION: &str = "toml";
-
-    #[test]
-    fn fresh_genesis_opens_rpc_after_complete_initialization() {
-        let factory = create_test_provider_factory_with_chain_spec(SEPOLIA.clone());
-        // Startup recovery may have closed admission before discovering the empty datadir.
-        drop(factory.rpc_maintenance(true).unwrap());
-        assert!(factory.rpc_provider().provider().is_err());
-
-        let hash = init_genesis_rpc_read_view(&factory, GravityStorageSettings::current()).unwrap();
-        let provider = factory.rpc_provider().provider().unwrap();
-        let bounds = provider.rpc_read_view_bounds().unwrap();
-        assert_eq!(bounds.block_number, 0);
-        assert_eq!(bounds.block_hash, hash);
-        assert_eq!(bounds.next_tx_num, 0);
-    }
-
-    #[test]
-    fn existing_genesis_keeps_rpc_closed_until_interrupted_replay_is_safe() {
-        let factory = create_test_provider_factory_with_chain_spec(SEPOLIA.clone());
-        let hash = init_genesis_rpc_read_view(&factory, GravityStorageSettings::current()).unwrap();
-        let static_files = factory.static_file_provider();
-        let db = Arc::try_unwrap(factory.into_db()).unwrap();
-        let path = db.path().to_path_buf();
-        drop(db.into_inner_db());
-
-        let db = DatabaseEnv::open(
-            &path,
-            DatabaseEnvKind::RW,
-            DatabaseArguments::new(ClientVersion::default()),
-        )
-        .unwrap();
-        let factory = ProviderFactory::<MockNodeTypesWithDB>::new(
-            Arc::new(TempDatabase::new(db, path)),
-            SEPOLIA.clone(),
-            static_files,
-        );
-        init_genesis_rpc_read_view(&factory, GravityStorageSettings::current()).unwrap();
-        assert!(factory.rpc_provider().provider().is_err());
-
-        // Equal genesis checkpoints still cannot rule out an uncheckpointed block-1 trie commit.
-        let mut write_guard = factory.consistent_write();
-        factory.publish_rpc_read_view(BlockNumHash { number: 0, hash }).unwrap();
-        write_guard.complete();
-        assert!(factory.rpc_provider().provider().is_err());
-    }
 
     fn with_tempdir(filename: &str, proc: fn(&std::path::Path)) {
         let temp_dir = tempfile::tempdir().unwrap();

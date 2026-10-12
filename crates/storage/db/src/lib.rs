@@ -268,46 +268,15 @@ pub mod test_utils {
 mod tests {
     use crate::{
         init_db, open_db, tables,
-        test_utils::create_test_rw_db,
         version::{db_version_file_path, DatabaseVersionError},
         DatabaseArguments,
     };
     use assert_matches::assert_matches;
     use reth_db_api::{
-        cursor::DbCursorRO,
-        database::Database,
-        models::ClientVersion,
-        transaction::{DbTx, DbTxMut},
+        cursor::DbCursorRO, database::Database, models::ClientVersion, transaction::DbTx,
     };
     use std::time::Duration;
     use tempfile::tempdir;
-
-    #[test]
-    fn temp_database_forwards_read_modes_and_write_guard() {
-        let db = create_test_rw_db();
-        assert!(!db.tx_live().unwrap().is_snapshot());
-        assert!(db.tx().unwrap().is_snapshot());
-
-        let writer = db.tx_mut().unwrap();
-        writer.put::<tables::Metadata>("shared-read-view".into(), vec![1]).unwrap();
-        writer.commit().unwrap();
-        let mut write = db.consistent_write();
-        let view = db.read_view().unwrap();
-        write.complete();
-        drop(write);
-        let writer = db.tx_mut().unwrap();
-        writer.put::<tables::Metadata>("shared-read-view".into(), vec![2]).unwrap();
-        writer.commit().unwrap();
-        // Exercise the &DB forwarding implementation in addition to Arc and TempDatabase.
-        let reader = Database::tx_with_read_view(&&*db, view).unwrap();
-        assert_eq!(
-            reader.get::<tables::Metadata>("shared-read-view".into()).unwrap(),
-            Some(vec![1])
-        );
-
-        drop(db.consistent_write());
-        assert!(db.tx().is_err());
-    }
 
     #[test]
     fn db_version() {

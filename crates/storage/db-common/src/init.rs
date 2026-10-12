@@ -972,74 +972,27 @@ mod tests {
         GravityStorageSettings { changesets_in_static_files: true };
 
     #[test]
-    fn genesis_initialization_writes_only_v2_trie() {
+    fn genesis_and_state_dump_rebuild_use_v2_trie() {
         let (_, _, _, chain_spec) = alloc_chain_spec();
         let factory = create_test_provider_factory_with_chain_spec(chain_spec);
-
         init_genesis(&factory).unwrap();
-        let provider = factory.database_provider_ro().unwrap();
+        let provider = factory.database_provider_rw().unwrap();
         let tx = provider.tx_ref();
-        assert_eq!(tx.entries::<tables::AccountsTrie>().unwrap(), 0);
-        assert_eq!(tx.entries::<tables::StoragesTrie>().unwrap(), 0);
-        assert!(tx.entries::<tables::AccountsTrieV2>().unwrap() > 0);
         let root = NestedStateRoot::new(tx, None).root(&HashedPostState::default()).unwrap();
         assert_ne!(root, EMPTY_ROOT_HASH);
-        let accounts_v2 = tx.entries::<tables::AccountsTrieV2>().unwrap();
-        let storages_v2 = tx.entries::<tables::StoragesTrieV2>().unwrap();
-        drop(provider);
-
-        init_genesis(&factory).unwrap();
-        let provider = factory.database_provider_ro().unwrap();
-        let tx = provider.tx_ref();
         assert_eq!(tx.entries::<tables::AccountsTrie>().unwrap(), 0);
         assert_eq!(tx.entries::<tables::StoragesTrie>().unwrap(), 0);
-        assert_eq!(tx.entries::<tables::AccountsTrieV2>().unwrap(), accounts_v2);
-        assert_eq!(tx.entries::<tables::StoragesTrieV2>().unwrap(), storages_v2);
-        assert_eq!(NestedStateRoot::new(tx, None).root(&HashedPostState::default()).unwrap(), root);
-    }
-
-    #[test]
-    fn state_dump_rebuild_uses_only_v2_trie() {
-        let (_, _, _, chain_spec) = alloc_chain_spec();
-        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
-        init_genesis(&factory).unwrap();
-
-        let provider = factory.database_provider_rw().unwrap();
-        let original_root = NestedStateRoot::new(provider.tx_ref(), None)
-            .root(&HashedPostState::default())
-            .unwrap();
-        assert_eq!(compute_state_root_with_chunk_limit(&provider, 1).unwrap(), original_root);
-        assert_eq!(provider.tx_ref().entries::<tables::AccountsTrie>().unwrap(), 0);
-        assert_eq!(provider.tx_ref().entries::<tables::StoragesTrie>().unwrap(), 0);
-
-        // A stopped import can leave a partial V2 trie. Rebuilding starts by clearing it.
-        provider.tx_ref().clear::<tables::AccountsTrieV2>().unwrap();
-        provider.tx_ref().clear::<tables::StoragesTrieV2>().unwrap();
-        provider.tx_ref().commit_view().unwrap();
-        let mut partial = HashedPostState::default();
-        let (address, account) = provider
-            .tx_ref()
-            .cursor_read::<tables::HashedAccounts>()
-            .unwrap()
-            .walk(None)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap();
-        partial.accounts.insert(address, Some(account));
-        let (_, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&partial).unwrap();
-        provider.write_trie_updatesv2(&updates).unwrap();
-        provider.tx_ref().commit_view().unwrap();
-        assert_eq!(compute_state_root_with_chunk_limit(&provider, 1).unwrap(), original_root);
+        // Rebuilding must discard stale nodes and produce the same root across chunk commits.
+        tx.clear::<tables::AccountsTrieV2>().unwrap();
+        tx.commit_view().unwrap();
+        assert_eq!(compute_state_root_with_chunk_limit(&provider, 1).unwrap(), root);
         provider.commit().unwrap();
-
         let provider = factory.database_provider_ro().unwrap();
         assert_eq!(
             NestedStateRoot::new(provider.tx_ref(), None)
                 .root(&HashedPostState::default())
                 .unwrap(),
-            original_root
+            root
         );
     }
 

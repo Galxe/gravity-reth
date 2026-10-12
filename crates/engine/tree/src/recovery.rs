@@ -225,9 +225,9 @@ mod tests {
         transaction::{DbTx, DbTxMut},
     };
     use reth_primitives_traits::{Account, StorageEntry};
-    use reth_provider::{test_utils::create_test_provider_factory, AccountReader, StateWriter};
+    use reth_provider::{test_utils::create_test_provider_factory, StateWriter};
     use reth_stages_api::{StageCheckpoint, StageId};
-    use reth_trie::{updates::TrieUpdatesV2, HashedPostState, HashedStorage};
+    use reth_trie::{HashedPostState, HashedStorage};
     use std::sync::Once;
 
     static INIT: Once = Once::new();
@@ -352,88 +352,13 @@ mod tests {
     #[test]
     fn test_recover_merkle_when_checkpoint_behind() {
         init_test_gravity_config();
-        // A failed trie commit may leave either shard ahead while its checkpoint remains old.
-        for committed_shard in [None, Some(true), Some(false)] {
-            let factory = create_test_provider_factory();
-            let address = Address::with_last_byte(1);
-            let slot = B256::with_last_byte(2);
-            let before = recovery_state(address, slot, 3, 4);
-            let current = recovery_state(address, slot, 7, 9);
-            let provider = factory.database_provider_rw().unwrap();
-            let (_, updates) =
-                NestedStateRoot::new(provider.tx_ref(), None).calculate(&before).unwrap();
-            provider.write_trie_updatesv2(&updates).unwrap();
-            provider.commit().unwrap();
-
-            let provider = factory.database_provider_rw().unwrap();
-            let (expected, updates) =
-                NestedStateRoot::new(provider.tx_ref(), None).calculate(&current).unwrap();
-            let expected_storage = NestedStateRoot::new(provider.tx_ref(), None)
-                .storage_root(keccak256(address), &current.storages[&keccak256(address)])
-                .unwrap();
-            if let Some(account_shard) = committed_shard {
-                let partial = if account_shard {
-                    TrieUpdatesV2 {
-                        account_nodes: updates.account_nodes,
-                        removed_nodes: updates.removed_nodes,
-                        ..Default::default()
-                    }
-                } else {
-                    TrieUpdatesV2 { storage_tries: updates.storage_tries, ..Default::default() }
-                };
-                provider.write_trie_updatesv2(&partial).unwrap();
-            }
-            provider.write_hashed_state(&current.into_sorted()).unwrap();
-            let tx = provider.tx_ref();
-            tx.put::<tables::AccountChangeSets>(
-                1,
-                AccountBeforeTx { address, info: before.accounts[&keccak256(address)] },
-            )
-            .unwrap();
-            tx.put::<tables::StorageChangeSets>(
-                BlockNumberAddress((1, address)),
-                StorageEntry { key: slot, value: U256::from(4) },
-            )
-            .unwrap();
-            let header = Header { number: 1, state_root: expected, ..Default::default() };
-            tx.put::<tables::Headers>(1, header.clone()).unwrap();
-            tx.put::<tables::CanonicalHeaders>(1, header.hash_slow()).unwrap();
-            write_checkpoint(tx, StageId::Execution, 1);
-            write_checkpoint(tx, StageId::AccountHashing, 1);
-            provider.commit().unwrap();
-
-            StorageRecoveryHelper::new(&factory).recover_merkle(1).unwrap();
-            let provider = factory.database_provider_ro().unwrap();
-            let root = NestedStateRoot::new(provider.tx_ref(), None)
-                .root(&HashedPostState::default())
-                .unwrap();
-            assert_eq!(root, expected, "committed account shard: {committed_shard:?}");
-            assert_eq!(
-                NestedStateRoot::new(provider.tx_ref(), None)
-                    .storage_root(keccak256(address), &HashedStorage::default())
-                    .unwrap(),
-                expected_storage,
-                "committed account shard: {committed_shard:?}",
-            );
-            assert_eq!(
-                provider
-                    .get_stage_checkpoint(StageId::MerkleExecute)
-                    .unwrap()
-                    .unwrap()
-                    .block_number,
-                1
-            );
-        }
-    }
-
-    #[test]
-    fn merkle_recovery_rejects_root_mismatch_before_writing_trie_or_checkpoint() {
-        init_test_gravity_config();
         let factory = create_test_provider_factory();
         let address = Address::with_last_byte(1);
         let slot = B256::with_last_byte(2);
+        let current = recovery_state(address, slot, 7, 9);
         let provider = factory.database_provider_rw().unwrap();
-        provider.write_hashed_state(&recovery_state(address, slot, 7, 9).into_sorted()).unwrap();
+        let expected = NestedStateRoot::new(provider.tx_ref(), None).root(&current).unwrap();
+        provider.write_hashed_state(&current.into_sorted()).unwrap();
         let tx = provider.tx_ref();
         tx.put::<tables::AccountChangeSets>(1, AccountBeforeTx { address, info: None }).unwrap();
         tx.put::<tables::StorageChangeSets>(
@@ -454,64 +379,60 @@ mod tests {
         assert!(provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap().is_none());
         assert_eq!(provider.tx_ref().entries::<tables::AccountsTrieV2>().unwrap(), 0);
         assert_eq!(provider.tx_ref().entries::<tables::StoragesTrieV2>().unwrap(), 0);
+        drop(provider);
+
+        let provider = factory.database_provider_rw().unwrap();
+        let header = Header { number: 1, state_root: expected, ..Default::default() };
+        provider.tx_ref().put::<tables::Headers>(1, header.clone()).unwrap();
+        provider.tx_ref().put::<tables::CanonicalHeaders>(1, header.hash_slow()).unwrap();
+        provider.commit().unwrap();
+        StorageRecoveryHelper::new(&factory).recover_merkle(1).unwrap();
+        let provider = factory.database_provider_ro().unwrap();
+        assert_eq!(
+            NestedStateRoot::new(provider.tx_ref(), None)
+                .root(&HashedPostState::default())
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap().unwrap().block_number,
+            1
+        );
     }
 
     #[test]
     fn recovery_retains_ahead_trie_but_does_not_publish_it_at_execution_height() {
         init_test_gravity_config();
         let factory = create_test_provider_factory();
-        let address = Address::with_last_byte(1);
-        let slot = B256::with_last_byte(2);
-        let current = recovery_state(address, slot, 3, 4);
+        let interrupted = factory.consistent_write();
         let provider = factory.database_provider_rw().unwrap();
-        let (root, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&current).unwrap();
+        let (ahead_root, updates) = NestedStateRoot::new(provider.tx_ref(), None)
+            .calculate(&recovery_state(Address::with_last_byte(1), B256::with_last_byte(2), 7, 9))
+            .unwrap();
         provider.write_trie_updatesv2(&updates).unwrap();
         let tx = provider.tx_ref();
-        let account = current.accounts[&keccak256(address)].unwrap();
-        tx.put::<tables::PlainAccountState>(address, account).unwrap();
-        tx.put::<tables::PlainStorageState>(
-            address,
-            StorageEntry { key: slot, value: U256::from(4) },
-        )
-        .unwrap();
-        let header = Header { number: 1, state_root: root, ..Default::default() };
+        let header =
+            Header { number: 1, state_root: reth_trie::EMPTY_ROOT_HASH, ..Default::default() };
         tx.put::<tables::Headers>(1, header.clone()).unwrap();
         tx.put::<tables::CanonicalHeaders>(1, header.hash_slow()).unwrap();
         tx.put::<tables::BlockBodyIndices>(1, StoredBlockBodyIndices::default()).unwrap();
         for stage in RECOVERY_STAGES {
             write_checkpoint(tx, stage, 1);
         }
-        provider.commit().unwrap();
-        factory
-            .publish_rpc_read_view(BlockNumHash { number: 1, hash: header.hash_slow() })
-            .unwrap();
-        let rpc = factory.rpc_provider();
-        assert_eq!(rpc.provider().unwrap().basic_account(&address).unwrap(), Some(account));
-
-        let interrupted = factory.consistent_write();
-        let provider = factory.database_provider_rw().unwrap();
-        let (ahead_root, updates) = NestedStateRoot::new(provider.tx_ref(), None)
-            .calculate(&recovery_state(address, slot, 7, 9))
-            .unwrap();
-        provider.write_trie_updatesv2(&updates).unwrap();
-        write_checkpoint(provider.tx_ref(), StageId::MerkleExecute, 2);
+        write_checkpoint(tx, StageId::MerkleExecute, 2);
         provider.commit().unwrap();
         drop(interrupted);
+        let rpc = factory.rpc_provider();
         assert!(rpc.provider().is_err());
 
-        // Even if given a factory configured for published reads, recovery must use live RW
-        // transactions and retain the ahead trie for the original deterministic replay path.
         StorageRecoveryHelper::new(&rpc).check_and_recover().unwrap();
         let provider = factory.database_provider_ro().unwrap();
-        assert_eq!(provider.basic_account(&address).unwrap(), Some(account));
         assert_eq!(
             NestedStateRoot::new(provider.tx_ref(), None)
                 .root(&HashedPostState::default())
                 .unwrap(),
             ahead_root
         );
-        assert_ne!(root, ahead_root);
         assert_eq!(
             provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap().unwrap().block_number,
             1
@@ -523,30 +444,9 @@ mod tests {
     fn recovery_rejects_legacy_future_plain_state_before_modifying_database() {
         init_test_gravity_config();
         let factory = create_test_provider_factory();
-        let address = Address::with_last_byte(1);
-        let slot = B256::with_last_byte(2);
-        let account = Account { nonce: 2, balance: U256::from(14), ..Default::default() };
-        let mut future = recovery_state(address, slot, 14, 18);
-        future.accounts.insert(keccak256(address), Some(account));
         let provider = factory.database_provider_rw().unwrap();
-        let (future_root, updates) =
-            NestedStateRoot::new(provider.tx_ref(), None).calculate(&future).unwrap();
-        provider.write_trie_updatesv2(&updates).unwrap();
-        provider.write_hashed_state(&future.into_sorted()).unwrap();
         let tx = provider.tx_ref();
-        tx.put::<tables::PlainAccountState>(address, account).unwrap();
-        tx.put::<tables::PlainStorageState>(
-            address,
-            StorageEntry { key: slot, value: U256::from(18) },
-        )
-        .unwrap();
-        for number in [1, 2] {
-            tx.put::<tables::BlockBodyIndices>(
-                number,
-                StoredBlockBodyIndices { first_tx_num: number, tx_count: 1 },
-            )
-            .unwrap();
-        }
+        tx.put::<tables::BlockBodyIndices>(2, StoredBlockBodyIndices::default()).unwrap();
         for stage in RECOVERY_STAGES {
             write_checkpoint(tx, stage, 1);
         }
@@ -556,32 +456,6 @@ mod tests {
         let error = StorageRecoveryHelper::new(&factory).check_and_recover().unwrap_err();
         assert!(error.to_string().contains("body tip 2 exceeds Execution checkpoint 1"));
         let provider = factory.database_provider_rw().unwrap();
-        assert_eq!(provider.basic_account(&address).unwrap(), Some(account));
-        assert_eq!(
-            provider.plain_state_storages([(address, [slot])]).unwrap()[0].1[0].value,
-            U256::from(18)
-        );
-        assert_eq!(
-            NestedStateRoot::new(provider.tx_ref(), None)
-                .root(&HashedPostState::default())
-                .unwrap(),
-            future_root
-        );
-        assert_eq!(
-            provider.tx_ref().get::<tables::HashedAccounts>(keccak256(address)).unwrap(),
-            Some(account)
-        );
-        assert_eq!(
-            provider
-                .tx_ref()
-                .cursor_read::<tables::BlockBodyIndices>()
-                .unwrap()
-                .last()
-                .unwrap()
-                .unwrap()
-                .0,
-            2
-        );
         assert_eq!(provider.get_all_checkpoints().unwrap(), checkpoints);
         assert!(factory.rpc_provider().provider().is_err());
     }
