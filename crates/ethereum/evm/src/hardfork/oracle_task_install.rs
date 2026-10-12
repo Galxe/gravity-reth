@@ -145,6 +145,14 @@ struct InstallationOverlay<'a, DB> {
     changes: EvmState,
 }
 
+impl<DB> core::fmt::Debug for InstallationOverlay<'_, DB> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("InstallationOverlay")
+            .field("changes", &self.changes)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<DB: Database> Database for InstallationOverlay<'_, DB> {
     type Error = DB::Error;
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
