@@ -13,6 +13,7 @@
 use super::common::HardforkState;
 use alloc::{format, vec::Vec};
 use alloy_primitives::{address, b256, Address, Bytes, B256};
+use reth_chainspec::{oracle_task_install_config, EthChainSpec};
 use reth_evm::execute::BlockExecutionError;
 use revm::{
     bytecode::Bytecode,
@@ -72,10 +73,41 @@ const UPGRADES: [CodeUpgrade; 2] = [
 /// state is accepted as an idempotent replay, while missing, unknown, or
 /// partially upgraded state fails closed before any migration diff is committed.
 /// The caller is responsible for checking the configured activation timestamp.
+#[cfg(test)]
 pub(crate) fn apply_state_changes<Executor>(
     executor: &mut Executor,
     block_number: u64,
     block_timestamp: u64,
+) -> Result<(), BlockExecutionError>
+where
+    Executor: HardforkState + ?Sized,
+{
+    apply_state_changes_inner(executor, block_number, block_timestamp, false)
+}
+
+/// Recognize the exact successor runtime only in the activated installer scope.
+/// The historical Gamma code pair and all other hash checks remain mandatory.
+pub(crate) fn apply_state_changes_for_block<Executor, S>(
+    executor: &mut Executor,
+    spec: &S,
+    block_number: u64,
+    block_timestamp: u64,
+) -> Result<(), BlockExecutionError>
+where
+    Executor: HardforkState + ?Sized,
+    S: EthChainSpec + ?Sized,
+{
+    let successor_active = oracle_task_install_config(spec)
+        .map_err(BlockExecutionError::msg)?
+        .is_some_and(|config| block_timestamp >= config.timestamp);
+    apply_state_changes_inner(executor, block_number, block_timestamp, successor_active)
+}
+
+fn apply_state_changes_inner<Executor>(
+    executor: &mut Executor,
+    block_number: u64,
+    block_timestamp: u64,
+    successor_active: bool,
 ) -> Result<(), BlockExecutionError>
 where
     Executor: HardforkState + ?Sized,
@@ -94,7 +126,11 @@ where
 
         if info.code_hash == upgrade.pre_fork_hash {
             pre_fork_count += 1;
-        } else if info.code_hash == upgrade.post_fork_hash {
+        } else if info.code_hash == upgrade.post_fork_hash ||
+            (successor_active &&
+                upgrade.address == NATIVE_ORACLE_ADDRESS &&
+                info.code_hash == super::oracle_task_install::NATIVE_ORACLE_CALLBACK_CODE_HASH)
+        {
             post_fork_count += 1;
         } else {
             return Err(BlockExecutionError::msg(format!(

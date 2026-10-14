@@ -779,7 +779,7 @@ mod tests {
         let requests_hash =
             B256::from(hex!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
         let mut parent_hash = B256::ZERO;
-        for (number, timestamp) in [(0, 98), (1, 99), (2, 103)] {
+        for (number, timestamp) in [(0, 98), (1, 99), (2, 103), (3, 104)] {
             let block = Block {
                 header: alloy_consensus::Header {
                     number,
@@ -825,11 +825,18 @@ mod tests {
         );
         let provider = factory.provider_rw().unwrap();
         let output =
-            stage.execute(&*provider, ExecInput { target: Some(2), checkpoint: None }).unwrap();
-        assert_eq!(output.checkpoint.block_number, 2);
+            stage.execute(&*provider, ExecInput { target: Some(3), checkpoint: None }).unwrap();
+        assert_eq!(output.checkpoint.block_number, 3);
         provider.commit().unwrap();
         let provider = factory.provider().unwrap();
         let state = LatestStateProviderRef::new(&provider);
+        assert_eq!(
+            state.basic_account(native).unwrap().unwrap().bytecode_hash,
+            Some(keccak256(include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/NativeOracle.bin"
+            ))))
+        );
         let map = |key: U256, root: U256| {
             let mut words = [0u8; 64];
             words[..32].copy_from_slice(&key.to_be_bytes::<32>());

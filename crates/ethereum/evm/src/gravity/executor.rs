@@ -388,7 +388,12 @@ where
                 .gravity_hardforks()
                 .is_fork_active_at_timestamp(GravityHardfork::Gamma, timestamp)
         {
-            gamma::apply_state_changes(&mut DbHardforkState(evm.db_mut()), number, timestamp)?;
+            gamma::apply_state_changes_for_block(
+                &mut DbHardforkState(evm.db_mut()),
+                chain_spec.as_ref(),
+                number,
+                timestamp,
+            )?;
         }
         if is_chain_block {
             oracle_task_install::apply_state_changes_for_block(
@@ -504,6 +509,15 @@ mod oracle_task_install_tests {
             assert_installed(evm.db_mut(), 100);
             assert_eq!(result.gas_used, 0);
             assert!(result.receipts.is_empty(), "installer creates no receipt");
+            let following = GravityBlockExecutorFactory::new(
+                spec(),
+                Arc::new(Reader { epoch: false, parent: Some(100) }),
+            );
+            let next_evm = following.evm_factory().create_evm(evm.db_mut().clone(), env(101));
+            let mut next_executor = following.create_executor(next_evm, ctx(true));
+            next_executor.apply_pre_execution_changes().unwrap();
+            let (mut next_evm, _) = next_executor.finish().unwrap();
+            assert_installed(next_evm.db_mut(), 100);
         }
     }
 

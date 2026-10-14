@@ -18,6 +18,9 @@ const TASK_CONFIG: Address = address!("00000000000000000000000000000001625f1009"
 const NATIVE_ORACLE: Address = address!("00000000000000000000000000000001625f4000");
 const RECEIVER: Address = address!("595475934ed7d9faa7fca28341c2ce583904a44e");
 const BRIDGE: Address = address!("E82c61Ac9Ec2041b493118051afa4F18a55dC876");
+const CALLBACK_RUNTIME: &[u8] = include_bytes!(
+    "../../../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/NativeOracle.bin"
+);
 
 sol! {
     struct OracleTask { bytes config; uint64 updatedAt; }
@@ -110,6 +113,10 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
     assert!(node.dkg_in_progress(), "first block must open the actual DKG session");
     tokio::task::block_in_place(|| {
         let chain = Chain::new(&rpc, spec.chain.id());
+        assert_eq!(
+            keccak256(chain.code(NATIVE_ORACLE, first.number)),
+            keccak256(include_bytes!("../../../../ethereum/evm/src/hardfork/bytecodes/gamma/NativeOracle.bin"))
+        );
         assert!(read(&chain, TASK_CONFIG, getSourceTypesCall {}, first.number).is_empty());
         assert_eq!(
             read(&chain, NATIVE_ORACLE, getDefaultCallbackCall { sourceType: 0 }, first.number),
@@ -131,6 +138,7 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
     assert_eq!(activation.epoch, first.epoch + 1);
     tokio::task::block_in_place(|| {
         let chain = Chain::new(&rpc, spec.chain.id());
+        assert_eq!(chain.code(NATIVE_ORACLE, activation.number).as_ref(), CALLBACK_RUNTIME);
         assert_eq!(read(&chain, TASK_CONFIG, getSourceTypesCall {}, activation.number), vec![0]);
         assert_eq!(
             read(&chain, TASK_CONFIG, getSourceIdsCall { sourceType: 0 }, activation.number),
@@ -175,6 +183,29 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
         assert_eq!(
             chain.storage(TASK_CONFIG, task_base + U256::from(1), activation.number),
             B256::from(U256::from(install_time))
+        );
+    });
+    let following = tokio::time::timeout(
+        BLOCK_TIMEOUT,
+        node.produce_block(BlockInput {
+            timestamp_us: (install_time + 1) * 1_000_000,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("post-installation normal block persistence");
+    assert!(!following.epoch_changed);
+    tokio::task::block_in_place(|| {
+        let chain = Chain::new(&rpc, spec.chain.id());
+        assert_eq!(chain.code(NATIVE_ORACLE, following.number).as_ref(), CALLBACK_RUNTIME);
+        assert_eq!(
+            read(
+                &chain,
+                TASK_CONFIG,
+                getTaskCall { sourceType: 0, sourceId: U256::from(1), taskName: B256::repeat_byte(1) },
+                following.number
+            ).updatedAt,
+            install_time
         );
     });
     Ok(())

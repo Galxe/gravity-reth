@@ -286,7 +286,13 @@ where
             .gravity_hardforks()
             .is_fork_active_at_timestamp(GravityHardfork::Gamma, block.timestamp())
         {
-            crate::hardfork::gamma::apply_state_changes(self, block.number(), block.timestamp())?;
+            let chain_spec = self.chain_spec.clone();
+            crate::hardfork::gamma::apply_state_changes_for_block(
+                self,
+                chain_spec.as_ref(),
+                block.number(),
+                block.timestamp(),
+            )?;
         }
 
         let env = self.evm_config.evm_env(block.header()).map_err(BlockExecutionError::other)?;

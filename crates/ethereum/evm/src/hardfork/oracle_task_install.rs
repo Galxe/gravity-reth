@@ -1,4 +1,4 @@
-//! Atomic, timestamp-crossing installation of the first Testnet bridge task.
+//! Atomic, timestamp-crossing bridge task and callback runtime installation.
 
 use super::gamma::{
     NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_POST_FORK_CODE_HASH, ORACLE_TASK_CONFIG_ADDRESS,
@@ -6,19 +6,26 @@ use super::gamma::{
 };
 use alloc::{format, vec::Vec};
 use alloy_evm::{eth::EthEvmBuilder, Evm, EvmEnv};
-use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{address, b256, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall, SolValue};
 use reth_chainspec::{oracle_task_install_config, EthChainSpec, OracleTaskInstallConfig};
 use reth_evm::execute::BlockExecutionError;
 use revm::{
     bytecode::Bytecode,
-    state::{AccountInfo, EvmState},
+    state::{Account, AccountInfo, EvmState},
     Database, DatabaseCommit,
 };
 
 /// Receiver authorized by the native-mint precompile.
 pub const BRIDGE_RECEIVER: Address = address!("595475934ed7d9faa7fca28341c2ce583904a44e");
 const GOVERNANCE: Address = address!("00000000000000000000000000000001625f3000");
+
+// Contracts 174123adf25395d0490210a3fad46e6018e10366, solc 0.8.30,
+// optimizer 200, via IR, Prague, metadata bytecode hash disabled.
+pub(crate) const NATIVE_ORACLE_CALLBACK_CODE_HASH: B256 =
+    b256!("13c995f14f5add575e656480be4c734a76bf1b4500097e8258f214c65e174a74");
+const NATIVE_ORACLE_CALLBACK_RUNTIME: &[u8] =
+    include_bytes!("bytecodes/oracle_task_install/NativeOracle.bin");
 
 sol! {
     struct OracleTask { bytes config; uint64 updatedAt; }
@@ -70,7 +77,14 @@ where
         return Ok(())
     }
     let mut overlay = InstallationOverlay { base: db, changes: EvmState::default() };
-    check_code(&mut overlay, NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_POST_FORK_CODE_HASH)?;
+    let native = overlay
+        .basic(NATIVE_ORACLE_ADDRESS)
+        .map_err(BlockExecutionError::other)?
+        .ok_or_else(|| failure("NativeOracle account is missing"))?;
+    let upgraded = native.code_hash == NATIVE_ORACLE_CALLBACK_CODE_HASH;
+    if !upgraded && native.code_hash != NATIVE_ORACLE_POST_FORK_CODE_HASH {
+        return Err(failure("unexpected NativeOracle runtime hash"))
+    }
     check_code(&mut overlay, ORACLE_TASK_CONFIG_ADDRESS, ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH)?;
     check_code(&mut overlay, BRIDGE_RECEIVER, config.receiver_code_hash)?;
     if query(&mut overlay, &env, BRIDGE_RECEIVER, trustedBridgeCall {})? != config.trusted_bridge ||
@@ -80,34 +94,47 @@ where
     }
 
     let before = configuration(&mut overlay, &env, &config)?;
-    if before.matches(&config, timestamp) {
+    let matching = before.matches(&config, timestamp);
+    if upgraded && matching {
         tracing::info!(target: "reth::evm::hardfork", block_number, block_timestamp = timestamp,
             action = "idempotent", execution_path, "oracle_task_install_applied");
         return Ok(())
     }
-    if !before.is_empty() {
+    if upgraded || (!matching && !before.is_empty()) {
         return Err(failure("partial or conflicting bridge configuration"))
     }
-    mutate(
-        &mut overlay,
-        &env,
-        ORACLE_TASK_CONFIG_ADDRESS,
-        setTaskCall {
-            sourceType: 0,
-            sourceId: config.source_id,
-            taskName: config.task_name,
-            config: config.task_config.clone(),
-        },
-    )?;
-    mutate(
-        &mut overlay,
-        &env,
-        NATIVE_ORACLE_ADDRESS,
-        setDefaultCallbackCall { sourceType: 0, callback: BRIDGE_RECEIVER },
-    )?;
+    let mut replacement = Account::from(AccountInfo {
+        code_hash: NATIVE_ORACLE_CALLBACK_CODE_HASH,
+        code: Some(Bytecode::new_raw(Bytes::from_static(NATIVE_ORACLE_CALLBACK_RUNTIME))),
+        ..native
+    });
+    replacement.mark_touch();
+    overlay.commit(core::iter::once((NATIVE_ORACLE_ADDRESS, replacement)).collect());
+    check_code(&mut overlay, NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_CALLBACK_CODE_HASH)?;
+    if !matching {
+        mutate(
+            &mut overlay,
+            &env,
+            ORACLE_TASK_CONFIG_ADDRESS,
+            setTaskCall {
+                sourceType: 0,
+                sourceId: config.source_id,
+                taskName: config.task_name,
+                config: config.task_config.clone(),
+            },
+        )?;
+        mutate(
+            &mut overlay,
+            &env,
+            NATIVE_ORACLE_ADDRESS,
+            setDefaultCallbackCall { sourceType: 0, callback: BRIDGE_RECEIVER },
+        )?;
+    }
     let after = configuration(&mut overlay, &env, &config)?;
+    check_code(&mut overlay, NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_CALLBACK_CODE_HASH)?;
+    let expected_updated_at = if matching { before.updated_at } else { timestamp };
     if !after.matches(&config, timestamp) ||
-        after.updated_at != timestamp ||
+        after.updated_at != expected_updated_at ||
         after.other_source_types() != before.other_source_types()
     {
         return Err(failure("installation postconditions failed"))
@@ -139,7 +166,7 @@ fn check_code<DB: Database>(
     Ok(())
 }
 
-/// Reads pass through to the execution cache; only successful setter diffs are retained.
+/// Reads pass through to the execution cache; runtime and setter diffs commit together.
 struct InstallationOverlay<'a, DB> {
     base: &'a mut DB,
     changes: EvmState,
@@ -162,6 +189,11 @@ impl<DB: Database> Database for InstallationOverlay<'_, DB> {
         self.base.basic(address)
     }
     fn code_by_hash(&mut self, hash: B256) -> Result<Bytecode, Self::Error> {
+        if let Some(code) = self.changes.values().find_map(|account| {
+            if account.info.code_hash == hash { account.info.code.clone() } else { None }
+        }) {
+            return Ok(code)
+        }
         self.base.code_by_hash(hash)
     }
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
@@ -324,7 +356,7 @@ pub(crate) mod tests {
         context::CfgEnv,
         database::{CacheDB, EmptyDB},
         primitives::hardfork::SpecId,
-        state::{Account, EvmStorageSlot, TransactionId},
+        state::{AccountId, EvmStorageSlot, TransactionId},
     };
     use std::{io, sync::Arc};
 
@@ -332,6 +364,12 @@ pub(crate) mod tests {
     const BRIDGE: Address = address!("0000000000000000000000000000000000001234");
     const COINBASE: Address = address!("0000000000000000000000000000000000002345");
     type DB = CacheDB<EmptyDB>;
+
+    #[test]
+    fn oracle_task_install_runtime_matches_pr119_manifest() {
+        assert_eq!(keccak256(NATIVE_ORACLE_CALLBACK_RUNTIME), NATIVE_ORACLE_CALLBACK_CODE_HASH);
+        assert_ne!(NATIVE_ORACLE_CALLBACK_CODE_HASH, NATIVE_ORACLE_POST_FORK_CODE_HASH);
+    }
 
     fn install<DB: Database + DatabaseCommit>(
         db: &mut DB,
@@ -436,6 +474,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn assert_installed(db: &mut DB, timestamp: u64) {
+        assert_eq!(
+            db.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash,
+            NATIVE_ORACLE_CALLBACK_CODE_HASH
+        );
         let config = oracle_task_install_config(spec().as_ref()).unwrap().unwrap();
         let state = snapshot(db);
         assert!(state.matches(&config, timestamp));
@@ -451,6 +493,11 @@ pub(crate) mod tests {
         let mut db = seeded_db();
         let caller = db.basic(GOVERNANCE).unwrap();
         let coinbase = db.basic(COINBASE).unwrap();
+        let mut original_native = db.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap();
+        original_native.balance = U256::from(313);
+        original_native.nonce = 27;
+        original_native.account_id = AccountId::new(29);
+        db.insert_account_info(NATIVE_ORACLE_ADDRESS, original_native.clone());
         // Independently compute the pinned nested mappings: legacy nonce slot1,
         // record slot0 (+1 is blockNumber), and packed SourceProgress slot5.
         let nested = |root: u64| {
@@ -497,6 +544,11 @@ pub(crate) mod tests {
         assert_eq!(installed.updated_at, T + 3);
         assert_eq!(db.basic(GOVERNANCE).unwrap(), caller);
         assert_eq!(db.basic(COINBASE).unwrap(), coinbase);
+        let native = db.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap();
+        assert_eq!(native.code_hash, NATIVE_ORACLE_CALLBACK_CODE_HASH);
+        assert_eq!(native.balance, original_native.balance);
+        assert_eq!(native.nonce, original_native.nonce);
+        assert_eq!(native.account_id, original_native.account_id);
         for (slot, value) in sentinels {
             assert_eq!(db.storage(NATIVE_ORACLE_ADDRESS, slot).unwrap(), value);
         }
@@ -565,6 +617,10 @@ pub(crate) mod tests {
         let spec = spec();
         let mut db = seeded_db();
         install(&mut db, spec.as_ref(), env(T - 1), Some(T - 2), 72).unwrap();
+        assert_eq!(
+            db.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash,
+            NATIVE_ORACLE_POST_FORK_CODE_HASH
+        );
         assert!(snapshot(&mut db).is_empty());
         assert!(install(&mut db, spec.as_ref(), env(T), None, 73).is_err());
         assert!(snapshot(&mut db).is_empty());
@@ -572,6 +628,96 @@ pub(crate) mod tests {
         assert!(snapshot(&mut db).is_empty());
         install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap();
         assert_eq!(snapshot(&mut db).updated_at, T);
+        assert_installed(&mut db, T);
+    }
+
+    #[test]
+    fn oracle_task_install_matching_old_configuration_upgrades_without_rewriting_timestamp() {
+        let spec = spec();
+        let mut db = seeded_db();
+        install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap();
+        // Characterize a governance-installed matching configuration on Gamma code.
+        insert_code(
+            &mut db,
+            NATIVE_ORACLE_ADDRESS,
+            Bytes::from_static(include_bytes!("bytecodes/gamma/NativeOracle.bin")),
+        );
+        install(&mut db, spec.as_ref(), env(T + 3), Some(T - 1), 73).unwrap();
+        assert_eq!(snapshot(&mut db).updated_at, T);
+        assert_installed(&mut db, T);
+        let before = db.basic(NATIVE_ORACLE_ADDRESS).unwrap();
+        install(&mut db, spec.as_ref(), env(T + 4), Some(T - 1), 73).unwrap();
+        assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap(), before);
+        assert_eq!(snapshot(&mut db).updated_at, T);
+    }
+
+    #[test]
+    fn oracle_task_install_unknown_or_unconfigured_successor_runtime_rejects() {
+        let spec = spec();
+        for code in [Bytes::from_static(&[0]), Bytes::from_static(NATIVE_ORACLE_CALLBACK_RUNTIME)] {
+            let mut db = seeded_db();
+            insert_code(&mut db, NATIVE_ORACLE_ADDRESS, code);
+            let before = db.basic(NATIVE_ORACLE_ADDRESS).unwrap();
+            assert!(install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).is_err());
+            assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap(), before);
+            // Task configuration was never committed even on an unexpected runtime.
+            let mut task_overlay = InstallationOverlay { base: &mut db, changes: EvmState::default() };
+            assert!(query(&mut task_overlay, &env(T), ORACLE_TASK_CONFIG_ADDRESS, getSourceTypesCall {})
+                .unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn oracle_task_install_overlay_resolves_uncommitted_runtime_by_hash() {
+        let mut db = seeded_db();
+        let mut overlay = InstallationOverlay { base: &mut db, changes: EvmState::default() };
+        let previous = overlay.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap();
+        let mut replacement = Account::from(AccountInfo {
+            code_hash: NATIVE_ORACLE_CALLBACK_CODE_HASH,
+            code: Some(Bytecode::new_raw(Bytes::from_static(NATIVE_ORACLE_CALLBACK_RUNTIME))),
+            ..previous
+        });
+        replacement.mark_touch();
+        overlay.commit(core::iter::once((NATIVE_ORACLE_ADDRESS, replacement)).collect());
+        assert_eq!(
+            overlay.code_by_hash(NATIVE_ORACLE_CALLBACK_CODE_HASH).unwrap().original_bytes(),
+            Bytes::from_static(NATIVE_ORACLE_CALLBACK_RUNTIME)
+        );
+        assert_eq!(
+            overlay.base.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash,
+            NATIVE_ORACLE_POST_FORK_CODE_HASH
+        );
+    }
+
+    #[test]
+    fn oracle_task_install_gamma_successor_is_scoped_and_preserves_h_plus_one_code() {
+        use crate::hardfork::{common::DbHardforkState, gamma};
+        let spec = spec();
+        let mut db = seeded_db();
+        gamma::apply_state_changes_for_block(&mut DbHardforkState(&mut db), spec.as_ref(), 72, T - 1)
+            .unwrap();
+        install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap();
+        let upgraded = db.basic(NATIVE_ORACLE_ADDRESS).unwrap();
+        gamma::apply_state_changes_for_block(&mut DbHardforkState(&mut db), spec.as_ref(), 74, T + 1)
+            .unwrap();
+        assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap(), upgraded);
+        let mut disabled = (*spec).clone();
+        disabled.genesis.config.extra_fields.remove("oracleTaskInstall");
+        disabled.genesis.config.extra_fields.remove("oracleTaskInstallTime");
+        let mut other_chain = (*spec).clone();
+        other_chain.chain = Chain::from(1625);
+        for (scope, timestamp) in [(spec.as_ref(), T - 1), (&disabled, T + 1), (&other_chain, T + 1)] {
+            assert!(gamma::apply_state_changes_for_block(
+                &mut DbHardforkState(&mut db), scope, 74, timestamp
+            ).is_err());
+            assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap(), upgraded);
+        }
+        let mut wrong_task = seeded_db();
+        insert_code(&mut wrong_task, NATIVE_ORACLE_ADDRESS, Bytes::from_static(NATIVE_ORACLE_CALLBACK_RUNTIME));
+        insert_code(&mut wrong_task, ORACLE_TASK_CONFIG_ADDRESS, Bytes::from_static(&[0]));
+        assert!(gamma::apply_state_changes_for_block(
+            &mut DbHardforkState(&mut wrong_task), spec.as_ref(), 74, T + 1
+        ).is_err());
     }
 
     #[test]
@@ -744,10 +890,16 @@ pub(crate) mod tests {
     fn oracle_task_install_second_setter_failure_discards_successful_first_setter() {
         let spec = spec();
         let mut db = FailSecondSetter { inner: seeded_db(), default_reads: 0, commits: 0 };
+        let native = db.inner.basic(NATIVE_ORACLE_ADDRESS).unwrap();
         let error = install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap_err();
         assert!(format!("{error}").contains("second setter injected"));
         assert_eq!(db.default_reads, 2);
         assert_eq!(db.commits, 0, "no base commit even though setTask succeeded");
+        assert_eq!(db.inner.basic(NATIVE_ORACLE_ADDRESS).unwrap(), native);
+        assert_eq!(
+            db.inner.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash,
+            NATIVE_ORACLE_POST_FORK_CODE_HASH
+        );
         assert!(snapshot(&mut db.inner).is_empty());
     }
 
@@ -811,9 +963,27 @@ pub(crate) mod tests {
             assert!(result.receipts.is_empty());
             assert_eq!(result.gas_used, 0);
             assert_eq!(result.blob_gas_used, 0);
+            let next = reth_ethereum_primitives::Block {
+                header: alloy_consensus::Header {
+                    number: 74,
+                    timestamp: T + 1,
+                    gas_limit: 30_000_000,
+                    parent_beacon_block_root: Some(B256::ZERO),
+                    excess_blob_gas: Some(0),
+                    blob_gas_used: Some(0),
+                    ..Default::default()
+                },
+                body: Default::default(),
+            };
+            let next = reth_primitives_traits::RecoveredBlock::new_unhashed(next, Vec::new());
+            executor.execute_one_with_parent_timestamp(&next, T).unwrap();
             let state = executor.take_bundle().state;
             assert!(state.contains_key(&ORACLE_TASK_CONFIG_ADDRESS));
             assert!(state.contains_key(&NATIVE_ORACLE_ADDRESS));
+            assert_eq!(
+                state[&NATIVE_ORACLE_ADDRESS].info.as_ref().unwrap().code_hash,
+                NATIVE_ORACLE_CALLBACK_CODE_HASH
+            );
             normal_states.push(state);
         }
         assert_eq!(normal_states[0], normal_states[1]);
