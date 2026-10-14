@@ -190,7 +190,11 @@ impl<DB: Database> Database for InstallationOverlay<'_, DB> {
     }
     fn code_by_hash(&mut self, hash: B256) -> Result<Bytecode, Self::Error> {
         if let Some(code) = self.changes.values().find_map(|account| {
-            if account.info.code_hash == hash { account.info.code.clone() } else { None }
+            if account.info.code_hash == hash {
+                account.info.code.clone()
+            } else {
+                None
+            }
         }) {
             return Ok(code)
         }
@@ -661,9 +665,16 @@ pub(crate) mod tests {
             assert!(install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).is_err());
             assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap(), before);
             // Task configuration was never committed even on an unexpected runtime.
-            let mut task_overlay = InstallationOverlay { base: &mut db, changes: EvmState::default() };
-            assert!(query(&mut task_overlay, &env(T), ORACLE_TASK_CONFIG_ADDRESS, getSourceTypesCall {})
-                .unwrap().is_empty());
+            let mut task_overlay =
+                InstallationOverlay { base: &mut db, changes: EvmState::default() };
+            assert!(query(
+                &mut task_overlay,
+                &env(T),
+                ORACLE_TASK_CONFIG_ADDRESS,
+                getSourceTypesCall {}
+            )
+            .unwrap()
+            .is_empty());
         }
     }
 
@@ -694,30 +705,54 @@ pub(crate) mod tests {
         use crate::hardfork::{common::DbHardforkState, gamma};
         let spec = spec();
         let mut db = seeded_db();
-        gamma::apply_state_changes_for_block(&mut DbHardforkState(&mut db), spec.as_ref(), 72, T - 1)
-            .unwrap();
+        gamma::apply_state_changes_for_block(
+            &mut DbHardforkState(&mut db),
+            spec.as_ref(),
+            72,
+            T - 1,
+        )
+        .unwrap();
         install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap();
         let upgraded = db.basic(NATIVE_ORACLE_ADDRESS).unwrap();
-        gamma::apply_state_changes_for_block(&mut DbHardforkState(&mut db), spec.as_ref(), 74, T + 1)
-            .unwrap();
+        gamma::apply_state_changes_for_block(
+            &mut DbHardforkState(&mut db),
+            spec.as_ref(),
+            74,
+            T + 1,
+        )
+        .unwrap();
         assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap(), upgraded);
         let mut disabled = (*spec).clone();
         disabled.genesis.config.extra_fields.remove("oracleTaskInstall");
         disabled.genesis.config.extra_fields.remove("oracleTaskInstallTime");
         let mut other_chain = (*spec).clone();
         other_chain.chain = Chain::from(1625);
-        for (scope, timestamp) in [(spec.as_ref(), T - 1), (&disabled, T + 1), (&other_chain, T + 1)] {
+        for (scope, timestamp) in
+            [(spec.as_ref(), T - 1), (&disabled, T + 1), (&other_chain, T + 1)]
+        {
             assert!(gamma::apply_state_changes_for_block(
-                &mut DbHardforkState(&mut db), scope, 74, timestamp
-            ).is_err());
+                &mut DbHardforkState(&mut db),
+                scope,
+                74,
+                timestamp
+            )
+            .is_err());
             assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap(), upgraded);
         }
         let mut wrong_task = seeded_db();
-        insert_code(&mut wrong_task, NATIVE_ORACLE_ADDRESS, Bytes::from_static(NATIVE_ORACLE_CALLBACK_RUNTIME));
+        insert_code(
+            &mut wrong_task,
+            NATIVE_ORACLE_ADDRESS,
+            Bytes::from_static(NATIVE_ORACLE_CALLBACK_RUNTIME),
+        );
         insert_code(&mut wrong_task, ORACLE_TASK_CONFIG_ADDRESS, Bytes::from_static(&[0]));
         assert!(gamma::apply_state_changes_for_block(
-            &mut DbHardforkState(&mut wrong_task), spec.as_ref(), 74, T + 1
-        ).is_err());
+            &mut DbHardforkState(&mut wrong_task),
+            spec.as_ref(),
+            74,
+            T + 1
+        )
+        .is_err());
     }
 
     #[test]

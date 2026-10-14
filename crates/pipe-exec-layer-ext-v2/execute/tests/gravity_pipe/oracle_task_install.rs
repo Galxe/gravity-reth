@@ -115,7 +115,9 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
         let chain = Chain::new(&rpc, spec.chain.id());
         assert_eq!(
             keccak256(chain.code(NATIVE_ORACLE, first.number)),
-            keccak256(include_bytes!("../../../../ethereum/evm/src/hardfork/bytecodes/gamma/NativeOracle.bin"))
+            keccak256(include_bytes!(
+                "../../../../ethereum/evm/src/hardfork/bytecodes/gamma/NativeOracle.bin"
+            ))
         );
         assert!(read(&chain, TASK_CONFIG, getSourceTypesCall {}, first.number).is_empty());
         assert_eq!(
@@ -202,9 +204,14 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
             read(
                 &chain,
                 TASK_CONFIG,
-                getTaskCall { sourceType: 0, sourceId: U256::from(1), taskName: B256::repeat_byte(1) },
+                getTaskCall {
+                    sourceType: 0,
+                    sourceId: U256::from(1),
+                    taskName: B256::repeat_byte(1)
+                },
                 following.number
-            ).updatedAt,
+            )
+            .updatedAt,
             install_time
         );
     });

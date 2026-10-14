@@ -129,7 +129,8 @@ where
         } else if info.code_hash == upgrade.post_fork_hash ||
             (successor_active &&
                 upgrade.address == NATIVE_ORACLE_ADDRESS &&
-                info.code_hash == super::oracle_task_install::NATIVE_ORACLE_CALLBACK_CODE_HASH)
+                info.code_hash ==
+                    super::oracle_task_install::NATIVE_ORACLE_CALLBACK_CODE_HASH)
         {
             post_fork_count += 1;
         } else {
