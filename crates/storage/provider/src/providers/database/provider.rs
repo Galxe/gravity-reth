@@ -1898,6 +1898,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
         &self,
         reverts: PlainStateReverts,
         first_block: BlockNumber,
+        mut history: Option<&mut StateHistoryIndices>,
     ) -> ProviderResult<()> {
         tracing::trace!("Writing storage changes to static files");
         let mut storages_cursor = self.tx_ref().cursor_dup_write::<tables::PlainStorageState>()?;
@@ -1931,6 +1932,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
 
                 for (key, value) in StorageRevertsIter::new(storage, wiped_storage) {
                     changeset.push(StorageBeforeTx { address, key, value });
+                    if let Some(history) = history.as_deref_mut() {
+                        history.storages.entry((address, key)).or_default().push(block_number);
+                    }
                 }
             }
             storage_writer.append_storage_changeset(changeset, block_number)?;
@@ -1944,26 +1948,53 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
             let block_number = first_block + block_index as BlockNumber;
             let changeset = account_block_reverts
                 .into_iter()
-                .map(|(address, info)| AccountBeforeTx { address, info: info.map(Into::into) })
+                .map(|(address, info)| {
+                    if let Some(history) = history.as_deref_mut() {
+                        history.accounts.entry(address).or_default().push(block_number);
+                    }
+                    AccountBeforeTx { address, info: info.map(Into::into) }
+                })
                 .collect();
             account_writer.append_account_changeset(changeset, block_number)?;
         }
 
         Ok(())
     }
-}
 
-impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
-    for DatabaseProvider<TX, N>
-{
-    type Receipt = ReceiptTy<N>;
-
-    fn write_state_with_indices(
+    /// Writes state, receipts and history indices using the actual changeset entries.
+    ///
+    /// Changesets are not read back from the transaction: `RocksDB` cursors cannot see pending
+    /// writes. Each history key is appended once, including old slots added by storage wipes.
+    /// Call once between commits with the combined outcome for the whole range; separate calls
+    /// for shared keys would read the same committed history tail and overwrite pending appends.
+    /// A primary storage wipe must be in the first block of the range so its old slots can be
+    /// read from committed plain state.
+    pub fn write_state_with_indices_and_history(
         &self,
-        execution_outcome: &ExecutionOutcome<Self::Receipt>,
+        execution_outcome: &ExecutionOutcome<ReceiptTy<N>>,
         is_value_known: OriginalValuesKnown,
         write_receipts_to: StorageLocation,
         body_indices: Option<Vec<StoredBlockBodyIndices>>,
+    ) -> ProviderResult<()> {
+        let mut history = StateHistoryIndices::default();
+        self.write_state_with_indices_inner(
+            execution_outcome,
+            is_value_known,
+            write_receipts_to,
+            body_indices,
+            Some(&mut history),
+        )?;
+        self.insert_account_history_index(history.accounts)?;
+        self.insert_storage_history_index(history.storages)
+    }
+
+    fn write_state_with_indices_inner(
+        &self,
+        execution_outcome: &ExecutionOutcome<ReceiptTy<N>>,
+        is_value_known: OriginalValuesKnown,
+        write_receipts_to: StorageLocation,
+        body_indices: Option<Vec<StoredBlockBodyIndices>>,
+        history: Option<&mut StateHistoryIndices>,
     ) -> ProviderResult<()> {
         let first_block = execution_outcome.first_block();
         let block_count = execution_outcome.len() as u64;
@@ -1975,7 +2006,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         let (plain_state, reverts) =
             execution_outcome.bundle.to_plain_state_and_reverts(is_value_known);
 
-        self.write_state_reverts(reverts, first_block)?;
+        self.write_state_reverts_inner(reverts, first_block, history)?;
         self.write_state_changes(plain_state)?;
 
         // Fetch the first transaction number for each block in the range
@@ -2003,7 +2034,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         // We are writing to database if requested or if there's any kind of receipt pruning
         // configured
         let mut receipts_cursor = (write_receipts_to.database() || has_receipts_pruning)
-            .then(|| self.tx.cursor_write::<tables::Receipts<Self::Receipt>>())
+            .then(|| self.tx.cursor_write::<tables::Receipts<ReceiptTy<N>>>())
             .transpose()?;
 
         // Prepare receipts static writer if we are going to write receipts to static files
@@ -2076,13 +2107,14 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         Ok(())
     }
 
-    fn write_state_reverts(
+    fn write_state_reverts_inner(
         &self,
         reverts: PlainStateReverts,
         first_block: BlockNumber,
+        mut history: Option<&mut StateHistoryIndices>,
     ) -> ProviderResult<()> {
         if self.cached_storage_settings().changesets_in_static_files {
-            return self.write_state_reverts_to_static_files(reverts, first_block);
+            return self.write_state_reverts_to_static_files(reverts, first_block, history);
         }
 
         // Write storage changes
@@ -2123,6 +2155,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                 tracing::trace!(?address, ?storage, "Writing storage reverts");
                 for (key, value) in StorageRevertsIter::new(storage, wiped_storage) {
                     storage_changeset_cursor.append_dup(storage_id, StorageEntry { key, value })?;
+                    if let Some(history) = history.as_deref_mut() {
+                        history.storages.entry((address, key)).or_default().push(block_number);
+                    }
                 }
             }
         }
@@ -2138,6 +2173,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             account_block_reverts.par_sort_by_key(|a| a.0);
 
             for (address, info) in account_block_reverts {
+                if let Some(history) = history.as_deref_mut() {
+                    history.accounts.entry(address).or_default().push(block_number);
+                }
                 account_changeset_cursor.append_dup(
                     block_number,
                     AccountBeforeTx { address, info: info.map(Into::into) },
@@ -2146,6 +2184,36 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         }
 
         Ok(())
+    }
+}
+
+impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
+    for DatabaseProvider<TX, N>
+{
+    type Receipt = ReceiptTy<N>;
+
+    fn write_state_with_indices(
+        &self,
+        execution_outcome: &ExecutionOutcome<Self::Receipt>,
+        is_value_known: OriginalValuesKnown,
+        write_receipts_to: StorageLocation,
+        body_indices: Option<Vec<StoredBlockBodyIndices>>,
+    ) -> ProviderResult<()> {
+        self.write_state_with_indices_inner(
+            execution_outcome,
+            is_value_known,
+            write_receipts_to,
+            body_indices,
+            None,
+        )
+    }
+
+    fn write_state_reverts(
+        &self,
+        reverts: PlainStateReverts,
+        first_block: BlockNumber,
+    ) -> ProviderResult<()> {
+        self.write_state_reverts_inner(reverts, first_block, None)
     }
 
     fn write_state_changes(&self, changes: StateChangeset) -> ProviderResult<()> {
@@ -3444,6 +3512,13 @@ impl<TX: DbTx + 'static, N: NodeTypes + 'static> DBProvider for DatabaseProvider
     }
 }
 
+/// Changeset keys grouped before appending to history, so pending shards are never read back.
+#[derive(Debug, Default)]
+struct StateHistoryIndices {
+    accounts: BTreeMap<Address, Vec<BlockNumber>>,
+    storages: BTreeMap<(Address, B256), Vec<BlockNumber>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3452,6 +3527,254 @@ mod tests {
         BlockWriter, DatabaseProviderFactory,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
+
+    #[test]
+    fn state_history_indices_include_wiped_slots_without_committing_changesets() {
+        use reth_ethereum_primitives::Receipt;
+        use revm_database::{states::AccountStatus, BundleState};
+        use revm_state::AccountInfo;
+
+        for changesets_in_static_files in [false, true] {
+            let factory = create_test_provider_factory();
+            factory
+                .set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
+            let static_files = factory.static_file_provider();
+            let address = Address::with_last_byte(1);
+            let touched_slot = B256::with_last_byte(1);
+            let untouched_slot = B256::with_last_byte(2);
+            let new_slot = B256::with_last_byte(3);
+            let account = Account { nonce: 1, balance: U256::from(10), bytecode_hash: None };
+            let provider = factory.database_provider_rw().unwrap();
+            provider.tx_ref().put::<tables::PlainAccountState>(address, account).unwrap();
+            let mut storage =
+                provider.tx_ref().cursor_dup_write::<tables::PlainStorageState>().unwrap();
+            storage
+                .upsert(address, &StorageEntry { key: touched_slot, value: U256::from(11) })
+                .unwrap();
+            storage
+                .upsert(address, &StorageEntry { key: untouched_slot, value: U256::from(22) })
+                .unwrap();
+            drop(storage);
+            provider.insert_account_history_index([(address, [0])]).unwrap();
+            provider
+                .insert_storage_history_index([
+                    ((address, touched_slot), [0]),
+                    ((address, untouched_slot), [0]),
+                ])
+                .unwrap();
+            provider.commit_view().unwrap();
+
+            if changesets_in_static_files {
+                for segment in
+                    [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+                {
+                    let mut writer = static_files.latest_writer(segment).unwrap();
+                    writer.increment_block(0).unwrap();
+                    writer.commit().unwrap();
+                }
+            }
+
+            let mut bundle = BundleState::builder(1..=1)
+                .state_original_account_info(address, AccountInfo::from(account))
+                .revert_account_info(1, address, Some(Some(AccountInfo::from(account))))
+                .revert_storage(
+                    1,
+                    address,
+                    vec![(U256::from(1), U256::from(11)), (U256::from(3), U256::ZERO)],
+                )
+                .build();
+            bundle.state.get_mut(&address).unwrap().status = AccountStatus::Destroyed;
+            bundle.reverts[0][0].1.wipe_storage = true;
+            let receipt = Receipt::default();
+            let outcome = ExecutionOutcome::new(bundle, vec![vec![receipt.clone()]], 1, Vec::new());
+            let indices = StoredBlockBodyIndices { first_tx_num: 7, tx_count: 1 };
+            provider.tx_ref().put::<tables::BlockBodyIndices>(1, indices).unwrap();
+            provider
+                .write_state_with_indices_and_history(
+                    &outcome,
+                    OriginalValuesKnown::Yes,
+                    StorageLocation::Database,
+                    Some(vec![indices]),
+                )
+                .unwrap();
+
+            // Neither the pending body indices nor changesets are needed for history insertion.
+            assert_eq!(provider.tx_ref().get::<tables::BlockBodyIndices>(1).unwrap(), None);
+            assert_eq!(provider.basic_account(&address).unwrap(), Some(account));
+            assert_eq!(
+                provider
+                    .tx_ref()
+                    .get::<tables::AccountsHistory>(ShardedKey::last(address))
+                    .unwrap()
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                vec![0]
+            );
+            assert_eq!(
+                provider
+                    .tx_ref()
+                    .get::<tables::StoragesHistory>(StorageShardedKey::last(address, new_slot))
+                    .unwrap(),
+                None
+            );
+            if !changesets_in_static_files {
+                assert!(provider.account_block_changeset(1).unwrap().is_empty());
+                assert!(provider.storage_changeset(1).unwrap().is_empty());
+            }
+
+            static_files.commit().unwrap();
+            provider.commit_view().unwrap();
+            let provider = factory.database_provider_ro().unwrap();
+            assert_eq!(provider.basic_account(&address).unwrap(), None);
+            assert!(provider
+                .tx_ref()
+                .cursor_dup_read::<tables::PlainStorageState>()
+                .unwrap()
+                .seek_exact(address)
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                provider.tx_ref().get::<tables::Receipts<Receipt>>(7).unwrap(),
+                Some(receipt)
+            );
+            assert_eq!(
+                provider
+                    .tx_ref()
+                    .get::<tables::AccountsHistory>(ShardedKey::last(address))
+                    .unwrap()
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                vec![0, 1]
+            );
+            for (key, expected) in
+                [(touched_slot, vec![0, 1]), (untouched_slot, vec![0, 1]), (new_slot, vec![1])]
+            {
+                assert_eq!(
+                    provider
+                        .tx_ref()
+                        .get::<tables::StoragesHistory>(StorageShardedKey::last(address, key))
+                        .unwrap()
+                        .unwrap()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+            let changesets = provider.storage_changeset(1).unwrap();
+            assert_eq!(changesets.len(), 3);
+            assert_eq!(
+                changesets
+                    .into_iter()
+                    .map(|(_, entry)| (entry.key, entry.value))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (touched_slot, U256::from(11)),
+                    (untouched_slot, U256::from(22)),
+                    (new_slot, U256::ZERO)
+                ]
+            );
+            assert_eq!(
+                provider.account_block_changeset(1).unwrap(),
+                vec![AccountBeforeTx { address, info: Some(account) }]
+            );
+        }
+    }
+
+    #[test]
+    fn state_history_indices_group_repeated_keys_across_shard_boundary() {
+        use revm_database::BundleState;
+        use revm_state::AccountInfo;
+
+        for changesets_in_static_files in [false, true] {
+            let factory = create_test_provider_factory();
+            factory
+                .set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
+            let static_files = factory.static_file_provider();
+            let address = Address::with_last_byte(1);
+            let slot = B256::with_last_byte(1);
+            let first_block = sharded_key::NUM_OF_INDICES_IN_SHARD as u64 - 1;
+            let last_block = first_block + 2;
+            let provider = factory.database_provider_rw().unwrap();
+            provider.insert_account_history_index([(address, 0..first_block)]).unwrap();
+            provider.insert_storage_history_index([((address, slot), 0..first_block)]).unwrap();
+            provider.commit_view().unwrap();
+
+            if changesets_in_static_files {
+                for segment in
+                    [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+                {
+                    let mut writer = static_files.latest_writer(segment).unwrap();
+                    for block in 0..first_block {
+                        writer.increment_block(block).unwrap();
+                    }
+                    writer.commit().unwrap();
+                }
+            }
+
+            let mut builder = BundleState::builder(first_block..=last_block)
+                .state_present_account_info(address, AccountInfo::default());
+            for block in first_block..=last_block {
+                builder = builder
+                    .revert_account_info(block, address, Some(Some(AccountInfo::default())))
+                    .revert_storage(block, address, vec![(U256::from(1), U256::from(block))]);
+            }
+            let outcome =
+                ExecutionOutcome::new(builder.build(), vec![vec![]; 3], first_block, Vec::new());
+            provider
+                .write_state_with_indices_and_history(
+                    &outcome,
+                    OriginalValuesKnown::No,
+                    StorageLocation::Database,
+                    Some(vec![StoredBlockBodyIndices::default(); 3]),
+                )
+                .unwrap();
+            static_files.commit().unwrap();
+            provider.commit_view().unwrap();
+
+            let provider = factory.database_provider_ro().unwrap();
+            let account_indices = provider
+                .tx_ref()
+                .cursor_read::<tables::AccountsHistory>()
+                .unwrap()
+                .walk(None)
+                .unwrap()
+                .flat_map(|entry| entry.unwrap().1.iter().collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            let storage_indices = provider
+                .tx_ref()
+                .cursor_read::<tables::StoragesHistory>()
+                .unwrap()
+                .walk(None)
+                .unwrap()
+                .flat_map(|entry| entry.unwrap().1.iter().collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            let expected = (0..=last_block).collect::<Vec<_>>();
+            assert_eq!(account_indices, expected);
+            assert_eq!(storage_indices, expected);
+            assert_eq!(
+                provider
+                    .tx_ref()
+                    .cursor_read::<tables::AccountsHistory>()
+                    .unwrap()
+                    .walk(None)
+                    .unwrap()
+                    .count(),
+                2
+            );
+            assert_eq!(
+                provider
+                    .tx_ref()
+                    .cursor_read::<tables::StoragesHistory>()
+                    .unwrap()
+                    .walk(None)
+                    .unwrap()
+                    .count(),
+                2
+            );
+        }
+    }
 
     #[test]
     fn trie_removals_override_pending_batch_updates() {

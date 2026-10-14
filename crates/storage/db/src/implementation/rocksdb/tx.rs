@@ -12,7 +12,7 @@ use reth_db_api::{
 };
 use reth_storage_errors::db::DatabaseErrorInfo;
 use rocksdb::{WriteOptions, DB};
-use std::{sync::Arc, thread};
+use std::{sync::Arc, thread, time::Instant};
 
 use crate::set_fail_point;
 pub(crate) use cursor::{RO, RW};
@@ -267,6 +267,17 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         // that partial block writes are always recoverable even after power loss.
         let mut sync_opts = WriteOptions::default();
         sync_opts.set_sync(true);
+        let write_batch = |db: &DB, batch: rocksdb::WriteBatch, database: &'static str| {
+            metrics::histogram!("reth_rocksdb_commit_batch_size_bytes", "database" => database)
+                .record(batch.size_in_bytes() as f64);
+            let start = Instant::now();
+            db.write_opt(batch, &sync_opts).map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+            metrics::counter!("reth_rocksdb_sync_commits_total", "database" => database)
+                .increment(1);
+            metrics::histogram!("reth_rocksdb_sync_commit_duration_seconds", "database" => database)
+                .record(start.elapsed());
+            Ok::<(), DatabaseError>(())
+        };
 
         // Acquire locks on all batches upfront to prepare for commit
         let mut state_batch = self.state_batch.lock();
@@ -282,16 +293,13 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             let storage_batch_data = std::mem::take(&mut *storage_batch);
             thread::scope(|scope| -> Result<(), DatabaseError> {
                 let account_handle = scope.spawn(|| -> Result<(), DatabaseError> {
-                    self.account_db
-                        .write_opt(account_batch_data, &sync_opts)
-                        .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+                    write_batch(&self.account_db, account_batch_data, "account")?;
                     set_fail_point!("db::commit::after_account_trie");
                     Ok(())
                 });
                 let storage_handle = scope.spawn(|| -> Result<(), DatabaseError> {
-                    self.storage_db
-                        .write_opt(storage_batch_data, &sync_opts)
-                        .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+                    set_fail_point!("db::commit::before_storage_trie");
+                    write_batch(&self.storage_db, storage_batch_data, "storage")?;
                     set_fail_point!("db::commit::after_storage_trie");
                     Ok(())
                 });
@@ -303,16 +311,13 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             // Only one trie batch has data - commit sequentially (no parallelism benefit)
             if !account_batch.is_empty() {
                 let account_batch = std::mem::take(&mut *account_batch);
-                self.account_db
-                    .write_opt(account_batch, &sync_opts)
-                    .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+                write_batch(&self.account_db, account_batch, "account")?;
                 set_fail_point!("db::commit::after_account_trie");
             }
             if !storage_batch.is_empty() {
                 let storage_batch = std::mem::take(&mut *storage_batch);
-                self.storage_db
-                    .write_opt(storage_batch, &sync_opts)
-                    .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+                set_fail_point!("db::commit::before_storage_trie");
+                write_batch(&self.storage_db, storage_batch, "storage")?;
                 set_fail_point!("db::commit::after_storage_trie");
             }
         }
@@ -323,9 +328,8 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         // checkpoint is absent, triggering a retry that will idempotently re-execute the stage.
         if !state_batch.is_empty() {
             let state_batch = std::mem::take(&mut *state_batch);
-            self.state_db
-                .write_opt(state_batch, &sync_opts)
-                .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+            set_fail_point!("db::commit::before_state");
+            write_batch(&self.state_db, state_batch, "state")?;
             set_fail_point!("db::commit::after_state");
         }
         Ok(true)
