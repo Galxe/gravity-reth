@@ -831,7 +831,7 @@ mod tests {
         let provider = factory.provider().unwrap();
         let state = LatestStateProviderRef::new(&provider);
         assert_eq!(
-            state.basic_account(native).unwrap().unwrap().bytecode_hash,
+            state.basic_account(&native).unwrap().unwrap().bytecode_hash,
             Some(keccak256(include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/NativeOracle.bin"
