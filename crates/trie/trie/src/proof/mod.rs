@@ -112,7 +112,7 @@ where
         // Create the walker.
         let mut prefix_set = self.prefix_sets.account_prefix_set.clone();
         prefix_set.extend_keys(targets.keys().map(Nibbles::unpack));
-        let walker = TrieWalker::<_>::state_trie(trie_cursor, prefix_set.freeze());
+        let walker = TrieWalker::<_>::state_trie(trie_cursor, prefix_set.freeze())?;
 
         // Create a hash builder to rebuild the root node since it is not available in the database.
         let retainer = targets.keys().map(Nibbles::unpack).collect();
@@ -310,7 +310,7 @@ where
         self.prefix_set.extend_keys(target_nibbles.clone());
 
         let trie_cursor = self.trie_cursor_factory.storage_trie_cursor(self.hashed_address)?;
-        let walker = TrieWalker::<_>::storage_trie(trie_cursor, self.prefix_set.freeze())
+        let walker = TrieWalker::<_>::storage_trie(trie_cursor, self.prefix_set.freeze())?
             .with_added_removed_keys(self.added_removed_keys.as_ref());
 
         let retainer = ProofRetainer::from_iter(target_nibbles)
