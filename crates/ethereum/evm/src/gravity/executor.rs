@@ -557,6 +557,14 @@ mod oracle_task_install_tests {
         let mut executor = factory.create_executor(evm, ctx(false));
         executor.apply_pre_execution_changes().unwrap();
         let (mut evm, _) = executor.finish().unwrap();
+        assert_eq!(
+            evm.db_mut()
+                .basic(crate::hardfork::gamma::NATIVE_ORACLE_ADDRESS)
+                .unwrap()
+                .unwrap()
+                .code_hash,
+            crate::hardfork::gamma::NATIVE_ORACLE_POST_FORK_CODE_HASH
+        );
         // NativeOracle default mapping slot2 remains zero after simulation.
         use alloy_primitives::keccak256;
         use alloy_sol_types::SolValue;
