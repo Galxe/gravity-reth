@@ -1,6 +1,6 @@
 # Bridge callback runtime upgrade test
 
-Primary record: [Mono cross-repository plan](../../../mono-grav/docs/changelogs/2026-10-14-bridge-callback-upgrade-test.md).
+Primary record: [Mono result and Dev evidence](../../../mono-grav-bridge119/docs/changelogs/2026-10-14-bridge-callback-upgrade-test.md).
 
 ## 1. Scope and current state
 
@@ -33,17 +33,21 @@ activation, network call, push or PR modification belongs to this branch.
 - [x] Preserve atomic setters, matching-config migration and strict idempotence.
 - [x] Scope Gamma's successor hash recognition across existing normal paths.
 - [x] Extend focused runtime/account preservation, rollback and hash tests.
-- [ ] Review complete diff and commit locally with `[skip ci]`.
+- [x] Review complete diff and commit locally with `[skip ci]`.
 
 ## 5. Verification
 
 All compilation, formatters and runtime tests run on Gravity Dev through the
 designated operator. Local work is source editing and static inspection only.
-Reuse existing chainspec, full Ethereum EVM and canonical epoch-path tests;
-add H-1/H/H+1, second-setter code/config rollback, preserved account/storage,
-new-code overlay lookup and scoped Gamma hash rejection coverage. Run the
-historical Bridge suite once, not five rounds; Mono owns its final E2E evidence.
-Exact commands and results will be appended after Dev verification.
+Dev owning checks passed: chainspec installer and the full Ethereum EVM suite
+on `c7fcd31fbf47d5e6370b2c05cc5062733a2f9b36`; staged history and the actual
+canonical epoch/H+1 test on `0a52b0c24c007fe1745c7f0f26ac7abf9012a0a6`.
+The later head fixes only the staged test's address borrow; EVM product files
+retain the previously checked content. Dev's formatter output was applied locally.
+
+The locked node candidate uses SDK `2213742d5847a9834bcf19835e82f203673b52c1`
+and Reth `0a52b0c24c007fe1745c7f0f26ac7abf9012a0a6`. The primary Mono record
+owns the lock/ELF identities and cross-repository case results and evidence.
 
 Fresh Dev artifact: `bytecodes/oracle_task_install/NativeOracle.bin`, 4010 bytes,
 Keccak `13c995f14f5add575e656480be4c734a76bf1b4500097e8258f214c65e174a74`,
@@ -60,3 +64,18 @@ The user approved the four-message Bridge plan and requested implementation and
 testing on temporary branches with multiple 6.1 SOL agents. This authorization
 overrides the skills' single-agent default. Keep PR #457 unchanged and perform
 all builds/tests/formatting on Gravity Dev.
+
+## 7. Outcome and evidence
+
+The approved temporary runtime/configuration transition and focused regression
+coverage are implemented, reviewed and committed locally. Dev checks above
+validate the owning paths; cross-repository acceptance is documented in the
+[primary Mono result](../../../mono-grav-bridge119/docs/changelogs/2026-10-14-bridge-callback-upgrade-test.md).
+Original Issue 131/PR branches and historical Gamma artifacts remain unchanged.
+
+## 8. Publication boundary
+
+This final changelog edit is a documentation-only follow-up. The tested code
+head remains Reth `0a52b0c24c007fe1745c7f0f26ac7abf9012a0a6`; its later docs
+commit is not a new SDK dependency pin or candidate build. No push, PR change,
+merge or deployment is authorized by this record.
