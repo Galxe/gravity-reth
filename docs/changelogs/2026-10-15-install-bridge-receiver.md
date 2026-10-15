@@ -5,7 +5,7 @@
 The Issue 131 candidate already replaces NativeOracle with Contracts PR119 and
 installs the Task/default callback atomically. Its Receiver check requires code
 that the target testnet does not currently have. The primary record is
-[Mono's integration plan](../../../mono-grav-bridge119/docs/changelogs/2026-10-15-oracle-install-missing-receiver.md).
+[Mono's integration plan](https://github.com/Galxe/mono-grav/blob/codex/issue131-oracle-install-e2e/docs/changelogs/2026-10-15-oracle-install-missing-receiver.md).
 
 ## 2. Problem Model and End-to-End Behavior
 
@@ -76,7 +76,7 @@ invalid Sender and real mint failure did not mint, and the following valid
 message did. The full H=757 case retained all twelve deliveries, actual original-DB
 Grevm replay, a second natural epoch recovery, and a 240.411-second/1081-block
 final soak. Its four replicas ended at nonce 12, progress `[12,167]`, balance 138.
-The [primary Mono report](../../../mono-grav-bridge119/docs/changelogs/2026-10-15-oracle-install-missing-receiver.md)
+The [primary Mono report](https://github.com/Galxe/mono-grav/blob/codex/issue131-oracle-install-e2e/docs/changelogs/2026-10-15-oracle-install-missing-receiver.md)
 contains exact source/binary bindings, archive hashes and known setup boundaries.
 
 Runtime/test results remain bound to the source head above. This closeout changes
@@ -85,4 +85,8 @@ revision. No local build/test, push, merge or public activation occurred.
 
 ## 8. Remaining Work
 
-None for the approved Receiver installation and Gravity Dev verification.
+The approved Receiver installation and Gravity Dev verification are complete.
+The user has now authorized preparing and publishing the four existing PRs for
+review. Merge and public activation remain separate work.
+
+Review order: [Contracts #119](https://github.com/Galxe/gravity_chain_core_contracts/pull/119) owns callback semantics; [Reth #457](https://github.com/Galxe/gravity-reth/pull/457) owns atomic installation; [SDK #844](https://github.com/Galxe/gravity-sdk/pull/844) pins the tested Reth; [Mono #132](https://github.com/Galxe/mono-grav/pull/132) owns acceptance flows and evidence.
