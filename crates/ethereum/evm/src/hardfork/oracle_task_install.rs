@@ -661,11 +661,13 @@ pub(crate) mod tests {
             },
         )
         .unwrap();
+        // The unrelated callback must already have code while Receiver is absent.
+        // Reuse the existing STOP contract; no JWK callback is executed here.
         mutate(
             &mut overlay,
             &env(T - 10),
             NATIVE_ORACLE_ADDRESS,
-            setDefaultCallbackCall { sourceType: 1, callback: BRIDGE_RECEIVER },
+            setDefaultCallbackCall { sourceType: 1, callback: GOVERNANCE },
         )
         .unwrap();
         let changes = overlay.changes;
@@ -720,7 +722,7 @@ pub(crate) mod tests {
                 getDefaultCallbackCall { sourceType: 1 }
             )
             .unwrap(),
-            BRIDGE_RECEIVER
+            GOVERNANCE
         );
         // Exact matching governance state is not rewritten at the crossing.
         install(&mut db, spec.as_ref(), env(T + 8), Some(T - 1), 74).unwrap();
