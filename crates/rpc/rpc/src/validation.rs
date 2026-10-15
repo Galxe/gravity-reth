@@ -114,9 +114,12 @@ where
 
 impl<Provider, E, T> ValidationApi<Provider, E, T>
 where
-    Provider: BlockReaderIdExt<Header = <E::Primitives as NodePrimitives>::BlockHeader>
-        + ChainSpecProvider<ChainSpec: EthereumHardforks>
+    Provider: BlockReaderIdExt<
+            Header = <E::Primitives as NodePrimitives>::BlockHeader,
+            Receipt = <E::Primitives as NodePrimitives>::Receipt,
+        > + ChainSpecProvider<ChainSpec: EthereumHardforks>
         + StateProviderFactory
+        + Clone
         + 'static,
     E: ConfigureEvm + 'static,
     T: PayloadTypes<ExecutionData = ExecutionData>,
@@ -153,15 +156,16 @@ where
             }
         }
 
+        let provider = self.provider.consistent_view()?;
+        let evm_config = self.evm_config.with_read_provider(provider.clone());
         let latest_header =
-            self.provider.latest_header()?.ok_or_else(|| ValidationApiError::MissingLatestBlock)?;
+            provider.latest_header()?.ok_or_else(|| ValidationApiError::MissingLatestBlock)?;
 
         let parent_header = if block.parent_hash() == latest_header.hash() {
             latest_header
         } else {
             // parent is not the latest header so we need to fetch it and ensure it's not too old
-            let parent_header = self
-                .provider
+            let parent_header = provider
                 .sealed_header_by_hash(block.parent_hash())?
                 .ok_or_else(|| ValidationApiError::MissingParentBlock)?;
 
@@ -176,12 +180,12 @@ where
         self.consensus.validate_header_against_parent(block.sealed_header(), &parent_header)?;
         self.validate_gas_limit(registered_gas_limit, &parent_header, block.sealed_header())?;
         let parent_header_hash = parent_header.hash();
-        let state_provider = self.provider.state_by_block_hash(parent_header_hash)?;
+        let state_provider = provider.state_by_block_hash(parent_header_hash)?;
 
         let mut request_cache = self.cached_reads(parent_header_hash).await;
 
         let cached_db = request_cache.as_db_mut(StateProviderDatabase::new(&state_provider));
-        let executor = self.evm_config.batch_executor(cached_db);
+        let executor = evm_config.batch_executor(cached_db);
 
         let mut accessed_blacklisted = None;
         let output = executor.execute_with_state_closure(&block, |state| {
@@ -511,8 +515,10 @@ where
 #[async_trait]
 impl<Provider, E, T> BlockSubmissionValidationApiServer for ValidationApi<Provider, E, T>
 where
-    Provider: BlockReaderIdExt<Header = <E::Primitives as NodePrimitives>::BlockHeader>
-        + ChainSpecProvider<ChainSpec: EthereumHardforks>
+    Provider: BlockReaderIdExt<
+            Header = <E::Primitives as NodePrimitives>::BlockHeader,
+            Receipt = <E::Primitives as NodePrimitives>::Receipt,
+        > + ChainSpecProvider<ChainSpec: EthereumHardforks>
         + StateProviderFactory
         + Clone
         + 'static,

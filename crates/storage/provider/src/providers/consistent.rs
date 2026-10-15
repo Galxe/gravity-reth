@@ -91,7 +91,7 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         })
     }
 
-    pub(crate) fn with_read_context(
+    pub(crate) fn with_view(
         factory: ProviderFactory<N>,
         state: CanonicalInMemoryState<N::Primitives>,
         memory: Arc<ReadMemory<N::Primitives>>,

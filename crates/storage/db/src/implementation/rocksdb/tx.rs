@@ -6,7 +6,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 use reth_db_api::{
-    database::DatabaseReadView,
+    database::DatabaseSnapshot,
     table::{Compress, Decompress, DupSort, Encode, Table, TableImporter},
     tables,
     transaction::{DbTx, DbTxMut},
@@ -42,6 +42,7 @@ pub(crate) use cursor::{RO, RW};
 ///
 /// The state batch is sync-written first, followed by non-empty trie batches in parallel.
 /// Each batch is atomic within its database; commits are not atomic across the three databases.
+/// Reads use the selected live or snapshot sources and do not include pending batch entries.
 ///
 /// # Type Parameter
 ///
@@ -102,14 +103,25 @@ impl DbSnapshot {
     }
 }
 
-/// Shareable state snapshot; the independent trie databases remain live.
-pub(super) struct StateReadView {
+/// Shareable snapshots of the primary store and optional additional stores.
+pub(super) struct Snapshot {
     state: Arc<DbSnapshot>,
+    tries: Option<(Arc<DbSnapshot>, Arc<DbSnapshot>)>,
 }
 
-impl StateReadView {
+impl Snapshot {
     pub(super) fn new(state_db: Arc<DB>) -> Self {
-        Self { state: Arc::new(DbSnapshot::new(state_db)) }
+        Self { state: Arc::new(DbSnapshot::new(state_db)), tries: None }
+    }
+
+    pub(super) fn all_stores(state_db: Arc<DB>, account_db: Arc<DB>, storage_db: Arc<DB>) -> Self {
+        Self {
+            state: Arc::new(DbSnapshot::new(state_db)),
+            tries: Some((
+                Arc::new(DbSnapshot::new(account_db)),
+                Arc::new(DbSnapshot::new(storage_db)),
+            )),
+        }
     }
 
     pub(super) fn belongs_to(&self, state_db: &Arc<DB>) -> bool {
@@ -117,13 +129,13 @@ impl StateReadView {
     }
 }
 
-impl std::fmt::Debug for StateReadView {
+impl std::fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StateReadView").finish_non_exhaustive()
+        f.debug_struct("Snapshot").finish_non_exhaustive()
     }
 }
 
-impl DatabaseReadView for StateReadView {
+impl DatabaseSnapshot for Snapshot {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -270,19 +282,21 @@ impl Tx<RO> {
         account_db: Arc<DB>,
         storage_db: Arc<DB>,
     ) -> Self {
-        Self::new_state_read_view(&StateReadView::new(state_db), account_db, storage_db)
+        Self::from_snapshot(&Snapshot::new(state_db), account_db, storage_db)
     }
 
-    pub(super) fn new_state_read_view(
-        view: &StateReadView,
+    pub(super) fn from_snapshot(
+        snapshot: &Snapshot,
         account_db: Arc<DB>,
         storage_db: Arc<DB>,
     ) -> Self {
-        Self::with_sources(
-            DbReadSource::Snapshot(view.state.clone()),
-            DbReadSource::Live(account_db),
-            DbReadSource::Live(storage_db),
-        )
+        let (accounts, storages) = match &snapshot.tries {
+            Some((accounts, storages)) => {
+                (DbReadSource::Snapshot(accounts.clone()), DbReadSource::Snapshot(storages.clone()))
+            }
+            None => (DbReadSource::Live(account_db), DbReadSource::Live(storage_db)),
+        };
+        Self::with_sources(DbReadSource::Snapshot(snapshot.state.clone()), accounts, storages)
     }
 }
 

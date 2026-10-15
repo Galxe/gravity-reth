@@ -16,17 +16,28 @@ where
     EthApiError: FromEvmError<N::Evm>,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError>,
 {
-    fn with_read_context(&self) -> Result<Self, Self::Error> {
-        if self.use_node_provider || self.read_context.is_some() {
+    fn with_view(&self) -> Result<Self, Self::Error> {
+        if self.use_node_provider || self.read_view.is_some() {
             return Ok(self.clone());
         }
         let provider = self
             .provider()
-            .read_context()
+            .view()
             .map_err(<EthApiError as From<reth_errors::ProviderError>>::from)?;
         let evm = self.evm_config().with_read_provider(provider.clone());
         let mut scoped = self.clone();
-        scoped.read_context = Some((provider, evm));
+        scoped.read_view = Some((provider, evm));
+        Ok(scoped)
+    }
+
+    fn with_consistent_view(&self) -> Result<Self, Self::Error> {
+        let provider = self
+            .provider()
+            .consistent_view()
+            .map_err(<EthApiError as From<reth_errors::ProviderError>>::from)?;
+        let evm = self.evm_config().with_read_provider(provider.clone());
+        let mut scoped = self.clone();
+        scoped.read_view = Some((provider, evm));
         Ok(scoped)
     }
 

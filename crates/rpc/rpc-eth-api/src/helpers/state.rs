@@ -172,9 +172,9 @@ pub trait EthState: LoadState + SpawnBlocking {
                 .map_err(EthApiError::Internal)?;
 
             let block_id = block_id.unwrap_or_default();
-            self.ensure_within_proof_window(block_id)?;
-
             self.spawn_blocking_io_fut(async move |this| {
+                let this = this.with_consistent_view()?;
+                this.ensure_within_proof_window(block_id)?;
                 let state = this.state_at_block_id(block_id).await?;
                 let storage_keys = keys.iter().map(|key| key.as_b256()).collect::<Vec<_>>();
                 let proof = state
@@ -196,9 +196,9 @@ pub trait EthState: LoadState + SpawnBlocking {
         Self: EthApiSpec,
     {
         async move {
-            self.ensure_within_proof_window(block_id)?;
-
             self.spawn_blocking_io_fut(async move |this| {
+                let this = this.with_consistent_view()?;
+                this.ensure_within_proof_window(block_id)?;
                 let state = this.state_at_block_id(block_id).await?;
                 let account = state.basic_account(&address).map_err(Self::Error::from_eth_err)?;
                 let Some(account) = account else { return Ok(None) };
@@ -259,12 +259,20 @@ pub trait LoadState:
         RpcConvert: RpcConvert<Network = Self::NetworkTypes>,
     > + RpcNodeCoreExt
 {
-    /// Captures a context on the IO executor before loading related blocks and state.
-    fn read_context(&self) -> impl Future<Output = Result<Self, Self::Error>> + Send
+    /// Captures a view on the IO executor before loading related blocks and state.
+    fn view(&self) -> impl Future<Output = Result<Self, Self::Error>> + Send
     where
         Self: SpawnBlocking,
     {
-        self.spawn_blocking_io(|this| this.with_read_context())
+        self.spawn_blocking_io(|this| this.with_view())
+    }
+
+    /// Captures matching state and trie snapshots on the IO executor.
+    fn consistent_view(&self) -> impl Future<Output = Result<Self, Self::Error>> + Send
+    where
+        Self: SpawnBlocking,
+    {
+        self.spawn_blocking_io(|this| this.with_consistent_view())
     }
 
     /// Returns the state at the given block number

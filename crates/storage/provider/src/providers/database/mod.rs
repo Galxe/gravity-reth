@@ -18,7 +18,7 @@ use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_db::{init_db, DatabaseArguments, DatabaseEnv};
 use reth_db_api::{
-    database::{Database, DatabaseReadView},
+    database::{Database, DatabaseSnapshot},
     models::{GravityStorageSettings, StoredBlockBodyIndices},
     tables,
     transaction::DbTx,
@@ -77,19 +77,20 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     /// Cached storage layout settings, loaded from the metadata table at construction.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
     state_reads: bool,
-    read_context: Option<Arc<StateReadContext>>,
+    read_view: Option<Arc<ReadView>>,
 }
 
 /// The database boundary and external resources shared by one state computation.
 #[derive(Debug)]
-pub(crate) struct StateReadContext {
-    view: Option<Arc<dyn DatabaseReadView>>,
-    pub(crate) bounds: StateReadBounds,
+pub(crate) struct ReadView {
+    db: Option<Arc<dyn DatabaseSnapshot>>,
+    consistent: bool,
+    pub(crate) bounds: ReadBounds,
     _files: super::static_file::StaticFileReadLease,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct StateReadBounds {
+pub(crate) struct ReadBounds {
     pub(crate) block_number: BlockNumber,
     pub(crate) next_tx_num: TxNumber,
 }
@@ -132,7 +133,7 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
             storage: Default::default(),
             storage_settings,
             state_reads: false,
-            read_context: None,
+            read_view: None,
         }
     }
 
@@ -179,7 +180,7 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
             storage: Default::default(),
             storage_settings,
             state_reads: false,
-            read_context: None,
+            read_view: None,
         })
     }
 }
@@ -193,12 +194,12 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     /// data.
     #[track_caller]
     pub fn provider(&self) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
-        if self.state_reads && self.read_context.is_none() {
+        if self.state_reads && self.read_view.is_none() {
             let files = self.read_lease()?;
-            return self.with_read_context(files)?.provider()
+            return self.capture_view(files, false)?.provider()
         }
-        let tx = match &self.read_context {
-            Some(context) => self.db.tx_with_state_read_view(context.view.clone())?,
+        let tx = match &self.read_view {
+            Some(view) => self.db.tx_with_snapshot(view.db.clone())?,
             None => self.db.tx()?,
         };
         let mut provider = DatabaseProvider::new(
@@ -209,7 +210,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.storage.clone(),
             self.storage_settings.clone(),
         );
-        provider.read_context = self.read_context.clone();
+        provider.read_view = self.read_view.clone();
         Ok(provider)
     }
 
@@ -221,16 +222,18 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         self.static_file_provider.read_lease()
     }
 
-    pub(crate) fn with_read_context(
+    pub(crate) fn has_consistent_view(&self) -> bool {
+        self.read_view.as_ref().is_some_and(|view| view.consistent)
+    }
+
+    pub(crate) fn capture_view(
         &self,
         files: super::static_file::StaticFileReadLease,
+        consistent: bool,
     ) -> ProviderResult<Self> {
-        if self.read_context.is_some() {
-            return Ok(self.clone())
-        }
-        let view = self.db.state_read_view()?;
+        let snapshot = self.db.snapshot(consistent)?;
         let provider: DatabaseProvider<_, N> = DatabaseProvider::new(
-            self.db.tx_with_state_read_view(view.clone())?,
+            self.db.tx_with_snapshot(snapshot.clone())?,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
@@ -247,6 +250,17 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
                 return Err(ProviderError::HeaderNotFound(block_number.into()))
             }
         }
+        if consistent &&
+            provider
+                .get_stage_checkpoint(StageId::MerkleExecute)?
+                .unwrap_or_default()
+                .block_number !=
+                block_number
+        {
+            return Err(ProviderError::other(std::io::Error::other(
+                "state and Merkle checkpoints do not match",
+            )))
+        }
         provider
             .block_hash(block_number)?
             .ok_or(ProviderError::HeaderNotFound(block_number.into()))?;
@@ -256,9 +270,10 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             .next_tx_num();
         let mut factory = self.clone();
         factory.state_reads = true;
-        factory.read_context = Some(Arc::new(StateReadContext {
-            view,
-            bounds: StateReadBounds { block_number, next_tx_num },
+        factory.read_view = Some(Arc::new(ReadView {
+            db: snapshot,
+            consistent,
+            bounds: ReadBounds { block_number, next_tx_num },
             _files: files,
         }));
         Ok(factory)
@@ -801,7 +816,7 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             storage: self.storage.clone(),
             storage_settings: self.storage_settings.clone(),
             state_reads: self.state_reads,
-            read_context: self.read_context.clone(),
+            read_view: self.read_view.clone(),
         }
     }
 }
@@ -843,6 +858,188 @@ mod tests {
     fn common_history_provider() {
         let factory = create_test_provider_factory();
         let _ = factory.latest();
+    }
+
+    #[test]
+    fn consistent_view_reads_v2_history_and_storage_only_overlays() -> eyre::Result<()> {
+        use crate::{
+            providers::state::historical::HistoricalStateProviderRef, StageCheckpointWriter,
+            StaticFileWriter,
+        };
+        use alloy_primitives::{keccak256, Address};
+        use reth_db_api::{
+            models::{AccountBeforeTx, StorageBeforeTx},
+            transaction::DbTxMut,
+        };
+        use reth_primitives_traits::{Account, StorageEntry};
+        use reth_storage_api::{
+            StateProofProvider, StateRootProvider, StorageRootProvider, TrieWriterV2,
+        };
+        use reth_trie::{test_utils, HashedStorage, TrieInput};
+        use reth_trie_db::nested_hash::NestedStateRoot;
+
+        for changesets_in_static_files in [false, true] {
+            let factory = create_test_provider_factory();
+            factory
+                .set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
+            let address = Address::with_last_byte(1);
+            let other = Address::with_last_byte(2);
+            let slot = B256::with_last_byte(1);
+            let new_slot = B256::with_last_byte(2);
+            let account = Account { nonce: 1, balance: U256::from(11), ..Default::default() };
+            let recreated = Account { nonce: 2, balance: U256::from(22), ..Default::default() };
+            let hashed = keccak256(address);
+            let other_hashed = keccak256(other);
+            let state = HashedPostState {
+                accounts: [(hashed, Some(account)), (other_hashed, Some(account))]
+                    .into_iter()
+                    .collect(),
+                storages: [
+                    (hashed, HashedStorage::from_iter(false, [(keccak256(slot), U256::from(10))])),
+                    (
+                        other_hashed,
+                        HashedStorage::from_iter(false, [(keccak256(slot), U256::from(40))]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            let provider = factory.provider_rw()?;
+            let (original_root, updates) =
+                NestedStateRoot::new(provider.tx_ref(), None).calculate(&state)?;
+            provider.write_trie_updatesv2(&updates)?;
+            provider.commit_view()?;
+            drop(provider);
+
+            let final_state = HashedPostState {
+                accounts: [(hashed, Some(recreated)), (other_hashed, Some(account))]
+                    .into_iter()
+                    .collect(),
+                storages: [
+                    (
+                        hashed,
+                        HashedStorage::from_iter(true, [(keccak256(new_slot), U256::from(30))]),
+                    ),
+                    (
+                        other_hashed,
+                        HashedStorage::from_iter(false, [(keccak256(slot), U256::from(60))]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            let provider = factory.provider_rw()?;
+            let (latest_root, updates) =
+                NestedStateRoot::new(provider.tx_ref(), None).calculate(&final_state)?;
+            provider.write_trie_updatesv2(&updates)?;
+            provider.tx_ref().put::<tables::HashedAccounts>(hashed, recreated)?;
+            provider.tx_ref().put::<tables::HashedAccounts>(other_hashed, account)?;
+            let mut rng = generators::rng();
+            for number in 0..=2 {
+                let block = random_block(
+                    &mut rng,
+                    number,
+                    generators::BlockParams { tx_count: Some(0), ..Default::default() },
+                );
+                provider.insert_block(block.try_recover()?, StorageLocation::StaticFiles)?;
+            }
+            provider.update_pipeline_stages(2, false)?;
+            let account_changes = vec![AccountBeforeTx { address, info: Some(account) }];
+            let first_storage =
+                vec![StorageBeforeTx { address: other, key: slot, value: U256::from(40) }];
+            let second_storage = vec![
+                StorageBeforeTx { address, key: slot, value: U256::from(10) },
+                StorageBeforeTx { address, key: new_slot, value: U256::ZERO },
+                StorageBeforeTx { address: other, key: slot, value: U256::from(50) },
+            ];
+            if changesets_in_static_files {
+                let files = factory.static_file_provider();
+                let mut accounts = files.latest_writer(StaticFileSegment::AccountChangeSets)?;
+                accounts.increment_block(0)?;
+                accounts.append_account_changeset(Vec::new(), 1)?;
+                accounts.append_account_changeset(account_changes, 2)?;
+                accounts.commit()?;
+                let mut storages = files.latest_writer(StaticFileSegment::StorageChangeSets)?;
+                storages.increment_block(0)?;
+                storages.append_storage_changeset(first_storage, 1)?;
+                storages.append_storage_changeset(second_storage, 2)?;
+                storages.commit()?;
+            } else {
+                for change in account_changes {
+                    provider.tx_ref().put::<tables::AccountChangeSets>(2, change)?;
+                }
+                for (number, changes) in [(1, first_storage), (2, second_storage)] {
+                    for change in changes {
+                        provider.tx_ref().put::<tables::StorageChangeSets>(
+                            (number, change.address).into(),
+                            StorageEntry { key: change.key, value: change.value },
+                        )?;
+                    }
+                }
+            }
+            factory.static_file_provider().commit()?;
+            provider.commit_view()?;
+            drop(provider);
+
+            let ordinary = factory.rpc_provider().capture_view(factory.read_lease()?, false)?;
+            assert_eq!(ordinary.latest()?.state_root(HashedPostState::default())?, latest_root);
+            let captured = factory.capture_view(factory.read_lease()?, true)?;
+            let provider = captured.provider()?;
+            let latest = provider.latest();
+            assert_eq!(latest.state_root(HashedPostState::default())?, latest_root);
+            let latest_proof = latest.proof(TrieInput::default(), address, &[slot, new_slot])?;
+            latest_proof.verify(latest_root)?;
+            assert_eq!(latest_proof.storage_proofs[0].value, U256::ZERO);
+            assert_eq!(latest_proof.storage_proofs[1].value, U256::from(30));
+            latest
+                .proof(TrieInput::default(), Address::with_last_byte(3), &[slot])?
+                .verify(latest_root)?;
+            let historical = HistoricalStateProviderRef::new(&provider, 1);
+            assert_eq!(historical.state_root(HashedPostState::default())?, original_root);
+            let proof = historical.proof(TrieInput::default(), address, &[slot, new_slot])?;
+            proof.verify(original_root)?;
+            assert_eq!(proof.info, Some(account));
+            assert_eq!(proof.storage_proofs[0].value, U256::from(10));
+            assert_eq!(proof.storage_proofs[1].value, U256::ZERO);
+            let storage_root = test_utils::storage_root([(slot, U256::from(40))]);
+            assert_eq!(historical.storage_root(other, HashedStorage::default())?, storage_root);
+            let overlay = HashedPostState {
+                accounts: Default::default(),
+                storages: std::iter::once((
+                    other_hashed,
+                    HashedStorage::from_iter(false, [(keccak256(slot), U256::from(99))]),
+                ))
+                .collect(),
+            };
+            let expected = test_utils::state_root([
+                (address, (account, vec![(slot, U256::from(10))])),
+                (other, (account, vec![(slot, U256::from(99))])),
+            ]);
+            assert_eq!(historical.state_root_from_nodes(TrieInput::from_state(overlay))?, expected);
+            let deleted = HashedPostState {
+                accounts: std::iter::once((hashed, None)).collect(),
+                storages: Default::default(),
+            };
+            assert_eq!(
+                historical.state_root(deleted)?,
+                test_utils::state_root([(other, (account, [(slot, U256::from(40))]))])
+            );
+            assert_eq!(provider.tx_ref().entries::<tables::AccountsTrie>()?, 0);
+            assert_eq!(provider.tx_ref().entries::<tables::StoragesTrie>()?, 0);
+
+            let writer = factory.provider_rw()?;
+            writer.tx_ref().put::<tables::StageCheckpoints>(
+                StageId::MerkleExecute.to_string(),
+                StageCheckpoint::new(1),
+            )?;
+            writer.commit_view()?;
+            drop(writer);
+            assert!(factory.capture_view(factory.read_lease()?, true).is_err());
+            let ordinary = factory.rpc_provider().capture_view(factory.read_lease()?, false)?;
+            assert!(ordinary.latest()?.basic_account(&address).is_ok());
+            assert_eq!(latest.state_root(HashedPostState::default())?, latest_root);
+        }
+        Ok(())
     }
 
     #[test]
@@ -891,7 +1088,7 @@ mod tests {
             }
             files.commit()?;
             provider.commit()?;
-            let captured = factory.rpc_provider().with_read_context(factory.read_lease()?)?;
+            let captured = factory.rpc_provider().capture_view(factory.read_lease()?, false)?;
 
             let next =
                 random_block(&mut rng, 1, BlockParams { tx_count: Some(1), ..Default::default() });

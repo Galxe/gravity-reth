@@ -82,7 +82,7 @@ pub mod test_utils {
     use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
-        database::{Database, DatabaseReadView},
+        database::{Database, DatabaseSnapshot},
         database_metrics::DatabaseMetrics,
         models::ClientVersion,
     };
@@ -179,16 +179,23 @@ pub mod test_utils {
             Ok(tx)
         }
 
-        fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
-            self.db().state_read_view()
+        fn snapshot(
+            &self,
+            consistent: bool,
+        ) -> Result<Option<Arc<dyn DatabaseSnapshot>>, DatabaseError> {
+            self.db().snapshot(consistent)
         }
 
-        fn tx_with_state_read_view(
+        fn with_write_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+            self.db().with_write_lock(f)
+        }
+
+        fn tx_with_snapshot(
             &self,
-            view: Option<Arc<dyn DatabaseReadView>>,
+            snapshot: Option<Arc<dyn DatabaseSnapshot>>,
         ) -> Result<Self::TX, DatabaseError> {
             self.pre_tx_hook.read()();
-            let tx = self.db().tx_with_state_read_view(view)?;
+            let tx = self.db().tx_with_snapshot(snapshot)?;
             self.post_tx_hook.read()();
             Ok(tx)
         }

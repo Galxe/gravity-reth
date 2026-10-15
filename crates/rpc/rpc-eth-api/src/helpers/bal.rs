@@ -24,7 +24,7 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
         block_id: BlockId,
     ) -> impl Future<Output = Result<Option<BlockAccessList>, Self::Error>> + Send {
         async move {
-            let this = self.read_context().await?;
+            let this = self.view().await?;
             let block = this
                 .recovered_block(block_id)
                 .await?
@@ -81,7 +81,7 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
         block_id: BlockId,
     ) -> impl Future<Output = Result<Option<Bytes>, Self::Error>> + Send {
         async move {
-            let this = self.read_context().await?;
+            let this = self.view().await?;
             let block = this
                 .recovered_block(block_id)
                 .await?

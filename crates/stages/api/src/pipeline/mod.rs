@@ -159,7 +159,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 match target {
                     PipelineTarget::Sync(tip) => self.set_tip(tip),
                     PipelineTarget::Unwind(target) => {
-                        let _maintenance =
+                        let maintenance =
                             self.provider_factory.static_file_provider().begin_maintenance();
                         if let Err(err) = self.move_to_static_files() {
                             return (self, Err(err.into()))
@@ -168,6 +168,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                             return (self, Err(err))
                         }
                         self.progress.update(target);
+                        maintenance.complete();
 
                         return (self, Ok(ControlFlow::Continue { block_number: target }))
                     }
@@ -226,7 +227,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     pub async fn run_loop(&mut self) -> Result<ControlFlow, PipelineError> {
         // Backfill runs on the blocking pipeline executor. Drain existing views there before
         // publishing stage commits that do not yet form a complete state boundary.
-        let _maintenance = self.provider_factory.static_file_provider().begin_maintenance();
+        let maintenance = self.provider_factory.static_file_provider().begin_maintenance();
         self.move_to_static_files()?;
 
         let mut previous_stage = None;
@@ -248,6 +249,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 ControlFlow::Continue { block_number } => self.progress.update(block_number),
                 ControlFlow::Unwind { target, bad_block } => {
                     self.unwind_inner(target, Some(bad_block.block.number))?;
+                    maintenance.complete();
                     return Ok(ControlFlow::Unwind { target, bad_block })
                 }
             }
@@ -261,6 +263,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             );
         }
 
+        maintenance.complete();
         Ok(self.progress.next_ctrl())
     }
 
@@ -304,8 +307,10 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
         to: BlockNumber,
         bad_block: Option<BlockNumber>,
     ) -> Result<(), PipelineError> {
-        let _maintenance = self.provider_factory.static_file_provider().begin_maintenance();
-        self.unwind_inner(to, bad_block)
+        let maintenance = self.provider_factory.static_file_provider().begin_maintenance();
+        self.unwind_inner(to, bad_block)?;
+        maintenance.complete();
+        Ok(())
     }
 
     fn unwind_inner(

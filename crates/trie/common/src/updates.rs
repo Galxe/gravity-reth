@@ -1,4 +1,4 @@
-use crate::{nested_trie::Node, BranchNodeCompact, HashBuilder, Nibbles};
+use crate::{nested_trie::Node, BranchNodeCompact, HashBuilder, Nibbles, TrieMask};
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
     vec::Vec,
@@ -17,6 +17,33 @@ pub struct TrieUpdatesV2 {
     pub removed_nodes: HashSet<Nibbles>,
     /// Collection of updated storage tries indexed by the hashed address.
     pub storage_tries: B256Map<StorageTrieUpdatesV2>,
+}
+
+impl TrieUpdatesV2 {
+    /// Convert to a sparse cache of legacy branch nodes.
+    ///
+    /// Only hashed child references are reusable; inline children and descendants are rebuilt
+    /// from hashed state. This produces valid legacy updates without requiring legacy trie tables.
+    pub fn into_legacy(self) -> TrieUpdates {
+        let (account_nodes, removed_nodes) = compact_nodes(self.account_nodes, self.removed_nodes);
+        let storage_tries = self
+            .storage_tries
+            .into_iter()
+            .map(|(address, updates)| {
+                let (storage_nodes, removed_nodes) =
+                    compact_nodes(updates.storage_nodes, updates.removed_nodes);
+                (
+                    address,
+                    StorageTrieUpdates {
+                        is_deleted: updates.is_deleted,
+                        storage_nodes,
+                        removed_nodes,
+                    },
+                )
+            })
+            .collect();
+        TrieUpdates { account_nodes, removed_nodes, storage_tries }
+    }
 }
 
 /// Trie updates for nested storage trie of a single account.
@@ -322,6 +349,50 @@ impl StorageTrieUpdates {
             storage_nodes: self.storage_nodes.iter().collect::<BTreeMap<_, _>>(),
         }
     }
+}
+
+fn compact_nodes(
+    nodes: HashMap<Nibbles, Node>,
+    mut removed: HashSet<Nibbles>,
+) -> (HashMap<Nibbles, BranchNodeCompact>, HashSet<Nibbles>) {
+    let mut compact = HashMap::default();
+    for (path, node) in nodes {
+        if let Node::FullNode { children, .. } = node {
+            if path.is_empty() {
+                continue;
+            }
+            let mut state_mask = TrieMask::default();
+            let mut hash_mask = TrieMask::default();
+            let mut hashes = Vec::new();
+            for (index, child) in children.iter().enumerate() {
+                if let Some(child) = child {
+                    state_mask.set_bit(index as u8);
+                    if let Some(hash) = child.cached_rlp().and_then(|rlp| rlp.as_hash()) {
+                        hash_mask.set_bit(index as u8);
+                        hashes.push(hash);
+                    }
+                }
+            }
+            if hash_mask.is_empty() {
+                removed.insert(path);
+                continue;
+            }
+            compact.insert(
+                path,
+                BranchNodeCompact {
+                    state_mask,
+                    tree_mask: TrieMask::default(),
+                    hash_mask,
+                    hashes: hashes.into(),
+                    root_hash: None,
+                },
+            );
+        } else {
+            // A branch replaced by an extension or leaf must invalidate the previous cache entry.
+            removed.insert(path);
+        }
+    }
+    (compact, removed)
 }
 
 /// Serializes and deserializes any [`HashSet`] that includes [`Nibbles`] elements, by using the

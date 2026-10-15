@@ -2,8 +2,9 @@
 
 use crate::{DatabaseError, TableSet};
 use metrics::Label;
+use parking_lot::RwLock;
 use reth_db_api::{
-    database::DatabaseReadView, database_metrics::DatabaseMetrics, models::ClientVersion,
+    database::DatabaseSnapshot, database_metrics::DatabaseMetrics, models::ClientVersion,
     table::Table, tables, Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
@@ -255,6 +256,8 @@ pub struct DatabaseEnv {
     pub(crate) account_db: Arc<DB>,
     /// `RocksDB` database for storage trie tables.
     pub(crate) storage_db: Arc<DB>,
+    /// Coordinates full-store snapshot capture with logical commits.
+    commit_lock: RwLock<()>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
 }
@@ -283,7 +286,7 @@ impl DatabaseEnv {
         let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
         let storage_db = dbs.get(&storage_path).cloned().expect("storage DB handle missing");
 
-        Ok(Self { state_db, account_db, storage_db, kind })
+        Ok(Self { state_db, account_db, storage_db, commit_lock: RwLock::new(()), kind })
     }
 
     /// Resolve shard paths based on configuration.
@@ -695,28 +698,46 @@ impl reth_db_api::database::Database for DatabaseEnv {
         Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
     }
 
-    fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
-        Ok(Some(Arc::new(tx::StateReadView::new(self.state_db.clone()))))
+    fn snapshot(
+        &self,
+        consistent: bool,
+    ) -> Result<Option<Arc<dyn DatabaseSnapshot>>, DatabaseError> {
+        let snapshot = if consistent {
+            let _guard = self.commit_lock.read();
+            tx::Snapshot::all_stores(
+                self.state_db.clone(),
+                self.account_db.clone(),
+                self.storage_db.clone(),
+            )
+        } else {
+            tx::Snapshot::new(self.state_db.clone())
+        };
+        Ok(Some(Arc::new(snapshot)))
     }
 
-    fn tx_with_state_read_view(
+    fn with_write_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self.commit_lock.write();
+        f()
+    }
+
+    fn tx_with_snapshot(
         &self,
-        view: Option<Arc<dyn DatabaseReadView>>,
+        snapshot: Option<Arc<dyn DatabaseSnapshot>>,
     ) -> Result<Self::TX, DatabaseError> {
-        let Some(view) = view else {
+        let Some(snapshot) = snapshot else {
             return Ok(tx::Tx::new_state_snapshot(
                 self.state_db.clone(),
                 self.account_db.clone(),
                 self.storage_db.clone(),
             ))
         };
-        let Some(view) = view.as_any().downcast_ref::<tx::StateReadView>() else {
-            return Err(DatabaseError::Other("state read view belongs to another database".into()));
+        let Some(snapshot) = snapshot.as_any().downcast_ref::<tx::Snapshot>() else {
+            return Err(DatabaseError::Other("snapshot belongs to another database".into()));
         };
-        if !view.belongs_to(&self.state_db) {
-            return Err(DatabaseError::Other("state read view belongs to another database".into()));
+        if !snapshot.belongs_to(&self.state_db) {
+            return Err(DatabaseError::Other("snapshot belongs to another database".into()));
         }
-        Ok(tx::Tx::new_state_read_view(view, self.account_db.clone(), self.storage_db.clone()))
+        Ok(tx::Tx::from_snapshot(snapshot, self.account_db.clone(), self.storage_db.clone()))
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
@@ -773,7 +794,7 @@ mod tests {
         let cf = env.state_db.cf_handle(tables::CanonicalHeaders::NAME).unwrap();
         env.state_db.flush_cf(cf).unwrap();
 
-        let snapshot = env.tx_with_state_read_view(None).unwrap();
+        let snapshot = env.tx_with_snapshot(None).unwrap();
         let mut cursor = snapshot.cursor_read::<tables::CanonicalHeaders>().unwrap();
         let live = env.tx().unwrap();
         let live_rw = env.tx_mut().unwrap();
@@ -804,8 +825,7 @@ mod tests {
         assert_eq!(live.get::<tables::CanonicalHeaders>(1).unwrap(), Some(new));
         assert_eq!(live.get::<tables::CanonicalHeaders>(2).unwrap(), None);
         assert_eq!(live_rw.get::<tables::CanonicalHeaders>(1).unwrap(), Some(new));
-        let fresh =
-            <&DatabaseEnv as Database>::tx_with_state_read_view(&env.as_ref(), None).unwrap();
+        let fresh = <&DatabaseEnv as Database>::tx_with_snapshot(&env.as_ref(), None).unwrap();
         assert_eq!(fresh.get::<tables::CanonicalHeaders>(1).unwrap(), Some(new));
         assert_eq!(fresh.get::<tables::CanonicalHeaders>(2).unwrap(), None);
         assert_eq!(fresh.get::<tables::CanonicalHeaders>(3).unwrap(), Some(new));
@@ -828,7 +848,7 @@ mod tests {
         writer.put::<tables::PlainStorageState>(deleted_address, first).unwrap();
         writer.commit().unwrap();
 
-        let snapshot = env.tx_with_state_read_view(None).unwrap();
+        let snapshot = env.tx_with_snapshot(None).unwrap();
         let writer = env.tx_mut().unwrap();
         writer.put::<tables::PlainStorageState>(address, changed).unwrap();
         writer.delete::<tables::PlainStorageState>(address, Some(second)).unwrap();
@@ -871,7 +891,7 @@ mod tests {
         writer.put::<tables::PlainStorageState>(address, entry).unwrap();
         writer.commit().unwrap();
 
-        let snapshot = env.tx_with_state_read_view(None).unwrap();
+        let snapshot = env.tx_with_snapshot(None).unwrap();
         let mut cursor = snapshot.cursor_read::<tables::CanonicalHeaders>().unwrap();
         let mut dup_cursor = snapshot.cursor_dup_read::<tables::PlainStorageState>().unwrap();
         drop(snapshot);
@@ -893,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn state_snapshot_read_view_is_shared_and_rejects_another_database() {
+    fn snapshot_is_shared_and_rejects_another_database() {
         let dir = tempfile::tempdir().unwrap();
         let env = Arc::new(
             DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, DatabaseArguments::default())
@@ -904,19 +924,18 @@ mod tests {
         let writer = env.tx_mut().unwrap();
         writer.put::<tables::CanonicalHeaders>(1, old).unwrap();
         writer.commit().unwrap();
-        let view = env.state_read_view().unwrap();
+        let view = env.snapshot(false).unwrap();
         assert!(view.is_some());
-        let first = env.tx_with_state_read_view(view.clone()).unwrap();
+        let first = env.tx_with_snapshot(view.clone()).unwrap();
         let writer = env.tx_mut().unwrap();
         writer.put::<tables::CanonicalHeaders>(1, new).unwrap();
         writer.commit().unwrap();
         let second =
-            <&DatabaseEnv as Database>::tx_with_state_read_view(&env.as_ref(), view.clone())
-                .unwrap();
+            <&DatabaseEnv as Database>::tx_with_snapshot(&env.as_ref(), view.clone()).unwrap();
         assert_eq!(first.get::<tables::CanonicalHeaders>(1).unwrap(), Some(old));
         assert_eq!(second.get::<tables::CanonicalHeaders>(1).unwrap(), Some(old));
         assert_eq!(
-            env.tx_with_state_read_view(None).unwrap().get::<tables::CanonicalHeaders>(1).unwrap(),
+            env.tx_with_snapshot(None).unwrap().get::<tables::CanonicalHeaders>(1).unwrap(),
             Some(new)
         );
 
@@ -924,7 +943,7 @@ mod tests {
         let other =
             DatabaseEnv::open(other_dir.path(), DatabaseEnvKind::RW, DatabaseArguments::default())
                 .unwrap();
-        assert!(other.tx_with_state_read_view(view).is_err());
+        assert!(other.tx_with_snapshot(view).is_err());
     }
 
     #[test]
@@ -932,7 +951,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, DatabaseArguments::default())
             .unwrap();
-        let snapshot = env.tx_with_state_read_view(None).unwrap();
+        let snapshot = env.tx_with_snapshot(None).unwrap();
         let writer = env.tx_mut().unwrap();
         writer
             .put::<RawTable<tables::AccountsTrieV2>>(
@@ -962,6 +981,74 @@ mod tests {
                 .unwrap()
                 .raw_value(),
             &[4]
+        );
+    }
+
+    #[test]
+    fn trie_snapshot_releases_lock_and_pins_all_shards() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = Arc::new(
+            DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, DatabaseArguments::default())
+                .unwrap(),
+        );
+        let write = |value| {
+            env.with_write_lock(|| {
+                let writer = env.tx_mut().unwrap();
+                writer.put::<tables::CanonicalHeaders>(1, B256::with_last_byte(value)).unwrap();
+                writer
+                    .put::<RawTable<tables::AccountsTrieV2>>(
+                        RawKey::from_vec(vec![1]),
+                        RawValue::from_vec(vec![value]),
+                    )
+                    .unwrap();
+                writer
+                    .put::<RawTable<tables::StoragesTrieV2>>(
+                        RawKey::from_vec(vec![1]),
+                        RawValue::from_vec(vec![value]),
+                    )
+                    .unwrap();
+                writer.commit().unwrap();
+
+                // Ordinary state snapshots must remain available even during a trie commit.
+                assert_eq!(
+                    env.tx_with_snapshot(env.snapshot(false).unwrap())
+                        .unwrap()
+                        .get::<tables::CanonicalHeaders>(1)
+                        .unwrap(),
+                    Some(B256::with_last_byte(value))
+                );
+            });
+        };
+        write(2);
+        let view = <&DatabaseEnv as Database>::snapshot(&env.as_ref(), true).unwrap();
+        write(3);
+
+        // Opening transactions after later commits still uses all three captured sequences.
+        let snapshot = env.tx_with_snapshot(view).unwrap();
+        assert_eq!(
+            snapshot.get::<tables::CanonicalHeaders>(1).unwrap(),
+            Some(B256::with_last_byte(2))
+        );
+        assert_eq!(
+            snapshot
+                .get::<RawTable<tables::AccountsTrieV2>>(RawKey::from_vec(vec![1]))
+                .unwrap()
+                .unwrap()
+                .raw_value(),
+            &[2]
+        );
+        let mut storage_cursor =
+            snapshot.cursor_read::<RawTable<tables::StoragesTrieV2>>().unwrap();
+        drop(snapshot);
+        assert_eq!(storage_cursor.first().unwrap().unwrap().1.raw_value(), &[2]);
+        assert_eq!(
+            env.tx()
+                .unwrap()
+                .get::<RawTable<tables::StoragesTrieV2>>(RawKey::from_vec(vec![1]))
+                .unwrap()
+                .unwrap()
+                .raw_value(),
+            &[3]
         );
     }
 

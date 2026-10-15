@@ -81,7 +81,7 @@ where
     }
 
     fn try_balance_changes_in_block(&self, block_id: BlockId) -> EthResult<AddressMap<U256>> {
-        let provider = self.provider().read_context()?;
+        let provider = self.provider().view()?;
         let Some(block_number) = provider.block_number_for_id(block_id)? else {
             return Err(EthApiError::HeaderNotFound(block_id))
         };
@@ -149,7 +149,7 @@ where
         block_id: BlockId,
         block_count: u64,
     ) -> EthResult<Option<ExecutionOutcome<N::Receipt>>> {
-        let provider = self.provider().read_context()?;
+        let provider = self.provider().view()?;
         let Some(start_block) = provider.block_number_for_id(block_id)? else { return Ok(None) };
 
         if start_block == 0 {

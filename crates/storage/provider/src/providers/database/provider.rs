@@ -116,7 +116,7 @@ impl<DB: Database, N: NodeTypes> AsRef<DatabaseProvider<<DB as Database>::TXMut,
 }
 
 impl<DB: Database, N: NodeTypes + 'static> DatabaseProviderRW<DB, N> {
-    /// Commit database transaction and static file if it exists.
+    /// Commits pending database writes and consumes the provider.
     pub fn commit(self) -> ProviderResult<bool> {
         self.0.commit()
     }
@@ -151,12 +151,12 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, shared with the provider factory.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
-    pub(crate) read_context: Option<Arc<super::StateReadContext>>,
+    pub(crate) read_view: Option<Arc<super::ReadView>>,
 }
 
 impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
-    pub(crate) fn read_bounds(&self) -> Option<super::StateReadBounds> {
-        self.read_context.as_ref().map(|context| context.bounds)
+    pub(crate) fn read_bounds(&self) -> Option<super::ReadBounds> {
+        self.read_view.as_ref().map(|view| view.bounds)
     }
 
     /// Returns reference to prune modes.
@@ -180,7 +180,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
         let mut block_number =
             self.block_number(block_hash)?.ok_or(ProviderError::BlockHashNotFound(block_hash))?;
         if !self.block_visible(block_number) ||
-            (self.read_context.is_some() && self.block_hash(block_number)? != Some(block_hash))
+            (self.read_view.is_some() && self.block_hash(block_number)? != Some(block_hash))
         {
             return Err(ProviderError::BlockHashNotFound(block_hash))
         }
@@ -274,7 +274,7 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
             prune_modes,
             storage,
             storage_settings,
-            read_context: None,
+            read_view: None,
         }
     }
 }
@@ -641,7 +641,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
             prune_modes,
             storage,
             storage_settings,
-            read_context: None,
+            read_view: None,
         }
     }
 
@@ -933,7 +933,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
         Ok(self.tx.commit()?)
     }
 
-    /// Commit data to let other readers read.
+    /// Commits pending database writes while retaining the provider for another batch.
+    /// Existing read snapshots keep their captured versions.
     pub fn commit_view(&self) -> ProviderResult<bool> {
         Ok(self.tx.commit_view()?)
     }
@@ -3606,6 +3607,10 @@ impl<TX: DbTxMut, N: NodeTypes> ChainStateBlockWriter for DatabaseProvider<TX, N
 
 impl<TX: DbTx + 'static, N: NodeTypes + 'static> DBProvider for DatabaseProvider<TX, N> {
     type Tx = TX;
+
+    fn uses_trie_v2(&self) -> bool {
+        self.read_view.is_some()
+    }
 
     fn tx_ref(&self) -> &Self::Tx {
         &self.tx

@@ -186,7 +186,7 @@ where
         rlp_block: Bytes,
         opts: GethDebugTracingOptions,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
-        let eth_api = self.eth_api().read_context().await?;
+        let eth_api = self.eth_api().view().await?;
         let block: ProviderBlock<Eth::Provider> = Decodable::decode(&mut rlp_block.as_ref())
             .map_err(BlockError::RlpDecodeRawBlock)
             .map_err(Eth::Error::from_eth_err)?;
@@ -222,7 +222,7 @@ where
         block_id: BlockId,
         opts: GethDebugTracingOptions,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
-        let eth_api = self.eth_api().read_context().await?;
+        let eth_api = self.eth_api().view().await?;
         let block = eth_api
             .recovered_block(block_id)
             .await?
@@ -240,7 +240,7 @@ where
         tx_hash: B256,
         opts: GethDebugTracingOptions,
     ) -> Result<GethTrace, Eth::Error> {
-        let eth_api = self.eth_api().read_context().await?;
+        let eth_api = self.eth_api().view().await?;
         let (transaction, block) = match eth_api.transaction_and_block(tx_hash).await? {
             None => return Err(EthApiError::TransactionNotFound.into()),
             Some(res) => res,
@@ -349,7 +349,7 @@ where
         tracing_options: GethDebugTracingOptions,
         overrides: EvmOverrides,
     ) -> Result<GethTrace, Eth::Error> {
-        let eth_api = self.eth_api().read_context().await?;
+        let eth_api = self.eth_api().view().await?;
         // Get the target block to check transaction count
         let block = eth_api
             .recovered_block(block_id)
@@ -410,7 +410,7 @@ where
         state_context: Option<StateContext>,
         opts: Option<GethDebugTracingCallOptions>,
     ) -> Result<Vec<Vec<GethTrace>>, Eth::Error> {
-        let eth_api = self.eth_api().read_context().await?;
+        let eth_api = self.eth_api().view().await?;
         if bundles.is_empty() {
             return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into())
         }
@@ -569,7 +569,8 @@ where
         tx_index: Index,
         address: Address,
     ) -> Result<Option<Account>, Eth::Error> {
-        self.replay_block_until(block_id, tx_index, move |db| Self::account(db, address))
+        let eth_api = self.eth_api().consistent_view().await?;
+        self.replay_block_until(eth_api, block_id, tx_index, move |db| Self::account(db, address))
             .await
             .map(Option::flatten)
     }
@@ -582,13 +583,18 @@ where
         tx_index: Index,
         address: Address,
     ) -> Result<Option<AccountInfo>, Eth::Error> {
-        self.replay_block_until(block_id, tx_index, move |db| Self::account_info(db, address)).await
+        let eth_api = self.eth_api().view().await?;
+        self.replay_block_until(eth_api, block_id, tx_index, move |db| {
+            Self::account_info(db, address)
+        })
+        .await
     }
 
     /// Replays a block through the transaction at the given index and calls `f` with the resulting
     /// state.
     async fn replay_block_until<F, R>(
         &self,
+        eth_api: Eth,
         block_id: BlockId,
         tx_index: Index,
         f: F,
@@ -597,7 +603,6 @@ where
         F: FnOnce(&mut StateCacheDb) -> Result<R, Eth::Error> + Send + 'static,
         R: Send + 'static,
     {
-        let eth_api = self.eth_api().read_context().await?;
         let block = eth_api
             .recovered_block(block_id)
             .await?
@@ -699,6 +704,7 @@ where
         self.inner
             .eth_api
             .spawn_blocking_io(move |this| {
+                let this = this.with_consistent_view()?;
                 let state = this
                     .provider()
                     .state_by_block_id(block_id.unwrap_or_default())
@@ -710,14 +716,14 @@ where
 
     /// Executes a block and returns the state root after each transaction.
     pub async fn intermediate_roots(&self, block_hash: B256) -> Result<Vec<B256>, Eth::Error> {
-        let block = self
-            .eth_api()
+        let eth_api = self.eth_api().consistent_view().await?;
+        let block = eth_api
             .recovered_block(block_hash.into())
             .await?
             .ok_or(EthApiError::HeaderNotFound(block_hash.into()))?;
-        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+        let evm_env = eth_api.evm_env_for_header(block.sealed_block().sealed_header())?;
 
-        self.eth_api()
+        eth_api
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
                 // Enable transition tracking so that merge_transitions works
                 db.transition_state = Some(Default::default());
@@ -1173,7 +1179,7 @@ where
             .to_rpc_result()?;
 
         let opts = opts.map(|o| o.tracing_options).unwrap_or_default();
-        let eth_api = self.eth_api().read_context().await.map_err(Into::into)?;
+        let eth_api = self.eth_api().view().await.map_err(Into::into)?;
         self.trace_block(eth_api, entry.block.clone(), evm_env, opts, false)
             .await
             .map_err(Into::into)

@@ -7,6 +7,7 @@ use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
     tables,
     transaction::{DbTx, DbTxMut},
+    Database,
 };
 use reth_errors::ProviderError;
 use reth_ethereum_primitives::EthPrimitives;
@@ -168,12 +169,13 @@ where
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
         let start_time = Instant::now();
         let sf_provider = self.provider.static_file_provider();
-        let _maintenance = sf_provider.begin_maintenance();
+        let maintenance = sf_provider.begin_maintenance();
         let provider_rw = self.provider.database_provider_rw()?;
 
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
         UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(new_tip_num)?;
         UnifiedStorageWriter::commit_unwind(provider_rw)?;
+        maintenance.complete();
 
         debug!(target: "engine::persistence", ?new_tip_num, ?new_tip_hash, "Removed blocks from disk");
         self.metrics.remove_blocks_above_duration_seconds.record(start_time.elapsed());
@@ -307,7 +309,7 @@ where
             )?;
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
 
-            Self::commit_block(provider_rw, block_number)?;
+            self.commit_block(provider_rw, block_number)?;
             metrics::histogram!("save_blocks_time", &[("process", "atomic_block")])
                 .record(start.elapsed());
         }
@@ -420,7 +422,7 @@ where
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
         }
 
-        Self::commit_block(provider_rw, group_last)?;
+        self.commit_block(provider_rw, group_last)?;
 
         metrics::histogram!("save_blocks_time", &[("process", "merge_block")])
             .record(start.elapsed() / block_count);
@@ -429,6 +431,7 @@ where
 
     /// Commit state before the tries, then record Merkle completion after both trie writes.
     fn commit_block<TX: DbTx + DbTxMut + 'static>(
+        &self,
         provider_rw: DatabaseProvider<TX, N>,
         block_number: u64,
     ) -> Result<(), PersistenceError> {
@@ -445,9 +448,11 @@ where
         provider_rw.static_file_provider().commit()?;
         // The old Merkle checkpoint makes recovery repair the entire block/group if either
         // trie write fails after state has committed.
-        provider_rw.tx_ref().commit_view().map_err(ProviderError::Database)?;
-        provider_rw.update_pipeline_stages(block_number, false)?;
-        provider_rw.commit()?;
+        self.provider.db_ref().with_write_lock(|| {
+            provider_rw.tx_ref().commit_view().map_err(ProviderError::Database)?;
+            provider_rw.update_pipeline_stages(block_number, false)?;
+            provider_rw.commit()
+        })?;
         PERSIST_BLOCK_CACHE.persist_tip(block_number);
         Ok(())
     }
@@ -1119,6 +1124,67 @@ mod tests {
         assert!(service.on_save_blocks(Vec::new()).unwrap().last_block.is_none());
         assert_eq!(service.pending_finalized_block, Some(10));
         assert_eq!(service.pending_safe_block, Some(11));
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn consistent_view_waits_for_both_persistence_commits() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        };
+
+        let _scenario = fail::FailScenario::setup();
+        for merged in [false, true] {
+            PERSIST_BLOCK_CACHE.reset();
+            let provider = create_test_provider_factory();
+            let service = persistence_service(provider.clone());
+            service.save_blocks_per_block(vec![state_block(&provider, empty_outcome())]).unwrap();
+            let block =
+                state_block(&provider, account_update(1, Address::with_last_byte(1), None, 7));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let readers = Arc::new(Mutex::new(Vec::new()));
+            let callback_provider = provider.clone();
+            let callback_calls = calls.clone();
+            let callback_readers = readers.clone();
+            fail::cfg_callback("db::commit::before_state", move || {
+                callback_calls.fetch_add(1, Ordering::Relaxed);
+                // This must not take the coordination lock held by the persistence writer.
+                callback_provider.db_ref().tx_with_snapshot(None).unwrap();
+                let (started_tx, started_rx) = std::sync::mpsc::channel();
+                let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+                let provider = callback_provider.clone();
+                callback_readers.lock().unwrap().push(std::thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    let view = provider.db_ref().snapshot(true).unwrap();
+                    let tx = provider.db_ref().tx_with_snapshot(view).unwrap();
+                    assert_eq!(
+                        tx.get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string())
+                            .unwrap()
+                            .unwrap()
+                            .block_number,
+                        1
+                    );
+                    let _ = finished_tx.send(());
+                }));
+                started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(matches!(
+                    finished_rx.recv_timeout(Duration::from_millis(20)),
+                    Err(RecvTimeoutError::Timeout)
+                ));
+            })
+            .unwrap();
+            if merged {
+                service.save_merged_blocks(vec![block]).unwrap();
+            } else {
+                service.save_blocks_per_block(vec![block]).unwrap();
+            }
+            fail::remove("db::commit::before_state");
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+            for reader in readers.lock().unwrap().drain(..) {
+                reader.join().unwrap();
+            }
+        }
     }
 
     #[cfg(feature = "failpoints")]

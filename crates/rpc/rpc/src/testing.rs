@@ -30,7 +30,7 @@ use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::{execute::BlockBuilder, ConfigureEvm, NextBlockEnvAttributes};
 use reth_primitives_traits::{
     transaction::{recover::try_recover_signers, signed::RecoveryError},
-    AlloyBlockHeader as BlockTrait, TxTy,
+    AlloyBlockHeader as BlockTrait, ReceiptTy, TxTy,
 };
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc_api::{TestingApiServer, TestingBuildBlockRequestV1};
@@ -86,7 +86,8 @@ impl<Eth, Evm> TestingApi<Eth, Evm> {
 impl<Eth, Evm> TestingApi<Eth, Evm>
 where
     Eth: Call<
-        Provider: BlockReader<Header = Header> + ChainSpecProvider<ChainSpec: EthereumHardforks>,
+        Provider: BlockReader<Header = Header, Receipt = ReceiptTy<Evm::Primitives>>
+                      + ChainSpecProvider<ChainSpec: EthereumHardforks>,
         Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Evm::Primitives>>>,
     >,
     Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes, Primitives = EthPrimitives>
@@ -96,11 +97,12 @@ where
         &self,
         request: TestingBuildBlockRequestV1,
     ) -> Result<ExecutionPayloadEnvelopeV5, Eth::Error> {
-        let evm_config = self.evm_config.clone();
+        let eth_api = self.eth_api.consistent_view().await?;
+        let evm_config = self.evm_config.with_read_provider(eth_api.provider().clone());
         let skip_invalid_transactions = self.skip_invalid_transactions;
         let desired_gas_limit = self.desired_gas_limit;
         let gas_limit_override = self.gas_limit_override;
-        self.eth_api
+        eth_api
             .spawn_with_state_at_block(request.parent_block_hash, move |eth_api, state| {
                 let state = state.database.0;
                 let mut db = State::builder()
@@ -255,7 +257,8 @@ where
 impl<Eth, Evm> TestingApiServer for TestingApi<Eth, Evm>
 where
     Eth: Call<
-        Provider: BlockReader<Header = Header> + ChainSpecProvider<ChainSpec: EthereumHardforks>,
+        Provider: BlockReader<Header = Header, Receipt = ReceiptTy<Evm::Primitives>>
+                      + ChainSpecProvider<ChainSpec: EthereumHardforks>,
         Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Evm::Primitives>>>,
     >,
     Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes, Primitives = EthPrimitives>

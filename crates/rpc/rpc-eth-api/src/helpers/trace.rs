@@ -215,7 +215,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         R: Send + 'static,
     {
         async move {
-            let this = self.read_context().await?;
+            let this = self.view().await?;
             let (transaction, block) = match this.transaction_and_block(hash).await? {
                 None => return Ok(None),
                 Some(res) => res,
@@ -317,7 +317,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         R: Send + 'static,
     {
         async move {
-            let this = self.read_context().await?;
+            let this = self.view().await?;
             let block =
                 if block.is_some() { block } else { this.recovered_block(block_id).await? };
 

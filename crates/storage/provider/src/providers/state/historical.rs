@@ -3,7 +3,7 @@ use crate::{
     HashedPostStateProvider, ProviderError, StateProvider, StateRootProvider,
 };
 use alloy_eips::merge::EPOCH_SLOTS;
-use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
+use alloy_primitives::{keccak256, Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
     models::{storage_sharded_key::StorageShardedKey, ShardedKey},
@@ -14,8 +14,8 @@ use reth_db_api::{
 };
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
-    BlockNumReader, BytecodeReader, ChangeSetReader, DBProvider, StateProofProvider,
-    StorageChangeSetReader, StorageRootProvider, StorageSettingsCache,
+    BlockNumReader, BytecodeReader, ChangeSetReader, ChangesetRangeReader, DBProvider,
+    StateProofProvider, StorageChangeSetReader, StorageRootProvider, StorageSettingsCache,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
@@ -26,8 +26,8 @@ use reth_trie::{
     StateRoot, StorageMultiProof, StorageRoot, TrieInput,
 };
 use reth_trie_db::{
-    DatabaseHashedPostState, DatabaseHashedStorage, DatabaseProof, DatabaseStateRoot,
-    DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness,
+    nested_hash::NestedStateRoot, DatabaseHashedPostState, DatabaseHashedStorage, DatabaseProof,
+    DatabaseStateRoot, DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness,
 };
 use std::fmt::Debug;
 
@@ -118,7 +118,10 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
     }
 
     /// Retrieve revert hashed state for this history provider.
-    fn revert_state(&self) -> ProviderResult<HashedPostState> {
+    fn revert_state(&self) -> ProviderResult<HashedPostState>
+    where
+        Provider: ChangesetRangeReader,
+    {
         if !self.lowest_available_blocks.is_account_history_available(self.block_number) ||
             !self.lowest_available_blocks.is_storage_history_available(self.block_number)
         {
@@ -133,11 +136,35 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
             );
         }
 
-        Ok(HashedPostState::from_reverts::<KeccakKeyHasher>(self.tx(), self.block_number)?)
+        if !self.provider.uses_trie_v2() {
+            return Ok(HashedPostState::from_reverts::<KeccakKeyHasher>(
+                self.tx(),
+                self.block_number,
+            )?)
+        }
+        let range = self.block_number..=self.provider.last_block_number()?;
+        let mut state = HashedPostState::default();
+        // Readers yield blocks in ascending order; the first before-value restores the target.
+        for (_, account) in self.provider.account_changesets_range(range.clone())? {
+            state.accounts.entry(keccak256(account.address)).or_insert(account.info);
+        }
+        for (key, entry) in self.provider.storage_changesets_range(range)? {
+            state
+                .storages
+                .entry(keccak256(key.address()))
+                .or_default()
+                .storage
+                .entry(keccak256(entry.key))
+                .or_insert(entry.value);
+        }
+        Ok(state)
     }
 
     /// Retrieve revert hashed storage for this history provider and target address.
-    fn revert_storage(&self, address: Address) -> ProviderResult<HashedStorage> {
+    fn revert_storage(&self, address: Address) -> ProviderResult<HashedStorage>
+    where
+        Provider: ChangesetRangeReader,
+    {
         if !self.lowest_available_blocks.is_storage_history_available(self.block_number) {
             return Err(ProviderError::StateAtBlockPruned(self.block_number))
         }
@@ -150,7 +177,29 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
             );
         }
 
-        Ok(HashedStorage::from_reverts(self.tx(), address, self.block_number)?)
+        if !self.provider.uses_trie_v2() {
+            return Ok(HashedStorage::from_reverts(self.tx(), address, self.block_number)?)
+        }
+        let mut storage = HashedStorage::default();
+        for (key, entry) in self
+            .provider
+            .storage_changesets_range(self.block_number..=self.provider.last_block_number()?)?
+        {
+            if key.address() == address {
+                storage.storage.entry(keccak256(entry.key)).or_insert(entry.value);
+            }
+        }
+        Ok(storage)
+    }
+
+    fn trie_state(&self, state: HashedPostState) -> ProviderResult<HashedPostState>
+    where
+        Provider: ChangesetRangeReader,
+    {
+        let mut reverted = self.revert_state()?;
+        reverted.extend(state);
+        super::complete_storage_accounts(self.tx(), &mut reverted)?;
+        Ok(reverted)
     }
 
     fn history_info<T, K>(
@@ -300,16 +349,22 @@ impl<Provider: DBProvider + BlockNumReader + BlockHashReader> BlockHashReader
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader> StateRootProvider
+impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StateRootProvider
     for HistoricalStateProviderRef<'_, Provider>
 {
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
+        if self.provider.uses_trie_v2() {
+            return NestedStateRoot::new(self.tx(), None).root(&self.trie_state(hashed_state)?)
+        }
         let mut revert_state = self.revert_state()?;
         revert_state.extend(hashed_state);
         StateRoot::overlay_root(self.tx(), revert_state).map_err(ProviderError::from)
     }
 
     fn state_root_from_nodes(&self, mut input: TrieInput) -> ProviderResult<B256> {
+        if self.provider.uses_trie_v2() {
+            return self.state_root(input.state)
+        }
         input.prepend(self.revert_state()?);
         StateRoot::overlay_root_from_nodes(self.tx(), input).map_err(ProviderError::from)
     }
@@ -318,6 +373,11 @@ impl<Provider: DBProvider + BlockNumReader> StateRootProvider
         &self,
         hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
+        if self.provider.uses_trie_v2() {
+            return NestedStateRoot::new(self.tx(), None)
+                .calculate(&self.trie_state(hashed_state)?)
+                .map(|(root, updates)| (root, updates.into_legacy()))
+        }
         let mut revert_state = self.revert_state()?;
         revert_state.extend(hashed_state);
         StateRoot::overlay_root_with_updates(self.tx(), revert_state).map_err(ProviderError::from)
@@ -327,13 +387,16 @@ impl<Provider: DBProvider + BlockNumReader> StateRootProvider
         &self,
         mut input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
+        if self.provider.uses_trie_v2() {
+            return self.state_root_with_updates(input.state)
+        }
         input.prepend(self.revert_state()?);
         StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
             .map_err(ProviderError::from)
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader> StorageRootProvider
+impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StorageRootProvider
     for HistoricalStateProviderRef<'_, Provider>
 {
     fn storage_root(
@@ -343,6 +406,10 @@ impl<Provider: DBProvider + BlockNumReader> StorageRootProvider
     ) -> ProviderResult<B256> {
         let mut revert_storage = self.revert_storage(address)?;
         revert_storage.extend(&hashed_storage);
+        if self.provider.uses_trie_v2() {
+            return NestedStateRoot::new(self.tx(), None)
+                .storage_root(keccak256(address), &revert_storage)
+        }
         StorageRoot::overlay_root(self.tx(), address, revert_storage)
             .map_err(|err| ProviderError::Database(err.into()))
     }
@@ -353,6 +420,12 @@ impl<Provider: DBProvider + BlockNumReader> StorageRootProvider
         slot: B256,
         hashed_storage: HashedStorage,
     ) -> ProviderResult<reth_trie::StorageProof> {
+        if self.provider.uses_trie_v2() {
+            return self
+                .storage_multiproof(address, &[slot], hashed_storage)?
+                .storage_proof(slot)
+                .map_err(Into::into)
+        }
         let mut revert_storage = self.revert_storage(address)?;
         revert_storage.extend(&hashed_storage);
         StorageProof::overlay_storage_proof(self.tx(), address, slot, revert_storage)
@@ -367,12 +440,20 @@ impl<Provider: DBProvider + BlockNumReader> StorageRootProvider
     ) -> ProviderResult<StorageMultiProof> {
         let mut revert_storage = self.revert_storage(address)?;
         revert_storage.extend(&hashed_storage);
+        if self.provider.uses_trie_v2() {
+            let slots = slots.iter().map(keccak256).collect::<Vec<_>>();
+            return NestedStateRoot::new(self.tx(), None).storage_proof(
+                keccak256(address),
+                &revert_storage,
+                &slots,
+            )
+        }
         StorageProof::overlay_storage_multiproof(self.tx(), address, slots, revert_storage)
             .map_err(ProviderError::from)
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader> StateProofProvider
+impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StateProofProvider
     for HistoricalStateProviderRef<'_, Provider>
 {
     /// Get account and storage proofs.
@@ -382,6 +463,16 @@ impl<Provider: DBProvider + BlockNumReader> StateProofProvider
         address: Address,
         slots: &[B256],
     ) -> ProviderResult<AccountProof> {
+        if self.provider.uses_trie_v2() {
+            let targets = MultiProofTargets::from_iter([(
+                keccak256(address),
+                slots.iter().map(keccak256).collect(),
+            )]);
+            return self
+                .multiproof(input, targets)?
+                .account_proof(address, slots)
+                .map_err(Into::into)
+        }
         input.prepend(self.revert_state()?);
         Proof::overlay_account_proof(self.tx(), input, address, slots).map_err(ProviderError::from)
     }
@@ -391,11 +482,18 @@ impl<Provider: DBProvider + BlockNumReader> StateProofProvider
         mut input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
+        if self.provider.uses_trie_v2() {
+            return NestedStateRoot::new(self.tx(), None)
+                .multiproof(&self.trie_state(input.state)?, targets)
+        }
         input.prepend(self.revert_state()?);
         Proof::overlay_multiproof(self.tx(), input, targets).map_err(ProviderError::from)
     }
 
     fn witness(&self, mut input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
+        if self.provider.uses_trie_v2() {
+            return Err(ProviderError::UnsupportedProvider)
+        }
         input.prepend(self.revert_state()?);
         TrieWitness::overlay_witness(self.tx(), input, target)
             .map_err(ProviderError::from)
@@ -415,7 +513,8 @@ impl<
             + BlockHashReader
             + StorageSettingsCache
             + ChangeSetReader
-            + StorageChangeSetReader,
+            + StorageChangeSetReader
+            + ChangesetRangeReader,
     > StateProvider for HistoricalStateProviderRef<'_, Provider>
 {
     /// Get storage.
@@ -523,7 +622,7 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
 }
 
 // Delegates all provider impls to [HistoricalStateProviderRef]
-delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader + StorageSettingsCache + ChangeSetReader + StorageChangeSetReader ]);
+delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader + StorageSettingsCache + ChangeSetReader + StorageChangeSetReader + ChangesetRangeReader ]);
 
 /// Lowest blocks at which different parts of the state are available.
 /// They may be [Some] if pruning is enabled.
@@ -587,7 +686,8 @@ mod tests {
             + BlockHashReader
             + StorageSettingsCache
             + ChangeSetReader
-            + StorageChangeSetReader,
+            + StorageChangeSetReader
+            + reth_storage_api::ChangesetRangeReader,
     >() {
         assert_state_provider::<HistoricalStateProvider<T>>();
     }

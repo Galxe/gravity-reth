@@ -625,7 +625,7 @@ where
         Rpc: RpcConvert,
         NextEnv: PendingEnvBuilder<N::Evm>,
     {
-        EthApi { inner: Arc::new(self.build_inner()), use_node_provider: false, read_context: None }
+        EthApi { inner: Arc::new(self.build_inner()), use_node_provider: false, read_view: None }
     }
 
     /// Sets the timeout for `send_raw_transaction_sync` RPC method.

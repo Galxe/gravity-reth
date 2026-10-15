@@ -207,6 +207,7 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
 
     /// Uses a request's fixed provider for chain reads outside the EVM database.
     /// Configurations without auxiliary chain reads retain their existing configuration.
+    /// Bind the concrete configuration before wrapping it; generated proxies only clone themselves.
     #[auto_impl(keep_default_for(&, Arc))]
     fn with_read_provider<P>(&self, _provider: P) -> Self
     where

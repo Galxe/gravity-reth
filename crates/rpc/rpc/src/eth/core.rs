@@ -73,7 +73,7 @@ pub struct EthApi<N: RpcNodeCore, Rpc: RpcConvert> {
     /// Internal execution reads retain the node's live provider.
     pub(super) use_node_provider: bool,
     /// Provider and auxiliary EVM reads pinned for one calculation.
-    pub(super) read_context: Option<(N::Provider, N::Evm)>,
+    pub(super) read_view: Option<(N::Provider, N::Evm)>,
 }
 
 impl<N, Rpc> Clone for EthApi<N, Rpc>
@@ -85,7 +85,7 @@ where
         Self {
             inner: self.inner.clone(),
             use_node_provider: self.use_node_provider,
-            read_context: self.read_context.clone(),
+            read_view: self.read_view.clone(),
         }
     }
 }
@@ -93,7 +93,7 @@ where
 impl<N: RpcNodeCore, Rpc: RpcConvert> EthApi<N, Rpc> {
     /// Returns the provider selected for this handler.
     pub fn provider(&self) -> &N::Provider {
-        if let Some((provider, _)) = &self.read_context {
+        if let Some((provider, _)) = &self.read_view {
             provider
         } else if self.use_node_provider {
             self.inner.components.provider()
@@ -104,7 +104,7 @@ impl<N: RpcNodeCore, Rpc: RpcConvert> EthApi<N, Rpc> {
 
     /// EVM configuration paired with the selected provider.
     pub fn evm_config(&self) -> &N::Evm {
-        self.read_context.as_ref().map_or_else(|| self.inner.evm_config(), |(_, evm)| evm)
+        self.read_view.as_ref().map_or_else(|| self.inner.evm_config(), |(_, evm)| evm)
     }
 }
 
@@ -688,8 +688,66 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_rpc_does_not_wait_for_consistent_view() {
+        use reth_db_api::database::Database;
+        use reth_rpc_eth_api::helpers::EthState;
+        use std::{sync::mpsc, time::Duration};
+
+        let factory = create_test_provider_factory();
+        let genesis = SealedHeader::seal_slow(Header::default());
+        let writer = factory.provider_rw().unwrap();
+        write_rpc_block(writer.tx_ref(), &genesis);
+        writer.commit().unwrap();
+        let provider = BlockchainProvider::with_latest(factory.clone(), genesis).unwrap();
+        let eth_api = EthApiBuilder::new(
+            provider.clone(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::new(provider.chain_spec()),
+        )
+        .provider(provider.rpc_provider())
+        .build();
+
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let commit = std::thread::spawn(move || {
+            factory.db_ref().with_write_lock(|| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            });
+        });
+        locked_rx.await.unwrap();
+        let trie_api = eth_api.clone();
+        let address = Address::repeat_byte(0x71);
+        let mut trie_query = tokio::spawn(async move {
+            let (account, proof) = tokio::join!(
+                EthState::get_account(&trie_api, address, BlockNumberOrTag::Latest.into()),
+                EthState::get_proof(&trie_api, address, Vec::new(), None).unwrap(),
+            );
+            assert!(account.unwrap().is_none());
+            let proof = proof.unwrap();
+            assert_eq!(proof.balance, U256::ZERO);
+            assert_eq!(proof.nonce, 0);
+            assert_eq!(proof.storage_hash, alloy_consensus::constants::EMPTY_ROOT_HASH);
+        });
+
+        let balance = tokio::time::timeout(
+            Duration::from_secs(5),
+            EthState::balance(&eth_api, address, None),
+        )
+        .await
+        .expect("ordinary RPC must not wait for a consistent view")
+        .unwrap();
+        assert_eq!(balance, U256::ZERO);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut trie_query).await.is_err());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), trie_query).await.unwrap().unwrap();
+        commit.join().unwrap();
+    }
+
     #[tokio::test]
-    async fn rpc_call_retains_its_state_context_while_state_advances_ahead_of_trie() {
+    async fn rpc_call_retains_its_view_while_state_advances_ahead_of_trie() {
         use reth_chain_state::{ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
         use reth_execution_types::ExecutionOutcome;
         use reth_primitives_traits::{RecoveredBlock, SealedBlock};
@@ -735,7 +793,7 @@ mod tests {
         )
         .provider(provider.rpc_provider())
         .build();
-        let captured = eth_api.read_context().await.unwrap();
+        let captured = eth_api.view().await.unwrap();
         let next = SealedHeader::seal_slow(Header {
             number: 1,
             parent_hash: genesis.hash(),

@@ -24,7 +24,8 @@ pub trait DbTx: Debug + Send + Sync {
     /// Commit for read only transaction will consume and free transaction and allows
     /// freeing of memory pages
     fn commit(self) -> Result<bool, DatabaseError>;
-    /// Commit data to let other readers read.
+    /// Commits pending writes without consuming the transaction, allowing another batch of writes.
+    /// Existing read snapshots keep their captured versions.
     fn commit_view(&self) -> Result<bool, DatabaseError> {
         unimplemented!("Not support")
     }

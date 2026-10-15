@@ -136,14 +136,14 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
     #[track_caller]
     pub fn consistent_provider(&self) -> ProviderResult<ConsistentProvider<N>> {
         if let Some(memory) = &self.read_memory {
-            return ConsistentProvider::with_read_context(
+            return ConsistentProvider::with_view(
                 self.database.clone(),
                 self.canonical_in_memory_state(),
                 memory.clone(),
             )
         }
         if self.database.uses_state_reads() {
-            return self.read_context()?.consistent_provider()
+            return self.view()?.consistent_provider()
         }
         ConsistentProvider::new(self.database.clone(), self.canonical_in_memory_state())
     }
@@ -561,9 +561,9 @@ impl<N: NodeTypesWithDB> ChainSpecProvider for BlockchainProvider<N> {
     }
 }
 
-impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
-    fn read_context(&self) -> ProviderResult<Self> {
-        if !self.database.uses_state_reads() || self.read_memory.is_some() {
+impl<N: ProviderNodeTypes> BlockchainProvider<N> {
+    fn capture_view(&self, consistent: bool) -> ProviderResult<Self> {
+        if self.read_memory.is_some() && (!consistent || self.database.has_consistent_view()) {
             return Ok(self.clone())
         }
         // Memory must precede the DB snapshot: persistence may evict the captured chain meanwhile.
@@ -577,9 +577,9 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
             let pending = self.canonical_in_memory_state.pending_state();
             let safe = self.canonical_in_memory_state.get_safe_num_hash();
             let finalized = self.canonical_in_memory_state.get_finalized_num_hash();
-            let database = self.database.with_read_context(files)?;
+            let database = self.database.capture_view(files, consistent)?;
             let storage = database.provider()?;
-            let bounds = storage.read_bounds().expect("state read context has bounds");
+            let bounds = storage.read_bounds().expect("read view has bounds");
             let anchor = head.as_ref().map(|head| head.anchor()).unwrap_or(best);
             if bounds.block_number > best.number ||
                 anchor.number > bounds.block_number ||
@@ -624,6 +624,16 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
             })
         }
         Err(ProviderError::BestBlockNotFound)
+    }
+}
+
+impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
+    fn view(&self) -> ProviderResult<Self> {
+        self.capture_view(false)
+    }
+
+    fn consistent_view(&self) -> ProviderResult<Self> {
+        self.capture_view(true)
     }
 
     /// Storage provider for latest block
@@ -719,7 +729,7 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     fn state_by_block_hash(&self, hash: BlockHash) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?hash, "Getting state by block hash");
         if self.database.uses_state_reads() && self.read_memory.is_none() {
-            return self.read_context()?.state_by_block_hash(hash)
+            return self.view()?.state_by_block_hash(hash)
         }
         if let Ok(state) = self.history_by_block_hash(hash) {
             // This could be tracked by a historical block
@@ -740,7 +750,7 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     fn pending(&self) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting provider for pending state");
         if self.database.uses_state_reads() {
-            let provider = self.read_context()?;
+            let provider = self.view()?;
             return match provider.consistent_provider()?.into_pending_state_provider(None)? {
                 Some(state) => Ok(state),
                 None => provider.latest(),
@@ -1937,7 +1947,7 @@ mod tests {
     }
 
     #[test]
-    fn rpc_state_context_retries_when_database_passes_captured_head() -> eyre::Result<()> {
+    fn rpc_view_retries_when_database_passes_captured_head() -> eyre::Result<()> {
         use reth_storage_api::StageCheckpointWriter;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1962,17 +1972,17 @@ mod tests {
                 state.set_canonical_head(latest.clone());
             }
         }));
-        let captured = provider.rpc_provider().read_context();
+        let captured = provider.rpc_provider().view();
         provider.database.db_ref().set_post_transaction_hook(Box::new(|| ()));
         let captured = captured?;
-        assert!(reads.load(Ordering::Relaxed) > 2, "must retry the complete context");
+        assert!(reads.load(Ordering::Relaxed) > 2, "must retry the complete view");
         assert_eq!(captured.best_block_number()?, 2);
         assert_eq!(captured.block_hash(2)?, Some(blocks[2].hash()));
         Ok(())
     }
 
     #[test]
-    fn rpc_state_context_rejects_database_fork_overlapping_captured_memory() -> eyre::Result<()> {
+    fn rpc_view_rejects_database_fork_overlapping_captured_memory() -> eyre::Result<()> {
         use reth_storage_api::StageCheckpointWriter;
 
         let mut rng = generators::rng();
@@ -1997,7 +2007,7 @@ mod tests {
         db.update_pipeline_stages(2, false)?;
         db.commit()?;
 
-        let captured = provider.rpc_provider().read_context()?;
+        let captured = provider.rpc_provider().view()?;
         assert_eq!(captured.block_hash(2)?, Some(memory_blocks[0].hash()));
         assert_eq!(captured.database.block_hash(2)?, Some(fork_hash));
         assert!(captured
@@ -2011,12 +2021,15 @@ mod tests {
 
     #[test]
     fn rpc_state_snapshot_keeps_history_and_existing_memory_overlay() -> eyre::Result<()> {
-        use alloy_primitives::{Address, U256};
+        use alloy_primitives::{keccak256, Address, U256};
         use reth_primitives_traits::Account;
         use reth_stages_types::{StageCheckpoint, StageId};
         use reth_storage_api::{
             DBProvider, HistoryWriter, StageCheckpointWriter, StateWriter, StorageLocation,
+            TrieWriterV2,
         };
+        use reth_trie::{HashedPostState, HashedStorage, TrieInput};
+        use reth_trie_db::nested_hash::NestedStateRoot;
         use revm_database::OriginalValuesKnown;
 
         let (provider, _, blocks, _) = provider_with_random_blocks(
@@ -2029,6 +2042,14 @@ mod tests {
         let slot = B256::ZERO;
         let account =
             |value| Account { balance: U256::from(value), nonce: value, ..Default::default() };
+        let hashed_state = |value| HashedPostState {
+            accounts: std::iter::once((keccak256(address), Some(account(value)))).collect(),
+            storages: std::iter::once((
+                keccak256(address),
+                HashedStorage::from_iter(false, [(keccak256(slot), U256::from(value))]),
+            ))
+            .collect(),
+        };
         let outcome = |number, before, after| ExecutionOutcome {
             bundle: BundleState::new(
                 [(
@@ -2056,6 +2077,7 @@ mod tests {
                     StageId::AccountHashing,
                     StageId::IndexAccountHistory,
                     StageId::Finish,
+                    StageId::MerkleExecute,
                 ] {
                     db.save_stage_checkpoint(stage, StageCheckpoint::new(number))?;
                 }
@@ -2068,6 +2090,9 @@ mod tests {
             StorageLocation::Database,
             None,
         )?;
+        let (_, updates) = NestedStateRoot::new(db.tx_ref(), None).calculate(&hashed_state(10))?;
+        db.write_hashed_state(&hashed_state(10).into_sorted())?;
+        db.write_trie_updatesv2(&updates)?;
         checkpoint(&db, 1)?;
         db.commit()?;
 
@@ -2075,12 +2100,16 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, block)| {
+                let state = hashed_state(20 + i as u64 * 10);
+                let db = provider.database.provider().unwrap();
+                let (_, updates) =
+                    NestedStateRoot::new(db.tx_ref(), None).calculate(&state).unwrap();
                 ExecutedBlockWithTrieUpdates::new(
                     Arc::new(block.clone().try_recover().unwrap()),
                     Arc::new(outcome(block.number, 10 + i as u64 * 10, 20 + i as u64 * 10)),
-                    Default::default(),
+                    Arc::new(state),
                     ExecutedTrieUpdates::empty(),
-                    Default::default(),
+                    Arc::new(updates),
                 )
             })
             .collect();
@@ -2088,7 +2117,8 @@ mod tests {
             .canonical_in_memory_state
             .update_chain(NewCanonicalChain::Commit { new: executed.clone() });
         let rpc = provider.rpc_provider();
-        let old = rpc.read_context()?;
+        let old = rpc.view()?;
+        let old_trie = rpc.consistent_view()?;
         let old_history = old.history_by_block_number(1)?;
 
         // Persistence can overlap the retained memory chain; the base must still be its anchor.
@@ -2098,8 +2128,12 @@ mod tests {
         checkpoint(&db, 2)?;
         provider.static_file_provider().commit()?;
         db.commit()?;
-        let overlap = rpc.read_context()?;
+        let overlap = rpc.view()?;
+        let overlap_trie = rpc.consistent_view()?;
         provider.canonical_in_memory_state.remove_persisted_blocks(blocks[0].num_hash());
+        let recaptured = old.consistent_view()?;
+        assert_eq!(old.database.provider()?.read_bounds().unwrap().block_number, 1);
+        assert_eq!(recaptured.database.provider()?.read_bounds().unwrap().block_number, 2);
 
         for view in [&old, &overlap] {
             assert_eq!(view.latest()?.basic_account(&address)?, Some(account(30)));
@@ -2117,6 +2151,17 @@ mod tests {
             );
         }
         assert_eq!(rpc.latest()?.basic_account(&address)?, Some(account(30)));
+        for view in [&old_trie, &overlap_trie, &recaptured] {
+            for (number, value) in [(1, 10), (2, 20), (3, 30)] {
+                let state = view.history_by_block_number(number)?;
+                let expected = reth_trie::test_utils::state_root([(
+                    address,
+                    (account(value), [(slot, U256::from(value))]),
+                )]);
+                assert_eq!(state.state_root(HashedPostState::default())?, expected);
+                state.proof(TrieInput::default(), address, &[slot])?.verify(expected)?;
+            }
+        }
 
         // DB pruning must preserve versions owned by already-created historical providers.
         use reth_db_api::transaction::DbTxMut;
@@ -2131,6 +2176,12 @@ mod tests {
             overlap.history_by_block_number(1)?.storage(address, slot)?,
             Some(U256::from(10))
         );
+        let expected =
+            reth_trie::test_utils::state_root([(address, (account(10), [(slot, U256::from(10))]))]);
+        old_trie
+            .history_by_block_number(1)?
+            .proof(TrieInput::default(), address, &[slot])?
+            .verify(expected)?;
         Ok(())
     }
 

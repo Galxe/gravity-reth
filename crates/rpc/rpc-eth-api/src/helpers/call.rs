@@ -79,7 +79,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         block: Option<BlockId>,
     ) -> impl Future<Output = SimulatedBlocksResult<Self::NetworkTypes, Self::Error>> + Send {
         async move {
-            let this = self.read_context().await?;
+            let this = if self.compute_state_root_for_eth_simulate() {
+                self.consistent_view().await?
+            } else {
+                self.view().await?
+            };
             if payload.block_state_calls.len() > this.max_simulate_blocks() as usize {
                 return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into())
             }
@@ -305,7 +309,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         mut state_override: Option<StateOverride>,
     ) -> impl Future<Output = Result<Vec<Vec<EthCallResponse>>, Self::Error>> + Send {
         async move {
-            let this = self.read_context().await?;
+            let this = self.view().await?;
             // Check if the vector of bundles is empty
             if bundles.is_empty() {
                 return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into());
@@ -448,7 +452,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         Self: Trace,
     {
         self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_read_context()?;
+            let this = this.with_view()?;
             let block_id = block_number.unwrap_or_default();
             let (evm_env, at) = this.evm_env_at(block_id).await?;
             this.create_access_list_with(evm_env, at, request, state_override).await
@@ -468,7 +472,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         Self: Trace,
     {
         self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_read_context()?;
+            let this = this.with_view()?;
             let state = this.state_at_block_id(at).await?;
             let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
 
@@ -579,7 +583,7 @@ pub trait Call:
         F: FnOnce(Self, StateProviderBox) -> Result<R, Self::Error> + Send + 'static,
     {
         self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_read_context()?;
+            let this = this.with_view()?;
             let state = this.state_at_block_id(at).await?;
             f(this, state)
         })
@@ -665,7 +669,7 @@ pub trait Call:
     {
         let at = at.into();
         self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_read_context()?;
+            let this = this.with_view()?;
             let state = this.state_at_block_id(at).await?;
             let db = State::builder()
                 .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
@@ -709,7 +713,7 @@ pub trait Call:
         R: Send + 'static,
     {
         self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_read_context()?;
+            let this = this.with_view()?;
             let (evm_env, at) = this.evm_env_at(at).await?;
             let state = this.state_at_block_id(at).await?;
             let mut db = State::builder()
@@ -746,7 +750,7 @@ pub trait Call:
         R: Send + 'static,
     {
         async move {
-            let this = self.read_context().await?;
+            let this = self.view().await?;
             let (transaction, block) = match this.transaction_and_block(hash).await? {
                 None => return Ok(None),
                 Some(res) => res,

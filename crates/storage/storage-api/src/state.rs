@@ -142,15 +142,31 @@ pub trait TryIntoHistoricalStateProvider {
 /// This affects tracing, or replaying blocks, which will need to be executed on top of the state of
 /// the parent block. For example, in order to trace block `n`, the state after block `n - 1` needs
 /// to be used, since block `n` was executed on its parent block's state.
+///
+/// Capture views on the concrete factory before wrapping it in `&`, `Arc`, or `Box`. The generated
+/// proxy implementations retain the default cloning behavior for methods returning `Self`.
 #[auto_impl(&, Arc, Box)]
 pub trait StateProviderFactory: BlockIdReader + Send + Sync {
-    /// Captures one state read context, reused by all reads in a computation.
+    /// Captures a read view reused by all reads in a computation.
+    /// No coordination between separate databases is required.
     #[auto_impl(keep_default_for(&, Arc, Box))]
-    fn read_context(&self) -> ProviderResult<Self>
+    fn view(&self) -> ProviderResult<Self>
     where
         Self: Sized + Clone,
     {
         Ok(self.clone())
+    }
+
+    /// Captures state and trie data at one completed height, paired with a fixed memory chain.
+    ///
+    /// Select this before reading state or replaying blocks. If this is an ordinary view,
+    /// captures a new view instead of combining its state snapshot with newer trie snapshots.
+    #[auto_impl(keep_default_for(&, Arc, Box))]
+    fn consistent_view(&self) -> ProviderResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        self.view()
     }
 
     /// Storage provider for latest block.

@@ -122,7 +122,7 @@ where
         trace_types: HashSet<TraceType>,
         block_id: Option<BlockId>,
     ) -> Result<TraceResults, Eth::Error> {
-        let eth_api = self.eth_api().read_context().await?;
+        let eth_api = self.eth_api().view().await?;
         let tx = recover_raw_transaction::<PoolPooledTx<Eth::Pool>>(&tx)?
             .map(<Eth::Pool as TransactionPool>::Transaction::pooled_into_consensus);
 
@@ -150,7 +150,7 @@ where
         calls: Vec<(RpcTxReq<Eth::NetworkTypes>, HashSet<TraceType>)>,
         block_id: Option<BlockId>,
     ) -> Result<Vec<TraceResults>, Eth::Error> {
-        let eth_api = self.eth_api().read_context().await?;
+        let eth_api = self.eth_api().view().await?;
         let at = block_id.unwrap_or(BlockId::pending());
         let (evm_env, at) = eth_api.evm_env_at(at).await?;
 

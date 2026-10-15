@@ -15,26 +15,36 @@ pub trait Database: Send + Sync + Debug {
     type TXMut: DbTxMut + DbTx + TableImporter + Send + Sync + Debug + 'static;
 
     /// Create read only transaction.
+    /// Read visibility follows the backend. Use [`Self::snapshot`] and [`Self::tx_with_snapshot`]
+    /// to reuse a captured database version.
     #[track_caller]
     fn tx(&self) -> Result<Self::TX, DatabaseError>;
 
-    /// Capture a state snapshot that can be shared by multiple read transactions.
-    ///
-    /// Backends without shareable snapshots return `None`. Separately sharded trie databases
-    /// and external static files are not covered by this view.
-    fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+    /// Capture a snapshot to reuse across read transactions. When `consistent` is true,
+    /// coordinate capture across all physical stores with writes; otherwise capture only the
+    /// primary store. Backends without shareable snapshots return `None`.
+    fn snapshot(
+        &self,
+        _consistent: bool,
+    ) -> Result<Option<Arc<dyn DatabaseSnapshot>>, DatabaseError> {
         Ok(None)
     }
 
-    /// Open a read transaction using a captured state snapshot, or capture a new snapshot.
+    /// Open a read transaction on a captured snapshot. `None` captures a fresh primary snapshot.
     ///
-    /// Backends with shareable views reject a view belonging to another database. Backends whose
-    /// ordinary read transactions already provide snapshots can use the default.
-    fn tx_with_state_read_view(
+    /// Reusing the snapshot keeps separately opened transactions at the same database versions.
+    /// Backends with shareable snapshots reject one belonging to another database.
+    fn tx_with_snapshot(
         &self,
-        _view: Option<Arc<dyn DatabaseReadView>>,
+        _snapshot: Option<Arc<dyn DatabaseSnapshot>>,
     ) -> Result<Self::TX, DatabaseError> {
         self.tx()
+    }
+
+    /// Exclude coordinated snapshot capture while committing one logical update across physical
+    /// stores. State-only snapshots remain independent of this coordination.
+    fn with_write_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        f()
     }
 
     /// Create read write transaction only possible if database is open with write access.
@@ -43,6 +53,7 @@ pub trait Database: Send + Sync + Debug {
 
     /// Takes a function and passes a read-only transaction into it, making sure it's closed in the
     /// end of the execution.
+    /// Uses [`Self::tx`] and its visibility rules.
     fn view<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
         F: FnOnce(&Self::TX) -> T,
@@ -70,9 +81,9 @@ pub trait Database: Send + Sync + Debug {
     }
 }
 
-/// An immutable, backend-specific state snapshot shared by read transactions.
-pub trait DatabaseReadView: Any + Debug + Send + Sync {
-    /// Backend-specific view identity, used to reject a view from another database.
+/// An immutable, backend-specific database snapshot shared by read transactions.
+pub trait DatabaseSnapshot: Any + Debug + Send + Sync {
+    /// Exposes the backend snapshot type for downcasting.
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -84,15 +95,22 @@ impl<DB: Database> Database for Arc<DB> {
         <DB as Database>::tx(self)
     }
 
-    fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
-        <DB as Database>::state_read_view(self)
+    fn snapshot(
+        &self,
+        consistent: bool,
+    ) -> Result<Option<Arc<dyn DatabaseSnapshot>>, DatabaseError> {
+        <DB as Database>::snapshot(self, consistent)
     }
 
-    fn tx_with_state_read_view(
+    fn with_write_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        <DB as Database>::with_write_lock(self, f)
+    }
+
+    fn tx_with_snapshot(
         &self,
-        view: Option<Arc<dyn DatabaseReadView>>,
+        snapshot: Option<Arc<dyn DatabaseSnapshot>>,
     ) -> Result<Self::TX, DatabaseError> {
-        <DB as Database>::tx_with_state_read_view(self, view)
+        <DB as Database>::tx_with_snapshot(self, snapshot)
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
@@ -108,15 +126,22 @@ impl<DB: Database> Database for &DB {
         <DB as Database>::tx(self)
     }
 
-    fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
-        <DB as Database>::state_read_view(self)
+    fn snapshot(
+        &self,
+        consistent: bool,
+    ) -> Result<Option<Arc<dyn DatabaseSnapshot>>, DatabaseError> {
+        <DB as Database>::snapshot(self, consistent)
     }
 
-    fn tx_with_state_read_view(
+    fn with_write_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        <DB as Database>::with_write_lock(self, f)
+    }
+
+    fn tx_with_snapshot(
         &self,
-        view: Option<Arc<dyn DatabaseReadView>>,
+        snapshot: Option<Arc<dyn DatabaseSnapshot>>,
     ) -> Result<Self::TX, DatabaseError> {
-        <DB as Database>::tx_with_state_read_view(self, view)
+        <DB as Database>::tx_with_snapshot(self, snapshot)
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {

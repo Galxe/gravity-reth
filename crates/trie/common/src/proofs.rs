@@ -255,6 +255,11 @@ impl MultiProof {
             };
             storage_proofs.push(proof);
         }
+        let proof = proof
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, node)| (index == 0 || node.len() >= 32).then_some(node))
+            .collect();
         Ok(AccountProof { address, info, proof, storage_root, storage_proofs })
     }
 
@@ -492,6 +497,12 @@ impl StorageMultiProof {
             U256::ZERO
         };
 
+        // Inline descendants are already encoded in their parent and must not be repeated.
+        let proof = proof
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, node)| (index == 0 || node.len() >= 32).then_some(node))
+            .collect();
         Ok(StorageProof { key: slot, nibbles, value, proof })
     }
 }

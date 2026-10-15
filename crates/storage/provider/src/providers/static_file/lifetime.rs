@@ -19,14 +19,28 @@ pub struct StaticFileReadLease {
 /// Excludes state reads and history collection while storage is being rewritten in place.
 ///
 /// The guard owns no mutex guard and can be held across the pipeline's asynchronous stage work.
+/// Call [`Self::complete`] only after every rewrite commits successfully.
+/// Otherwise new state reads remain unavailable until restart.
 #[derive(Debug)]
 pub struct StaticFileMaintenanceGuard {
     lifetime: Arc<StaticFileReadLifetime>,
+    completed: bool,
+}
+
+impl StaticFileMaintenanceGuard {
+    /// Marks all storage rewrites as successfully committed before reopening read admission.
+    pub fn complete(mut self) {
+        self.completed = true;
+    }
 }
 
 impl Drop for StaticFileMaintenanceGuard {
     fn drop(&mut self) {
-        self.lifetime.state.lock().maintenance = false;
+        let mut state = self.lifetime.state.lock();
+        // A later successful no-op cannot repair data changed by an earlier failed rewrite.
+        state.maintenance_failed |= !self.completed;
+        state.maintenance = false;
+        drop(state);
         self.lifetime.changed.notify_all();
     }
 }
@@ -75,6 +89,7 @@ struct LifetimeState {
     account_before: Option<BlockNumber>,
     storage_before: Option<BlockNumber>,
     maintenance: bool,
+    maintenance_failed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -91,6 +106,11 @@ impl StaticFileReadLifetime {
             if state.maintenance {
                 return Err(ProviderError::other(std::io::Error::other(
                     "State reads unavailable during storage maintenance",
+                )))
+            }
+            if state.maintenance_failed {
+                return Err(ProviderError::other(std::io::Error::other(
+                    "State reads unavailable after failed storage maintenance",
                 )))
             }
             let epoch = state.epoch;
@@ -117,7 +137,7 @@ impl StaticFileReadLifetime {
         // A collector that started before admission closed may still be doing file I/O.
         // Never wait for it while holding the reader-registration mutex.
         drop(self.collection.lock());
-        StaticFileMaintenanceGuard { lifetime: self.clone() }
+        StaticFileMaintenanceGuard { lifetime: self.clone(), completed: false }
     }
 
     /// Must run after the database commit that made these prune horizons visible.
@@ -243,9 +263,23 @@ mod tests {
         let maintenance = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(lifetime.read_lease().is_err());
         assert!(lifetime.ready_history().is_empty());
-        drop(maintenance);
+        maintenance.complete();
         assert!(lifetime.read_lease().is_ok());
         assert_eq!(lifetime.ready_history()[0].before, 10);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn failed_maintenance_keeps_read_admission_closed() {
+        let lifetime = Arc::new(StaticFileReadLifetime::default());
+        lifetime.begin_maintenance().complete();
+        assert!(lifetime.read_lease().is_ok());
+
+        // Returning early or unwinding a panic drops the guard without declaring success.
+        drop(lifetime.begin_maintenance());
+        assert!(lifetime.read_lease().is_err());
+
+        lifetime.begin_maintenance().complete();
+        assert!(lifetime.read_lease().is_err());
     }
 }

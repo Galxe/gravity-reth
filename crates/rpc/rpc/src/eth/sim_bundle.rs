@@ -290,7 +290,7 @@ where
         let flattened_bundle = self.parse_and_flatten_bundle(&request)?;
 
         let block_id = parent_block.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest));
-        let eth_api = self.eth_api().read_context().await?;
+        let eth_api = self.eth_api().view().await?;
         let (current_block, mut evm_env, current_block_id) =
             eth_api.evm_env_and_recovered_block_at(block_id).await?;
 
