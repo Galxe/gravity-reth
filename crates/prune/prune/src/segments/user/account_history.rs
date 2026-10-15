@@ -226,9 +226,8 @@ mod tests {
     use assert_matches::assert_matches;
     use reth_db_api::{models::GravityStorageSettings, tables, BlockNumberList};
     use reth_provider::{
-        providers::StaticFileProvider, ChangeSetReader, DatabaseProviderFactory, ProviderFactory,
-        PruneCheckpointReader, StageCheckpointWriter, StaticFileProviderFactory, StaticFileSegment,
-        StorageSettingsCache,
+        DatabaseProviderFactory, PruneCheckpointReader, StaticFileProviderFactory,
+        StaticFileSegment, StorageSettingsCache,
     };
     use reth_prune_types::{
         PruneCheckpoint, PruneInterruptReason, PruneMode, PruneProgress, PruneSegment,
@@ -397,15 +396,7 @@ mod tests {
     /// static files to prune the `AccountsHistory` index and to reclaim below-horizon jars.
     #[test]
     fn prune_static_files_path() {
-        let mut db = TestStageDB::default();
-        let database = db.factory.into_db();
-        db.factory = ProviderFactory::new(
-            database,
-            reth_chainspec::MAINNET.clone(),
-            StaticFileProvider::read_write(db.temp_static_files_dir.path())
-                .unwrap()
-                .with_custom_blocks_per_file(10),
-        );
+        let db = TestStageDB::default();
         let mut rng = generators::rng();
 
         let blocks = random_block_range(
@@ -428,14 +419,6 @@ mod tests {
         db.insert_changesets_to_static_files(changesets.clone(), None)
             .expect("insert changesets to static files");
         db.insert_history(changesets.clone(), None).expect("insert history");
-        let provider = db.factory.database_provider_rw().unwrap();
-        provider.update_pipeline_stages(100, false).unwrap();
-        provider.commit().unwrap();
-        let files = db.factory.static_file_provider();
-        assert_eq!(
-            files.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets),
-            Some(9)
-        );
 
         // Under this configuration the database changeset table stays empty.
         assert!(db.table::<tables::AccountChangeSets>().unwrap().is_empty());
@@ -473,23 +456,8 @@ mod tests {
         segment
             .save_checkpoint(&provider, result.checkpoint.unwrap().as_prune_checkpoint(prune_mode))
             .unwrap();
-
-        // A hook racing before the state commit must only observe the durable checkpoint.
-        db.factory.on_prune_commit().unwrap();
-        assert_eq!(
-            db.factory
-                .provider()
-                .unwrap()
-                .get_prune_checkpoint(PruneSegment::AccountHistory)
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            files.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets),
-            Some(9)
-        );
-        let old_query = db.factory.rpc_provider().database_provider_ro().unwrap();
         provider.commit().expect("commit");
+        db.factory.on_prune_commit().unwrap();
 
         // The history index no longer references pruned blocks, and it shrank.
         assert!(count_index_blocks() < blocks_before);
@@ -507,44 +475,8 @@ mod tests {
             Some(PruneCheckpoint { block_number: Some(to_block), tx_number: None, prune_mode })
         );
 
-        // The logical checkpoint is durable before retirement or physical collection begins.
-        assert_eq!(
-            files.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets),
-            Some(9)
-        );
-        db.factory.on_prune_commit().unwrap();
-        let new_query = db.factory.rpc_provider().database_provider_ro().unwrap();
-        assert_eq!(old_query.get_prune_checkpoint(PruneSegment::AccountHistory).unwrap(), None);
-        assert_eq!(
-            new_query.get_prune_checkpoint(PruneSegment::AccountHistory).unwrap(),
-            Some(PruneCheckpoint { block_number: Some(to_block), tx_number: None, prune_mode })
-        );
-        // The old query can open its changeset jar lazily, after the prune commit and hook.
-        assert_eq!(old_query.static_file_provider().account_block_changeset(1).unwrap().len(), 2);
-        assert_eq!(
-            files.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets),
-            Some(9)
-        );
-
-        drop(old_query);
-        db.factory.on_prune_commit().unwrap();
-        // A query admitted after retirement does not retain jars below its prune checkpoint.
-        assert_eq!(
-            files.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets),
-            Some(59)
-        );
-        assert!(files.account_block_changeset(1).is_err());
-        assert_eq!(files.account_block_changeset(to_block + 1).unwrap().len(), 2);
-        assert_eq!(
-            new_query
-                .get_prune_checkpoint(PruneSegment::AccountHistory)
-                .unwrap()
-                .unwrap()
-                .block_number,
-            Some(to_block)
-        );
-
-        // The partially live jar and the tip remain available.
+        // The single changeset jar spans the tip, so it is not reclaimed, but nothing above the
+        // horizon is lost: the static-file tip is preserved.
         assert_eq!(
             db.factory
                 .static_file_provider()

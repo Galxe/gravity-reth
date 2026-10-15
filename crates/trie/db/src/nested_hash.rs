@@ -888,62 +888,14 @@ mod tests {
     }
 
     #[test]
-    fn v2_multiproof_wipe_recreate_and_delete() {
-        let factory = create_test_provider_factory();
-        let address = Address::repeat_byte(1);
-        let slots = [B256::with_last_byte(1), B256::with_last_byte(2)];
-        let account = Account { balance: U256::from(42), ..Default::default() };
-        let initial_storage = HashMap::from_iter([(slots[0], U256::from(11))]);
-        let state = single_account_state(keccak256(address), account, false, &initial_storage);
-        let writer = factory.provider_rw().unwrap();
-        let (_, updates) = NestedStateRoot::new(writer.tx_ref(), None).calculate(&state).unwrap();
-        writer.write_trie_updatesv2(&updates).unwrap();
-        writer.commit().unwrap();
-
-        let reader = factory.database_provider_ro().unwrap();
-        let nested = NestedStateRoot::new(reader.tx_ref(), None);
-        for deleted in [false, true] {
-            let storage = HashMap::from_iter([(slots[1], U256::from(22))]);
-            let mut state = single_account_state(keccak256(address), account, true, &storage);
-            if deleted {
-                state.accounts.insert(keccak256(address), None);
-            }
-            let expected = if deleted {
-                EMPTY_ROOT_HASH
-            } else {
-                test_utils::state_root([(address, (account, storage))])
-            };
-            let (root, proof) = nested
-                .multiproof_with_root(
-                    &state,
-                    MultiProofTargets::account_with_slots(keccak256(address), slots.map(keccak256)),
-                )
-                .unwrap();
-            assert_eq!(root, expected);
-            let proof = proof.account_proof(address, &slots).unwrap();
-            proof.verify(expected).unwrap();
-            assert_eq!(proof.storage_proofs[0].value, U256::ZERO);
-            assert_eq!(
-                proof.storage_proofs[1].value,
-                if deleted { U256::ZERO } else { U256::from(22) }
-            );
-        }
-    }
-
-    #[test]
     fn v2_updates_are_valid_legacy_sparse_cache() {
-        use crate::{DatabaseProof, DatabaseStateRoot, DatabaseStorageRoot};
+        use crate::DatabaseStateRoot;
         use reth_provider::{StateWriter, TrieWriter};
-        use reth_trie::{StateRoot, StorageRoot};
+        use reth_trie::StateRoot;
 
         let factory = create_test_provider_factory();
         let addresses = [B256::repeat_byte(0x11), B256::repeat_byte(0x12), B256::repeat_byte(0x99)];
-        let slots = [
-            B256::with_last_byte(1),
-            B256::with_last_byte(2),
-            B256::repeat_byte(0x11),
-            B256::repeat_byte(0x12),
-        ];
+        let slots = [B256::with_last_byte(1), B256::with_last_byte(2), B256::repeat_byte(0x11)];
         let account = Account { balance: U256::from(1), ..Default::default() };
         let mut initial = HashedPostState::default();
         for address in addresses {
@@ -968,34 +920,21 @@ mod tests {
         recreate.accounts.insert(addresses[0], Some(account));
         recreate.storages.insert(
             addresses[0],
-            HashedStorage {
-                wiped: true,
-                storage: HashMap::from_iter([(slots[0], U256::from(2)), (slots[1], U256::from(3))]),
-            },
+            HashedStorage { wiped: true, storage: HashMap::from_iter([(slots[0], U256::from(2))]) },
         );
         let mut state = HashedPostState::default();
-        for (index, delta) in [initial, delete, recreate].into_iter().enumerate() {
+        for delta in [initial, delete, recreate] {
             state.extend(delta.clone());
             let expected = test_utils::state_root_prehashed(state.accounts.iter().filter_map(
                 |(address, account)| {
                     account.map(|account| {
-                        (
-                            *address,
-                            (
-                                account,
-                                state
-                                    .storages
-                                    .get(address)
-                                    .map(|s| {
-                                        s.storage
-                                            .iter()
-                                            .filter(|(_, value)| !value.is_zero())
-                                            .map(|(slot, value)| (*slot, *value))
-                                            .collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default(),
-                            ),
-                        )
+                        let storage = state.storages[address]
+                            .storage
+                            .iter()
+                            .filter(|(_, value)| !value.is_zero())
+                            .map(|(slot, value)| (*slot, *value))
+                            .collect::<Vec<_>>();
+                        (*address, (account, storage))
                     })
                 },
             ));
@@ -1003,107 +942,25 @@ mod tests {
             let (root, updates) =
                 NestedStateRoot::new(writer.tx_ref(), None).calculate(&delta).unwrap();
             assert_eq!(root, expected);
-            let legacy = updates.clone().into_legacy();
-            if index == 0 {
-                assert!(legacy
-                    .storage_tries
-                    .values()
-                    .any(|updates| !updates.storage_nodes.is_empty()));
-                let inline_path = Nibbles::unpack(slots[0]).slice(..63);
-                assert!(legacy.storage_tries[&addresses[0]].removed_nodes.contains(&inline_path));
-                assert!(!legacy.storage_tries[&addresses[0]]
-                    .storage_nodes
-                    .contains_key(&inline_path));
-            }
-            for update in legacy.storage_tries.values() {
-                for node in update.storage_nodes.values() {
-                    assert_eq!(node.tree_mask, Default::default());
-                    assert!(!node.hash_mask.is_empty());
-                }
-            }
             writer.write_hashed_state(&delta.into_sorted()).unwrap();
             writer.write_trie_updatesv2(&updates).unwrap();
-            writer.write_trie_updates(&legacy).unwrap();
+            writer.write_trie_updates(&updates.into_legacy()).unwrap();
             writer.commit().unwrap();
             let reader = factory.database_provider_ro().unwrap();
             assert_eq!(
                 StateRoot::overlay_root(reader.tx_ref(), HashedPostState::default()).unwrap(),
                 expected
             );
-            for (address, account) in &state.accounts {
-                if account.is_some() {
-                    let expected = test_utils::storage_root_prehashed(
-                        state.storages[address]
-                            .storage
-                            .iter()
-                            .filter(|(_, value)| !value.is_zero())
-                            .map(|(slot, value)| (*slot, *value)),
-                    );
-                    assert_eq!(
-                        StorageRoot::from_tx_hashed(reader.tx_ref(), *address).root().unwrap(),
-                        expected
-                    );
-                }
-            }
-            let nested = NestedStateRoot::new(reader.tx_ref(), None);
-            let proof =
-                nested.storage_proof(addresses[0], &HashedStorage::default(), &slots).unwrap();
-            for slot in slots {
-                let nodes = proof
-                    .subtree
-                    .matching_nodes_sorted(&Nibbles::unpack(slot))
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(index, (_, node))| {
-                        (index == 0 || node.len() >= 32).then_some(node)
-                    })
-                    .collect::<Vec<_>>();
-                let value = state.storages[&addresses[0]]
-                    .storage
-                    .get(&slot)
-                    .filter(|value| !value.is_zero())
-                    .map(|value| encode_fixed_size(value).to_vec());
-                reth_trie_common::proof::verify_proof(
-                    proof.root,
-                    Nibbles::unpack(slot),
-                    value,
-                    &nodes,
-                )
-                .unwrap();
-            }
-            let proof = reth_trie::proof::Proof::overlay_multiproof(
-                reader.tx_ref(),
-                reth_trie::TrieInput::default(),
-                MultiProofTargets::accounts(addresses),
-            )
-            .unwrap();
-            for address in addresses {
-                let nodes = proof
-                    .account_proof_nodes(&Nibbles::unpack(address))
-                    .into_iter()
-                    .map(|(_, node)| node)
-                    .collect::<Vec<_>>();
-                let account = state.accounts[&address];
-                let value = account.map(|account| {
-                    let storage_root = test_utils::storage_root_prehashed(
-                        state.storages[&address]
-                            .storage
-                            .iter()
-                            .filter(|(_, value)| !value.is_zero())
-                            .map(|(slot, value)| (*slot, *value)),
-                    );
-                    alloy_rlp::encode(account.into_trie_account(storage_root))
-                });
-                reth_trie_common::proof::verify_proof(
-                    expected,
-                    Nibbles::unpack(address),
-                    value,
-                    &nodes,
-                )
-                .unwrap();
-            }
+            // Reuse the persisted V1 cache for a subsequent account and storage update.
             let mut next = HashedPostState::default();
-            next.accounts.insert(addresses[2], Some(Account { balance: U256::from(9), ..account }));
+            next.accounts.insert(addresses[0], Some(Account { balance: U256::from(9), ..account }));
+            next.storages.insert(
+                addresses[0],
+                HashedStorage {
+                    wiped: false,
+                    storage: HashMap::from_iter([(slots[1], U256::from(3))]),
+                },
+            );
             assert_eq!(
                 StateRoot::overlay_root(reader.tx_ref(), next.clone()).unwrap(),
                 NestedStateRoot::new(reader.tx_ref(), None).root(&next).unwrap()

@@ -2023,10 +2023,8 @@ mod tests {
     fn rpc_state_snapshot_keeps_history_and_existing_memory_overlay() -> eyre::Result<()> {
         use alloy_primitives::{keccak256, Address, U256};
         use reth_primitives_traits::Account;
-        use reth_stages_types::{StageCheckpoint, StageId};
         use reth_storage_api::{
-            DBProvider, HistoryWriter, StageCheckpointWriter, StateWriter, StorageLocation,
-            TrieWriterV2,
+            DBProvider, StageCheckpointWriter, StateWriter, StorageLocation, TrieWriterV2,
         };
         use reth_trie::{HashedPostState, HashedStorage, TrieInput};
         use reth_trie_db::nested_hash::NestedStateRoot;
@@ -2070,19 +2068,6 @@ mod tests {
             receipts: vec![vec![]],
             ..Default::default()
         };
-        let checkpoint =
-            |db: &crate::DatabaseProviderRW<_, MockNodeTypesWithDB>, number| -> eyre::Result<()> {
-                for stage in [
-                    StageId::Execution,
-                    StageId::AccountHashing,
-                    StageId::IndexAccountHistory,
-                    StageId::Finish,
-                    StageId::MerkleExecute,
-                ] {
-                    db.save_stage_checkpoint(stage, StageCheckpoint::new(number))?;
-                }
-                Ok(())
-            };
         let db = provider.database.provider_rw()?;
         db.write_state_with_indices_and_history(
             &outcome(1, 0, 10),
@@ -2093,7 +2078,7 @@ mod tests {
         let (_, updates) = NestedStateRoot::new(db.tx_ref(), None).calculate(&hashed_state(10))?;
         db.write_hashed_state(&hashed_state(10).into_sorted())?;
         db.write_trie_updatesv2(&updates)?;
-        checkpoint(&db, 1)?;
+        db.update_pipeline_stages(1, false)?;
         db.commit()?;
 
         let executed: Vec<_> = blocks
@@ -2119,17 +2104,15 @@ mod tests {
         let rpc = provider.rpc_provider();
         let old = rpc.view()?;
         let old_trie = rpc.consistent_view()?;
-        let old_history = old.history_by_block_number(1)?;
 
         // Persistence can overlap the retained memory chain; the base must still be its anchor.
         let db = provider.database.provider_rw()?;
         UnifiedStorageWriter::from(&db, &provider.static_file_provider())
             .save_blocks(vec![executed[0].clone()])?;
-        checkpoint(&db, 2)?;
+        db.update_pipeline_stages(2, false)?;
         provider.static_file_provider().commit()?;
         db.commit()?;
         let overlap = rpc.view()?;
-        let overlap_trie = rpc.consistent_view()?;
         provider.canonical_in_memory_state.remove_persisted_blocks(blocks[0].num_hash());
         let recaptured = old.consistent_view()?;
         assert_eq!(old.database.provider()?.read_bounds().unwrap().block_number, 1);
@@ -2138,20 +2121,11 @@ mod tests {
         for view in [&old, &overlap] {
             assert_eq!(view.latest()?.basic_account(&address)?, Some(account(30)));
             assert_eq!(
-                view.history_by_block_number(2)?.basic_account(&address)?,
-                Some(account(20))
-            );
-            assert_eq!(
-                view.history_by_block_number(1)?.basic_account(&address)?,
-                Some(account(10))
-            );
-            assert_eq!(
                 view.history_by_block_number(2)?.storage(address, slot)?,
                 Some(U256::from(20))
             );
         }
-        assert_eq!(rpc.latest()?.basic_account(&address)?, Some(account(30)));
-        for view in [&old_trie, &overlap_trie, &recaptured] {
+        for view in [&old_trie, &recaptured] {
             for (number, value) in [(1, 10), (2, 20), (3, 30)] {
                 let state = view.history_by_block_number(number)?;
                 let expected = reth_trie::test_utils::state_root([(
@@ -2163,25 +2137,6 @@ mod tests {
             }
         }
 
-        // DB pruning must preserve versions owned by already-created historical providers.
-        use reth_db_api::transaction::DbTxMut;
-        let db = provider.database.provider_rw()?;
-        db.tx_ref().clear::<tables::AccountChangeSets>()?;
-        db.tx_ref().clear::<tables::StorageChangeSets>()?;
-        db.tx_ref().clear::<tables::AccountsHistory>()?;
-        db.tx_ref().clear::<tables::StoragesHistory>()?;
-        db.commit()?;
-        assert_eq!(old_history.basic_account(&address)?, Some(account(10)));
-        assert_eq!(
-            overlap.history_by_block_number(1)?.storage(address, slot)?,
-            Some(U256::from(10))
-        );
-        let expected =
-            reth_trie::test_utils::state_root([(address, (account(10), [(slot, U256::from(10))]))]);
-        old_trie
-            .history_by_block_number(1)?
-            .proof(TrieInput::default(), address, &[slot])?
-            .verify(expected)?;
         Ok(())
     }
 

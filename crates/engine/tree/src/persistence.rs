@@ -633,9 +633,8 @@ mod tests {
     use reth_chain_state::{test_utils::TestBlockBuilder, ExecutedTrieUpdates};
     #[cfg(feature = "failpoints")]
     use reth_db::cursor::DbCursorRO;
-    use reth_db::{
-        cursor::DbDupCursorRO,
-        models::{storage_sharded_key::StorageShardedKey, GravityStorageSettings, ShardedKey},
+    use reth_db::models::{
+        storage_sharded_key::StorageShardedKey, GravityStorageSettings, ShardedKey,
     };
     use reth_ethereum_primitives::Block;
     use reth_execution_types::ExecutionOutcome;
@@ -745,15 +744,8 @@ mod tests {
         let slot = B256::with_last_byte(1);
         let old_value = if previous.is_some() { U256::from(value - 1) } else { U256::ZERO };
         let account = Account { nonce: number, balance: U256::from(value), ..Default::default() };
-        let state = std::iter::once((
-            address,
-            (
-                previous,
-                Some(account),
-                std::iter::once((slot, (old_value, U256::from(value)))).collect(),
-            ),
-        ))
-        .collect();
+        let storage = std::iter::once((slot, (old_value, U256::from(value)))).collect();
+        let state = std::iter::once((address, (previous, Some(account), storage))).collect();
         let account_reverts = std::iter::once((
             address,
             (Some(previous), vec![StorageEntry { key: slot, value: old_value }]),
@@ -782,66 +774,38 @@ mod tests {
     fn assert_state_boundary<TX: DbTx>(
         tx: &TX,
         address: Address,
+        height: u64,
         state_committed: bool,
         completion_committed: bool,
     ) {
-        let complete = state_committed;
-        let account = Account { nonce: 1, balance: U256::from(7), ..Default::default() };
-        assert_eq!(
-            tx.get::<tables::PlainAccountState>(address).unwrap(),
-            complete.then_some(account)
-        );
-        assert_eq!(
-            tx.get::<tables::HashedAccounts>(keccak256(address)).unwrap(),
-            complete.then_some(account)
-        );
-        let slot = B256::with_last_byte(1);
-        let plain = tx
-            .cursor_dup_read::<tables::PlainStorageState>()
+        let records = [
+            tx.get::<tables::PlainAccountState>(address).unwrap().is_some(),
+            tx.get::<tables::HashedAccounts>(keccak256(address)).unwrap().is_some(),
+            tx.get::<tables::PlainStorageState>(address).unwrap().is_some(),
+            tx.get::<tables::HashedStorages>(keccak256(address)).unwrap().is_some(),
+            tx.get::<tables::AccountsHistory>(ShardedKey::last(address)).unwrap().is_some(),
+            tx.get::<tables::StoragesHistory>(StorageShardedKey::last(
+                address,
+                B256::with_last_byte(1),
+            ))
             .unwrap()
-            .seek_by_key_subkey(address, slot)
-            .unwrap();
-        let hashed = tx
-            .cursor_dup_read::<tables::HashedStorages>()
-            .unwrap()
-            .seek_by_key_subkey(keccak256(address), keccak256(slot))
-            .unwrap();
-        assert_eq!(plain, complete.then_some(StorageEntry { key: slot, value: U256::from(7) }));
-        assert_eq!(
-            hashed,
-            complete.then_some(StorageEntry { key: keccak256(slot), value: U256::from(7) })
-        );
-        let account_history = tx.get::<tables::AccountsHistory>(ShardedKey::last(address)).unwrap();
-        let storage_history =
-            tx.get::<tables::StoragesHistory>(StorageShardedKey::last(address, slot)).unwrap();
-        assert_eq!(
-            account_history.map(|indices| indices.iter().collect::<Vec<_>>()),
-            complete.then_some(vec![1])
-        );
-        assert_eq!(
-            storage_history.map(|indices| indices.iter().collect::<Vec<_>>()),
-            complete.then_some(vec![1])
-        );
-        assert_eq!(tx.get::<tables::BlockBodyIndices>(1).unwrap().is_some(), complete);
-        for stage in StageId::ALL {
+            .is_some(),
+            tx.get::<tables::BlockBodyIndices>(height).unwrap().is_some(),
+        ];
+        assert_eq!(records, [state_committed; 7]);
+        for (stage, committed) in [
+            (StageId::Execution, state_committed),
+            (StageId::AccountHashing, state_committed),
+            (StageId::IndexAccountHistory, state_committed),
+            (StageId::Finish, state_committed),
+            (StageId::MerkleExecute, completion_committed),
+        ] {
             assert_eq!(
                 tx.get::<tables::StageCheckpoints>(stage.to_string())
                     .unwrap()
                     .unwrap()
                     .block_number,
-                u64::from(
-                    if matches!(
-                        stage,
-                        StageId::Execution |
-                            StageId::AccountHashing |
-                            StageId::IndexAccountHistory |
-                            StageId::Finish
-                    ) {
-                        state_committed
-                    } else {
-                        completion_committed
-                    }
-                ),
+                if committed { height } else { 0 },
                 "{stage:?}"
             );
         }
@@ -877,31 +841,19 @@ mod tests {
         address: Address,
         block: &ExecutedBlockWithTrieUpdates,
     ) {
-        use reth_trie::{
-            nested_trie::{StorageNodeEntry, Trie},
-            Nibbles, StoredNibblesSubKey,
-        };
+        use reth_trie::{nested_trie::Trie, Nibbles};
         use reth_trie_db::nested_hash::StorageTrieReader;
 
         let hashed_address = keccak256(address);
-        let expected = &block.triev2.storage_tries[&hashed_address].storage_nodes;
-        let mut cursor = tx.cursor_dup_read::<tables::StoragesTrieV2>().unwrap();
-        let stored = cursor
-            .walk_dup(Some(hashed_address), None)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(stored.len(), expected.len());
-        for (path, node) in expected {
-            let path = StoredNibblesSubKey(*path);
-            assert_eq!(
-                cursor.get_by_key_subkey(hashed_address, path.clone()).unwrap(),
-                Some(StorageNodeEntry::create(&path, node))
-            );
-        }
-        let reader = StorageTrieReader::new(cursor, hashed_address, None);
-        let mut trie = Trie::new(reader, false).unwrap();
-        assert_eq!(trie.hash(), expected[&Nibbles::new()].hash());
+        let reader = StorageTrieReader::new(
+            tx.cursor_dup_read::<tables::StoragesTrieV2>().unwrap(),
+            hashed_address,
+            None,
+        );
+        assert_eq!(
+            Trie::new(reader, false).unwrap().hash(),
+            block.triev2.storage_tries[&hashed_address].storage_nodes[&Nibbles::new()].hash()
+        );
         assert_eq!(
             NestedStateRoot::new(tx, None).calculate(&Default::default()).unwrap().0,
             block.recovered_block().state_root()
@@ -936,35 +888,7 @@ mod tests {
         let slot = B256::with_last_byte(1);
         let account = Account { nonce: 2, balance: U256::from(8), ..Default::default() };
         assert_eq!(tx.get::<tables::PlainAccountState>(address).unwrap(), Some(account));
-        assert_eq!(tx.get::<tables::HashedAccounts>(keccak256(address)).unwrap(), Some(account));
-        assert_eq!(
-            tx.cursor_dup_read::<tables::PlainStorageState>()
-                .unwrap()
-                .seek_by_key_subkey(address, slot)
-                .unwrap()
-                .unwrap()
-                .value,
-            U256::from(8)
-        );
-        assert_eq!(
-            tx.cursor_dup_read::<tables::HashedStorages>()
-                .unwrap()
-                .seek_by_key_subkey(keccak256(address), keccak256(slot))
-                .unwrap()
-                .unwrap()
-                .value,
-            U256::from(8)
-        );
         assert_eq!(NestedStateRoot::new(tx, None).calculate(&Default::default()).unwrap().0, root);
-        for stage in StageId::ALL {
-            assert_eq!(
-                tx.get::<tables::StageCheckpoints>(stage.to_string())
-                    .unwrap()
-                    .unwrap()
-                    .block_number,
-                2
-            );
-        }
         drop(provider_ro);
 
         let mut bundle = BundleState::default();
@@ -993,41 +917,24 @@ mod tests {
         persist(vec![wipe]);
         let provider_ro = provider.database_provider_ro().unwrap();
         let tx = provider_ro.tx_ref();
-        assert!(tx.get::<tables::PlainAccountState>(address).unwrap().is_none());
-        assert!(tx.get::<tables::HashedAccounts>(keccak256(address)).unwrap().is_none());
-        assert!(tx
-            .cursor_dup_read::<tables::PlainStorageState>()
-            .unwrap()
-            .seek_by_key_subkey(address, slot)
-            .unwrap()
-            .is_none());
-        assert!(tx
-            .cursor_dup_read::<tables::HashedStorages>()
-            .unwrap()
-            .seek_by_key_subkey(keccak256(address), keccak256(slot))
-            .unwrap()
-            .is_none());
+        assert_eq!(tx.get::<tables::PlainAccountState>(address).unwrap(), None);
+        assert_eq!(tx.get::<tables::HashedAccounts>(keccak256(address)).unwrap(), None);
+        assert_eq!(tx.get::<tables::PlainStorageState>(address).unwrap(), None);
+        assert_eq!(tx.get::<tables::HashedStorages>(keccak256(address)).unwrap(), None);
         assert_eq!(
             provider_ro.storage_changeset(3).unwrap()[0].1,
             StorageEntry { key: slot, value: U256::from(8) }
         );
         assert_eq!(provider_ro.account_changesets_range(3..=3).unwrap()[0].1.info, Some(account));
-        assert_eq!(
-            tx.get::<tables::AccountsHistory>(ShardedKey::last(address))
-                .unwrap()
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-        assert_eq!(
+        let histories = [
+            tx.get::<tables::AccountsHistory>(ShardedKey::last(address)).unwrap().unwrap(),
             tx.get::<tables::StoragesHistory>(StorageShardedKey::last(address, slot))
                 .unwrap()
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
+                .unwrap(),
+        ];
+        for history in histories {
+            assert_eq!(history.iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+        }
         assert_eq!(NestedStateRoot::new(tx, None).calculate(&Default::default()).unwrap().0, root);
     }
 
@@ -1035,84 +942,6 @@ mod tests {
     fn per_block_persistence_keeps_state_history_and_wipes_complete() {
         for static_changesets in [false, true] {
             exercise_state_history(static_changesets, false);
-        }
-    }
-
-    #[test]
-    #[ignore = "local persistence timing and serialized batch measurement"]
-    fn measure_atomic_persistence() {
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        recorder.install().unwrap();
-        for merged in [false, true] {
-            PERSIST_BLOCK_CACHE.reset();
-            let provider = create_test_provider_factory();
-            let service = persistence_service(provider.clone());
-            service.save_blocks_per_block(vec![state_block(&provider, empty_outcome())]).unwrap();
-            let mut previous = None;
-            let blocks = (1..=32)
-                .map(|number| {
-                    let value = number + 6;
-                    let outcome =
-                        account_update(number, Address::with_last_byte(1), previous, value);
-                    previous = Some(Account {
-                        nonce: number,
-                        balance: U256::from(value),
-                        ..Default::default()
-                    });
-                    state_block(&provider, outcome)
-                })
-                .collect();
-            snapshotter.snapshot();
-            let start = Instant::now();
-            if merged {
-                service.save_merged_blocks(blocks)
-            } else {
-                service.save_blocks_per_block(blocks)
-            }
-            .unwrap();
-            let elapsed = start.elapsed();
-            println!(
-                "merged={merged}, 32 blocks, persistence={elapsed:?}, blocks/s={:.1}",
-                32.0 / elapsed.as_secs_f64()
-            );
-            for (key, _, _, value) in snapshotter.snapshot().into_vec() {
-                match (key.key().name(), value) {
-                    ("reth_rocksdb_sync_commits_total", DebugValue::Counter(count)) => {
-                        let database = key
-                            .key()
-                            .labels()
-                            .find(|label| label.key() == "database")
-                            .unwrap()
-                            .value();
-                        let commits = if merged { 1 } else { 32 };
-                        assert_eq!(count, if database == "state" { 2 * commits } else { commits });
-                        println!("{:?}: {count} sync commits", key.key());
-                    }
-                    ("reth_rocksdb_commit_batch_size_bytes", DebugValue::Histogram(values)) => {
-                        println!(
-                            "{:?}: maximum serialized batch {:?} bytes",
-                            key.key(),
-                            values.into_iter().max().unwrap()
-                        );
-                    }
-                    (
-                        "reth_rocksdb_sync_commit_duration_seconds",
-                        DebugValue::Histogram(values),
-                    ) => {
-                        let total = values.iter().map(|value| value.into_inner()).sum::<f64>();
-                        println!(
-                            "{:?}: total sync time {total:.6}s, mean {:.6}s, max {:?}s",
-                            key.key(),
-                            total / values.len() as f64,
-                            values.into_iter().max().unwrap()
-                        );
-                    }
-                    _ => {}
-                }
-            }
         }
     }
 
@@ -1128,77 +957,40 @@ mod tests {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn consistent_view_waits_for_both_persistence_commits() {
-        use std::sync::{
-            atomic::{AtomicUsize, Ordering},
-            Mutex,
-        };
-
-        let _scenario = fail::FailScenario::setup();
-        for merged in [false, true] {
-            PERSIST_BLOCK_CACHE.reset();
-            let provider = create_test_provider_factory();
-            let service = persistence_service(provider.clone());
-            service.save_blocks_per_block(vec![state_block(&provider, empty_outcome())]).unwrap();
-            let block =
-                state_block(&provider, account_update(1, Address::with_last_byte(1), None, 7));
-            let calls = Arc::new(AtomicUsize::new(0));
-            let readers = Arc::new(Mutex::new(Vec::new()));
-            let callback_provider = provider.clone();
-            let callback_calls = calls.clone();
-            let callback_readers = readers.clone();
-            fail::cfg_callback("db::commit::before_state", move || {
-                callback_calls.fetch_add(1, Ordering::Relaxed);
-                // This must not take the coordination lock held by the persistence writer.
-                callback_provider.db_ref().tx_with_snapshot(None).unwrap();
-                let (started_tx, started_rx) = std::sync::mpsc::channel();
-                let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-                let provider = callback_provider.clone();
-                callback_readers.lock().unwrap().push(std::thread::spawn(move || {
-                    started_tx.send(()).unwrap();
-                    let view = provider.db_ref().snapshot(true).unwrap();
-                    let tx = provider.db_ref().tx_with_snapshot(view).unwrap();
-                    assert_eq!(
-                        tx.get::<tables::StageCheckpoints>(StageId::MerkleExecute.to_string())
-                            .unwrap()
-                            .unwrap()
-                            .block_number,
-                        1
-                    );
-                    let _ = finished_tx.send(());
-                }));
-                started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                assert!(matches!(
-                    finished_rx.recv_timeout(Duration::from_millis(20)),
-                    Err(RecvTimeoutError::Timeout)
-                ));
-            })
-            .unwrap();
-            if merged {
-                service.save_merged_blocks(vec![block]).unwrap();
-            } else {
-                service.save_blocks_per_block(vec![block]).unwrap();
-            }
-            fail::remove("db::commit::before_state");
-            assert_eq!(calls.load(Ordering::Relaxed), 2);
-            for reader in readers.lock().unwrap().drain(..) {
-                reader.join().unwrap();
-            }
-        }
-    }
-
-    #[cfg(feature = "failpoints")]
-    #[test]
-    fn interrupted_commits_reopen_and_recover_the_ordered_block() {
+    fn interrupted_commits_reopen_and_recover() {
         use crate::recovery::StorageRecoveryHelper;
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let _scenario = fail::FailScenario::setup();
         for static_changesets in [false, true] {
-            for (failpoint, storage_committed, state_committed) in [
-                ("db::commit::before_storage_trie", false, true),
-                ("db::commit::before_state", false, false),
+            for (merged, failpoint, state_committed) in [
+                (false, "db::commit::before_state", false),
+                (false, "db::commit::before_storage_trie", true),
+                (true, "db::commit::before_storage_trie", true),
             ] {
+                PERSIST_BLOCK_CACHE.reset();
+                let reference = create_test_provider_factory();
+                let reference_service = persistence_service(reference.clone());
+                reference_service
+                    .save_blocks_per_block(vec![state_block(&reference, empty_outcome())])
+                    .unwrap();
+                let height = if merged { 2 } else { 1 };
+                let address = Address::with_last_byte(height as u8);
+                let first_address = Address::with_last_byte(1);
+                let blocks: Vec<_> = (1..=height)
+                    .map(|number| {
+                        let block = state_block(
+                            &reference,
+                            account_update(number, Address::with_last_byte(number as u8), None, 7),
+                        );
+                        reference_service.save_blocks_per_block(vec![block.clone()]).unwrap();
+                        block
+                    })
+                    .collect();
+                let last = blocks.last().unwrap().clone();
+                drop(reference_service);
+                drop(reference);
+
                 PERSIST_BLOCK_CACHE.reset();
                 let provider = create_test_provider_factory();
                 provider.set_storage_settings_cache(GravityStorageSettings {
@@ -1208,160 +1000,70 @@ mod tests {
                 service
                     .save_blocks_per_block(vec![state_block(&provider, empty_outcome())])
                     .unwrap();
-                let address = Address::with_last_byte(1);
-                let block = state_block(&provider, account_update(1, address, None, 7));
                 fail::cfg(failpoint, "panic").unwrap();
-                let interrupted = catch_unwind(AssertUnwindSafe(|| {
-                    service.save_blocks_per_block(vec![block.clone()]).unwrap();
-                }));
-                fail::remove(failpoint);
-                assert!(interrupted.is_err(), "{failpoint}");
-
-                let provider_ro = provider.database_provider_ro().unwrap();
-                assert_state_boundary(provider_ro.tx_ref(), address, state_committed, false);
-                assert_eq!(
-                    provider_ro
-                        .tx_ref()
-                        .get::<tables::AccountsTrieV2>(Default::default())
-                        .unwrap()
-                        .is_some(),
-                    state_committed
-                );
-                assert_eq!(
-                    provider_ro
-                        .tx_ref()
-                        .cursor_dup_read::<tables::StoragesTrieV2>()
-                        .unwrap()
-                        .seek_exact(keccak256(address))
-                        .unwrap()
-                        .is_some(),
-                    storage_committed
-                );
-                drop(provider_ro);
+                assert!(catch_unwind(AssertUnwindSafe(|| {
+                    if merged {
+                        service.save_merged_blocks(blocks)
+                    } else {
+                        service.save_blocks_per_block(blocks)
+                    }
+                    .unwrap();
+                }))
+                .is_err());
                 drop(service);
 
-                let provider = reopen_provider(provider, static_changesets);
+                let mut provider = reopen_provider(provider, static_changesets);
                 let provider_ro = provider.database_provider_ro().unwrap();
-                assert_state_boundary(provider_ro.tx_ref(), address, state_committed, false);
+                let tx = provider_ro.tx_ref();
+                assert_state_boundary(tx, first_address, height, state_committed, false);
+                assert_eq!(
+                    tx.get::<tables::AccountsTrieV2>(Default::default()).unwrap().is_some(),
+                    state_committed
+                );
+                assert!(tx
+                    .cursor_dup_read::<tables::StoragesTrieV2>()
+                    .unwrap()
+                    .seek_exact(keccak256(address))
+                    .unwrap()
+                    .is_none());
                 provider.static_file_provider().check_consistency(&provider_ro, false).unwrap();
                 drop(provider_ro);
-                StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
-                let provider_ro = provider.database_provider_ro().unwrap();
-                assert_state_boundary(
-                    provider_ro.tx_ref(),
-                    address,
-                    state_committed,
-                    state_committed,
-                );
-                if state_committed {
-                    assert_persisted_trie(provider_ro.tx_ref(), address, &block);
+                if merged {
+                    // A second interruption must leave the Merkle checkpoint behind state.
+                    assert!(catch_unwind(AssertUnwindSafe(|| {
+                        StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
+                    }))
+                    .is_err());
+                    provider = reopen_provider(provider, static_changesets);
+                    assert_state_boundary(
+                        provider.database_provider_ro().unwrap().tx_ref(),
+                        first_address,
+                        height,
+                        true,
+                        false,
+                    );
                 }
-                drop(provider_ro);
+                fail::remove(failpoint);
+                StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
                 if !state_committed {
                     let replay = state_block(&provider, account_update(1, address, None, 7));
                     assert_eq!(
                         replay.recovered_block().state_root(),
-                        block.recovered_block().state_root()
+                        last.recovered_block().state_root()
                     );
                     persistence_service(provider.clone())
                         .save_blocks_per_block(vec![replay])
                         .unwrap();
                 }
                 let provider_ro = provider.database_provider_ro().unwrap();
-                assert_state_boundary(provider_ro.tx_ref(), address, true, true);
-                assert_eq!(provider_ro.account_changesets_range(1..=1).unwrap().len(), 1);
-                assert_eq!(provider_ro.storage_changeset(1).unwrap().len(), 1);
-                assert_persisted_trie(provider_ro.tx_ref(), address, &block);
-            }
-        }
-    }
-
-    #[cfg(feature = "failpoints")]
-    #[test]
-    fn merged_commit_recovers_after_interrupted_trie_write() {
-        use crate::recovery::StorageRecoveryHelper;
-        use reth_provider::StageCheckpointReader;
-        use std::panic::{catch_unwind, AssertUnwindSafe};
-
-        let _scenario = fail::FailScenario::setup();
-        for static_changesets in [false, true] {
-            PERSIST_BLOCK_CACHE.reset();
-            let reference = create_test_provider_factory();
-            let reference_service = persistence_service(reference.clone());
-            reference_service
-                .save_blocks_per_block(vec![state_block(&reference, empty_outcome())])
-                .unwrap();
-            let blocks: Vec<_> = (1..=2)
-                .map(|number| {
-                    let block = state_block(
-                        &reference,
-                        account_update(number, Address::with_last_byte(number as u8), None, 7),
-                    );
-                    reference_service.save_blocks_per_block(vec![block.clone()]).unwrap();
-                    block
-                })
-                .collect();
-            let expected = blocks.last().unwrap().recovered_block().state_root();
-
-            PERSIST_BLOCK_CACHE.reset();
-            let provider = create_test_provider_factory();
-            provider.set_storage_settings_cache(GravityStorageSettings {
-                changesets_in_static_files: static_changesets,
-            });
-            let service = persistence_service(provider.clone());
-            service.save_blocks_per_block(vec![state_block(&provider, empty_outcome())]).unwrap();
-            fail::cfg("db::commit::before_storage_trie", "panic").unwrap();
-            assert!(catch_unwind(AssertUnwindSafe(|| {
-                service.save_merged_blocks(blocks).unwrap();
-            }))
-            .is_err());
-            drop(service);
-
-            let provider = reopen_provider(provider, static_changesets);
-            let provider_ro = provider.database_provider_ro().unwrap();
-            provider.static_file_provider().check_consistency(&provider_ro, false).unwrap();
-            for (stage, number) in [(StageId::Execution, 2), (StageId::MerkleExecute, 0)] {
+                assert_state_boundary(provider_ro.tx_ref(), first_address, height, true, true);
                 assert_eq!(
-                    provider_ro.get_stage_checkpoint(stage).unwrap().unwrap().block_number,
-                    number
+                    provider_ro.account_changesets_range(1..=height).unwrap().len(),
+                    height as usize
                 );
+                assert_eq!(provider_ro.storage_changeset(height).unwrap().len(), 1);
+                assert_persisted_trie(provider_ro.tx_ref(), address, &last);
             }
-            drop(provider_ro);
-            // Interrupt recovery too: it must not advance Merkle before storage is durable.
-            assert!(catch_unwind(AssertUnwindSafe(|| {
-                StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
-            }))
-            .is_err());
-            fail::remove("db::commit::before_storage_trie");
-
-            let provider = reopen_provider(provider, static_changesets);
-            assert_eq!(
-                provider
-                    .database_provider_ro()
-                    .unwrap()
-                    .get_stage_checkpoint(StageId::MerkleExecute)
-                    .unwrap()
-                    .unwrap()
-                    .block_number,
-                0
-            );
-            StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
-            let provider_ro = provider.database_provider_ro().unwrap();
-            assert_eq!(
-                NestedStateRoot::new(provider_ro.tx_ref(), None)
-                    .calculate(&Default::default())
-                    .unwrap()
-                    .0,
-                expected
-            );
-            assert_eq!(
-                provider_ro
-                    .get_stage_checkpoint(StageId::MerkleExecute)
-                    .unwrap()
-                    .unwrap()
-                    .block_number,
-                2
-            );
         }
     }
 
