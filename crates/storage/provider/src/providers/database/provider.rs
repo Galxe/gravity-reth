@@ -2048,11 +2048,6 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
         let has_contract_log_filter = !self.prune_modes.receipts_log_filter.is_empty();
         let contract_log_pruner = self.prune_modes.receipts_log_filter.group_by_block(tip, None)?;
 
-        // All receipts from the last 128 blocks are required for blockchain tree, even with
-        // [`PruneSegment::ContractLogs`].
-        let prunable_receipts =
-            PruneMode::Distance(MINIMUM_DISTANCE).should_prune(first_block, tip);
-
         // Prepare set of addresses which logs should not be pruned.
         let mut allowed_addresses: HashSet<Address, _> = HashSet::new();
         for (_, addresses) in contract_log_pruner.range(..first_block) {
@@ -2063,6 +2058,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
             execution_outcome.receipts.iter().zip(block_indices).enumerate()
         {
             let block_number = first_block + idx as u64;
+            // A batch can span the retention boundary; recent blocks must keep all receipts.
+            let prunable_receipts =
+                PruneMode::Distance(MINIMUM_DISTANCE).should_prune(block_number, tip);
 
             // Increment block number for receipts static file writer
             if let Some(writer) = receipts_static_writer.as_mut() {
@@ -3527,6 +3525,50 @@ mod tests {
         BlockWriter, DatabaseProviderFactory,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
+
+    #[test]
+    fn batched_receipts_keep_recent_blocks_with_log_filter() {
+        use reth_ethereum_primitives::Receipt;
+        use reth_prune_types::ReceiptsLogPruneConfig;
+        use revm_database::{states::reverts::Reverts, BundleState};
+
+        let factory = create_test_provider_factory().with_prune_modes(PruneModes {
+            receipts_log_filter: ReceiptsLogPruneConfig(BTreeMap::from([(
+                Address::with_last_byte(1),
+                PruneMode::Before(1),
+            )])),
+            ..Default::default()
+        });
+        let provider = factory.database_provider_rw().unwrap();
+        let tip = MINIMUM_DISTANCE + 7;
+        let outcome = ExecutionOutcome::new(
+            BundleState { reverts: Reverts::new(vec![vec![]; tip as usize]), ..Default::default() },
+            vec![vec![Receipt::default()]; tip as usize],
+            1,
+            Vec::new(),
+        );
+        let indices = (0..tip)
+            .map(|first_tx_num| StoredBlockBodyIndices { first_tx_num, tx_count: 1 })
+            .collect();
+        provider
+            .write_state_with_indices_and_history(
+                &outcome,
+                OriginalValuesKnown::No,
+                StorageLocation::Database,
+                Some(indices),
+            )
+            .unwrap();
+        provider.commit_view().unwrap();
+
+        assert!(provider.tx_ref().get::<tables::Receipts<Receipt>>(0).unwrap().is_none());
+        for block in tip - MINIMUM_DISTANCE..=tip {
+            assert!(provider
+                .tx_ref()
+                .get::<tables::Receipts<Receipt>>(block - 1)
+                .unwrap()
+                .is_some());
+        }
+    }
 
     #[test]
     fn state_history_indices_include_wiped_slots_without_committing_changesets() {

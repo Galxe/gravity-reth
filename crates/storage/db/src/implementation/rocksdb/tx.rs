@@ -39,9 +39,8 @@ pub(crate) use cursor::{RO, RW};
 /// - Mutex provides interior mutability, allowing batch modifications through shared references
 /// - Separate batches ensure writes to different DBs can be built concurrently
 ///
-/// During commit, if both `account_batch` and `storage_batch` contain data, they are committed
-/// in parallel using `thread::scope`. The `state_batch` is always committed last to ensure
-/// atomicity - if state commit succeeds, the entire transaction is considered successful.
+/// The state batch is sync-written first, followed by non-empty trie batches in parallel.
+/// Each batch is atomic within its database; commits are not atomic across the three databases.
 ///
 /// # Type Parameter
 ///
@@ -49,7 +48,6 @@ pub(crate) use cursor::{RO, RW};
 /// from read-write (RW) transactions at compile time, enabling type-safe cursor APIs.
 pub struct Tx<K: cursor::TransactionKind> {
     /// State database instance (accounts, storage, receipts, history indices).
-    /// Committed last to act as the commit coordinator.
     state_db: Arc<DB>,
 
     /// Account trie database instance (Merkle Patricia Trie for account state).
@@ -207,64 +205,9 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         }
     }
 
-    /// Commits all pending writes across the three database instances.
-    ///
-    /// # Commit Ordering and Correctness Guarantees
-    ///
-    /// This commit strategy ensures correctness through careful ordering and checkpoint-based
-    /// idempotency, even in the face of partial failures:
-    ///
-    /// 1. **Parallel Trie Commits**: If both `account_batch` and `storage_batch` contain data, they
-    ///    are committed in parallel to maximize throughput. These commits may succeed or fail
-    ///    independently.
-    ///
-    /// 2. **State Commit as Coordinator**: The `state_batch` is ALWAYS committed last. This is
-    ///    critical because stage checkpoints are stored in `state_db`. A checkpoint's presence
-    ///    indicates that the corresponding stage has been fully completed.
-    ///
-    /// # Failure Scenarios and Recovery
-    ///
-    /// Several partial failure scenarios can occur, all of which are handled safely through
-    /// checkpoint-based recovery:
-    ///
-    /// **Scenario 1: Trie commit fails, state commit succeeds**
-    /// - If `account_batch` or `storage_batch` commit fails, the function returns an error
-    /// - The `state_batch` commit never executes, so no checkpoint is written
-    /// - On retry, the entire transaction is re-executed (idempotent trie writes)
-    ///
-    /// **Scenario 2: Account commit succeeds, storage commit fails**
-    /// - When running in parallel, `account_db` write may succeed while `storage_db` write fails
-    /// - The function returns an error before `state_batch` is committed
-    /// - No checkpoint is written; account trie data is orphaned but harmless
-    /// - On retry, account trie writes are idempotent and will overwrite orphaned data
-    ///
-    /// **Scenario 3: Both trie commits succeed, state commit fails**
-    /// - Account and storage trie data is written to disk
-    /// - `State_batch` commit fails, so no checkpoint is recorded
-    /// - On retry, the stage is re-executed because the checkpoint is missing
-    /// - Trie writes are idempotent: re-writing the same trie nodes produces identical results
-    ///
-    /// # Why This Works: Idempotency of Trie Operations
-    ///
-    /// The correctness of this approach relies on a critical property: **account trie and
-    /// storage trie writes are idempotent**. Writing the same trie node multiple times with
-    /// the same data produces the same on-disk state. This means:
-    ///
-    /// - Orphaned trie data (from failed state commits) can be safely overwritten
-    /// - Retrying a stage will produce consistent results even if partial trie data exists
-    /// - The checkpoint in `state_db` acts as the authoritative "commit point" for the entire
-    ///   multi-database transaction
-    ///
-    /// # Performance vs. Atomicity Trade-off
-    ///
-    /// This design prioritizes write throughput (via parallel commits) over strict atomicity.
-    /// The lack of distributed transaction coordination means we can have temporary
-    /// inconsistencies (orphaned trie data), but these are always resolved by the checkpoint
-    /// mechanism and idempotent retry logic.
+    /// Sync-writes state before either trie database. The two trie batches may commit in parallel;
+    /// callers must record their completion in a separate state commit.
     fn commit_view(&self) -> Result<bool, DatabaseError> {
-        // Use sync writes so every commit() call is durable before returning.
-        // Combined with stage-level idempotency (recovery.rs), this guarantees
-        // that partial block writes are always recoverable even after power loss.
         let mut sync_opts = WriteOptions::default();
         sync_opts.set_sync(true);
         let write_batch = |db: &DB, batch: rocksdb::WriteBatch, database: &'static str| {
@@ -278,59 +221,35 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
                 .record(start.elapsed());
             Ok::<(), DatabaseError>(())
         };
-
-        // Acquire locks on all batches upfront to prepare for commit
+        let write_storage = |batch| {
+            set_fail_point!("db::commit::before_storage_trie");
+            write_batch(&self.storage_db, batch, "storage")
+        };
         let mut state_batch = self.state_batch.lock();
         let mut account_batch = self.account_batch.lock();
         let mut storage_batch = self.storage_batch.lock();
+        let state_data = (!state_batch.is_empty()).then(|| std::mem::take(&mut *state_batch));
+        let account_data = (!account_batch.is_empty()).then(|| std::mem::take(&mut *account_batch));
+        let storage_data = (!storage_batch.is_empty()).then(|| std::mem::take(&mut *storage_batch));
 
-        // Phase 1: Commit trie batches (potentially in parallel)
-        if !account_batch.is_empty() && !storage_batch.is_empty() {
-            // Both trie batches have data - commit them in parallel for maximum throughput.
-            // If either fails, we return an error BEFORE committing state_batch, ensuring
-            // no checkpoint is written and the stage will be retried.
-            let account_batch_data = std::mem::take(&mut *account_batch);
-            let storage_batch_data = std::mem::take(&mut *storage_batch);
-            thread::scope(|scope| -> Result<(), DatabaseError> {
-                let account_handle = scope.spawn(|| -> Result<(), DatabaseError> {
-                    write_batch(&self.account_db, account_batch_data, "account")?;
-                    set_fail_point!("db::commit::after_account_trie");
-                    Ok(())
-                });
-                let storage_handle = scope.spawn(|| -> Result<(), DatabaseError> {
-                    set_fail_point!("db::commit::before_storage_trie");
-                    write_batch(&self.storage_db, storage_batch_data, "storage")?;
-                    set_fail_point!("db::commit::after_storage_trie");
-                    Ok(())
-                });
-                account_handle.join().unwrap()?;
-                storage_handle.join().unwrap()?;
-                Ok(())
-            })?;
-        } else {
-            // Only one trie batch has data - commit sequentially (no parallelism benefit)
-            if !account_batch.is_empty() {
-                let account_batch = std::mem::take(&mut *account_batch);
-                write_batch(&self.account_db, account_batch, "account")?;
-                set_fail_point!("db::commit::after_account_trie");
-            }
-            if !storage_batch.is_empty() {
-                let storage_batch = std::mem::take(&mut *storage_batch);
-                set_fail_point!("db::commit::before_storage_trie");
-                write_batch(&self.storage_db, storage_batch, "storage")?;
-                set_fail_point!("db::commit::after_storage_trie");
-            }
+        // A merged trie must never advance beyond the durable Execution checkpoint.
+        if let Some(batch) = state_data {
+            set_fail_point!("db::commit::before_state");
+            write_batch(&self.state_db, batch, "state")?;
         }
 
-        // Phase 2: Commit state batch LAST (acts as the commit coordinator)
-        // The state_db contains stage checkpoints. Only when this commit succeeds is the
-        // checkpoint written, marking the stage as complete. If this commit fails, the
-        // checkpoint is absent, triggering a retry that will idempotently re-execute the stage.
-        if !state_batch.is_empty() {
-            let state_batch = std::mem::take(&mut *state_batch);
-            set_fail_point!("db::commit::before_state");
-            write_batch(&self.state_db, state_batch, "state")?;
-            set_fail_point!("db::commit::after_state");
+        match (account_data, storage_data) {
+            (Some(account), Some(storage)) => thread::scope(|scope| {
+                let account_handle =
+                    scope.spawn(|| write_batch(&self.account_db, account, "account"));
+                let storage_result = write_storage(storage);
+                // Wait for the worker before propagating either write error.
+                account_handle.join().unwrap()?;
+                storage_result
+            })?,
+            (Some(account), None) => write_batch(&self.account_db, account, "account")?,
+            (None, Some(storage)) => write_storage(storage)?,
+            (None, None) => {}
         }
         Ok(true)
     }

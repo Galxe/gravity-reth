@@ -4,15 +4,18 @@ use alloy_eips::BlockNumHash;
 use crossbeam_channel::Sender as CrossbeamSender;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
-use reth_db::{set_fail_point, tables, transaction::DbTx};
+use reth_db::{
+    tables,
+    transaction::{DbTx, DbTxMut},
+};
 use reth_errors::ProviderError;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockWriter,
-    ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, StageCheckpointWriter,
-    StateWriter, StaticFileProviderFactory, StaticFileWriter, StorageLocation, TrieWriter,
-    TrieWriterV2, PERSIST_BLOCK_CACHE,
+    ChainStateBlockWriter, DatabaseProvider, DatabaseProviderFactory, ProviderFactory,
+    StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StaticFileWriter,
+    StorageLocation, TrieWriter, TrieWriterV2, PERSIST_BLOCK_CACHE,
 };
 use reth_prune::{PrunerError, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender, StageCheckpoint, StageId};
@@ -247,8 +250,7 @@ where
         Ok(())
     }
 
-    /// Persist each block in one transaction: static files first, trie shards next, and the
-    /// complete state batch (including stage checkpoints) last.
+    /// Persist each block's main data atomically per database, then record trie completion.
     fn save_blocks_per_block(
         &self,
         blocks: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
@@ -280,24 +282,13 @@ where
                 StorageLocation::StaticFiles,
                 Some(vec![body_indices]),
             )?;
-            set_fail_point!("persistence::after_write_state");
             provider_rw.write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
-            set_fail_point!("persistence::after_hashed_state");
             provider_rw.write_trie_updates(
                 trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
             )?;
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
-            set_fail_point!("persistence::after_trie_update");
 
-            // Finish and the other pipeline stages describe this same complete block. V1 trie
-            // tables also belong to state_db and must share its sole main-data commit.
-            provider_rw.update_pipeline_stages(block_number, false)?;
-            provider_rw.static_file_provider().commit()?;
-            set_fail_point!("persistence::after_static_file_commit");
-            // Tx::commit writes each non-empty trie batch atomically before the state batch.
-            provider_rw.commit()?;
-            set_fail_point!("persistence::after_state_commit");
-            PERSIST_BLOCK_CACHE.persist_tip(block_number);
+            Self::commit_block(provider_rw, block_number)?;
             metrics::histogram!("save_blocks_time", &[("process", "atomic_block")])
                 .record(start.elapsed());
         }
@@ -410,14 +401,35 @@ where
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
         }
 
-        provider_rw.update_pipeline_stages(group_last, false)?;
-
-        provider_rw.static_file_provider().commit()?;
-        provider_rw.commit()?;
-        PERSIST_BLOCK_CACHE.persist_tip(group_last);
+        Self::commit_block(provider_rw, group_last)?;
 
         metrics::histogram!("save_blocks_time", &[("process", "merge_block")])
             .record(start.elapsed() / block_count);
+        Ok(())
+    }
+
+    /// Commit state before the tries, then record Merkle completion after both trie writes.
+    fn commit_block<TX: DbTx + DbTxMut + 'static>(
+        provider_rw: DatabaseProvider<TX, N>,
+        block_number: u64,
+    ) -> Result<(), PersistenceError> {
+        for stage in [
+            StageId::Execution,
+            StageId::AccountHashing,
+            StageId::IndexAccountHistory,
+            StageId::Finish,
+        ] {
+            let checkpoint = Self::get_checkpoint(provider_rw.tx_ref(), stage, None)?;
+            provider_rw
+                .save_stage_checkpoint(stage, StageCheckpoint { block_number, ..checkpoint })?;
+        }
+        provider_rw.static_file_provider().commit()?;
+        // The old Merkle checkpoint makes recovery repair the entire block/group if either
+        // trie write fails after state has committed.
+        provider_rw.tx_ref().commit_view().map_err(ProviderError::Database)?;
+        provider_rw.update_pipeline_stages(block_number, false)?;
+        provider_rw.commit()?;
+        PERSIST_BLOCK_CACHE.persist_tip(block_number);
         Ok(())
     }
 }
@@ -694,8 +706,13 @@ mod tests {
     }
 
     #[cfg(feature = "failpoints")]
-    #[cfg(feature = "failpoints")]
-    fn assert_state_boundary<TX: DbTx>(tx: &TX, address: Address, complete: bool) {
+    fn assert_state_boundary<TX: DbTx>(
+        tx: &TX,
+        address: Address,
+        state_committed: bool,
+        completion_committed: bool,
+    ) {
+        let complete = state_committed;
         let account = Account { nonce: 1, balance: U256::from(7), ..Default::default() };
         assert_eq!(
             tx.get::<tables::PlainAccountState>(address).unwrap(),
@@ -739,9 +756,83 @@ mod tests {
                     .unwrap()
                     .unwrap()
                     .block_number,
-                u64::from(complete)
+                u64::from(
+                    if matches!(
+                        stage,
+                        StageId::Execution |
+                            StageId::AccountHashing |
+                            StageId::IndexAccountHistory |
+                            StageId::Finish
+                    ) {
+                        state_committed
+                    } else {
+                        completion_committed
+                    }
+                ),
+                "{stage:?}"
             );
         }
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn reopen_provider(
+        provider: ProviderFactory<MockNodeTypesWithDB>,
+        changesets_in_static_files: bool,
+    ) -> ProviderFactory<MockNodeTypesWithDB> {
+        use reth_chainspec::MAINNET;
+        use reth_db::{test_utils::TempDatabase, ClientVersion, DatabaseArguments};
+        use reth_provider::providers::StaticFileProvider;
+
+        let db_path = provider.db_ref().path().to_path_buf();
+        let static_path = provider.static_file_provider().path().to_path_buf();
+        // Keep the datadir but close all three RocksDB instances before reopening it.
+        drop(Arc::try_unwrap(provider.into_db()).unwrap().into_inner_db());
+        let db =
+            reth_db::open_db(&db_path, DatabaseArguments::new(ClientVersion::default())).unwrap();
+        let provider = ProviderFactory::<MockNodeTypesWithDB>::new(
+            Arc::new(TempDatabase::new(db, db_path)),
+            MAINNET.clone(),
+            StaticFileProvider::read_write(static_path).unwrap(),
+        );
+        provider.set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
+        provider
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn assert_persisted_trie<TX: DbTx>(
+        tx: &TX,
+        address: Address,
+        block: &ExecutedBlockWithTrieUpdates,
+    ) {
+        use reth_trie::{
+            nested_trie::{StorageNodeEntry, Trie},
+            Nibbles, StoredNibblesSubKey,
+        };
+        use reth_trie_db::nested_hash::StorageTrieReader;
+
+        let hashed_address = keccak256(address);
+        let expected = &block.triev2.storage_tries[&hashed_address].storage_nodes;
+        let mut cursor = tx.cursor_dup_read::<tables::StoragesTrieV2>().unwrap();
+        let stored = cursor
+            .walk_dup(Some(hashed_address), None)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(stored.len(), expected.len());
+        for (path, node) in expected {
+            let path = StoredNibblesSubKey(*path);
+            assert_eq!(
+                cursor.get_by_key_subkey(hashed_address, path.clone()).unwrap(),
+                Some(StorageNodeEntry::create(&path, node))
+            );
+        }
+        let reader = StorageTrieReader::new(cursor, hashed_address, None);
+        let mut trie = Trie::new(reader, false).unwrap();
+        assert_eq!(trie.hash(), expected[&Nibbles::new()].hash());
+        assert_eq!(
+            NestedStateRoot::new(tx, None).calculate(&Default::default()).unwrap().0,
+            block.recovered_block().state_root()
+        );
     }
 
     fn exercise_state_history(changesets_in_static_files: bool, merged: bool) {
@@ -909,21 +1000,40 @@ mod tests {
                 service.save_blocks_per_block(blocks)
             }
             .unwrap();
+            let elapsed = start.elapsed();
             println!(
-                "merged={merged}, 32 blocks, persistence={:?}, blocks/s={:.1}",
-                start.elapsed(),
-                32.0 / start.elapsed().as_secs_f64()
+                "merged={merged}, 32 blocks, persistence={elapsed:?}, blocks/s={:.1}",
+                32.0 / elapsed.as_secs_f64()
             );
             for (key, _, _, value) in snapshotter.snapshot().into_vec() {
                 match (key.key().name(), value) {
                     ("reth_rocksdb_sync_commits_total", DebugValue::Counter(count)) => {
-                        println!("{:?}: {count} commits", key.key());
-                        assert_eq!(count, if merged { 1 } else { 32 });
+                        let database = key
+                            .key()
+                            .labels()
+                            .find(|label| label.key() == "database")
+                            .unwrap()
+                            .value();
+                        let commits = if merged { 1 } else { 32 };
+                        assert_eq!(count, if database == "state" { 2 * commits } else { commits });
+                        println!("{:?}: {count} sync commits", key.key());
                     }
                     ("reth_rocksdb_commit_batch_size_bytes", DebugValue::Histogram(values)) => {
                         println!(
                             "{:?}: maximum serialized batch {:?} bytes",
                             key.key(),
+                            values.into_iter().max().unwrap()
+                        );
+                    }
+                    (
+                        "reth_rocksdb_sync_commit_duration_seconds",
+                        DebugValue::Histogram(values),
+                    ) => {
+                        let total = values.iter().map(|value| value.into_inner()).sum::<f64>();
+                        println!(
+                            "{:?}: total sync time {total:.6}s, mean {:.6}s, max {:?}s",
+                            key.key(),
+                            total / values.len() as f64,
                             values.into_iter().max().unwrap()
                         );
                     }
@@ -945,19 +1055,15 @@ mod tests {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn interrupted_shard_commits_reopen_and_replay_the_ordered_block() {
+    fn interrupted_commits_reopen_and_recover_the_ordered_block() {
         use crate::recovery::StorageRecoveryHelper;
-        use reth_chainspec::MAINNET;
-        use reth_db::{test_utils::TempDatabase, ClientVersion, DatabaseArguments};
-        use reth_provider::providers::StaticFileProvider;
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let _scenario = fail::FailScenario::setup();
         for static_changesets in [false, true] {
             for (failpoint, storage_committed, state_committed) in [
-                ("db::commit::before_storage_trie", false, false),
-                ("db::commit::before_state", true, false),
-                ("db::commit::after_state", true, true),
+                ("db::commit::before_storage_trie", false, true),
+                ("db::commit::before_state", false, false),
             ] {
                 PERSIST_BLOCK_CACHE.reset();
                 let provider = create_test_provider_factory();
@@ -971,19 +1077,22 @@ mod tests {
                 let address = Address::with_last_byte(1);
                 let block = state_block(&provider, account_update(1, address, None, 7));
                 fail::cfg(failpoint, "panic").unwrap();
-                assert!(catch_unwind(AssertUnwindSafe(|| {
+                let interrupted = catch_unwind(AssertUnwindSafe(|| {
                     service.save_blocks_per_block(vec![block.clone()]).unwrap();
-                }))
-                .is_err());
+                }));
                 fail::remove(failpoint);
+                assert!(interrupted.is_err(), "{failpoint}");
 
                 let provider_ro = provider.database_provider_ro().unwrap();
-                assert_state_boundary(provider_ro.tx_ref(), address, state_committed);
-                assert!(provider_ro
-                    .tx_ref()
-                    .get::<tables::AccountsTrieV2>(Default::default())
-                    .unwrap()
-                    .is_some());
+                assert_state_boundary(provider_ro.tx_ref(), address, state_committed, false);
+                assert_eq!(
+                    provider_ro
+                        .tx_ref()
+                        .get::<tables::AccountsTrieV2>(Default::default())
+                        .unwrap()
+                        .is_some(),
+                    state_committed
+                );
                 assert_eq!(
                     provider_ro
                         .tx_ref()
@@ -995,45 +1104,130 @@ mod tests {
                     storage_committed
                 );
                 drop(provider_ro);
-
-                let db_path = provider.db_ref().path().to_path_buf();
-                let static_path = provider.static_file_provider().path().to_path_buf();
                 drop(service);
-                // Keep the datadir but close all three RocksDB instances before reopening it.
-                drop(Arc::try_unwrap(provider.into_db()).unwrap().into_inner_db());
-                let db =
-                    reth_db::open_db(&db_path, DatabaseArguments::new(ClientVersion::default()))
-                        .unwrap();
-                let provider = ProviderFactory::<MockNodeTypesWithDB>::new(
-                    Arc::new(TempDatabase::new(db, db_path)),
-                    MAINNET.clone(),
-                    StaticFileProvider::read_write(static_path).unwrap(),
-                );
-                provider.set_storage_settings_cache(GravityStorageSettings {
-                    changesets_in_static_files: static_changesets,
-                });
+
+                let provider = reopen_provider(provider, static_changesets);
                 let provider_ro = provider.database_provider_ro().unwrap();
-                assert_state_boundary(provider_ro.tx_ref(), address, state_committed);
+                assert_state_boundary(provider_ro.tx_ref(), address, state_committed, false);
                 provider.static_file_provider().check_consistency(&provider_ro, false).unwrap();
                 drop(provider_ro);
                 StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
+                let provider_ro = provider.database_provider_ro().unwrap();
+                assert_state_boundary(
+                    provider_ro.tx_ref(),
+                    address,
+                    state_committed,
+                    state_committed,
+                );
+                if state_committed {
+                    assert_persisted_trie(provider_ro.tx_ref(), address, &block);
+                }
+                drop(provider_ro);
                 if !state_committed {
+                    let replay = state_block(&provider, account_update(1, address, None, 7));
+                    assert_eq!(
+                        replay.recovered_block().state_root(),
+                        block.recovered_block().state_root()
+                    );
                     persistence_service(provider.clone())
-                        .save_blocks_per_block(vec![block.clone()])
+                        .save_blocks_per_block(vec![replay])
                         .unwrap();
                 }
                 let provider_ro = provider.database_provider_ro().unwrap();
-                assert_state_boundary(provider_ro.tx_ref(), address, true);
+                assert_state_boundary(provider_ro.tx_ref(), address, true, true);
                 assert_eq!(provider_ro.account_changesets_range(1..=1).unwrap().len(), 1);
                 assert_eq!(provider_ro.storage_changeset(1).unwrap().len(), 1);
+                assert_persisted_trie(provider_ro.tx_ref(), address, &block);
+            }
+        }
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn merged_commit_recovers_after_interrupted_trie_write() {
+        use crate::recovery::StorageRecoveryHelper;
+        use reth_provider::StageCheckpointReader;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let _scenario = fail::FailScenario::setup();
+        for static_changesets in [false, true] {
+            PERSIST_BLOCK_CACHE.reset();
+            let reference = create_test_provider_factory();
+            let reference_service = persistence_service(reference.clone());
+            reference_service
+                .save_blocks_per_block(vec![state_block(&reference, empty_outcome())])
+                .unwrap();
+            let blocks: Vec<_> = (1..=2)
+                .map(|number| {
+                    let block = state_block(
+                        &reference,
+                        account_update(number, Address::with_last_byte(number as u8), None, 7),
+                    );
+                    reference_service.save_blocks_per_block(vec![block.clone()]).unwrap();
+                    block
+                })
+                .collect();
+            let expected = blocks.last().unwrap().recovered_block().state_root();
+
+            PERSIST_BLOCK_CACHE.reset();
+            let provider = create_test_provider_factory();
+            provider.set_storage_settings_cache(GravityStorageSettings {
+                changesets_in_static_files: static_changesets,
+            });
+            let service = persistence_service(provider.clone());
+            service.save_blocks_per_block(vec![state_block(&provider, empty_outcome())]).unwrap();
+            fail::cfg("db::commit::before_storage_trie", "panic").unwrap();
+            assert!(catch_unwind(AssertUnwindSafe(|| {
+                service.save_merged_blocks(blocks).unwrap();
+            }))
+            .is_err());
+            drop(service);
+
+            let provider = reopen_provider(provider, static_changesets);
+            let provider_ro = provider.database_provider_ro().unwrap();
+            provider.static_file_provider().check_consistency(&provider_ro, false).unwrap();
+            for (stage, number) in [(StageId::Execution, 2), (StageId::MerkleExecute, 0)] {
                 assert_eq!(
-                    NestedStateRoot::new(provider_ro.tx_ref(), None)
-                        .calculate(&Default::default())
-                        .unwrap()
-                        .0,
-                    block.recovered_block().state_root()
+                    provider_ro.get_stage_checkpoint(stage).unwrap().unwrap().block_number,
+                    number
                 );
             }
+            drop(provider_ro);
+            // Interrupt recovery too: it must not advance Merkle before storage is durable.
+            assert!(catch_unwind(AssertUnwindSafe(|| {
+                StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
+            }))
+            .is_err());
+            fail::remove("db::commit::before_storage_trie");
+
+            let provider = reopen_provider(provider, static_changesets);
+            assert_eq!(
+                provider
+                    .database_provider_ro()
+                    .unwrap()
+                    .get_stage_checkpoint(StageId::MerkleExecute)
+                    .unwrap()
+                    .unwrap()
+                    .block_number,
+                0
+            );
+            StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
+            let provider_ro = provider.database_provider_ro().unwrap();
+            assert_eq!(
+                NestedStateRoot::new(provider_ro.tx_ref(), None)
+                    .calculate(&Default::default())
+                    .unwrap()
+                    .0,
+                expected
+            );
+            assert_eq!(
+                provider_ro
+                    .get_stage_checkpoint(StageId::MerkleExecute)
+                    .unwrap()
+                    .unwrap()
+                    .block_number,
+                2
+            );
         }
     }
 
