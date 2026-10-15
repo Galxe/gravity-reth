@@ -720,8 +720,15 @@ mod tests {
         let native = address!("00000000000000000000000000000001625f4000");
         let tasks = address!("00000000000000000000000000000001625f1009");
         let receiver = address!("595475934ed7d9faa7fca28341c2ce583904a44e");
-        // Both immutable getter results are 123 in this Receiver fixture.
-        let receiver_code = hex!("607b60005260206000f3");
+        // Independently patch the frozen artifact; begin without Receiver code.
+        let mut receiver_code = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/GBridgeReceiver.bin"
+        )).to_vec();
+        for offset in [84, 153, 790, 832] {
+            receiver_code[offset..offset + 32].copy_from_slice(&U256::from(123).to_be_bytes::<32>());
+        }
+        let receiver_hash = keccak256(&receiver_code);
         let mut genesis = MAINNET.genesis().clone();
         genesis.timestamp = 0;
         genesis.config.chain_id = LONGEVITY_TESTNET_CHAIN_ID;
@@ -729,7 +736,7 @@ mod tests {
         genesis.config.extra_fields.insert("oracleTaskInstallTime".into(), serde_json::json!(100));
         genesis.config.extra_fields.insert("oracleTaskInstall".into(), serde_json::json!({
             "sourceId":"0x7b", "taskName":format!("{:#x}", B256::repeat_byte(1)),
-            "taskConfig":"0x616263", "receiverCodeHash":format!("{:#x}", keccak256(receiver_code)),
+            "taskConfig":"0x616263", "receiverCodeHash":format!("{receiver_hash:#x}"),
             "trustedBridge":"0x000000000000000000000000000000000000007b"
         }));
         let spec = Arc::new(
@@ -743,7 +750,7 @@ mod tests {
         );
         let factory = create_test_provider_factory_with_chain_spec(spec.clone());
         let provider = factory.provider_rw().unwrap();
-        let codes: [(Address, &[u8]); 3] = [
+        let codes: [(Address, &[u8]); 2] = [
             (
                 native,
                 include_bytes!(concat!(
@@ -758,7 +765,6 @@ mod tests {
                     "/../../ethereum/evm/src/hardfork/bytecodes/gamma/OracleTaskConfig.bin"
                 )),
             ),
-            (receiver, &receiver_code),
         ];
         for (address, code) in codes {
             let hash = keccak256(code);
@@ -830,6 +836,7 @@ mod tests {
         provider.commit().unwrap();
         let provider = factory.provider().unwrap();
         let state = LatestStateProviderRef::new(&provider);
+        assert_eq!(state.basic_account(&receiver).unwrap().unwrap().bytecode_hash, Some(receiver_hash));
         assert_eq!(
             state.basic_account(&native).unwrap().unwrap().bytecode_hash,
             Some(keccak256(include_bytes!(concat!(

@@ -22,6 +22,20 @@ const CALLBACK_RUNTIME: &[u8] = include_bytes!(
     "../../../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/NativeOracle.bin"
 );
 
+fn receiver_runtime() -> Bytes {
+    // Independent fixture construction checks the installer's immutable mapping.
+    let mut runtime = include_bytes!(
+        "../../../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/GBridgeReceiver.bin"
+    ).to_vec();
+    for offset in [84, 832] {
+        runtime[offset..offset + 32].copy_from_slice(BRIDGE.into_word().as_slice());
+    }
+    for offset in [153, 790] {
+        runtime[offset..offset + 32].copy_from_slice(&U256::from(1).to_be_bytes::<32>());
+    }
+    runtime.into()
+}
+
 sol! {
     struct OracleTask { bytes config; uint64 updatedAt; }
     function getSourceTypes() external view returns (uint32[]);
@@ -29,6 +43,8 @@ sol! {
     function getTaskNames(uint32 sourceType, uint256 sourceId) external view returns (bytes32[]);
     function getTask(uint32 sourceType, uint256 sourceId, bytes32 taskName) external view returns (OracleTask);
     function getDefaultCallback(uint32 sourceType) external view returns (address);
+    function trustedBridge() external view returns (address);
+    function trustedSourceId() external view returns (uint256);
 }
 
 fn read<C: SolCall>(chain: &Chain<'_>, address: Address, call: C, number: u64) -> C::Return {
@@ -47,15 +63,13 @@ fn oracle_task_install_canonical_pipe_epoch_boundary() {
     }
     genesis["config"]["gammaTime"] = json!(start + 1);
     genesis["config"]["oracleTaskInstallTime"] = json!(install_time);
-    let receiver_code: Bytes =
-        genesis["alloc"][format!("{RECEIVER:#x}")]["code"].as_str().unwrap().parse().unwrap();
     genesis["config"]["oracleTaskInstall"] = json!({
         "sourceId": "0x1", "taskName": B256::repeat_byte(1),
-        "taskConfig": "0x616263", "receiverCodeHash": keccak256(receiver_code),
+        "taskConfig": "0x616263", "receiverCodeHash": keccak256(receiver_runtime()),
         "trustedBridge": BRIDGE,
     });
-    // Keep real initialized protocol contracts and Receiver immutables. Only
-    // discovery/task state and source0's default start empty.
+    // Keep initialized protocol contracts, but require deployment of Receiver.
+    genesis["alloc"].as_object_mut().unwrap().remove(&format!("{RECEIVER:#x}"));
     genesis["alloc"][format!("{TASK_CONFIG:#x}")]["storage"] = json!({});
     let default_slot = U256::from_be_bytes(keccak256((U256::ZERO, U256::from(2)).abi_encode()).0);
     genesis["alloc"][format!("{NATIVE_ORACLE:#x}")]["storage"]
@@ -113,6 +127,7 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
     assert!(node.dkg_in_progress(), "first block must open the actual DKG session");
     tokio::task::block_in_place(|| {
         let chain = Chain::new(&rpc, spec.chain.id());
+        assert!(chain.code(RECEIVER, first.number).is_empty());
         assert_eq!(
             keccak256(chain.code(NATIVE_ORACLE, first.number)),
             keccak256(include_bytes!(
@@ -140,6 +155,9 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
     assert_eq!(activation.epoch, first.epoch + 1);
     tokio::task::block_in_place(|| {
         let chain = Chain::new(&rpc, spec.chain.id());
+        assert_eq!(chain.code(RECEIVER, activation.number), receiver_runtime());
+        assert_eq!(read(&chain, RECEIVER, trustedBridgeCall {}, activation.number), BRIDGE);
+        assert_eq!(read(&chain, RECEIVER, trustedSourceIdCall {}, activation.number), U256::from(1));
         assert_eq!(chain.code(NATIVE_ORACLE, activation.number).as_ref(), CALLBACK_RUNTIME);
         assert_eq!(read(&chain, TASK_CONFIG, getSourceTypesCall {}, activation.number), vec![0]);
         assert_eq!(
@@ -199,6 +217,7 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
     assert!(!following.epoch_changed);
     tokio::task::block_in_place(|| {
         let chain = Chain::new(&rpc, spec.chain.id());
+        assert_eq!(chain.code(RECEIVER, following.number), receiver_runtime());
         assert_eq!(chain.code(NATIVE_ORACLE, following.number).as_ref(), CALLBACK_RUNTIME);
         assert_eq!(
             read(

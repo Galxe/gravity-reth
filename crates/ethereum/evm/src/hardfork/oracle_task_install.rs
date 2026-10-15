@@ -1,4 +1,4 @@
-//! Atomic, timestamp-crossing bridge task and callback runtime installation.
+//! Atomic, timestamp-crossing Receiver, Oracle runtime and bridge task installation.
 
 use super::gamma::{
     NATIVE_ORACLE_ADDRESS, NATIVE_ORACLE_POST_FORK_CODE_HASH, ORACLE_TASK_CONFIG_ADDRESS,
@@ -12,7 +12,7 @@ use reth_chainspec::{oracle_task_install_config, EthChainSpec, OracleTaskInstall
 use reth_evm::execute::BlockExecutionError;
 use revm::{
     bytecode::Bytecode,
-    state::{Account, AccountInfo, EvmState},
+    state::{Account, AccountInfo, AccountStatus, EvmState},
     Database, DatabaseCommit,
 };
 
@@ -26,6 +26,25 @@ pub(crate) const NATIVE_ORACLE_CALLBACK_CODE_HASH: B256 =
     b256!("13c995f14f5add575e656480be4c734a76bf1b4500097e8258f214c65e174a74");
 const NATIVE_ORACLE_CALLBACK_RUNTIME: &[u8] =
     include_bytes!("bytecodes/oracle_task_install/NativeOracle.bin");
+const BRIDGE_RECEIVER_TEMPLATE: &[u8] =
+    include_bytes!("bytecodes/oracle_task_install/GBridgeReceiver.bin");
+// Frozen solc immutableReferences, independently bound to the public getters.
+const RECEIVER_BRIDGE_OFFSETS: [usize; 2] = [84, 832];
+const RECEIVER_SOURCE_OFFSETS: [usize; 2] = [153, 790];
+
+/// Construct the frozen Receiver runtime with its two constructor immutables.
+/// The installer requires the resulting hash to equal `receiverCodeHash`.
+fn bridge_receiver_runtime(source_id: U256, trusted_bridge: Address) -> Bytes {
+    let mut runtime = BRIDGE_RECEIVER_TEMPLATE.to_vec();
+    let bridge_word = trusted_bridge.into_word();
+    for offset in RECEIVER_BRIDGE_OFFSETS {
+        runtime[offset..offset + 32].copy_from_slice(bridge_word.as_slice());
+    }
+    for offset in RECEIVER_SOURCE_OFFSETS {
+        runtime[offset..offset + 32].copy_from_slice(&source_id.to_be_bytes::<32>());
+    }
+    runtime.into()
+}
 
 sol! {
     struct OracleTask { bytes config; uint64 updatedAt; }
@@ -86,7 +105,7 @@ where
         return Err(failure("unexpected NativeOracle runtime hash"))
     }
     check_code(&mut overlay, ORACLE_TASK_CONFIG_ADDRESS, ORACLE_TASK_CONFIG_POST_FORK_CODE_HASH)?;
-    check_code(&mut overlay, BRIDGE_RECEIVER, config.receiver_code_hash)?;
+    let receiver_installed = ensure_receiver(&mut overlay, &config)?;
     if query(&mut overlay, &env, BRIDGE_RECEIVER, trustedBridgeCall {})? != config.trusted_bridge ||
         query(&mut overlay, &env, BRIDGE_RECEIVER, trustedSourceIdCall {})? != config.source_id
     {
@@ -95,7 +114,7 @@ where
 
     let before = configuration(&mut overlay, &env, &config)?;
     let matching = before.matches(&config, timestamp);
-    if upgraded && matching {
+    if upgraded && matching && !receiver_installed {
         tracing::info!(target: "reth::evm::hardfork", block_number, block_timestamp = timestamp,
             action = "idempotent", execution_path, "oracle_task_install_applied");
         return Ok(())
@@ -149,6 +168,42 @@ where
 
 fn failure(detail: &str) -> BlockExecutionError {
     BlockExecutionError::msg(format!("OracleTaskInstall: {detail}"))
+}
+
+/// Stage only an absent or unused empty-code account. A prefunding transfer must
+/// not prevent activation, and existing account fields/storage must survive.
+fn ensure_receiver<DB: Database>(
+    overlay: &mut InstallationOverlay<'_, DB>,
+    config: &OracleTaskInstallConfig,
+) -> Result<bool, BlockExecutionError> {
+    let runtime = bridge_receiver_runtime(config.source_id, config.trusted_bridge);
+    if keccak256(&runtime) != config.receiver_code_hash {
+        return Err(failure("Receiver runtime hash does not match installation inputs"))
+    }
+    let previous = overlay.basic(BRIDGE_RECEIVER).map_err(BlockExecutionError::other)?;
+    if let Some(info) = &previous {
+        if info.code_hash == config.receiver_code_hash {
+            return Ok(false)
+        }
+        if info.nonce != 0 ||
+            (info.code_hash != B256::ZERO && info.code_hash != keccak256([]))
+        {
+            return Err(failure("Receiver account conflicts with installation inputs"))
+        }
+    }
+    let created = previous.is_none();
+    let mut receiver = Account::from(AccountInfo {
+        nonce: 1,
+        code_hash: config.receiver_code_hash,
+        code: Some(Bytecode::new_raw(runtime)),
+        ..previous.unwrap_or_default()
+    });
+    receiver.mark_touch();
+    if created {
+        receiver.status |= AccountStatus::Created;
+    }
+    overlay.commit(core::iter::once((BRIDGE_RECEIVER, receiver)).collect());
+    Ok(true)
 }
 
 fn check_code<DB: Database>(
@@ -386,15 +441,7 @@ pub(crate) mod tests {
     }
 
     fn receiver_code() -> Bytes {
-        // trustedBridge selector returns address; trustedSourceId returns 123.
-        let mut code = vec![0x60, 0, 0x35, 0x60, 0xe0, 0x1c, 0x63];
-        code.extend(trustedBridgeCall::SELECTOR);
-        code.extend([0x14, 0x60, 56, 0x57, 0x7f]);
-        code.extend(U256::from(123).to_be_bytes::<32>());
-        code.extend([0x60, 0, 0x52, 0x60, 32, 0x60, 0, 0xf3, 0x5b, 0x73]);
-        code.extend(BRIDGE.as_slice());
-        code.extend([0x60, 0, 0x52, 0x60, 32, 0x60, 0, 0xf3]);
-        code.into()
+        bridge_receiver_runtime(U256::from(123), BRIDGE)
     }
 
     pub(crate) fn spec() -> Arc<ChainSpec> {
@@ -453,7 +500,6 @@ pub(crate) mod tests {
             ORACLE_TASK_CONFIG_ADDRESS,
             Bytes::from_static(include_bytes!("bytecodes/gamma/OracleTaskConfig.bin")),
         );
-        insert_code(&mut db, BRIDGE_RECEIVER, receiver_code());
         insert_code(&mut db, GOVERNANCE, Bytes::from_static(&[0]));
         let mut governance = db.basic(GOVERNANCE).unwrap().unwrap();
         governance.nonce = 19;
@@ -479,6 +525,10 @@ pub(crate) mod tests {
 
     pub(crate) fn assert_installed(db: &mut DB, timestamp: u64) {
         assert_eq!(
+            db.basic(BRIDGE_RECEIVER).unwrap().unwrap().code_hash,
+            keccak256(receiver_code())
+        );
+        assert_eq!(
             db.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash,
             NATIVE_ORACLE_CALLBACK_CODE_HASH
         );
@@ -489,6 +539,78 @@ pub(crate) mod tests {
         assert_eq!(state.source_ids, vec![U256::from(123)]);
         assert_eq!(state.names, vec![B256::repeat_byte(1)]);
         assert_eq!(state.config.as_ref(), b"abc");
+    }
+
+    #[test]
+    fn oracle_task_install_receiver_immutables_and_prefunded_account_are_preserved() {
+        for offsets in [RECEIVER_BRIDGE_OFFSETS, RECEIVER_SOURCE_OFFSETS] {
+            for offset in offsets {
+                assert_eq!(&BRIDGE_RECEIVER_TEMPLATE[offset..offset + 32], &[0u8; 32]);
+            }
+        }
+        let spec = spec();
+        let mut db = seeded_db();
+        let original = AccountInfo {
+            balance: U256::from(321),
+            account_id: AccountId::new(51),
+            ..Default::default()
+        };
+        db.insert_account_info(BRIDGE_RECEIVER, original.clone());
+        db.insert_account_storage(BRIDGE_RECEIVER, U256::from(8), U256::from(99)).unwrap();
+        install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap();
+        assert_installed(&mut db, T);
+        let receiver = db.basic(BRIDGE_RECEIVER).unwrap().unwrap();
+        assert_eq!(receiver.balance, original.balance);
+        assert_eq!(receiver.account_id, original.account_id);
+        assert_eq!(receiver.nonce, 1);
+        assert_eq!(db.storage(BRIDGE_RECEIVER, U256::from(8)).unwrap(), U256::from(99));
+        let config = oracle_task_install_config(spec.as_ref()).unwrap().unwrap();
+        let mut overlay = InstallationOverlay { base: &mut db, changes: EvmState::default() };
+        assert_eq!(query(&mut overlay, &env(T), BRIDGE_RECEIVER, trustedBridgeCall {}).unwrap(), BRIDGE);
+        assert_eq!(query(&mut overlay, &env(T), BRIDGE_RECEIVER, trustedSourceIdCall {}).unwrap(), config.source_id);
+    }
+
+    #[test]
+    fn oracle_task_install_matching_receiver_is_unchanged() {
+        let spec = spec();
+        let mut db = seeded_db();
+        insert_code(&mut db, BRIDGE_RECEIVER, receiver_code());
+        let mut receiver = db.basic(BRIDGE_RECEIVER).unwrap().unwrap();
+        receiver.balance = U256::from(765);
+        receiver.nonce = 9;
+        receiver.account_id = AccountId::new(27);
+        db.insert_account_info(BRIDGE_RECEIVER, receiver.clone());
+        db.insert_account_storage(BRIDGE_RECEIVER, U256::from(8), U256::from(99)).unwrap();
+        install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap();
+        assert_eq!(db.basic(BRIDGE_RECEIVER).unwrap().unwrap(), receiver);
+        assert_eq!(db.storage(BRIDGE_RECEIVER, U256::from(8)).unwrap(), U256::from(99));
+        install(&mut db, spec.as_ref(), env(T + 1), Some(T - 1), 73).unwrap();
+        assert_eq!(db.basic(BRIDGE_RECEIVER).unwrap().unwrap(), receiver);
+    }
+
+    #[test]
+    fn oracle_task_install_conflicting_receiver_and_partial_install_fail_without_commit() {
+        let spec = spec();
+        for nonce in [1, 2] {
+            let mut db = seeded_db();
+            db.insert_account_info(BRIDGE_RECEIVER, AccountInfo { nonce, ..Default::default() });
+            let before = db.basic(BRIDGE_RECEIVER).unwrap();
+            assert!(install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).is_err());
+            assert_eq!(db.basic(BRIDGE_RECEIVER).unwrap(), before);
+            assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash, NATIVE_ORACLE_POST_FORK_CODE_HASH);
+            assert!(snapshot(&mut db).is_empty());
+        }
+        let mut db = seeded_db();
+        insert_code(&mut db, BRIDGE_RECEIVER, Bytes::from_static(&[0]));
+        let before = db.basic(BRIDGE_RECEIVER).unwrap();
+        assert!(install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).is_err());
+        assert_eq!(db.basic(BRIDGE_RECEIVER).unwrap(), before);
+        assert!(snapshot(&mut db).is_empty());
+        let mut db = seeded_db();
+        install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap();
+        db.accounts.remove(&BRIDGE_RECEIVER);
+        assert!(install(&mut db, spec.as_ref(), env(T + 1), Some(T - 1), 73).is_err());
+        assert!(db.basic(BRIDGE_RECEIVER).unwrap().is_none());
     }
 
     #[test]
@@ -828,6 +950,7 @@ pub(crate) mod tests {
                 .insert(key.into(), value);
             let mut db = seeded_db();
             assert!(install(&mut db, &wrong, env(T), Some(T - 1), 73).is_err(), "{key}");
+            assert!(db.basic(BRIDGE_RECEIVER).unwrap().is_none());
             assert!(snapshot(&mut db).is_empty());
         }
     }
@@ -930,6 +1053,7 @@ pub(crate) mod tests {
         assert!(format!("{error}").contains("second setter injected"));
         assert_eq!(db.default_reads, 2);
         assert_eq!(db.commits, 0, "no base commit even though setTask succeeded");
+        assert!(db.inner.basic(BRIDGE_RECEIVER).unwrap().is_none());
         assert_eq!(db.inner.basic(NATIVE_ORACLE_ADDRESS).unwrap(), native);
         assert_eq!(
             db.inner.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash,
@@ -1015,6 +1139,8 @@ pub(crate) mod tests {
             let state = executor.take_bundle().state;
             assert!(state.contains_key(&ORACLE_TASK_CONFIG_ADDRESS));
             assert!(state.contains_key(&NATIVE_ORACLE_ADDRESS));
+            assert_eq!(state[&BRIDGE_RECEIVER].info.as_ref().unwrap().code_hash, keccak256(receiver_code()));
+            assert_eq!(state[&BRIDGE_RECEIVER].info.as_ref().unwrap().nonce, 1);
             assert_eq!(
                 state[&NATIVE_ORACLE_ADDRESS].info.as_ref().unwrap().code_hash,
                 NATIVE_ORACLE_CALLBACK_CODE_HASH
