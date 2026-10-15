@@ -90,3 +90,27 @@ The user has now authorized preparing and publishing the four existing PRs for
 review. Merge and public activation remain separate work.
 
 Review order: [Contracts #119](https://github.com/Galxe/gravity_chain_core_contracts/pull/119) owns callback semantics; [Reth #457](https://github.com/Galxe/gravity-reth/pull/457) owns atomic installation; [SDK #844](https://github.com/Galxe/gravity-sdk/pull/844) pins the tested Reth; [Mono #132](https://github.com/Galxe/mono-grav/pull/132) owns acceptance flows and evidence.
+
+## 9. Review Fix: Gamma and Installation Crossing on One Epoch Block
+
+Review identified a valid configuration where the parent precedes Gamma and an
+actual epoch block crosses both Gamma and installation timestamps. The canonical
+and RPC epoch early returns previously reached the installer with pre-Gamma code.
+The installer now stages Gamma's prerequisite migration inside its existing
+post-crossing overlay before reading the Oracle runtime. Gamma, Receiver, Oracle
+and task/default callback commit together; a later installation failure commits
+none of them. Unconfigured and non-crossing historical epoch behavior is unchanged.
+
+Regression inputs retain the canonical Gamma-before-install case and add a second
+case whose first normal block precedes Gamma and whose actual epoch block crosses
+both timestamps. RPC coverage exercises real epoch `finish` from authenticated
+pre-Gamma account hashes; a rollback case rejects a Receiver conflict without
+committing Gamma. Both execution tests check the following normal block retains
+the successor runtime and original installation timestamp.
+
+These product/test changes await Gravity Dev formatting, installer/RPC tests,
+staged history, and both canonical epoch cases. The earlier build and two Mono
+acceptance results remain bound to `b84b33c` / SDK `ceae46b`; they do not validate
+this review fix. The sole Dev operator owns fresh verification and any downstream
+release/evidence refresh before this change is called verified. No local build,
+formatting, or tests were run for this fix.

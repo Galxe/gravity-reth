@@ -1,7 +1,7 @@
 //! Installation at the real canonical pipe's epoch-change early return.
 
 use crate::{node, BlockInput, Builder, Chain, Node, RpcClient, BLOCK_TIMEOUT};
-use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{address, b256, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall, SolValue};
 use gravity_storage::block_view_storage::BlockViewStorage;
 use reth_node_builder::EngineNodeLauncher;
@@ -54,15 +54,24 @@ fn read<C: SolCall>(chain: &Chain<'_>, address: Address, call: C, number: u64) -
 
 #[test]
 fn oracle_task_install_canonical_pipe_epoch_boundary() {
+    run_epoch_boundary_case(false);
+}
+
+#[test]
+fn oracle_task_install_canonical_pipe_epoch_boundary_crosses_gamma_together() {
+    run_epoch_boundary_case(true);
+}
+
+fn run_epoch_boundary_case(same_block_gamma: bool) {
     let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let install_time = start + 2;
+    let install_time = start + 3;
     let mut genesis: serde_json::Value =
         serde_json::from_str(include_str!("mainnet_genesis.json")).unwrap();
     genesis["config"]["chainId"] = json!(7771625);
     for fork in ["pragueTime", "alphaTime", "betaTime"] {
         genesis["config"][fork] = json!(0);
     }
-    genesis["config"]["gammaTime"] = json!(start + 1);
+    genesis["config"]["gammaTime"] = json!(start + if same_block_gamma { 2 } else { 1 });
     genesis["config"]["oracleTaskInstallTime"] = json!(install_time);
     genesis["config"]["oracleTaskInstall"] = json!({
         "sourceId": "0x1", "taskName": B256::repeat_byte(1),
@@ -80,12 +89,22 @@ fn oracle_task_install_canonical_pipe_epoch_boundary() {
     genesis["alloc"]["0x00000000000000000000000000000001625f1005"]["storage"]["0x00"] =
         json!(B256::from((U256::from(1) << 136) | U256::from(1_000_000)));
 
-    node::run_node(&genesis.to_string(), "data/oracle_task_install_epoch", move |builder| {
-        run_epoch_boundary(builder, start, install_time)
+    let data_dir = if same_block_gamma {
+        "data/oracle_task_install_epoch_same_block_gamma"
+    } else {
+        "data/oracle_task_install_epoch"
+    };
+    node::run_node(&genesis.to_string(), data_dir, move |builder| {
+        run_epoch_boundary(builder, start, install_time, same_block_gamma)
     });
 }
 
-async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> eyre::Result<()> {
+async fn run_epoch_boundary(
+    builder: Builder,
+    start: u64,
+    install_time: u64,
+    same_block_gamma: bool,
+) -> eyre::Result<()> {
     let handle = builder
         .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
         .with_components(EthereumNode::gravity_components())
@@ -129,17 +148,24 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
     tokio::task::block_in_place(|| {
         let chain = Chain::new(&rpc, spec.chain.id());
         assert!(chain.code(RECEIVER, first.number).is_empty());
-        assert_eq!(
-            keccak256(chain.code(NATIVE_ORACLE, first.number)),
-            keccak256(include_bytes!(
-                "../../../../ethereum/evm/src/hardfork/bytecodes/gamma/NativeOracle.bin"
-            ))
-        );
-        assert!(read(&chain, TASK_CONFIG, getSourceTypesCall {}, first.number).is_empty());
-        assert_eq!(
-            read(&chain, NATIVE_ORACLE, getDefaultCallbackCall { sourceType: 0 }, first.number),
-            Address::ZERO
-        );
+        let gamma_hash = keccak256(include_bytes!(
+            "../../../../ethereum/evm/src/hardfork/bytecodes/gamma/NativeOracle.bin"
+        ));
+        if same_block_gamma {
+            assert_eq!(
+                keccak256(chain.code(NATIVE_ORACLE, first.number)),
+                b256!("30dd3888ce26735c0d6c5a036b48a1de668dd5506efa7588ce450f976da28255")
+            );
+        } else {
+            assert_eq!(keccak256(chain.code(NATIVE_ORACLE, first.number)), gamma_hash);
+        }
+        if !same_block_gamma {
+            assert!(read(&chain, TASK_CONFIG, getSourceTypesCall {}, first.number).is_empty());
+            assert_eq!(
+                read(&chain, NATIVE_ORACLE, getDefaultCallbackCall { sourceType: 0 }, first.number),
+                Address::ZERO
+            );
+        }
     });
     let activation = tokio::time::timeout(
         BLOCK_TIMEOUT,

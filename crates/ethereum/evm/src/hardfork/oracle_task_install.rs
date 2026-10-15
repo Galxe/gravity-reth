@@ -96,6 +96,15 @@ where
         return Ok(())
     }
     let mut overlay = InstallationOverlay { base: db, changes: EvmState::default() };
+    // An epoch block may be the first block to cross both fork timestamps.
+    // Stage the prerequisite here so every installation path sees Gamma code,
+    // and a later installation failure commits neither migration.
+    super::gamma::apply_state_changes_for_block(
+        &mut super::common::DbHardforkState(&mut overlay),
+        spec,
+        block_number,
+        timestamp,
+    )?;
     let native = overlay
         .basic(NATIVE_ORACLE_ADDRESS)
         .map_err(BlockExecutionError::other)?
@@ -508,6 +517,35 @@ pub(crate) mod tests {
             AccountInfo { balance: U256::from(55), nonce: 7, ..Default::default() },
         );
         db
+    }
+
+    pub(crate) fn pre_gamma_db() -> DB {
+        let mut db = seeded_db();
+        for (address, hash) in [
+            (NATIVE_ORACLE_ADDRESS, super::super::gamma::NATIVE_ORACLE_PRE_FORK_CODE_HASH),
+            (
+                ORACLE_TASK_CONFIG_ADDRESS,
+                super::super::gamma::ORACLE_TASK_CONFIG_PRE_FORK_CODE_HASH,
+            ),
+        ] {
+            let mut info = db.basic(address).unwrap().unwrap();
+            // Gamma authenticates the old hash and replaces code without executing it.
+            info.code_hash = hash;
+            info.code = None;
+            db.insert_account_info(address, info);
+        }
+        db
+    }
+
+    #[test]
+    fn oracle_task_install_same_block_gamma_rolls_back_on_receiver_conflict() {
+        let mut db = pre_gamma_db();
+        insert_code(&mut db, BRIDGE_RECEIVER, Bytes::from_static(&[0]));
+        let native = db.basic(NATIVE_ORACLE_ADDRESS).unwrap();
+        let tasks = db.basic(ORACLE_TASK_CONFIG_ADDRESS).unwrap();
+        assert!(install(&mut db, spec().as_ref(), env(T), Some(9), 73).is_err());
+        assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap(), native);
+        assert_eq!(db.basic(ORACLE_TASK_CONFIG_ADDRESS).unwrap(), tasks);
     }
 
     fn snapshot(db: &mut DB) -> Configuration {

@@ -424,7 +424,9 @@ where
 #[cfg(test)]
 mod oracle_task_install_tests {
     use super::*;
-    use crate::hardfork::oracle_task_install::tests::{assert_installed, env, seeded_db, spec};
+    use crate::hardfork::oracle_task_install::tests::{
+        assert_installed, env, pre_gamma_db, seeded_db, spec,
+    };
     use alloy_evm::EvmFactory;
     use alloy_primitives::{Address, Bytes, Log, LogData, U256};
     use alloy_sol_types::SolEvent;
@@ -519,6 +521,30 @@ mod oracle_task_install_tests {
             let (mut next_evm, _) = next_executor.finish().unwrap();
             assert_installed(next_evm.db_mut(), 100);
         }
+    }
+
+    #[test]
+    fn oracle_task_install_rpc_epoch_finish_crosses_gamma_and_install_together() {
+        let factory = GravityBlockExecutorFactory::new(
+            spec(),
+            Arc::new(Reader { epoch: true, parent: Some(9) }),
+        );
+        let evm = factory.evm_factory().create_evm(pre_gamma_db(), env(100));
+        let mut executor = factory.create_executor(evm, ctx(true));
+        executor.apply_pre_execution_changes().unwrap();
+        assert!(executor.epoch_change);
+        let (mut evm, _) = executor.finish().unwrap();
+        assert_installed(evm.db_mut(), 100);
+
+        let following = GravityBlockExecutorFactory::new(
+            spec(),
+            Arc::new(Reader { epoch: false, parent: Some(100) }),
+        );
+        let next_evm = following.evm_factory().create_evm(evm.db_mut().clone(), env(101));
+        let mut next_executor = following.create_executor(next_evm, ctx(true));
+        next_executor.apply_pre_execution_changes().unwrap();
+        let (mut next_evm, _) = next_executor.finish().unwrap();
+        assert_installed(next_evm.db_mut(), 100);
     }
 
     #[test]
