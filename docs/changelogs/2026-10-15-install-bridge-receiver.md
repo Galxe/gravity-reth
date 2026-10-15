@@ -35,7 +35,7 @@ is unchanged. Only truly absent accounts receive Created status.
 - [x] Stage Receiver creation in the existing atomic overlay.
 - [x] Cover missing/prefunded/conflicting/idempotent/rollback states.
 - [x] Start staged and canonical tests without Receiver code.
-- [ ] Have the sole Gravity Dev operator format, build and test the final tree.
+- [x] Have the sole Gravity Dev operator format, build and test the final tree.
 
 ## 5. Verification and E2E Design
 
@@ -55,12 +55,34 @@ mainnet activation, push or merge.
 
 ## 7. Outcome and Evidence
 
-Static implementation is complete. The frozen 1212-byte template and immutable
-offsets are documented beside the binary. Tests now construct the actual runtime
-and begin without the Receiver; additional owning tests cover prefunding,
+The tested Reth source is `b84b33c58e7db2566a8115e31efba5943d660183`.
+The sole Gravity Dev operator ran the final installer group (19 passed), actual
+staged-history test (1 passed), and canonical pipe epoch-boundary test (1 passed).
+These checks begin without Receiver code and cover creation, prefunding,
 preservation, code/nonce conflicts, partial installation and setter rollback.
-No new build, formatting or test result is claimed; these await Gravity Dev.
+The earlier chainspec checks are not relabeled as a new run on this final head.
+Main-agent and independent static reviews found no remaining implementation issue.
+
+The frozen 1212-byte Solidity template was also independently recompiled on Dev;
+its bytes and named immutable offsets matched the retained compiler artifact.
+SDK `ceae46b6a97bd74cc9fddce273a3123a6be6bfb8` locked this Reth revision and built
+release ELF SHA256
+`3fecc79aa22e2fad3ad1f55c67e6c84f896ce73c9c75c61c9532c7a64275e1bd`.
+
+Both Mono flows ran once and passed runtime, fresh source receipt reload,
+independent verification, archive reload and safe raw cleanup. The focused H=1235
+case installed Receiver/PR119/task/callback together and consumed four nonces;
+invalid Sender and real mint failure did not mint, and the following valid
+message did. The full H=757 case retained all twelve deliveries, actual original-DB
+Grevm replay, a second natural epoch recovery, and a 240.411-second/1081-block
+final soak. Its four replicas ended at nonce 12, progress `[12,167]`, balance 138.
+The [primary Mono report](../../../mono-grav-bridge119/docs/changelogs/2026-10-15-oracle-install-missing-receiver.md)
+contains exact source/binary bindings, archive hashes and known setup boundaries.
+
+Runtime/test results remain bound to the source head above. This closeout changes
+only this record and the bytecode README; SDK's product pin stays at the tested
+revision. No local build/test, push, merge or public activation occurred.
 
 ## 8. Remaining Work
 
-Complete the checklist and record Gravity Dev's final-tree evidence.
+None for the approved Receiver installation and Gravity Dev verification.

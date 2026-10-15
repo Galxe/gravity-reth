@@ -23,6 +23,8 @@ The installer patches both occurrences of each immutable using the existing
 `trustedBridge` and `sourceId` inputs and checks the complete resulting runtime
 against `receiverCodeHash`. Getter calls then verify the installed bindings.
 
-The template was extracted from the existing frozen Gravity Dev compiler
-artifact, without recompilation. Provenance is archived under the primary
-Issue 131 integration evidence, `receiver-install-20261015/artifacts/`.
+The template was extracted from the retained frozen Gravity Dev compiler
+artifact. An independent Dev recompilation of the pinned sources with the same
+settings reproduced its bytes; the fresh compiler AST and immutable references
+confirmed the two named offset groups above. Provenance is archived under the
+primary Issue 131 integration evidence, `receiver-install-20261015/artifacts/`.
