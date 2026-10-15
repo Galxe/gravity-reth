@@ -724,9 +724,11 @@ mod tests {
         let mut receiver_code = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/GBridgeReceiver.bin"
-        )).to_vec();
+        ))
+        .to_vec();
         for offset in [84, 153, 790, 832] {
-            receiver_code[offset..offset + 32].copy_from_slice(&U256::from(123).to_be_bytes::<32>());
+            receiver_code[offset..offset + 32]
+                .copy_from_slice(&U256::from(123).to_be_bytes::<32>());
         }
         let receiver_hash = keccak256(&receiver_code);
         let mut genesis = MAINNET.genesis().clone();
@@ -734,11 +736,14 @@ mod tests {
         genesis.config.chain_id = LONGEVITY_TESTNET_CHAIN_ID;
         genesis.config.extra_fields.insert("gammaTime".into(), serde_json::json!(10));
         genesis.config.extra_fields.insert("oracleTaskInstallTime".into(), serde_json::json!(100));
-        genesis.config.extra_fields.insert("oracleTaskInstall".into(), serde_json::json!({
-            "sourceId":"0x7b", "taskName":format!("{:#x}", B256::repeat_byte(1)),
-            "taskConfig":"0x616263", "receiverCodeHash":format!("{receiver_hash:#x}"),
-            "trustedBridge":"0x000000000000000000000000000000000000007b"
-        }));
+        genesis.config.extra_fields.insert(
+            "oracleTaskInstall".into(),
+            serde_json::json!({
+                "sourceId":"0x7b", "taskName":format!("{:#x}", B256::repeat_byte(1)),
+                "taskConfig":"0x616263", "receiverCodeHash":format!("{receiver_hash:#x}"),
+                "trustedBridge":"0x000000000000000000000000000000000000007b"
+            }),
+        );
         let spec = Arc::new(
             ChainSpecBuilder::from(&*MAINNET)
                 .chain(Chain::from(LONGEVITY_TESTNET_CHAIN_ID))
@@ -836,7 +841,10 @@ mod tests {
         provider.commit().unwrap();
         let provider = factory.provider().unwrap();
         let state = LatestStateProviderRef::new(&provider);
-        assert_eq!(state.basic_account(&receiver).unwrap().unwrap().bytecode_hash, Some(receiver_hash));
+        assert_eq!(
+            state.basic_account(&receiver).unwrap().unwrap().bytecode_hash,
+            Some(receiver_hash)
+        );
         assert_eq!(
             state.basic_account(&native).unwrap().unwrap().bytecode_hash,
             Some(keccak256(include_bytes!(concat!(

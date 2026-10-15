@@ -185,9 +185,7 @@ fn ensure_receiver<DB: Database>(
         if info.code_hash == config.receiver_code_hash {
             return Ok(false)
         }
-        if info.nonce != 0 ||
-            (info.code_hash != B256::ZERO && info.code_hash != keccak256([]))
-        {
+        if info.nonce != 0 || (info.code_hash != B256::ZERO && info.code_hash != keccak256([])) {
             return Err(failure("Receiver account conflicts with installation inputs"))
         }
     }
@@ -566,8 +564,14 @@ pub(crate) mod tests {
         assert_eq!(db.storage(BRIDGE_RECEIVER, U256::from(8)).unwrap(), U256::from(99));
         let config = oracle_task_install_config(spec.as_ref()).unwrap().unwrap();
         let mut overlay = InstallationOverlay { base: &mut db, changes: EvmState::default() };
-        assert_eq!(query(&mut overlay, &env(T), BRIDGE_RECEIVER, trustedBridgeCall {}).unwrap(), BRIDGE);
-        assert_eq!(query(&mut overlay, &env(T), BRIDGE_RECEIVER, trustedSourceIdCall {}).unwrap(), config.source_id);
+        assert_eq!(
+            query(&mut overlay, &env(T), BRIDGE_RECEIVER, trustedBridgeCall {}).unwrap(),
+            BRIDGE
+        );
+        assert_eq!(
+            query(&mut overlay, &env(T), BRIDGE_RECEIVER, trustedSourceIdCall {}).unwrap(),
+            config.source_id
+        );
     }
 
     #[test]
@@ -597,7 +601,10 @@ pub(crate) mod tests {
             let before = db.basic(BRIDGE_RECEIVER).unwrap();
             assert!(install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).is_err());
             assert_eq!(db.basic(BRIDGE_RECEIVER).unwrap(), before);
-            assert_eq!(db.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash, NATIVE_ORACLE_POST_FORK_CODE_HASH);
+            assert_eq!(
+                db.basic(NATIVE_ORACLE_ADDRESS).unwrap().unwrap().code_hash,
+                NATIVE_ORACLE_POST_FORK_CODE_HASH
+            );
             assert!(snapshot(&mut db).is_empty());
         }
         let mut db = seeded_db();
@@ -608,7 +615,7 @@ pub(crate) mod tests {
         assert!(snapshot(&mut db).is_empty());
         let mut db = seeded_db();
         install(&mut db, spec.as_ref(), env(T), Some(T - 1), 73).unwrap();
-        db.accounts.remove(&BRIDGE_RECEIVER);
+        db.cache.accounts.remove(&BRIDGE_RECEIVER);
         assert!(install(&mut db, spec.as_ref(), env(T + 1), Some(T - 1), 73).is_err());
         assert!(db.basic(BRIDGE_RECEIVER).unwrap().is_none());
     }
@@ -1139,7 +1146,10 @@ pub(crate) mod tests {
             let state = executor.take_bundle().state;
             assert!(state.contains_key(&ORACLE_TASK_CONFIG_ADDRESS));
             assert!(state.contains_key(&NATIVE_ORACLE_ADDRESS));
-            assert_eq!(state[&BRIDGE_RECEIVER].info.as_ref().unwrap().code_hash, keccak256(receiver_code()));
+            assert_eq!(
+                state[&BRIDGE_RECEIVER].info.as_ref().unwrap().code_hash,
+                keccak256(receiver_code())
+            );
             assert_eq!(state[&BRIDGE_RECEIVER].info.as_ref().unwrap().nonce, 1);
             assert_eq!(
                 state[&NATIVE_ORACLE_ADDRESS].info.as_ref().unwrap().code_hash,

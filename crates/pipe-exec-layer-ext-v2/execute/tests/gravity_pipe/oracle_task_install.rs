@@ -26,7 +26,8 @@ fn receiver_runtime() -> Bytes {
     // Independent fixture construction checks the installer's immutable mapping.
     let mut runtime = include_bytes!(
         "../../../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/GBridgeReceiver.bin"
-    ).to_vec();
+    )
+    .to_vec();
     for offset in [84, 832] {
         runtime[offset..offset + 32].copy_from_slice(BRIDGE.into_word().as_slice());
     }
@@ -157,7 +158,10 @@ async fn run_epoch_boundary(builder: Builder, start: u64, install_time: u64) -> 
         let chain = Chain::new(&rpc, spec.chain.id());
         assert_eq!(chain.code(RECEIVER, activation.number), receiver_runtime());
         assert_eq!(read(&chain, RECEIVER, trustedBridgeCall {}, activation.number), BRIDGE);
-        assert_eq!(read(&chain, RECEIVER, trustedSourceIdCall {}, activation.number), U256::from(1));
+        assert_eq!(
+            read(&chain, RECEIVER, trustedSourceIdCall {}, activation.number),
+            U256::from(1)
+        );
         assert_eq!(chain.code(NATIVE_ORACLE, activation.number).as_ref(), CALLBACK_RUNTIME);
         assert_eq!(read(&chain, TASK_CONFIG, getSourceTypesCall {}, activation.number), vec![0]);
         assert_eq!(
