@@ -31,6 +31,7 @@ use reth_node_core::{
     version::{version_metadata, CLIENT_CODE},
 };
 use reth_payload_builder::{PayloadBuilderHandle, PayloadStore};
+use reth_provider::DatabaseProviderFactory;
 use reth_rpc::{
     eth::{core::EthRpcConverterFor, DevSigner, EthApiTypes, FullEthApiServer},
     AdminApi,
@@ -1103,7 +1104,7 @@ where
         info!(target: "reth::cli", "Engine API handler initialized");
 
         let cache = EthStateCache::spawn_with(
-            node.provider().clone(),
+            node.provider().rpc_provider(),
             config.rpc.eth_config().cache,
             node.task_executor().clone(),
         );
@@ -1128,7 +1129,7 @@ where
         debug!(target: "reth::cli", http=?module_config.http(), ws=?module_config.ws(), "Using RPC module config");
 
         let (mut modules, mut auth_module, registry) = RpcModuleBuilder::default()
-            .with_provider(node.provider().clone())
+            .with_provider(node.provider().rpc_provider())
             .with_pool(node.pool().clone())
             .with_network(node.network().clone())
             .with_executor(node.task_executor().clone())
@@ -1300,6 +1301,7 @@ impl<'a, N: FullNodeComponents<Types: NodeTypes<ChainSpec: Hardforks + EthereumH
     /// Provides a [`EthApiBuilder`] with preconfigured config and components.
     pub fn eth_api_builder(self) -> reth_rpc::EthApiBuilder<N, EthRpcConverterFor<N>> {
         reth_rpc::EthApiBuilder::new_with_components(self.components.clone())
+            .provider(self.components.provider().rpc_provider())
             .eth_cache(self.cache)
             .task_spawner(self.components.task_executor().clone())
             .gas_cap(self.config.rpc_gas_cap.into())

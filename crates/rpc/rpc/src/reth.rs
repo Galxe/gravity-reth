@@ -55,7 +55,7 @@ impl<Provider, EvmConfig> RethApi<Provider, EvmConfig> {
 
 impl<Provider, EvmConfig> RethApi<Provider, EvmConfig>
 where
-    Provider: BlockReaderIdExt + ChangeSetReader + StateProviderFactory + 'static,
+    Provider: BlockReaderIdExt + ChangeSetReader + StateProviderFactory + Clone + 'static,
     EvmConfig: Send + Sync + 'static,
 {
     /// Executes the future on a new blocking task.
@@ -81,12 +81,13 @@ where
     }
 
     fn try_balance_changes_in_block(&self, block_id: BlockId) -> EthResult<AddressMap<U256>> {
-        let Some(block_number) = self.provider().block_number_for_id(block_id)? else {
+        let provider = self.provider().read_context()?;
+        let Some(block_number) = provider.block_number_for_id(block_id)? else {
             return Err(EthApiError::HeaderNotFound(block_id))
         };
 
-        let state = self.provider().state_by_block_id(block_id)?;
-        let accounts_before = self.provider().account_block_changeset(block_number)?;
+        let state = provider.state_by_block_id(block_id)?;
+        let accounts_before = provider.account_block_changeset(block_number)?;
         let hash_map = accounts_before.iter().try_fold(
             AddressMap::default(),
             |mut hash_map, account_before| -> RethResult<_> {
@@ -108,8 +109,9 @@ where
     Provider: BlockReaderIdExt
         + ChangeSetReader
         + StateProviderFactory
-        + BlockReader<Block = N::Block>
+        + BlockReader<Block = N::Block, Receipt = N::Receipt, Header = N::BlockHeader>
         + CanonStateSubscriptions<Primitives = N>
+        + Clone
         + 'static,
     EvmConfig: ConfigureEvm<Primitives = N> + 'static,
 {
@@ -147,22 +149,20 @@ where
         block_id: BlockId,
         block_count: u64,
     ) -> EthResult<Option<ExecutionOutcome<N::Receipt>>> {
-        let Some(start_block) = self.provider().block_number_for_id(block_id)? else {
-            return Ok(None)
-        };
+        let provider = self.provider().read_context()?;
+        let Some(start_block) = provider.block_number_for_id(block_id)? else { return Ok(None) };
 
         if start_block == 0 {
             return Ok(Some(ExecutionOutcome::default()))
         }
 
-        let state_provider = self.provider().history_by_block_number(start_block - 1)?;
+        let state_provider = provider.history_by_block_number(start_block - 1)?;
         let db = reth_revm::database::StateProviderDatabase::new(&state_provider);
 
         let mut blocks = Vec::with_capacity(block_count as usize);
         for block_number in start_block..start_block + block_count {
-            let Some(block) = self
-                .provider()
-                .recovered_block(block_number.into(), TransactionVariant::WithHash)?
+            let Some(block) =
+                provider.recovered_block(block_number.into(), TransactionVariant::WithHash)?
             else {
                 if block_number == start_block {
                     return Ok(None)
@@ -173,7 +173,7 @@ where
         }
 
         // Committed blocks: replay them with the chain's block-level steps.
-        let evm_config = self.evm_config().chain_block_mode();
+        let evm_config = self.evm_config().with_read_provider(provider.clone()).chain_block_mode();
         let outcome = evm_config.executor(db).execute_batch(&blocks).map_err(
             |e: reth_evm::execute::BlockExecutionError| {
                 EthApiError::Internal(reth_errors::RethError::Other(e.into()))
@@ -190,9 +190,13 @@ where
     Provider: BlockReaderIdExt
         + ChangeSetReader
         + StateProviderFactory
-        + BlockReader<Block = <Provider::Primitives as NodePrimitives>::Block>
-        + CanonStateSubscriptions
+        + BlockReader<
+            Block = <Provider::Primitives as NodePrimitives>::Block,
+            Receipt = <Provider::Primitives as NodePrimitives>::Receipt,
+            Header = <Provider::Primitives as NodePrimitives>::BlockHeader,
+        > + CanonStateSubscriptions
         + ForkChoiceSubscriptions<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>
+        + Clone
         + 'static,
     EvmConfig: ConfigureEvm<Primitives = Provider::Primitives> + 'static,
 {

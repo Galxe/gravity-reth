@@ -259,6 +259,14 @@ pub trait LoadState:
         RpcConvert: RpcConvert<Network = Self::NetworkTypes>,
     > + RpcNodeCoreExt
 {
+    /// Captures a context on the IO executor before loading related blocks and state.
+    fn read_context(&self) -> impl Future<Output = Result<Self, Self::Error>> + Send
+    where
+        Self: SpawnBlocking,
+    {
+        self.spawn_blocking_io(|this| this.with_read_context())
+    }
+
     /// Returns the state at the given block number
     fn state_at_hash(&self, block_hash: B256) -> Result<StateProviderBox, Self::Error> {
         self.provider().history_by_block_hash(block_hash).map_err(Self::Error::from_eth_err)
@@ -323,10 +331,7 @@ pub trait LoadState:
 
     /// Returns the revm evm env for the requested [`BlockId`]
     ///
-    /// If the [`BlockId`] this will return the [`BlockId`] of the block the env was configured
-    /// for.
-    /// If the [`BlockId`] is pending, this will return the "Pending" tag, otherwise this returns
-    /// the hash of the exact block.
+    /// Returns the hash of the captured block, or the canonical parent when deriving pending.
     fn evm_env_at(
         &self,
         at: BlockId,
@@ -348,16 +353,19 @@ pub trait LoadState:
                     .ok_or_else(|| EthApiError::HeaderNotFound(at))?;
                 let evm_env = self.evm_env_for_header(&header)?;
 
-                Ok((evm_env, header.hash().into()))
+                let state_block = match at {
+                    BlockId::Hash(_) => at,
+                    BlockId::Number(_) => BlockId::hash_canonical(header.hash()),
+                };
+                Ok((evm_env, state_block))
             }
         }
     }
 
     /// Returns the recovered block, revm evm env, and state block id for the requested [`BlockId`].
     ///
-    /// For pending blocks, this preserves the state id returned by [`Self::evm_env_at`], which can
-    /// be the pending tag for an actual pending block or the latest block hash when the pending env
-    /// is derived from latest.
+    /// For pending blocks, this preserves the pending hash or canonical parent returned by
+    /// [`Self::evm_env_at`].
     #[expect(clippy::type_complexity)]
     fn evm_env_and_recovered_block_at(
         &self,
@@ -373,11 +381,15 @@ pub trait LoadState:
     {
         async move {
             if at.is_pending() {
-                let (evm_env, block_id) = self.evm_env_at(at).await?;
-                let block = self
-                    .recovered_block(block_id)
-                    .await?
-                    .ok_or_else(|| EthApiError::HeaderNotFound(at))?;
+                let PendingBlockEnv { evm_env, origin } = self.pending_block_env_and_cfg()?;
+                let block_id = origin.state_block_id();
+                let block = if let Some(block) = origin.into_actual_pending() {
+                    block
+                } else {
+                    self.recovered_block(block_id)
+                        .await?
+                        .ok_or_else(|| EthApiError::HeaderNotFound(at))?
+                };
 
                 Ok((block, evm_env, block_id))
             } else {
@@ -386,7 +398,10 @@ pub trait LoadState:
                     .await?
                     .ok_or_else(|| EthApiError::HeaderNotFound(at))?;
                 let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
-                let block_id = block.hash().into();
+                let block_id = match at {
+                    BlockId::Hash(_) => at,
+                    BlockId::Number(_) => BlockId::hash_canonical(block.hash()),
+                };
 
                 Ok((block, evm_env, block_id))
             }

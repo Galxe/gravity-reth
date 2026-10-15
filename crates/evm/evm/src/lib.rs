@@ -205,6 +205,23 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     /// The primitives type used by the EVM.
     type Primitives: NodePrimitives;
 
+    /// Uses a request's fixed provider for chain reads outside the EVM database.
+    /// Configurations without auxiliary chain reads retain their existing configuration.
+    #[auto_impl(keep_default_for(&, Arc))]
+    fn with_read_provider<P>(&self, _provider: P) -> Self
+    where
+        Self: Sized,
+        P: reth_storage_api::HeaderProvider<Header = HeaderTy<Self::Primitives>>
+            + reth_storage_api::ReceiptProvider<Receipt = ReceiptTy<Self::Primitives>>
+            + reth_storage_api::BlockHashReader
+            + reth_storage_api::StateProviderFactory
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.clone()
+    }
+
     /// The error type that is returned by [`Self::next_evm_env`].
     type Error: Error + Send + Sync + 'static;
 

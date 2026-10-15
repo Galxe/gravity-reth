@@ -29,8 +29,8 @@ use reth_rpc_eth_types::{
     FillTransaction, SignError, TransactionSource,
 };
 use reth_storage_api::{
-    BlockNumReader, BlockReaderIdExt, ProviderBlock, ProviderReceipt, ProviderTx, ReceiptProvider,
-    TransactionsProvider,
+    BlockIdReader, BlockNumReader, BlockReaderIdExt, ProviderBlock, ProviderReceipt, ProviderTx,
+    ReceiptProvider, TransactionsProvider,
 };
 use reth_transaction_pool::{
     AddedTransactionOutcome, PoolPooledTx, PoolTransaction, TransactionOrigin, TransactionPool,
@@ -763,9 +763,12 @@ pub trait LoadTransaction: SpawnBlocking + FullEthApiTypes + RpcNodeCoreExt {
 
             // Note: this is always either hash or pending
             let block_hash = match at {
-                BlockId::Hash(hash) => hash.block_hash,
+                BlockId::Hash(_) => {
+                    self.provider().block_hash_for_id(at).map_err(Self::Error::from_eth_err)?
+                }
                 _ => return Ok(None),
             };
+            let Some(block_hash) = block_hash else { return Ok(None) };
             let block = self
                 .cache()
                 .get_recovered_block(block_hash)

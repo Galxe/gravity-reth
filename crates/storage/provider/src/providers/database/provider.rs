@@ -151,9 +151,14 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, shared with the provider factory.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
+    pub(crate) read_context: Option<Arc<super::StateReadContext>>,
 }
 
 impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
+    pub(crate) fn read_bounds(&self) -> Option<super::StateReadBounds> {
+        self.read_context.as_ref().map(|context| context.bounds)
+    }
+
     /// Returns reference to prune modes.
     pub const fn prune_modes_ref(&self) -> &PruneModes {
         &self.prune_modes
@@ -174,6 +179,11 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
     ) -> ProviderResult<Box<dyn StateProvider + 'a>> {
         let mut block_number =
             self.block_number(block_hash)?.ok_or(ProviderError::BlockHashNotFound(block_hash))?;
+        if !self.block_visible(block_number) ||
+            (self.read_context.is_some() && self.block_hash(block_number)? != Some(block_hash))
+        {
+            return Err(ProviderError::BlockHashNotFound(block_hash))
+        }
         // Always return historical provider in rocksdb
         // if block_number == self.best_block_number().unwrap_or_default() &&
         //     block_number == self.last_block_number().unwrap_or_default()
@@ -257,7 +267,15 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
         storage: Arc<N::Storage>,
         storage_settings: Arc<RwLock<GravityStorageSettings>>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage, storage_settings }
+        Self {
+            tx,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings,
+            read_context: None,
+        }
     }
 }
 
@@ -268,13 +286,41 @@ impl<TX, N: NodeTypes> AsRef<Self> for DatabaseProvider<TX, N> {
 }
 
 impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
+    fn block_visible(&self, number: BlockNumber) -> bool {
+        self.read_bounds().is_none_or(|bounds| number <= bounds.block_number)
+    }
+
+    fn tx_visible(&self, number: TxNumber) -> bool {
+        self.read_bounds().is_none_or(|bounds| number < bounds.next_tx_num)
+    }
+
+    fn read_block_range(&self, range: impl RangeBounds<BlockNumber>) -> Range<BlockNumber> {
+        Self::bounded_range(
+            range,
+            self.read_bounds().map(|bounds| bounds.block_number.saturating_add(1)),
+        )
+    }
+
+    fn tx_range(&self, range: impl RangeBounds<TxNumber>) -> Range<TxNumber> {
+        Self::bounded_range(range, self.read_bounds().map(|bounds| bounds.next_tx_num))
+    }
+
+    fn bounded_range(range: impl RangeBounds<u64>, limit: Option<u64>) -> Range<u64> {
+        let mut range = to_range(range);
+        if let Some(limit) = limit {
+            range.end = range.end.min(limit);
+            range.start = range.start.min(range.end);
+        }
+        range
+    }
+
     /// Collects account changesets in `range`, routed by the persisted storage layout.
     fn account_changesets_by_block_range(
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<(BlockNumber, AccountBeforeTx)>> {
         if self.cached_storage_settings().changesets_in_static_files {
-            self.static_file_provider.account_changesets_range(range)
+            self.static_file_provider.account_changesets_range(self.read_block_range(range))
         } else {
             self.tx
                 .cursor_read::<tables::AccountChangeSets>()?
@@ -309,7 +355,8 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
                 // the end to the segment tip anyway.
                 Bound::Unbounded => u64::MAX,
             };
-            self.static_file_provider.storage_changesets_range(start..=end)
+            let range = self.read_block_range(start..=end);
+            self.static_file_provider.storage_changesets_range(range)
         } else {
             self.tx
                 .cursor_read::<tables::StorageChangeSets>()?
@@ -325,7 +372,7 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<(BlockNumberAddress, StorageEntry)>> {
         if self.cached_storage_settings().changesets_in_static_files {
-            self.static_file_provider.storage_changesets_range(range)
+            self.static_file_provider.storage_changesets_range(self.read_block_range(range))
         } else {
             self.tx
                 .cursor_read::<tables::StorageChangeSets>()?
@@ -435,6 +482,9 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
         self,
         mut block_number: BlockNumber,
     ) -> ProviderResult<StateProviderBox> {
+        if !self.block_visible(block_number) {
+            return Err(ProviderError::StateForNumberNotFound(block_number))
+        }
         // if the block number is the same as the currently best block number on disk we can use the
         // latest state provider here
         // Always return historical provider in rocksdb
@@ -584,7 +634,15 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         storage: Arc<N::Storage>,
         storage_settings: Arc<RwLock<GravityStorageSettings>>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage, storage_settings }
+        Self {
+            tx,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings,
+            read_context: None,
+        }
     }
 
     /// Consume `DbTx` or `DbTxMut`.
@@ -617,6 +675,8 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
     where
         C: DbCursorRO<tables::Transactions<TxTy<N>>>,
     {
+        let range = self.tx_range(range);
+
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Transactions,
             to_range(range),
@@ -1001,6 +1061,10 @@ impl<TX: DbTx, N: NodeTypes> StorageChangeSetReader for DatabaseProvider<TX, N> 
         &self,
         block_number: BlockNumber,
     ) -> ProviderResult<Vec<(BlockNumberAddress, StorageEntry)>> {
+        if !self.block_visible(block_number) {
+            return Ok(Vec::new())
+        }
+
         if self.cached_storage_settings().changesets_in_static_files {
             return self.static_file_provider.storage_changeset(block_number);
         }
@@ -1035,6 +1099,10 @@ impl<TX: DbTx, N: NodeTypes> ChangeSetReader for DatabaseProvider<TX, N> {
         &self,
         block_number: BlockNumber,
     ) -> ProviderResult<Vec<AccountBeforeTx>> {
+        if !self.block_visible(block_number) {
+            return Ok(Vec::new())
+        }
+
         if self.cached_storage_settings().changesets_in_static_files {
             return self.static_file_provider.account_block_changeset(block_number);
         }
@@ -1107,6 +1175,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
     }
 
     fn header_by_number(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
+        if !self.block_visible(num) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             num,
@@ -1124,6 +1196,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
     }
 
     fn header_td_by_number(&self, number: BlockNumber) -> ProviderResult<Option<U256>> {
+        if !self.block_visible(number) {
+            return Ok(None)
+        }
+
         if self.chain_spec.is_paris_active_at_block(number) &&
             let Some(td) = self.chain_spec.final_paris_total_difficulty()
         {
@@ -1146,7 +1222,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
     ) -> ProviderResult<Vec<Self::Header>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
-            to_range(range),
+            self.read_block_range(range),
             |static_file, range, _| static_file.headers_range(range),
             |range, _| self.cursor_read_collect::<tables::Headers<Self::Header>>(range),
             |_| true,
@@ -1157,6 +1233,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
         &self,
         number: BlockNumber,
     ) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
+        if !self.block_visible(number) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -1181,7 +1261,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
     ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
-            to_range(range),
+            self.read_block_range(range),
             |static_file, range, predicate| static_file.sealed_headers_while(range, predicate),
             |range, mut predicate| {
                 let mut headers = vec![];
@@ -1207,6 +1287,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
 
 impl<TX: DbTx + 'static, N: NodeTypes> BlockHashReader for DatabaseProvider<TX, N> {
     fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
+        if !self.block_visible(number) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -1222,7 +1306,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockHashReader for DatabaseProvider<TX, 
     ) -> ProviderResult<Vec<B256>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
-            start..end,
+            self.read_block_range(start..end),
             |static_file, range, _| static_file.canonical_hashes_range(range.start, range.end),
             |range, _| self.cursor_read_collect::<tables::CanonicalHeaders>(range),
             |_| true,
@@ -1238,6 +1322,9 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
     }
 
     fn best_block_number(&self) -> ProviderResult<BlockNumber> {
+        if let Some(bounds) = self.read_bounds() {
+            return Ok(bounds.block_number)
+        }
         // The best block number is tracked via the finished stage which gets updated in the same tx
         // when new blocks committed
         Ok(self
@@ -1247,6 +1334,9 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
     }
 
     fn last_block_number(&self) -> ProviderResult<BlockNumber> {
+        if let Some(bounds) = self.read_bounds() {
+            return Ok(bounds.block_number)
+        }
         Ok(self
             .tx
             .cursor_read::<tables::CanonicalHeaders>()?
@@ -1266,7 +1356,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
     }
 
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
-        Ok(self.tx.get::<tables::HeaderNumbers>(hash)?)
+        Ok(self.tx.get::<tables::HeaderNumbers>(hash)?.filter(|number| self.block_visible(*number)))
     }
 }
 
@@ -1424,7 +1514,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProviderExt
     ) -> ProviderResult<Vec<(TxHash, TxNumber)>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Transactions,
-            tx_range,
+            self.tx_range(tx_range),
             |static_file, range, _| static_file.transaction_hashes_by_range(range),
             |tx_range, _| {
                 let mut tx_cursor = self.tx.cursor_read::<tables::Transactions<TxTy<N>>>()?;
@@ -1490,10 +1580,17 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
     type Transaction = TxTy<N>;
 
     fn transaction_id(&self, tx_hash: TxHash) -> ProviderResult<Option<TxNumber>> {
-        Ok(self.tx.get::<tables::TransactionHashNumbers>(tx_hash)?)
+        Ok(self
+            .tx
+            .get::<tables::TransactionHashNumbers>(tx_hash)?
+            .filter(|number| self.tx_visible(*number)))
     }
 
     fn transaction_by_id(&self, id: TxNumber) -> ProviderResult<Option<Self::Transaction>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -1506,6 +1603,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
         &self,
         id: TxNumber,
     ) -> ProviderResult<Option<Self::Transaction>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -1559,8 +1660,11 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
     }
 
     fn transaction_block(&self, id: TxNumber) -> ProviderResult<Option<BlockNumber>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
         let mut cursor = self.tx.cursor_read::<tables::TransactionBlocks>()?;
-        Ok(cursor.seek(id)?.map(|(_, bn)| bn))
+        Ok(cursor.seek(id)?.map(|(_, bn)| bn).filter(|number| self.block_visible(*number)))
     }
 
     fn transactions_by_block(
@@ -1619,10 +1723,13 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
         &self,
         range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Address>> {
-        self.cursor_read_collect::<tables::TransactionSenders>(range)
+        self.cursor_read_collect::<tables::TransactionSenders>(self.tx_range(range))
     }
 
     fn transaction_sender(&self, id: TxNumber) -> ProviderResult<Option<Address>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
         Ok(self.tx.get::<tables::TransactionSenders>(id)?)
     }
 }
@@ -1631,6 +1738,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> ReceiptProvider for DatabasePr
     type Receipt = ReceiptTy<N>;
 
     fn receipt(&self, id: TxNumber) -> ProviderResult<Option<Self::Receipt>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Receipts,
             id,
@@ -1670,7 +1781,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> ReceiptProvider for DatabasePr
     ) -> ProviderResult<Vec<Self::Receipt>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Receipts,
-            to_range(range),
+            self.tx_range(range),
             |static_file, range, _| static_file.receipts_by_tx_range(range),
             |range, _| self.cursor_read_collect::<tables::Receipts<Self::Receipt>>(range),
             |_| true,
@@ -1737,6 +1848,9 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> BlockBodyIndicesProvider
     for DatabaseProvider<TX, N>
 {
     fn block_body_indices(&self, num: u64) -> ProviderResult<Option<StoredBlockBodyIndices>> {
+        if !self.block_visible(num) {
+            return Ok(None)
+        }
         Ok(self.tx.get::<tables::BlockBodyIndices>(num)?)
     }
 
@@ -1744,7 +1858,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> BlockBodyIndicesProvider
         &self,
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<StoredBlockBodyIndices>> {
-        self.cursor_read_collect::<tables::BlockBodyIndices>(range)
+        self.cursor_read_collect::<tables::BlockBodyIndices>(self.read_block_range(range))
     }
 }
 

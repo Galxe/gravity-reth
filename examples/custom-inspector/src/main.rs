@@ -63,16 +63,14 @@ fn main() {
                         let call_request =
                             TransactionRequest::from_recovered_transaction(tx.to_consensus());
 
-                        let evm_config = node.evm_config.clone();
-
                         let result = eth_api
                             .spawn_with_call_at(
                                 call_request,
                                 BlockNumberOrTag::Latest.into(),
                                 EvmOverrides::default(),
-                                move |db, evm_env, tx_env| {
+                                move |eth_api, db, evm_env, tx_env| {
                                     let mut dummy_inspector = DummyInspector::default();
-                                    let mut evm = evm_config.evm_with_env_and_inspector(
+                                    let mut evm = eth_api.evm_config().evm_with_env_and_inspector(
                                         db,
                                         evm_env,
                                         &mut dummy_inspector,

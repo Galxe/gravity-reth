@@ -59,7 +59,7 @@ use {
 };
 
 pub use alloy_evm::EthEvm;
-pub use gravity::{GravityChainReader, GravityEvmConfig};
+pub use gravity::{GravityChainReader, GravityEvmConfig, ProviderChainReader};
 
 mod config;
 use alloy_evm::eth::spec::EthExecutorSpec;

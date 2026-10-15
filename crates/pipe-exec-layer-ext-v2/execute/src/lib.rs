@@ -1714,7 +1714,7 @@ where
     let (event_tx, discard_txs_tx) = get_pipe_exec_layer_event_bus().take_senders();
 
     let storage = Arc::new(storage);
-    let onchain_config_fetcher = OnchainConfigFetcher::new(eth_api);
+    let onchain_config_fetcher = OnchainConfigFetcher::new(eth_api.with_execution_provider());
 
     let latest_block_number = latest_block_header.number;
     let epoch = onchain_config_fetcher

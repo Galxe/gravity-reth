@@ -152,8 +152,22 @@ pub trait DatabaseProviderFactory: Send + Sync {
     /// Read-write provider type returned by the factory.
     type ProviderRW: DBProvider<Tx = <Self::DB as Database>::TXMut>;
 
+    /// Selects fixed state reads for external queries without changing execution providers.
+    #[auto_impl(keep_default_for(&, Arc))]
+    fn rpc_provider(&self) -> Self
+    where
+        Self: Sized + Clone,
+    {
+        self.clone()
+    }
+
     /// Create new read-only database provider.
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider>;
+
+    /// Retires external history files after their prune checkpoints have committed.
+    fn on_prune_commit(&self) -> ProviderResult<()> {
+        Ok(())
+    }
 
     /// Create new read-write database provider.
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW>;

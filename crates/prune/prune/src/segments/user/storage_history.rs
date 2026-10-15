@@ -12,9 +12,7 @@ use reth_db_api::{
     tables,
     transaction::DbTxMut,
 };
-use reth_provider::{
-    DBProvider, StaticFileProviderFactory, StaticFileSegment, StorageSettingsCache,
-};
+use reth_provider::{DBProvider, StaticFileProviderFactory, StorageSettingsCache};
 use reth_prune_types::{PruneMode, PrunePurpose, PruneSegment, SegmentOutputCheckpoint};
 use rustc_hash::FxHashMap;
 use tracing::{instrument, trace};
@@ -65,7 +63,7 @@ where
 
         // Under storage-v2 the storage changesets live in static files and the database changeset
         // table is empty, so pruning the DB table would no-op while the jars leak. Walk the static
-        // files and reclaim their jars instead.
+        // files to update the history index instead.
         if provider.cached_storage_settings().changesets_in_static_files {
             self.prune_static_files(provider, input, range, range_end)
         } else {
@@ -77,8 +75,8 @@ where
 impl StorageHistory {
     /// Prunes storage history when changesets are stored in static files.
     ///
-    /// Walks the changesets from static files to prune the [`tables::StoragesHistory`] index, then
-    /// reclaims any changeset jar that has fallen entirely below the prune horizon.
+    /// Walks static changesets to prune the [`tables::StoragesHistory`] index. Files are retired
+    /// only after the caller commits the history index and its prune checkpoint.
     fn prune_static_files<Provider>(
         &self,
         provider: &Provider,
@@ -131,14 +129,6 @@ impl StorageHistory {
             limiter.increment_deleted_entries_count();
         }
 
-        // Reclaim whole jars only once the range is fully processed, so a jar straddling the
-        // horizon is never removed while it still holds live blocks (`delete_segment_below_block`
-        // additionally refuses to delete the highest jar).
-        if done && let Some(last_block) = last_changeset_pruned_block {
-            provider
-                .static_file_provider()
-                .delete_segment_below_block(StaticFileSegment::StorageChangeSets, last_block + 1)?;
-        }
         trace!(target: "pruner", pruned = %pruned_changesets, %done, "Pruned storage history (changesets from static files)");
 
         let result = HistoryPruneResult {

@@ -43,6 +43,8 @@ pub use reth_db_api::*;
 use libc as _;
 #[cfg(feature = "mdbx")]
 use page_size as _;
+#[cfg(feature = "quanta")]
+use quanta as _;
 #[cfg(feature = "mdbx")]
 use reth_libmdbx as _;
 
@@ -80,7 +82,9 @@ pub mod test_utils {
     use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
-        database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
+        database::{Database, DatabaseReadView},
+        database_metrics::DatabaseMetrics,
+        models::ClientVersion,
     };
     use reth_fs_util;
     use std::{
@@ -171,6 +175,20 @@ pub mod test_utils {
         fn tx(&self) -> Result<Self::TX, DatabaseError> {
             self.pre_tx_hook.read()();
             let tx = self.db().tx()?;
+            self.post_tx_hook.read()();
+            Ok(tx)
+        }
+
+        fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+            self.db().state_read_view()
+        }
+
+        fn tx_with_state_read_view(
+            &self,
+            view: Option<Arc<dyn DatabaseReadView>>,
+        ) -> Result<Self::TX, DatabaseError> {
+            self.pre_tx_hook.read()();
+            let tx = self.db().tx_with_state_read_view(view)?;
             self.post_tx_hook.read()();
             Ok(tx)
         }

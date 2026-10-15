@@ -854,7 +854,7 @@ impl<N, Provider, Pool, Network, EthApi, EvmConfig, Consensus>
     RpcRegistryInner<Provider, Pool, Network, EthApi, EvmConfig, Consensus>
 where
     N: NodePrimitives,
-    Provider: FullRpcProvider<Block = N::Block>
+    Provider: FullRpcProvider<Block = N::Block, Header = N::BlockHeader, Receipt = N::Receipt>
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>
         + AccountReader

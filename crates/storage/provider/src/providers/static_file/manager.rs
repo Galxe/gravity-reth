@@ -1,6 +1,7 @@
 use super::{
-    metrics::StaticFileProviderMetrics, writer::StaticFileWriters, LoadedJar,
-    StaticFileJarProvider, StaticFileProviderRW, StaticFileProviderRWRefMut,
+    lifetime::StaticFileReadLifetime, metrics::StaticFileProviderMetrics,
+    writer::StaticFileWriters, LoadedJar, StaticFileJarProvider, StaticFileMaintenanceGuard,
+    StaticFileProviderRW, StaticFileProviderRWRefMut, StaticFileReadLease,
 };
 use crate::{
     changeset_walker::{StaticFileAccountChangesetWalker, StaticFileStorageChangesetWalker},
@@ -232,7 +233,9 @@ impl<N: NodePrimitives> Deref for StaticFileProvider<N> {
 pub struct StaticFileProviderInner<N> {
     /// Maintains a map which allows for concurrent access to different `NippyJars`, over different
     /// segments and ranges.
-    map: DashMap<(BlockNumber, StaticFileSegment), LoadedJar>,
+    map: DashMap<(BlockNumber, StaticFileSegment), Arc<LoadedJar>>,
+    /// Pins retired changeset files until all older state views have been released.
+    history_reads: Arc<StaticFileReadLifetime>,
     /// Min static file range for each segment.
     /// This index is initialized on launch to keep track of the lowest, non-expired static file
     /// per segment.
@@ -285,6 +288,7 @@ impl<N: NodePrimitives> StaticFileProviderInner<N> {
 
         let provider = Self {
             map: Default::default(),
+            history_reads: Default::default(),
             writers: Default::default(),
             static_files_min_block: Default::default(),
             earliest_history_height: Default::default(),
@@ -328,6 +332,55 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             Arc::try_unwrap(self.0).expect("should be called when initializing only");
         provider.metrics = Some(Arc::new(StaticFileProviderMetrics::default()));
         Self(Arc::new(provider))
+    }
+
+    /// Pins static files before capturing the corresponding database snapshot.
+    /// Returns immediately with an error while storage maintenance has closed admission.
+    pub fn read_lease(&self) -> ProviderResult<StaticFileReadLease> {
+        self.history_reads.read_lease()
+    }
+
+    /// Stops admitting state reads, then waits for old views and history collection to drain.
+    ///
+    /// Call on the blocking writer thread before a staged pipeline or in-place unwind. Normal
+    /// append and history pruning must not acquire this guard.
+    pub fn begin_maintenance(&self) -> StaticFileMaintenanceGuard {
+        self.history_reads.begin_maintenance()
+    }
+
+    /// Retires changeset files below committed, exclusive history-pruning horizons.
+    ///
+    /// Call only after the corresponding database commit succeeds. On startup the same call
+    /// reconstructs deferred collection from the persisted prune checkpoints.
+    pub fn retire_history_after_commit(
+        &self,
+        account_before: Option<BlockNumber>,
+        storage_before: Option<BlockNumber>,
+    ) {
+        self.history_reads.retire_after_commit(account_before, storage_before);
+    }
+
+    /// Reclaims retired history without waiting for any reader.
+    ///
+    /// Must run on the serialized static-file writer, outside any active jar writer borrow.
+    pub fn collect_retired_history(&self) -> ProviderResult<()> {
+        let Some(_collection) = self.history_reads.collection.try_lock() else { return Ok(()) };
+        let retired = self.history_reads.ready_history();
+        // An old reader can hold several pruning rounds. Reclaim each segment once at the
+        // newest safe horizon instead of rescanning the directory for every round.
+        for segment in [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+        {
+            if let Some(before) = retired
+                .iter()
+                .filter(|retired| retired.segment == segment)
+                .map(|retired| retired.before)
+                .max()
+            {
+                self.delete_segment_below_block(segment, before)?;
+            }
+        }
+        self.history_reads.collected(retired.len());
+        Ok(())
     }
 
     /// Reports metrics for the static files.
@@ -438,7 +491,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
 
     /// Given a segment and block range it removes the cached provider from the map.
     ///
-    /// CAUTION: cached provider should be dropped before calling this or IT WILL deadlock.
+    /// Existing providers retain their own handle to the jar.
     pub fn remove_cached_provider(
         &self,
         segment: StaticFileSegment,
@@ -506,30 +559,23 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             return Ok(())
         }
 
-        let highest_block = self.get_highest_static_file_block(segment);
-
-        loop {
-            // `get_lowest_static_file_block` returns the *end* of the lowest jar's block range, so
-            // the jar is fully below the horizon only while that end is still `< block`.
-            let Some(range_end) = self.get_lowest_static_file_block(segment) else { return Ok(()) };
-
-            // Stop once the lowest jar reaches the horizon, and never delete the highest jar.
-            if range_end >= block || Some(range_end) == highest_block {
-                return Ok(())
+        // Discover jars before taking metadata locks. Deletion updates only the affected indexes,
+        // so collecting old history never clears live readers' cached providers.
+        let mut files = iter_static_files(&self.path).map_err(ProviderError::other)?;
+        let Some(ranges) = files.remove(&segment) else { return Ok(()) };
+        for pair in ranges.windows(2) {
+            let range = pair[0].0;
+            if range.end() >= block {
+                break
             }
-
-            debug!(
-                target: "provider::static_file",
-                ?segment,
-                ?range_end,
-                "Deleting static file below block"
-            );
-
-            // Wipe the jar; this updates the index and advances the lowest tracked block height.
-            self.delete_jar(segment, range_end).inspect_err(|err| {
-                warn!(target: "provider::static_file", ?segment, %range_end, ?err, "Failed to delete static file below block")
-            })?;
+            self.delete_jar_files(segment, range.end())?;
+            self.static_files_min_block.write().insert(segment, pair[1].0);
+            if let Some(index) = self.static_files_tx_index.write().get_mut(&segment) {
+                let fixed_range = self.find_fixed_range(range.end());
+                index.retain(|_, block_range| block_range.start() != fixed_range.start());
+            }
         }
+        Ok(())
     }
 
     /// Given a segment and block, it deletes the jar and all files from the respective block range.
@@ -538,21 +584,23 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
     ///
     /// This will re-initialize the index after deletion, so all files are tracked.
     pub fn delete_jar(&self, segment: StaticFileSegment, block: BlockNumber) -> ProviderResult<()> {
+        self.delete_jar_files(segment, block)?;
+        self.initialize_index()
+    }
+
+    fn delete_jar_files(
+        &self,
+        segment: StaticFileSegment,
+        block: BlockNumber,
+    ) -> ProviderResult<()> {
         let fixed_block_range = self.find_fixed_range(block);
         let key = (fixed_block_range.end(), segment);
-        let jar = if let Some((_, jar)) = self.map.remove(&key) {
-            jar.jar
-        } else {
-            let file = self.path.join(segment.filename(&fixed_block_range));
-            debug!(
-                target: "provider::static_file",
-                ?file,
-                ?fixed_block_range,
-                ?block,
-                "Loading static file jar for deletion"
-            );
-            NippyJar::<SegmentHeader>::load(&file).map_err(ProviderError::other)?
-        };
+        // Drop removed handles after releasing the map lock. Existing readers own an Arc and do
+        // not hold a DashMap guard while doing file I/O.
+        let cached = self.map.remove(&key);
+        drop(cached);
+        let file = self.path.join(segment.filename(&fixed_block_range));
+        let jar = NippyJar::<SegmentHeader>::load(&file).map_err(ProviderError::other)?;
 
         // Deleting the file invalidates any cached writer for this segment; drop it so a
         // later `latest_writer` reopens fresh state instead of stale block/offset tracking.
@@ -567,8 +615,6 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         }
 
         jar.delete().map_err(ProviderError::other)?;
-
-        self.initialize_index()?;
 
         Ok(())
     }
@@ -587,12 +633,15 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         trace!(target: "provider::static_file", ?segment, ?fixed_block_range, "Getting provider");
         let mut provider: StaticFileJarProvider<'_, N> = if let Some(jar) = self.map.get(&key) {
             trace!(target: "provider::static_file", ?segment, ?fixed_block_range, "Jar found in cache");
-            jar.into()
+            Arc::clone(jar.value()).into()
         } else {
             trace!(target: "provider::static_file", ?segment, ?fixed_block_range, "Creating jar from scratch");
             let path = self.path.join(segment.filename(fixed_block_range));
             let jar = NippyJar::load(&path).map_err(ProviderError::other)?;
-            self.map.entry(key).insert(LoadedJar::new(jar)?).downgrade().into()
+            let loaded = Arc::new(LoadedJar::new(jar)?);
+            // A concurrent reader may have cached this jar while we performed I/O.
+            let loaded = self.map.entry(key).or_insert(loaded).clone();
+            loaded.into()
         };
 
         if let Some(metrics) = &self.metrics {
@@ -653,69 +702,84 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         segment: StaticFileSegment,
         segment_max_block: Option<BlockNumber>,
     ) -> ProviderResult<()> {
-        let mut max_block = self.static_files_max_block.write();
-        let mut tx_index = self.static_files_tx_index.write();
-
-        match segment_max_block {
-            Some(segment_max_block) => {
-                // Update the max block for the segment
-                max_block.insert(segment, segment_max_block);
-                let fixed_range = self.find_fixed_range(segment_max_block);
-
+        // Opening the jar, its mmap and its sidecar can block on disk. Prepare them before
+        // publishing the small in-memory index update used by concurrent readers.
+        let loaded = segment_max_block
+            .map(|block| {
+                let fixed_range = self.find_fixed_range(block);
                 let jar = NippyJar::<SegmentHeader>::load(
                     &self.path.join(segment.filename(&fixed_range)),
                 )
                 .map_err(ProviderError::other)?;
+                LoadedJar::new(jar).map(Arc::new)
+            })
+            .transpose()?;
 
-                // Updates the tx index by first removing all entries which have a higher
-                // block_start than our current static file.
-                if let Some(tx_range) = jar.user_header().tx_range() {
-                    let tx_end = tx_range.end();
-
-                    // Current block range has the same block start as `fixed_range``, but block end
-                    // might be different if we are still filling this static file.
-                    if let Some(current_block_range) = jar.user_header().block_range() {
-                        // Considering that `update_index` is called when we either append/truncate,
-                        // we are sure that we are handling the latest data
-                        // points.
-                        //
-                        // Here we remove every entry of the index that has a block start higher or
-                        // equal than our current one. This is important in the case
-                        // that we prune a lot of rows resulting in a file (and thus
-                        // a higher block range) deletion.
-                        tx_index
+        match (segment_max_block, loaded) {
+            (Some(segment_max_block), Some(jar)) => {
+                let fixed_range = self.find_fixed_range(segment_max_block);
+                {
+                    let mut min_block = self.static_files_min_block.write();
+                    let mut max_block = self.static_files_max_block.write();
+                    let mut tx_index = self.static_files_tx_index.write();
+                    max_block.insert(segment, segment_max_block);
+                    if let Some(range) = jar.user_header().block_range() {
+                        min_block
                             .entry(segment)
-                            .and_modify(|index| {
-                                index.retain(|_, block_range| {
-                                    block_range.start() < fixed_range.start()
-                                });
-                                index.insert(tx_end, current_block_range);
+                            .and_modify(|first| {
+                                if first.start() >= fixed_range.start() {
+                                    *first = range;
+                                }
                             })
-                            .or_insert_with(|| BTreeMap::from([(tx_end, current_block_range)]));
+                            .or_insert(range);
                     }
-                } else if segment.is_tx_based() {
-                    // The unwinded file has no more transactions/receipts. However, the highest
-                    // block is within this files' block range. We only retain
-                    // entries with block ranges before the current one.
-                    tx_index.entry(segment).and_modify(|index| {
-                        index.retain(|_, block_range| block_range.start() < fixed_range.start());
-                    });
 
-                    // If the index is empty, just remove it.
-                    if tx_index.get(&segment).is_some_and(|index| index.is_empty()) {
-                        tx_index.remove(&segment);
+                    // Appends and truncations replace the current range and every later range.
+                    if let Some(tx_range) = jar.user_header().tx_range() {
+                        let tx_end = tx_range.end();
+                        if let Some(current_block_range) = jar.user_header().block_range() {
+                            tx_index
+                                .entry(segment)
+                                .and_modify(|index| {
+                                    index.retain(|_, block_range| {
+                                        block_range.start() < fixed_range.start()
+                                    });
+                                    index.insert(tx_end, current_block_range);
+                                })
+                                .or_insert_with(|| BTreeMap::from([(tx_end, current_block_range)]));
+                        }
+                    } else if segment.is_tx_based() {
+                        tx_index.entry(segment).and_modify(|index| {
+                            index
+                                .retain(|_, block_range| block_range.start() < fixed_range.start());
+                        });
+                        if tx_index.get(&segment).is_some_and(|index| index.is_empty()) {
+                            tx_index.remove(&segment);
+                        }
                     }
                 }
 
-                // Update the cached provider.
-                self.map.insert((fixed_range.end(), segment), LoadedJar::new(jar)?);
-
-                // Delete any cached provider that no longer has an associated jar.
-                self.map.retain(|(end, seg), _| !(*seg == segment && *end > fixed_range.end()));
+                // Readers clone an Arc, so neither cache changes nor reader I/O hold index locks.
+                let previous = self.map.insert((fixed_range.end(), segment), jar);
+                drop(previous);
+                let removed = self
+                    .map
+                    .iter()
+                    .filter(|entry| {
+                        let (end, seg) = entry.key();
+                        *seg == segment && *end > fixed_range.end()
+                    })
+                    .map(|entry| *entry.key())
+                    .collect::<Vec<_>>();
+                for key in removed {
+                    let previous = self.map.remove(&key);
+                    drop(previous);
+                }
             }
-            None => {
-                tx_index.remove(&segment);
-                max_block.remove(&segment);
+            _ => {
+                self.static_files_min_block.write().remove(&segment);
+                self.static_files_max_block.write().remove(&segment);
+                self.static_files_tx_index.write().remove(&segment);
             }
         };
 
@@ -724,13 +788,9 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
 
     /// Initializes the inner transaction and block index
     pub fn initialize_index(&self) -> ProviderResult<()> {
-        let mut min_block = self.static_files_min_block.write();
-        let mut max_block = self.static_files_max_block.write();
-        let mut tx_index = self.static_files_tx_index.write();
-
-        min_block.clear();
-        max_block.clear();
-        tx_index.clear();
+        let mut min_block = HashMap::new();
+        let mut max_block = HashMap::new();
+        let mut tx_index = SegmentRanges::new();
 
         for (segment, ranges) in iter_static_files(&self.path).map_err(ProviderError::other)? {
             // Update first and last block for each segment
@@ -758,14 +818,27 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             }
         }
 
-        // If this is a re-initialization, we need to clear this as well
-        self.map.clear();
-
         // initialize the expired history height to the lowest static file block
         if let Some(lowest_range) = min_block.get(&StaticFileSegment::Transactions) {
             // the earliest height is the lowest available block number
             self.earliest_history_height
                 .store(lowest_range.start(), std::sync::atomic::Ordering::Relaxed);
+        }
+
+        {
+            let mut current_min = self.static_files_min_block.write();
+            let mut current_max = self.static_files_max_block.write();
+            let mut current_tx = self.static_files_tx_index.write();
+            *current_min = min_block;
+            *current_max = max_block;
+            *current_tx = tx_index;
+        }
+
+        // Dispose file handles outside metadata and cache locks.
+        let cached = self.map.iter().map(|entry| *entry.key()).collect::<Vec<_>>();
+        for key in cached {
+            let previous = self.map.remove(&key);
+            drop(previous);
         }
 
         Ok(())
@@ -1342,10 +1415,6 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
                             };
                             return Err(err)
                         }
-                        // There is a very small chance of hitting a deadlock if two consecutive
-                        // static files share the same bucket in the
-                        // internal dashmap and we don't drop the current provider
-                        // before requesting the next one.
                         drop(cursor);
                         drop(provider);
                         provider = get_provider(number)?;

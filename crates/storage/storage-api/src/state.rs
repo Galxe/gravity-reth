@@ -144,6 +144,15 @@ pub trait TryIntoHistoricalStateProvider {
 /// to be used, since block `n` was executed on its parent block's state.
 #[auto_impl(&, Arc, Box)]
 pub trait StateProviderFactory: BlockIdReader + Send + Sync {
+    /// Captures one state read context, reused by all reads in a computation.
+    #[auto_impl(keep_default_for(&, Arc, Box))]
+    fn read_context(&self) -> ProviderResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        Ok(self.clone())
+    }
+
     /// Storage provider for latest block.
     fn latest(&self) -> ProviderResult<StateProviderBox>;
 

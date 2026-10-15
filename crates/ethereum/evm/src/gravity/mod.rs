@@ -25,7 +25,7 @@ pub use executor::{
     ChainBlock, GravityBlockExecutionCtx, GravityBlockExecutor, GravityBlockExecutorFactory,
 };
 pub use randomness::HeaderRandomnessProvider;
-pub use reader::GravityChainReader;
+pub use reader::{GravityChainReader, ProviderChainReader};
 
 use crate::{EthBlockAssembler, EthEvmConfig, RethReceiptBuilder};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -89,6 +89,24 @@ impl GravityEvmConfig {
 }
 
 impl ConfigureEvm for GravityEvmConfig {
+    fn with_read_provider<P>(&self, provider: P) -> Self
+    where
+        P: reth_storage_api::HeaderProvider<Header = Header>
+            + reth_storage_api::ReceiptProvider<Receipt = reth_ethereum_primitives::Receipt>
+            + reth_storage_api::BlockHashReader
+            + reth_storage_api::StateProviderFactory
+            + Send
+            + Sync
+            + 'static,
+    {
+        let mut config = self.clone();
+        config.executor_factory = GravityBlockExecutorFactory::new(
+            self.chain_spec().clone(),
+            Arc::new(ProviderChainReader(provider)),
+        );
+        config
+    }
+
     type Primitives = EthPrimitives;
     type Error = Infallible;
     type NextBlockEnvCtx = NextBlockEnvAttributes;

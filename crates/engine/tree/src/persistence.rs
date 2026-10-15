@@ -23,7 +23,7 @@ use reth_tasks::spawn_os_thread;
 use revm::database::OriginalValuesKnown;
 use std::{
     sync::{
-        mpsc::{Receiver, SendError, Sender},
+        mpsc::{Receiver, RecvTimeoutError, SendError, Sender},
         Arc,
     },
     thread::JoinHandle,
@@ -110,8 +110,23 @@ where
     /// This is the main loop, that will listen to database events and perform the requested
     /// database actions
     pub fn run(mut self) -> Result<(), PersistenceError> {
-        // If the receiver errors then senders have disconnected, so the loop should then end.
-        while let Ok(action) = self.incoming.recv() {
+        if let Err(err) = self.provider.on_prune_commit() {
+            tracing::warn!(target: "engine::persistence", %err, "History file reclamation deferred");
+        }
+        let mut last_collection = Instant::now();
+        loop {
+            // Retry even when messages keep arriving without advancing the prune checkpoint.
+            if last_collection.elapsed() >= Duration::from_secs(1) {
+                if let Err(err) = self.provider.on_prune_commit() {
+                    tracing::warn!(target: "engine::persistence", %err, "History file reclamation deferred");
+                }
+                last_collection = Instant::now();
+            }
+            let action = match self.incoming.recv_timeout(Duration::from_secs(1)) {
+                Ok(action) => action,
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => continue,
+            };
             match action {
                 PersistenceAction::RemoveBlocksAbove(new_tip_num, sender) => {
                     let last_block = self.on_remove_blocks_above(new_tip_num)?;
@@ -152,8 +167,9 @@ where
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
         let start_time = Instant::now();
-        let provider_rw = self.provider.database_provider_rw()?;
         let sf_provider = self.provider.static_file_provider();
+        let _maintenance = sf_provider.begin_maintenance();
+        let provider_rw = self.provider.database_provider_rw()?;
 
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
         UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(new_tip_num)?;
@@ -243,6 +259,9 @@ where
             let provider_rw = self.provider.database_provider_rw()?;
             let _ = self.pruner.run_with_provider(&provider_rw, block_number)?;
             provider_rw.commit()?;
+            if let Err(err) = self.provider.on_prune_commit() {
+                tracing::warn!(target: "engine::persistence", %err, "History file reclamation deferred");
+            }
             debug!(target: "engine::persistence", tip=?block_number, "Finished pruning after saving blocks");
             self.metrics.prune_before_duration_seconds.record(prune_start.elapsed());
         }
@@ -640,6 +659,55 @@ mod tests {
             pruner,
             unbounded_channel().0,
         )
+    }
+
+    #[test]
+    fn history_collection_progresses_while_persistence_messages_keep_arriving() {
+        use reth_db::models::AccountBeforeTx;
+        use reth_provider::{providers::StaticFileProvider, ChainSpecProvider, StaticFileSegment};
+
+        let factory = create_test_provider_factory();
+        let sf = StaticFileProvider::read_write(factory.static_file_provider().path())
+            .unwrap()
+            .with_custom_blocks_per_file(5);
+        {
+            let mut writer = sf.latest_writer(StaticFileSegment::AccountChangeSets).unwrap();
+            for block in 0..=12 {
+                writer
+                    .append_account_changeset(
+                        vec![AccountBeforeTx { address: Address::ZERO, info: None }],
+                        block,
+                    )
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        let provider =
+            ProviderFactory::new(factory.db_ref().clone(), factory.chain_spec(), sf.clone());
+        provider.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+        let mut service = persistence_service(provider);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        service.incoming = receiver;
+        let old = sf.read_lease().unwrap();
+        sf.retire_history_after_commit(Some(10), None);
+        let worker = std::thread::spawn(move || service.run());
+        let (completed, completion) = crossbeam_channel::bounded(1);
+        sender.send(PersistenceAction::SaveBlocks(vec![], completed)).unwrap();
+        completion.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(old);
+
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) &&
+            sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets) == Some(4)
+        {
+            sender.send(PersistenceAction::SaveSafeBlock(12)).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(sender);
+        worker.join().unwrap().unwrap();
+        assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(12));
     }
 
     fn state_block(

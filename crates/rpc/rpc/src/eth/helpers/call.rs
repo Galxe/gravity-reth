@@ -14,6 +14,12 @@ where
     EthApiError: FromEvmError<N::Evm>,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
+    fn with_execution_provider(&self) -> Self {
+        let mut execution = self.clone();
+        execution.use_node_provider = true;
+        execution.read_context = None;
+        execution
+    }
 }
 
 impl<N, Rpc> Call for EthApi<N, Rpc>

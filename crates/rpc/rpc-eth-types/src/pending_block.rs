@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Instant};
 
 use crate::block::BlockAndReceipts;
 use alloy_consensus::BlockHeader;
-use alloy_eips::{BlockId, BlockNumberOrTag};
+use alloy_eips::BlockId;
 use alloy_primitives::{BlockHash, TxHash, B256};
 use derive_more::Constructor;
 use reth_chain_state::{
@@ -58,11 +58,11 @@ impl<B: Block, R> PendingBlockEnvOrigin<B, R> {
 
     /// Returns the [`BlockId`] that represents the state of the block.
     ///
-    /// If this is the actual pending block, the state is the "Pending" tag, otherwise we can safely
-    /// identify the block by its hash (latest block).
+    /// The hash fixes the state to the captured pending block or its latest canonical parent,
+    /// even if the pending block changes before the state is loaded.
     pub fn state_block_id(&self) -> BlockId {
         match self {
-            Self::ActualPending(_, _) => BlockNumberOrTag::Pending.into(),
+            Self::ActualPending(block, _) => BlockId::Hash(block.hash().into()),
             Self::DerivedFromLatest(latest) => BlockId::Hash(latest.hash().into()),
         }
     }

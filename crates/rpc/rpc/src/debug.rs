@@ -113,12 +113,13 @@ where
     /// block-level steps (see [`ConfigureEvm::chain_block_mode`]).
     async fn trace_block(
         &self,
+        eth_api: Eth,
         block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
         evm_env: EvmEnvFor<Eth::Evm>,
         opts: GethDebugTracingOptions,
         chain_block: bool,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
-        self.eth_api()
+        eth_api
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
                 let mut results = Vec::with_capacity(block.body().transactions().len());
 
@@ -185,12 +186,12 @@ where
         rlp_block: Bytes,
         opts: GethDebugTracingOptions,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
+        let eth_api = self.eth_api().read_context().await?;
         let block: ProviderBlock<Eth::Provider> = Decodable::decode(&mut rlp_block.as_ref())
             .map_err(BlockError::RlpDecodeRawBlock)
             .map_err(Eth::Error::from_eth_err)?;
 
-        let evm_env = self
-            .eth_api()
+        let evm_env = eth_api
             .evm_config()
             .evm_env(block.header())
             .map_err(RethError::other)
@@ -205,8 +206,14 @@ where
             }
             .map_err(Eth::Error::from_eth_err)?;
 
-        self.trace_block(Arc::new(block.into_recovered_with_signers(senders)), evm_env, opts, false)
-            .await
+        self.trace_block(
+            eth_api,
+            Arc::new(block.into_recovered_with_signers(senders)),
+            evm_env,
+            opts,
+            false,
+        )
+        .await
     }
 
     /// Replays a block and returns the trace of each transaction.
@@ -215,14 +222,14 @@ where
         block_id: BlockId,
         opts: GethDebugTracingOptions,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
-        let block = self
-            .eth_api()
+        let eth_api = self.eth_api().read_context().await?;
+        let block = eth_api
             .recovered_block(block_id)
             .await?
             .ok_or(EthApiError::HeaderNotFound(block_id))?;
-        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+        let evm_env = eth_api.evm_env_for_header(block.sealed_block().sealed_header())?;
 
-        self.trace_block(block, evm_env, opts, true).await
+        self.trace_block(eth_api, block, evm_env, opts, true).await
     }
 
     /// Trace the transaction according to the provided options.
@@ -233,18 +240,19 @@ where
         tx_hash: B256,
         opts: GethDebugTracingOptions,
     ) -> Result<GethTrace, Eth::Error> {
-        let (transaction, block) = match self.eth_api().transaction_and_block(tx_hash).await? {
+        let eth_api = self.eth_api().read_context().await?;
+        let (transaction, block) = match eth_api.transaction_and_block(tx_hash).await? {
             None => return Err(EthApiError::TransactionNotFound.into()),
             Some(res) => res,
         };
-        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+        let evm_env = eth_api.evm_env_for_header(block.sealed_block().sealed_header())?;
 
         // we need to get the state of the parent block because we're essentially replaying the
         // block the transaction is included in
         let state_at: BlockId = block.parent_hash().into();
         let block_hash = block.hash();
 
-        self.eth_api()
+        eth_api
             .spawn_with_state_at_block(state_at, move |eth_api, mut db| {
                 let block_txs = block.transactions_recovered();
 
@@ -316,17 +324,12 @@ where
                 .await;
         }
 
-        let this = self.clone();
         self.eth_api()
-            .spawn_with_call_at(call, at, overrides, move |db, evm_env, tx_env| {
+            .spawn_with_call_at(call, at, overrides, move |eth_api, db, evm_env, tx_env| {
                 let mut inspector =
                     DebugInspector::new(tracing_options).map_err(Eth::Error::from_eth_err)?;
-                let res = this.eth_api().inspect(
-                    &mut *db,
-                    evm_env.clone(),
-                    tx_env.clone(),
-                    &mut inspector,
-                )?;
+                let res =
+                    eth_api.inspect(&mut *db, evm_env.clone(), tx_env.clone(), &mut inspector)?;
                 let trace = inspector
                     .get_result(None, &tx_env, &evm_env.block_env, &res, db)
                     .map_err(Eth::Error::from_eth_err)?;
@@ -346,9 +349,9 @@ where
         tracing_options: GethDebugTracingOptions,
         overrides: EvmOverrides,
     ) -> Result<GethTrace, Eth::Error> {
+        let eth_api = self.eth_api().read_context().await?;
         // Get the target block to check transaction count
-        let block = self
-            .eth_api()
+        let block = eth_api
             .recovered_block(block_id)
             .await?
             .ok_or(EthApiError::HeaderNotFound(block_id))?;
@@ -363,12 +366,12 @@ where
             .into())
         }
 
-        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+        let evm_env = eth_api.evm_env_for_header(block.sealed_block().sealed_header())?;
 
         // execute after the parent block, replaying `tx_index` transactions
         let state_at = block.parent_hash();
 
-        self.eth_api()
+        eth_api
             .spawn_with_state_at_block(state_at, move |eth_api, mut db| {
                 // 1. apply pre-execution changes
                 eth_api.apply_pre_execution_changes(&block, &mut db)?;
@@ -407,6 +410,7 @@ where
         state_context: Option<StateContext>,
         opts: Option<GethDebugTracingCallOptions>,
     ) -> Result<Vec<Vec<GethTrace>>, Eth::Error> {
+        let eth_api = self.eth_api().read_context().await?;
         if bundles.is_empty() {
             return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into())
         }
@@ -415,13 +419,11 @@ where
         let transaction_index = transaction_index.unwrap_or_default();
 
         let target_block = block_number.unwrap_or_default();
-        let block = self
-            .eth_api()
+        let block = eth_api
             .recovered_block(target_block)
             .await?
             .ok_or(EthApiError::HeaderNotFound(target_block))?;
-        let mut evm_env =
-            self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+        let mut evm_env = eth_api.evm_env_for_header(block.sealed_block().sealed_header())?;
 
         let opts = opts.unwrap_or_default();
         let GethDebugTracingCallOptions { tracing_options, mut state_overrides, .. } = opts;
@@ -442,7 +444,7 @@ where
             replay_block_txs = false;
         }
 
-        self.eth_api()
+        eth_api
             .spawn_with_state_at_block(at, move |eth_api, mut db| {
                 // the outer vec for the bundles
                 let mut all_bundles = Vec::with_capacity(bundles.len());
@@ -595,8 +597,8 @@ where
         F: FnOnce(&mut StateCacheDb) -> Result<R, Eth::Error> + Send + 'static,
         R: Send + 'static,
     {
-        let block = self
-            .eth_api()
+        let eth_api = self.eth_api().read_context().await?;
+        let block = eth_api
             .recovered_block(block_id)
             .await?
             .ok_or(EthApiError::HeaderNotFound(block_id))?;
@@ -609,7 +611,7 @@ where
             .into())
         }
 
-        self.eth_api()
+        eth_api
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
                 eth_api.apply_pre_execution_changes(&block, &mut db)?;
                 let mut executor = eth_api
@@ -1171,7 +1173,10 @@ where
             .to_rpc_result()?;
 
         let opts = opts.map(|o| o.tracing_options).unwrap_or_default();
-        self.trace_block(entry.block.clone(), evm_env, opts, false).await.map_err(Into::into)
+        let eth_api = self.eth_api().read_context().await.map_err(Into::into)?;
+        self.trace_block(eth_api, entry.block.clone(), evm_env, opts, false)
+            .await
+            .map_err(Into::into)
     }
 
     /// Handler for `debug_setFailpoint`

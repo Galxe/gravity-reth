@@ -123,8 +123,10 @@ impl<N: NodePrimitives> InMemoryState<N> {
 
     /// Returns the current chain head state.
     pub(crate) fn head_state(&self) -> Option<Arc<BlockState<N>>> {
-        let hash = *self.numbers.read().last_key_value()?.1;
-        self.state_by_hash(hash)
+        // Match update/eviction lock order so the head cannot disappear between the lookups.
+        let numbers = self.numbers.read();
+        let blocks = self.blocks.read();
+        blocks.get(numbers.last_key_value()?.1).cloned()
     }
 
     /// Returns the pending state corresponding to the current head plus one,

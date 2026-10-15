@@ -3,7 +3,7 @@ use crate::{
     transaction::{DbTx, DbTxMut},
     DatabaseError,
 };
-use std::{fmt::Debug, sync::Arc};
+use std::{any::Any, fmt::Debug, sync::Arc};
 
 /// Main Database trait that can open read-only and read-write transactions.
 ///
@@ -17,6 +17,25 @@ pub trait Database: Send + Sync + Debug {
     /// Create read only transaction.
     #[track_caller]
     fn tx(&self) -> Result<Self::TX, DatabaseError>;
+
+    /// Capture a state snapshot that can be shared by multiple read transactions.
+    ///
+    /// Backends without shareable snapshots return `None`. Separately sharded trie databases
+    /// and external static files are not covered by this view.
+    fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+        Ok(None)
+    }
+
+    /// Open a read transaction using a captured state snapshot, or capture a new snapshot.
+    ///
+    /// Backends with shareable views reject a view belonging to another database. Backends whose
+    /// ordinary read transactions already provide snapshots can use the default.
+    fn tx_with_state_read_view(
+        &self,
+        _view: Option<Arc<dyn DatabaseReadView>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        self.tx()
+    }
 
     /// Create read write transaction only possible if database is open with write access.
     #[track_caller]
@@ -51,12 +70,29 @@ pub trait Database: Send + Sync + Debug {
     }
 }
 
+/// An immutable, backend-specific state snapshot shared by read transactions.
+pub trait DatabaseReadView: Any + Debug + Send + Sync {
+    /// Backend-specific view identity, used to reject a view from another database.
+    fn as_any(&self) -> &dyn Any;
+}
+
 impl<DB: Database> Database for Arc<DB> {
     type TX = <DB as Database>::TX;
     type TXMut = <DB as Database>::TXMut;
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
         <DB as Database>::tx(self)
+    }
+
+    fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+        <DB as Database>::state_read_view(self)
+    }
+
+    fn tx_with_state_read_view(
+        &self,
+        view: Option<Arc<dyn DatabaseReadView>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        <DB as Database>::tx_with_state_read_view(self, view)
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
@@ -70,6 +106,17 @@ impl<DB: Database> Database for &DB {
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
         <DB as Database>::tx(self)
+    }
+
+    fn state_read_view(&self) -> Result<Option<Arc<dyn DatabaseReadView>>, DatabaseError> {
+        <DB as Database>::state_read_view(self)
+    }
+
+    fn tx_with_state_read_view(
+        &self,
+        view: Option<Arc<dyn DatabaseReadView>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        <DB as Database>::tx_with_state_read_view(self, view)
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {

@@ -51,6 +51,17 @@ pub struct ConsistentProvider<N: ProviderNodeTypes> {
     head_block: Option<Arc<BlockState<N::Primitives>>>,
     /// In-memory canonical state. This is not a snapshot, and can change! Use with caution.
     canonical_in_memory_state: CanonicalInMemoryState<N::Primitives>,
+    read_memory: Option<Arc<ReadMemory<N::Primitives>>>,
+}
+
+/// Memory retained for the lifetime of an external state computation.
+#[derive(Debug)]
+pub(crate) struct ReadMemory<N: reth_primitives_traits::NodePrimitives> {
+    pub(crate) head: Option<Arc<BlockState<N>>>,
+    pub(crate) best: BlockNumHash,
+    pub(crate) pending: Option<BlockState<N>>,
+    pub(crate) safe: Option<BlockNumHash>,
+    pub(crate) finalized: Option<BlockNumHash>,
 }
 
 impl<N: ProviderNodeTypes> ConsistentProvider<N> {
@@ -72,7 +83,54 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         // entirely. Resulting in gaps on the range.
         let head_block = state.head_state();
         let storage_provider = storage_provider_factory.database_provider_ro()?;
-        Ok(Self { storage_provider, head_block, canonical_in_memory_state: state })
+        Ok(Self {
+            storage_provider,
+            head_block,
+            canonical_in_memory_state: state,
+            read_memory: None,
+        })
+    }
+
+    pub(crate) fn with_read_context(
+        factory: ProviderFactory<N>,
+        state: CanonicalInMemoryState<N::Primitives>,
+        memory: Arc<ReadMemory<N::Primitives>>,
+    ) -> ProviderResult<Self> {
+        Ok(Self {
+            storage_provider: factory.provider()?,
+            head_block: memory.head.clone(),
+            canonical_in_memory_state: state,
+            read_memory: Some(memory),
+        })
+    }
+
+    pub(crate) fn into_latest_state_provider(self) -> ProviderResult<Box<dyn StateProvider>> {
+        let hash = match &self.read_memory {
+            Some(memory) => memory.best.hash,
+            None => self.chain_info()?.best_hash,
+        };
+        self.into_state_provider_at_block_hash(hash)
+    }
+
+    pub(crate) fn into_pending_state_provider(
+        self,
+        hash: Option<B256>,
+    ) -> ProviderResult<Option<Box<dyn StateProvider>>> {
+        let pending = self.read_memory.as_ref().and_then(|memory| memory.pending.clone());
+        let Some(pending) =
+            pending.filter(|pending| hash.is_none_or(|hash| hash == pending.hash()))
+        else {
+            return Ok(None)
+        };
+        let base = self.storage_provider.try_into_history_at_block(pending.anchor().number)?;
+        Ok(Some(Box::new(pending.state_provider(base))))
+    }
+
+    fn pending_state(&self) -> Option<BlockState<N::Primitives>> {
+        match &self.read_memory {
+            Some(memory) => memory.pending.clone(),
+            None => self.canonical_in_memory_state.pending_state(),
+        }
     }
 
     // Helper function to convert range bounds
@@ -102,6 +160,9 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
     /// Storage provider for latest block
     fn latest_ref<'a>(&'a self) -> ProviderResult<Box<dyn StateProvider + 'a>> {
         trace!(target: "providers::blockchain", "Getting latest block state provider");
+        if let Some(memory) = &self.read_memory {
+            return self.history_by_block_hash_ref(memory.best.hash)
+        }
 
         // use latest state provider if the head state exists
         if let Some(state) = &self.head_block {
@@ -596,11 +657,24 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         self,
         block_hash: BlockHash,
     ) -> ProviderResult<Box<dyn StateProvider>> {
-        let Self { storage_provider, head_block, .. } = self;
+        let Self { storage_provider, head_block, read_memory, .. } = self;
         let into_history_at_block_hash = |block_hash| -> ProviderResult<Box<dyn StateProvider>> {
             let block_number = storage_provider
                 .block_number(block_hash)?
                 .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
+            if storage_provider.read_bounds().is_some() &&
+                storage_provider.block_hash(block_number)? != Some(block_hash)
+            {
+                return Err(ProviderError::BlockHashNotFound(block_hash))
+            }
+            if read_memory.is_some() &&
+                head_block
+                    .as_ref()
+                    .and_then(|head| head.block_on_chain(block_number.into()))
+                    .is_some_and(|block| block.hash() != block_hash)
+            {
+                return Err(ProviderError::BlockHashNotFound(block_hash))
+            }
             storage_provider.try_into_history_at_block(block_number)
         };
         if let Some(Some(block_state)) =
@@ -688,9 +762,7 @@ impl<N: ProviderNodeTypes> HeaderProvider for ConsistentProvider<N> {
             // have zero difficulty. This means we can use the total difficulty for the last
             // finalized block number if present (so that we are not affected by reorgs), if not the
             // last number in the database will be used.
-            if let Some(last_finalized_num_hash) =
-                self.canonical_in_memory_state.get_finalized_num_hash()
-            {
+            if let Some(last_finalized_num_hash) = self.finalized_block_num_hash()? {
                 last_finalized_num_hash.number
             } else {
                 self.last_block_number()?
@@ -787,6 +859,9 @@ impl<N: ProviderNodeTypes> BlockNumReader for ConsistentProvider<N> {
     }
 
     fn best_block_number(&self) -> ProviderResult<BlockNumber> {
+        if let Some(memory) = &self.read_memory {
+            return Ok(memory.best.number)
+        }
         self.head_block.as_ref().map(|b| Ok(b.number())).unwrap_or_else(|| self.last_block_number())
     }
 
@@ -804,16 +879,53 @@ impl<N: ProviderNodeTypes> BlockNumReader for ConsistentProvider<N> {
 }
 
 impl<N: ProviderNodeTypes> BlockIdReader for ConsistentProvider<N> {
+    fn block_hash_for_id(&self, block_id: BlockId) -> ProviderResult<Option<B256>> {
+        if let (Some(memory), BlockId::Hash(hash)) = (&self.read_memory, block_id) {
+            if !hash.require_canonical.unwrap_or(false) &&
+                memory.pending.as_ref().is_some_and(|pending| pending.hash() == hash.block_hash)
+            {
+                return Ok(Some(hash.block_hash))
+            }
+            let Some(number) = self.block_number(hash.block_hash)? else { return Ok(None) };
+            return Ok((number <= memory.best.number &&
+                self.block_hash(number)? == Some(hash.block_hash))
+            .then_some(hash.block_hash))
+        }
+        match block_id {
+            BlockId::Hash(hash) => Ok(Some(hash.block_hash)),
+            BlockId::Number(BlockNumberOrTag::Pending) => {
+                Ok(self.pending_block_num_hash()?.map(|pending| pending.hash))
+            }
+            BlockId::Number(number) => self
+                .convert_block_number(number)?
+                .map(|number| self.block_hash(number))
+                .transpose()
+                .map(Option::flatten),
+        }
+    }
+
     fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        Ok(self.canonical_in_memory_state.pending_block_num_hash())
+        Ok(match &self.read_memory {
+            Some(memory) => memory
+                .pending
+                .as_ref()
+                .map(|pending| BlockNumHash::new(pending.number(), pending.hash())),
+            None => self.canonical_in_memory_state.pending_block_num_hash(),
+        })
     }
 
     fn safe_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        Ok(self.canonical_in_memory_state.get_safe_num_hash())
+        Ok(match &self.read_memory {
+            Some(memory) => memory.safe,
+            None => self.canonical_in_memory_state.get_safe_num_hash(),
+        })
     }
 
     fn finalized_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        Ok(self.canonical_in_memory_state.get_finalized_num_hash())
+        Ok(match &self.read_memory {
+            Some(memory) => memory.finalized,
+            None => self.canonical_in_memory_state.get_finalized_num_hash(),
+        })
     }
 }
 
@@ -837,10 +949,9 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
 
         if matches!(source, BlockSource::Pending | BlockSource::Any) {
             return Ok(self
-                .canonical_in_memory_state
-                .pending_block()
+                .pending_state()
                 .filter(|b| b.hash() == hash)
-                .map(|b| b.into_block()))
+                .map(|b| b.block_ref().recovered_block().clone_block()))
         }
 
         Ok(None)
@@ -855,13 +966,15 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
     }
 
     fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
-        Ok(self.canonical_in_memory_state.pending_recovered_block())
+        Ok(self.pending_state().map(|state| state.block_ref().recovered_block().clone()))
     }
 
     fn pending_block_and_receipts(
         &self,
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
-        Ok(self.canonical_in_memory_state.pending_block_and_receipts())
+        Ok(self.pending_state().map(|state| {
+            (state.block_ref().recovered_block().clone(), state.executed_block_receipts())
+        }))
     }
 
     /// Returns the block with senders with matching number or hash from database.
@@ -1155,7 +1268,6 @@ impl<N: ProviderNodeTypes> ReceiptProviderIdExt for ConsistentProvider<N> {
             }
             BlockId::Number(num_tag) => match num_tag {
                 BlockNumberOrTag::Pending => Ok(self
-                    .canonical_in_memory_state
                     .pending_state()
                     .map(|block_state| block_state.executed_block_receipts())),
                 _ => {
@@ -1269,6 +1381,9 @@ impl<N: ProviderNodeTypes> BlockReaderIdExt for ConsistentProvider<N> {
     }
 
     fn header_by_number_or_tag(&self, id: BlockNumberOrTag) -> ProviderResult<Option<HeaderTy<N>>> {
+        if self.read_memory.is_some() {
+            return Ok(self.sealed_header_by_number_or_tag(id)?.map(|header| header.unseal()))
+        }
         Ok(match id {
             BlockNumberOrTag::Latest => {
                 Some(self.canonical_in_memory_state.get_canonical_head().unseal())
@@ -1290,6 +1405,18 @@ impl<N: ProviderNodeTypes> BlockReaderIdExt for ConsistentProvider<N> {
         &self,
         id: BlockNumberOrTag,
     ) -> ProviderResult<Option<SealedHeader<HeaderTy<N>>>> {
+        if self.read_memory.is_some() {
+            if id.is_pending() {
+                return Ok(self
+                    .pending_state()
+                    .map(|state| state.block_ref().recovered_block().sealed_header().clone()))
+            }
+            return self
+                .convert_block_number(id)?
+                .map(|number| self.sealed_header(number))
+                .transpose()
+                .map(Option::flatten)
+        }
         match id {
             BlockNumberOrTag::Latest => {
                 Ok(Some(self.canonical_in_memory_state.get_canonical_head()))
@@ -1314,14 +1441,22 @@ impl<N: ProviderNodeTypes> BlockReaderIdExt for ConsistentProvider<N> {
     ) -> ProviderResult<Option<SealedHeader<HeaderTy<N>>>> {
         Ok(match id {
             BlockId::Number(num) => self.sealed_header_by_number_or_tag(num)?,
-            BlockId::Hash(hash) => self.header(&hash.block_hash)?.map(SealedHeader::seal_slow),
+            BlockId::Hash(_) => self.header_by_id(id)?.map(SealedHeader::seal_slow),
         })
     }
 
     fn header_by_id(&self, id: BlockId) -> ProviderResult<Option<HeaderTy<N>>> {
         Ok(match id {
             BlockId::Number(num) => self.header_by_number_or_tag(num)?,
-            BlockId::Hash(hash) => self.header(&hash.block_hash)?,
+            BlockId::Hash(hash) => {
+                if !hash.require_canonical.unwrap_or(false) &&
+                    let Some(pending) =
+                        self.pending_state().filter(|pending| pending.hash() == hash.block_hash)
+                {
+                    return Ok(Some(pending.block_ref().recovered_block().clone_header()))
+                }
+                self.header(&hash.block_hash)?
+            }
         })
     }
 }
