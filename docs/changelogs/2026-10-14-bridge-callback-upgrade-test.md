@@ -1,6 +1,6 @@
 # Bridge callback runtime upgrade test
 
-Primary record: [Mono result and Dev evidence](../../../mono-grav-bridge119/docs/changelogs/2026-10-14-bridge-callback-upgrade-test.md).
+Primary record: [Mono result and Dev evidence](https://github.com/Galxe/mono-grav/blob/codex/issue131-oracle-install-e2e/docs/changelogs/2026-10-14-bridge-callback-upgrade-test.md).
 
 ## 1. Scope and current state
 
@@ -70,7 +70,7 @@ all builds/tests/formatting on Gravity Dev.
 The approved temporary runtime/configuration transition and focused regression
 coverage are implemented, reviewed and committed locally. Dev checks above
 validate the owning paths; cross-repository acceptance is documented in the
-[primary Mono result](../../../mono-grav-bridge119/docs/changelogs/2026-10-14-bridge-callback-upgrade-test.md).
+[primary Mono result](https://github.com/Galxe/mono-grav/blob/codex/issue131-oracle-install-e2e/docs/changelogs/2026-10-14-bridge-callback-upgrade-test.md).
 Original Issue 131/PR branches and historical Gamma artifacts remain unchanged.
 
 ## 8. Publication boundary
