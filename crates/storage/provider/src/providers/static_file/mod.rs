@@ -1,9 +1,6 @@
 mod manager;
 pub use manager::{StaticFileAccess, StaticFileProvider, StaticFileWriter};
 
-mod lifetime;
-pub use lifetime::{StaticFileMaintenanceGuard, StaticFileReadLease};
-
 mod jar;
 pub use jar::StaticFileJarProvider;
 
@@ -17,7 +14,7 @@ use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use std::{io, ops::Deref, sync::Arc};
 
 /// Alias type for each specific `NippyJar`.
-type LoadedJarRef = Arc<LoadedJar>;
+type LoadedJarRef<'a> = dashmap::mapref::one::Ref<'a, (u64, StaticFileSegment), LoadedJar>;
 
 /// Helper type to reuse an associated static file mmap handle on created cursors.
 #[derive(Debug)]
@@ -693,7 +690,7 @@ mod changeset_tests {
         }
         assert_eq!(sf.get_highest_static_file_block(StaticFileSegment::AccountChangeSets), Some(1));
         assert_eq!(sf.account_block_changeset(1)?.len(), 2);
-        assert!(sf.account_block_changeset(3)?.is_empty());
+        assert!(sf.account_block_changeset(3).is_err());
         assert_eq!(sf.account_changesets_range(0..=3)?.len(), 2);
 
         Ok(())
@@ -719,7 +716,9 @@ mod changeset_tests {
             }
             writer.commit()?;
         }
-        // Verify that rebuilding the startup index agrees with the writer's index updates.
+        // The `min_block` index (which `get_lowest_static_file_block` reads) is only rebuilt by
+        // `initialize_index`, which a production provider runs at startup. Refresh it here so it
+        // reflects the jars we just wrote, mirroring a fresh provider over existing files.
         sf.initialize_index()?;
 
         // `get_lowest_static_file_block` returns the *end* of the lowest jar's range.
@@ -732,6 +731,8 @@ mod changeset_tests {
         // Horizon at block 10: jars [0..=4] and [5..=9] end below it and are reclaimed, while the
         // straddling jar [10..=12] still holds live blocks (>= 10) and must be kept whole.
         sf.delete_segment_below_block(StaticFileSegment::AccountChangeSets, 10)?;
+        assert!(sf.account_block_changeset(1).is_err());
+        assert!(sf.account_changesets_range(1..=12).is_err());
 
         assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(12));
         assert_eq!(
@@ -751,42 +752,6 @@ mod changeset_tests {
         );
         assert_eq!(sf.account_block_changeset(12)?.len(), 1);
 
-        Ok(())
-    }
-
-    #[test]
-    fn history_collection_preserves_old_views_without_waiting_for_new_views() -> eyre::Result<()> {
-        let (static_dir, _) = create_test_static_files_dir();
-        let sf = StaticFileProvider::<EthPrimitives>::read_write(&static_dir)?
-            .with_custom_blocks_per_file(5);
-        let address = Address::with_last_byte(1);
-        {
-            let mut writer = sf.latest_writer(StaticFileSegment::AccountChangeSets)?;
-            for block in 0..=12 {
-                writer.append_account_changeset(
-                    vec![AccountBeforeTx { address, info: None }],
-                    block,
-                )?;
-            }
-            writer.commit()?;
-        }
-
-        let writer_side = sf.clone();
-        let old_view = sf.read_lease()?;
-        writer_side.retire_history_after_commit(Some(10), None);
-        let new_view = sf.read_lease()?;
-        writer_side.collect_retired_history()?;
-        // A view may read its changesets lazily, after the pruning commit.
-        assert_eq!(sf.account_block_changeset(1)?.len(), 1);
-        assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(4));
-
-        drop(old_view);
-        // Dropping the lease only updates registrations; the writer performs the file I/O.
-        assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(4));
-        writer_side.collect_retired_history()?;
-        assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(12));
-        assert_eq!(sf.account_block_changeset(10)?.len(), 1);
-        drop(new_view);
         Ok(())
     }
 }

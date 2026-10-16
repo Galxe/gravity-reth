@@ -220,28 +220,15 @@ impl<K: cursor::TransactionKind> Tx<K> {
         }
     }
 
+    /// Returns RocksDB's live estimate, independent of the transaction's read snapshot.
     pub fn table_entries(&self, name: &str) -> Result<usize, DatabaseError> {
-        let source = self.source_for_name(name);
-        let db = source.db();
+        let db = self.source_for_name(name).db();
         let cf_handle = db.cf_handle(name).ok_or_else(|| {
             DatabaseError::Open(DatabaseErrorInfo {
                 message: format!("Column family '{}' not found", name).into(),
                 code: -1,
             })
         })?;
-
-        if matches!(source, DbReadSource::Snapshot(_)) {
-            // RocksDB's estimated key-count property ignores the snapshot's sequence number.
-            let mut iter = source.raw_iterator_cf(cf_handle);
-            iter.seek_to_first();
-            let mut count = 0;
-            while iter.valid() {
-                count += 1;
-                iter.next();
-            }
-            iter.status().map_err(read_error)?;
-            return Ok(count)
-        }
 
         // Use property_value_cf to get estimated number of keys
         match db.property_value_cf(cf_handle, "rocksdb.estimate-num-keys") {

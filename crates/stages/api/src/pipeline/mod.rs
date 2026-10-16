@@ -9,7 +9,7 @@ use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockNumReader,
     ChainStateBlockReader, ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory,
-    PruneCheckpointReader, StageCheckpointReader, StageCheckpointWriter, StaticFileProviderFactory,
+    PruneCheckpointReader, StageCheckpointReader, StageCheckpointWriter,
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
@@ -159,16 +159,13 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 match target {
                     PipelineTarget::Sync(tip) => self.set_tip(tip),
                     PipelineTarget::Unwind(target) => {
-                        let maintenance =
-                            self.provider_factory.static_file_provider().begin_maintenance();
                         if let Err(err) = self.move_to_static_files() {
                             return (self, Err(err.into()))
                         }
-                        if let Err(err) = self.unwind_inner(target, None) {
+                        if let Err(err) = self.unwind(target, None) {
                             return (self, Err(err))
                         }
                         self.progress.update(target);
-                        maintenance.complete();
 
                         return (self, Ok(ControlFlow::Continue { block_number: target }))
                     }
@@ -225,9 +222,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     /// the pipeline (for example the `Finish` stage). Or [`ControlFlow::Unwind`] of the stage
     /// that caused the unwind.
     pub async fn run_loop(&mut self) -> Result<ControlFlow, PipelineError> {
-        // Backfill runs on the blocking pipeline executor. Drain existing views there before
-        // publishing stage commits that do not yet form a complete state boundary.
-        let maintenance = self.provider_factory.static_file_provider().begin_maintenance();
         self.move_to_static_files()?;
 
         let mut previous_stage = None;
@@ -248,8 +242,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 }
                 ControlFlow::Continue { block_number } => self.progress.update(block_number),
                 ControlFlow::Unwind { target, bad_block } => {
-                    self.unwind_inner(target, Some(bad_block.block.number))?;
-                    maintenance.complete();
+                    self.unwind(target, Some(bad_block.block.number))?;
                     return Ok(ControlFlow::Unwind { target, bad_block })
                 }
             }
@@ -263,7 +256,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             );
         }
 
-        maintenance.complete();
         Ok(self.progress.next_ctrl())
     }
 
@@ -303,17 +295,6 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
     ///
     /// If the unwind is due to a bad block the number of that block should be specified.
     pub fn unwind(
-        &mut self,
-        to: BlockNumber,
-        bad_block: Option<BlockNumber>,
-    ) -> Result<(), PipelineError> {
-        let maintenance = self.provider_factory.static_file_provider().begin_maintenance();
-        self.unwind_inner(to, bad_block)?;
-        maintenance.complete();
-        Ok(())
-    }
-
-    fn unwind_inner(
         &mut self,
         to: BlockNumber,
         bad_block: Option<BlockNumber>,

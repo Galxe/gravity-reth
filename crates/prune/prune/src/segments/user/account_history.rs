@@ -7,7 +7,9 @@ use crate::{
 };
 use alloy_primitives::BlockNumber;
 use reth_db_api::{cursor::DbCursorRO, models::ShardedKey, tables, transaction::DbTxMut};
-use reth_provider::{DBProvider, StaticFileProviderFactory, StorageSettingsCache};
+use reth_provider::{
+    DBProvider, StaticFileProviderFactory, StaticFileSegment, StorageSettingsCache,
+};
 use reth_prune_types::{
     PruneMode, PrunePurpose, PruneSegment, SegmentOutput, SegmentOutputCheckpoint,
 };
@@ -60,7 +62,7 @@ where
 
         // Under storage-v2 the account changesets live in static files and the database changeset
         // table is empty, so pruning the DB table would no-op while the jars leak. Walk the static
-        // files to update the history index instead.
+        // files and reclaim their jars instead.
         if provider.cached_storage_settings().changesets_in_static_files {
             self.prune_static_files(provider, input, range, range_end)
         } else {
@@ -72,8 +74,8 @@ where
 impl AccountHistory {
     /// Prunes account history when changesets are stored in static files.
     ///
-    /// Walks static changesets to prune the [`tables::AccountsHistory`] index. Files are retired
-    /// only after the caller commits the history index and its prune checkpoint.
+    /// Walks the changesets from static files to prune the [`tables::AccountsHistory`] index, then
+    /// reclaims any changeset jar that has fallen entirely below the prune horizon.
     fn prune_static_files<Provider>(
         &self,
         provider: &Provider,
@@ -126,6 +128,14 @@ impl AccountHistory {
             limiter.increment_deleted_entries_count();
         }
 
+        // Reclaim whole jars only once the range is fully processed, so a jar straddling the
+        // horizon is never removed while it still holds live blocks (`delete_segment_below_block`
+        // additionally refuses to delete the highest jar).
+        if done && let Some(last_block) = last_changeset_pruned_block {
+            provider
+                .static_file_provider()
+                .delete_segment_below_block(StaticFileSegment::AccountChangeSets, last_block + 1)?;
+        }
         trace!(target: "pruner", pruned = %pruned_changesets, %done, "Pruned account history (changesets from static files)");
 
         let result = HistoryPruneResult {
@@ -457,7 +467,6 @@ mod tests {
             .save_checkpoint(&provider, result.checkpoint.unwrap().as_prune_checkpoint(prune_mode))
             .unwrap();
         provider.commit().expect("commit");
-        db.factory.on_prune_commit().unwrap();
 
         // The history index no longer references pruned blocks, and it shrank.
         assert!(count_index_blocks() < blocks_before);

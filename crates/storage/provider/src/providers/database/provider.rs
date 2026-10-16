@@ -320,7 +320,14 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<(BlockNumber, AccountBeforeTx)>> {
         if self.cached_storage_settings().changesets_in_static_files {
-            self.static_file_provider.account_changesets_range(self.read_block_range(range))
+            if self.read_bounds().is_some() {
+                // A snapshot requires the whole range, even if pruning removed its files.
+                return self
+                    .static_file_provider
+                    .walk_account_changeset_range(self.read_block_range(range))
+                    .collect()
+            }
+            self.static_file_provider.account_changesets_range(range)
         } else {
             self.tx
                 .cursor_read::<tables::AccountChangeSets>()?
@@ -356,6 +363,9 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
                 Bound::Unbounded => u64::MAX,
             };
             let range = self.read_block_range(start..=end);
+            if self.read_bounds().is_some() {
+                return self.static_file_provider.walk_storage_changeset_range(range).collect()
+            }
             self.static_file_provider.storage_changesets_range(range)
         } else {
             self.tx
@@ -372,7 +382,13 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<(BlockNumberAddress, StorageEntry)>> {
         if self.cached_storage_settings().changesets_in_static_files {
-            self.static_file_provider.storage_changesets_range(self.read_block_range(range))
+            if self.read_bounds().is_some() {
+                return self
+                    .static_file_provider
+                    .walk_storage_changeset_range(self.read_block_range(range))
+                    .collect()
+            }
+            self.static_file_provider.storage_changesets_range(range)
         } else {
             self.tx
                 .cursor_read::<tables::StorageChangeSets>()?

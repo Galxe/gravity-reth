@@ -80,13 +80,12 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     read_view: Option<Arc<ReadView>>,
 }
 
-/// The database boundary and external resources shared by one state computation.
+/// The database snapshot and height shared by one state computation.
 #[derive(Debug)]
 pub(crate) struct ReadView {
     db: Option<Arc<dyn DatabaseSnapshot>>,
     consistent: bool,
     pub(crate) bounds: ReadBounds,
-    _files: super::static_file::StaticFileReadLease,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -195,8 +194,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     #[track_caller]
     pub fn provider(&self) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
         if self.state_reads && self.read_view.is_none() {
-            let files = self.read_lease()?;
-            return self.capture_view(files, false)?.provider()
+            return self.capture_view(false)?.provider()
         }
         let tx = match &self.read_view {
             Some(view) => self.db.tx_with_snapshot(view.db.clone())?,
@@ -218,19 +216,11 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         self.state_reads
     }
 
-    pub(crate) fn read_lease(&self) -> ProviderResult<super::static_file::StaticFileReadLease> {
-        self.static_file_provider.read_lease()
-    }
-
     pub(crate) fn has_consistent_view(&self) -> bool {
         self.read_view.as_ref().is_some_and(|view| view.consistent)
     }
 
-    pub(crate) fn capture_view(
-        &self,
-        files: super::static_file::StaticFileReadLease,
-        consistent: bool,
-    ) -> ProviderResult<Self> {
+    pub(crate) fn capture_view(&self, consistent: bool) -> ProviderResult<Self> {
         let snapshot = self.db.snapshot(consistent)?;
         let provider: DatabaseProvider<_, N> = DatabaseProvider::new(
             self.db.tx_with_snapshot(snapshot.clone())?,
@@ -242,14 +232,8 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
         );
         let block_number =
             provider.get_stage_checkpoint(StageId::Execution)?.unwrap_or_default().block_number;
-        // These stages commit with plain state. Merkle completion is deliberately independent.
-        for stage in [StageId::AccountHashing, StageId::IndexAccountHistory, StageId::Finish] {
-            if provider.get_stage_checkpoint(stage)?.unwrap_or_default().block_number !=
-                block_number
-            {
-                return Err(ProviderError::HeaderNotFound(block_number.into()))
-            }
-        }
+        // Gravity persistence commits state atomically at Execution. A failed trie commit can
+        // leave Merkle behind after releasing the write lock, so cross-store reads must check it.
         if consistent &&
             provider
                 .get_stage_checkpoint(StageId::MerkleExecute)?
@@ -261,9 +245,6 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
                 "state and Merkle checkpoints do not match",
             )))
         }
-        provider
-            .block_hash(block_number)?
-            .ok_or(ProviderError::HeaderNotFound(block_number.into()))?;
         let next_tx_num = provider
             .block_body_indices(block_number)?
             .ok_or(ProviderError::BlockBodyIndicesNotFound(block_number))?
@@ -274,7 +255,6 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             db: snapshot,
             consistent,
             bounds: ReadBounds { block_number, next_tx_num },
-            _files: files,
         }));
         Ok(factory)
     }
@@ -343,24 +323,6 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for ProviderFactory<N> {
 
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
         self.provider()
-    }
-
-    fn on_prune_commit(&self) -> ProviderResult<()> {
-        if !self.cached_storage_settings().changesets_in_static_files {
-            return Ok(())
-        }
-        let tx = self.db.tx()?;
-        let before = |segment: PruneSegment| -> ProviderResult<Option<u64>> {
-            Ok(tx
-                .get::<tables::PruneCheckpoints>(segment)?
-                .and_then(|checkpoint| checkpoint.block_number)
-                .map(|block| block.saturating_add(1)))
-        };
-        self.static_file_provider.retire_history_after_commit(
-            before(PruneSegment::AccountHistory)?,
-            before(PruneSegment::StorageHistory)?,
-        );
-        self.static_file_provider.collect_retired_history()
     }
 
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
@@ -906,7 +868,7 @@ mod tests {
             }
             files.commit()?;
             provider.commit()?;
-            let captured = factory.rpc_provider().capture_view(factory.read_lease()?, false)?;
+            let captured = factory.rpc_provider().capture_view(false)?;
 
             let next =
                 random_block(&mut rng, 1, BlockParams { tx_count: Some(1), ..Default::default() });

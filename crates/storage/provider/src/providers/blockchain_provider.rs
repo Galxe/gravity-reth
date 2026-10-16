@@ -191,10 +191,6 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for BlockchainProvider<N> {
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
         self.database.database_provider_rw()
     }
-
-    fn on_prune_commit(&self) -> ProviderResult<()> {
-        self.database.on_prune_commit()
-    }
 }
 
 impl<N: ProviderNodeTypes> StaticFileProviderFactory for BlockchainProvider<N> {
@@ -566,7 +562,6 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
         if self.read_memory.is_some() && (!consistent || self.database.has_consistent_view()) {
             return Ok(self.clone())
         }
-        let files = self.database.read_lease()?;
         // Capture tags before the head so normal chain advancement cannot put them ahead of it.
         let safe = self.canonical_in_memory_state.get_safe_num_hash();
         let finalized = self.canonical_in_memory_state.get_finalized_num_hash();
@@ -574,7 +569,7 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
         let pending = self.canonical_in_memory_state.pending_state();
         // Retain memory before opening the DB snapshot. Persistence may overlap this chain;
         // state reads use its historical anchor, even if the DB has advanced past its head.
-        let database = self.database.capture_view(files, consistent)?;
+        let database = self.database.capture_view(consistent)?;
         let storage = database.provider()?;
         let bounds = storage.read_bounds().expect("read view has bounds");
         let best = if let Some(head) = &head {

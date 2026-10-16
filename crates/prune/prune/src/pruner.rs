@@ -13,7 +13,7 @@ use reth_prune_types::{PruneProgress, PrunedSegmentInfo, PrunerOutput};
 use reth_tokio_util::{EventSender, EventStream};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Result of [`Pruner::run`] execution.
 pub type PrunerResult = Result<PrunerOutput, PrunerError>;
@@ -329,9 +329,6 @@ where
         let provider = self.provider_factory.database_provider_rw()?;
         let result = self.run_with_provider(&provider, tip_block_number);
         provider.commit()?;
-        if let Err(err) = self.provider_factory.on_prune_commit() {
-            warn!(target: "pruner", %err, "History file reclamation deferred after pruning commit");
-        }
         result
     }
 }

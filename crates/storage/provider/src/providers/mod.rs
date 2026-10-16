@@ -9,8 +9,8 @@ pub use database::*;
 
 mod static_file;
 pub use static_file::{
-    StaticFileAccess, StaticFileJarProvider, StaticFileMaintenanceGuard, StaticFileProvider,
-    StaticFileProviderRW, StaticFileProviderRWRefMut, StaticFileReadLease, StaticFileWriter,
+    StaticFileAccess, StaticFileJarProvider, StaticFileProvider, StaticFileProviderRW,
+    StaticFileProviderRWRefMut, StaticFileWriter,
 };
 
 mod state;

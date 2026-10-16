@@ -28,24 +28,24 @@ use std::{
 #[derive(Debug)]
 pub struct StaticFileJarProvider<'a, N> {
     /// Main static file segment
-    jar: LoadedJarRef,
+    jar: LoadedJarRef<'a>,
     /// Another kind of static file segment to help query data from the main one.
     auxiliary_jar: Option<Box<Self>>,
     /// Metrics for the static files.
     metrics: Option<Arc<StaticFileProviderMetrics>>,
     /// Node primitives
-    _pd: std::marker::PhantomData<(&'a (), N)>,
+    _pd: std::marker::PhantomData<N>,
 }
 
 impl<'a, N: NodePrimitives> Deref for StaticFileJarProvider<'a, N> {
-    type Target = LoadedJarRef;
+    type Target = LoadedJarRef<'a>;
     fn deref(&self) -> &Self::Target {
         &self.jar
     }
 }
 
-impl<'a, N: NodePrimitives> From<LoadedJarRef> for StaticFileJarProvider<'a, N> {
-    fn from(value: LoadedJarRef) -> Self {
+impl<'a, N: NodePrimitives> From<LoadedJarRef<'a>> for StaticFileJarProvider<'a, N> {
+    fn from(value: LoadedJarRef<'a>) -> Self {
         StaticFileJarProvider {
             jar: value,
             auxiliary_jar: None,
@@ -61,7 +61,7 @@ impl<'a, N: NodePrimitives> StaticFileJarProvider<'a, N> {
     where
         'b: 'a,
     {
-        let result = StaticFileCursor::new(&self.jar, self.mmap_handle())?;
+        let result = StaticFileCursor::new(self.value(), self.mmap_handle())?;
 
         if let Some(metrics) = &self.metrics {
             metrics.record_segment_operation(
@@ -99,7 +99,7 @@ impl<'a, N: NodePrimitives> StaticFileJarProvider<'a, N> {
             return Ok(None);
         };
 
-        if let Some(reader) = self.jar.csoff_reader() {
+        if let Some(reader) = self.jar.value().csoff_reader() {
             reader.get(index).map_err(ProviderError::other)
         } else {
             Ok(None)
@@ -122,7 +122,7 @@ impl<'a, N: NodePrimitives> StaticFileJarProvider<'a, N> {
             return Ok(Some(Vec::new()));
         }
 
-        if let Some(reader) = self.jar.csoff_reader() {
+        if let Some(reader) = self.jar.value().csoff_reader() {
             let offsets = reader.get_range(0, len).map_err(ProviderError::other)?;
             Ok(Some(offsets))
         } else {

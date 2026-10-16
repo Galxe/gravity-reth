@@ -170,11 +170,6 @@ pub trait DatabaseProviderFactory: Send + Sync {
     /// Create new read-only database provider.
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider>;
 
-    /// Retires external history files after their prune checkpoints have committed.
-    fn on_prune_commit(&self) -> ProviderResult<()> {
-        Ok(())
-    }
-
     /// Create new read-write database provider.
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW>;
 }
