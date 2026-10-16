@@ -432,6 +432,7 @@ mod oracle_task_install_tests {
     use alloy_sol_types::SolEvent;
     use reth_chainspec::gravity_system_contracts::{NewEpochEvent, RECONFIGURATION_ADDR};
     use reth_storage_errors::provider::ProviderResult;
+    use revm::database::{CacheDB, EmptyDB};
 
     #[derive(Debug)]
     struct Reader {
@@ -499,42 +500,28 @@ mod oracle_task_install_tests {
     #[test]
     fn oracle_task_install_rpc_committed_normal_and_epoch_finish_install_identically() {
         for epoch in [false, true] {
-            let factory = GravityBlockExecutorFactory::new(
-                spec(),
-                Arc::new(Reader { epoch, parent: Some(99) }),
-            );
-            let evm = factory.evm_factory().create_evm(seeded_db(), env(100));
-            let mut executor = factory.create_executor(evm, ctx(true));
-            executor.apply_pre_execution_changes().unwrap();
-            assert_eq!(executor.epoch_change, epoch, "exercise the actual early-return branch");
-            let (mut evm, result) = executor.finish().unwrap();
-            assert_installed(evm.db_mut(), 100);
-            assert_eq!(result.gas_used, 0);
-            assert!(result.receipts.is_empty(), "installer creates no receipt");
-            let following = GravityBlockExecutorFactory::new(
-                spec(),
-                Arc::new(Reader { epoch: false, parent: Some(100) }),
-            );
-            let next_evm = following.evm_factory().create_evm(evm.db_mut().clone(), env(101));
-            let mut next_executor = following.create_executor(next_evm, ctx(true));
-            next_executor.apply_pre_execution_changes().unwrap();
-            let (mut next_evm, _) = next_executor.finish().unwrap();
-            assert_installed(next_evm.db_mut(), 100);
+            assert_rpc_installation(seeded_db(), epoch, 99);
         }
     }
 
     #[test]
     fn oracle_task_install_rpc_epoch_finish_crosses_gamma_and_install_together() {
+        assert_rpc_installation(pre_gamma_db(), true, 9);
+    }
+
+    fn assert_rpc_installation(db: CacheDB<EmptyDB>, epoch: bool, parent: u64) {
         let factory = GravityBlockExecutorFactory::new(
             spec(),
-            Arc::new(Reader { epoch: true, parent: Some(9) }),
+            Arc::new(Reader { epoch, parent: Some(parent) }),
         );
-        let evm = factory.evm_factory().create_evm(pre_gamma_db(), env(100));
+        let evm = factory.evm_factory().create_evm(db, env(100));
         let mut executor = factory.create_executor(evm, ctx(true));
         executor.apply_pre_execution_changes().unwrap();
-        assert!(executor.epoch_change);
-        let (mut evm, _) = executor.finish().unwrap();
+        assert_eq!(executor.epoch_change, epoch, "exercise the actual early-return branch");
+        let (mut evm, result) = executor.finish().unwrap();
         assert_installed(evm.db_mut(), 100);
+        assert_eq!(result.gas_used, 0);
+        assert!(result.receipts.is_empty(), "installer creates no receipt");
 
         let following = GravityBlockExecutorFactory::new(
             spec(),

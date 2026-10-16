@@ -1,126 +1,114 @@
-# fix: install the Receiver with the testnet bridge hardfork
+# Testnet bridge installation hardfork
 
-## 1. Background and Current State
+This is the Reth implementation record for [Issue #131](https://github.com/Galxe/mono-grav/issues/131).
+[Mono's upgrade and reproduction guide](https://github.com/Galxe/mono-grav/blob/codex/issue131-oracle-install-e2e/docs/changelogs/2026-10-15-oracle-install-missing-receiver.md)
+owns the cross-repository plan, complete E2E results, binary provenance and rerun procedure.
 
-The target testnet lacks code at the native-mint precompile's authorized Receiver
-address. This installation must provide the fixed Receiver, Contracts PR119
-NativeOracle runtime, and bridge Task/default callback together. The cross-repository
-source of truth is [Mono's integration plan and evidence](https://github.com/Galxe/mono-grav/blob/codex/issue131-oracle-install-e2e/docs/changelogs/2026-10-15-oracle-install-missing-receiver.md).
+## 1. Background
 
-## 2. Problem Model and End-to-End Behavior
+The target testnet needs an Oracle Task and a Receiver that is not yet deployed.
+It also needs the NativeOracle callback-continuation fix from Contracts #119.
+Reth installs these together at one timestamp boundary.
 
-B1: At the first block crossing the configured installation timestamp H, install
-all four components atomically. B2: The crossing must also work on an epoch block
-whose parent precedes both Gamma and H, without requiring an intervening normal
-Gamma block. B3: Preserve a matching Receiver and prefunded empty account fields
-and storage. F1: Reject code/nonce conflicts, partial configuration, or mismatched
-Receiver immutables/runtime hash. F2: A later installation failure commits none
-of its staged Gamma prerequisite, Receiver, Oracle, or configuration changes.
+## 2. Behavior
 
-## 3. Research, Findings, and Architecture Decision
+On chain `7771625`, H is the first block with `parent.timestamp < T <= block.timestamp`.
+Transactions in H use the preceding runtimes. At H block end, one atomic transition:
 
-Reuse the five existing configuration fields. Construct Receiver runtime from the
-frozen Contracts `174123ad` template using compiler-provided immutable offsets;
-verify its hash and real getters. After the authenticated timestamp-crossing gate,
-stage Gamma through `DbHardforkState` inside the same installation overlay before
-checking the Oracle runtime. The ordinary path's preceding Gamma migration is
-idempotent; epoch and RPC replay paths use the same installer prerequisite.
-Unconfigured and non-crossing historical epoch behavior is unchanged.
+1. Installs the fixed-address `GBridgeReceiver`, with the configured Sender/source ID.
+2. Replaces NativeOracle with the Contracts #119 runtime.
+3. Calls `OracleTaskConfig.setTask(0, sourceId, taskName, taskConfig)`.
+4. Calls `NativeOracle.setDefaultCallback(0, receiver)`.
 
-## 4. Implementation Design
+Receiver rejection or mint failure still reverts the callback. The new NativeOracle
+reports that failure and advances delivery progress; malformed successful callback
+returns and outer-transaction failures can still revert. Installation itself creates
+no mint, body transaction, receipt, fee debit, caller nonce increment or header-gas charge.
 
-The overlay preserves existing account fields/storage and marks only truly absent
-accounts Created. It replaces Oracle code and calls the actual Task/default
-callback setters, checks postconditions, then commits once. Already matching
-successor state is accepted without downgrading code; partial state fails closed.
-Historical Gamma bytes and mainnet activation remain outside this change.
+## 3. Configuration and state policy
 
-- [x] Extract frozen Receiver artifact and document immutable provenance.
-- [x] Stage Receiver, Gamma prerequisite, Oracle and configuration atomically.
-- [x] Add same-block Gamma/installation epoch and RPC regressions plus rollback coverage.
-- [x] Have the sole Gravity Dev operator verify formatting and installer tests.
-- [x] Complete staged history, both canonical epoch cases and the locked SDK release.
-- [x] Complete both final-binary acceptance archives and reconcile evidence.
+Genesis `config` contains `oracleTaskInstallTime` and an `oracleTaskInstall` object:
 
-## 5. Verification and E2E Design
+| Field | Value |
+| --- | --- |
+| `oracleTaskInstallTime` | Integer Unix seconds, after genesis and `gammaTime` |
+| `sourceId` | Nonzero `0x` U256 |
+| `taskName` | Nonzero `0x` bytes32 |
+| `taskConfig` | `0x` bytes, length 1–4096 |
+| `receiverCodeHash` | Exact nonzero runtime hash including Receiver immutables |
+| `trustedBridge` | Nonzero Sender address |
 
-All formatting, builds and tests run on Gravity Dev. Installer/RPC and staged
-history checks are `cargo test -p reth-evm-ethereum oracle_task_install` and
-`cargo test -p reth-stages oracle_task_install_staged_history`.
+The object accepts exactly those five fields. Both installation keys absent disables
+installation; malformed explicit inputs reject execution. Other chains ignore them.
+Freeze public-network values before release; test fixtures do not select them.
 
-Run the two canonical cases as separate Cargo processes (or use nextest's process
-isolation). The validated Dev builder had `mold` available, used the following
-`RUSTFLAGS`, and required `GRETH_DISABLE_PIPE_EXECUTION` to be unset:
+Source type 0 must be empty or fully matching, without a specialized callback override.
+Conflicting/partial state fails before the overlay commits. Matching state retains its
+configuration timestamp; H+1 never overwrites later governance edits. Existing account
+fields, Oracle nonce/progress/history and unrelated source types are preserved.
+
+## 4. Implementation
+
+`chainspec/src/oracle_task_install.rs` owns parsing shared with SDK startup validation.
+`ethereum/evm/src/hardfork/oracle_task_install.rs` owns the single migration and overlay;
+its unit tests are in `oracle_task_install/tests.rs`. Canonical normal/epoch execution,
+staged history and committed-block RPC replay supply real parent timestamps to it.
+RPC simulation does not install. ExEx backfill is outside this rollout's scope.
+
+The installer stages Gamma inside its overlay before checking the Oracle code, covering
+an epoch block that crosses both timestamps. Runtime changes and both Solidity setters
+commit together; a failure discards the staged changes. Gamma recognizes the exact
+successor runtime only in the configured, activated scope. Historical Gamma bytes stay
+frozen. The [runtime README](../../crates/ethereum/evm/src/hardfork/bytecodes/oracle_task_install/README.md)
+records Contracts sources, compiler settings, hashes and Receiver immutable offsets.
+
+## 5. Focused verification commands
+
+Builds and runtime tests run on Gravity Dev. Owning checks:
 
 ```sh
+cargo test --locked -p reth-chainspec oracle_task_install
+cargo test --locked -p reth-evm-ethereum oracle_task_install
+cargo test --locked -p reth-stages oracle_task_install_staged_history
 export RUSTFLAGS="--cfg tokio_unstable -C link-arg=-fuse-ld=mold"
 unset GRETH_DISABLE_PIPE_EXECUTION
 cargo test --locked -p reth-pipe-exec-layer-ext-v2 --features tokio/taskdump --test gravity_pipe oracle_task_install::oracle_task_install_canonical_pipe_epoch_boundary -- --exact --nocapture --test-threads=1
 cargo test --locked -p reth-pipe-exec-layer-ext-v2 --features tokio/taskdump --test gravity_pipe oracle_task_install::oracle_task_install_canonical_pipe_epoch_boundary_crosses_gamma_together -- --exact --nocapture --test-threads=1
 ```
 
-A combined Cargo invocation cannot run both node harnesses: the second hits the
-process-global `GLOBAL_CONFIG` initialization guard before its case runs. Each
-command above ran exactly one test. The cases retain Gamma-before-install and add
-an actual epoch block crossing both forks; they verify the preceding runtime and
-following normal block. RPC coverage calls real epoch `finish` from authenticated
-pre-Gamma hashes, and rollback checks that a Receiver conflict commits neither
-Gamma account change.
+The recorded Dev builder provides `mold`. Run canonical cases in separate processes
+(or nextest): the node harness initializes process-global `GLOBAL_CONFIG` once.
+Tests cover state preservation, rollback, H/H+1, epoch returns, replay and simulation
+boundaries. The empty-block Grevm test covers installation hooks/accounting, not
+parallel-versus-sequential transaction scheduling.
 
-E2E Required: yes. The final SDK release must rerun Mono's focused four-message
-callback flow and complete twelve-message installer/replay/recovery flow, beginning
-without a Receiver. Old binary results do not verify the review fix.
+## 6. Review and integration
 
-## 6. Human Decisions and Interaction
+Merge order: [Contracts #119](https://github.com/Galxe/gravity_chain_core_contracts/pull/119)
+→ [Reth #457](https://github.com/Galxe/gravity-reth/pull/457)
+→ [SDK #844](https://github.com/Galxe/gravity-sdk/pull/844)
+→ [Mono #132](https://github.com/Galxe/mono-grav/pull/132).
+No database schema migration or public activation is performed by publishing these PRs.
 
-The user authorized preparing and publishing the four existing PRs for review,
-including the Gamma-crossing review fix, with one Gravity Dev operator. Local work
-is static editing/review; formatting, builds and tests run only on Dev. Merge and
-public activation remain separate work.
+## 7. Verification record and October 16 cleanup
 
-Review order: [Contracts #119](https://github.com/Galxe/gravity_chain_core_contracts/pull/119) owns callback semantics; [Reth #457](https://github.com/Galxe/gravity-reth/pull/457) owns atomic installation; [SDK #844](https://github.com/Galxe/gravity-sdk/pull/844) pins Reth; [Mono #132](https://github.com/Galxe/mono-grav/pull/132) owns acceptance flows and evidence.
+Gravity Dev verified Reth `f028d188e207a5963af38120e76f7f406e563d6d`: 21 installer/RPC
+tests, one staged-history test and two canonical epoch cases passed. SDK
+`4412093c7cb48c39843c2b16ab19eb5926c06ba1` passed its locked release build. The focused
+four-message callback flow and full twelve-message installation/recovery flow each
+passed once, including independent archive verification. Mono owns the detailed evidence.
 
-## 7. Outcome and Evidence
+The October 16 cleanup consolidates the three Reth changelogs, extracts the unit-test
+module, shares the RPC installation fixture, removes duplicate nonce/empty-block
+samples and corrects the empty-block test's name and coverage description. Production
+logic, configuration, bytecode artifacts and dependency pins are unchanged.
 
-Product Reth revision: `f028d188e207a5963af38120e76f7f406e563d6d`.
-SDK product revision: `4412093c7cb48c39843c2b16ab19eb5926c06ba1`.
-Gravity Dev formatting produced zero diff. All 21 installer/RPC tests, the staged
-history test, and both canonical epoch cases passed. The canonical cases ran in
-separate processes; an earlier combined invocation hit `GLOBAL_CONFIG` setup
-initialization on its second harness and is not counted as that case passing.
-Removing only the Gamma overlay prerequisite made the targeted RPC regression
-run one test and fail for the expected runtime hash mismatch. The mutation
-wrapper exited 127 after the test because its builder lacked Python; the durable
-log proves the one-test failure, without an observed inner Cargo exit code.
+The user explicitly requested no rebuild or test rerun for this cleanup. The edited
+tests have not been compiled or executed again; the prior results above describe the
+previous test tree and unchanged production implementation, not a new test run.
 
-SDK locked/offline metadata and its new release build passed. Independent
-candidate verification bound 17,309 source files and both embedded Oracle runtimes
-to ELF SHA256
-`d6b6930e8a6f4301314de37e9e54d89387070ef16ab9ca1aba1076bae4d880ec`.
-The focused runtime passed at H1220: four replicas ended at nonce 4, progress
-`[4,13]`, balance 13 and exactly two mints. Its fresh four-receipt source reload, independent
-verifier, archive reload and raw cleanup all passed; acceptance archive SHA256 is
-`f1733b11197bf29cffe31a3268b2624ca8d5183d01d65ad77164917c62dcd194`.
-The full flow passed at H457, including original-database replay and a second
-recovery. Its four replicas ended at nonce 12, progress `[12,167]`, balance 138 and
-12 mints. The final soak lasted 240.407 seconds and advanced common
-blocks 2932 to 4013 (+1081), exceeding the 768-block minimum. Fresh source reload
-verified 12 receipts; independent verification, archive reload and raw cleanup
-passed. Full acceptance archive SHA256 is
-`483dd88db3c57c0c593fb5d39aca66472bd8e1b84bd044a43cb81917f06c71f2`.
-Both case archives remained unchanged after cleanup, and the original offline PFN
-baseline remained intact. Local evidence is retained under
-`/home/jingyue/.local/state/issue131/cross-fork-install-recovered-20261015/`.
+## 8. Remaining work
 
-The [initial verification record](https://github.com/Galxe/gravity-reth/blob/c6f37ce08e6d56fb1a1cbe72e16b917335dc767e/docs/changelogs/2026-10-15-install-bridge-receiver.md)
-retains the earlier artifact, release and acceptance evidence. Those results bind
-Reth `b84b33c` and SDK `ceae46b`; they are historical evidence, not verification of
-`f028d188`. [Mono's primary report](https://github.com/Galxe/mono-grav/blob/codex/issue131-oracle-install-e2e/docs/changelogs/2026-10-15-oracle-install-missing-receiver.md) owns current cross-repository provenance
-and acceptance archives.
-
-## 8. Remaining Work
-
-Implementation and Gravity Dev verification are complete. This documentation
-closeout follows the tested product revisions. Hosted required checks, review,
-merge, release publication and public activation remain separate steps. The shared
-callback batch-gas budget boundary remains unresolved; see Mono's primary report.
+Hosted checks, human approval, merge and release remain separate gates. The callback
+batch-gas budget question remains tracked in Contracts #119 and Mono's guide.
+SDK #843 and randomness recovery are outside this change.
