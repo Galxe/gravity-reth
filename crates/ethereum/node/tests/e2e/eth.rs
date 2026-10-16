@@ -444,6 +444,7 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
 /// nodes. The preserved trie's allocations are still reused to reduce memory overhead,
 /// but the trie is cleared between blocks.
 #[tokio::test]
+#[ignore = "native sparse trie uses Trie V1; Gravity state providers require pipe-executed Trie V2"]
 async fn test_sparse_trie_reuse_across_blocks() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

@@ -19,15 +19,10 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{
-    proof::{Proof, StorageProof},
-    updates::TrieUpdates,
-    AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher, MultiProof, MultiProofTargets,
-    StateRoot, StorageMultiProof, StorageRoot, TrieInput,
+    updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher,
+    MultiProof, MultiProofTargets, StorageMultiProof, TrieInput,
 };
-use reth_trie_db::{
-    nested_hash::NestedStateRoot, DatabaseProof, DatabaseStateRoot, DatabaseStorageProof,
-    DatabaseStorageRoot,
-};
+use reth_trie_db::nested_hash::NestedStateRoot;
 use std::{fmt::Debug, ops::RangeInclusive};
 
 /// State provider for a given block number which takes a tx reference.
@@ -340,18 +335,10 @@ impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StateRootProv
     for HistoricalStateProviderRef<'_, Provider>
 {
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
-        let state = self.trie_state(hashed_state)?;
-        if super::uses_legacy_trie() {
-            return StateRoot::overlay_root(self.tx(), state).map_err(Into::into)
-        }
-        NestedStateRoot::new(self.tx(), None).root(&state)
+        NestedStateRoot::new(self.tx(), None).root(&self.trie_state(hashed_state)?)
     }
 
-    fn state_root_from_nodes(&self, mut input: TrieInput) -> ProviderResult<B256> {
-        if super::uses_legacy_trie() {
-            input.prepend(self.revert_state()?);
-            return StateRoot::overlay_root_from_nodes(self.tx(), input).map_err(Into::into)
-        }
+    fn state_root_from_nodes(&self, input: TrieInput) -> ProviderResult<B256> {
         self.state_root(input.state)
     }
 
@@ -359,24 +346,15 @@ impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StateRootProv
         &self,
         hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        let state = self.trie_state(hashed_state)?;
-        if super::uses_legacy_trie() {
-            return StateRoot::overlay_root_with_updates(self.tx(), state).map_err(Into::into)
-        }
         NestedStateRoot::new(self.tx(), None)
-            .calculate(&state)
+            .calculate(&self.trie_state(hashed_state)?)
             .map(|(root, updates)| (root, updates.into_legacy()))
     }
 
     fn state_root_from_nodes_with_updates(
         &self,
-        mut input: TrieInput,
+        input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        if super::uses_legacy_trie() {
-            input.prepend(self.revert_state()?);
-            return StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
-                .map_err(Into::into)
-        }
         self.state_root_with_updates(input.state)
     }
 }
@@ -391,10 +369,6 @@ impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StorageRootPr
     ) -> ProviderResult<B256> {
         let mut revert_storage = self.revert_storage(address)?;
         revert_storage.extend(&hashed_storage);
-        if super::uses_legacy_trie() {
-            return StorageRoot::overlay_root(self.tx(), address, revert_storage)
-                .map_err(|err| ProviderError::Database(err.into()))
-        }
         NestedStateRoot::new(self.tx(), None).storage_root(keccak256(address), &revert_storage)
     }
 
@@ -417,15 +391,6 @@ impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StorageRootPr
     ) -> ProviderResult<StorageMultiProof> {
         let mut revert_storage = self.revert_storage(address)?;
         revert_storage.extend(&hashed_storage);
-        if super::uses_legacy_trie() {
-            return StorageProof::overlay_storage_multiproof(
-                self.tx(),
-                address,
-                slots,
-                revert_storage,
-            )
-            .map_err(Into::into)
-        }
         let slots = slots.iter().map(keccak256).collect::<Vec<_>>();
         NestedStateRoot::new(self.tx(), None).storage_proof(
             keccak256(address),
@@ -454,13 +419,9 @@ impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StateProofPro
 
     fn multiproof(
         &self,
-        mut input: TrieInput,
+        input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
-        if super::uses_legacy_trie() {
-            input.prepend(self.revert_state()?);
-            return Proof::overlay_multiproof(self.tx(), input, targets).map_err(Into::into)
-        }
         NestedStateRoot::new(self.tx(), None).multiproof(&self.trie_state(input.state)?, targets)
     }
 
