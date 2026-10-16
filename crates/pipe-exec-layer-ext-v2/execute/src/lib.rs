@@ -683,7 +683,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 self.execute_ordered_block(ordered_block, &parent_header)
             }
             ReceivedBlock::HistoryBlock(recovered_block) => {
-                self.execute_history_block(*recovered_block)
+                self.execute_history_block(*recovered_block, parent_header.timestamp)
             }
         };
 
@@ -1243,6 +1243,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let mut executor = self
             .evm_config
             .parallel_executor_with_delegated_safety(state, DelegatedSafetyConfig::enabled());
+        executor.validate_installation_config().unwrap_or_else(|error| panic!("{error}"));
         executor.apply_custom_precompiles(
             self.custom_precompiles_for_ordered_block(&ordered_block, parent_header),
         );
@@ -1310,7 +1311,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         let fix_owner_results = testnet_owner_fix::execute_forced_transfers(
             &mut *executor,
             self.chain_spec.as_ref(),
-            evm_env,
+            evm_env.clone(),
             system_tx_gas_price,
             block_number,
             block_ts,
@@ -1320,6 +1321,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         let (metadata_txn_result, validator_txn_results) = match system_outcome {
             SystemTxnExecutionOutcome::EpochChanged { mut system_results, validators } => {
                 system_results.extend(fix_owner_results);
+                executor
+                    .apply_oracle_task_install(evm_env, parent_timestamp, block_number)
+                    .unwrap_or_else(|error| panic!("{error}"));
                 let bundle = executor.take_bundle();
                 return system_txns_into_executed_ordered_block_result(
                     system_results,
@@ -1377,14 +1381,18 @@ impl<Storage: GravityStorage> Core<Storage> {
             "ready to execute block"
         );
 
-        let outcome = executor.execute(&block).unwrap_or_else(|err| {
-            serde_json::to_writer_pretty(
-                std::io::BufWriter::new(std::fs::File::create(format!("{block_id}.json")).unwrap()),
-                &block,
-            )
-            .unwrap();
-            panic!("failed to execute block {block_id:?}: {err:?}")
-        });
+        let outcome = executor
+            .execute_with_parent_timestamp(&block, parent_timestamp)
+            .unwrap_or_else(|err| {
+                serde_json::to_writer_pretty(
+                    std::io::BufWriter::new(
+                        std::fs::File::create(format!("{block_id}.json")).unwrap(),
+                    ),
+                    &block,
+                )
+                .unwrap();
+                panic!("failed to execute block {block_id:?}: {err:?}")
+            });
         info!(target: "execute_ordered_block",
             id=?block_id,
             parent_id=?parent_id,
@@ -1442,19 +1450,25 @@ impl<Storage: GravityStorage> Core<Storage> {
     }
 
     /// Only used for testing.
-    fn execute_history_block(&self, block: RecoveredBlock<Block>) -> ExecuteOrderedBlockResult {
+    fn execute_history_block(
+        &self,
+        block: RecoveredBlock<Block>,
+        parent_timestamp: u64,
+    ) -> ExecuteOrderedBlockResult {
         let state = self.storage.get_state_view().unwrap();
         let mut executor = self.evm_config.parallel_executor(state);
-        let outcome = executor.execute(&block).unwrap_or_else(|err| {
-            serde_json::to_writer(
-                std::io::BufWriter::new(
-                    std::fs::File::create(format!("{}.json", block.number)).unwrap(),
-                ),
-                &block,
-            )
-            .unwrap();
-            panic!("failed to execute block {:?}: {:?}", block.number, err)
-        });
+        let outcome = executor
+            .execute_with_parent_timestamp(&block, parent_timestamp)
+            .unwrap_or_else(|err| {
+                serde_json::to_writer(
+                    std::io::BufWriter::new(
+                        std::fs::File::create(format!("{}.json", block.number)).unwrap(),
+                    ),
+                    &block,
+                )
+                .unwrap();
+                panic!("failed to execute block {:?}: {:?}", block.number, err)
+            });
         let (block, senders) = block.split();
         ExecuteOrderedBlockResult {
             block,

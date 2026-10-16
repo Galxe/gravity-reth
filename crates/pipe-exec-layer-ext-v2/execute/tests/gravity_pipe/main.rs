@@ -13,6 +13,7 @@
 mod config_reads;
 mod hardfork;
 mod node;
+mod oracle_task_install;
 mod replay;
 mod report;
 mod rpc;

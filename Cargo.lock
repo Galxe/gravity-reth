@@ -9174,6 +9174,7 @@ dependencies = [
  "reth-testing-utils",
  "revm",
  "secp256k1 0.30.0",
+ "serde_json",
  "tracing",
 ]
 
@@ -10776,6 +10777,7 @@ dependencies = [
  "reth-trie",
  "reth-trie-db",
  "reth-trie-parallel",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

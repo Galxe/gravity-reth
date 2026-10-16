@@ -41,6 +41,7 @@ derive_more = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 reth-testing-utils.workspace = true
 reth-evm = { workspace = true, features = ["test-utils"] }
 secp256k1.workspace = true
@@ -68,6 +69,7 @@ std = [
     "alloy-sol-types/std",
     "reth-storage-errors/std",
     "tracing/std",
+    "serde_json/std",
 ]
 test-utils = [
     "std",

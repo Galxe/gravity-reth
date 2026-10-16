@@ -291,6 +291,12 @@ where
 
         let db = StateProviderDatabase(LatestStateProviderRef::new(provider));
         let mut executor = self.evm_config.parallel_executor(db);
+        // Timestamp crossings use authenticated chain context, including the
+        // first block in a resumed staged batch.
+        let mut parent_timestamp = provider
+            .header_by_number(start_block.saturating_sub(1))?
+            .ok_or_else(|| ProviderError::HeaderNotFound(start_block.saturating_sub(1).into()))?
+            .timestamp();
 
         // Progress tracking
         let mut stage_progress = start_block;
@@ -338,11 +344,14 @@ where
             let execute_start = Instant::now();
 
             let result = self.metrics.metered_one(&block, |input| {
-                executor.execute_one(input).map_err(|error| StageError::Block {
-                    block: Box::new(block.block_with_parent()),
-                    error: BlockErrorKind::Execution(error),
-                })
+                executor.execute_one_with_parent_timestamp(input, parent_timestamp).map_err(
+                    |error| StageError::Block {
+                        block: Box::new(block.block_with_parent()),
+                        error: BlockErrorKind::Execution(error),
+                    },
+                )
             })?;
+            parent_timestamp = block.header().timestamp();
 
             if let Err(err) =
                 self.consensus.validate_block_post_execution(&block, &result, None, None)
@@ -699,6 +708,171 @@ mod tests {
             MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD,
             ExExManagerHandle::empty(),
         )
+    }
+
+    #[test]
+    fn oracle_task_install_staged_history_uses_real_parent_across_timestamp_jump() {
+        use reth_chainspec::{Chain, LONGEVITY_TESTNET_CHAIN_ID, MAINNET};
+        use reth_primitives_traits::Block as _;
+        use reth_provider::{
+            test_utils::create_test_provider_factory_with_chain_spec, StateProvider,
+        };
+        let native = address!("00000000000000000000000000000001625f4000");
+        let tasks = address!("00000000000000000000000000000001625f1009");
+        let receiver = address!("595475934ed7d9faa7fca28341c2ce583904a44e");
+        // Independently patch the frozen artifact; begin without Receiver code.
+        let mut receiver_code = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/GBridgeReceiver.bin"
+        ))
+        .to_vec();
+        for offset in [84, 153, 790, 832] {
+            receiver_code[offset..offset + 32]
+                .copy_from_slice(&U256::from(123).to_be_bytes::<32>());
+        }
+        let receiver_hash = keccak256(&receiver_code);
+        let mut genesis = MAINNET.genesis().clone();
+        genesis.timestamp = 0;
+        genesis.config.chain_id = LONGEVITY_TESTNET_CHAIN_ID;
+        genesis.config.extra_fields.insert("gammaTime".into(), serde_json::json!(10));
+        genesis.config.extra_fields.insert("oracleTaskInstallTime".into(), serde_json::json!(100));
+        genesis.config.extra_fields.insert(
+            "oracleTaskInstall".into(),
+            serde_json::json!({
+                "sourceId":"0x7b", "taskName":format!("{:#x}", B256::repeat_byte(1)),
+                "taskConfig":"0x616263", "receiverCodeHash":format!("{receiver_hash:#x}"),
+                "trustedBridge":"0x000000000000000000000000000000000000007b"
+            }),
+        );
+        let spec = Arc::new(
+            ChainSpecBuilder::from(&*MAINNET)
+                .chain(Chain::from(LONGEVITY_TESTNET_CHAIN_ID))
+                .genesis(genesis)
+                .shanghai_activated()
+                .cancun_activated()
+                .prague_activated()
+                .build(),
+        );
+        let factory = create_test_provider_factory_with_chain_spec(spec.clone());
+        let provider = factory.provider_rw().unwrap();
+        let codes: [(Address, &[u8]); 2] = [
+            (
+                native,
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../ethereum/evm/src/hardfork/bytecodes/gamma/NativeOracle.bin"
+                )),
+            ),
+            (
+                tasks,
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../ethereum/evm/src/hardfork/bytecodes/gamma/OracleTaskConfig.bin"
+                )),
+            ),
+        ];
+        for (address, code) in codes {
+            let hash = keccak256(code);
+            provider
+                .tx_ref()
+                .put::<tables::PlainAccountState>(
+                    address,
+                    Account { nonce: 1, balance: U256::ZERO, bytecode_hash: Some(hash) },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::Bytecodes>(hash, Bytecode::new_raw(code.to_vec().into()))
+                .unwrap();
+        }
+        let receipts_root =
+            B256::from(hex!("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"));
+        let requests_hash =
+            B256::from(hex!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        let mut parent_hash = B256::ZERO;
+        for (number, timestamp) in [(0, 98), (1, 99), (2, 103), (3, 104)] {
+            let block = Block {
+                header: alloy_consensus::Header {
+                    number,
+                    timestamp,
+                    parent_hash,
+                    receipts_root,
+                    requests_hash: Some(requests_hash),
+                    gas_limit: 30_000_000,
+                    excess_blob_gas: Some(0),
+                    blob_gas_used: Some(0),
+                    parent_beacon_block_root: Some(B256::ZERO),
+                    ..Default::default()
+                },
+                body: Default::default(),
+            }
+            .seal_slow();
+            parent_hash = block.hash();
+            provider.insert_historical_block(block.try_recover().unwrap()).unwrap();
+        }
+        provider
+            .static_file_provider()
+            .latest_writer(StaticFileSegment::Headers)
+            .unwrap()
+            .commit()
+            .unwrap();
+        let static_files = provider.static_file_provider();
+        let mut receipts = static_files.latest_writer(StaticFileSegment::Receipts).unwrap();
+        receipts.increment_block(0).unwrap();
+        receipts.commit().unwrap();
+        drop(receipts);
+        provider.commit().unwrap();
+        let mut stage = ExecutionStage::new(
+            EthEvmConfig::new(spec.clone()),
+            Arc::new(EthBeaconConsensus::new(spec)),
+            ExecutionStageThresholds {
+                max_blocks: Some(100),
+                max_changes: None,
+                max_cumulative_gas: None,
+                max_duration: None,
+            },
+            MERKLE_STAGE_DEFAULT_REBUILD_THRESHOLD,
+            ExExManagerHandle::empty(),
+        );
+        let provider = factory.provider_rw().unwrap();
+        let output =
+            stage.execute(&*provider, ExecInput { target: Some(3), checkpoint: None }).unwrap();
+        assert_eq!(output.checkpoint.block_number, 3);
+        provider.commit().unwrap();
+        let provider = factory.provider().unwrap();
+        let state = LatestStateProviderRef::new(&provider);
+        assert_eq!(
+            state.basic_account(&receiver).unwrap().unwrap().bytecode_hash,
+            Some(receiver_hash)
+        );
+        assert_eq!(
+            state.basic_account(&native).unwrap().unwrap().bytecode_hash,
+            Some(keccak256(include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../ethereum/evm/src/hardfork/bytecodes/oracle_task_install/NativeOracle.bin"
+            ))))
+        );
+        let map = |key: U256, root: U256| {
+            let mut words = [0u8; 64];
+            words[..32].copy_from_slice(&key.to_be_bytes::<32>());
+            words[32..].copy_from_slice(&root.to_be_bytes::<32>());
+            U256::from_be_bytes(keccak256(words).0)
+        };
+        let task_base = map(
+            U256::from_be_bytes(B256::repeat_byte(1).0),
+            map(U256::from(123), map(U256::ZERO, U256::from(1))),
+        );
+        assert_eq!(
+            state
+                .storage(tasks, B256::from((task_base + U256::from(1)).to_be_bytes::<32>()))
+                .unwrap(),
+            Some(U256::from(103))
+        );
+        let callback_slot = B256::from(map(U256::ZERO, U256::from(2)).to_be_bytes::<32>());
+        assert_eq!(
+            state.storage(native, callback_slot).unwrap(),
+            Some(U256::from_be_slice(receiver.as_slice()))
+        );
     }
 
     #[test]
